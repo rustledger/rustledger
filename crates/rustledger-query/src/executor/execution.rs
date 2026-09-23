@@ -993,133 +993,136 @@ impl Executor<'_> {
         // LSP) `self.directives` is empty and the data is in
         // `spanned_directives`. Iterating `self.directives` directly here is
         // what made `JOURNAL` return zero rows in the CLI.
-        for directive in self.resolved_directives() {
-            if let Directive::Transaction(txn) = directive {
-                // Apply FROM clause filter if present
-                if let Some(from) = &query.from
-                    && let Some(filter) = &from.filter
-                    && !self.evaluate_from_filter(filter, txn)?
-                {
-                    continue;
-                }
+        //
+        // The FROM clause's date window comes from `window_transactions`, the
+        // one definition `SELECT` iterates too. JOURNAL used to walk the
+        // ledger itself and applied only the filter expression, so `OPEN ON`
+        // and `CLOSE ON` were silently ignored here (#2401).
+        for (_, txn) in
+            self.window_transactions(query.from.as_ref(), self.resolved_directives().enumerate())?
+        {
+            if let Some(from) = &query.from
+                && let Some(filter) = &from.filter
+                && !self.evaluate_from_filter(filter, &txn)?
+            {
+                continue;
+            }
 
-                for posting in &txn.postings {
-                    // Match account using regex or substring
-                    let matches = if let Some(ref regex) = account_regex {
-                        regex.is_match(&posting.account)
-                    } else {
-                        posting.account.contains(account_pattern)
+            for posting in &txn.postings {
+                // Match account using regex or substring
+                let matches = if let Some(ref regex) = account_regex {
+                    regex.is_match(&posting.account)
+                } else {
+                    posting.account.contains(account_pattern)
+                };
+
+                if matches {
+                    // Resolve the posting into a Position once. Used for
+                    // both the running balance accumulator and the
+                    // default-case position column. With cost when the
+                    // posting carries a cost annotation; bare units
+                    // otherwise.
+                    let pos = posting.amount().map(|units| {
+                        Position::from_posting(units, posting.cost.as_deref(), txn.date)
+                    });
+
+                    if let Some(ref p) = pos {
+                        cumulative_balance
+                            .add(p.clone())
+                            .map_err(|e| QueryError::Evaluation(e.to_string()))?;
+                    }
+
+                    // Apply AT function if specified, using the at_mode
+                    // precomputed once per query above.
+                    //
+                    // - default (no AT): show the full Position (units +
+                    //   cost when present), matching bean-query's
+                    //   JOURNAL column. Issue #955.
+                    // - AT COST: when a cost annotation is present and
+                    //   resolves, show the cost-currency total
+                    //   (units × per-unit cost). Otherwise fall back to
+                    //   the original units — so the output currency is
+                    //   not guaranteed to be the cost currency.
+                    // - AT UNITS: show just the units, dropping cost.
+                    let position_value = match at_mode {
+                        AtMode::None => pos
+                            .as_ref()
+                            .map_or(Value::Null, |p| Value::Position(Box::new(p.clone()))),
+                        AtMode::Cost => {
+                            if let Some(units) = posting.amount() {
+                                if let Some(cost_spec) = &posting.cost
+                                    && let Some(cost) = cost_spec.resolve(units.number, txn.date)
+                                {
+                                    let total = units.number * cost.number;
+                                    Value::Amount(Amount::new(total, &cost.currency))
+                                } else {
+                                    Value::Amount(units.clone())
+                                }
+                            } else {
+                                Value::Null
+                            }
+                        }
+                        AtMode::Units | AtMode::Other => posting
+                            .amount()
+                            .map_or(Value::Null, |u| Value::Amount(u.clone())),
                     };
 
-                    if matches {
-                        // Resolve the posting into a Position once. Used for
-                        // both the running balance accumulator and the
-                        // default-case position column. With cost when the
-                        // posting carries a cost annotation; bare units
-                        // otherwise.
-                        let pos = posting.amount().map(|units| {
-                            Position::from_posting(units, posting.cost.as_deref(), txn.date)
-                        });
+                    // Apply the same AT-mode transformation to the balance
+                    // column that bean-query's `summary_func(balance)`
+                    // applies. Issue #957: previously the balance always
+                    // showed the full cumulative inventory regardless of
+                    // AT mode; that diverged from bean-query, where AT
+                    // cost collapses the balance to cost-currency totals
+                    // and AT units strips lots from the balance.
+                    // An out-of-range cost basis is reported, not
+                    // clamped: a query cell showing a saturated total is
+                    // indistinguishable from a real one (#1863).
+                    let balance_for_row = match at_mode {
+                        AtMode::Cost => cumulative_balance
+                            .at_cost()
+                            .map_err(|e| QueryError::Evaluation(e.to_string()))?,
+                        AtMode::Units => cumulative_balance
+                            .at_units()
+                            .map_err(|e| QueryError::Evaluation(e.to_string()))?,
+                        AtMode::None | AtMode::Other => cumulative_balance.clone(),
+                    };
 
-                        if let Some(ref p) = pos {
-                            cumulative_balance
-                                .add(p.clone())
-                                .map_err(|e| QueryError::Evaluation(e.to_string()))?;
-                        }
-
-                        // Apply AT function if specified, using the at_mode
-                        // precomputed once per query above.
-                        //
-                        // - default (no AT): show the full Position (units +
-                        //   cost when present), matching bean-query's
-                        //   JOURNAL column. Issue #955.
-                        // - AT COST: when a cost annotation is present and
-                        //   resolves, show the cost-currency total
-                        //   (units × per-unit cost). Otherwise fall back to
-                        //   the original units — so the output currency is
-                        //   not guaranteed to be the cost currency.
-                        // - AT UNITS: show just the units, dropping cost.
-                        let position_value = match at_mode {
-                            AtMode::None => pos
+                    // `JOURNAL` is defined by beancount as a SELECT whose
+                    // payee and narration go through `MAXWIDTH`
+                    // (`beanquery/compiler.py::transform_journal`:
+                    // `MAXWIDTH(payee, 48)`, `MAXWIDTH(narration, 80)`).
+                    // Skipping it let a single long narration widen the
+                    // column without bound — the command exists to give a
+                    // readable ledger view, and an 800-character memo
+                    // defeats that.
+                    // Propagate rather than substituting a fallback. The
+                    // arguments are fully controlled here — a string and a
+                    // width comfortably above the placeholder's own length
+                    // — so this cannot fail in practice; if it ever does,
+                    // that is a bug worth surfacing, not worth hiding
+                    // behind a silently emptied payee.
+                    let payee = Self::maxwidth_on_values(&[
+                        Value::String(
+                            txn.payee
                                 .as_ref()
-                                .map_or(Value::Null, |p| Value::Position(Box::new(p.clone()))),
-                            AtMode::Cost => {
-                                if let Some(units) = posting.amount() {
-                                    if let Some(cost_spec) = &posting.cost
-                                        && let Some(cost) =
-                                            cost_spec.resolve(units.number, txn.date)
-                                    {
-                                        let total = units.number * cost.number;
-                                        Value::Amount(Amount::new(total, &cost.currency))
-                                    } else {
-                                        Value::Amount(units.clone())
-                                    }
-                                } else {
-                                    Value::Null
-                                }
-                            }
-                            AtMode::Units | AtMode::Other => posting
-                                .amount()
-                                .map_or(Value::Null, |u| Value::Amount(u.clone())),
-                        };
-
-                        // Apply the same AT-mode transformation to the balance
-                        // column that bean-query's `summary_func(balance)`
-                        // applies. Issue #957: previously the balance always
-                        // showed the full cumulative inventory regardless of
-                        // AT mode; that diverged from bean-query, where AT
-                        // cost collapses the balance to cost-currency totals
-                        // and AT units strips lots from the balance.
-                        // An out-of-range cost basis is reported, not
-                        // clamped: a query cell showing a saturated total is
-                        // indistinguishable from a real one (#1863).
-                        let balance_for_row = match at_mode {
-                            AtMode::Cost => cumulative_balance
-                                .at_cost()
-                                .map_err(|e| QueryError::Evaluation(e.to_string()))?,
-                            AtMode::Units => cumulative_balance
-                                .at_units()
-                                .map_err(|e| QueryError::Evaluation(e.to_string()))?,
-                            AtMode::None | AtMode::Other => cumulative_balance.clone(),
-                        };
-
-                        // `JOURNAL` is defined by beancount as a SELECT whose
-                        // payee and narration go through `MAXWIDTH`
-                        // (`beanquery/compiler.py::transform_journal`:
-                        // `MAXWIDTH(payee, 48)`, `MAXWIDTH(narration, 80)`).
-                        // Skipping it let a single long narration widen the
-                        // column without bound — the command exists to give a
-                        // readable ledger view, and an 800-character memo
-                        // defeats that.
-                        // Propagate rather than substituting a fallback. The
-                        // arguments are fully controlled here — a string and a
-                        // width comfortably above the placeholder's own length
-                        // — so this cannot fail in practice; if it ever does,
-                        // that is a bug worth surfacing, not worth hiding
-                        // behind a silently emptied payee.
-                        let payee = Self::maxwidth_on_values(&[
-                            Value::String(
-                                txn.payee
-                                    .as_ref()
-                                    .map_or_else(String::new, ToString::to_string),
-                            ),
-                            Value::Integer(JOURNAL_PAYEE_MAXWIDTH),
-                        ])?;
-                        let narration = Self::maxwidth_on_values(&[
-                            Value::String(txn.narration.to_string()),
-                            Value::Integer(JOURNAL_NARRATION_MAXWIDTH),
-                        ])?;
-                        let row = vec![
-                            Value::Date(txn.date),
-                            Value::String(txn.flag.to_string()),
-                            payee,
-                            narration,
-                            Value::String(posting.account.to_string()),
-                            position_value,
-                            Value::Inventory(std::sync::Arc::new(balance_for_row)),
-                        ];
-                        result.add_row(row);
-                    }
+                                .map_or_else(String::new, ToString::to_string),
+                        ),
+                        Value::Integer(JOURNAL_PAYEE_MAXWIDTH),
+                    ])?;
+                    let narration = Self::maxwidth_on_values(&[
+                        Value::String(txn.narration.to_string()),
+                        Value::Integer(JOURNAL_NARRATION_MAXWIDTH),
+                    ])?;
+                    let row = vec![
+                        Value::Date(txn.date),
+                        Value::String(txn.flag.to_string()),
+                        payee,
+                        narration,
+                        Value::String(posting.account.to_string()),
+                        position_value,
+                        Value::Inventory(std::sync::Arc::new(balance_for_row)),
+                    ];
+                    result.add_row(row);
                 }
             }
         }

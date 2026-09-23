@@ -666,6 +666,63 @@ impl<'a> Executor<'a> {
     /// ([`Self::collect_postings`]) and the `#postings` table
     /// ([`Self::build_postings_table`]).
     ///
+    /// The transactions a `FROM` clause's date window admits, in order: the
+    /// one definition of `OPEN ON` / `CLOSE ON` that every posting source
+    /// iterates, so `SELECT`, `BALANCES` and `JOURNAL` cannot disagree on it.
+    /// The `FROM` filter expression is the caller's to apply.
+    ///
+    /// - `OPEN ON`: beanquery replaces every transaction before the date with
+    ///   opening-balance summaries dated the day before (beancount's
+    ///   `summarize.open`), so the period starts from what the ledger held
+    ///   (#2401). The summaries come first, then the transactions on or after
+    ///   the date.
+    /// - `CLOSE ON` is exclusive, as in bean-query: the books close AT the
+    ///   date, so the range is `[open, close)`.
+    ///
+    /// # Errors
+    ///
+    /// A `CLOSE ON` before the `OPEN ON`, which beanquery refuses ("CLOSE date
+    /// must follow OPEN date") and would otherwise yield an empty result, and
+    /// anything [`Self::open_summaries`] refuses.
+    pub(super) fn window_transactions<I>(
+        &self,
+        from: Option<&FromClause>,
+        directives: I,
+    ) -> Result<impl Iterator<Item = (Option<usize>, TransactionRef<'a>)>, QueryError>
+    where
+        I: IntoIterator<Item = (usize, &'a Directive)>,
+    {
+        let open_on = from.and_then(|f| f.open_on);
+        let close_on = from.and_then(|f| f.close_on);
+        if let (Some(open), Some(close)) = (open_on, close_on)
+            && open > close
+        {
+            return Err(QueryError::Evaluation(
+                "CLOSE date must follow OPEN date".to_string(),
+            ));
+        }
+        let summaries = match open_on {
+            Some(open) => self.open_summaries(open)?,
+            None => Vec::new(),
+        };
+        Ok(summaries
+            .into_iter()
+            .map(|txn| (None, TransactionRef::Synthesized(txn)))
+            .chain(
+                directives
+                    .into_iter()
+                    .filter_map(move |(index, directive)| match directive {
+                        Directive::Transaction(txn)
+                            if open_on.is_none_or(|open| txn.date >= open) =>
+                        {
+                            Some((Some(index), TransactionRef::Ledger(txn)))
+                        }
+                        _ => None,
+                    }),
+            )
+            .filter(move |(_, txn)| close_on.is_none_or(|close| txn.date < close)))
+    }
+
     /// Iterates the resolved directives in order, applies the optional `FROM` and
     /// posting-level `WHERE` filters, accumulates the running cumulative `balance`
     /// (over `WHERE`-passed postings) and the per-account `account_balance`, and
@@ -748,51 +805,13 @@ impl<'a> Executor<'a> {
                 .map(|units| Position::from_posting(units, posting.cost.as_deref(), txn_date))
         };
 
-        // `FROM ... OPEN ON`: beanquery replaces every transaction before the
-        // date with opening-balance summaries dated the day before (beancount's
-        // `summarize.open`), so the period's rows, its running `balance` and
-        // each `account_balance` start from what the ledger held (#2401). The
-        // summaries go through exactly the same filters and replay as any
-        // other transaction; the transactions they replace yield no rows.
-        let open_on = from.and_then(|f| f.open_on);
-        let summaries = match open_on {
-            Some(open) => self.open_summaries(open)?,
-            None => Vec::new(),
-        };
-        let stream =
-            summaries
-                .into_iter()
-                .map(|txn| (None, TransactionRef::Synthesized(txn)))
-                .chain(directive_iter.into_iter().filter_map(
-                    |(index, directive)| match directive {
-                        Directive::Transaction(txn)
-                            if open_on.is_none_or(|open| txn.date >= open) =>
-                        {
-                            Some((Some(index), TransactionRef::Ledger(txn)))
-                        }
-                        _ => None,
-                    },
-                ));
-        for (directive_index, txn) in stream {
-            // Check FROM clause (transaction-level filter). `OPEN ON` is not
-            // checked here: the stream below already starts at the open date,
-            // with the ledger before it summarized.
-            if let Some(from) = from {
-                // `close on D` is exclusive (matches bean-query): the books
-                // are closed AT D, so a transaction stamped exactly on D is
-                // not part of the closing period. Combined with `open on D`
-                // being inclusive, the resulting range is `[open, close)`.
-                if let Some(close_date) = from.close_on
-                    && txn.date >= close_date
-                {
-                    continue;
-                }
-                // Apply filter expression
-                if let Some(filter) = &from.filter
-                    && !self.evaluate_from_filter(filter, &txn)?
-                {
-                    continue;
-                }
+        for (directive_index, txn) in self.window_transactions(from, directive_iter)? {
+            // Apply the FROM filter expression; the date window is the
+            // stream's (`window_transactions`).
+            if let Some(filter) = from.and_then(|f| f.filter.as_ref())
+                && !self.evaluate_from_filter(filter, &txn)?
+            {
+                continue;
             }
 
             // Replayed in the order `book` read the transaction, not one

@@ -1245,6 +1245,53 @@ mod tests {
         }
     }
 
+    /// #2401: the previous-period summary accounts resolve under the
+    /// ledger's own equity root when unset, and are the name written when set.
+    #[test]
+    fn previous_summary_accounts_resolve_under_the_equity_root() {
+        let defaults = Options::new();
+        assert_eq!(
+            defaults.previous_balances_account(),
+            "Equity:Opening-Balances"
+        );
+        assert_eq!(
+            defaults.previous_earnings_account(),
+            "Equity:Earnings:Previous"
+        );
+        assert_eq!(
+            defaults.previous_conversions_account(),
+            "Equity:Conversions:Previous"
+        );
+
+        let mut renamed = Options::new();
+        renamed.set("name_equity", "Eigenkapital");
+        assert_eq!(
+            renamed.previous_balances_account(),
+            "Eigenkapital:Opening-Balances"
+        );
+        assert_eq!(
+            renamed.previous_earnings_account(),
+            "Eigenkapital:Earnings:Previous"
+        );
+        assert_eq!(
+            renamed.previous_conversions_account(),
+            "Eigenkapital:Conversions:Previous"
+        );
+
+        // Set: the name as written, whatever the equity root (#2408).
+        let mut set = Options::new();
+        set.set("name_equity", "Eigenkapital");
+        set.set("account_previous_balances", "Eigenkapital:Anfang");
+        set.set("account_previous_earnings", "Eigenkapital:Vorjahr");
+        set.set("account_previous_conversions", "Eigenkapital:Umrechnung");
+        assert_eq!(set.previous_balances_account(), "Eigenkapital:Anfang");
+        assert_eq!(set.previous_earnings_account(), "Eigenkapital:Vorjahr");
+        assert_eq!(
+            set.previous_conversions_account(),
+            "Eigenkapital:Umrechnung"
+        );
+    }
+
     #[test]
     fn test_invalid_booking_method() {
         let mut opts = Options::new();

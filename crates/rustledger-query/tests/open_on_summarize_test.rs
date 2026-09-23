@@ -467,3 +467,78 @@ fn account_balance_and_location_of_summary_rows() {
         "account_balance carries the opening balance; a summary has no file",
     );
 }
+
+/// JOURNAL takes its date window from the same place `SELECT` does. It used
+/// to walk the ledger itself and applied only the `FROM` filter expression,
+/// so `OPEN ON` and `CLOSE ON` were silently ignored and the pre-date posting
+/// showed as itself.
+#[test]
+fn journal_honors_the_from_date_window() {
+    assert_rows(
+        &rows(OPENING, "JOURNAL 'Assets:Bank' FROM OPEN ON 2024-02-01"),
+        &[
+            &[
+                "2024-01-31",
+                "S",
+                "",
+                "Opening balance for 'Assets:Bank' (Summarization)",
+                "Assets:Bank",
+                "1000.00 USD",
+                "1000.00 USD",
+            ],
+            &[
+                "2024-02-10",
+                "*",
+                "",
+                "lunch",
+                "Assets:Bank",
+                "-20.00 USD",
+                "980.00 USD",
+            ],
+        ],
+        "bean-query's journal",
+    );
+    assert_rows(
+        &rows(OPENING, "JOURNAL 'Assets:Bank' FROM CLOSE ON 2024-02-01"),
+        &[&[
+            "2024-01-05",
+            "*",
+            "",
+            "opening",
+            "Assets:Bank",
+            "1000.00 USD",
+            "1000.00 USD",
+        ]],
+        "bean-query's journal: nothing from the close date on",
+    );
+}
+
+/// beanquery refuses a `CLOSE ON` before the `OPEN ON`; the window would
+/// otherwise be empty and the query would answer with nothing, silently.
+#[test]
+fn a_close_before_the_open_is_refused() {
+    let ledger = load(OPENING);
+    let directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
+    for query in [
+        "SELECT date FROM OPEN ON 2024-03-01 CLOSE ON 2024-02-01",
+        "BALANCES FROM OPEN ON 2024-03-01 CLOSE ON 2024-02-01",
+        "JOURNAL 'Assets' FROM OPEN ON 2024-03-01 CLOSE ON 2024-02-01",
+    ] {
+        let err = Executor::new(&directives)
+            .execute(&parse(query).expect("parses"))
+            .expect_err(query);
+        assert!(
+            err.to_string().contains("CLOSE date must follow OPEN date"),
+            "{query}: {err}"
+        );
+    }
+    // Equal dates are an empty period, not an error, as in beanquery.
+    assert!(
+        rows(
+            OPENING,
+            "SELECT date FROM OPEN ON 2024-02-01 CLOSE ON 2024-02-01"
+        )
+        .iter()
+        .all(|r| r[0] != "2024-02-10")
+    );
+}

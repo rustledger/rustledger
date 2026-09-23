@@ -47,3 +47,52 @@ fn a_wildcard_merge_loads_without_errors() {
         ledger.errors,
     );
 }
+
+/// A trailing `*` component is the same merge as `{*}` (#2329).
+///
+/// Beancount's grammar takes `*` as any component of the cost list, so
+/// `{110.00 USD, *}` is a merge. It used to parse as a plain per-unit spec,
+/// so this sale looked for a lot at 110, found none, and failed; written
+/// `{100.00 USD, *}` it silently sold from the 100 lot instead of the pool.
+/// Both now merge, and book from the pool at 110 like `{*}`.
+#[test]
+fn a_trailing_star_component_merges_like_a_leading_one() {
+    use rustledger_core::Directive;
+    for spec in ["{*}", "{110.00 USD, *}", "{100.00 USD, *}"] {
+        let source = MERGE_SOURCE.replace("-5 X {*}", &format!("-5 X {spec}"));
+        assert!(
+            source.contains(&format!("-5 X {spec}")),
+            "fixture edit must apply"
+        );
+        let mut f = tempfile::Builder::new()
+            .prefix("trailing-merge-")
+            .suffix(".beancount")
+            .tempfile()
+            .expect("create tempfile");
+        f.write_all(source.as_bytes()).expect("write fixture");
+        let ledger = load(f.path(), &LoadOptions::default()).expect("the ledger loads");
+        assert!(ledger.errors.is_empty(), "{spec}: got {:?}", ledger.errors);
+
+        let sale = ledger
+            .directives
+            .iter()
+            .filter_map(|d| match &d.value {
+                Directive::Transaction(t)
+                    if t.narration.as_str() == "sell against the merged pool" =>
+                {
+                    Some(t)
+                }
+                _ => None,
+            })
+            .flat_map(|t| t.postings.iter())
+            .find(|p| p.account.as_str() == "Assets:Stock")
+            .expect("the sale");
+        let cost = sale.cost.as_deref().expect("booked cost");
+        assert!(cost.merge, "{spec}: booked as a merge");
+        assert_eq!(
+            cost.number.and_then(|n| n.per_unit()),
+            Some(rustledger_core::Decimal::new(11000, 2)),
+            "{spec}: sold from the merged pool at 110",
+        );
+    }
+}

@@ -2419,9 +2419,12 @@ impl Inventory {
     /// Called after operations that may invalidate them (`compact`'s retain) and
     /// on deserialization, which is what [`CacheSource`] distinguishes.
     fn rebuild_index(&mut self) {
-        // Internal positions came through `add`, which already rejected any
-        // sum that would overflow, so this cannot fail. Asserted rather than
-        // ignored: a failure here would mean `add`'s check had a hole.
+        // Internal positions came through `add`, whose running total stayed
+        // in range, so their exact total is in range and this cannot fail.
+        // The rebuild fails only on an out-of-range TOTAL, not on a partial
+        // sum in slot order, which could overflow on a valid inventory
+        // (#2404). Asserted rather than ignored: a failure here would mean
+        // `add`'s check had a hole.
         // Call FIRST, assert on the result. Putting the call inside
         // `debug_assert!` compiles the rebuild itself out of release builds,
         // so `compact` would have left the caches stale — caught by clippy's
@@ -2429,7 +2432,7 @@ impl Inventory {
         let rebuilt = self.try_rebuild_index_from(CacheSource::Internal);
         debug_assert!(
             rebuilt.is_ok(),
-            "internal positions summed past the Decimal range; `add` should \
+            "internal positions total past the Decimal range; `add` should \
              have rejected them",
         );
     }
@@ -2456,6 +2459,10 @@ impl Inventory {
         // that the shared backing exists to avoid. Snapshots keep an empty map
         // and clone it for free.
         let index_costs = matches!(self.positions, PositionStore::Owned(_)) && !self.indexless;
+
+        // Currencies whose slot-order total overflowed; totaled exactly below.
+        // Empty on every ledger with ordinary magnitudes.
+        let mut overflowed: SmallVec<[crate::Currency; 1]> = SmallVec::new();
 
         for (idx, pos) in self.positions.iter_slots() {
             if index_costs {
@@ -2492,10 +2499,25 @@ impl Inventory {
                 .entry(pos.units.currency.clone())
                 .or_default();
             slot.counts.bump(pos.cost.is_some(), pos.units.number, 1);
-            slot.total = crate::decimal::checked_add_python_scale(slot.total, pos.units.number)
-                .ok_or_else(|| OverflowError {
-                    currency: pos.units.currency.clone(),
-                })?;
+            //
+            // A slot-order fold can overflow on a PARTIAL sum even though the
+            // total fits: `add` checked its running total one operation at a
+            // time, and slot order is not operation order (a merge adds into
+            // an earlier slot). Holding `[MAX - k, MAX, -MAX]`, the fold's first
+            // step overflows while the total, `MAX - k`, is the value `add`
+            // cached. So an overflow here is not an error yet: the currency is
+            // totaled exactly after the walk, and only a total that is itself
+            // out of range fails (#2404). Once a currency overflows, its fold
+            // stops, so this costs nothing until it happens.
+            if !overflowed.contains(&pos.units.currency) {
+                if let Some(total) =
+                    crate::decimal::checked_add_python_scale(slot.total, pos.units.number)
+                {
+                    slot.total = total;
+                } else {
+                    overflowed.push(pos.units.currency.clone());
+                }
+            }
 
             // Record the cost-less lot only for positions without cost
             if pos.cost.is_none() {
@@ -2516,6 +2538,21 @@ impl Inventory {
                     .entry(pos.units.currency.clone())
                     .or_default()
                     .simple_slot = Some(idx);
+            }
+        }
+
+        for currency in overflowed {
+            let total = crate::decimal::checked_exact_sum_python_scale(
+                self.positions
+                    .iter()
+                    .filter(|p| p.units.currency == currency)
+                    .map(|p| p.units.number),
+            )
+            .ok_or_else(|| OverflowError {
+                currency: currency.clone(),
+            })?;
+            if let Some(stats) = self.units_cache.get_mut(&currency) {
+                stats.total = total;
             }
         }
 
@@ -3625,6 +3662,63 @@ mod tests {
             built,
             "a serde round-trip must not change the reported scale",
         );
+    }
+
+    /// The #2404 fuzz input's inventory: slots `[MAX - k, MAX, -MAX]` in that
+    /// order, built by `add` with every running total in range. The third add
+    /// merges into the FIRST slot, which is how slot order and operation order
+    /// come apart.
+    fn slots_whose_slot_order_prefix_overflows() -> (Inventory, Decimal) {
+        let cost =
+            |d: NaiveDate| Cost::new(dec!(-0.0000000000000000000000000001), "USD").with_date(d);
+        let k = dec!(10653859.85);
+        let mut inv = Inventory::new();
+        for (units, day) in [
+            (-k, date(2020, 2, 2)),
+            (Decimal::MAX, date(2022, 2, 2)),
+            (-Decimal::MAX, date(2023, 2, 2)),
+            (Decimal::MAX, date(2020, 2, 2)),
+        ] {
+            inv.add(Position::with_cost(Amount::new(units, "CORP"), cost(day)))
+                .expect("every running total fits");
+        }
+        let slots: Vec<Decimal> = inv.positions().map(|p| p.units.number).collect();
+        assert_eq!(
+            slots,
+            [Decimal::MAX - k, Decimal::MAX, -Decimal::MAX],
+            "precondition: the slot order whose first partial sum overflows"
+        );
+        (inv, Decimal::MAX - k)
+    }
+
+    /// #2404: rebuilding the caches from such slots is not an overflow. The
+    /// total is in range; only a partial sum in slot order is not.
+    #[test]
+    fn a_rebuild_totals_slots_whose_slot_order_prefix_overflows() {
+        let (inv, total) = slots_whose_slot_order_prefix_overflows();
+        assert_eq!(inv.units("CORP"), total, "the total `add` kept");
+
+        let json = serde_json::to_string(&inv).expect("serializes");
+        let round_tripped: Inventory =
+            serde_json::from_str(&json).expect("a valid inventory deserializes");
+        assert_eq!(round_tripped.units("CORP"), total);
+    }
+
+    /// The path the fuzzer took: an operation fails, the undo log restores
+    /// the slots, and the rebuild used to trip `rebuild_index`'s assertion (a
+    /// debug panic; in release, a cleared `units_cache` left half rebuilt).
+    #[test]
+    fn a_rollback_restores_slots_whose_slot_order_prefix_overflows() {
+        let (mut inv, total) = slots_whose_slot_order_prefix_overflows();
+        inv.begin_undo();
+        inv.add(Position::with_cost(
+            Amount::new(dec!(-1), "CORP"),
+            Cost::new(dec!(5), "USD").with_date(date(2024, 1, 1)),
+        ))
+        .expect("an ordinary lot fits");
+        inv.rollback_undo();
+        assert_eq!(inv.units("CORP"), total, "the rollback restores the total");
+        assert_eq!(inv.positions().count(), 3);
     }
 
     /// Coalescing must not make a balance depend on the order it was built in.

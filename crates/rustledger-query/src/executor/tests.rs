@@ -2685,3 +2685,85 @@ fn entry_meta_fallback_does_not_disturb_postings() {
         Value::String("from-entry".to_string()),
     );
 }
+
+/// A buy of `5 X {100 USD}` and a sale of `-2 X {90 USD}`: a NONE-booked
+/// ledger, where the sale is its own lot. Replayed under STRICT, the sale is a
+/// reduction that names no lot and the replay refuses it.
+fn none_booked_sale_at_a_new_cost() -> Vec<Directive> {
+    let cost = |n: rust_decimal::Decimal| {
+        rustledger_core::CostSpec::empty()
+            .with_number(rustledger_core::CostNumber::PerUnit { value: n })
+            .with_currency("USD")
+            .with_date(date(2020, 1, 2))
+    };
+    vec![
+        Directive::Transaction(
+            Transaction::new(date(2020, 1, 2), "buy")
+                .with_synthesized_posting(
+                    Posting::new("Assets:Stock", Amount::new(dec!(5), "X"))
+                        .with_cost(cost(dec!(100))),
+                )
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(-500), "USD"),
+                )),
+        ),
+        Directive::Transaction(
+            Transaction::new(date(2020, 1, 3), "sell at a cost no lot has")
+                .with_synthesized_posting(
+                    Posting::new("Assets:Stock", Amount::new(dec!(-2), "X"))
+                        .with_cost(cost(dec!(90))),
+                )
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(dec!(180), "USD"),
+                )),
+        ),
+    ]
+}
+
+/// #2386: `account_balance` replays with the method set by
+/// `set_booking_method`, on the default source and on `#postings`.
+#[test]
+fn account_balance_replays_with_the_ledgers_booking_method() {
+    let directives = none_booked_sale_at_a_new_cost();
+    for sql in [
+        "SELECT account, account_balance WHERE account = 'Assets:Stock'",
+        "SELECT account, account_balance FROM #postings WHERE account = 'Assets:Stock'",
+    ] {
+        let mut executor = Executor::new(&directives);
+        executor.set_booking_method(rustledger_core::BookingMethod::None);
+        let result = executor
+            .execute(&parse(sql).unwrap())
+            .unwrap_or_else(|e| panic!("{sql}: must answer under NONE: {e}"));
+        let last = format!("{:?}", result.rows.last().expect("a row per Stock posting"));
+        assert!(
+            last.contains("-2") && last.contains("100") && last.contains("90"),
+            "{sql}: the sale is its own lot beside the buy: {last}"
+        );
+    }
+}
+
+/// The `#postings` table reports a replay the engine refuses as a query
+/// error. It used to `expect` the scan could not fail, and a NONE-booked
+/// ledger replayed under the wrong default crashed the process (#2386).
+#[test]
+fn postings_table_reports_a_refused_replay_as_an_error() {
+    let directives = none_booked_sale_at_a_new_cost();
+    // No `set_booking_method`: the STRICT default reads the sale as a
+    // reduction that names no lot.
+    let mut executor = Executor::new(&directives);
+    let query = parse("SELECT account_balance FROM #postings").unwrap();
+    let outcome =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| executor.execute(&query)))
+            .unwrap_or_else(|_| {
+                panic!("#postings panicked on a refused replay instead of returning an error")
+            });
+    match outcome {
+        Err(QueryError::Evaluation(message)) => assert!(
+            message.contains("No matching lot"),
+            "the replay's own error must reach the caller: {message}"
+        ),
+        other => panic!("expected the refused replay as an error, got {other:?}"),
+    }
+}

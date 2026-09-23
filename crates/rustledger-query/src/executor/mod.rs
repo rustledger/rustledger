@@ -2531,14 +2531,22 @@ impl<'a> Executor<'a> {
     /// compatibility (issue #632).
     ///
     /// Returns `None` if the table name is not a recognized built-in table.
-    pub(super) fn get_builtin_table(&self, table_name: &str, query: &SelectQuery) -> Option<Table> {
+    ///
+    /// # Errors
+    ///
+    /// When building `#postings` fails (see [`Self::build_postings_table`]).
+    pub(super) fn get_builtin_table(
+        &self,
+        table_name: &str,
+        query: &SelectQuery,
+    ) -> Result<Option<Table>, QueryError> {
         // Normalize table name: strip # prefix if present for Python beancount compatibility.
         // Both "#transactions" (rustledger) and "transactions" (beancount) work.
         // Using strip_prefix avoids allocation in the common case.
         let upper = table_name.to_uppercase();
         let normalized = upper.strip_prefix('#').unwrap_or(&upper);
 
-        match normalized {
+        Ok(match normalized {
             "PRICES" => Some(self.build_prices_table()),
             "BALANCES" => Some(self.build_balances_table()),
             "COMMODITIES" => Some(self.build_commodities_table()),
@@ -2548,9 +2556,9 @@ impl<'a> Executor<'a> {
             "ACCOUNTS" => Some(self.build_accounts_table()),
             "TRANSACTIONS" => Some(self.build_transactions_table()),
             "ENTRIES" => Some(self.build_entries_table()),
-            "POSTINGS" => Some(self.build_postings_table(query)),
+            "POSTINGS" => Some(self.build_postings_table(query)?),
             _ => None,
-        }
+        })
     }
 }
 

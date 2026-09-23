@@ -73,6 +73,38 @@ pub fn checked_add_python_scale(a: Decimal, b: Decimal) -> Option<Decimal> {
     Some(sum)
 }
 
+/// Sum `values` exactly and round ONCE, with [`add_python_scale`]'s scale rule:
+/// the result's scale is at least the largest operand scale.
+///
+/// A left fold of [`checked_add_python_scale`] is order-DEPENDENT at the edge
+/// of the range: a partial sum can overflow even though the total fits
+/// (`[MAX - k, MAX, -MAX]` fails at its first step, while `[MAX, -MAX,
+/// MAX - k]` succeeds). This answers what the total IS, whatever the order.
+/// `None` only when the exact total itself cannot be held in a `Decimal`.
+///
+/// Slower than the fold, since every operand goes through `BigDecimal`, so it
+/// is for the fold's failure path, not a replacement for it (#2404).
+#[must_use]
+pub fn checked_exact_sum_python_scale<I>(values: I) -> Option<Decimal>
+where
+    I: IntoIterator<Item = Decimal>,
+{
+    let mut target = 0;
+    let mut exact = bigdecimal::BigDecimal::from(0);
+    for value in values {
+        target = target.max(value.scale());
+        exact += to_bigdecimal(value);
+    }
+    // `to_plain_string`, not `Display`, as in the AVERAGE escalation (#2353):
+    // `Display` switches to exponent form. Parsing rounds to what a `Decimal`
+    // can hold and fails only when the magnitude cannot fit at all.
+    let mut sum = <Decimal as core::str::FromStr>::from_str(&exact.to_plain_string()).ok()?;
+    if sum.scale() < target {
+        sum.rescale(target);
+    }
+    Some(sum)
+}
+
 /// Overflow-checked [`sub_python_scale`] — see [`checked_add_python_scale`].
 #[must_use]
 pub fn checked_sub_python_scale(a: Decimal, b: Decimal) -> Option<Decimal> {
@@ -535,5 +567,75 @@ mod tests {
             "a value too large to carry the target scale must keep its VALUE",
         );
         assert_eq!(sum.to_string(), near_max.to_string());
+    }
+
+    /// #2404: the exact sum does not depend on the order of its operands,
+    /// where a fold of `checked_add_python_scale` does.
+    #[test]
+    fn exact_sum_is_order_independent_where_the_fold_is_not() {
+        let near_max = Decimal::MAX - dec!(10653859.85);
+        let slot_order = [near_max, Decimal::MAX, -Decimal::MAX];
+        let fold = |values: &[Decimal]| {
+            values
+                .iter()
+                .try_fold(Decimal::ZERO, |acc, v| checked_add_python_scale(acc, *v))
+        };
+        // Precondition: the fold fails in slot order and succeeds in another,
+        // so this pins the order dependence and not a total out of range.
+        assert_eq!(fold(&slot_order), None, "the first partial sum overflows");
+        assert_eq!(
+            fold(&[Decimal::MAX, -Decimal::MAX, near_max]),
+            Some(near_max),
+            "the same values fold fine in another order"
+        );
+
+        assert_eq!(checked_exact_sum_python_scale(slot_order), Some(near_max));
+        assert_eq!(
+            checked_exact_sum_python_scale([-Decimal::MAX, near_max, Decimal::MAX]),
+            Some(near_max)
+        );
+    }
+
+    /// Only a TOTAL out of range is refused.
+    #[test]
+    fn exact_sum_refuses_only_an_out_of_range_total() {
+        assert_eq!(
+            checked_exact_sum_python_scale([Decimal::MAX, dec!(1)]),
+            None
+        );
+        assert_eq!(
+            checked_exact_sum_python_scale([Decimal::MIN, dec!(-1)]),
+            None
+        );
+        assert_eq!(
+            checked_exact_sum_python_scale([Decimal::MAX, dec!(1), dec!(-1)]),
+            Some(Decimal::MAX),
+            "a partial sum past MAX is not a total past MAX"
+        );
+        assert_eq!(
+            checked_exact_sum_python_scale(std::iter::empty()),
+            Some(Decimal::ZERO)
+        );
+    }
+
+    /// Where the fold succeeds, the exact sum agrees with it, value AND scale,
+    /// so escalating changes nothing but whether an answer exists. Scale is
+    /// compared through `to_string`, since `==` ignores it.
+    #[test]
+    fn exact_sum_agrees_with_the_fold_value_and_scale() {
+        for values in [
+            vec![dec!(2.00), dec!(-2.00), dec!(1)],
+            vec![dec!(1.00), dec!(-1)],
+            vec![dec!(0.1), dec!(0.20), dec!(-0.3)],
+            vec![dec!(123456.789), dec!(-0.000001), dec!(42)],
+            vec![Decimal::MAX, -Decimal::MAX, dec!(0.5)],
+        ] {
+            let fold = values
+                .iter()
+                .try_fold(Decimal::ZERO, |acc, v| checked_add_python_scale(acc, *v))
+                .expect("fixture folds");
+            let exact = checked_exact_sum_python_scale(values.iter().copied()).expect("fits");
+            assert_eq!(exact.to_string(), fold.to_string(), "{values:?}");
+        }
     }
 }

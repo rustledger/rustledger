@@ -158,7 +158,10 @@ use crate::types::{Error, LedgerOptions};
 /// (#2384, #2391), AVERAGE pooling one side (#2393, #2395), and cost-less
 /// units no longer matched by a cost spec (#2396, #2397). A v23 blob can
 /// serve the pre-fix answer for any of them.
-pub const CACHE_VERSION: u32 = 24;
+/// v25: `LedgerPayload` gained `booking_method` (#2386), an archived LAYOUT
+/// change. Loader v36, unchanged: the loader already archives `set_options`,
+/// which is what its `Ledger::booking_method` is derived from.
+pub const CACHE_VERSION: u32 = 25;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -229,6 +232,11 @@ pub struct LedgerPayload {
     /// Plain strings rather than `rustledger_core::AccountTypes` so the
     /// rkyv derive stays local to this crate.
     pub account_type_names: Vec<String>,
+    /// The effective booking method (`BookingMethod`'s `Display` form), the
+    /// default BQL realizes with. Without it a `fromCache` ledger booked
+    /// under `option "booking_method" "NONE"` would replay as STRICT and
+    /// refuse `BALANCES` (#2386). A string for the same reason as above.
+    pub booking_method: String,
     pub errors: Vec<Error>,
 }
 
@@ -534,6 +542,7 @@ mod tests {
                 "Revenue".to_string(),
                 "Expenses".to_string(),
             ],
+            booking_method: "NONE".to_string(),
             errors: vec![Error::new("a warning")],
         };
         let bytes = serialize_ledger(&payload).expect("serialize");
@@ -542,6 +551,7 @@ mod tests {
         let restored = deserialize_ledger(&bytes).expect("deserialize");
         assert_eq!(restored.options.operating_currencies, ["USD"]);
         assert_eq!(restored.options.title.as_deref(), Some("Test"));
+        assert_eq!(restored.booking_method, "NONE");
         assert_eq!(restored.errors.len(), 1);
     }
 
@@ -583,6 +593,7 @@ option "operating_currency" "USD"
             directives: Vec::new(),
             options: LedgerOptions::default(),
             account_type_names: Vec::new(),
+            booking_method: "STRICT".to_string(),
             errors: Vec::new(),
         })
         .unwrap();
@@ -605,6 +616,7 @@ option "operating_currency" "USD"
             directives: Vec::new(),
             options: LedgerOptions::default(),
             account_type_names: Vec::new(),
+            booking_method: "STRICT".to_string(),
             errors: Vec::new(),
         })
         .unwrap();
@@ -645,6 +657,7 @@ option "operating_currency" "USD"
             directives: Vec::new(),
             options: LedgerOptions::default(),
             account_type_names: Vec::new(),
+            booking_method: "STRICT".to_string(),
             errors: Vec::new(),
         })
         .unwrap();

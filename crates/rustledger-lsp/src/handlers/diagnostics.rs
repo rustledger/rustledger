@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use rustledger_booking::BookingEngine;
-use rustledger_core::{BookingMethod, Directive};
+use rustledger_core::Directive;
 use rustledger_loader::{LoadOptions, Options as LoaderOptions, Plugin, SourceMap};
 use rustledger_parser::{ParseError, ParseResult, Span, Spanned};
 use rustledger_plugin::NativePluginRegistry;
@@ -305,17 +305,22 @@ pub(crate) fn run_ledger_validation(
 
     // Run booking/interpolation on transactions before validation.
     // This fills in missing amounts (auto-balancing) so validation sees the complete picture.
-    // Use Strict booking method to match rledger check's default behavior.
     //
-    // The tolerance knobs come along too. Since #2034 interpolation quantizes
-    // a solved amount against the transaction's balance tolerance, so an
+    // The engine is built from the validator's own options. First the
+    // tolerance knobs: since #2034 interpolation quantizes a solved amount against the transaction's balance tolerance, so an
     // engine left on beancount's defaults would round a ledger that sets
     // `tolerance_multiplier` / `infer_tolerance_from_cost` /
     // `inferred_tolerance_default` differently from `rledger check` — the
     // same class of drift `build_validation_options_from_*` exists to stop.
     // These are the very options the validator below is handed, so booking
     // and validation cannot disagree about the tolerance either.
-    let mut booking_engine = BookingEngine::with_method(BookingMethod::Strict)
+    //
+    // And the default booking method, the file's `option "booking_method"`,
+    // which `build_validation_options_from_*` already resolved for the
+    // validator, so the editor books as `rledger check` does.
+    // A hardcoded STRICT booked a global-NONE ledger's sale at a new cost as a
+    // failed reduction, a diagnostic `check` does not give (#2386).
+    let mut booking_engine = BookingEngine::with_method(validation_options.default_booking_method)
         .with_tolerance_policy(rustledger_booking::TolerancePolicy {
             multiplier: validation_options.tolerance_multiplier,
             infer_from_cost: validation_options.infer_tolerance_from_cost,
@@ -2802,6 +2807,67 @@ plugin "auto_accounts"
             "must NOT re-derive a balance error from the unfilled postings: {}",
             d.message
         );
+    }
+
+    /// #2386: the editor books with the ledger's `option "booking_method"`,
+    /// as `rledger check` does, not a hardcoded STRICT.
+    ///
+    /// Each ledger books cleanly under its global method and fails under
+    /// STRICT: NONE opens a new lot for a sale at a cost no lot has, and FIFO
+    /// resolves a `{}` sale that STRICT finds ambiguous. The STRICT engine
+    /// reported both as booking errors `check` does not give.
+    #[test]
+    fn booking_uses_the_ledgers_global_booking_method() {
+        const LEDGER: &str = "2024-01-01 open Assets:Stock\n\
+                              2024-01-01 open Assets:Cash\n\
+                              2024-01-02 * \"buy\"\n\
+                             \x20 Assets:Stock  5 X {100 USD}\n\
+                             \x20 Assets:Cash  -500 USD\n\
+                              2024-01-03 * \"buy\"\n\
+                             \x20 Assets:Stock  5 X {120 USD}\n\
+                             \x20 Assets:Cash  -600 USD\n";
+        for (method, sale) in [
+            (
+                "NONE",
+                "  Assets:Stock  -2 X {90 USD}\n  Assets:Cash  180 USD\n",
+            ),
+            ("FIFO", "  Assets:Stock  -2 X {}\n  Assets:Cash  200 USD\n"),
+        ] {
+            let body = format!("{LEDGER}2024-01-04 * \"sell\"\n{sale}");
+            // Precondition: the same ledger does NOT book under STRICT, so the
+            // assertion below is about the method and not a ledger that books
+            // under anything.
+            let strict = rustledger_parser::parse(&body);
+            let strict_diags = all_diagnostics(
+                &strict,
+                &body,
+                None,
+                None,
+                None,
+                &[],
+                PositionEncoding::Utf16,
+            );
+            assert!(
+                !strict_diags.is_empty(),
+                "{method}: the sale must fail under STRICT"
+            );
+
+            let src = format!("option \"booking_method\" \"{method}\"\n{body}");
+            let parsed = rustledger_parser::parse(&src);
+            let diags = all_diagnostics(
+                &parsed,
+                &src,
+                None,
+                None,
+                None,
+                &[],
+                PositionEncoding::Utf16,
+            );
+            assert!(
+                diags.is_empty(),
+                "{method}: must book under the global method: {diags:?}"
+            );
+        }
     }
 
     /// The complement: an overflow must not silence a transaction that IS

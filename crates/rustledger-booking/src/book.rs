@@ -201,6 +201,25 @@ impl BookingEngine {
         self.account_methods.insert(account, method);
     }
 
+    /// An engine for realizing a booked ledger: `default` for accounts that
+    /// declare no method, and each `open`'s declared method for its own.
+    ///
+    /// `default` must be the ledger's effective method (the loader's
+    /// `Ledger::booking_method`), not [`Self::new`]'s FIFO: under a global
+    /// `option "booking_method" "NONE"`, a sale at a cost no lot has is booked
+    /// as an augmentation, and a FIFO or STRICT replay reads it as a reduction
+    /// and fails (#2386). The one constructor for every such consumer, so
+    /// they cannot drift apart again.
+    #[must_use]
+    pub fn for_ledger<'a, I>(default: BookingMethod, directives: I) -> Self
+    where
+        I: IntoIterator<Item = &'a rustledger_core::Directive>,
+    {
+        let mut engine = Self::with_method(default);
+        engine.register_account_methods(directives);
+        engine
+    }
+
     /// Scan a sequence of directives and register any per-account booking
     /// methods found on `open` directives. Open directives whose booking
     /// method is absent or fails to parse are silently ignored (they fall
@@ -3942,6 +3961,33 @@ mod tests {
     /// Helper: does any posting still have an unfilled (elided) amount?
     fn has_elided_posting(txn: &Transaction) -> bool {
         txn.postings.iter().any(|p| p.units.is_none())
+    }
+
+    /// #2386: `for_ledger` takes the ledger's default for accounts with no
+    /// declared method and each `open`'s own method for its account. The
+    /// default is the point: `new()` would give FIFO, and realizing a
+    /// NONE-booked ledger with it fails.
+    #[test]
+    fn for_ledger_uses_the_ledger_default_and_each_opens_method() {
+        let opens = [
+            Directive::Open(rustledger_core::Open::new(date(2024, 1, 1), "Assets:Plain")),
+            Directive::Open(
+                rustledger_core::Open::new(date(2024, 1, 1), "Assets:Fifo").with_booking("FIFO"),
+            ),
+        ];
+        let engine = BookingEngine::for_ledger(BookingMethod::None, opens.iter());
+        assert_eq!(
+            engine.method_for(&"Assets:Plain".into()),
+            BookingMethod::None
+        );
+        assert_eq!(
+            engine.method_for(&"Assets:Fifo".into()),
+            BookingMethod::Fifo
+        );
+        assert_eq!(
+            engine.method_for(&"Assets:Unopened".into()),
+            BookingMethod::None
+        );
     }
 
     #[test]

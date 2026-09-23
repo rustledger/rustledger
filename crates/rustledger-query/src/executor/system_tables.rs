@@ -787,7 +787,14 @@ impl Executor<'_> {
     /// Build the #postings table from transaction postings.
     ///
     /// Column schema matches Python beancount's `postings` table for compatibility.
-    pub(super) fn build_postings_table(&self, query: &crate::ast::SelectQuery) -> Table {
+    ///
+    /// # Errors
+    ///
+    /// When the `account_balance` replay refuses a transaction (see below).
+    pub(super) fn build_postings_table(
+        &self,
+        query: &crate::ast::SelectQuery,
+    ) -> Result<Table, crate::QueryError> {
         let columns = vec![
             // Entry-level columns
             "type".to_string(),
@@ -836,8 +843,12 @@ impl Executor<'_> {
         // Single posting-source scan, shared with the default `SELECT` path
         // ([`Self::collect_postings`]): every posting in directive order, with no
         // FROM/WHERE filter and both running balances tracked. With no filter
-        // there are no predicates to evaluate, so the scan is infallible here —
-        // assert that invariant rather than silently emitting an empty table.
+        // there are no predicates to evaluate, but the scan is still fallible:
+        // `account_balance` replays each transaction through a booking engine,
+        // which refuses one it cannot read. This used to be an `expect` that
+        // called that impossible, and a global `option "booking_method"
+        // "NONE"` ledger, replayed with the wrong default, crashed the process
+        // (exit 101) instead of reporting a query error (#2386).
         let contexts = self
             .scan_postings(
                 None,
@@ -886,8 +897,7 @@ impl Executor<'_> {
                     }
                 },
                 true,
-            )
-            .expect("scan_postings(None, None, ..) evaluates no predicates, so it cannot fail")
+            )?
             .postings;
 
         // Four columns hold ~40% of this table's build time and ~47% of its
@@ -1118,6 +1128,6 @@ impl Executor<'_> {
             table.add_row(row);
         }
 
-        table
+        Ok(table)
     }
 }

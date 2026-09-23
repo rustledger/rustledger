@@ -10,6 +10,7 @@ use std::io::Write;
 /// Generate an income statement report (Income and Expenses).
 pub(super) fn report_income<W: Write>(
     directives: &[Directive],
+    booking_method: rustledger_core::BookingMethod,
     account_types: &rustledger_core::AccountTypes,
     ctx: &DisplayContext,
     format: &OutputFormat,
@@ -25,7 +26,7 @@ pub(super) fn report_income<W: Write>(
     // ledger with `option "name_income" "Revenue"` previously rendered an
     // EMPTY income statement here).
     use rustledger_core::AccountTypeKind as K;
-    for (account, inv) in super::account_balances(directives)? {
+    for (account, inv) in super::account_balances(directives, booking_method)? {
         let section = match account_types.kind(&account) {
             Some(K::Income) => &mut income,
             Some(K::Expenses) => &mut expenses,

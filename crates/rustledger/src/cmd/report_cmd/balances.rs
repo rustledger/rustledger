@@ -8,6 +8,7 @@ use std::io::Write;
 /// Generate a balances report.
 pub(super) fn report_balances<W: Write>(
     directives: &[Directive],
+    booking_method: rustledger_core::BookingMethod,
     account_filter: Option<&str>,
     ctx: &DisplayContext,
     format: &OutputFormat,
@@ -15,7 +16,7 @@ pub(super) fn report_balances<W: Write>(
 ) -> Result<()> {
     // Single source of truth for per-account balances (see
     // `super::account_balances`); no report re-derives them itself.
-    let balances = super::account_balances(directives)?;
+    let balances = super::account_balances(directives, booking_method)?;
 
     // Collect data for output. `cost` is the beancount-style lot annotation
     // (e.g. ` {150.00 USD}`) for held commodities, empty for plain currency.

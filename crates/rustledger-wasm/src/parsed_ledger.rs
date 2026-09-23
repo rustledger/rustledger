@@ -27,6 +27,7 @@ fn execute_query(
     directives: &[Directive],
     query_str: &str,
     account_types: rustledger_core::AccountTypes,
+    booking_method: rustledger_core::BookingMethod,
 ) -> Result<JsValue, JsError> {
     use crate::convert::value_to_cell;
     use rustledger_query::{Executor, parse as parse_query};
@@ -56,6 +57,7 @@ fn execute_query(
     // renames) — the wasm wire LedgerOptions deliberately lacks name_*,
     // so callers supply core AccountTypes from their construction source.
     executor.set_account_types(account_types);
+    executor.set_booking_method(booking_method);
     match executor.execute(&query) {
         Ok(result) => {
             let rows: Vec<Vec<_>> = result
@@ -310,6 +312,7 @@ impl ParsedLedger {
             &self.directives,
             query_str,
             crate::helpers::account_types_from_raw(&self.parse_result.options),
+            crate::helpers::booking_method_from_raw(&self.parse_result.options),
         )
     }
 
@@ -528,6 +531,10 @@ pub struct Ledger {
     /// persisted in the cache payload so `fromCache` ledgers classify
     /// identically.
     account_types: rustledger_core::AccountTypes,
+    /// The effective booking method the ledger was booked with, the default
+    /// BQL realizes with (#2386). Persisted in the cache payload, like
+    /// `account_types`.
+    booking_method: rustledger_core::BookingMethod,
     /// Processing errors (load, booking, validation).
     errors: Vec<Error>,
     /// Editor cache for cross-file completions.
@@ -574,6 +581,7 @@ impl Ledger {
                     directives: Vec::new(),
                     options: LedgerOptions::default(),
                     account_types: rustledger_core::AccountTypes::default(),
+                    booking_method: LoadOptions::default().booking_method,
                     errors: vec![Error::new(format!("Load error: {e}"))],
                     editor_cache: editor::EditorCache::from_directives(&[]),
                 });
@@ -590,6 +598,11 @@ impl Ledger {
             validate: true,
             ..Default::default()
         };
+        // Read before `process` consumes the options, so the error arm below
+        // carries it too; `Ledger::booking_method` is this same value.
+        let booking_method = load_result
+            .options
+            .effective_booking_method(load_options.booking_method);
 
         match process(load_result, &load_options) {
             Ok(ledger) => {
@@ -603,6 +616,7 @@ impl Ledger {
                     directives,
                     options,
                     account_types,
+                    booking_method,
                     errors,
                     editor_cache,
                 })
@@ -611,6 +625,7 @@ impl Ledger {
                 directives: Vec::new(),
                 options,
                 account_types,
+                booking_method,
                 errors: vec![Error::new(format!("Processing error: {e}"))],
                 editor_cache: editor::EditorCache::from_directives(&[]),
             }),
@@ -656,7 +671,12 @@ impl Ledger {
     /// Run a BQL query on this ledger.
     #[wasm_bindgen]
     pub fn query(&self, query_str: &str) -> Result<JsValue, JsError> {
-        execute_query(&self.directives, query_str, self.account_types.clone())
+        execute_query(
+            &self.directives,
+            query_str,
+            self.account_types.clone(),
+            self.booking_method,
+        )
     }
 
     /// Get account balances (shorthand for query("BALANCES")).
@@ -713,6 +733,7 @@ impl Ledger {
                 self.account_types.income.clone(),
                 self.account_types.expenses.clone(),
             ],
+            booking_method: self.booking_method.to_string(),
             errors: self.errors.clone(),
         };
         cache::serialize_ledger(&payload).map_err(|e| JsError::new(&e))
@@ -747,10 +768,18 @@ impl Ledger {
             Err(_) => rustledger_core::AccountTypes::default(),
         };
 
+        // Written by `serialize` from a parsed method, so it parses back; the
+        // fallback only covers a hand-built blob, as `account_types` does.
+        let booking_method = payload
+            .booking_method
+            .parse()
+            .unwrap_or(rustledger_core::BookingMethod::Strict);
+
         Ok(Self {
             directives: payload.directives,
             options: payload.options,
             account_types,
+            booking_method,
             errors: payload.errors,
             editor_cache,
         })
@@ -838,6 +867,7 @@ mod option_warning_severity_tests {
             directives: Vec::new(),
             options: LedgerOptions::default(),
             account_types: rustledger_core::AccountTypes::default(),
+            booking_method: rustledger_core::BookingMethod::Strict,
             errors: option_warnings_to_errors(&[warn("E7009")]),
             editor_cache: editor::EditorCache::from_directives(&[]),
         };
@@ -855,6 +885,7 @@ mod option_warning_severity_tests {
             directives: Vec::new(),
             options: LedgerOptions::default(),
             account_types: rustledger_core::AccountTypes::default(),
+            booking_method: rustledger_core::BookingMethod::Strict,
             errors: option_warnings_to_errors(&[warn("E7001")]),
             editor_cache: editor::EditorCache::from_directives(&[]),
         };
@@ -888,6 +919,7 @@ mod option_warning_severity_tests {
                 directives: Vec::new(),
                 options: LedgerOptions::default(),
                 account_types: rustledger_core::AccountTypes::default(),
+                booking_method: rustledger_core::BookingMethod::Strict,
                 errors,
                 editor_cache: editor::EditorCache::from_directives(&[]),
             };

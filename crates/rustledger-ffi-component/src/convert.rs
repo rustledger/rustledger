@@ -690,7 +690,12 @@ fn query_loaded(loaded: &ffi::helpers::LoadResult, query_str: &str) -> out::Quer
         };
     }
     let directives = rustledger_booking::merge_with_padding(&loaded.directives);
-    run_query(&directives, query_str, account_types_from(&loaded.options))
+    run_query(
+        &directives,
+        query_str,
+        account_types_from(&loaded.options),
+        booking_method_from(&loaded.options.booking_method),
+    )
 }
 
 /// Run one query against already-loaded, pad-expanded directives.
@@ -709,10 +714,24 @@ fn account_types_from(
     }
 }
 
+/// The ledger's effective booking method from the loaded options, the
+/// default BQL realizes with (#2386).
+///
+/// `booking_method` is the options' `booking-method`, the loader's option value, `"STRICT"` unless the file
+/// set it, and every FFI load books with the STRICT `LoadOptions` default, so
+/// parsing it gives the loader's `Ledger::booking_method`. An unparsable
+/// value falls back to STRICT, as the loader does.
+fn booking_method_from(booking_method: &str) -> rustledger_core::BookingMethod {
+    booking_method
+        .parse()
+        .unwrap_or(rustledger_core::BookingMethod::Strict)
+}
+
 pub fn run_query(
     directives: &[rustledger_core::Directive],
     query_str: &str,
     account_types: rustledger_core::AccountTypes,
+    booking_method: rustledger_core::BookingMethod,
 ) -> out::QueryResult {
     let parsed = match parse_query(query_str) {
         Ok(q) => q,
@@ -726,6 +745,7 @@ pub fn run_query(
     };
     let mut executor = Executor::new(directives);
     executor.set_account_types(account_types);
+    executor.set_booking_method(booking_method);
     match executor.execute(&parsed) {
         Ok(result) => {
             // Infer each column's datatype from its first NON-NULL value.
@@ -790,7 +810,14 @@ pub fn batch(source: &str, queries: &[String]) -> out::BatchResult {
         let directives = rustledger_booking::merge_with_padding(&loaded.directives);
         queries
             .iter()
-            .map(|q| run_query(&directives, q, account_types_from(&loaded.options)))
+            .map(|q| {
+                run_query(
+                    &directives,
+                    q,
+                    account_types_from(&loaded.options),
+                    booking_method_from(&loaded.options.booking_method),
+                )
+            })
             .collect()
     } else {
         queries
@@ -1552,6 +1579,7 @@ pub fn query_entries(entries: &[wit::Directive], query_str: &str) -> out::QueryR
         &directives,
         query_str,
         rustledger_core::AccountTypes::default(),
+        rustledger_core::BookingMethod::Strict,
     )
 }
 
@@ -1772,7 +1800,12 @@ impl SessionState {
         let directives = self
             .padded
             .get_or_init(|| rustledger_booking::merge_with_padding(&self.directives));
-        run_query(directives, query_str, self.account_types())
+        run_query(
+            directives,
+            query_str,
+            self.account_types(),
+            booking_method_from(&self.options.booking_method),
+        )
     }
 
     /// The held options' account-root classifier — the single place the
@@ -3407,5 +3440,63 @@ option \"name_expenses\" \"Depenses\"
     fn account_type_rejects_an_unknown_root() {
         let session = SessionState::from_source(RENAMED);
         assert_eq!(session.account_type("Nonsense:Thing"), "unknown");
+    }
+}
+
+#[cfg(test)]
+mod global_booking_method_tests {
+    //! #2386: every component query path realizes `BALANCES` with the
+    //! ledger's `option "booking_method"`, not a hardcoded default.
+    //!
+    //! Under a global NONE the sale at `{90 USD}`, a cost no lot has, books as
+    //! its own `-2 X {90 USD}` lot (beancount 3.2.3 holds the same). Replayed
+    //! under STRICT it reads as a reduction that finds no lot, and `BALANCES`
+    //! failed with "No matching lot".
+
+    use super::SessionState;
+
+    const GLOBAL_NONE: &str = "\
+option \"booking_method\" \"NONE\"
+2020-01-01 open Assets:Stock
+2020-01-01 open Assets:Cash
+2020-01-02 * \"buy\"
+  Assets:Stock  5 X {100 USD}
+  Assets:Cash  -500 USD
+2020-01-03 * \"sell at a cost no lot has\"
+  Assets:Stock  -2 X {90 USD}
+  Assets:Cash   180 USD
+";
+
+    fn assert_both_lots(result: &super::out::QueryResult, surface: &str) {
+        assert!(
+            result.errors.is_empty(),
+            "{surface}: BALANCES must not error: {:?}",
+            result.errors
+        );
+        let rows = format!("{:?}", result.rows);
+        for number in ["\"100\"", "\"90\"", "\"-2\"", "\"5\""] {
+            assert!(
+                rows.contains(number),
+                "{surface}: BALANCES must hold 5 X {{100 USD}} and -2 X {{90 USD}}, \
+                 missing {number}: {rows}"
+            );
+        }
+    }
+
+    #[test]
+    fn query_realizes_with_the_global_booking_method() {
+        assert_both_lots(&super::query(GLOBAL_NONE, "BALANCES"), "query");
+    }
+
+    #[test]
+    fn batch_realizes_with_the_global_booking_method() {
+        let batch = super::batch(GLOBAL_NONE, &["BALANCES".to_owned()]);
+        assert_both_lots(&batch.queries[0], "batch");
+    }
+
+    #[test]
+    fn session_realizes_with_the_global_booking_method() {
+        let session = SessionState::from_source(GLOBAL_NONE);
+        assert_both_lots(&session.query("BALANCES"), "session");
     }
 }

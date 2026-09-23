@@ -108,6 +108,10 @@ pub struct FromClause {
     /// excluded. Combined with `open_on`, the resulting period is
     /// `[open_on, close_on)`.
     pub close_on: Option<NaiveDate>,
+    /// CLOSE, with or without a date. `close_on` is its date when it has one;
+    /// a bare `CLOSE` closes at the end of the ledger. Either way beanquery
+    /// books a conversions entry (#2406).
+    pub close: bool,
     /// CLEAR - transfer income/expense to equity.
     pub clear: bool,
     /// Filter expression.
@@ -520,6 +524,7 @@ impl FromClause {
         Self {
             open_on: None,
             close_on: None,
+            close: false,
             clear: false,
             filter: None,
             subquery: None,
@@ -532,6 +537,7 @@ impl FromClause {
         Self {
             open_on: None,
             close_on: None,
+            close: false,
             clear: false,
             filter: None,
             subquery: Some(Box::new(query)),
@@ -544,6 +550,7 @@ impl FromClause {
         Self {
             open_on: None,
             close_on: None,
+            close: false,
             clear: false,
             filter: None,
             subquery: None,
@@ -560,6 +567,13 @@ impl FromClause {
     /// Set the CLOSE ON date.
     pub const fn close_on(mut self, date: NaiveDate) -> Self {
         self.close_on = Some(date);
+        self.close = true;
+        self
+    }
+
+    /// Set a bare CLOSE: close at the end of the ledger.
+    pub const fn close(mut self) -> Self {
+        self.close = true;
         self
     }
 

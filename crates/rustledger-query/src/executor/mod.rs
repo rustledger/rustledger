@@ -677,7 +677,9 @@ impl<'a> Executor<'a> {
     ///   (#2401). The summaries come first, then the transactions on or after
     ///   the date.
     /// - `CLOSE ON` is exclusive, as in bean-query: the books close AT the
-    ///   date, so the range is `[open, close)`.
+    ///   date, so the range is `[open, close)`. Any `CLOSE`, dated or bare,
+    ///   then appends beancount's conversions entry (#2406).
+    /// - `CLEAR` appends beancount's income-statement transfers, last.
     ///
     /// # Errors
     ///
@@ -688,12 +690,15 @@ impl<'a> Executor<'a> {
         &self,
         from: Option<&FromClause>,
         directives: I,
-    ) -> Result<impl Iterator<Item = (Option<usize>, TransactionRef<'a>)>, QueryError>
+    ) -> Result<Box<dyn Iterator<Item = (Option<usize>, TransactionRef<'a>)> + 'a>, QueryError>
     where
         I: IntoIterator<Item = (usize, &'a Directive)>,
+        I::IntoIter: 'a,
     {
         let open_on = from.and_then(|f| f.open_on);
         let close_on = from.and_then(|f| f.close_on);
+        let close = from.is_some_and(|f| f.close || f.close_on.is_some());
+        let clear = from.is_some_and(|f| f.clear);
         if let (Some(open), Some(close)) = (open_on, close_on)
             && open > close
         {
@@ -701,26 +706,73 @@ impl<'a> Executor<'a> {
                 "CLOSE date must follow OPEN date".to_string(),
             ));
         }
+        let in_window = move |date: NaiveDate| {
+            open_on.is_none_or(|open| date >= open) && close_on.is_none_or(|close| date < close)
+        };
         let summaries = match open_on {
             Some(open) => self.open_summaries(open)?,
             None => Vec::new(),
         };
-        Ok(summaries
+        let summarized_on = open_on.filter(|_| !summaries.is_empty());
+        let head = summaries
             .into_iter()
-            .map(|txn| (None, TransactionRef::Synthesized(txn)))
-            .chain(
-                directives
+            .map(|txn| (None, TransactionRef::Synthesized(txn)));
+        let transactions = move |(index, directive): (usize, &'a Directive)| match directive {
+            Directive::Transaction(txn) if in_window(txn.date) => {
+                Some((Some(index), TransactionRef::Ledger(txn)))
+            }
+            _ => None,
+        };
+        if !close && !clear {
+            return Ok(Box::new(
+                head.chain(directives.into_iter().filter_map(transactions)),
+            ));
+        }
+
+        // CLOSE and CLEAR append entries computed from the whole window, so it
+        // is materialized; every other query stays lazy.
+        let mut stream: Vec<(Option<usize>, TransactionRef<'a>)> = head.collect();
+        // beancount dates a bare CLOSE's conversions entry, and CLEAR's
+        // transfers, at `entries[-1].date`: the last entry of ANY type left
+        // after OPEN and CLOSE, which can be a price or a balance dated after
+        // the last transaction.
+        let mut last_date = summarized_on.and_then(|open| open.yesterday().ok());
+        for (index, directive) in directives {
+            let date = directive.date();
+            let kept_before_open = open_on.is_some_and(|open| date < open)
+                && matches!(directive, Directive::Open(_) | Directive::Price(_));
+            if in_window(date) || kept_before_open {
+                last_date = last_date.max(Some(date));
+            }
+            if let Some(entry) = transactions((index, directive)) {
+                stream.push(entry);
+            }
+        }
+        if close {
+            let date = match close_on {
+                Some(close) => Some(
+                    close
+                        .yesterday()
+                        .map_err(|e| QueryError::Evaluation(format!("CLOSE ON {close}: {e}")))?,
+                ),
+                None => last_date,
+            };
+            if let Some(date) = date
+                && let Some(conversions) = self.close_conversions(&stream, date)?
+            {
+                last_date = last_date.max(Some(date));
+                stream.push((None, TransactionRef::Synthesized(conversions)));
+            }
+        }
+        if clear && let Some(date) = last_date {
+            let transfers = self.clear_transfers(&stream, date)?;
+            stream.extend(
+                transfers
                     .into_iter()
-                    .filter_map(move |(index, directive)| match directive {
-                        Directive::Transaction(txn)
-                            if open_on.is_none_or(|open| txn.date >= open) =>
-                        {
-                            Some((Some(index), TransactionRef::Ledger(txn)))
-                        }
-                        _ => None,
-                    }),
-            )
-            .filter(move |(_, txn)| close_on.is_none_or(|close| txn.date < close)))
+                    .map(|txn| (None, TransactionRef::Synthesized(txn))),
+            );
+        }
+        Ok(Box::new(stream.into_iter()))
     }
 
     /// Iterates the resolved directives in order, applies the optional `FROM` and

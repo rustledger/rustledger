@@ -320,7 +320,41 @@ impl Options {
         )
     }
 
-    /// A previous-period summary account's full name.
+    /// The account a period's income and expenses move to under `CLEAR`
+    /// (`account_current_earnings`), resolved as
+    /// [`Self::previous_balances_account`] is.
+    #[must_use]
+    pub fn current_earnings_account(&self) -> String {
+        self.resolve_previous(
+            "account_current_earnings",
+            &self.account_current_earnings,
+            "Earnings:Current",
+        )
+    }
+
+    /// The account a period's conversion residual goes to under `CLOSE`
+    /// (`account_current_conversions`), resolved as
+    /// [`Self::previous_balances_account`] is.
+    #[must_use]
+    pub fn current_conversions_account(&self) -> String {
+        match &self.account_current_conversions {
+            Some(value) if self.set_options.contains("account_current_conversions") => {
+                value.clone()
+            }
+            _ => format!("{}:Conversions:Current", self.name_equity),
+        }
+    }
+
+    /// The currency a conversions entry prices its postings in
+    /// (`conversion_currency`): beancount's `NOTHING` when unset.
+    #[must_use]
+    pub fn conversion_currency_or_default(&self) -> String {
+        self.conversion_currency
+            .clone()
+            .unwrap_or_else(|| "NOTHING".to_string())
+    }
+
+    /// A summary account's full name.
     ///
     /// Unset, it is beancount's default leaf under the ledger's equity root,
     /// as beancount's `get_previous_accounts` builds it, so a ledger that sets

@@ -750,6 +750,9 @@ impl Ledger {
                 self.summary_accounts.previous_balances.clone(),
                 self.summary_accounts.previous_earnings.clone(),
                 self.summary_accounts.previous_conversions.clone(),
+                self.summary_accounts.current_earnings.clone(),
+                self.summary_accounts.current_conversions.clone(),
+                self.summary_accounts.conversion_currency.clone(),
             ],
             errors: self.errors.clone(),
         };
@@ -791,14 +794,24 @@ impl Ledger {
             .booking_method
             .parse()
             .unwrap_or(rustledger_core::BookingMethod::Strict);
-        let summary_accounts = match <[String; 3]>::try_from(payload.summary_account_names) {
-            Ok([previous_balances, previous_earnings, previous_conversions]) => {
-                rustledger_query::executor::SummaryAccounts {
+        let summary_accounts = match <[String; 6]>::try_from(payload.summary_account_names) {
+            Ok(
+                [
                     previous_balances,
                     previous_earnings,
                     previous_conversions,
-                }
-            }
+                    current_earnings,
+                    current_conversions,
+                    conversion_currency,
+                ],
+            ) => rustledger_query::executor::SummaryAccounts {
+                previous_balances,
+                previous_earnings,
+                previous_conversions,
+                current_earnings,
+                current_conversions,
+                conversion_currency,
+            },
             // Wrong arity can only come from a hand-built blob, as for
             // `account_types`; fall back to beancount's names.
             Err(_) => rustledger_query::executor::SummaryAccounts::default(),

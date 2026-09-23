@@ -5633,6 +5633,38 @@ mod tests {
             flag.is_merge(),
             "a token before the opener must not consume the decision"
         );
+
+        // A comma before the opener must not arm a component start either, or
+        // the star that follows it would read as a merge component.
+        let mut flag = MergeFlag::default();
+        for kind in [K::COMMA, K::STAR, K::L_BRACE, K::NUMBER, K::R_BRACE] {
+            flag.feed(kind);
+        }
+        assert!(
+            !flag.is_merge(),
+            "a comma before the opener must not make the next star a merge"
+        );
+    }
+
+    /// Only the FIRST opener starts the component list. A later brace on
+    /// malformed input is not an opener, so a star after it is not a merge
+    /// component (#2329 moved the rule from "first token" to "starts a
+    /// component", and this keeps it from re-arming mid-spec).
+    #[test]
+    fn merge_flag_ignores_a_later_opener() {
+        use crate::SyntaxKind as K;
+        let mut flag = MergeFlag::default();
+        for kind in [
+            K::L_BRACE,
+            K::NUMBER,
+            K::WHITESPACE,
+            K::CURRENCY,
+            K::L_BRACE,
+            K::STAR,
+        ] {
+            flag.feed(kind);
+        }
+        assert!(!flag.is_merge(), "`{{2 USD {{*` is not a merge");
     }
 
     /// Every diagnostic span in this module is built as `offset + bom_offset`,

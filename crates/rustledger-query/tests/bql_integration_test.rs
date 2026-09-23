@@ -1650,17 +1650,59 @@ fn test_balances_close_on_partial_window() {
 }
 
 #[test]
-fn test_balances_open_on_is_noop_for_totals() {
-    // OPEN ON folds pre-date postings into the running balance as carry-in, so an
-    // account TOTAL is unchanged by where OPEN ON falls (matches bean-query). The
-    // result must be identical to unfiltered BALANCES.
+fn test_balances_open_on_keeps_balance_sheet_totals_and_clears_income() {
+    // OPEN ON summarizes the ledger before the date, as beanquery does with
+    // beancount's `summarize.open` (#2401). Balance-sheet totals are unchanged;
+    // income and expenses before the date move to `Equity:Earnings:Previous`,
+    // so each income-statement account shows the period only.
+    //
+    // This test used to assert that OPEN ON left every BALANCES total
+    // unchanged, "matching bean-query". It did not match: bean-query clears
+    // the income statement, and pinning the carry-in is what kept #2401's
+    // wrong period totals in place.
     let directives = make_test_directives();
-    let full = execute_query("BALANCES", &directives);
-    let windowed = execute_query("BALANCES FROM OPEN ON 2024-01-22", &directives);
+    let totals = |query: &str| -> std::collections::BTreeMap<String, String> {
+        execute_query(query, &directives)
+            .rows
+            .iter()
+            .filter_map(|r| match (&r[0], &r[1]) {
+                (Value::String(a), Value::Inventory(inv)) => Some((a.clone(), inv.to_string())),
+                _ => None,
+            })
+            .collect()
+    };
+    let full = totals("BALANCES");
+    let windowed = totals("BALANCES FROM OPEN ON 2024-01-22");
+
+    for account in [
+        "Assets:Bank:Checking",
+        "Assets:Bank:Savings",
+        "Expenses:Transport",
+    ] {
+        assert_eq!(
+            windowed.get(account),
+            full.get(account),
+            "{account}: a balance-sheet total, or one touched only in the period, is unchanged"
+        );
+    }
     assert_eq!(
-        format!("{:?}", full.rows),
-        format!("{:?}", windowed.rows),
-        "OPEN ON must not change BALANCES totals (carry-in keeps pre-date postings)"
+        full.get("Expenses:Food").map(String::as_str),
+        Some("230 USD")
+    );
+    assert_eq!(
+        windowed.get("Expenses:Food").map(String::as_str),
+        Some("80 USD"),
+        "the period's food only; the 150 before it was cleared"
+    );
+    assert_eq!(
+        windowed.get("Income:Salary"),
+        None,
+        "all salary was before the date, so the period has none"
+    );
+    assert_eq!(
+        windowed.get("Equity:Earnings:Previous").map(String::as_str),
+        Some("-4850 USD"),
+        "the income statement before the date: -5000 salary + 150 food"
     );
 }
 

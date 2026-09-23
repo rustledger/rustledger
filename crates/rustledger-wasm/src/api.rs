@@ -207,6 +207,9 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
     executor.set_booking_method(crate::helpers::booking_method_from_raw(
         &load.parse_result.options,
     ));
+    executor.set_summary_accounts(crate::helpers::summary_accounts_from_raw(
+        &load.parse_result.options,
+    ));
     match executor.execute(&query) {
         Ok(result) => {
             let rows: Vec<Vec<_>> = result
@@ -851,6 +854,8 @@ fn query_with_filesystem(
     // Grab the configured account types before `ledger` fields are moved.
     let account_types = ledger.options.to_account_types();
     let booking_method = ledger.booking_method;
+    let summary_accounts =
+        rustledger_query::executor::SummaryAccounts::from_options(&ledger.options);
     let booked_directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
     let directives = merge_with_padding(&booked_directives);
 
@@ -871,6 +876,7 @@ fn query_with_filesystem(
     let mut executor = Executor::new(&directives);
     executor.set_account_types(account_types);
     executor.set_booking_method(booking_method);
+    executor.set_summary_accounts(summary_accounts);
     match executor.execute(&query) {
         Ok(result) => {
             let rows: Vec<Vec<_>> = result

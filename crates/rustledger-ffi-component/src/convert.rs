@@ -695,6 +695,11 @@ fn query_loaded(loaded: &ffi::helpers::LoadResult, query_str: &str) -> out::Quer
         query_str,
         account_types_from(&loaded.options),
         booking_method_from(&loaded.options.booking_method),
+        summary_accounts_from(
+            &loaded.options.account_previous_balances,
+            &loaded.options.account_previous_earnings,
+            &loaded.options.account_previous_conversions,
+        ),
     )
 }
 
@@ -721,6 +726,20 @@ fn account_types_from(
 /// set it, and every FFI load books with the STRICT `LoadOptions` default, so
 /// parsing it gives the loader's `Ledger::booking_method`. An unparsable
 /// value falls back to STRICT, as the loader does.
+/// The `account_previous_*` accounts `FROM ... OPEN ON` summarizes into
+/// (#2401), from the options' three names.
+fn summary_accounts_from(
+    previous_balances: &str,
+    previous_earnings: &str,
+    previous_conversions: &str,
+) -> rustledger_query::executor::SummaryAccounts {
+    rustledger_query::executor::SummaryAccounts {
+        previous_balances: previous_balances.to_owned(),
+        previous_earnings: previous_earnings.to_owned(),
+        previous_conversions: previous_conversions.to_owned(),
+    }
+}
+
 fn booking_method_from(booking_method: &str) -> rustledger_core::BookingMethod {
     booking_method
         .parse()
@@ -732,6 +751,7 @@ pub fn run_query(
     query_str: &str,
     account_types: rustledger_core::AccountTypes,
     booking_method: rustledger_core::BookingMethod,
+    summary_accounts: rustledger_query::executor::SummaryAccounts,
 ) -> out::QueryResult {
     let parsed = match parse_query(query_str) {
         Ok(q) => q,
@@ -746,6 +766,7 @@ pub fn run_query(
     let mut executor = Executor::new(directives);
     executor.set_account_types(account_types);
     executor.set_booking_method(booking_method);
+    executor.set_summary_accounts(summary_accounts);
     match executor.execute(&parsed) {
         Ok(result) => {
             // Infer each column's datatype from its first NON-NULL value.
@@ -816,6 +837,11 @@ pub fn batch(source: &str, queries: &[String]) -> out::BatchResult {
                     q,
                     account_types_from(&loaded.options),
                     booking_method_from(&loaded.options.booking_method),
+                    summary_accounts_from(
+                        &loaded.options.account_previous_balances,
+                        &loaded.options.account_previous_earnings,
+                        &loaded.options.account_previous_conversions,
+                    ),
                 )
             })
             .collect()
@@ -1580,6 +1606,7 @@ pub fn query_entries(entries: &[wit::Directive], query_str: &str) -> out::QueryR
         query_str,
         rustledger_core::AccountTypes::default(),
         rustledger_core::BookingMethod::Strict,
+        rustledger_query::executor::SummaryAccounts::default(),
     )
 }
 
@@ -1805,6 +1832,11 @@ impl SessionState {
             query_str,
             self.account_types(),
             booking_method_from(&self.options.booking_method),
+            summary_accounts_from(
+                &self.options.account_previous_balances,
+                &self.options.account_previous_earnings,
+                &self.options.account_previous_conversions,
+            ),
         )
     }
 

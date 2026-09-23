@@ -250,9 +250,12 @@ pub fn build_ledger_options(
         inferred_tolerance_multiplier: options.inferred_tolerance_multiplier.to_string(),
         infer_tolerance_from_cost: options.infer_tolerance_from_cost,
         account_rounding: options.account_rounding.clone(),
-        account_previous_balances: options.account_previous_balances.clone(),
-        account_previous_earnings: options.account_previous_earnings.clone(),
-        account_previous_conversions: options.account_previous_conversions.clone(),
+        // Resolved, not the raw fields: unset, they name the ledger's own
+        // equity root rather than a hardcoded `Equity:` (#2401). Hosts and
+        // `session.clamp` / BQL all read these.
+        account_previous_balances: options.previous_balances_account(),
+        account_previous_earnings: options.previous_earnings_account(),
+        account_previous_conversions: options.previous_conversions_account(),
         account_current_earnings: options.account_current_earnings.clone(),
         account_current_conversions: options.account_current_conversions.clone(),
         account_unrealized_gains: options.account_unrealized_gains.clone(),

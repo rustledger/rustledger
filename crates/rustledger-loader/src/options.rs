@@ -276,6 +276,71 @@ impl Default for Options {
 }
 
 impl Options {
+    /// The account previous-period balances summarize against
+    /// (`account_previous_balances`), as a full account name.
+    ///
+    /// Unset, it is beancount's default leaf under the ledger's equity root,
+    /// as beancount's `get_previous_accounts` builds it, so a ledger that sets
+    /// `option "name_equity" "Eigenkapital"` summarizes into
+    /// `Eigenkapital:Opening-Balances` (#2401). Set, it is the value as
+    /// written, since rledger takes these options as full account names
+    /// (beancount takes them relative to the equity root; #2408). The same
+    /// rule resolves [`Self::previous_earnings_account`] and
+    /// [`Self::previous_conversions_account`].
+    #[must_use]
+    pub fn previous_balances_account(&self) -> String {
+        self.resolve_previous(
+            "account_previous_balances",
+            &self.account_previous_balances,
+            "Opening-Balances",
+        )
+    }
+
+    /// The account previous-period income and expenses move to
+    /// (`account_previous_earnings`), resolved as
+    /// [`Self::previous_balances_account`] is.
+    #[must_use]
+    pub fn previous_earnings_account(&self) -> String {
+        self.resolve_previous(
+            "account_previous_earnings",
+            &self.account_previous_earnings,
+            "Earnings:Previous",
+        )
+    }
+
+    /// The account a previous-period conversion residual goes to
+    /// (`account_previous_conversions`), resolved as
+    /// [`Self::previous_balances_account`] is.
+    #[must_use]
+    pub fn previous_conversions_account(&self) -> String {
+        self.resolve_previous(
+            "account_previous_conversions",
+            &self.account_previous_conversions,
+            "Conversions:Previous",
+        )
+    }
+
+    /// A previous-period summary account's full name.
+    ///
+    /// Unset, it is beancount's default leaf under the ledger's equity root,
+    /// as beancount's `get_previous_accounts` builds it, so a ledger that sets
+    /// `option "name_equity" "Eigenkapital"` summarizes into
+    /// `Eigenkapital:Opening-Balances`. The stored default
+    /// (`Equity:Opening-Balances`) named a root such a ledger does not have
+    /// (#2401).
+    ///
+    /// Set, it is the value as written: rledger takes these options as full
+    /// account names. beancount takes them relative to the equity root and
+    /// joins the root on, which is a separate divergence in how the option
+    /// is parsed, not in how an unset one resolves (#2408).
+    fn resolve_previous(&self, key: &str, value: &str, default_leaf: &str) -> String {
+        if self.set_options.contains(key) {
+            value.to_string()
+        } else {
+            format!("{}:{default_leaf}", self.name_equity)
+        }
+    }
+
     /// The ledger-wide booking method: the file's `option "booking_method"`
     /// when the file set it (an `include`d file cannot, see `set_scoped`) and
     /// it parses, otherwise `default`, the embedder's own choice
@@ -1178,6 +1243,53 @@ mod tests {
                 "{key}: `yes` is outside the shared vocabulary and must warn"
             );
         }
+    }
+
+    /// #2401: the previous-period summary accounts resolve under the
+    /// ledger's own equity root when unset, and are the name written when set.
+    #[test]
+    fn previous_summary_accounts_resolve_under_the_equity_root() {
+        let defaults = Options::new();
+        assert_eq!(
+            defaults.previous_balances_account(),
+            "Equity:Opening-Balances"
+        );
+        assert_eq!(
+            defaults.previous_earnings_account(),
+            "Equity:Earnings:Previous"
+        );
+        assert_eq!(
+            defaults.previous_conversions_account(),
+            "Equity:Conversions:Previous"
+        );
+
+        let mut renamed = Options::new();
+        renamed.set("name_equity", "Eigenkapital");
+        assert_eq!(
+            renamed.previous_balances_account(),
+            "Eigenkapital:Opening-Balances"
+        );
+        assert_eq!(
+            renamed.previous_earnings_account(),
+            "Eigenkapital:Earnings:Previous"
+        );
+        assert_eq!(
+            renamed.previous_conversions_account(),
+            "Eigenkapital:Conversions:Previous"
+        );
+
+        // Set: the name as written, whatever the equity root (#2408).
+        let mut set = Options::new();
+        set.set("name_equity", "Eigenkapital");
+        set.set("account_previous_balances", "Eigenkapital:Anfang");
+        set.set("account_previous_earnings", "Eigenkapital:Vorjahr");
+        set.set("account_previous_conversions", "Eigenkapital:Umrechnung");
+        assert_eq!(set.previous_balances_account(), "Eigenkapital:Anfang");
+        assert_eq!(set.previous_earnings_account(), "Eigenkapital:Vorjahr");
+        assert_eq!(
+            set.previous_conversions_account(),
+            "Eigenkapital:Umrechnung"
+        );
     }
 
     #[test]

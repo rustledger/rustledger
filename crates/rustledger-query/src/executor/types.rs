@@ -424,11 +424,44 @@ impl QueryResult {
     }
 }
 
+/// The transaction a posting row belongs to: one in the ledger, or one the
+/// query synthesized.
+///
+/// `FROM ... OPEN ON` replaces the transactions before the date with opening
+/// balance summaries, as beanquery does (#2401). Those summaries exist only
+/// for the query, so a row cannot borrow them from the ledger; they are
+/// shared instead. Both forms dereference to the [`Transaction`], so a row
+/// reads its transaction the same way whichever it holds.
+#[derive(Debug, Clone)]
+pub enum TransactionRef<'a> {
+    /// A transaction in the ledger.
+    Ledger(&'a Transaction),
+    /// A transaction the query synthesized, with no source in the ledger.
+    Synthesized(std::sync::Arc<Transaction>),
+}
+
+impl std::ops::Deref for TransactionRef<'_> {
+    type Target = Transaction;
+
+    fn deref(&self) -> &Transaction {
+        match self {
+            Self::Ledger(txn) => txn,
+            Self::Synthesized(txn) => txn,
+        }
+    }
+}
+
+impl<'a> From<&'a Transaction> for TransactionRef<'a> {
+    fn from(txn: &'a Transaction) -> Self {
+        Self::Ledger(txn)
+    }
+}
+
 /// Context for a single posting being evaluated.
 #[derive(Debug)]
 pub struct PostingContext<'a> {
     /// The transaction this posting belongs to.
-    pub transaction: &'a Transaction,
+    pub transaction: TransactionRef<'a>,
     /// The posting index within the transaction.
     pub posting_index: usize,
     /// Cumulative running balance across all WHERE-filtered postings up to and

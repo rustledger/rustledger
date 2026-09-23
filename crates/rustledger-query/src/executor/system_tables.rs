@@ -947,7 +947,7 @@ impl Executor<'_> {
         let mut last_entry: Option<(usize, Value)> = None;
 
         for ctx in contexts {
-            let txn = ctx.transaction;
+            let txn: &rustledger_core::Transaction = &ctx.transaction;
             let posting = &txn.postings[ctx.posting_index];
             // `scan_postings` always sets a real directive index on every context.
             let dir_idx = ctx

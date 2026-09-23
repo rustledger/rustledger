@@ -42,7 +42,7 @@ impl Executor<'_> {
                 } else {
                     // For other functions, create a dummy context and evaluate
                     let dummy_ctx = PostingContext {
-                        transaction: txn,
+                        transaction: txn.into(),
                         posting_index: 0,
                         balance: None,
                         account_balance: None,
@@ -108,7 +108,7 @@ impl Executor<'_> {
                     _ => {
                         // Fall back to posting-level evaluation
                         let dummy_ctx = PostingContext {
-                            transaction: txn,
+                            transaction: txn.into(),
                             posting_index: 0,
                             balance: None,
                             account_balance: None,
@@ -121,7 +121,7 @@ impl Executor<'_> {
             _ => {
                 // For other expressions, create a dummy context
                 let dummy_ctx = PostingContext {
-                    transaction: txn,
+                    transaction: txn.into(),
                     posting_index: 0,
                     balance: None,
                     account_balance: None,
@@ -507,7 +507,7 @@ impl Executor<'_> {
                 let entry_loc = ctx
                     .directive_index
                     .and_then(|i| self.get_source_location(i).cloned());
-                Ok(Self::entry_object(ctx.transaction, entry_loc.as_ref()))
+                Ok(Self::entry_object(&ctx.transaction, entry_loc.as_ref()))
             }
             // type - directive type. bean-query lowercases it (`transaction`),
             // and the `#postings` table already emits lowercase; the default

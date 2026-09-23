@@ -112,3 +112,34 @@ fn a_cost_spec_sale_leaves_cost_less_units_alone_under_every_method() {
         );
     }
 }
+
+/// Selling more than the lots held at cost is refused, not filled from the
+/// cost-less units: those have no basis, so no gain could be computed for
+/// them (#2396). Beancount refuses it too (`Not enough lots to reduce`).
+///
+/// Under AVERAGE this used to load: the 15 sold from a pool of 20 at 50, a
+/// basis invented from the cost-less units. FIFO, LIFO and STRICT refused it
+/// already, but for the wrong reason (interpolation, or an ambiguous match).
+#[test]
+fn a_sale_larger_than_the_cost_held_lots_is_refused() {
+    for method in ["AVERAGE", "FIFO", "LIFO", "STRICT"] {
+        let source = ledger_with_sale(method, "{}")
+            .replace("-4 X {} @ 110 USD", "-15 X {} @ 110 USD")
+            .replace("Assets:Cash   440 USD", "Assets:Cash   1650 USD");
+        assert!(source.contains("-15 X {}"), "the fixture edit must apply");
+        let mut f = tempfile::Builder::new()
+            .prefix("costless-over-")
+            .suffix(".beancount")
+            .tempfile()
+            .expect("create tempfile");
+        f.write_all(source.as_bytes()).expect("write fixture");
+        let ledger = load(f.path(), &LoadOptions::default()).expect("the ledger loads");
+        let messages: Vec<String> = ledger.errors.iter().map(|e| format!("{e:?}")).collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("InsufficientUnits") || m.contains("Not enough units")),
+            "{method}: selling 15 of 10 cost-held units must be refused as insufficient; got {messages:?}",
+        );
+    }
+}

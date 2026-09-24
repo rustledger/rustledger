@@ -70,37 +70,34 @@ Values:
 | `AVERAGE` | Average cost |
 | `NONE` | No booking |
 
-### account_previous_earnings
+### Account-name options
 
-Account for previous period earnings in equity.
-
-```beancount
-option "account_previous_earnings" "Equity:Retained-Earnings"
-```
-
-### account_current_earnings
-
-Account for current period earnings.
+These options name an account as a **leaf under a root**, as beancount defines
+them: the value is joined onto the equity root (`name_equity`, `Equity` by
+default), so write the part after the root.
 
 ```beancount
-option "account_current_earnings" "Equity:Current-Earnings"
+option "account_previous_balances" "Opening-Balances"   ; -> Equity:Opening-Balances
+option "account_previous_earnings" "Retained-Earnings"  ; -> Equity:Retained-Earnings
 ```
 
-### account_previous_balances
+| Option | Used for | Default leaf |
+|--------|----------|--------------|
+| `account_previous_balances` | Contra account of opening balances (`FROM ... OPEN ON`) | `Opening-Balances` |
+| `account_previous_earnings` | Income and expenses before the period (`OPEN ON`) | `Earnings:Previous` |
+| `account_previous_conversions` | Conversion residual before the period (`OPEN ON`) | `Conversions:Previous` |
+| `account_current_earnings` | The period's income and expenses (`CLEAR`) | `Earnings:Current` |
+| `account_current_conversions` | The period's conversion residual (`CLOSE`) | `Conversions:Current` |
+| `account_unrealized_gains` | Unrealized gains (under `name_income` in beancount) | (none) |
 
-Account for opening/previous balances.
+A ledger that renames its equity root gets the defaults under that root:
+`option "name_equity" "Eigenkapital"` makes `Eigenkapital:Opening-Balances`.
 
-```beancount
-option "account_previous_balances" "Equity:Opening-Balances"
-```
-
-### account_unrealized_gains
-
-Account for unrealized gains reporting.
-
-```beancount
-option "account_unrealized_gains" "Income:Unrealized-Gains"
-```
+rustledger used to document and require full names here
+(`"Equity:Opening-Balances"`). Such a value resolves as beancount resolves it,
+the root joined on (`Equity:Equity:Opening-Balances`), and raises
+[E7010](errors.md#e7010-account-option-written-as-a-full-name) with the leaf to
+write instead.
 
 ## Display Options
 

@@ -77,15 +77,17 @@ pub struct LedgerOptions {
     /// Account for rounding errors.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_rounding: Option<String>,
-    /// Account for previous balances (opening balances).
+    /// Account for previous balances (opening balances): a LEAF name under
+    /// `name_equity`, as in beancount's options map (#2408).
     pub account_previous_balances: String,
-    /// Account for previous earnings.
+    /// Account for previous earnings: a leaf under `name_equity`.
     pub account_previous_earnings: String,
-    /// Account for previous conversions.
+    /// Account for previous conversions: a leaf under `name_equity`.
     pub account_previous_conversions: String,
-    /// Account for current earnings.
+    /// Account for current earnings: a leaf under `name_equity`.
     pub account_current_earnings: String,
-    /// Account for current conversion differences.
+    /// Account for current conversion differences: a leaf under
+    /// `name_equity`, always present when exported.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub account_current_conversions: Option<String>,
     /// Account for unrealized gains.
@@ -115,11 +117,12 @@ impl Default for LedgerOptions {
             inferred_tolerance_multiplier: "0.5".to_string(),
             infer_tolerance_from_cost: false,
             account_rounding: None,
-            account_previous_balances: "Equity:Opening-Balances".to_string(),
-            account_previous_earnings: "Equity:Earnings:Previous".to_string(),
-            account_previous_conversions: "Equity:Conversions:Previous".to_string(),
-            account_current_earnings: "Equity:Earnings:Current".to_string(),
-            account_current_conversions: None,
+            // beancount's defaults: leaves under `name_equity` (#2408).
+            account_previous_balances: "Opening-Balances".to_string(),
+            account_previous_earnings: "Earnings:Previous".to_string(),
+            account_previous_conversions: "Conversions:Previous".to_string(),
+            account_current_earnings: "Earnings:Current".to_string(),
+            account_current_conversions: Some("Conversions:Current".to_string()),
             account_unrealized_gains: None,
             conversion_currency: None,
         }

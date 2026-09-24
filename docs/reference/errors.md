@@ -290,6 +290,18 @@ cannot change how the whole tree books or what counts as balanced.
 **Fix**: Move the option to the top-level ledger if it should govern, or remove
 it if the sub-ledger only needed it when loaded standalone.
 
+### E7010: Account Option Written as a Full Name
+
+**Cause**: An account-name option (`account_previous_*`, `account_current_*`)
+starts with one of the ledger's root names, e.g.
+`option "account_previous_balances" "Equity:Opening-Balances"`. These options
+are leaf names under the equity root, as beancount defines them, so the root is
+joined on and the value names `Equity:Equity:Opening-Balances`, in rustledger
+and in beancount alike. It is a warning because the value is legal; it is almost
+always the full-name form rustledger used to require.
+
+**Fix**: Drop the root: `option "account_previous_balances" "Opening-Balances"`.
+
 ### E7007: Option Accepted but Has No Effect
 
 **Cause**: A recognized Beancount option is parsed for compatibility but is intentionally a no-op in rustledger. Currently this applies to `account_rounding`: Beancount uses it to absorb the residual created when an interpolated leg is *rounded* and the rounding breaks the sum, but rustledger preserves full precision during interpolation (it never rounds a non-zero residual to zero), so no rounding residual is ever produced and there is nothing for a rounding account to catch.

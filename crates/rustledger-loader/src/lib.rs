@@ -65,7 +65,7 @@ pub use discover::{
     COMMON_ROOT_NAMES, MAX_CANDIDATES, discover_include_roots_upward, discover_journal_file,
     discover_journal_upward,
 };
-pub use options::{OptionWarning, Options};
+pub use options::{DEFAULT_CURRENT_CONVERSIONS, OptionWarning, Options, resolve_leaf_account};
 pub use source_map::{SourceFile, SourceMap, line_col_in};
 pub use vfs::{DiskFileSystem, FileSystem, VirtualFileSystem};
 
@@ -520,6 +520,11 @@ impl Loader {
         let doc_warnings =
             process::document_root_warnings(&options.documents, base_dir, self.fs.as_ref());
         options.warnings.extend(doc_warnings);
+        // E7010: an account option written as a full name. Here, once every
+        // option is set, because `name_*` can follow the account options in
+        // the file (#2408).
+        let rooted = options.rooted_leaf_warnings();
+        options.warnings.extend(rooted);
 
         Ok(LoadResult {
             directives,

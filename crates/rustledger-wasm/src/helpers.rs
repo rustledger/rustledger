@@ -350,6 +350,9 @@ pub fn validate_option_tuples(options: &[(String, String, rustledger_parser::Spa
     for (key, value, _span) in options {
         opts.set(key, value);
     }
+    // E7010, which needs every option set first, as the loader raises it.
+    let rooted = opts.rooted_leaf_warnings();
+    opts.warnings.extend(rooted);
     option_warnings_to_errors(&opts.warnings)
 }
 

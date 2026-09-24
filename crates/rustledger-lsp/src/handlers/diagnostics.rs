@@ -950,6 +950,9 @@ pub fn all_diagnostics(
                     current_file_path.and_then(|p| p.parent()),
                     &rustledger_loader::DiskFileSystem,
                 ));
+            // E7010, once every option is set, as the loader raises it (#2408).
+            let rooted = opts.rooted_leaf_warnings();
+            opts.warnings.extend(rooted);
             single_file_options = opts;
             single_file_options.warnings.as_slice()
         };

@@ -110,8 +110,8 @@ option "booking_method" "FIFO"
 | `title`                      | Ledger title                                      | (none)                    |
 | `operating_currency`         | Main currency                                     | (none)                    |
 | `booking_method`             | FIFO, LIFO, AVERAGE, etc.                         | STRICT                    |
-| `account_previous_balances`  | Retained earnings account                         | `Equity:Opening-Balances` |
-| `account_current_earnings`   | Current earnings account                          | `Equity:Earnings:Current` |
+| `account_previous_balances`  | Opening-balances account, a leaf under `name_equity` | `Opening-Balances`     |
+| `account_current_earnings`   | Current earnings account, a leaf under `name_equity` | `Earnings:Current`     |
 | `inferred_tolerance_default` | Per-currency balance tolerance (e.g. `USD:0.005`) | (none)                    |
 
 ### Booking Methods

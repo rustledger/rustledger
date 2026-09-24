@@ -168,7 +168,12 @@ use crate::types::{Error, LedgerOptions};
 /// earnings and conversions accounts and the conversion currency, #2406). The
 /// layout did not move, but a v26 blob's three names fail the new arity and
 /// would silently fall back to beancount's defaults, so it must not be read.
-pub const CACHE_VERSION: u32 = 27;
+/// v28: loader v37, the account-name options read as leaves under a root
+/// (#2408). `LedgerPayload::summary_account_names` archives the RESOLVED names,
+/// and a set value resolves differently now (`Equity:Anfang` names
+/// `Equity:Equity:Anfang`, as in beancount), so a v27 blob would serve the old
+/// names.
+pub const CACHE_VERSION: u32 = 28;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -200,7 +205,7 @@ pub const CACHE_VERSION: u32 = 27;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 36;
+const LOADER_CACHE_VERSION_PIN: u32 = 37;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

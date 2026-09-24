@@ -1844,10 +1844,16 @@ fn differ(a: Decimal, b: Decimal, allowance: Decimal) -> bool {
 }
 
 /// Half a unit in the last decimal place of `number`: `0.005` for `106.67`,
-/// `0.5` for `110`. Zero at `Decimal`'s 28-place limit, where the next place
-/// cannot be written: such a number is compared exactly.
+/// `0.5` for `110`.
+///
+/// At `Decimal`'s 28-place limit the half unit cannot be written, and the
+/// allowance is one unit in the 28th place instead, not zero. A cost that long
+/// comes from an expression (`{*, 500/3 USD}`), and it and the pool are both
+/// quotients rounded to 28 places, so each may sit half a unit from the true
+/// value; comparing them exactly would reject a correct claim whenever the two
+/// roundings land on neighboring digits.
 fn half_unit_in_last_place(number: Decimal) -> Decimal {
-    Decimal::try_new(5, number.scale() + 1).unwrap_or(Decimal::ZERO)
+    Decimal::try_new(5, number.scale() + 1).unwrap_or(Decimal::new(1, 28))
 }
 
 /// The error for a cost whose per-unit value cannot be represented.
@@ -2156,6 +2162,18 @@ impl TransactionReplay<'_, '_> {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn half_unit_in_last_place_is_half_the_last_digit_written() {
+        use super::half_unit_in_last_place as half;
+        let d = |s: &str| s.parse::<rust_decimal::Decimal>().unwrap();
+        assert_eq!(half(d("106.67")), d("0.005"));
+        assert_eq!(half(d("110")), d("0.5"));
+        // 28 places: one unit in the 28th, not zero (#2398).
+        let at_limit = d("1") / d("3");
+        assert_eq!(at_limit.scale(), 28);
+        assert_eq!(half(at_limit), rust_decimal::Decimal::new(1, 28));
+    }
+
     use super::*;
     use rust_decimal_macros::dec;
     use rustledger_core::{NaiveDate, Posting, PriceAnnotation};

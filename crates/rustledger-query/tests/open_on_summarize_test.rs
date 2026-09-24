@@ -768,3 +768,53 @@ fn open_with_a_bare_close_and_clear_matches_beancounts_summarize() {
         "beancount's summarize (bean-query cannot run this query)",
     );
 }
+
+/// #2407: a `FROM` filter expression before the modifiers, beanquery's order
+/// (`FROM <expr> [OPEN ON d] [CLOSE [ON d]] [CLEAR]`), used to be a syntax
+/// error. The expression filters the summarized stream, so it can drop a
+/// summary row (`month >= 2` drops the 2024-01-31 summaries) and keep a
+/// transfer.
+#[test]
+fn a_filter_expression_before_the_modifiers() {
+    assert_rows(
+        &rows(
+            OPENING,
+            "SELECT date, flag, account, position FROM has_account('Bank') OPEN ON 2024-02-01",
+        ),
+        &[
+            &["2024-01-31", "S", "Assets:Bank", "1000.00 USD"],
+            &["2024-01-31", "S", "Equity:Opening-Balances", "-1000.00 USD"],
+            &["2024-02-10", "*", "Expenses:Food", "20.00 USD"],
+            &["2024-02-10", "*", "Assets:Bank", "-20.00 USD"],
+        ],
+        "bean-query's rows",
+    );
+    assert_rows(
+        &rows(
+            EARNINGS,
+            "SELECT date, flag, account, position FROM year = 2024 AND month >= 2 OPEN ON 2024-02-01 CLOSE ON 2024-03-01 CLEAR",
+        ),
+        &[
+            &["2024-02-05", "*", "Assets:Bank", "3000.00 USD"],
+            &["2024-02-05", "*", "Income:Salary", "-3000.00 USD"],
+            &["2024-02-12", "*", "Expenses:Food", "80.25 USD"],
+            &["2024-02-12", "*", "Liabilities:Card", "-80.25 USD"],
+            &["2024-02-12", "T", "Expenses:Food", "-80.25 USD"],
+            &["2024-02-12", "T", "Equity:Earnings:Current", "80.25 USD"],
+            &["2024-02-12", "T", "Income:Salary", "3000.00 USD"],
+            &["2024-02-12", "T", "Equity:Earnings:Current", "-3000.00 USD"],
+        ],
+        "bean-query's rows: the summaries fail the filter, the transfers pass",
+    );
+    // rledger's own order, modifiers then filter, keeps working.
+    assert_eq!(
+        rows(
+            OPENING,
+            "SELECT date FROM OPEN ON 2024-02-01 has_account('Bank')"
+        ),
+        rows(
+            OPENING,
+            "SELECT date FROM has_account('Bank') OPEN ON 2024-02-01"
+        ),
+    );
+}

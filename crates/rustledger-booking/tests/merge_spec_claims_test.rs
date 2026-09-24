@@ -223,6 +223,41 @@ fn a_full_precision_total_allows_for_the_pools_rounding() {
         .expect("1604500/66 is what 50 units cost at 32090/66 per unit");
 }
 
+/// A correct total built from separately rounded parts is not refused either.
+///
+/// 38 at 873 and 8 at 523; selling 40 written as `40*33174/46 + 40*4184/46`,
+/// as the parser evaluates it: two divisions, each rounded, then a rounded
+/// sum. It lands two units in the last place from `40 × pool`, more than one
+/// rounding explains, so a number that fills `Decimal`'s digits is held to the
+/// place before its last.
+#[test]
+fn a_total_summed_from_rounded_parts_is_not_refused_for_its_last_digit() {
+    let pool = engine_with(&[("38", "873"), ("8", "523")]);
+    let stated = dec("40") * dec("33174") / dec("46") + dec("40") * dec("4184") / dec("46");
+    let spec = CostSpec {
+        number: Some(CostNumber::Total { value: stated }),
+        currency: Some("USD".into()),
+        ..merge()
+    };
+    let mut sale = Posting::new("Assets:Broker", amount("-40", "X"));
+    sale.cost = Some(Box::new(spec));
+    let txn = Transaction::new(date(10), "sell")
+        .with_synthesized_posting(sale)
+        .with_synthesized_posting(Posting::new("Assets:Cash", amount("32485.22", "USD")));
+    pool.book(&txn)
+        .expect("the parts sum to what 40 units cost at the pool's price");
+    // Still a claim: the same total 0.01 off is refused.
+    let mut off = txn;
+    let cost = off.postings[0].cost.as_mut().unwrap();
+    cost.number = Some(CostNumber::Total {
+        value: stated + dec("0.01"),
+    });
+    assert!(
+        pool.book(&off).is_err(),
+        "a total 0.01 off is not the pool's"
+    );
+}
+
 /// A currency must be the pool's; alone it asserts only that.
 #[test]
 fn a_currency_must_be_the_pools() {

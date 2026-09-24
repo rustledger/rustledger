@@ -1747,12 +1747,14 @@ fn convert_core_booking_error(
 /// not the ledger's balance tolerance: that bounds how far two sides of a
 /// transaction may disagree, and this compares one number with itself.
 ///
-/// The pool's side carries its own rounding on top, which matters once the
-/// written number is as long as `Decimal` holds (a cost written as an
-/// expression, `{{*, 1000/3 USD}}`): a total is checked against `units ×
-/// pool`, and a pool rounded to 28 digits is off by up to half a unit in its
-/// last place, once per unit. See [`rounding_bound`]; 32 of 150 generated
-/// correct total claims were refused without it.
+/// Both sides carry rounding once the stated number is as long as `Decimal`
+/// holds, which only an expression produces (`{{*, 1604500/66 USD}}`). The
+/// stated side is then held to the place before its last digit
+/// ([`written_allowance`]), since how often an expression rounded depends on
+/// how it was written. The pool's side adds its own ([`rounding_bound`]): a
+/// total is checked against `units × pool`, and a rounded pool is off by up
+/// to half a unit in its last place, once per unit. Without these, 32 of 150
+/// generated correct totals were refused, and one of 200 summed from parts.
 ///
 /// A mismatch reports the pool rounded to the places the spec writes, which
 /// reads as the number the author should have written; being more than half a
@@ -1795,7 +1797,7 @@ fn check_merge_spec(
         let (stated_total, allowance) = match written {
             None => (None, Decimal::ZERO),
             Some(CostNumber::PerUnit { value }) => {
-                let allowance = half_unit_in_last_place(value)
+                let allowance = written_allowance(value)
                     .checked_add(rounding_bound(pool.number))
                     .ok_or_else(|| overflow(currency))?;
                 if differ(pool.number, value, allowance) {
@@ -1806,10 +1808,10 @@ fn check_merge_spec(
                 }
                 (None, Decimal::ZERO)
             }
-            Some(CostNumber::Total { value }) => (Some(value), half_unit_in_last_place(value)),
+            Some(CostNumber::Total { value }) => (Some(value), written_allowance(value)),
             // Not something a ledger writes; booking's own output.
             Some(CostNumber::PerUnitFromTotal(booked)) => {
-                (Some(booked.total), half_unit_in_last_place(booked.total))
+                (Some(booked.total), written_allowance(booked.total))
             }
             Some(CostNumber::Compound { per_unit, total }) => {
                 let combined = reduction
@@ -1817,8 +1819,8 @@ fn check_merge_spec(
                     .and_then(|v| v.checked_add(total))
                     .ok_or_else(|| overflow(currency))?;
                 let allowance = reduction
-                    .checked_mul(half_unit_in_last_place(per_unit))
-                    .and_then(|v| v.checked_add(half_unit_in_last_place(total)))
+                    .checked_mul(written_allowance(per_unit))
+                    .and_then(|v| v.checked_add(written_allowance(total)))
                     .ok_or_else(|| overflow(currency))?;
                 (Some(combined), allowance)
             }
@@ -1867,6 +1869,36 @@ fn half_unit_in_last_place(number: Decimal) -> Decimal {
     Decimal::try_new(5, number.scale() + 1).unwrap_or(Decimal::new(1, 28))
 }
 
+/// How far a number a spec states may be from the value its author meant.
+///
+/// Half a unit in the last place written, for a number typed to the places
+/// its author chose. A number that fills `Decimal`'s digits was not typed:
+/// it is an expression's result (`{{*, 1604500/66 USD}}`), rounded at every
+/// operation, and how many operations depends on how the expression was
+/// written (`r*S/N` rounds once, `r*a/N + r*b/N` three times). So its last
+/// digit is noise, and it is held to one unit in the place before that: a
+/// correct sum of fractions landed two units out in one of 200 generated
+/// claims, and nothing an author means lives in the 28th digit.
+fn written_allowance(number: Decimal) -> Decimal {
+    if fills_decimal(number) {
+        // At least 28 digits, so there is a place before the last.
+        Decimal::try_new(1, number.scale().saturating_sub(1)).unwrap_or(Decimal::ONE)
+    } else {
+        half_unit_in_last_place(number)
+    }
+}
+
+/// Whether `number` uses all of `Decimal`'s precision: 28 or 29 significant
+/// digits, which is what a rounded result has (106.666… is
+/// `106.66666666666666666666666667`).
+fn fills_decimal(number: Decimal) -> bool {
+    number
+        .mantissa()
+        .unsigned_abs()
+        .checked_ilog10()
+        .is_some_and(|l| l + 1 >= 28)
+}
+
 /// How far a computed `number` may be from the value it stands for.
 ///
 /// `Decimal` rounds a result that needs more digits than it holds, and such a
@@ -1877,12 +1909,7 @@ fn half_unit_in_last_place(number: Decimal) -> Decimal {
 /// stated 110.01. An exact result that happens to be 28 digits long gets a
 /// half unit it does not need, at the 28th digit.
 fn rounding_bound(number: Decimal) -> Decimal {
-    let digits = number
-        .mantissa()
-        .unsigned_abs()
-        .checked_ilog10()
-        .map_or(1, |l| l + 1);
-    if digits >= 28 {
+    if fills_decimal(number) {
         half_unit_in_last_place(number)
     } else {
         Decimal::ZERO
@@ -2209,6 +2236,21 @@ mod tests {
         let at_limit = d("1") / d("3");
         assert_eq!(at_limit.scale(), 28);
         assert_eq!(half(at_limit), rust_decimal::Decimal::new(1, 28));
+    }
+
+    #[test]
+    fn a_written_number_that_fills_decimal_is_held_to_the_place_before_its_last() {
+        use super::written_allowance;
+        let d = |s: &str| s.parse::<rust_decimal::Decimal>().unwrap();
+        // Typed: half a unit in the last place written.
+        assert_eq!(written_allowance(d("106.67")), d("0.005"));
+        // Computed, 29 digits at scale 26: one unit at scale 25.
+        let computed = d("1600") / d("15");
+        assert_eq!(computed.scale(), 26);
+        assert_eq!(
+            written_allowance(computed),
+            rust_decimal::Decimal::new(1, 25)
+        );
     }
 
     #[test]

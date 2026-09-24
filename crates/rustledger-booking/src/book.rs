@@ -1747,6 +1747,13 @@ fn convert_core_booking_error(
 /// not the ledger's balance tolerance: that bounds how far two sides of a
 /// transaction may disagree, and this compares one number with itself.
 ///
+/// The pool's side carries its own rounding on top, which matters once the
+/// written number is as long as `Decimal` holds (a cost written as an
+/// expression, `{{*, 1000/3 USD}}`): a total is checked against `units ×
+/// pool`, and a pool rounded to 28 digits is off by up to half a unit in its
+/// last place, once per unit. See [`rounding_bound`]; 32 of 150 generated
+/// correct total claims were refused without it.
+///
 /// A mismatch reports the pool rounded to the places the spec writes, which
 /// reads as the number the author should have written; being more than half a
 /// unit away, it can never round to the stated one.
@@ -1788,7 +1795,10 @@ fn check_merge_spec(
         let (stated_total, allowance) = match written {
             None => (None, Decimal::ZERO),
             Some(CostNumber::PerUnit { value }) => {
-                if differ(pool.number, value, half_unit_in_last_place(value)) {
+                let allowance = half_unit_in_last_place(value)
+                    .checked_add(rounding_bound(pool.number))
+                    .ok_or_else(|| overflow(currency))?;
+                if differ(pool.number, value, allowance) {
                     return Err(mismatch(M::PerUnit {
                         stated: Amount::new(value, currency.clone()),
                         pool: Amount::new(pool.number.round_dp(value.scale()), currency.clone()),
@@ -1815,6 +1825,13 @@ fn check_merge_spec(
         };
         if let Some(stated) = stated_total {
             let got = pool_total()?;
+            // The pool side is `units × pool`: the pool's own rounding,
+            // once per unit, then the product's.
+            let allowance = reduction
+                .checked_mul(rounding_bound(pool.number))
+                .and_then(|v| v.checked_add(rounding_bound(got)))
+                .and_then(|v| v.checked_add(allowance))
+                .ok_or_else(|| overflow(currency))?;
             if differ(got, stated, allowance) {
                 return Err(mismatch(M::Total {
                     stated: Amount::new(stated, currency.clone()),
@@ -1844,16 +1861,32 @@ fn differ(a: Decimal, b: Decimal, allowance: Decimal) -> bool {
 }
 
 /// Half a unit in the last decimal place of `number`: `0.005` for `106.67`,
-/// `0.5` for `110`.
-///
-/// At `Decimal`'s 28-place limit the half unit cannot be written, and the
-/// allowance is one unit in the 28th place instead, not zero. A cost that long
-/// comes from an expression (`{*, 500/3 USD}`), and it and the pool are both
-/// quotients rounded to 28 places, so each may sit half a unit from the true
-/// value; comparing them exactly would reject a correct claim whenever the two
-/// roundings land on neighboring digits.
+/// `0.5` for `110`. At 28 decimal places the half unit cannot be written, and
+/// it is one unit in the 28th place instead.
 fn half_unit_in_last_place(number: Decimal) -> Decimal {
     Decimal::try_new(5, number.scale() + 1).unwrap_or(Decimal::new(1, 28))
+}
+
+/// How far a computed `number` may be from the value it stands for.
+///
+/// `Decimal` rounds a result that needs more digits than it holds, and such a
+/// result fills them: 28 or 29 significant digits (106.666… is
+/// `106.66666666666666666666666667`). One that fills them is treated as
+/// rounded, off by up to half a unit in its last place; any shorter one is
+/// exact, and gets no allowance, so an exact pool of 110.00 still refuses a
+/// stated 110.01. An exact result that happens to be 28 digits long gets a
+/// half unit it does not need, at the 28th digit.
+fn rounding_bound(number: Decimal) -> Decimal {
+    let digits = number
+        .mantissa()
+        .unsigned_abs()
+        .checked_ilog10()
+        .map_or(1, |l| l + 1);
+    if digits >= 28 {
+        half_unit_in_last_place(number)
+    } else {
+        Decimal::ZERO
+    }
 }
 
 /// The error for a cost whose per-unit value cannot be represented.
@@ -2162,6 +2195,10 @@ impl TransactionReplay<'_, '_> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+    use rustledger_core::{NaiveDate, Posting, PriceAnnotation};
+
     #[test]
     fn half_unit_in_last_place_is_half_the_last_digit_written() {
         use super::half_unit_in_last_place as half;
@@ -2174,9 +2211,17 @@ mod tests {
         assert_eq!(half(at_limit), rust_decimal::Decimal::new(1, 28));
     }
 
-    use super::*;
-    use rust_decimal_macros::dec;
-    use rustledger_core::{NaiveDate, Posting, PriceAnnotation};
+    #[test]
+    fn rounding_bound_is_zero_for_an_exact_quotient() {
+        use super::rounding_bound;
+        let d = |s: &str| s.parse::<rust_decimal::Decimal>().unwrap();
+        // Exact: 2200/20. No allowance, so a stated 110.01 still differs.
+        assert_eq!(rounding_bound(d("2200") / d("20")), d("0"));
+        // Rounded: 1600/15 fills the digits; half a unit in the last place.
+        let pool = d("1600") / d("15");
+        assert_eq!(pool.to_string(), "106.66666666666666666666666667");
+        assert_eq!(rounding_bound(pool), d("0.000000000000000000000000005"));
+    }
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         rustledger_core::naive_date(year, month, day).unwrap()

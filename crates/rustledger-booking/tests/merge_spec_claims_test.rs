@@ -197,6 +197,32 @@ fn a_total_or_compound_cost_is_checked_as_a_total() {
     );
 }
 
+/// A correct total as long as `Decimal` holds is not refused for the pool's
+/// rounding.
+///
+/// 37 at 292 and 29 at 734 pool at 32090/66 = 486.21…, which `Decimal`
+/// rounds. Selling 50 checks the stated total against `50 × pool`, carrying
+/// that rounding fifty times, while `1604500/66` rounds once: the two land
+/// 0.000000000000000000000001 apart, which half a unit in the last place
+/// written does not cover. One of 32 such refusals in 150 generated claims.
+#[test]
+fn a_full_precision_total_allows_for_the_pools_rounding() {
+    let pool = engine_with(&[("37", "292"), ("29", "734")]);
+    let stated = dec("1604500") / dec("66");
+    let spec = CostSpec {
+        number: Some(CostNumber::Total { value: stated }),
+        currency: Some("USD".into()),
+        ..merge()
+    };
+    let mut sale = Posting::new("Assets:Broker", amount("-50", "X"));
+    sale.cost = Some(Box::new(spec));
+    let txn = Transaction::new(date(10), "sell")
+        .with_synthesized_posting(sale)
+        .with_synthesized_posting(Posting::new("Assets:Cash", amount("24310.61", "USD")));
+    pool.book(&txn)
+        .expect("1604500/66 is what 50 units cost at 32090/66 per unit");
+}
+
 /// A currency must be the pool's; alone it asserts only that.
 #[test]
 fn a_currency_must_be_the_pools() {

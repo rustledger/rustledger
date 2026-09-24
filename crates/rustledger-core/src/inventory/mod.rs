@@ -3644,6 +3644,52 @@ mod tests {
         assert!(s.contains("100 USD"));
     }
 
+    /// Each way a `{*}` spec can disagree with its pool says which part, and
+    /// the account wrapper adds the account (#2398).
+    #[test]
+    fn merge_spec_mismatch_messages() {
+        let err = |detail| {
+            BookingError::MergeSpecMismatch {
+                currency: "X".into(),
+                detail,
+            }
+            .with_account("Assets:Broker".into())
+            .to_string()
+        };
+        let usd = |n| Amount::new(n, "USD");
+        assert_eq!(
+            err(MergeSpecMismatch::PerUnit {
+                stated: usd(dec!(100.00)),
+                pool: usd(dec!(110.00)),
+            }),
+            "Assets:Broker: {*} merge of X: the merged pool costs 110.00 USD per unit, \
+             not the 100.00 USD the cost spec states"
+        );
+        assert_eq!(
+            err(MergeSpecMismatch::Total {
+                stated: usd(dec!(600.00)),
+                pool: usd(dec!(550.00)),
+            }),
+            "Assets:Broker: {*} merge of X: the reduced units cost 550.00 USD at the merged \
+             pool's price, not the total 600.00 USD the cost spec states"
+        );
+        assert_eq!(
+            err(MergeSpecMismatch::Currency {
+                stated: "EUR".into(),
+                pool: "USD".into(),
+            }),
+            "Assets:Broker: {*} merge of X: the merged pool is held at a cost in USD, not the \
+             EUR the cost spec states"
+        );
+        assert_eq!(
+            err(MergeSpecMismatch::DateOrLabel {
+                stated: "2024-01-01".into(),
+            }),
+            "Assets:Broker: {*} merge of X: the merge builds one lot with no date or label, so \
+             the cost spec's 2024-01-01 describes no lot; remove it"
+        );
+    }
+
     #[test]
     fn test_display_empty() {
         let inv = Inventory::new();

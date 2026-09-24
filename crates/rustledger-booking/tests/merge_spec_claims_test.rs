@@ -41,8 +41,13 @@ fn per_unit(n: &str) -> Option<CostNumber> {
 /// 10 X at 100 and 5 X at 120: a pool of 1600/15 = 106.666…, a quotient no
 /// ledger can write out, which is the case the precision rule is for.
 fn engine() -> BookingEngine {
+    engine_with(&[("10", "100.00"), ("5", "120.00")])
+}
+
+/// An engine holding `(units, per-unit cost)` lots of X, bought on days 1, 2, ….
+fn engine_with(lots: &[(&str, &str)]) -> BookingEngine {
     let mut engine = BookingEngine::with_method(BookingMethod::Fifo);
-    for (day, units, cost) in [(1u32, "10", "100.00"), (2, "5", "120.00")] {
+    for (day, (units, cost)) in (1u32..).zip(lots.iter().copied()) {
         let mut buy = Posting::new("Assets:Broker", amount(units, "X"));
         buy.cost = Some(Box::new(CostSpec {
             number: per_unit(cost),
@@ -62,12 +67,16 @@ fn engine() -> BookingEngine {
 
 /// Sell 5 X with `spec`, returning what booking said.
 fn sell(spec: CostSpec) -> Result<Transaction, BookingError> {
+    sell_from(&engine(), spec)
+}
+
+fn sell_from(engine: &BookingEngine, spec: CostSpec) -> Result<Transaction, BookingError> {
     let mut sale = Posting::new("Assets:Broker", amount("-5", "X"));
     sale.cost = Some(Box::new(spec));
     let txn = Transaction::new(date(10), "sell")
         .with_synthesized_posting(sale)
         .with_synthesized_posting(Posting::new("Assets:Cash", amount("650.00", "USD")));
-    engine().book(&txn).map(|b| b.transaction)
+    engine.book(&txn).map(|b| b.transaction)
 }
 
 /// The mismatch booking reported, or a panic naming what it did instead.
@@ -114,6 +123,40 @@ fn a_per_unit_cost_is_the_pool_to_the_places_written() {
             "{bad}: the pool is reported to the places the spec writes"
         );
     }
+}
+
+/// Exactly half a unit away still holds: a pool of 100.5 is 100 or 101 to
+/// whole units, depending only on which way the author rounded the tie.
+#[test]
+fn a_cost_exactly_half_a_unit_from_the_pool_holds() {
+    for stated in ["100", "101"] {
+        let spec = CostSpec {
+            number: per_unit(stated),
+            currency: Some("USD".into()),
+            ..merge()
+        };
+        let halfway = engine_with(&[("10", "100"), ("10", "101")]);
+        assert!(
+            sell_from(&halfway, spec).is_ok(),
+            "{stated} is the pool 100.5, rounded either way"
+        );
+    }
+}
+
+/// The message names the account, the commodity, and both numbers.
+#[test]
+fn the_message_says_what_the_pool_costs() {
+    let spec = CostSpec {
+        number: per_unit("100.00"),
+        currency: Some("USD".into()),
+        ..merge()
+    };
+    let err = sell(spec).expect_err("100.00 is not the pool");
+    assert_eq!(
+        err.to_string(),
+        "Assets:Broker: {*} merge of X: the merged pool costs 106.67 USD per unit, \
+         not the 100.00 USD the cost spec states"
+    );
 }
 
 /// A total, and a compound cost, are checked as the total they state.

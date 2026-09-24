@@ -457,3 +457,43 @@ impl Executor<'_> {
         Ok(transfers)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    fn amount(n: rustledger_core::Decimal, c: &str) -> Position {
+        Position::simple(Amount::new(n, c))
+    }
+
+    /// Python drops a key that reaches zero, and never adds one that starts
+    /// there: a zero-amount posting leaves no trace in the balance or in the
+    /// conversions narration.
+    #[test]
+    fn a_zero_position_never_enters_the_balance() {
+        let mut balance = OrderedBalance::default();
+        balance.add(&amount(dec!(0), "USD")).unwrap();
+        balance.add(&amount(dec!(5.00), "EUR")).unwrap();
+        assert_eq!(balance.render(), "(5.00 EUR)");
+        balance.add(&amount(dec!(-5.00), "EUR")).unwrap();
+        assert_eq!(balance.render(), "()");
+    }
+
+    /// beancount's `Position.sortkey`: the eight ranked currencies first in
+    /// their order, then any other by the LENGTH of its code, then units.
+    #[test]
+    fn the_narration_sorts_as_beancount_sorts_an_inventory() {
+        let mut balance = OrderedBalance::default();
+        for (n, c) in [
+            (dec!(1), "ABCD"),
+            (dec!(2), "XYZ"),
+            (dec!(3), "EUR"),
+            (dec!(4), "CHF"),
+            (dec!(5), "USD"),
+        ] {
+            balance.add(&amount(n, c)).unwrap();
+        }
+        assert_eq!(balance.render(), "(5 USD, 3 EUR, 4 CHF, 2 XYZ, 1 ABCD)");
+    }
+}

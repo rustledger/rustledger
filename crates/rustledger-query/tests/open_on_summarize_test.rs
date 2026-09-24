@@ -726,3 +726,45 @@ fn close_and_clear_use_the_ledgers_equity_root_and_conversion_currency() {
         "bean-query's accounts (it renders the price through the display context: 0.00 EUR)",
     );
 }
+
+/// `OPEN ON` with a bare `CLOSE` and `CLEAR`. bean-query 0.2.0 crashes on this
+/// form (its compiler compares the open date with the bare CLOSE's `True`), so
+/// the expected rows are beancount's own `summarize.open_opt`, `close_opt(None)`
+/// and `clear_opt`, applied in beanquery's order. The period after 2024-02-15
+/// has no conversion, so there is no `C` entry; its travel expense is cleared.
+#[test]
+fn open_with_a_bare_close_and_clear_matches_beancounts_summarize() {
+    assert_rows(
+        &rows(
+            CONVERSIONS,
+            "SELECT date, flag, account, position FROM OPEN ON 2024-02-15 CLOSE CLEAR WHERE flag != '*'",
+        ),
+        &[
+            &["2024-02-14", "S", "Assets:EUR", "20.00 EUR"],
+            &["2024-02-14", "S", "Equity:Opening-Balances", "-20.00 EUR"],
+            &["2024-02-14", "S", "Assets:USD", "945.00 USD"],
+            &["2024-02-14", "S", "Equity:Opening-Balances", "-945.00 USD"],
+            &[
+                "2024-02-14",
+                "S",
+                "Equity:Conversions:Previous",
+                "-50.00 EUR",
+            ],
+            &["2024-02-14", "S", "Equity:Opening-Balances", "50.00 EUR"],
+            &[
+                "2024-02-14",
+                "S",
+                "Equity:Conversions:Previous",
+                "55.00 USD",
+            ],
+            &["2024-02-14", "S", "Equity:Opening-Balances", "-55.00 USD"],
+            &["2024-02-14", "S", "Equity:Earnings:Previous", "30.00 EUR"],
+            &["2024-02-14", "S", "Equity:Opening-Balances", "-30.00 EUR"],
+            &["2024-02-14", "S", "Equity:Opening", "-1000.00 USD"],
+            &["2024-02-14", "S", "Equity:Opening-Balances", "1000.00 USD"],
+            &["2024-02-20", "T", "Expenses:Travel", "-10.00 EUR"],
+            &["2024-02-20", "T", "Equity:Earnings:Current", "10.00 EUR"],
+        ],
+        "beancount's summarize (bean-query cannot run this query)",
+    );
+}

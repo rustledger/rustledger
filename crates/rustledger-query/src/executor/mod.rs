@@ -713,7 +713,6 @@ impl<'a> Executor<'a> {
             Some(open) => self.open_summaries(open)?,
             None => Vec::new(),
         };
-        let summarized_on = open_on.filter(|_| !summaries.is_empty());
         let head = summaries
             .into_iter()
             .map(|txn| (None, TransactionRef::Synthesized(txn)));
@@ -736,12 +735,18 @@ impl<'a> Executor<'a> {
         // transfers, at `entries[-1].date`: the last entry of ANY type left
         // after OPEN and CLOSE, which can be a price or a balance dated after
         // the last transaction.
-        let mut last_date = summarized_on.and_then(|open| open.yesterday().ok());
+        //
+        // Only the window's own directives can be that entry whenever it
+        // matters. A conversions entry or a transfer exists only for a balance
+        // the window's transactions produced: `OPEN ON`'s summaries sum to
+        // zero at cost and hold no income-statement account. So when one is
+        // booked there is a transaction in the window, dated on or after the
+        // open date, and the entries beancount keeps from before it (the
+        // summaries, active Opens, last Prices) are all earlier.
+        let mut last_date: Option<NaiveDate> = None;
         for (index, directive) in directives {
             let date = directive.date();
-            let kept_before_open = open_on.is_some_and(|open| date < open)
-                && matches!(directive, Directive::Open(_) | Directive::Price(_));
-            if in_window(date) || kept_before_open {
+            if in_window(date) {
                 last_date = last_date.max(Some(date));
             }
             if let Some(entry) = transactions((index, directive)) {

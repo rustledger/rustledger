@@ -301,6 +301,9 @@ and in beancount alike. It is a warning because the value is legal; it is almost
 always the full-name form rustledger used to require.
 
 **Fix**: Drop the root: `option "account_previous_balances" "Opening-Balances"`.
+The warning says so only when the root is the equity root. A value that is the
+root itself (`"Equity"`), or that starts with another root (`"Income:Oops"`),
+has no leaf form: these options can only name accounts under equity.
 
 ### E7007: Option Accepted but Has No Effect
 

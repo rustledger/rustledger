@@ -402,15 +402,35 @@ impl Options {
             .into_iter()
             .filter(|(key, _)| self.set_options.contains(*key))
             .filter_map(|(key, leaf)| {
-                let first = leaf.split(':').next()?;
-                roots.contains(&first).then(|| OptionWarning {
+                let (first, rest) = match leaf.split_once(':') {
+                    Some((first, rest)) => (first, Some(rest)),
+                    None => (leaf, None),
+                };
+                if !roots.contains(&first) {
+                    return None;
+                }
+                let full = resolve_leaf_account(&self.name_equity, leaf);
+                // The fix depends on WHICH root: dropping the equity root
+                // keeps the account meant; any other root cannot be kept,
+                // since these options only name accounts under equity.
+                let advice = match rest {
+                    Some(rest) if first == self.name_equity => {
+                        format!("write \"{rest}\" for {leaf}")
+                    }
+                    None if first == self.name_equity => {
+                        "it names an account under the equity root, not the root itself".to_string()
+                    }
+                    _ => format!(
+                        "it names an account under the equity root ({}), so it cannot name \
+                         an account under {first}",
+                        self.name_equity
+                    ),
+                };
+                Some(OptionWarning {
                     code: "E7010",
                     message: format!(
                         "Option \"{key}\" names a leaf under the equity root, so \"{leaf}\" \
-                         resolves to \"{full}\"; write \"{suggested}\" for {intended}",
-                        full = resolve_leaf_account(&self.name_equity, leaf),
-                        suggested = leaf.split_once(':').map_or(leaf, |(_, rest)| rest),
-                        intended = leaf,
+                         resolves to \"{full}\"; {advice}"
                     ),
                     option: key.to_string(),
                     value: leaf.to_string(),
@@ -1450,6 +1470,28 @@ mod tests {
         assert_eq!(
             renamed.previous_balances_account(),
             "Eigenkapital:Eigenkapital:Anfang"
+        );
+
+        // The advice depends on which root. Only the EQUITY root can be
+        // dropped to keep the account meant; a value that is the root itself,
+        // or another root's account, cannot be written as a leaf at all.
+        let advice = |value: &str| {
+            let mut opts = Options::new();
+            opts.set("account_previous_balances", value);
+            opts.rooted_leaf_warnings()[0].message.clone()
+        };
+        assert!(advice("Equity:Anfang").ends_with("write \"Anfang\" for Equity:Anfang"));
+        assert!(
+            advice("Equity").ends_with("not the root itself"),
+            "{}",
+            advice("Equity")
+        );
+        let other = advice("Income:Oops");
+        assert!(
+            other.contains("\"Equity:Income:Oops\"")
+                && other.ends_with("so it cannot name an account under Income")
+                && !other.contains("write"),
+            "{other}"
         );
 
         // Defaults and ordinary leaves raise nothing.

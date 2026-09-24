@@ -148,12 +148,26 @@ fn parse_on_current_stack(source: &str) -> Result<Query, ParseError> {
         .parse(source)
         .into_output_errors();
 
-    if let Some(query) = result {
+    // An output is not success on its own: an error emitted by `validate`
+    // leaves the output in place. Were errors ignored whenever an output
+    // exists, a query the grammar refused (a FROM modifier given twice,
+    // #2407) would run as if nothing were wrong.
+    let parsed = result.is_some();
+    if let Some(query) = result
+        && errs.is_empty()
+    {
         Ok(query)
     } else {
         let err = errs.first().map(|e| {
             let start = e.span().start;
-            let kind = if e.found().is_some() {
+            let kind = if parsed {
+                // The query parsed and a rule then refused it (`validate`), so
+                // this is that rule's own message ("a FROM modifier ... is
+                // given twice"), not a stray token: report it as written. The
+                // token-naming below is for parses that FAILED, whose custom
+                // errors are `kw`'s "expected keyword" and must not win.
+                ParseErrorKind::SyntaxError(e.to_string())
+            } else if e.found().is_some() {
                 // chumsky found a concrete unexpected token: keep its rich
                 // message ("expected keyword …", "invalid number", …).
                 ParseErrorKind::SyntaxError(e.to_string())
@@ -392,22 +406,57 @@ fn from_modifiers<'a>() -> impl Parser<'a, ParserInput<'a>, FromClause, ParserEx
     );
     let clear = ws().ignore_then(kw("CLEAR"));
 
-    // Parse modifiers in order: OPEN ON, CLOSE ON, CLEAR, filter
-    // Or just a table name for user-created tables
-    open_on
-        .or_not()
-        .then(close_on.or_not())
-        .then(clear.or_not().map(|c| c.is_some()))
+    // beanquery's grammar (`bql.ebnf`, `from`) puts the filter expression
+    // FIRST: `FROM <expr> [OPEN ON d] [CLOSE [ON d]] [CLEAR]`, or the
+    // modifiers alone. rledger parsed only the modifiers followed by the
+    // filter, so `FROM year = 2024 OPEN ON 2024-02-01` was a syntax error
+    // (#2407). Both orders parse now: modifiers, then the filter, then
+    // modifiers again. The old order keeps working for queries written
+    // against it; a modifier given on both sides of the filter is refused.
+    //
+    // A single sequence, not a choice between the two orders: a
+    // modifiers-first alternative succeeds on `year = 2024` and leaves
+    // ` OPEN ON ...` unparsed with no way back, and a filter-first one reads
+    // `OPEN` as a column name.
+    let modifiers = |leading_ws: bool| {
+        let open = if leading_ws {
+            ws1().ignore_then(open_on.clone()).boxed()
+        } else {
+            open_on.clone().boxed()
+        };
+        open.or_not()
+            .then(close_on.clone().or_not())
+            .then(clear.clone().or_not().map(|c| c.is_some()))
+    };
+    modifiers(false)
         .then(from_filter().or_not())
-        .map(|(((open_on, close), clear), filter)| FromClause {
-            open_on,
-            close_on: close.flatten(),
-            close: close.is_some(),
-            clear,
-            filter,
-            subquery: None,
-            table_name: None,
-        })
+        .then(modifiers(true))
+        // `validate`, not `try_map`: a failed `try_map` backtracks out of the
+        // whole FROM clause and chumsky reports "unexpected token 'FROM'";
+        // emitting here keeps the parse and reports what is actually wrong.
+        .validate(
+            |((((open1, close1), clear1), filter), ((open2, close2), clear2)), e, emitter| {
+                if (open1.is_some() && open2.is_some())
+                    || (close1.is_some() && close2.is_some())
+                    || (clear1 && clear2)
+                {
+                    emitter.emit(Rich::custom(
+                        e.span(),
+                        "a FROM modifier (OPEN ON, CLOSE, CLEAR) is given twice",
+                    ));
+                }
+                let close = close1.or(close2);
+                FromClause {
+                    open_on: open1.or(open2),
+                    close_on: close.flatten(),
+                    close: close.is_some(),
+                    clear: clear1 || clear2,
+                    filter,
+                    subquery: None,
+                    table_name: None,
+                }
+            },
+        )
 }
 
 /// Parse FROM filter expression (predicates).
@@ -1436,6 +1485,41 @@ mod tests {
             from("SELECT * FROM mytable").table_name.as_deref(),
             Some("mytable")
         );
+    }
+
+    /// #2407: the filter expression goes before the modifiers, as in
+    /// beanquery, or after them, as rledger used to require; one modifier
+    /// may not be given on both sides.
+    #[test]
+    fn test_from_filter_before_or_after_the_modifiers() {
+        let from = |q: &str| match parse(q).unwrap_or_else(|e| panic!("{q}: {e}")) {
+            Query::Select(sel) => sel.from.unwrap_or_else(|| panic!("{q}: no FROM")),
+            _ => panic!("{q}: expected SELECT"),
+        };
+        let before = from(
+            "SELECT * FROM year = 2024 OPEN ON 2024-02-01 CLOSE ON 2024-03-01 CLEAR WHERE account ~ 'A'",
+        );
+        assert!(before.filter.is_some() && before.open_on.is_some() && before.close_on.is_some());
+        assert!(before.close && before.clear);
+        let after = from("SELECT * FROM OPEN ON 2024-02-01 CLOSE ON 2024-03-01 CLEAR year = 2024");
+        assert_eq!(before.filter, after.filter);
+        assert_eq!(
+            (before.open_on, before.close_on, before.clear),
+            (after.open_on, after.close_on, after.clear)
+        );
+        let split = from("SELECT * FROM OPEN ON 2024-02-01 year = 2024 CLOSE CLEAR");
+        assert!(split.open_on.is_some() && split.filter.is_some() && split.close && split.clear);
+        for q in [
+            "SELECT * FROM OPEN ON 2024-02-01 year = 2024 OPEN ON 2024-01-01",
+            "SELECT * FROM CLOSE year = 2024 CLOSE ON 2024-03-01",
+            "SELECT * FROM CLEAR year = 2024 CLEAR",
+        ] {
+            let err = parse(q).expect_err(q);
+            assert!(
+                err.to_string().contains("given twice"),
+                "{q}: the rule's own message, got {err}"
+            );
+        }
     }
 
     #[test]

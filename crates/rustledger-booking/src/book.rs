@@ -2221,6 +2221,10 @@ mod tests {
         let pool = d("1600") / d("15");
         assert_eq!(pool.to_string(), "106.66666666666666666666666667");
         assert_eq!(rounding_bound(pool), d("0.000000000000000000000000005"));
+        // Exactly 28 digits counts too: 1/3 is rounded at the 28th place.
+        let third = d("1") / d("3");
+        assert_eq!(third.mantissa().to_string().len(), 28);
+        assert_eq!(rounding_bound(third), rust_decimal::Decimal::new(1, 28));
     }
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {

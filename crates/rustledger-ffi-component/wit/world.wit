@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.11.0;
+package rustledger:ledger@3.12.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -220,6 +220,16 @@ interface types {
     inferred-tolerance-multiplier: string,
     infer-tolerance-from-cost: bool,
     account-rounding: option<string>,
+    // 3.12.0: the account-name options below are LEAF names, as beancount's
+    // options map holds them ("Leaf name of the equity account ..."), not
+    // full account names. Join the root on to use one, as fava does:
+    // `name-equity + ":" + account-previous-balances` (and the other
+    // previous/current accounts); `account-unrealized-gains` sits under
+    // `name-income` in beancount. Before 3.12.0 the previous/current accounts
+    // were exported as full names (`Equity:Opening-Balances`), which a host
+    // joining the root turned into `Equity:Equity:Opening-Balances` (#2408).
+    // `account-current-conversions` is always present when a ledger's options
+    // are exported.
     account-previous-balances: string,
     account-previous-earnings: string,
     account-previous-conversions: string,

@@ -685,20 +685,34 @@ pub fn query(source: &str, query_str: &str) -> out::QueryResult {
 /// set it, and every FFI load books with the STRICT `LoadOptions` default, so
 /// parsing it gives the loader's `Ledger::booking_method`. An unparsable
 /// value falls back to STRICT, as the loader does.
-/// The `account_previous_*` accounts `FROM ... OPEN ON` summarizes into
-/// (#2401), from the options' three names.
+/// The accounts `FROM ... OPEN ON / CLOSE / CLEAR` summarize into (#2401,
+/// #2406), resolved from the options' leaf names (#2408).
 fn summary_accounts_from(o: &SummaryOptions<'_>) -> rustledger_query::executor::SummaryAccounts {
     rustledger_query::executor::SummaryAccounts {
-        previous_balances: o.previous_balances.to_owned(),
-        previous_earnings: o.previous_earnings.to_owned(),
-        previous_conversions: o.previous_conversions.to_owned(),
-        current_earnings: o.current_earnings.to_owned(),
-        // Unset, beancount's default leaf under the ledger's equity root, as
-        // the loader's `Options::current_conversions_account` resolves it;
-        // the option is exported as `None` then.
-        current_conversions: o.current_conversions.map_or_else(
-            || format!("{}:Conversions:Current", o.name_equity),
-            str::to_owned,
+        // The options carry LEAF names under `name_equity`, as beancount's
+        // options map does (#2408); resolve them the one way the loader does.
+        previous_balances: rustledger_loader::resolve_leaf_account(
+            o.name_equity,
+            o.previous_balances,
+        ),
+        previous_earnings: rustledger_loader::resolve_leaf_account(
+            o.name_equity,
+            o.previous_earnings,
+        ),
+        previous_conversions: rustledger_loader::resolve_leaf_account(
+            o.name_equity,
+            o.previous_conversions,
+        ),
+        current_earnings: rustledger_loader::resolve_leaf_account(
+            o.name_equity,
+            o.current_earnings,
+        ),
+        // Unset (a host's own options may omit it), beancount's default leaf,
+        // as the loader's `Options::current_conversions_account` resolves it.
+        current_conversions: rustledger_loader::resolve_leaf_account(
+            o.name_equity,
+            o.current_conversions
+                .unwrap_or(rustledger_loader::DEFAULT_CURRENT_CONVERSIONS),
         ),
         conversion_currency: o.conversion_currency.unwrap_or("NOTHING").to_owned(),
     }
@@ -1883,8 +1897,16 @@ impl SessionState {
     fn clamp_accounts(&self) -> rustledger_ops::clamp::ClampAccounts {
         rustledger_ops::clamp::ClampAccounts {
             types: self.account_types(),
-            previous_balances: self.options.account_previous_balances.clone(),
-            previous_earnings: self.options.account_previous_earnings.clone(),
+            // Leaves under `name_equity`, as beancount's options map holds
+            // them (#2408).
+            previous_balances: rustledger_loader::resolve_leaf_account(
+                &self.options.name_equity,
+                &self.options.account_previous_balances,
+            ),
+            previous_earnings: rustledger_loader::resolve_leaf_account(
+                &self.options.name_equity,
+                &self.options.account_previous_earnings,
+            ),
         }
     }
 
@@ -2827,8 +2849,9 @@ option \"name_income\" \"Einnahmen\"
     fn clamp_honors_held_options_for_classification_and_summaries() {
         const RENAMED_EARNINGS: &str = "\
 option \"name_income\" \"Einnahmen\"
-option \"account_previous_earnings\" \"Eigenkapital:Gewinn\"
-option \"account_previous_balances\" \"Eigenkapital:Anfang\"
+option \"name_equity\" \"Eigenkapital\"
+option \"account_previous_earnings\" \"Gewinn\"
+option \"account_previous_balances\" \"Anfang\"
 2023-01-01 open Assets:Bank
 2023-01-01 open Einnahmen:Lohn
 

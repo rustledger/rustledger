@@ -386,31 +386,48 @@ fn unset_summary_accounts_use_the_ledgers_equity_root() {
     );
 }
 
-/// Set, a summary account is the full name written. beancount would join the
-/// equity root onto it (`Equity:Equity:Anfang`); rledger takes these options
-/// as full names, a parsing divergence tracked in #2408.
+/// Set, a summary account is a LEAF under the equity root, as beancount reads
+/// it (#2408): `Anfang` is `Equity:Anfang`. A value written as a full name
+/// (rledger's old documented form) resolves as bean-query resolves it, the
+/// root joined on: bean-query 0.2.0 names `Equity:Equity:Anfang` for
+/// `option "account_previous_balances" "Equity:Anfang"`. The loader raises
+/// E7010 for it.
 #[test]
-fn set_summary_accounts_are_the_names_written() {
-    let source = "option \"account_previous_balances\" \"Equity:Anfang\"\n\
-                  option \"account_previous_earnings\" \"Equity:Vorjahr\"\n\
-                  2024-01-01 open Assets:Bank USD\n\
-                  2024-01-01 open Income:Salary USD\n\
-                  2024-01-05 * \"pay\"\n  Assets:Bank  10 USD\n  Income:Salary\n";
-    let accounts: Vec<String> = rows(
-        source,
-        "SELECT account FROM OPEN ON 2024-02-01 WHERE flag = 'S'",
-    )
-    .into_iter()
-    .map(|row| row[0].clone())
-    .collect();
+fn set_summary_accounts_are_leaves_under_the_equity_root() {
+    let accounts = |balances: &str, earnings: &str| -> Vec<String> {
+        let source = format!(
+            "option \"account_previous_balances\" \"{balances}\"\n\
+             option \"account_previous_earnings\" \"{earnings}\"\n\
+             2024-01-01 open Assets:Bank USD\n\
+             2024-01-01 open Income:Salary USD\n\
+             2024-01-05 * \"pay\"\n  Assets:Bank  10 USD\n  Income:Salary\n"
+        );
+        rows(
+            &source,
+            "SELECT account FROM OPEN ON 2024-02-01 WHERE flag = 'S'",
+        )
+        .into_iter()
+        .map(|row| row[0].clone())
+        .collect()
+    };
     assert_eq!(
-        accounts,
+        accounts("Anfang", "Vorjahr"),
         [
             "Assets:Bank",
             "Equity:Anfang",
             "Equity:Vorjahr",
             "Equity:Anfang"
         ]
+    );
+    assert_eq!(
+        accounts("Equity:Anfang", "Equity:Vorjahr"),
+        [
+            "Assets:Bank",
+            "Equity:Equity:Anfang",
+            "Equity:Equity:Vorjahr",
+            "Equity:Equity:Anfang"
+        ],
+        "bean-query's resolution of a full-name value"
     );
 }
 

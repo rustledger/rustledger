@@ -250,15 +250,24 @@ pub fn build_ledger_options(
         inferred_tolerance_multiplier: options.inferred_tolerance_multiplier.to_string(),
         infer_tolerance_from_cost: options.infer_tolerance_from_cost,
         account_rounding: options.account_rounding.clone(),
-        // Resolved, not the raw fields: unset, they name the ledger's own
-        // equity root rather than a hardcoded `Equity:` (#2401). Hosts and
-        // `session.clamp` / BQL all read these.
-        account_previous_balances: options.previous_balances_account(),
-        account_previous_earnings: options.previous_earnings_account(),
-        account_previous_conversions: options.previous_conversions_account(),
-        // Resolved like the previous-period names above (#2406).
-        account_current_earnings: options.current_earnings_account(),
-        account_current_conversions: options.account_current_conversions.clone(),
+        // LEAF names under the equity root, exactly as beancount's options
+        // map holds them (#2408). Hosts join `name_equity` on, as fava does
+        // (`equity + ":" + options["account_current_earnings"]`); exporting
+        // full names made rustfava's balance sheet show
+        // `Equity:Equity:Earnings:Current`. In-process consumers resolve
+        // them with `rustledger_loader::resolve_leaf_account`.
+        account_previous_balances: options.account_previous_balances.clone(),
+        account_previous_earnings: options.account_previous_earnings.clone(),
+        account_previous_conversions: options.account_previous_conversions.clone(),
+        account_current_earnings: options.account_current_earnings.clone(),
+        // Always present, beancount's default when unset: a host falling back
+        // to its own default would fall back to a full name and double it.
+        account_current_conversions: Some(
+            options
+                .account_current_conversions
+                .clone()
+                .unwrap_or_else(|| rustledger_loader::DEFAULT_CURRENT_CONVERSIONS.to_string()),
+        ),
         account_unrealized_gains: options.account_unrealized_gains.clone(),
         conversion_currency: options.conversion_currency.clone(),
     }

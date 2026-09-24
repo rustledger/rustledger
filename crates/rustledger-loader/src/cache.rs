@@ -502,12 +502,19 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     to parse as a plain per-unit spec, so a v35 blob of such a file would
 ///     keep serving a plain spec and book it as a lot filter.
 ///
+/// v37: the account-name options (`account_previous_*`, `account_current_*`,
+///     `account_unrealized_gains`, `account_rounding`) are LEAF names under a
+///     root, as beancount defines them, and their defaults changed from full
+///     names (`Equity:Opening-Balances`) to leaves (`Opening-Balances`)
+///     (#2408). A v36 entry archives the old full-name defaults, which the new
+///     code would read as leaves and resolve to `Equity:Equity:Opening-Balances`.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 36;
+pub const CACHE_VERSION: u32 = 37;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1263,7 +1270,7 @@ mod tests {
         // the byte arrays below still hold.
         // v35 (#2193) is the same shape for balance tolerances: new errors,
         // same archived `CostNumber` encoding.
-        const FIXTURE_VERSION: u32 = 36;
+        const FIXTURE_VERSION: u32 = 37;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1379,7 +1386,7 @@ mod tests {
         // is unchanged.
         // v35 (#2193) likewise adds errors on a balance tolerance and touches
         // no `MetaValue`; the hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 36;
+        const FIXTURE_VERSION: u32 = 37;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

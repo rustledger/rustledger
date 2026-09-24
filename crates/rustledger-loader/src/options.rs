@@ -104,6 +104,20 @@ const REPEATABLE_OPTIONS: &[&str] = &[
 /// Options that are read-only and cannot be set by users.
 const READONLY_OPTIONS: &[&str] = &["filename"];
 
+/// beancount's default for `account_current_conversions`, a leaf under the
+/// equity root.
+pub const DEFAULT_CURRENT_CONVERSIONS: &str = "Conversions:Current";
+
+/// The full name of an account option given as a leaf under `root`.
+///
+/// beancount's `account.join(root, leaf)`, which resolves `account_previous_*`
+/// and `account_current_*` onto `name_equity`. The one join every consumer
+/// uses, the loader's accessors and the component's options alike (#2408).
+#[must_use]
+pub fn resolve_leaf_account(root: &str, leaf: &str) -> String {
+    format!("{root}:{leaf}")
+}
+
 /// Option validation warning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionWarning {
@@ -143,7 +157,7 @@ impl OptionWarning {
     /// to end caught it.
     #[must_use]
     pub fn is_error(&self) -> bool {
-        !matches!(self.code, "E7003" | "E7009")
+        !matches!(self.code, "E7003" | "E7009" | "E7010")
     }
 
     /// The processing phase these belong to.
@@ -194,22 +208,30 @@ pub struct Options {
     /// Account for rounding errors.
     pub account_rounding: Option<String>,
 
-    /// Account for previous balances (opening balances).
+    /// Account for previous balances (opening balances), as a LEAF name
+    /// relative to the equity root, as beancount defines it; the full name is
+    /// [`Self::previous_balances_account`].
     pub account_previous_balances: String,
 
-    /// Account for previous earnings.
+    /// Account for previous earnings: a leaf under the equity root; the full
+    /// name is [`Self::previous_earnings_account`].
     pub account_previous_earnings: String,
 
-    /// Account for previous conversions.
+    /// Account for previous conversions: a leaf under the equity root; the
+    /// full name is [`Self::previous_conversions_account`].
     pub account_previous_conversions: String,
 
-    /// Account for current earnings.
+    /// Account for current earnings: a leaf under the equity root; the full
+    /// name is [`Self::current_earnings_account`].
     pub account_current_earnings: String,
 
-    /// Account for current conversion differences.
+    /// Account for current conversion differences: a leaf under the equity
+    /// root when set (`Conversions:Current` when not); the full name is
+    /// [`Self::current_conversions_account`].
     pub account_current_conversions: Option<String>,
 
-    /// Account for unrealized gains.
+    /// Account for unrealized gains: a leaf, which beancount joins onto the
+    /// INCOME root (`doctor`), not the equity one. rledger does not post to it.
     pub account_unrealized_gains: Option<String>,
 
     /// Currency for conversion (if specified).
@@ -279,21 +301,19 @@ impl Options {
     /// The account previous-period balances summarize against
     /// (`account_previous_balances`), as a full account name.
     ///
-    /// Unset, it is beancount's default leaf under the ledger's equity root,
-    /// as beancount's `get_previous_accounts` builds it, so a ledger that sets
-    /// `option "name_equity" "Eigenkapital"` summarizes into
-    /// `Eigenkapital:Opening-Balances` (#2401). Set, it is the value as
-    /// written, since rledger takes these options as full account names
-    /// (beancount takes them relative to the equity root; #2408). The same
-    /// rule resolves [`Self::previous_earnings_account`] and
-    /// [`Self::previous_conversions_account`].
+    /// These options are LEAF names relative to the equity root, as beancount
+    /// v2 and v3 define them ("Leaf name of the equity account ...") and as
+    /// fava reads them: `get_previous_accounts` / `get_current_accounts` join
+    /// `name_equity` on. So `Opening-Balances` is `Equity:Opening-Balances`,
+    /// and a ledger with `option "name_equity" "Eigenkapital"` gets
+    /// `Eigenkapital:Opening-Balances`. rledger used to take the value as a
+    /// full name and rejected beancount's form with E7002 (#2408); a value
+    /// written that old way now resolves as beancount resolves it and raises
+    /// E7010 ([`Self::rooted_leaf_warnings`]). The same rule resolves the
+    /// other previous- and current-period accounts.
     #[must_use]
     pub fn previous_balances_account(&self) -> String {
-        self.resolve_previous(
-            "account_previous_balances",
-            &self.account_previous_balances,
-            "Opening-Balances",
-        )
+        resolve_leaf_account(&self.name_equity, &self.account_previous_balances)
     }
 
     /// The account previous-period income and expenses move to
@@ -301,11 +321,7 @@ impl Options {
     /// [`Self::previous_balances_account`] is.
     #[must_use]
     pub fn previous_earnings_account(&self) -> String {
-        self.resolve_previous(
-            "account_previous_earnings",
-            &self.account_previous_earnings,
-            "Earnings:Previous",
-        )
+        resolve_leaf_account(&self.name_equity, &self.account_previous_earnings)
     }
 
     /// The account a previous-period conversion residual goes to
@@ -313,11 +329,7 @@ impl Options {
     /// [`Self::previous_balances_account`] is.
     #[must_use]
     pub fn previous_conversions_account(&self) -> String {
-        self.resolve_previous(
-            "account_previous_conversions",
-            &self.account_previous_conversions,
-            "Conversions:Previous",
-        )
+        resolve_leaf_account(&self.name_equity, &self.account_previous_conversions)
     }
 
     /// The account a period's income and expenses move to under `CLEAR`
@@ -325,11 +337,7 @@ impl Options {
     /// [`Self::previous_balances_account`] is.
     #[must_use]
     pub fn current_earnings_account(&self) -> String {
-        self.resolve_previous(
-            "account_current_earnings",
-            &self.account_current_earnings,
-            "Earnings:Current",
-        )
+        resolve_leaf_account(&self.name_equity, &self.account_current_earnings)
     }
 
     /// The account a period's conversion residual goes to under `CLOSE`
@@ -337,11 +345,12 @@ impl Options {
     /// [`Self::previous_balances_account`] is.
     #[must_use]
     pub fn current_conversions_account(&self) -> String {
-        // `Some` only when the file set it: `set` is the one writer, and an
-        // included file cannot set options.
-        self.account_current_conversions
-            .clone()
-            .unwrap_or_else(|| format!("{}:Conversions:Current", self.name_equity))
+        resolve_leaf_account(
+            &self.name_equity,
+            self.account_current_conversions
+                .as_deref()
+                .unwrap_or(DEFAULT_CURRENT_CONVERSIONS),
+        )
     }
 
     /// The currency a conversions entry prices its postings in
@@ -353,25 +362,81 @@ impl Options {
             .unwrap_or_else(|| "NOTHING".to_string())
     }
 
-    /// A summary account's full name.
+    /// The options that name an account as a leaf under the equity root,
+    /// with their leaf values: beancount's `get_previous_accounts` and
+    /// `get_current_accounts` join these onto `name_equity`.
+    fn equity_leaf_options(&self) -> [(&'static str, &str); 5] {
+        [
+            ("account_previous_balances", &self.account_previous_balances),
+            ("account_previous_earnings", &self.account_previous_earnings),
+            (
+                "account_previous_conversions",
+                &self.account_previous_conversions,
+            ),
+            ("account_current_earnings", &self.account_current_earnings),
+            (
+                "account_current_conversions",
+                self.account_current_conversions
+                    .as_deref()
+                    .unwrap_or(DEFAULT_CURRENT_CONVERSIONS),
+            ),
+        ]
+    }
+
+    /// E7010 for every account option whose value begins with one of the
+    /// ledger's root names.
     ///
-    /// Unset, it is beancount's default leaf under the ledger's equity root,
-    /// as beancount's `get_previous_accounts` builds it, so a ledger that sets
-    /// `option "name_equity" "Eigenkapital"` summarizes into
-    /// `Eigenkapital:Opening-Balances`. The stored default
-    /// (`Equity:Opening-Balances`) named a root such a ledger does not have
-    /// (#2401).
+    /// Such a value is legal, and resolves as beancount resolves it: the
+    /// equity root is joined on, so `Equity:Anfang` names
+    /// `Equity:Equity:Anfang`. It is almost always the full-name form rledger
+    /// used to document and require (#2408), so it is reported rather than
+    /// reinterpreted: reinterpreting it would make the same ledger name
+    /// different accounts in rledger and in beancount or fava.
     ///
-    /// Set, it is the value as written: rledger takes these options as full
-    /// account names. beancount takes them relative to the equity root and
-    /// joins the root on, which is a separate divergence in how the option
-    /// is parsed, not in how an unset one resolves (#2408).
-    fn resolve_previous(&self, key: &str, value: &str, default_leaf: &str) -> String {
-        if self.set_options.contains(key) {
-            value.to_string()
-        } else {
-            format!("{}:{default_leaf}", self.name_equity)
-        }
+    /// Run once all options are set, since `name_*` can come after the
+    /// account options in the file.
+    #[must_use]
+    pub fn rooted_leaf_warnings(&self) -> Vec<OptionWarning> {
+        let roots = self.account_types();
+        self.equity_leaf_options()
+            .into_iter()
+            .filter(|(key, _)| self.set_options.contains(*key))
+            .filter_map(|(key, leaf)| {
+                let (first, rest) = match leaf.split_once(':') {
+                    Some((first, rest)) => (first, Some(rest)),
+                    None => (leaf, None),
+                };
+                if !roots.contains(&first) {
+                    return None;
+                }
+                let full = resolve_leaf_account(&self.name_equity, leaf);
+                // The fix depends on WHICH root: dropping the equity root
+                // keeps the account meant; any other root cannot be kept,
+                // since these options only name accounts under equity.
+                let advice = match rest {
+                    Some(rest) if first == self.name_equity => {
+                        format!("write \"{rest}\" for {leaf}")
+                    }
+                    None if first == self.name_equity => {
+                        "it names an account under the equity root, not the root itself".to_string()
+                    }
+                    _ => format!(
+                        "it names an account under the equity root ({}), so it cannot name \
+                         an account under {first}",
+                        self.name_equity
+                    ),
+                };
+                Some(OptionWarning {
+                    code: "E7010",
+                    message: format!(
+                        "Option \"{key}\" names a leaf under the equity root, so \"{leaf}\" \
+                         resolves to \"{full}\"; {advice}"
+                    ),
+                    option: key.to_string(),
+                    value: leaf.to_string(),
+                })
+            })
+            .collect()
     }
 
     /// The ledger-wide booking method: the file's `option "booking_method"`
@@ -411,10 +476,12 @@ impl Options {
             name_income: "Income".to_string(),
             name_expenses: "Expenses".to_string(),
             account_rounding: None,
-            account_previous_balances: "Equity:Opening-Balances".to_string(),
-            account_previous_earnings: "Equity:Earnings:Previous".to_string(),
-            account_previous_conversions: "Equity:Conversions:Previous".to_string(),
-            account_current_earnings: "Equity:Earnings:Current".to_string(),
+            // beancount's defaults: LEAF names, joined onto the equity root
+            // where they are used (#2408); see `previous_balances_account`.
+            account_previous_balances: "Opening-Balances".to_string(),
+            account_previous_earnings: "Earnings:Previous".to_string(),
+            account_previous_conversions: "Conversions:Previous".to_string(),
+            account_current_earnings: "Earnings:Current".to_string(),
             account_current_conversions: None,
             account_unrealized_gains: None,
             conversion_currency: None,
@@ -563,7 +630,7 @@ impl Options {
                 self.name_expenses = value.to_string();
             }
             "account_rounding" => {
-                if !Self::is_valid_account(value) {
+                if !Self::is_valid_leaf(value) {
                     self.warnings.push(OptionWarning {
                         code: "E7002",
                         message: format!("Invalid leaf account name: '{value}'"),
@@ -591,7 +658,7 @@ impl Options {
                 self.account_rounding = Some(value.to_string());
             }
             "account_current_conversions" => {
-                if !Self::is_valid_account(value) {
+                if !Self::is_valid_leaf(value) {
                     self.warnings.push(OptionWarning {
                         code: "E7002",
                         message: format!("Invalid leaf account name: '{value}'"),
@@ -602,7 +669,7 @@ impl Options {
                 self.account_current_conversions = Some(value.to_string());
             }
             "account_unrealized_gains" => {
-                if !Self::is_valid_account(value) {
+                if !Self::is_valid_leaf(value) {
                     self.warnings.push(OptionWarning {
                         code: "E7002",
                         message: format!("Invalid leaf account name: '{value}'"),
@@ -736,7 +803,7 @@ impl Options {
             }
             "filename" => self.filename = Some(value.to_string()),
             "account_previous_balances" => {
-                if !Self::is_valid_account(value) {
+                if !Self::is_valid_leaf(value) {
                     self.warnings.push(OptionWarning {
                         code: "E7002",
                         message: format!("Invalid leaf account name: '{value}'"),
@@ -747,7 +814,7 @@ impl Options {
                 self.account_previous_balances = value.to_string();
             }
             "account_previous_earnings" => {
-                if !Self::is_valid_account(value) {
+                if !Self::is_valid_leaf(value) {
                     self.warnings.push(OptionWarning {
                         code: "E7002",
                         message: format!("Invalid leaf account name: '{value}'"),
@@ -758,7 +825,7 @@ impl Options {
                 self.account_previous_earnings = value.to_string();
             }
             "account_previous_conversions" => {
-                if !Self::is_valid_account(value) {
+                if !Self::is_valid_leaf(value) {
                     self.warnings.push(OptionWarning {
                         code: "E7002",
                         message: format!("Invalid leaf account name: '{value}'"),
@@ -769,7 +836,7 @@ impl Options {
                 self.account_previous_conversions = value.to_string();
             }
             "account_current_earnings" => {
-                if !Self::is_valid_account(value) {
+                if !Self::is_valid_leaf(value) {
                     self.warnings.push(OptionWarning {
                         code: "E7002",
                         message: format!("Invalid leaf account name: '{value}'"),
@@ -935,8 +1002,12 @@ impl Options {
     /// parser applies to account tokens. The old hand-written check here was a
     /// third, divergent variant (it accepted lowercase-adjacent first chars the
     /// lexer rejects and had no per-character rule at all).
-    fn is_valid_account(value: &str) -> bool {
-        rustledger_parser::is_valid_account_name(value)
+    /// beancount's `is_valid_leaf`: one or more account components, with no
+    /// root required, as the account-name options take them (#2408).
+    /// Checked by running the canonical account predicate on `Assets:<leaf>`,
+    /// so a leaf is valid exactly when it can extend a real account.
+    fn is_valid_leaf(value: &str) -> bool {
+        rustledger_parser::is_valid_account_name(&format!("Assets:{value}"))
     }
 
     /// Check if a value is usable as an account TYPE root (a `name_*` option
@@ -1311,12 +1382,12 @@ mod tests {
             "Eigenkapital:Conversions:Previous"
         );
 
-        // Set: the name as written, whatever the equity root (#2408).
+        // Set: a leaf under the equity root, as beancount reads it (#2408).
         let mut set = Options::new();
         set.set("name_equity", "Eigenkapital");
-        set.set("account_previous_balances", "Eigenkapital:Anfang");
-        set.set("account_previous_earnings", "Eigenkapital:Vorjahr");
-        set.set("account_previous_conversions", "Eigenkapital:Umrechnung");
+        set.set("account_previous_balances", "Anfang");
+        set.set("account_previous_earnings", "Vorjahr");
+        set.set("account_previous_conversions", "Umrechnung");
         assert_eq!(set.previous_balances_account(), "Eigenkapital:Anfang");
         assert_eq!(set.previous_earnings_account(), "Eigenkapital:Vorjahr");
         assert_eq!(
@@ -1353,11 +1424,8 @@ mod tests {
 
         let mut set = Options::new();
         set.set("name_equity", "Eigenkapital");
-        set.set("account_current_earnings", "Eigenkapital:Laufend");
-        set.set(
-            "account_current_conversions",
-            "Eigenkapital:Umrechnung:Laufend",
-        );
+        set.set("account_current_earnings", "Laufend");
+        set.set("account_current_conversions", "Umrechnung:Laufend");
         set.set("conversion_currency", "EUR");
         assert_eq!(set.current_earnings_account(), "Eigenkapital:Laufend");
         assert_eq!(
@@ -1365,6 +1433,72 @@ mod tests {
             "Eigenkapital:Umrechnung:Laufend"
         );
         assert_eq!(set.conversion_currency_or_default(), "EUR");
+    }
+
+    /// #2408: a value written as a full name (rledger's old documented form)
+    /// resolves as beancount resolves it, the equity root joined on, and
+    /// raises E7010 naming what to write instead. A warning, not an error:
+    /// the value is legal beancount.
+    #[test]
+    fn a_rooted_account_option_resolves_like_beancount_and_warns() {
+        let mut opts = Options::new();
+        opts.set("account_previous_balances", "Equity:Anfang");
+        opts.set("account_current_earnings", "Income:Oops");
+        assert!(
+            opts.warnings.is_empty(),
+            "legal leaves: {:?}",
+            opts.warnings
+        );
+        assert_eq!(opts.previous_balances_account(), "Equity:Equity:Anfang");
+        assert_eq!(opts.current_earnings_account(), "Equity:Income:Oops");
+
+        let warnings = opts.rooted_leaf_warnings();
+        assert_eq!(warnings.len(), 2, "{warnings:?}");
+        assert!(warnings.iter().all(|w| w.code == "E7010" && !w.is_error()));
+        assert!(
+            warnings[0].message.contains("\"Equity:Equity:Anfang\"")
+                && warnings[0].message.contains("write \"Anfang\""),
+            "{}",
+            warnings[0].message
+        );
+
+        // Against the ledger's own root names, whenever `name_*` was set.
+        let mut renamed = Options::new();
+        renamed.set("account_previous_balances", "Eigenkapital:Anfang");
+        renamed.set("name_equity", "Eigenkapital");
+        assert_eq!(renamed.rooted_leaf_warnings().len(), 1);
+        assert_eq!(
+            renamed.previous_balances_account(),
+            "Eigenkapital:Eigenkapital:Anfang"
+        );
+
+        // The advice depends on which root. Only the EQUITY root can be
+        // dropped to keep the account meant; a value that is the root itself,
+        // or another root's account, cannot be written as a leaf at all.
+        let advice = |value: &str| {
+            let mut opts = Options::new();
+            opts.set("account_previous_balances", value);
+            opts.rooted_leaf_warnings()[0].message.clone()
+        };
+        assert!(advice("Equity:Anfang").ends_with("write \"Anfang\" for Equity:Anfang"));
+        assert!(
+            advice("Equity").ends_with("not the root itself"),
+            "{}",
+            advice("Equity")
+        );
+        let other = advice("Income:Oops");
+        assert!(
+            other.contains("\"Equity:Income:Oops\"")
+                && other.ends_with("so it cannot name an account under Income")
+                && !other.contains("write"),
+            "{other}"
+        );
+
+        // Defaults and ordinary leaves raise nothing.
+        assert!(Options::new().rooted_leaf_warnings().is_empty());
+        let mut leaf = Options::new();
+        leaf.set("account_previous_balances", "Anfang");
+        assert!(leaf.rooted_leaf_warnings().is_empty());
     }
 
     #[test]
@@ -1499,20 +1633,23 @@ mod tests {
     }
 
     #[test]
-    fn test_is_valid_account() {
-        // Valid accounts — ASCII
-        assert!(Options::is_valid_account("Assets:Bank"));
-        assert!(Options::is_valid_account("Equity:Rounding:Precision"));
+    fn test_is_valid_leaf() {
+        // beancount's `is_valid_leaf` (#2408): one or more components, no
+        // root required.
+        assert!(Options::is_valid_leaf("Opening-Balances"));
+        assert!(Options::is_valid_leaf("Earnings:Previous"));
+        assert!(Options::is_valid_leaf("Anfang"));
+        // A value that happens to start with a root is a legal leaf too (it
+        // resolves under the equity root and raises E7010, not E7002).
+        assert!(Options::is_valid_leaf("Equity:Rounding:Precision"));
+        assert!(Options::is_valid_leaf("Капитал:Retained"));
+        assert!(Options::is_valid_leaf("银行:支票"));
 
-        // Valid accounts — Unicode
-        assert!(Options::is_valid_account("Капитал:Retained"));
-        assert!(Options::is_valid_account("资产:银行:支票"));
-
-        // Invalid accounts
-        assert!(!Options::is_valid_account("invalid")); // No colon
-        assert!(!Options::is_valid_account("assets:bank")); // Lowercase ASCII
-        assert!(!Options::is_valid_account("Assets:")); // Empty component
-        assert!(!Options::is_valid_account(":Bank")); // Empty first component
+        assert!(!Options::is_valid_leaf("anfang")); // Lowercase ASCII
+        assert!(!Options::is_valid_leaf("Bad Name")); // Space
+        assert!(!Options::is_valid_leaf("Anfang:")); // Empty component
+        assert!(!Options::is_valid_leaf(":Anfang")); // Empty first component
+        assert!(!Options::is_valid_leaf("")); // Nothing
     }
 
     #[test]
@@ -1648,16 +1785,16 @@ mod tests {
 
     #[test]
     fn test_account_option_uses_canonical_rule() {
-        // The old hand-written is_valid_account had no per-character rule:
+        // The old hand-written account check had no per-character rule:
         // 'Equity:Ro unding' style values with invalid chars slipped through
         // as long as first chars looked right. The canonical predicate
         // rejects what the lexer rejects.
         let mut opts = Options::new();
-        opts.set("account_current_conversions", "Equity:Conv ersions");
+        opts.set("account_current_conversions", "Conv ersions");
         assert!(opts.warnings.iter().any(|w| w.code == "E7002"));
 
         let mut opts = Options::new();
-        opts.set("account_current_conversions", "Equity:Conversions:Current");
+        opts.set("account_current_conversions", "Conversions:Current");
         assert!(opts.warnings.is_empty(), "{:?}", opts.warnings);
     }
 

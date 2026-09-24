@@ -409,6 +409,10 @@ impl BookingEngine {
                 // Compound form deliberately exposes neither component as
                 // an effective value. Combined total N*a + b is preserved
                 // exactly for residual math, same as the {{T}} conversion.
+                // As written, for the `{*}` check below: normalizing folds a
+                // compound cost into one total and loses the precision each
+                // part was written to (#2398).
+                let written_number = cost_spec.number;
                 let normalized_compound: Option<CostSpec> = match cost_spec.number {
                     Some(rustledger_core::CostNumber::Compound { per_unit, total })
                         if !units.number.is_zero() =>
@@ -606,6 +610,14 @@ impl BookingEngine {
                             ),
                         }
                         .map_err(|e| convert_core_booking_error(e, &posting.account))?;
+                        // Only here: `apply`, the validator and the query
+                        // replay see the BOOKED posting, whose cost is the
+                        // pool's own by then, and a filtered replay builds a
+                        // different pool on purpose (#1985).
+                        if cost_spec.merge {
+                            check_merge_spec(cost_spec, written_number, units, &booking_result)
+                                .map_err(|e| convert_core_booking_error(e, &posting.account))?;
+                        }
                         {
                             // Check if multiple lots were matched
                             if booking_result.matched.len() > 1 {
@@ -1716,6 +1728,126 @@ fn convert_core_booking_error(
     account: &rustledger_core::Account,
 ) -> BookingError {
     BookingError::Inventory(err.with_account(account.clone()))
+}
+
+/// Check what a `{*}` spec states against the pool the merge built (#2398).
+///
+/// `{*}` computes its cost, so everything else in the spec is a claim about
+/// the result, and a claim is checked rather than dropped: a cost or currency
+/// must be the pool's, and a date or label must not be there at all, since the
+/// merge builds one undated, unlabeled lot. Beancount has no merge to compare
+/// with (`Cost merging is not supported yet`), so this is the reading that
+/// keeps the number the ledger wrote from being thrown away silently.
+///
+/// A stated cost holds when it IS the pool's cost at the precision written.
+/// The pool is a quotient and seldom has a finite decimal a ledger could
+/// write: `{*, 106.67 USD}` for a pool of 106.666… is the pool, to cents. So
+/// the allowance is half a unit in the last place written, and for a compound
+/// cost the sum of both parts' (the per-unit part's times the units). It is
+/// not the ledger's balance tolerance: that bounds how far two sides of a
+/// transaction may disagree, and this compares one number with itself.
+///
+/// A mismatch reports the pool rounded to the places the spec writes, which
+/// reads as the number the author should have written; being more than half a
+/// unit away, it can never round to the stated one.
+///
+/// Cost-less lots degrade `{*}` to AVERAGE with no pool cost; there is nothing
+/// to hold a stated cost against, so only the date and label are checked.
+fn check_merge_spec(
+    spec: &CostSpec,
+    written: Option<rustledger_core::CostNumber>,
+    units: &rustledger_core::Amount,
+    result: &rustledger_core::BookingResult,
+) -> Result<(), rustledger_core::BookingError> {
+    use rustledger_core::{BookingError as B, CostNumber, MergeSpecMismatch as M};
+    let mismatch = |detail| B::MergeSpecMismatch {
+        currency: units.currency.clone(),
+        detail,
+    };
+    let overflow = |currency: &rustledger_core::Currency| {
+        B::Overflow(rustledger_core::OverflowError {
+            currency: currency.clone(),
+        })
+    };
+    if let Some(pool) = result.matched.first().and_then(|p| p.cost.as_ref()) {
+        let currency = &pool.currency;
+        if let Some(stated) = &spec.currency
+            && stated != currency
+        {
+            return Err(mismatch(M::Currency {
+                stated: stated.clone(),
+                pool: currency.clone(),
+            }));
+        }
+        let reduction = units.number.abs();
+        let pool_total = || {
+            reduction
+                .checked_mul(pool.number)
+                .ok_or_else(|| overflow(currency))
+        };
+        let (stated_total, allowance) = match written {
+            None => (None, Decimal::ZERO),
+            Some(CostNumber::PerUnit { value }) => {
+                if differ(pool.number, value, half_unit_in_last_place(value)) {
+                    return Err(mismatch(M::PerUnit {
+                        stated: Amount::new(value, currency.clone()),
+                        pool: Amount::new(pool.number.round_dp(value.scale()), currency.clone()),
+                    }));
+                }
+                (None, Decimal::ZERO)
+            }
+            Some(CostNumber::Total { value }) => (Some(value), half_unit_in_last_place(value)),
+            // Not something a ledger writes; booking's own output.
+            Some(CostNumber::PerUnitFromTotal(booked)) => {
+                (Some(booked.total), half_unit_in_last_place(booked.total))
+            }
+            Some(CostNumber::Compound { per_unit, total }) => {
+                let combined = reduction
+                    .checked_mul(per_unit)
+                    .and_then(|v| v.checked_add(total))
+                    .ok_or_else(|| overflow(currency))?;
+                let allowance = reduction
+                    .checked_mul(half_unit_in_last_place(per_unit))
+                    .and_then(|v| v.checked_add(half_unit_in_last_place(total)))
+                    .ok_or_else(|| overflow(currency))?;
+                (Some(combined), allowance)
+            }
+        };
+        if let Some(stated) = stated_total {
+            let got = pool_total()?;
+            if differ(got, stated, allowance) {
+                return Err(mismatch(M::Total {
+                    stated: Amount::new(stated, currency.clone()),
+                    pool: Amount::new(got.round_dp(stated.scale()), currency.clone()),
+                }));
+            }
+        }
+    }
+    if let Some(date) = spec.date {
+        return Err(mismatch(M::DateOrLabel {
+            stated: date.to_string(),
+        }));
+    }
+    if let Some(label) = &spec.label {
+        return Err(mismatch(M::DateOrLabel {
+            stated: format!("\"{label}\""),
+        }));
+    }
+    Ok(())
+}
+
+/// Whether `a` and `b` are more than `allowance` apart. Checked, since a
+/// stated cost is ledger input and `a - b` can leave `Decimal`'s range (a
+/// panic in `rust_decimal`); numbers that far apart differ by any allowance.
+fn differ(a: Decimal, b: Decimal, allowance: Decimal) -> bool {
+    a.checked_sub(b).is_none_or(|d| d.abs() > allowance)
+}
+
+/// Half a unit in the last decimal place of `number`: `0.005` for `106.67`,
+/// `0.5` for `110`. Zero at `Decimal`'s 28-place limit, where the next place
+/// cannot be written: such a number is compared exactly.
+fn half_unit_in_last_place(number: Decimal) -> Decimal {
+    Decimal::try_new(5, number.scale() + 1).unwrap_or(Decimal::ZERO)
 }
 
 /// The error for a cost whose per-unit value cannot be represented.

@@ -320,7 +320,40 @@ impl Options {
         )
     }
 
-    /// A previous-period summary account's full name.
+    /// The account a period's income and expenses move to under `CLEAR`
+    /// (`account_current_earnings`), resolved as
+    /// [`Self::previous_balances_account`] is.
+    #[must_use]
+    pub fn current_earnings_account(&self) -> String {
+        self.resolve_previous(
+            "account_current_earnings",
+            &self.account_current_earnings,
+            "Earnings:Current",
+        )
+    }
+
+    /// The account a period's conversion residual goes to under `CLOSE`
+    /// (`account_current_conversions`), resolved as
+    /// [`Self::previous_balances_account`] is.
+    #[must_use]
+    pub fn current_conversions_account(&self) -> String {
+        // `Some` only when the file set it: `set` is the one writer, and an
+        // included file cannot set options.
+        self.account_current_conversions
+            .clone()
+            .unwrap_or_else(|| format!("{}:Conversions:Current", self.name_equity))
+    }
+
+    /// The currency a conversions entry prices its postings in
+    /// (`conversion_currency`): beancount's `NOTHING` when unset.
+    #[must_use]
+    pub fn conversion_currency_or_default(&self) -> String {
+        self.conversion_currency
+            .clone()
+            .unwrap_or_else(|| "NOTHING".to_string())
+    }
+
+    /// A summary account's full name.
     ///
     /// Unset, it is beancount's default leaf under the ledger's equity root,
     /// as beancount's `get_previous_accounts` builds it, so a ledger that sets
@@ -1290,6 +1323,48 @@ mod tests {
             set.previous_conversions_account(),
             "Eigenkapital:Umrechnung"
         );
+    }
+
+    /// #2406: the current-period accounts and the conversion currency resolve
+    /// the same way: under the equity root when unset, as written when set.
+    #[test]
+    fn current_summary_accounts_and_conversion_currency_resolve() {
+        let defaults = Options::new();
+        assert_eq!(
+            defaults.current_earnings_account(),
+            "Equity:Earnings:Current"
+        );
+        assert_eq!(
+            defaults.current_conversions_account(),
+            "Equity:Conversions:Current"
+        );
+        assert_eq!(defaults.conversion_currency_or_default(), "NOTHING");
+
+        let mut renamed = Options::new();
+        renamed.set("name_equity", "Eigenkapital");
+        assert_eq!(
+            renamed.current_earnings_account(),
+            "Eigenkapital:Earnings:Current"
+        );
+        assert_eq!(
+            renamed.current_conversions_account(),
+            "Eigenkapital:Conversions:Current"
+        );
+
+        let mut set = Options::new();
+        set.set("name_equity", "Eigenkapital");
+        set.set("account_current_earnings", "Eigenkapital:Laufend");
+        set.set(
+            "account_current_conversions",
+            "Eigenkapital:Umrechnung:Laufend",
+        );
+        set.set("conversion_currency", "EUR");
+        assert_eq!(set.current_earnings_account(), "Eigenkapital:Laufend");
+        assert_eq!(
+            set.current_conversions_account(),
+            "Eigenkapital:Umrechnung:Laufend"
+        );
+        assert_eq!(set.conversion_currency_or_default(), "EUR");
     }
 
     #[test]

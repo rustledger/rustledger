@@ -245,6 +245,14 @@ fn select_query<'a>() -> impl Parser<'a, ParserInput<'a>, SelectQuery, ParserExt
                         span,
                         "table names cannot contain ':' - this looks like an account filter expression",
                     ))
+                } else if ["OPEN", "CLOSE", "CLEAR"]
+                    .iter()
+                    .any(|kw| name.eq_ignore_ascii_case(kw))
+                {
+                    // The FROM modifiers are keywords, as in beanquery's
+                    // grammar. Read as a table, `FROM CLEAR` / `FROM CLOSE`
+                    // failed with "table 'CLEAR' does not exist" (#2406).
+                    Err(Rich::custom(span, "a FROM modifier, not a table name"))
                 } else {
                     Ok(name)
                 }
@@ -365,11 +373,23 @@ fn from_modifiers<'a>() -> impl Parser<'a, ParserInput<'a>, FromClause, ParserEx
         .ignore_then(ws1())
         .ignore_then(date_literal());
 
-    let close_on = ws()
-        .ignore_then(kw("CLOSE"))
-        .ignore_then(ws().then(kw("ON")).then(ws()).or_not())
-        .ignore_then(date_literal());
-
+    // `CLOSE [ON] <date>`, or a bare `CLOSE`: close at the end of the ledger,
+    // which truncates nothing but still books the conversions entry, as in
+    // beanquery (#2406). `Some(None)` is the bare form.
+    //
+    // The dated form is one all-or-nothing unit: the separator, an optional
+    // `ON`, then the date. Were the separator outside it, a failed `ON` would
+    // leave the date unparsed, and `CLOSE 2024-03-01` read as a bare CLOSE
+    // with the date as a FILTER expression: the whole ledger, silently.
+    // beanquery requires `ON`; the bare-date form is accepted as the old
+    // parser intended (and never managed).
+    let close_on = ws().ignore_then(kw("CLOSE")).ignore_then(
+        ws1()
+            .ignore_then(kw("ON").then(ws1()).or_not())
+            .ignore_then(date_literal())
+            .map(Some)
+            .or(empty().to(None)),
+    );
     let clear = ws().ignore_then(kw("CLEAR"));
 
     // Parse modifiers in order: OPEN ON, CLOSE ON, CLEAR, filter
@@ -379,9 +399,10 @@ fn from_modifiers<'a>() -> impl Parser<'a, ParserInput<'a>, FromClause, ParserEx
         .then(close_on.or_not())
         .then(clear.or_not().map(|c| c.is_some()))
         .then(from_filter().or_not())
-        .map(|(((open_on, close_on), clear), filter)| FromClause {
+        .map(|(((open_on, close), clear), filter)| FromClause {
             open_on,
-            close_on,
+            close_on: close.flatten(),
+            close: close.is_some(),
             clear,
             filter,
             subquery: None,
@@ -1385,6 +1406,36 @@ mod tests {
             }
             _ => panic!("Expected SELECT query"),
         }
+    }
+
+    /// #2406: the FROM modifiers stand alone, and `CLOSE` takes an optional
+    /// date. `FROM CLEAR` and `FROM CLOSE` used to parse as table names.
+    #[test]
+    fn test_from_modifiers_alone_and_bare_close() {
+        let from = |q: &str| match parse(q).unwrap_or_else(|e| panic!("{q}: {e}")) {
+            Query::Select(sel) => sel.from.unwrap_or_else(|| panic!("{q}: no FROM")),
+            _ => panic!("{q}: expected SELECT"),
+        };
+        let clear = from("SELECT * FROM CLEAR");
+        assert!(clear.clear && !clear.close && clear.table_name.is_none());
+        let close = from("SELECT * FROM CLOSE");
+        assert!(close.close && close.close_on.is_none() && close.table_name.is_none());
+        let both = from("SELECT * FROM CLOSE CLEAR WHERE account ~ 'Income'");
+        assert!(both.close && both.clear && both.close_on.is_none());
+        let dated = from("SELECT * FROM CLOSE 2024-03-01");
+        assert!(dated.close);
+        assert_eq!(dated.close_on, rustledger_core::naive_date(2024, 3, 1));
+        let on = from("SELECT * FROM CLOSE ON 2024-03-01");
+        assert!(on.close && on.close_on.is_some());
+        // A table name is still a table name.
+        assert_eq!(
+            from("SELECT * FROM #postings").table_name.as_deref(),
+            Some("#postings")
+        );
+        assert_eq!(
+            from("SELECT * FROM mytable").table_name.as_deref(),
+            Some("mytable")
+        );
     }
 
     #[test]

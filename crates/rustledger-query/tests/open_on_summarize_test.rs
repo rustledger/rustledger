@@ -1,5 +1,5 @@
-//! `FROM ... OPEN ON` summarizes the ledger before the date, as beanquery does
-//! with beancount's `summarize.open` (#2401).
+//! `FROM ... OPEN ON / CLOSE / CLEAR` rewrite the ledger as beanquery does,
+//! with beancount's `summarize.open`, `close` and `clear` (#2401, #2406).
 //!
 //! Every expected value below is bean-query's (beanquery 0.2.0, beancount
 //! 3.2.3) on the same ledger, except where a test says otherwise.
@@ -540,5 +540,231 @@ fn a_close_before_the_open_is_refused() {
         )
         .iter()
         .all(|r| r[0] != "2024-02-10")
+    );
+}
+
+/// #2406: `CLEAR` transfers every income-statement balance to
+/// `account_current_earnings`, dated the last entry's date. rledger used to
+/// ignore the keyword, and `FROM CLEAR` alone failed as a table name.
+#[test]
+fn clear_transfers_the_income_statement_to_current_earnings() {
+    assert_rows(
+        &rows(
+            EARNINGS,
+            "SELECT date, flag, narration, account, position FROM CLEAR WHERE flag = 'T'",
+        ),
+        &[
+            &[
+                "2024-03-01",
+                "T",
+                "Transfer balance for 'Expenses:Food' (Transfer balance)",
+                "Expenses:Food",
+                "-125.75 USD",
+            ],
+            &[
+                "2024-03-01",
+                "T",
+                "Transfer balance for 'Expenses:Food' (Transfer balance)",
+                "Equity:Earnings:Current",
+                "125.75 USD",
+            ],
+            &[
+                "2024-03-01",
+                "T",
+                "Transfer balance for 'Expenses:Rent' (Transfer balance)",
+                "Expenses:Rent",
+                "-1200.00 USD",
+            ],
+            &[
+                "2024-03-01",
+                "T",
+                "Transfer balance for 'Expenses:Rent' (Transfer balance)",
+                "Equity:Earnings:Current",
+                "1200.00 USD",
+            ],
+            &[
+                "2024-03-01",
+                "T",
+                "Transfer balance for 'Income:Salary' (Transfer balance)",
+                "Income:Salary",
+                "6000.00 USD",
+            ],
+            &[
+                "2024-03-01",
+                "T",
+                "Transfer balance for 'Income:Salary' (Transfer balance)",
+                "Equity:Earnings:Current",
+                "-6000.00 USD",
+            ],
+        ],
+        "bean-query's transfers",
+    );
+    assert_rows(
+        &rows(
+            EARNINGS,
+            "SELECT account, sum(position) FROM CLOSE ON 2024-03-01 CLEAR GROUP BY account ORDER BY account",
+        ),
+        &[
+            &["Assets:Bank", "4800.00 USD"],
+            &["Equity:Earnings:Current", "-4674.25 USD"],
+            &["Expenses:Food", "(empty)"],
+            &["Expenses:Rent", "(empty)"],
+            &["Income:Salary", "(empty)"],
+            &["Liabilities:Card", "-125.75 USD"],
+        ],
+        "bean-query's totals: the income statement cleared into current earnings",
+    );
+}
+
+/// #2406: `CLOSE` books beancount's conversions entry, the period's balance
+/// at cost negated into `account_current_conversions` at a zero price. Its
+/// narration names the balance sorted as beancount's `str(Inventory)` sorts
+/// it (USD before EUR), while the postings keep the balance's own order.
+#[test]
+fn close_books_the_conversion_residual() {
+    assert_rows(
+        &rows(
+            CONVERSIONS,
+            "SELECT date, flag, narration, account, position, price FROM CLOSE ON 2024-03-01 WHERE flag = 'C'",
+        ),
+        &[
+            &[
+                "2024-02-29",
+                "C",
+                "Conversion for (-55.00 USD, 50.00 EUR)",
+                "Equity:Conversions:Current",
+                "-50.00 EUR",
+                "0 NOTHING",
+            ],
+            &[
+                "2024-02-29",
+                "C",
+                "Conversion for (-55.00 USD, 50.00 EUR)",
+                "Equity:Conversions:Current",
+                "55.00 USD",
+                "0 NOTHING",
+            ],
+        ],
+        "bean-query's conversions entry",
+    );
+    // A bare CLOSE truncates nothing and dates the entry at the last entry.
+    assert_rows(
+        &rows(
+            CONVERSIONS,
+            "SELECT date, account, position FROM CLOSE WHERE flag = 'C'",
+        ),
+        &[
+            &["2024-02-20", "Equity:Conversions:Current", "-50.00 EUR"],
+            &["2024-02-20", "Equity:Conversions:Current", "55.00 USD"],
+        ],
+        "bean-query's bare CLOSE",
+    );
+    // With `OPEN ON`, the residual before the date is in the summaries, so the
+    // entry books only the period's.
+    assert_rows(
+        &rows(
+            CONVERSIONS,
+            "SELECT account, position FROM OPEN ON 2024-02-01 CLOSE ON 2024-03-01 WHERE flag = 'C'",
+        ),
+        &[
+            &["Equity:Conversions:Current", "-55.00 USD"],
+            &["Equity:Conversions:Current", "50.00 EUR"],
+        ],
+        "bean-query's order (the summaries meet USD first): the period's residual only",
+    );
+    // No price conversion, no residual: no entry.
+    assert!(
+        rows(
+            EARNINGS,
+            "SELECT flag FROM CLOSE ON 2024-03-01 WHERE flag = 'C'"
+        )
+        .is_empty(),
+        "a ledger balanced at cost gets no conversions entry"
+    );
+}
+
+/// Unset, the current accounts live under the ledger's own equity root, and
+/// the conversions entry is priced in `conversion_currency`.
+#[test]
+fn close_and_clear_use_the_ledgers_equity_root_and_conversion_currency() {
+    let source = "option \"name_equity\" \"Eigenkapital\"\n\
+                  option \"conversion_currency\" \"EUR\"\n\
+                  2024-01-01 open Assets:USD USD\n\
+                  2024-01-01 open Assets:EUR EUR\n\
+                  2024-01-01 open Income:Pay USD\n\
+                  2024-01-05 * \"pay\"\n  Assets:USD  100.00 USD\n  Income:Pay\n\
+                  2024-01-10 * \"fx\"\n  Assets:EUR  50.00 EUR @ 1.10 USD\n  Assets:USD  -55.00 USD\n";
+    assert_rows(
+        &rows(
+            source,
+            "SELECT date, flag, account, position, price FROM CLOSE CLEAR WHERE flag != '*'",
+        ),
+        &[
+            &[
+                "2024-01-10",
+                "C",
+                "Eigenkapital:Conversions:Current",
+                "-50.00 EUR",
+                "0 EUR",
+            ],
+            &[
+                "2024-01-10",
+                "C",
+                "Eigenkapital:Conversions:Current",
+                "55.00 USD",
+                "0 EUR",
+            ],
+            &["2024-01-10", "T", "Income:Pay", "100.00 USD", ""],
+            &[
+                "2024-01-10",
+                "T",
+                "Eigenkapital:Earnings:Current",
+                "-100.00 USD",
+                "",
+            ],
+        ],
+        "bean-query's accounts (it renders the price through the display context: 0.00 EUR)",
+    );
+}
+
+/// `OPEN ON` with a bare `CLOSE` and `CLEAR`. bean-query 0.2.0 crashes on this
+/// form (its compiler compares the open date with the bare CLOSE's `True`), so
+/// the expected rows are beancount's own `summarize.open_opt`, `close_opt(None)`
+/// and `clear_opt`, applied in beanquery's order. The period after 2024-02-15
+/// has no conversion, so there is no `C` entry; its travel expense is cleared.
+#[test]
+fn open_with_a_bare_close_and_clear_matches_beancounts_summarize() {
+    assert_rows(
+        &rows(
+            CONVERSIONS,
+            "SELECT date, flag, account, position FROM OPEN ON 2024-02-15 CLOSE CLEAR WHERE flag != '*'",
+        ),
+        &[
+            &["2024-02-14", "S", "Assets:EUR", "20.00 EUR"],
+            &["2024-02-14", "S", "Equity:Opening-Balances", "-20.00 EUR"],
+            &["2024-02-14", "S", "Assets:USD", "945.00 USD"],
+            &["2024-02-14", "S", "Equity:Opening-Balances", "-945.00 USD"],
+            &[
+                "2024-02-14",
+                "S",
+                "Equity:Conversions:Previous",
+                "-50.00 EUR",
+            ],
+            &["2024-02-14", "S", "Equity:Opening-Balances", "50.00 EUR"],
+            &[
+                "2024-02-14",
+                "S",
+                "Equity:Conversions:Previous",
+                "55.00 USD",
+            ],
+            &["2024-02-14", "S", "Equity:Opening-Balances", "-55.00 USD"],
+            &["2024-02-14", "S", "Equity:Earnings:Previous", "30.00 EUR"],
+            &["2024-02-14", "S", "Equity:Opening-Balances", "-30.00 EUR"],
+            &["2024-02-14", "S", "Equity:Opening", "-1000.00 USD"],
+            &["2024-02-14", "S", "Equity:Opening-Balances", "1000.00 USD"],
+            &["2024-02-20", "T", "Expenses:Travel", "-10.00 EUR"],
+            &["2024-02-20", "T", "Equity:Earnings:Current", "10.00 EUR"],
+        ],
+        "beancount's summarize (bean-query cannot run this query)",
     );
 }

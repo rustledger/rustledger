@@ -256,7 +256,8 @@ pub fn build_ledger_options(
         account_previous_balances: options.previous_balances_account(),
         account_previous_earnings: options.previous_earnings_account(),
         account_previous_conversions: options.previous_conversions_account(),
-        account_current_earnings: options.account_current_earnings.clone(),
+        // Resolved like the previous-period names above (#2406).
+        account_current_earnings: options.current_earnings_account(),
         account_current_conversions: options.account_current_conversions.clone(),
         account_unrealized_gains: options.account_unrealized_gains.clone(),
         conversion_currency: options.conversion_currency.clone(),

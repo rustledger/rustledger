@@ -24,8 +24,16 @@
 //! date, so beancount summarizes them away too. Only the summaries survive,
 //! and they are all this module emits.
 //!
-//! `CLOSE ON`'s conversions entry and `CLEAR`'s transfer, the rest of the
-//! `summarize` family, are not implemented yet (#2406).
+//! The rest of the family, applied after `OPEN ON` in beanquery's order
+//! (#2406):
+//!
+//! - **`CLOSE [ON <date>]`** is beancount's `summarize.close`: truncate at the
+//!   date (the window already does), then book a conversions entry, flagged
+//!   `C`, that brings the period's total at cost to zero against
+//!   `account_current_conversions`. A bare `CLOSE` truncates nothing.
+//! - **`CLEAR`** is beancount's `summarize.clear` with no date: transfer every
+//!   income-statement balance to `account_current_earnings`, flagged `T`,
+//!   dated the last entry's date.
 //!
 //! One deliberate difference: beancount totals each account with plain
 //! inventory addition, and rledger realizes it through the booking engine,
@@ -62,6 +70,15 @@ pub struct SummaryAccounts {
     /// Where a conversion residual before the period goes
     /// (`account_previous_conversions`).
     pub previous_conversions: String,
+    /// Where `CLEAR` moves the period's income and expenses
+    /// (`account_current_earnings`).
+    pub current_earnings: String,
+    /// Where `CLOSE` books the period's conversion residual
+    /// (`account_current_conversions`).
+    pub current_conversions: String,
+    /// The currency a conversions entry prices its postings in
+    /// (`conversion_currency`, `NOTHING` by default).
+    pub conversion_currency: String,
 }
 
 impl Default for SummaryAccounts {
@@ -78,6 +95,9 @@ impl SummaryAccounts {
             previous_balances: options.previous_balances_account(),
             previous_earnings: options.previous_earnings_account(),
             previous_conversions: options.previous_conversions_account(),
+            current_earnings: options.current_earnings_account(),
+            current_conversions: options.current_conversions_account(),
+            conversion_currency: options.conversion_currency_or_default(),
         }
     }
 }
@@ -107,6 +127,98 @@ fn add_amount(inventory: &mut Inventory, amount: Amount) -> Result<(), QueryErro
     inventory
         .add(Position::simple(amount))
         .map_err(|e| QueryError::Evaluation(format!("OPEN ON: {e}")))
+}
+
+/// A running balance with Python beancount's `Inventory` ordering: positions
+/// keyed by `(currency, cost)` in the order they first appear, a key DROPPED
+/// when its units reach zero and appended again if it comes back.
+///
+/// beancount's conversions entry lists its postings, and names its balance,
+/// in exactly this order, so bean-query's `C` rows come out in it (on the
+/// #2406 conversions ledger, the USD posting before the EUR one, although EUR
+/// appeared first: its balance crossed zero on the way).
+#[derive(Default)]
+struct OrderedBalance {
+    positions: Vec<Position>,
+}
+
+impl OrderedBalance {
+    fn add(&mut self, position: &Position) -> Result<(), QueryError> {
+        let slot = self.positions.iter().position(|held| {
+            held.units.currency == position.units.currency && held.cost == position.cost
+        });
+        match slot {
+            Some(i) => {
+                let held = &mut self.positions[i];
+                held.units.number = rustledger_core::checked_add_python_scale(
+                    held.units.number,
+                    position.units.number,
+                )
+                .ok_or_else(|| {
+                    QueryError::Evaluation(format!(
+                        "CLOSE: the balance of {} overflows",
+                        position.units.currency
+                    ))
+                })?;
+                if held.units.number.is_zero() {
+                    self.positions.remove(i);
+                }
+            }
+            None if position.units.number.is_zero() => {}
+            None => self.positions.push(position.clone()),
+        }
+        Ok(())
+    }
+
+    /// Python's `str(Inventory)`: `(55.00 USD, 10 AAPL {150.00 USD,
+    /// 2024-01-03})`, SORTED by beancount's `Position.sortkey`, not in the
+    /// balance's own order. The key is a currency rank (USD, EUR, JPY, CAD,
+    /// GBP, AUD, NZD, CHF first; any other currency `8 + len(code)`), then the
+    /// cost number, the cost currency and the units. The sort is stable, as
+    /// Python's is. So bean-query names `(-55.00 USD, 50.00 EUR)` while
+    /// listing the EUR posting first.
+    fn render(&self) -> String {
+        const CURRENCY_ORDER: [&str; 8] = ["USD", "EUR", "JPY", "CAD", "GBP", "AUD", "NZD", "CHF"];
+        let rank = |currency: &str| {
+            CURRENCY_ORDER
+                .iter()
+                .position(|c| *c == currency)
+                .unwrap_or(CURRENCY_ORDER.len() + currency.len())
+        };
+        let mut sorted: Vec<&Position> = self.positions.iter().collect();
+        sorted.sort_by(|a, b| {
+            let key = |p: &Position| {
+                (
+                    rank(p.units.currency.as_str()),
+                    p.cost
+                        .as_ref()
+                        .map_or(rustledger_core::Decimal::ZERO, |c| c.number),
+                    p.cost
+                        .as_ref()
+                        .map_or_else(String::new, |c| c.currency.to_string()),
+                    p.units.number,
+                )
+            };
+            key(a).cmp(&key(b))
+        });
+        let positions: Vec<String> = sorted
+            .into_iter()
+            .map(|p| match &p.cost {
+                None => p.units.to_string(),
+                Some(cost) => {
+                    let mut parts = vec![format!("{} {}", cost.number, cost.currency)];
+                    if let Some(date) = cost.date {
+                        parts.push(date.to_string());
+                    }
+                    if let Some(label) = &cost.label {
+                        parts.push(format!("\"{label}\""));
+                    }
+                    format!("{} {{{}}}", p.units, parts.join(", "))
+                }
+            })
+            .collect();
+        format!("({})", positions.join(", "))
+    }
 }
 
 /// The cost spec of a held position: its per-unit cost, date and label, so a
@@ -231,5 +343,157 @@ impl Executor<'_> {
             }
         }
         Ok(summaries)
+    }
+}
+
+impl Executor<'_> {
+    /// `CLOSE`'s conversions entry: dated `date`, the period's balance at
+    /// cost negated into `account_current_conversions`, each posting priced
+    /// at zero in `conversion_currency` as beancount prices it (the one
+    /// place its balance rule is bent; see beancount's `conversions`).
+    /// `None` when the balance at cost is already zero.
+    ///
+    /// # Errors
+    ///
+    /// A balance or cost that leaves the `Decimal` range.
+    pub(super) fn close_conversions(
+        &self,
+        stream: &[(Option<usize>, super::TransactionRef<'_>)],
+        date: NaiveDate,
+    ) -> Result<Option<Arc<Transaction>>, QueryError> {
+        let mut balance = OrderedBalance::default();
+        for (_, txn) in stream {
+            for posting in &txn.postings {
+                if let Some(units) = posting.amount() {
+                    balance.add(&Position::from_posting(
+                        units,
+                        posting.cost.as_deref(),
+                        txn.date,
+                    ))?;
+                }
+            }
+        }
+        let mut at_cost = OrderedBalance::default();
+        for position in &balance.positions {
+            at_cost.add(&Position::simple(cost_amount(position)?))?;
+        }
+        if at_cost.positions.is_empty() {
+            return Ok(None);
+        }
+        let mut txn =
+            Transaction::new(date, format!("Conversion for {}", balance.render())).with_flag('C');
+        for position in &at_cost.positions {
+            txn = txn.with_synthesized_posting(
+                Posting::new(
+                    self.summary_accounts.current_conversions.as_str(),
+                    Amount::new(-position.units.number, position.units.currency.clone()),
+                )
+                .with_price(rustledger_core::PriceAnnotation::unit(Amount::new(
+                    rustledger_core::Decimal::ZERO,
+                    self.summary_accounts.conversion_currency.as_str(),
+                ))),
+            );
+        }
+        Ok(Some(Arc::new(txn)))
+    }
+
+    /// `CLEAR`'s transfers: one transaction per income-statement account
+    /// holding a balance over `stream`, in account order, dated `date`, moving
+    /// the balance at cost to `account_current_earnings`. Balances are
+    /// realized through the booking engine, as `open_summaries` realizes them.
+    ///
+    /// # Errors
+    ///
+    /// A transaction the engine cannot realize, or a cost out of range.
+    pub(super) fn clear_transfers(
+        &self,
+        stream: &[(Option<usize>, super::TransactionRef<'_>)],
+        date: NaiveDate,
+    ) -> Result<Vec<Arc<Transaction>>, QueryError> {
+        let mut engine = rustledger_booking::BookingEngine::for_ledger(
+            self.booking_method,
+            self.resolved_directives(),
+        );
+        for (_, txn) in stream {
+            engine
+                .replay_transaction(txn)
+                .map_err(|e| QueryError::Evaluation(e.to_string()))?;
+        }
+        let balances: BTreeMap<String, Inventory> = engine
+            .inventories()
+            .filter(|(account, _)| self.account_types.is_income_statement(account))
+            .map(|(account, inventory)| (account.to_string(), inventory.clone()))
+            .collect();
+        let mut transfers = Vec::new();
+        for (account, inventory) in &balances {
+            let mut txn = Transaction::new(
+                date,
+                format!("Transfer balance for '{account}' (Transfer balance)"),
+            )
+            .with_flag('T');
+            for position in inventory.positions() {
+                if position.units.number.is_zero() {
+                    continue;
+                }
+                let mut moved = Posting::new(
+                    account.as_str(),
+                    Amount::new(-position.units.number, position.units.currency.clone()),
+                );
+                if let Some(spec) = position_cost_spec(position) {
+                    moved = moved.with_cost(spec);
+                }
+                let cost = cost_amount(position)?;
+                txn = txn
+                    .with_synthesized_posting(moved)
+                    .with_synthesized_posting(Posting::new(
+                        self.summary_accounts.current_earnings.as_str(),
+                        cost,
+                    ));
+            }
+            if !txn.postings.is_empty() {
+                transfers.push(Arc::new(txn));
+            }
+        }
+        Ok(transfers)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rust_decimal_macros::dec;
+
+    fn amount(n: rustledger_core::Decimal, c: &str) -> Position {
+        Position::simple(Amount::new(n, c))
+    }
+
+    /// Python drops a key that reaches zero, and never adds one that starts
+    /// there: a zero-amount posting leaves no trace in the balance or in the
+    /// conversions narration.
+    #[test]
+    fn a_zero_position_never_enters_the_balance() {
+        let mut balance = OrderedBalance::default();
+        balance.add(&amount(dec!(0), "USD")).unwrap();
+        balance.add(&amount(dec!(5.00), "EUR")).unwrap();
+        assert_eq!(balance.render(), "(5.00 EUR)");
+        balance.add(&amount(dec!(-5.00), "EUR")).unwrap();
+        assert_eq!(balance.render(), "()");
+    }
+
+    /// beancount's `Position.sortkey`: the eight ranked currencies first in
+    /// their order, then any other by the LENGTH of its code, then units.
+    #[test]
+    fn the_narration_sorts_as_beancount_sorts_an_inventory() {
+        let mut balance = OrderedBalance::default();
+        for (n, c) in [
+            (dec!(1), "ABCD"),
+            (dec!(2), "XYZ"),
+            (dec!(3), "EUR"),
+            (dec!(4), "CHF"),
+            (dec!(5), "USD"),
+        ] {
+            balance.add(&amount(n, c)).unwrap();
+        }
+        assert_eq!(balance.render(), "(5 USD, 3 EUR, 4 CHF, 2 XYZ, 1 ABCD)");
     }
 }

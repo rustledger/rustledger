@@ -678,6 +678,60 @@ pub fn query(source: &str, query_str: &str) -> out::QueryResult {
     query_loaded(&ffi::helpers::load_source(source), query_str)
 }
 
+/// The ledger's effective booking method from the loaded options, the
+/// default BQL realizes with (#2386).
+///
+/// `booking_method` is the options' `booking-method`, the loader's option value, `"STRICT"` unless the file
+/// set it, and every FFI load books with the STRICT `LoadOptions` default, so
+/// parsing it gives the loader's `Ledger::booking_method`. An unparsable
+/// value falls back to STRICT, as the loader does.
+/// The `account_previous_*` accounts `FROM ... OPEN ON` summarizes into
+/// (#2401), from the options' three names.
+fn summary_accounts_from(o: &SummaryOptions<'_>) -> rustledger_query::executor::SummaryAccounts {
+    rustledger_query::executor::SummaryAccounts {
+        previous_balances: o.previous_balances.to_owned(),
+        previous_earnings: o.previous_earnings.to_owned(),
+        previous_conversions: o.previous_conversions.to_owned(),
+        current_earnings: o.current_earnings.to_owned(),
+        // Unset, beancount's default leaf under the ledger's equity root, as
+        // the loader's `Options::current_conversions_account` resolves it;
+        // the option is exported as `None` then.
+        current_conversions: o.current_conversions.map_or_else(
+            || format!("{}:Conversions:Current", o.name_equity),
+            str::to_owned,
+        ),
+        conversion_currency: o.conversion_currency.unwrap_or("NOTHING").to_owned(),
+    }
+}
+
+/// The option fields [`summary_accounts_from`] reads, borrowed from either the
+/// wasi-side `LedgerOptions` or the WIT one, which carry the same names.
+struct SummaryOptions<'o> {
+    name_equity: &'o str,
+    previous_balances: &'o str,
+    previous_earnings: &'o str,
+    previous_conversions: &'o str,
+    current_earnings: &'o str,
+    current_conversions: Option<&'o str>,
+    conversion_currency: Option<&'o str>,
+}
+
+/// Borrow the summary-account fields of an options value; both
+/// `LedgerOptions` types spell them identically.
+macro_rules! summary_options {
+    ($o:expr) => {
+        SummaryOptions {
+            name_equity: &$o.name_equity,
+            previous_balances: &$o.account_previous_balances,
+            previous_earnings: &$o.account_previous_earnings,
+            previous_conversions: &$o.account_previous_conversions,
+            current_earnings: &$o.account_current_earnings,
+            current_conversions: $o.account_current_conversions.as_deref(),
+            conversion_currency: $o.conversion_currency.as_deref(),
+        }
+    };
+}
+
 /// Short-circuit on load (parse/booking) errors, then run one query over the
 /// pad-expanded directives — matching `handle_query` (FFI's `load_source` does
 /// not pad-expand, so balance-computing consumers must opt in explicitly).
@@ -695,11 +749,7 @@ fn query_loaded(loaded: &ffi::helpers::LoadResult, query_str: &str) -> out::Quer
         query_str,
         account_types_from(&loaded.options),
         booking_method_from(&loaded.options.booking_method),
-        summary_accounts_from(
-            &loaded.options.account_previous_balances,
-            &loaded.options.account_previous_earnings,
-            &loaded.options.account_previous_conversions,
-        ),
+        summary_accounts_from(&summary_options!(loaded.options)),
     )
 }
 
@@ -716,27 +766,6 @@ fn account_types_from(
         equity: options.name_equity.clone(),
         income: options.name_income.clone(),
         expenses: options.name_expenses.clone(),
-    }
-}
-
-/// The ledger's effective booking method from the loaded options, the
-/// default BQL realizes with (#2386).
-///
-/// `booking_method` is the options' `booking-method`, the loader's option value, `"STRICT"` unless the file
-/// set it, and every FFI load books with the STRICT `LoadOptions` default, so
-/// parsing it gives the loader's `Ledger::booking_method`. An unparsable
-/// value falls back to STRICT, as the loader does.
-/// The `account_previous_*` accounts `FROM ... OPEN ON` summarizes into
-/// (#2401), from the options' three names.
-fn summary_accounts_from(
-    previous_balances: &str,
-    previous_earnings: &str,
-    previous_conversions: &str,
-) -> rustledger_query::executor::SummaryAccounts {
-    rustledger_query::executor::SummaryAccounts {
-        previous_balances: previous_balances.to_owned(),
-        previous_earnings: previous_earnings.to_owned(),
-        previous_conversions: previous_conversions.to_owned(),
     }
 }
 
@@ -837,11 +866,7 @@ pub fn batch(source: &str, queries: &[String]) -> out::BatchResult {
                     q,
                     account_types_from(&loaded.options),
                     booking_method_from(&loaded.options.booking_method),
-                    summary_accounts_from(
-                        &loaded.options.account_previous_balances,
-                        &loaded.options.account_previous_earnings,
-                        &loaded.options.account_previous_conversions,
-                    ),
+                    summary_accounts_from(&summary_options!(loaded.options)),
                 )
             })
             .collect()
@@ -1832,11 +1857,7 @@ impl SessionState {
             query_str,
             self.account_types(),
             booking_method_from(&self.options.booking_method),
-            summary_accounts_from(
-                &self.options.account_previous_balances,
-                &self.options.account_previous_earnings,
-                &self.options.account_previous_conversions,
-            ),
+            summary_accounts_from(&summary_options!(self.options)),
         )
     }
 

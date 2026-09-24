@@ -164,7 +164,11 @@ use crate::types::{Error, LedgerOptions};
 /// v26: `LedgerPayload` gained `summary_account_names` (#2401), another
 /// archived LAYOUT change. Loader v36, unchanged: the loader already archives
 /// the `account_previous_*` options they come from.
-pub const CACHE_VERSION: u32 = 26;
+/// v27: `summary_account_names` grew from three names to six (the current
+/// earnings and conversions accounts and the conversion currency, #2406). The
+/// layout did not move, but a v26 blob's three names fail the new arity and
+/// would silently fall back to beancount's defaults, so it must not be read.
+pub const CACHE_VERSION: u32 = 27;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -240,9 +244,10 @@ pub struct LedgerPayload {
     /// under `option "booking_method" "NONE"` would replay as STRICT and
     /// refuse `BALANCES` (#2386). A string for the same reason as above.
     pub booking_method: String,
-    /// `[previous_balances, previous_earnings, previous_conversions]`, the
-    /// accounts `FROM ... OPEN ON` summarizes into (#2401). Plain strings for
-    /// the same reason as `account_type_names`.
+    /// `[previous_balances, previous_earnings, previous_conversions,
+    /// current_earnings, current_conversions, conversion_currency]`, what
+    /// `FROM ... OPEN ON / CLOSE / CLEAR` summarize into (#2401, #2406). Plain
+    /// strings for the same reason as `account_type_names`.
     pub summary_account_names: Vec<String>,
     pub errors: Vec<Error>,
 }
@@ -554,6 +559,9 @@ mod tests {
                 "Eigenkapital:Anfang".to_string(),
                 "Eigenkapital:Vorjahr".to_string(),
                 "Eigenkapital:Umrechnung".to_string(),
+                "Eigenkapital:Laufend".to_string(),
+                "Eigenkapital:Umrechnung:Laufend".to_string(),
+                "EUR".to_string(),
             ],
             errors: vec![Error::new("a warning")],
         };
@@ -569,7 +577,10 @@ mod tests {
             [
                 "Eigenkapital:Anfang",
                 "Eigenkapital:Vorjahr",
-                "Eigenkapital:Umrechnung"
+                "Eigenkapital:Umrechnung",
+                "Eigenkapital:Laufend",
+                "Eigenkapital:Umrechnung:Laufend",
+                "EUR"
             ]
         );
         assert_eq!(restored.errors.len(), 1);

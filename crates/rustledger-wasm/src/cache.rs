@@ -180,7 +180,10 @@ use crate::types::{Error, LedgerOptions};
 /// v30: a `{*}` that runs no merge (on a buy, a sale from an empty account,
 /// or any sale on a NONE account) is refused instead of booked with the `*`
 /// dropped (#2418). A v29 blob restores such a ledger's errors as none.
-pub const CACHE_VERSION: u32 = 30;
+/// v31: a sale of a whole AVERAGE or `{*}` pool books its exact total as
+/// `PerUnitFromTotal` instead of the rounded average as `PerUnit` (#2417). A
+/// v30 blob would serve the old booked cost and its 1E-26 imbalance.
+pub const CACHE_VERSION: u32 = 31;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

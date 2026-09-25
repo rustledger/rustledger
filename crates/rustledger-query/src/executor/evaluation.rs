@@ -347,18 +347,21 @@ impl Executor<'_> {
                 .amount()
                 .map_or(Value::Null, |u| Value::Amount(u.clone()))),
             "cost" => {
-                // Get the cost of the posting. Both `PerUnit` and the
-                // post-booking `PerUnitFromTotal` carry a per-unit
-                // value; `Total` is divided to derive one. The pre-
-                // booking `Total` case is unlikely here (this column
-                // sees post-booking data) but is handled for safety.
+                // The posting's cost, unsigned: what `units` cost, whichever
+                // side of the lot they are on. From the canonical weight rule,
+                // which for a per-unit cost is `|units| × per-unit` and for a
+                // total-carrying one (`{{T}}`, or the sale that empties such a
+                // lot) is that total exactly (#2425). This multiplied the
+                // resolved per-unit cost back out, which gave 500.00…01 for a
+                // lot that cost 500, with a bare `*` that panicked on overflow.
                 if let Some(units) = posting.amount()
                     && let Some(cost) = &posting.cost
-                    && let Some(cost_num) = cost.number.as_ref().and_then(CostNumber::per_unit)
+                    && let Some(number) = cost.number.as_ref()
                     && let Some(currency) = &cost.currency
                 {
-                    let total = units.number.abs() * cost_num;
-                    return Ok(Value::Amount(Amount::new(total, currency.clone())));
+                    let total = rustledger_booking::cost_number_weight(units.number, number)
+                        .ok_or_else(|| super::overflow_err(currency))?;
+                    return Ok(Value::Amount(Amount::new(total.abs(), currency.clone())));
                 }
                 Ok(Value::Null)
             }

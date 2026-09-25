@@ -1615,6 +1615,11 @@ impl Inventory {
     ///
     /// Pre-1.0 break: the closure sees a dense `Vec<Position>` with tombstones
     /// already dropped, and whatever it leaves becomes the inventory.
+    ///
+    /// Drops every lot's exact total (#2425): the closure may reorder, split or
+    /// rewrite lots, so there is no telling which total belongs to which. The
+    /// lots are then priced at `units × per-unit`, as they were before totals
+    /// were kept. Nothing on the booking path calls this.
     pub fn modify_positions(&mut self, f: impl FnOnce(&mut Vec<Position>)) {
         let mut dense: Vec<Position> = self.positions.iter().cloned().collect();
         f(&mut dense);

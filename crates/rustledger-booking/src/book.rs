@@ -1818,15 +1818,19 @@ fn booked_cost_number(
     }
 }
 
-/// The exact total a booked augmentation's lot cost, signed like its units:
-/// the total a `{{T}}` or compound cost carries once booked (#2425). `None`
+/// The exact total a booked augmentation's lot cost, signed like `units ×
+/// per-unit`: the total a `{{T}}` or compound cost carries once booked, times
+/// the units' sign (#2425). `None`
 /// for a per-unit cost, whose `units × per-unit` is already exact.
 fn posting_lot_total(posting: &Posting, units: &rustledger_core::Amount) -> Option<Decimal> {
+    // Signed like `units × per-unit`: the written total times the units'
+    // sign. Not `abs`: a negative cost's total (E4005, still booked) keeps
+    // its sign, or its sale's gain comes out flipped.
     let total = posting.cost.as_deref()?.number?.total()?;
     Some(if units.number.is_sign_negative() {
-        -total.abs()
+        -total
     } else {
-        total.abs()
+        total
     })
 }
 

@@ -120,6 +120,17 @@ fn a_short_total_cost_lot_covered_in_parts_adds_up_to_its_total() {
     assert_eq!(covered, d(500));
 }
 
+/// A negative total cost (E4005, still booked) keeps its sign through the
+/// engine, so the sale that empties the lot books -500, not +500.
+#[test]
+fn a_negative_total_cost_lot_books_its_signed_total() {
+    let booked = sell(&engine(&[(3, -500)]), -3);
+    assert_eq!(
+        booked.iter().map(total_of).collect::<Vec<_>>(),
+        vec![Some(d(-500))]
+    );
+}
+
 /// A FIFO sale of two whole `{{T}}` lots expands into one posting per lot,
 /// each booked at its own lot's total.
 #[test]

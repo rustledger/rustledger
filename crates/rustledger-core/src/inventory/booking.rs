@@ -281,8 +281,10 @@ impl Inventory {
         let lot = &self.positions[idx];
         let cost = lot.cost.as_ref()?;
         if take == lot.units.number.abs() {
-            // Signed like the lot's units; a basis is a magnitude.
-            self.lot_total(idx).map(|t| t.abs())
+            // `lot_total` is signed like the lot's units; a basis is signed
+            // like the per-unit cost, as `take × per-unit` is. Not `abs`: a
+            // negative cost (E4005, still booked) would flip its gain.
+            self.lot_total(idx).map(|t| t * lot.units.number.signum())
         } else {
             let basis = take.checked_mul(cost.number)?;
             // Only a lot with an exact total has a remainder to keep exact;
@@ -1106,9 +1108,11 @@ impl Inventory {
         // the units (#2417).
         // What the pool's lots cost, each at its exact total where kept.
         let pool_cost = self.pool_total(matching_slots.iter().copied());
+        // Signed like the average, as `reduction × average` is (see
+        // `take_basis`).
         let whole_pool = pool_cost
             .filter(|_| reduction == total_units.abs())
-            .map(|t| t.abs());
+            .map(|t| t * total_units.signum());
         let cost_basis = avg
             .as_ref()
             .map(|(avg_cost, currency)| {
@@ -1356,7 +1360,7 @@ impl Inventory {
         // the units (#2417).
         let whole_pool = total_cost
             .filter(|_| reduction == total_units.abs())
-            .map(|t| t.abs());
+            .map(|t| t * total_units.signum());
         let cost_basis = Some(Amount::new(
             match whole_pool {
                 Some(total) => total,
@@ -1921,6 +1925,40 @@ mod reduction_tests {
                 sum += basis_of(&r);
             }
             assert_eq!(sum, d(55505), "{takes:?}");
+        }
+    }
+
+    /// A negative cost (E4005, but still booked) keeps its sign: the basis
+    /// of a sale is signed like the per-unit cost, as `take × per-unit` is,
+    /// so selling the whole lot takes -500, not +500 (which flipped the gain).
+    /// Whole and partial, lot and pool.
+    #[test]
+    fn a_negative_cost_lot_keeps_its_sign() {
+        let per_unit = d(-500) / d(3);
+        let negative_lot = || {
+            let mut i = Inventory::new();
+            i.add_with_total(
+                Position::with_cost(
+                    Amount::new(d(3), "STK"),
+                    Cost::new(per_unit, "USD").with_date(naive_date(2024, 1, 1).unwrap()),
+                ),
+                Some(d(-500)),
+            )
+            .unwrap();
+            i
+        };
+        let spec = CostSpec::default();
+        for method in [BookingMethod::Fifo, BookingMethod::Average] {
+            let whole = negative_lot()
+                .reduce(&sell_stk(3), Some(&spec), method)
+                .unwrap();
+            assert_eq!(basis_of(&whole), d(-500), "{method:?} whole");
+
+            let mut i = negative_lot();
+            let a = i.reduce(&sell_stk(1), Some(&spec), method).unwrap();
+            let b = i.reduce(&sell_stk(2), Some(&spec), method).unwrap();
+            assert!(basis_of(&a).is_sign_negative(), "{method:?} partial");
+            assert_eq!(basis_of(&a) + basis_of(&b), d(-500), "{method:?} sold down");
         }
     }
 

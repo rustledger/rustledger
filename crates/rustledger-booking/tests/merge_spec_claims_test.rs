@@ -337,3 +337,152 @@ fn a_stated_cost_out_of_the_pools_range_is_reported_not_panicked() {
     };
     let _ = sell(spec).expect_err("a cost that far from the pool is refused");
 }
+
+/// Book one `{*}` posting of `units` X against a fresh engine using
+/// `method`, holding one lot of 10 X at 100 unless `empty`.
+fn book_merge_posting(
+    method: BookingMethod,
+    empty: bool,
+    units: &str,
+    spec: CostSpec,
+) -> Result<Transaction, BookingError> {
+    let mut engine = BookingEngine::with_method(method);
+    if !empty {
+        let mut buy = Posting::new("Assets:Broker", amount("10", "X"));
+        buy.cost = Some(Box::new(CostSpec {
+            number: per_unit("100.00"),
+            currency: Some("USD".into()),
+            date: Some(date(1)),
+            label: None,
+            merge: false,
+        }));
+        let txn = Transaction::new(date(1), "buy")
+            .with_synthesized_posting(buy)
+            .with_synthesized_posting(Posting::new("Assets:Cash", amount("-1000.00", "USD")));
+        engine.apply(&txn).expect("the lot applies");
+    }
+    let mut posting = Posting::new("Assets:Broker", amount(units, "X"));
+    posting.cost = Some(Box::new(spec));
+    let cash = -dec(units) * dec("100.00");
+    let txn = Transaction::new(date(10), "merge")
+        .with_synthesized_posting(posting)
+        .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(cash, "USD")));
+    engine.book(&txn).map(|b| b.transaction)
+}
+
+fn detail_of(result: Result<Transaction, BookingError>) -> MergeSpecMismatch {
+    match result {
+        Err(BookingError::Inventory(e)) => match e.error {
+            CoreError::MergeSpecMismatch { detail, .. } => detail,
+            other => panic!("expected a merge spec mismatch, got {other}"),
+        },
+        Err(other) => panic!("expected a merge spec mismatch, got {other}"),
+        Ok(_) => panic!("a `{{*}}` that merges nothing must be refused, not booked"),
+    }
+}
+
+/// A `{*}` that runs no merge is refused rather than booked with the `*`
+/// dropped (#2418): a buy has no pool to sell from, and nor does a sale from
+/// an account that holds nothing. Beancount refuses every `{*}`.
+#[test]
+fn a_merge_on_a_posting_that_reduces_nothing_is_refused() {
+    let with_cost = CostSpec {
+        number: per_unit("100.00"),
+        currency: Some("USD".into()),
+        ..merge()
+    };
+    for (what, method, empty, units, spec) in [
+        ("a bare {*} buy", BookingMethod::Fifo, false, "5", merge()),
+        (
+            "a {*} buy with a cost",
+            BookingMethod::Fifo,
+            false,
+            "5",
+            with_cost.clone(),
+        ),
+        (
+            "a {*} buy into an empty account",
+            BookingMethod::Fifo,
+            true,
+            "5",
+            with_cost.clone(),
+        ),
+        (
+            "a {*} sale from an empty account",
+            BookingMethod::Fifo,
+            true,
+            "-5",
+            with_cost.clone(),
+        ),
+    ] {
+        assert_eq!(
+            detail_of(book_merge_posting(method, empty, units, spec)),
+            MergeSpecMismatch::NoReduction { average: false },
+            "{what}"
+        );
+    }
+    assert_eq!(
+        detail_of(book_merge_posting(
+            BookingMethod::Average,
+            false,
+            "5",
+            with_cost
+        )),
+        MergeSpecMismatch::NoReduction { average: true },
+        "an AVERAGE account is told it pools already, not told to book AVERAGE"
+    );
+}
+
+/// NONE never reduces a lot, so a `{*}` sale there merges nothing (#2418).
+#[test]
+fn a_merge_sale_under_none_booking_is_refused() {
+    assert_eq!(
+        detail_of(book_merge_posting(
+            BookingMethod::None,
+            false,
+            "-5",
+            merge()
+        )),
+        MergeSpecMismatch::NoneBooking,
+    );
+}
+
+/// The refusal is only for a `{*}` that merges nothing: a merge sale still
+/// books, from the pool.
+#[test]
+fn a_merge_sale_still_books() {
+    for method in [
+        BookingMethod::Fifo,
+        BookingMethod::Strict,
+        BookingMethod::Average,
+    ] {
+        book_merge_posting(method, false, "-5", merge())
+            .unwrap_or_else(|e| panic!("{method:?}: a merge sale books: {e}"));
+    }
+}
+
+/// A `{*}` with elided units is refused: booking runs the merge and checks
+/// its spec before interpolation solves the units, and `apply` used to re-run
+/// the merge unchecked, booking a plain lot for a buy (#2418).
+#[test]
+fn a_merge_with_elided_units_is_refused() {
+    for spec in [
+        merge(),
+        CostSpec {
+            number: per_unit("110.00"),
+            currency: Some("USD".into()),
+            ..merge()
+        },
+    ] {
+        let mut posting = Posting::new("Assets:Broker", amount("1", "X"));
+        posting.units = Some(rustledger_core::IncompleteAmount::currency_only("X"));
+        posting.cost = Some(Box::new(spec));
+        let txn = Transaction::new(date(10), "merge")
+            .with_synthesized_posting(posting)
+            .with_synthesized_posting(Posting::new("Assets:Cash", amount("550.00", "USD")));
+        assert_eq!(
+            detail_of(engine().book(&txn).map(|b| b.transaction)),
+            MergeSpecMismatch::UnitsElided
+        );
+    }
+}

@@ -398,6 +398,30 @@ impl BookingEngine {
 
         // First pass: identify postings that need lot matching (reductions)
         for (idx, posting) in txn.postings.iter().enumerate() {
+            // A `{*}` whose units are elided never reaches the lot matching
+            // below: interpolation solves the units only after booking, and
+            // `apply` then re-ran the merge unchecked (a buy booked a plain
+            // lot; a wrong stated cost surfaced as a misleading #2068
+            // "applied against different inventory" error). The merge and
+            // the check of its spec both need the units, so they must be
+            // written (#2418).
+            if let Some(spec) = posting.cost.as_deref()
+                && spec.merge
+                && !matches!(posting.units, Some(IncompleteAmount::Complete(_)))
+            {
+                let currency = posting
+                    .units
+                    .as_ref()
+                    .and_then(IncompleteAmount::currency)
+                    .unwrap_or("?");
+                return Err(convert_core_booking_error(
+                    rustledger_core::BookingError::MergeSpecMismatch {
+                        currency: currency.into(),
+                        detail: rustledger_core::MergeSpecMismatch::UnitsElided,
+                    },
+                    &posting.account,
+                ));
+            }
             // Check if this is a reduction with a cost spec
             if let Some(IncompleteAmount::Complete(units)) = &posting.units
                 && let Some(cost_spec) = &posting.cost
@@ -490,6 +514,9 @@ impl BookingEngine {
                 // This handles both:
                 // - Selling long positions (negative units, positive inventory)
                 // - Closing short positions (positive units, negative inventory)
+                // Whether a `{*}` on this posting ran its merge, which only
+                // the reduction branch below does (#2418).
+                let mut merged = false;
                 if let Some(inv) = working_inventories
                     .get(&posting.account)
                     .or_else(|| self.inventories.get(&posting.account).map(AsRef::as_ref))
@@ -617,6 +644,7 @@ impl BookingEngine {
                         if cost_spec.merge {
                             check_merge_spec(cost_spec, written_number, units, &booking_result)
                                 .map_err(|e| convert_core_booking_error(e, &posting.account))?;
+                            merged = true;
                         }
                         {
                             // Check if multiple lots were matched
@@ -831,6 +859,28 @@ impl BookingEngine {
                         }
                     }
                     // If not a reduction: fall through to augmentation code below
+                }
+
+                // A `{*}` that ran no merge is refused, not booked as a plain
+                // lot with the `*` dropped (#2418). `{*}` merges the pool and
+                // then sells from it; a posting that reduces nothing has no
+                // pool to merge, and NONE never merges at all. Beancount
+                // refuses every `{*}` (`Cost merging is not supported yet`);
+                // a merge sale is the one use with a meaning here.
+                if cost_spec.merge && !merged {
+                    let detail = match self.method_for(&posting.account) {
+                        BookingMethod::None => rustledger_core::MergeSpecMismatch::NoneBooking,
+                        method => rustledger_core::MergeSpecMismatch::NoReduction {
+                            average: method == BookingMethod::Average,
+                        },
+                    };
+                    return Err(convert_core_booking_error(
+                        rustledger_core::BookingError::MergeSpecMismatch {
+                            currency: units.currency.clone(),
+                            detail,
+                        },
+                        &posting.account,
+                    ));
                 }
 
                 let is_booked = booked_indices.contains(&idx);

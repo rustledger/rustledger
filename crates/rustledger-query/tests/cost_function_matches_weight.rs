@@ -168,3 +168,22 @@ fn cost_of_another_row_expression_is_not_the_postings_cost() {
         other => panic!("expected an amount, got {other:?}"),
     }
 }
+
+/// `BALANCES AT COST` values a held `{{T}}` lot at its total: the balances
+/// come from the booking engine's replay, whose inventories keep each lot's
+/// exact total (#2425), and `at_cost` reads it.
+#[test]
+fn balances_at_cost_values_a_held_total_cost_lot_at_its_total() {
+    let directives = booked(
+        r#"
+2024-01-01 open Assets:H X "FIFO"
+2024-01-01 open Assets:C
+
+2024-01-02 * "total lot"
+  Assets:H  3 X {{500 USD}}
+  Assets:C
+"#,
+    );
+    let rows = query(&directives, "BALANCES AT COST WHERE account = 'Assets:H'");
+    assert_eq!(number(&rows[0][1]), Decimal::from(500));
+}

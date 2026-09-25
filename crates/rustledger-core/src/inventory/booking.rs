@@ -312,9 +312,13 @@ impl Inventory {
         // remainder is what the lot cost less exactly what was taken. Signed
         // like the lot, as `total` is: a short's remainder moves toward zero
         // from below.
-        let taken = (old_units - new_units).abs();
-        let rest = self
-            .take_basis(idx, taken)
+        // Checked: ledger units reach `Decimal`'s range, and a bare `-`
+        // there panics (fuzz_booking found it). Out of range, the lot simply
+        // drops its exact total and is priced at `units × per-unit`, as any
+        // lot is.
+        let rest = old_units
+            .checked_sub(new_units)
+            .and_then(|taken| self.take_basis(idx, taken.abs()))
             .and_then(|basis| total.checked_sub(basis * old_units.signum()));
         self.positions.set_total(idx, rest);
     }

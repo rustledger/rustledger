@@ -254,6 +254,10 @@ pub enum MergeSpecMismatch {
     /// The account books with NONE, which never reduces or merges a lot, so
     /// a `{*}` sale there merges nothing (#2418).
     NoneBooking,
+    /// The posting's units are elided (`X {*, 110.00 USD}`). Booking runs the
+    /// merge and checks the spec against its pool before interpolation solves
+    /// the units, so there is nothing to merge yet (#2418).
+    UnitsElided,
 }
 
 impl fmt::Display for MergeSpecMismatch {
@@ -291,6 +295,11 @@ impl fmt::Display for MergeSpecMismatch {
             Self::NoneBooking => write!(
                 f,
                 "the account books NONE, which never reduces or merges lots; remove the `*`"
+            ),
+            Self::UnitsElided => write!(
+                f,
+                "the posting's units are elided, and a merge is booked before interpolation \
+                 could solve them; write the units"
             ),
         }
     }
@@ -3723,6 +3732,11 @@ mod tests {
             "Assets:Broker: {*} merge of X: the posting reduces no lot, so there is no pool to \
              merge; remove the `*` (the account books AVERAGE, which pools its lots on every sale \
              already)"
+        );
+        assert_eq!(
+            err(MergeSpecMismatch::UnitsElided),
+            "Assets:Broker: {*} merge of X: the posting's units are elided, and a merge is \
+             booked before interpolation could solve them; write the units"
         );
         assert_eq!(
             err(MergeSpecMismatch::NoneBooking),

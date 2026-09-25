@@ -198,7 +198,8 @@ A `{*}` on a posting that reduces no lot is reported as well: a buy, a sale
 from an account holding nothing, or any sale in an account booked `NONE`. `{*}`
 merges the pool and then sells from it, so where nothing is sold there is no
 pool to merge. Remove the `*`; to keep an account at its average cost, book it
-`AVERAGE`. Beancount refuses every `{*}` (`Cost merging is not supported yet`).
+`AVERAGE`. A `{*}` must also write its units (`-5 X {*}`, not `X {*}`): the
+merge runs while booking, before interpolation could solve them. Beancount refuses every `{*}` (`Cost merging is not supported yet`).
 
 ### E4002: Insufficient Units
 

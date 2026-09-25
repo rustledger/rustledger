@@ -398,6 +398,30 @@ impl BookingEngine {
 
         // First pass: identify postings that need lot matching (reductions)
         for (idx, posting) in txn.postings.iter().enumerate() {
+            // A `{*}` whose units are elided never reaches the lot matching
+            // below: interpolation solves the units only after booking, and
+            // `apply` then re-ran the merge unchecked (a buy booked a plain
+            // lot; a wrong stated cost surfaced as a misleading #2068
+            // "applied against different inventory" error). The merge and
+            // the check of its spec both need the units, so they must be
+            // written (#2418).
+            if let Some(spec) = posting.cost.as_deref()
+                && spec.merge
+                && !matches!(posting.units, Some(IncompleteAmount::Complete(_)))
+            {
+                let currency = posting
+                    .units
+                    .as_ref()
+                    .and_then(IncompleteAmount::currency)
+                    .unwrap_or("?");
+                return Err(convert_core_booking_error(
+                    rustledger_core::BookingError::MergeSpecMismatch {
+                        currency: currency.into(),
+                        detail: rustledger_core::MergeSpecMismatch::UnitsElided,
+                    },
+                    &posting.account,
+                ));
+            }
             // Check if this is a reduction with a cost spec
             if let Some(IncompleteAmount::Complete(units)) = &posting.units
                 && let Some(cost_spec) = &posting.cost

@@ -460,3 +460,29 @@ fn a_merge_sale_still_books() {
             .unwrap_or_else(|e| panic!("{method:?}: a merge sale books: {e}"));
     }
 }
+
+/// A `{*}` with elided units is refused: booking runs the merge and checks
+/// its spec before interpolation solves the units, and `apply` used to re-run
+/// the merge unchecked, booking a plain lot for a buy (#2418).
+#[test]
+fn a_merge_with_elided_units_is_refused() {
+    for spec in [
+        merge(),
+        CostSpec {
+            number: per_unit("110.00"),
+            currency: Some("USD".into()),
+            ..merge()
+        },
+    ] {
+        let mut posting = Posting::new("Assets:Broker", amount("1", "X"));
+        posting.units = Some(rustledger_core::IncompleteAmount::currency_only("X"));
+        posting.cost = Some(Box::new(spec));
+        let txn = Transaction::new(date(10), "merge")
+            .with_synthesized_posting(posting)
+            .with_synthesized_posting(Posting::new("Assets:Cash", amount("550.00", "USD")));
+        assert_eq!(
+            detail_of(engine().book(&txn).map(|b| b.transaction)),
+            MergeSpecMismatch::UnitsElided
+        );
+    }
+}

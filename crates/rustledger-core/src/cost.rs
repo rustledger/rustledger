@@ -447,7 +447,22 @@ impl BookedCost {
                 overflow: true,
             });
         };
-        let abs_diff = (derived_total - total).abs();
+        // Checked for the same reason: a derived total and a total of
+        // opposite sign near the range differ by more than `Decimal::MAX`,
+        // and a bare `-` panics (fuzz_booking reached it through #2425's
+        // exact-total bookings).
+        let Some(diff) = derived_total.checked_sub(total) else {
+            return Err(BookedCostInvariantError {
+                per_unit,
+                total,
+                units,
+                derived_total,
+                abs_diff: Decimal::ZERO,
+                tolerance: None,
+                overflow: true,
+            });
+        };
+        let abs_diff = diff.abs();
         // `total.abs() * 1e-24` cannot overflow: `Decimal::MAX` is
         // ~7.92e28, so the product is bounded by ~7.92e4. The relative
         // tolerance scales with the magnitude of `total`; the absolute
@@ -1329,6 +1344,16 @@ mod tests {
         // 2.5e31, which exceeds Decimal::MAX (~7.92e28).
         let huge = Decimal::from_str_exact("5000000000000000").unwrap();
         let _ = BookedCost::new(huge, Decimal::from_str_exact("0.01").unwrap(), huge);
+    }
+
+    /// The difference overflows too, not just the product: a derived total
+    /// and a total of opposite sign near the range (#2425's fuzz find).
+    #[test]
+    fn booked_cost_try_new_surfaces_a_difference_overflow_instead_of_panicking() {
+        let big = Decimal::from_str_exact("50000000000000000000000000000").unwrap();
+        let err = BookedCost::try_new(-big, big, Decimal::ONE)
+            .expect_err("an overflowing difference must surface as Err, not panic");
+        assert!(err.overflow, "overflow flag must be set");
     }
 
     #[test]

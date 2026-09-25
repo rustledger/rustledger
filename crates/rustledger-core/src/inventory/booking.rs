@@ -51,22 +51,6 @@ fn pool_units<'a>(positions: impl IntoIterator<Item = &'a Position>) -> Option<(
         })
 }
 
-/// What a pool's lots cost in total: `Σ |units| × cost`, the basis a sale of
-/// the WHOLE pool takes (#2417).
-///
-/// A sale of part of a pool can only be priced at the average, a quotient
-/// rounded to `Decimal`'s digits. Selling all of it need not be: the lots'
-/// own costs add up to the basis exactly (1 at 100 and 2 at 200 cost 500),
-/// where `3 × 166.66…67` is 500.00…01 and fails to balance against a
-/// whole-dollar sale. `None` on overflow, or when a lot has no cost, so the
-/// caller keeps the average.
-fn pool_total_cost<'a>(positions: impl IntoIterator<Item = &'a Position>) -> Option<Decimal> {
-    positions.into_iter().try_fold(Decimal::ZERO, |acc, p| {
-        let cost = p.cost.as_ref()?;
-        acc.checked_add(p.units.number.abs().checked_mul(cost.number)?)
-    })
-}
-
 /// Weighted-average cost of `positions` over `total_units`:
 /// `Σ units × cost / total_units`, taken over the positions that carry a cost.
 ///
@@ -261,7 +245,100 @@ struct MergePlan {
     total_cost: Option<Decimal>,
 }
 
+/// `basis` rounded so that `total` less it, and less any further such
+/// basis, stays exactly representable (#2425).
+///
+/// A partial sale of a lot or pool with an exact total is booked at
+/// `take × per-unit`, which `Decimal` gives to 28 significant digits: 25 or
+/// more decimals for a per-unit cost of a few dollars. Subtracted from a
+/// total with integer digits of its own, the remainder needs more digits than
+/// `Decimal` holds, rounds, and the sale that empties the lot inherits the
+/// error, so a sell-down misses its total by up to ~1E-23 (79 of 600
+/// generated sell-downs did). Rounding the basis to `28 − (the total's
+/// integer digits)` decimals keeps every remainder exact, at a cost below a
+/// unit in the 25th decimal place of each partial basis.
+fn fit_to_total(total: Decimal, basis: Decimal) -> Decimal {
+    let integer_digits = total
+        .abs()
+        .trunc()
+        .mantissa()
+        .unsigned_abs()
+        .checked_ilog10()
+        .map_or(1, |l| l + 1);
+    basis.round_dp(28_u32.saturating_sub(integer_digits))
+}
+
 impl Inventory {
+    /// What taking `take` units from the lot in slot `idx` costs (#2425).
+    ///
+    /// A take that empties the lot takes what the lot cost in total
+    /// ([`Self::lot_total`]), exact when the inventory keeps that total; any
+    /// other take is `take × per-unit`, and the lot keeps the rest of its
+    /// total (see [`Self::retotal_after_take`]). So a lot's sales add up to
+    /// exactly its cost, however it is sold down. `None` for a cost-less lot
+    /// or on overflow.
+    fn take_basis(&self, idx: usize, take: Decimal) -> Option<Decimal> {
+        let lot = &self.positions[idx];
+        let cost = lot.cost.as_ref()?;
+        if take == lot.units.number.abs() {
+            // `lot_total` is signed like the lot's units; a basis is signed
+            // like the per-unit cost, as `take × per-unit` is. Not `abs`: a
+            // negative cost (E4005, still booked) would flip its gain.
+            self.lot_total(idx).map(|t| t * lot.units.number.signum())
+        } else {
+            let basis = take.checked_mul(cost.number)?;
+            // Only a lot with an exact total has a remainder to keep exact;
+            // every other partial take is booked as it always was.
+            Some(
+                self.positions
+                    .total(idx)
+                    .map_or(basis, |total| fit_to_total(total, basis)),
+            )
+        }
+    }
+
+    /// Carry an exact-total lot's remaining total across a partial take:
+    /// what it cost, less what the take was booked at, `taken × per-unit`
+    /// (#2425). Call BEFORE its units change. A no-op for a lot without an
+    /// exact total, and for a take that drains it (the slot goes).
+    ///
+    /// Exact, because `take_basis` fits a partial basis to the lot's total
+    /// (`fit_to_total`), so the subtraction never needs more digits than
+    /// `Decimal` holds.
+    fn retotal_after_take(&mut self, idx: usize, new_units: Decimal) {
+        let Some(total) = self.positions.total(idx) else {
+            return;
+        };
+        let old_units = self.positions[idx].units.number;
+        // The SAME basis the take was booked at (`take_basis`), so the
+        // remainder is what the lot cost less exactly what was taken. Signed
+        // like the lot, as `total` is: a short's remainder moves toward zero
+        // from below.
+        // Checked: ledger units reach `Decimal`'s range, and a bare `-`
+        // there panics (fuzz_booking found it). Out of range, the lot simply
+        // drops its exact total and is priced at `units × per-unit`, as any
+        // lot is.
+        let rest = old_units
+            .checked_sub(new_units)
+            .and_then(|taken| self.take_basis(idx, taken.abs()))
+            .and_then(|basis| total.checked_sub(basis * old_units.signum()));
+        self.positions.set_total(idx, rest);
+    }
+
+    /// What the lots in `slots` cost in total, each at [`Self::lot_total`]
+    /// and signed like their units: the basis (as a magnitude) a sale of the
+    /// WHOLE pool takes (#2417, #2425).
+    ///
+    /// A sale of part of a pool is priced at the average, a quotient rounded
+    /// to `Decimal`'s digits. All of it need not be: the lots' costs add up to
+    /// the basis exactly (1 at 100 and 2 at 200 cost 500, where `3 ×
+    /// 166.66…67` is 500.00…01). `None` on overflow or for a cost-less lot.
+    fn pool_total(&self, slots: impl IntoIterator<Item = usize>) -> Option<Decimal> {
+        slots
+            .into_iter()
+            .try_fold(Decimal::ZERO, |acc, i| acc.checked_add(self.lot_total(i)?))
+    }
+
     /// Try reducing positions without modifying the inventory.
     ///
     /// The read-only preview of [`Self::reduce`]: returns exactly what
@@ -720,6 +797,7 @@ impl Inventory {
     ) -> Result<(BookingResult, SmallVec<[(usize, Decimal); 1]>), BookingError> {
         let mut remaining = units.number.abs();
         let mut matched: MatchedLots = SmallVec::new();
+        let mut matched_basis: SmallVec<[Option<Decimal>; 1]> = SmallVec::new();
         let mut cost_basis = Decimal::ZERO;
         let mut cost_currency = None;
 
@@ -805,10 +883,8 @@ impl Inventory {
                 // of units and unrepresentable reported the shortfall — the
                 // actionable half. Returning here would report the overflow
                 // instead, which is a behavior change nothing asked for.
-                match take
-                    .checked_mul(cost.number)
-                    .and_then(|v| cost_basis.checked_add(v))
-                {
+                let lot_basis = self.take_basis(idx, take);
+                match lot_basis.and_then(|v| cost_basis.checked_add(v)) {
                     Some(v) => cost_basis = v,
                     None => {
                         overflow.get_or_insert_with(|| OverflowError {
@@ -816,6 +892,9 @@ impl Inventory {
                         });
                     }
                 }
+                matched_basis.push(lot_basis);
+            } else {
+                matched_basis.push(None);
             }
 
             // Record what we matched
@@ -872,6 +951,7 @@ impl Inventory {
             BookingResult {
                 matched,
                 cost_basis: cost_currency.map(|c| Amount::new(cost_basis, c)),
+                matched_basis,
             },
             updates,
         ))
@@ -925,6 +1005,7 @@ impl Inventory {
             // Drop the old classification before overwriting: a reduction can
             // take a lot through zero and flip its sign bucket.
             self.sign_index_bump(idx, -1);
+            self.retotal_after_take(idx, new_units);
             self.positions[idx].units.number = new_units;
             self.sign_index_bump(idx, 1);
 
@@ -990,11 +1071,13 @@ impl Inventory {
                 && !p.is_empty()
                 && p.units.number.is_sign_positive() != units.number.is_sign_positive()
         };
-        let matching: Vec<&Position> = self
+        let matching_slots: Vec<usize> = self
             .positions
-            .iter()
-            .filter(|p| on_reduced_side(p))
+            .iter_slots()
+            .filter(|(_, p)| on_reduced_side(p))
+            .map(|(i, _)| i)
             .collect();
+        let matching: Vec<&Position> = matching_slots.iter().map(|&i| &self.positions[i]).collect();
 
         let (total_units, total_units_exact) =
             pool_units(matching.iter().copied()).ok_or_else(|| {
@@ -1023,16 +1106,23 @@ impl Inventory {
         let avg = weighted_average_cost(&matching, total_units, total_units_exact)?;
         // The whole pool: what its lots cost, not the rounded average times
         // the units (#2417).
-        let whole_pool = if reduction == total_units.abs() {
-            pool_total_cost(matching.iter().copied())
-        } else {
-            None
-        };
+        // What the pool's lots cost, each at its exact total where kept.
+        let pool_cost = self.pool_total(matching_slots.iter().copied());
+        // Signed like the average, as `reduction × average` is (see
+        // `take_basis`).
+        let whole_pool = pool_cost
+            .filter(|_| reduction == total_units.abs())
+            .map(|t| t * total_units.signum());
         let cost_basis = avg
             .as_ref()
             .map(|(avg_cost, currency)| {
                 whole_pool
-                    .or_else(|| reduction.checked_mul(*avg_cost))
+                    .or_else(|| {
+                        // A partial sale, rounded so the pool's remainder stays
+                        // exact (see `fit_to_total`).
+                        let basis = reduction.checked_mul(*avg_cost)?;
+                        Some(pool_cost.map_or(basis, |pool| fit_to_total(pool, basis)))
+                    })
                     .map(|n| Amount::new(n, currency.clone()))
                     .ok_or_else(|| {
                         BookingError::Overflow(OverflowError {
@@ -1074,14 +1164,22 @@ impl Inventory {
         // Add back the remainder (if non-zero) at the average cost, so a later
         // reduction sees the correct basis instead of a costless position.
         if !new_units.is_zero() {
-            self.positions.push(at_avg_cost(new_units));
+            let slot = self.positions.push_slot(at_avg_cost(new_units));
+            // The remainder keeps what the pool cost less what this sale took,
+            // so the sale that empties it takes exactly the rest (#2425).
+            let rest = pool_cost
+                .zip(cost_basis.as_ref())
+                .and_then(|(pool, taken)| pool.checked_sub(taken.number * total_units.signum()));
+            self.set_lot_total(slot, rest);
         }
 
         self.rebuild_index();
 
+        let matched_basis = smallvec![cost_basis.as_ref().map(|b| b.number)];
         Ok(BookingResult {
             matched,
             cost_basis,
+            matched_basis,
         })
     }
 
@@ -1108,12 +1206,16 @@ impl Inventory {
             .collect();
 
         for currency in currencies {
+            let slots: Vec<usize> = self
+                .positions
+                .iter_slots()
+                .filter(|(_, p)| p.units.currency == currency && p.cost.is_some())
+                .map(|(i, _)| i)
+                .collect();
+            // Carried onto the merged lot, so it keeps exact totals (#2425).
+            let pool_cost = self.pool_total(slots.iter().copied());
             let (total_units, avg) = {
-                let matching: Vec<&Position> = self
-                    .positions
-                    .iter()
-                    .filter(|p| p.units.currency == currency && p.cost.is_some())
-                    .collect();
+                let matching: Vec<&Position> = slots.iter().map(|&i| &self.positions[i]).collect();
                 let (total_units, total_units_exact) = pool_units(matching.iter().copied())
                     .ok_or_else(|| OverflowError {
                         currency: currency.clone(),
@@ -1137,10 +1239,11 @@ impl Inventory {
             self.positions
                 .retain(|p| !(p.units.currency == currency && p.cost.is_some()));
             if let Some((avg_cost, cost_currency)) = avg {
-                self.positions.push(Position::with_cost(
+                let slot = self.positions.push_slot(Position::with_cost(
                     Amount::new(total_units, currency.clone()),
                     Cost::new(avg_cost, cost_currency),
                 ));
+                self.set_lot_total(slot, pool_cost);
             }
         }
         self.rebuild_index();
@@ -1214,7 +1317,7 @@ impl Inventory {
             matching_indices: matching.iter().map(|(i, _)| *i).collect(),
             total_units,
             pool,
-            total_cost: pool_total_cost(matching_refs.iter().copied()),
+            total_cost: self.pool_total(matching.iter().map(|(i, _)| *i)),
         })
     }
 
@@ -1255,15 +1358,20 @@ impl Inventory {
 
         // The whole pool: what its lots cost, not the rounded average times
         // the units (#2417).
-        let whole_pool = total_cost.filter(|_| reduction == total_units.abs());
+        let whole_pool = total_cost
+            .filter(|_| reduction == total_units.abs())
+            .map(|t| t * total_units.signum());
         let cost_basis = Some(Amount::new(
             match whole_pool {
                 Some(total) => total,
-                None => reduction.checked_mul(avg_cost).ok_or_else(|| {
-                    BookingError::Overflow(OverflowError {
-                        currency: cost_currency.clone(),
-                    })
-                })?,
+                None => reduction
+                    .checked_mul(avg_cost)
+                    .map(|basis| total_cost.map_or(basis, |pool| fit_to_total(pool, basis)))
+                    .ok_or_else(|| {
+                        BookingError::Overflow(OverflowError {
+                            currency: cost_currency.clone(),
+                        })
+                    })?,
             },
             cost_currency.clone(),
         ));
@@ -1290,17 +1398,25 @@ impl Inventory {
         // Add back a single merged lot with the remainder
         let remaining = total_units + units.number; // units.number is negative for reductions
         if !remaining.is_zero() {
-            self.positions.push(Position::with_cost(
+            let slot = self.positions.push_slot(Position::with_cost(
                 Amount::new(remaining, units.currency.clone()),
                 make_avg_cost(),
             ));
+            // As `reduce_average`: the remainder keeps the rest of the pool's
+            // cost (#2425).
+            let rest = total_cost
+                .zip(cost_basis.as_ref())
+                .and_then(|(pool, taken)| pool.checked_sub(taken.number * total_units.signum()));
+            self.set_lot_total(slot, rest);
         }
 
         self.rebuild_index();
 
+        let matched_basis = smallvec![cost_basis.as_ref().map(|b| b.number)];
         Ok(BookingResult {
             matched,
             cost_basis,
+            matched_basis,
         })
     }
 
@@ -1316,6 +1432,7 @@ impl Inventory {
             return Ok(BookingResult {
                 matched: SmallVec::new(),
                 cost_basis: None,
+                matched_basis: SmallVec::new(),
             });
         }
 
@@ -1368,16 +1485,19 @@ impl Inventory {
             });
         }
 
-        // Calculate cost basis
+        // Calculate cost basis: the lot's exact total when this empties it
+        // (#2425), else `requested × per-unit`.
         let cost_basis = pos
             .cost
             .as_ref()
             .map(|c| {
-                c.total_cost(requested).ok_or_else(|| {
-                    BookingError::Overflow(OverflowError {
-                        currency: c.currency.clone(),
+                self.take_basis(idx, requested)
+                    .map(|n| Amount::new(n, c.currency.clone()))
+                    .ok_or_else(|| {
+                        BookingError::Overflow(OverflowError {
+                            currency: c.currency.clone(),
+                        })
                     })
-                })
             })
             .transpose()?;
 
@@ -1394,6 +1514,7 @@ impl Inventory {
         Ok((
             BookingResult {
                 matched: smallvec![matched],
+                matched_basis: smallvec![cost_basis.as_ref().map(|b| b.number)],
                 cost_basis,
             },
             new_units,
@@ -1415,6 +1536,7 @@ impl Inventory {
         // Drop the old classification before overwriting: a reduction can take
         // a lot through zero and flip its sign bucket.
         self.sign_index_bump(idx, -1);
+        self.retotal_after_take(idx, new_units);
         self.positions[idx] = new_pos;
         self.sign_index_bump(idx, 1);
 
@@ -1710,6 +1832,283 @@ mod reduction_tests {
         Amount::new(d(-n), "STK")
     }
 
+    /// A 3-unit lot bought for 500: per-unit 500/3, which `Decimal` rounds.
+    fn total_lot(units: i64, total: i64) -> (Position, Decimal) {
+        let per_unit = d(total) / d(units.abs());
+        (
+            Position::with_cost(
+                Amount::new(d(units), "STK"),
+                Cost::new(per_unit, "USD").with_date(naive_date(2024, 1, 1).unwrap()),
+            ),
+            d(total) * d(units.signum()),
+        )
+    }
+
+    fn inv_with_total(units: i64, total: i64) -> Inventory {
+        let (lot, exact) = total_lot(units, total);
+        let mut i = Inventory::new();
+        i.add_with_total(lot, Some(exact))
+            .expect("fixture fits in Decimal");
+        i
+    }
+
+    fn basis_of(r: &super::BookingResult) -> Decimal {
+        r.cost_basis.as_ref().expect("a costed match").number
+    }
+
+    /// A lot bought as `{{500 USD}}` and sold whole takes 500, not `3 ×
+    /// 166.66…67` (#2425), under every method that can take it.
+    #[test]
+    fn a_whole_total_cost_lot_is_sold_at_its_total() {
+        for method in [
+            BookingMethod::Fifo,
+            BookingMethod::Lifo,
+            BookingMethod::Hifo,
+            BookingMethod::Strict,
+            BookingMethod::StrictWithSize,
+            BookingMethod::Average,
+        ] {
+            let mut i = inv_with_total(3, 500);
+            let r = i
+                .reduce(&sell_stk(3), Some(&CostSpec::default()), method)
+                .unwrap();
+            assert_eq!(basis_of(&r), d(500), "{method:?}");
+            assert_eq!(r.matched_basis.as_slice(), &[Some(d(500))], "{method:?}");
+        }
+        // Rounding is the whole point: the per-unit cost cannot give 500.
+        assert_ne!(d(3) * (d(500) / d(3)), d(500));
+    }
+
+    /// Sold down, a lot's sales add up to exactly what it cost: a partial
+    /// sale takes `units × per-unit`, fitted to the total, and the lot keeps
+    /// the rest, which the sale that empties it takes (#2425).
+    #[test]
+    fn a_lot_sold_down_takes_exactly_its_total() {
+        let per_unit = d(500) / d(3);
+        let mut i = inv_with_total(3, 500);
+        let spec = CostSpec::default();
+        let first = i
+            .reduce(&sell_stk(1), Some(&spec), BookingMethod::Fifo)
+            .unwrap();
+        // At the per-unit cost, fitted to the three-digit total: 25 decimals.
+        assert_eq!(
+            basis_of(&first),
+            per_unit.round_dp(25),
+            "a partial sale is at the per-unit cost, fitted to the total"
+        );
+        let rest = i
+            .reduce(&sell_stk(2), Some(&spec), BookingMethod::Fifo)
+            .unwrap();
+        assert_eq!(basis_of(&rest), d(500) - basis_of(&first));
+        assert_eq!(basis_of(&first) + basis_of(&rest), d(500));
+        assert!(i.is_empty());
+    }
+
+    /// Sold down in takes of any size, the lot realizes exactly its total:
+    /// 19 units bought for 55505, sold in several ways.
+    #[test]
+    fn any_sell_down_realizes_exactly_the_total() {
+        // `1 + 1 + 17` is the hard one: 55505 less one sale at the per-unit
+        // cost needs 30 digits, unless the partial basis is fitted to the
+        // total (`fit_to_total`).
+        for takes in [vec![18, 1], vec![16, 2, 1], vec![1, 1, 17], vec![9, 9, 1]] {
+            let mut i = inv_with_total(19, 55505);
+            let mut sum = Decimal::ZERO;
+            for &take in &takes {
+                let r = i
+                    .reduce(
+                        &sell_stk(take),
+                        Some(&CostSpec::default()),
+                        BookingMethod::Fifo,
+                    )
+                    .unwrap();
+                sum += basis_of(&r);
+            }
+            assert_eq!(sum, d(55505), "{takes:?}");
+        }
+    }
+
+    /// A negative cost (E4005, but still booked) keeps its sign: the basis
+    /// of a sale is signed like the per-unit cost, as `take × per-unit` is,
+    /// so selling the whole lot takes -500, not +500 (which flipped the gain).
+    /// Whole and partial, lot and pool.
+    #[test]
+    fn a_negative_cost_lot_keeps_its_sign() {
+        let per_unit = d(-500) / d(3);
+        let negative_lot = || {
+            let mut i = Inventory::new();
+            i.add_with_total(
+                Position::with_cost(
+                    Amount::new(d(3), "STK"),
+                    Cost::new(per_unit, "USD").with_date(naive_date(2024, 1, 1).unwrap()),
+                ),
+                Some(d(-500)),
+            )
+            .unwrap();
+            i
+        };
+        let spec = CostSpec::default();
+        for method in [BookingMethod::Fifo, BookingMethod::Average] {
+            let whole = negative_lot()
+                .reduce(&sell_stk(3), Some(&spec), method)
+                .unwrap();
+            assert_eq!(basis_of(&whole), d(-500), "{method:?} whole");
+
+            let mut i = negative_lot();
+            let a = i.reduce(&sell_stk(1), Some(&spec), method).unwrap();
+            let b = i.reduce(&sell_stk(2), Some(&spec), method).unwrap();
+            assert!(basis_of(&a).is_sign_negative(), "{method:?} partial");
+            assert_eq!(basis_of(&a) + basis_of(&b), d(-500), "{method:?} sold down");
+        }
+    }
+
+    /// A short lot's total is signed like its units, and covering it takes
+    /// the total as a magnitude.
+    #[test]
+    fn covering_a_whole_short_total_lot_takes_its_total() {
+        let mut i = inv_with_total(-3, 500);
+        let r = i
+            .reduce(
+                &Amount::new(d(3), "STK"),
+                Some(&CostSpec::default()),
+                BookingMethod::Fifo,
+            )
+            .unwrap();
+        assert_eq!(basis_of(&r), d(500));
+    }
+
+    /// Identical lots merge (#2118), and so do their totals.
+    #[test]
+    fn merged_identical_lots_keep_their_combined_total() {
+        let mut i = inv_with_total(3, 500);
+        let (lot, exact) = total_lot(3, 500);
+        i.add_with_total(lot, Some(exact)).unwrap();
+        assert_eq!(i.len(), 1, "the two lots are one position");
+        let r = i
+            .reduce(
+                &sell_stk(6),
+                Some(&CostSpec::default()),
+                BookingMethod::Fifo,
+            )
+            .unwrap();
+        assert_eq!(basis_of(&r), d(1000));
+    }
+
+    /// A total is kept even when `units × per-unit` rounds to it:
+    /// `19 × 2921.3157…895` rounds to exactly 55505, yet 18 and 1 sold
+    /// separately must still add up to it.
+    #[test]
+    fn a_total_is_kept_even_when_the_rounded_product_matches_it() {
+        assert_eq!(
+            d(19) * (d(55505) / d(19)),
+            d(55505),
+            "the fixture's premise"
+        );
+        let mut i = inv_with_total(19, 55505);
+        let spec = CostSpec::default();
+        let a = i
+            .reduce(&sell_stk(18), Some(&spec), BookingMethod::Fifo)
+            .unwrap();
+        let b = i
+            .reduce(&sell_stk(1), Some(&spec), BookingMethod::Fifo)
+            .unwrap();
+        assert_eq!(basis_of(&a) + basis_of(&b), d(55505));
+    }
+
+    /// A rolled-back reduction restores the lot's total with its units, so
+    /// a later sale of the whole lot still takes it exactly.
+    #[test]
+    fn a_rollback_restores_a_lots_total() {
+        let mut i = inv_with_total(3, 500);
+        i.begin_undo();
+        i.reduce(
+            &sell_stk(1),
+            Some(&CostSpec::default()),
+            BookingMethod::Fifo,
+        )
+        .unwrap();
+        i.rollback_undo();
+        let r = i
+            .reduce(
+                &sell_stk(3),
+                Some(&CostSpec::default()),
+                BookingMethod::Fifo,
+            )
+            .unwrap();
+        assert_eq!(basis_of(&r), d(500));
+    }
+
+    /// A pool holding a total-cost lot, sold down, long and short, under
+    /// AVERAGE and `{*}`: the partial sale is at the average, the remainder
+    /// keeps the rest of the pool's cost, and the last sale takes it (#2425).
+    /// 3 for 500 and 4 at 200 pool at 1300/7, which does not terminate.
+    #[test]
+    fn a_pool_sold_down_takes_exactly_its_total() {
+        for sign in [1, -1] {
+            for (method, spec) in [
+                (BookingMethod::Average, CostSpec::default()),
+                (BookingMethod::Fifo, CostSpec::default().with_merge()),
+            ] {
+                let mut i = inv_with_total(3 * sign, 500);
+                i.add(lot(4 * sign, 200, 2)).unwrap();
+                let take = |n: i64| Amount::new(d(-n * sign), "STK");
+                let a = i.reduce(&take(1), Some(&spec), method).unwrap();
+                let b = i.reduce(&take(6), Some(&spec), method).unwrap();
+                assert_eq!(
+                    basis_of(&a) + basis_of(&b),
+                    d(1300),
+                    "{method:?} sign {sign}"
+                );
+                assert!(i.is_empty(), "{method:?} sign {sign}");
+            }
+        }
+    }
+
+    /// An exact-total lot merging into an identical plain lot keeps the
+    /// combined total: the plain side counts at `units × per-unit`. 7 for
+    /// 1300 twice over, once without its total: `7 × per-unit + 1300`, which
+    /// is not `14 × per-unit`.
+    #[test]
+    fn an_exact_lot_merged_into_a_plain_one_keeps_its_total() {
+        let (lot, exact) = total_lot(7, 1300);
+        let per_unit = lot.cost.as_ref().unwrap().number;
+        let expected = d(7) * per_unit + d(1300);
+        assert_ne!(expected, d(14) * per_unit, "the fixture's premise");
+        let mut i = Inventory::new();
+        i.add(lot.clone()).unwrap();
+        i.add_with_total(lot, Some(exact)).unwrap();
+        let r = i
+            .reduce(
+                &sell_stk(14),
+                Some(&CostSpec::default()),
+                BookingMethod::Fifo,
+            )
+            .unwrap();
+        assert_eq!(basis_of(&r), expected);
+    }
+
+    /// `merge_average` carries the lots' exact totals onto the merged lot, and
+    /// only this currency's costed lots: a sale of the merged lot takes it.
+    #[test]
+    fn merge_average_keeps_the_pools_exact_total() {
+        let mut i = inv_with_total(3, 500);
+        i.add(lot(4, 200, 2)).unwrap();
+        i.add(Position::with_cost(
+            Amount::new(d(5), "OTH"),
+            Cost::new(d(7), "USD"),
+        ))
+        .unwrap();
+        i.merge_average().unwrap();
+        let r = i
+            .reduce(
+                &sell_stk(7),
+                Some(&CostSpec::default()),
+                BookingMethod::Fifo,
+            )
+            .unwrap();
+        assert_eq!(basis_of(&r), d(1300));
+    }
+
     /// Selling a whole pool takes what its lots cost, not the rounded
     /// average times the units (#2417): 1 at 100 and 2 at 200 cost 500,
     /// where `3 × 166.66…67` is 500.00…01. A partial sale still takes the
@@ -1735,9 +2134,11 @@ mod reduction_tests {
 
             let part = pool().reduce(&sell_stk(2), Some(&spec), method).unwrap();
             let average = d(500) / d(3);
+            // At the average, fitted to the pool's three-digit total so the
+            // remainder stays exact (#2425): 25 decimals.
             assert_eq!(
                 part.cost_basis.unwrap().number,
-                d(2) * average,
+                (d(2) * average).round_dp(25),
                 "{method:?}: a partial sale is priced at the average"
             );
         }

@@ -651,7 +651,8 @@ impl BookingEngine {
                             if booking_result.matched.len() > 1 {
                                 // Expand single posting into multiple postings
                                 let mut expanded = Vec::new();
-                                for matched_pos in &booking_result.matched {
+                                for (lot, matched_pos) in booking_result.matched.iter().enumerate()
+                                {
                                     let mut new_posting = posting.clone();
                                     // Set units to the matched portion with NEGATED sign
                                     // (matched_pos.units has the inventory sign, but we need
@@ -665,9 +666,15 @@ impl BookingEngine {
                                     // Set cost from the matched lot
                                     if let Some(cost) = &matched_pos.cost {
                                         new_posting.cost = Some(Box::new(CostSpec {
-                                            number: Some(rustledger_core::CostNumber::PerUnit {
-                                                value: cost.number,
-                                            }),
+                                            number: Some(booked_cost_number(
+                                                cost.number,
+                                                booking_result
+                                                    .matched_basis
+                                                    .get(lot)
+                                                    .copied()
+                                                    .flatten(),
+                                                -matched_pos.units.number,
+                                            )),
                                             currency: Some(cost.currency.clone()),
                                             date: cost.date,
                                             label: cost.label.clone(),
@@ -734,35 +741,15 @@ impl BookingEngine {
                                 // augmenting lot and nets against it — otherwise a
                                 // labeled reduction leaves a phantom unlabeled
                                 // negative lot in the holdings view (#1666).
-                                // A sale of a whole AVERAGE or `{*}` pool is
-                                // priced at what the pool's lots cost, which the
-                                // rounded average times the units is not (#2417).
-                                // Carry that total, as `{{T}}` does, so the
-                                // balance weighs the exact basis.
-                                let pooled = cost_spec.merge || method == BookingMethod::Average;
-                                let exact_total = pooled
-                                    .then(|| {
-                                        let at_average =
-                                            units.number.abs().checked_mul(matched_cost.number)?;
-                                        (at_average != cost_basis.number).then(|| {
-                                            rustledger_core::BookedCost::try_new(
-                                                matched_cost.number,
-                                                cost_basis.number,
-                                                units.number,
-                                            )
-                                            .ok()
-                                        })?
-                                    })
-                                    .flatten();
+                                // Booked at the lot's basis, exact when the
+                                // sale empties a lot or pool whose total the
+                                // inventory keeps (#2417, #2425).
                                 result.postings[idx].cost = Some(Box::new(CostSpec {
-                                    number: Some(match exact_total {
-                                        Some(booked) => {
-                                            rustledger_core::CostNumber::PerUnitFromTotal(booked)
-                                        }
-                                        None => rustledger_core::CostNumber::PerUnit {
-                                            value: matched_cost.number,
-                                        },
-                                    }),
+                                    number: Some(booked_cost_number(
+                                        matched_cost.number,
+                                        Some(cost_basis.number),
+                                        units.number,
+                                    )),
                                     currency: Some(matched_cost.currency),
                                     date: matched_cost.date,
                                     label: matched_cost.label,
@@ -800,7 +787,7 @@ impl BookingEngine {
                             && !units.number.is_zero()
                         {
                             let total_units = units.number.abs();
-                            for m in &booking_result.matched {
+                            for (lot, m) in booking_result.matched.iter().enumerate() {
                                 // A matched cost-bearing lot always carries a cost; skip a
                                 // (defensive) cost-less one since it has no basis. The
                                 // cost and sale currencies are recorded as-is — a
@@ -815,19 +802,26 @@ impl BookingEngine {
                                 // #2327): both factors are user-supplied, so
                                 // their product can leave the range where a bare
                                 // `*` PANICS. The fuzzer reaches these now (#2340).
-                                // A single pooled match is the whole
-                                // reduction, and its basis is the one core
-                                // computed: exact when the sale takes the
-                                // whole pool (#2417), `units × average`
-                                // otherwise, the same product as below.
-                                let pooled = cost_spec.merge || method == BookingMethod::Average;
-                                let lot_value = match &booking_result.cost_basis {
-                                    Some(basis) if pooled && booking_result.matched.len() == 1 => {
-                                        basis.number
+                                // The lot's basis as core computed it: exact
+                                // when the sale empties a lot or pool whose
+                                // total the inventory keeps (#2417, #2425),
+                                // `units × per-unit` otherwise.
+                                let lot_value = match booking_result
+                                    .matched_basis
+                                    .get(lot)
+                                    .copied()
+                                    .flatten()
+                                {
+                                    Some(basis) => basis,
+                                    None => {
+                                        lot_units.checked_mul(cost.number).ok_or_else(|| {
+                                            cost_overflow(
+                                                &posting.account,
+                                                Some(&cost.currency),
+                                                units,
+                                            )
+                                        })?
                                     }
-                                    _ => lot_units.checked_mul(cost.number).ok_or_else(|| {
-                                        cost_overflow(&posting.account, Some(&cost.currency), units)
-                                    })?,
                                 };
                                 // The reduction's sale value (in the sale-price currency).
                                 // A `Unit` (`@`) price is exact per unit. A `Total` (`@@`)
@@ -1323,13 +1317,13 @@ impl BookingEngine {
         // `CostSpec::resolve`). `apply`'s callers book first, which fills the
         // inferred currency into `cost_spec.currency`; direct-`apply` tests use
         // explicit-currency fixtures, which need no inference.
-        inv.add(Position::from_posting(units, posting.cost.as_deref(), date))
-            .map_err(|e| {
-                convert_core_booking_error(
-                    rustledger_core::BookingError::Overflow(e),
-                    &posting.account,
-                )
-            })?;
+        inv.add_with_total(
+            Position::from_posting(units, posting.cost.as_deref(), date),
+            posting_lot_total(posting, units),
+        )
+        .map_err(|e| {
+            convert_core_booking_error(rustledger_core::BookingError::Overflow(e), &posting.account)
+        })?;
         Ok(())
     }
 
@@ -1801,6 +1795,45 @@ impl BookingEngine {
     }
 }
 
+/// The cost number to book for taking `units` (the posting's, signed) from a
+/// lot at `per_unit` whose share cost `basis` (#2417, #2425).
+///
+/// `PerUnitFromTotal` when the basis is not `|units| × per_unit`: a sale that
+/// empties a `{{500 USD}}` lot of 3, or a whole pool, takes the lot's exact
+/// total, which the rounded per-unit cost cannot reproduce. Carrying it the
+/// way a `{{T}}` augmentation already does (#1026) is what lets the balance
+/// weigh it exactly. `PerUnit` otherwise, so every other booked cost, and its
+/// `meta.hash`, is unchanged.
+fn booked_cost_number(
+    per_unit: Decimal,
+    basis: Option<Decimal>,
+    units: Decimal,
+) -> rustledger_core::CostNumber {
+    let exact = basis
+        .filter(|b| units.abs().checked_mul(per_unit) != Some(*b))
+        .and_then(|b| rustledger_core::BookedCost::try_new(per_unit, b, units).ok());
+    match exact {
+        Some(booked) => rustledger_core::CostNumber::PerUnitFromTotal(booked),
+        None => rustledger_core::CostNumber::PerUnit { value: per_unit },
+    }
+}
+
+/// The exact total a booked augmentation's lot cost, signed like `units ×
+/// per-unit`: the total a `{{T}}` or compound cost carries once booked, times
+/// the units' sign (#2425). `None`
+/// for a per-unit cost, whose `units × per-unit` is already exact.
+fn posting_lot_total(posting: &Posting, units: &rustledger_core::Amount) -> Option<Decimal> {
+    // Signed like `units × per-unit`: the written total times the units'
+    // sign. Not `abs`: a negative cost's total (E4005, still booked) keeps
+    // its sign, or its sale's gain comes out flipped.
+    let total = posting.cost.as_deref()?.number?.total()?;
+    Some(if units.number.is_sign_negative() {
+        -total
+    } else {
+        total
+    })
+}
+
 /// Convert a core inventory `BookingError` into the booking-layer error,
 /// attaching the account context that the core layer doesn't carry.
 ///
@@ -2270,11 +2303,10 @@ impl TransactionReplay<'_, '_> {
         for posting in pending {
             // An unfilled posting fails in `finish`; it adds nothing here.
             if let Some(units) = posting.amount() {
-                inv.add(Position::from_posting(
-                    units,
-                    posting.cost.as_deref(),
-                    self.txn.date,
-                ))
+                inv.add_with_total(
+                    Position::from_posting(units, posting.cost.as_deref(), self.txn.date),
+                    posting_lot_total(posting, units),
+                )
                 .map_err(|e| {
                     convert_core_booking_error(
                         rustledger_core::BookingError::Overflow(e),

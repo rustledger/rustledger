@@ -127,6 +127,14 @@ pub struct BookingResult {
     pub matched: MatchedLots,
     /// The cost basis of the matched positions (for capital gains).
     pub cost_basis: Option<Amount>,
+    /// Each matched position's cost basis, parallel to `matched`, in the
+    /// cost currency; `None` for a cost-less match (#2425).
+    ///
+    /// Not always `units × per-unit`: a take that empties a lot whose exact
+    /// total the inventory keeps (a `{{500 USD}}` lot of 3, a pool) takes that
+    /// total, so a lot's sales add up to exactly what it cost. The booking
+    /// layer books these per lot, and they sum to `cost_basis`.
+    pub matched_basis: SmallVec<[Option<Decimal>; 1]>,
 }
 
 /// Error that can occur during booking.
@@ -554,6 +562,14 @@ impl<'a> Iterator for PositionStoreIter<'a> {
 #[derive(Debug, Clone, Default)]
 struct Slots {
     entries: Vec<Option<Position>>,
+    /// Each slot's exact total cost, for a lot that was given one (#2425): a
+    /// lot bought as `3 X {{500 USD}}` holds 166.66…67 per unit, and `3 ×`
+    /// that is not 500, so the total is kept here for the sale that empties
+    /// the lot to take exactly. Always as long as `entries`; `None` for a lot
+    /// bought at a per-unit cost, whose `units × per-unit` is its cost. Kept
+    /// beside the positions rather than on `Cost`, which is the lot's identity
+    /// and would otherwise split lots that are the same.
+    totals: Vec<Option<Decimal>>,
     live: usize,
     /// Prior contents of every slot this transaction has touched, so a failed
     /// transaction can be undone without having copied the whole account.
@@ -567,7 +583,7 @@ struct Slots {
     /// primitives and the field is private, so covering the primitives is
     /// complete by construction; covering call sites would be complete only
     /// until someone adds a twelfth.
-    undo: Option<Vec<(usize, Option<Position>)>>,
+    undo: Option<Vec<(usize, Option<Position>, Option<Decimal>)>>,
     /// Slots already captured in `undo`, for O(1) "have I recorded this?".
     ///
     /// This bounds the log's size and cost; it is not what makes rollback
@@ -588,6 +604,7 @@ impl Slots {
         let live = positions.len();
         Self {
             entries: positions.into_iter().map(Some).collect(),
+            totals: vec![None; live],
             live,
             undo: None,
             undo_seen: rustc_hash::FxHashSet::default(),
@@ -609,8 +626,9 @@ impl Slots {
             return;
         }
         let prior = self.entries.get(i).cloned().flatten();
+        let prior_total = self.totals.get(i).copied().flatten();
         if let Some(log) = self.undo.as_mut() {
-            log.push((i, prior));
+            log.push((i, prior, prior_total));
         }
     }
 
@@ -633,6 +651,9 @@ impl Slots {
             && entry.take().is_some()
         {
             self.live -= 1;
+        }
+        if let Some(total) = self.totals.get_mut(i) {
+            *total = None;
         }
     }
 }
@@ -750,8 +771,25 @@ impl PositionStore {
         }
     }
 
-    fn push(&mut self, p: Position) {
-        self.push_slot(p);
+    /// Slot `i`'s exact total cost, when it is not `units × per-unit`
+    /// (#2425). `None` for every other lot, and always on the `Shared`
+    /// backing, which is BQL's running balance and never books.
+    fn total(&self, i: usize) -> Option<Decimal> {
+        match self {
+            Self::Owned(v) => v.totals.get(i).copied().flatten(),
+            Self::Shared(_) => None,
+        }
+    }
+
+    /// Record slot `i`'s exact total, captured by the undo log like any other
+    /// write, so a rolled-back transaction restores it. A no-op on `Shared`.
+    fn set_total(&mut self, i: usize, total: Option<Decimal>) {
+        if let Self::Owned(v) = self {
+            v.record(i);
+            if let Some(slot) = v.totals.get_mut(i) {
+                *slot = total;
+            }
+        }
     }
 
     /// Append a position, returning the slot index it landed in.
@@ -763,10 +801,11 @@ impl PositionStore {
         match self {
             Self::Owned(v) => {
                 if let Some(log) = v.undo.as_mut() {
-                    log.push((slot, None));
+                    log.push((slot, None, None));
                     v.undo_seen.insert(slot);
                 }
                 v.entries.push(Some(p));
+                v.totals.push(None);
                 v.live += 1;
             }
             Self::Shared(v) => v.push_back(p),
@@ -840,7 +879,8 @@ impl PositionStore {
             return;
         };
         v.undo_seen.clear();
-        for (slot, prior) in log.into_iter().rev() {
+        for (slot, prior, prior_total) in log.into_iter().rev() {
+            v.totals[slot] = prior_total;
             // The slot existed: put back exactly what was there. Otherwise it
             // was created by this transaction (or was already a tombstone), so
             // it must end up not-live — dropped entirely when it is the last
@@ -858,6 +898,7 @@ impl PositionStore {
                 v.entries[slot] = None;
                 if slot + 1 == v.entries.len() {
                     v.entries.pop();
+                    v.totals.pop();
                 }
             }
         }
@@ -870,6 +911,9 @@ impl PositionStore {
     /// before planning, when nothing is held.
     fn compact_slots(&mut self) {
         if let Self::Owned(v) = self {
+            // In lockstep: a slot's total moves with its position.
+            let mut live = v.entries.iter().map(Option::is_some);
+            v.totals.retain(|_| live.next().unwrap_or(false));
             v.entries.retain(Option::is_some);
             debug_assert_eq!(
                 v.entries.len(),
@@ -917,10 +961,14 @@ impl PositionStore {
     /// The live positions, in slot order, in a fresh `Owned` store with no
     /// tombstones and no undo log.
     fn dense_copy(&self) -> Self {
-        let entries: Vec<Option<Position>> = self.iter().cloned().map(Some).collect();
+        let (entries, totals): (Vec<Option<Position>>, Vec<Option<Decimal>>) = self
+            .iter_slots()
+            .map(|(i, p)| (Some(p.clone()), self.total(i)))
+            .unzip();
         let live = entries.len();
         Self::Owned(Slots {
             entries,
+            totals,
             live,
             undo: None,
             undo_seen: rustc_hash::FxHashSet::default(),
@@ -948,6 +996,9 @@ impl PositionStore {
             let live = slots.len();
             *self = Self::Owned(Slots {
                 entries: slots,
+                // A shared store is BQL's running balance, which records no
+                // exact totals (see `set_total`).
+                totals: vec![None; live],
                 live,
                 undo: None,
                 undo_seen: rustc_hash::FxHashSet::default(),
@@ -1000,6 +1051,7 @@ impl FromIterator<Position> for PositionStore {
         let live = slots.len();
         Self::Owned(Slots {
             entries: slots,
+            totals: vec![None; live],
             live,
             undo: None,
             undo_seen: rustc_hash::FxHashSet::default(),
@@ -1563,6 +1615,11 @@ impl Inventory {
     ///
     /// Pre-1.0 break: the closure sees a dense `Vec<Position>` with tombstones
     /// already dropped, and whatever it leaves becomes the inventory.
+    ///
+    /// Drops every lot's exact total (#2425): the closure may reorder, split or
+    /// rewrite lots, so there is no telling which total belongs to which. The
+    /// lots are then priced at `units × per-unit`, as they were before totals
+    /// were kept. Nothing on the booking path calls this.
     pub fn modify_positions(&mut self, f: impl FnOnce(&mut Vec<Position>)) {
         let mut dense: Vec<Position> = self.positions.iter().cloned().collect();
         f(&mut dense);
@@ -2009,9 +2066,33 @@ impl Inventory {
     /// caller that reports the error and moves on does not carry a
     /// half-applied position (#1863).
     pub fn add(&mut self, position: Position) -> Result<(), OverflowError> {
+        self.add_with_total(position, None)
+    }
+
+    /// [`Self::add`], recording the lot's exact total cost (#2425), signed
+    /// like the position's units.
+    ///
+    /// A lot bought as `3 X {{500 USD}}` resolves to a per-unit cost of
+    /// 166.66…67, and `3 ×` that is 500.00…01, not the 500 it cost. `total`
+    /// is what it cost; the inventory keeps it, and the reduction that empties
+    /// the lot takes it exactly. Ignored for a cost-less position.
+    ///
+    /// Kept even when `units × per-unit` rounds to it: `19 × 2921.3157…895`
+    /// rounds to exactly 55505, yet 18 and 1 sold separately still drift, so a
+    /// matching rounded product proves nothing.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::add`].
+    pub fn add_with_total(
+        &mut self,
+        position: Position,
+        total: Option<Decimal>,
+    ) -> Result<(), OverflowError> {
         if position.is_empty() {
             return Ok(());
         }
+        let total = total.filter(|_| position.cost.is_some());
 
         let overflow = || OverflowError {
             currency: position.units.currency.clone(),
@@ -2164,7 +2245,20 @@ impl Inventory {
                 self.positions.remove(idx);
                 return Ok(());
             }
+            // The merged lot's exact total, when either side carries one:
+            // each side's own total, or `units × per-unit` where it has none.
+            let merged_total = (total.is_some() || self.positions.total(idx).is_some())
+                .then(|| {
+                    let per_unit = self.positions[idx].cost.as_ref()?.number;
+                    let own = |units: Decimal, exact: Option<Decimal>| {
+                        exact.or_else(|| units.checked_mul(per_unit))
+                    };
+                    own(self.positions[idx].units.number, self.positions.total(idx))?
+                        .checked_add(own(position.units.number, total)?)
+                })
+                .flatten();
             self.positions[idx].units.number = merged;
+            self.positions.set_total(idx, merged_total);
             return Ok(());
         }
 
@@ -2190,6 +2284,7 @@ impl Inventory {
         // omitted them picked a different lot than the scan.
         let ordering = position.units.currency.clone();
         let slot = self.positions.push_slot(position);
+        self.positions.set_total(slot, total);
         if let Some(key) = key
             && !self.indexless
         {
@@ -2203,6 +2298,26 @@ impl Inventory {
     ///
     /// Called with `-1` before changing or removing a lot and `+1` after, so
     /// a sign flip lands in the right bucket.
+    /// What the lot in slot `idx` cost in total, SIGNED like its units (a
+    /// short lot's is negative): its exact total when the inventory keeps one
+    /// (#2425), else `units × per-unit`. `None` for a cost-less lot, or when
+    /// the product leaves `Decimal`'s range.
+    pub(super) fn lot_total(&self, idx: usize) -> Option<Decimal> {
+        let lot = &self.positions[idx];
+        let cost = lot.cost.as_ref()?;
+        self.positions
+            .total(idx)
+            .or_else(|| lot.units.number.checked_mul(cost.number))
+    }
+
+    /// Set the exact total of the lot in slot `idx` (#2425); ignored for a
+    /// cost-less lot. See [`Self::add_with_total`] for why a total is kept
+    /// even when `units × per-unit` rounds to it.
+    pub(super) fn set_lot_total(&mut self, idx: usize, total: Option<Decimal>) {
+        let keep = total.filter(|_| self.positions[idx].cost.is_some());
+        self.positions.set_total(idx, keep);
+    }
+
     /// Drop `idx` from [`Self::cost_index`]. Called wherever a lot is
     /// tombstoned, since the slot stays valid but the lot is gone.
     pub(super) fn cost_index_remove(&mut self, idx: usize) {
@@ -3676,6 +3791,18 @@ mod tests {
 
         let s = format!("{inv}");
         assert!(s.contains("100 USD"));
+    }
+
+    /// A store collected from positions holds them all, live and in order.
+    #[test]
+    fn a_collected_position_store_holds_every_position() {
+        let positions = [
+            Position::simple(Amount::new(dec!(1), "A")),
+            Position::simple(Amount::new(dec!(2), "B")),
+        ];
+        let store: PositionStore = positions.iter().cloned().collect();
+        assert_eq!(store.len(), 2);
+        assert_eq!(store.iter().cloned().collect::<Vec<_>>(), positions);
     }
 
     /// Each way a `{*}` spec can disagree with its pool says which part, and

@@ -194,6 +194,12 @@ it must be the pool's cost rounded to the decimal places written
 be what the units sold cost at that price, and a currency must be the pool's.
 A date or label is an error, because the merged lot has neither.
 
+A `{*}` on a posting that reduces no lot is reported as well: a buy, a sale
+from an account holding nothing, or any sale in an account booked `NONE`. `{*}`
+merges the pool and then sells from it, so where nothing is sold there is no
+pool to merge. Remove the `*`; to keep an account at its average cost, book it
+`AVERAGE`. Beancount refuses every `{*}` (`Cost merging is not supported yet`).
+
 ### E4002: Insufficient Units
 
 **Cause**: Trying to reduce more units than available in the lot.

@@ -177,7 +177,10 @@ use crate::types::{Error, LedgerOptions};
 /// the merged pool instead of dropped (#2398). The layout did not move, but a
 /// restored `Ledger` skips booking and serves its cached errors, so a v28 blob
 /// of a ledger stating a wrong pool cost would go on reporting none.
-pub const CACHE_VERSION: u32 = 29;
+/// v30: a `{*}` that runs no merge (on a buy, a sale from an empty account,
+/// or any sale on a NONE account) is refused instead of booked with the `*`
+/// dropped (#2418). A v29 blob restores such a ledger's errors as none.
+pub const CACHE_VERSION: u32 = 30;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

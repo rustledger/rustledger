@@ -183,7 +183,10 @@ use crate::types::{Error, LedgerOptions};
 /// v31: a sale of a whole AVERAGE or `{*}` pool books its exact total as
 /// `PerUnitFromTotal` instead of the rounded average as `PerUnit` (#2417). A
 /// v30 blob would serve the old booked cost and its 1E-26 imbalance.
-pub const CACHE_VERSION: u32 = 31;
+/// v32: a lot keeps its exact total, so a sale that empties a `{{T}}` lot
+/// books that total, and a partial sale of such a lot or of a pool books a
+/// basis fitted to it (#2425). A v31 blob serves the old booked costs.
+pub const CACHE_VERSION: u32 = 32;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

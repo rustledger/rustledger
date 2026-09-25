@@ -734,9 +734,34 @@ impl BookingEngine {
                                 // augmenting lot and nets against it — otherwise a
                                 // labeled reduction leaves a phantom unlabeled
                                 // negative lot in the holdings view (#1666).
+                                // A sale of a whole AVERAGE or `{*}` pool is
+                                // priced at what the pool's lots cost, which the
+                                // rounded average times the units is not (#2417).
+                                // Carry that total, as `{{T}}` does, so the
+                                // balance weighs the exact basis.
+                                let pooled = cost_spec.merge || method == BookingMethod::Average;
+                                let exact_total = pooled
+                                    .then(|| {
+                                        let at_average =
+                                            units.number.abs().checked_mul(matched_cost.number)?;
+                                        (at_average != cost_basis.number).then(|| {
+                                            rustledger_core::BookedCost::try_new(
+                                                matched_cost.number,
+                                                cost_basis.number,
+                                                units.number,
+                                            )
+                                            .ok()
+                                        })?
+                                    })
+                                    .flatten();
                                 result.postings[idx].cost = Some(Box::new(CostSpec {
-                                    number: Some(rustledger_core::CostNumber::PerUnit {
-                                        value: matched_cost.number,
+                                    number: Some(match exact_total {
+                                        Some(booked) => {
+                                            rustledger_core::CostNumber::PerUnitFromTotal(booked)
+                                        }
+                                        None => rustledger_core::CostNumber::PerUnit {
+                                            value: matched_cost.number,
+                                        },
                                     }),
                                     currency: Some(matched_cost.currency),
                                     date: matched_cost.date,
@@ -790,10 +815,20 @@ impl BookingEngine {
                                 // #2327): both factors are user-supplied, so
                                 // their product can leave the range where a bare
                                 // `*` PANICS. The fuzzer reaches these now (#2340).
-                                let lot_value =
-                                    lot_units.checked_mul(cost.number).ok_or_else(|| {
+                                // A single pooled match is the whole
+                                // reduction, and its basis is the one core
+                                // computed: exact when the sale takes the
+                                // whole pool (#2417), `units × average`
+                                // otherwise, the same product as below.
+                                let pooled = cost_spec.merge || method == BookingMethod::Average;
+                                let lot_value = match &booking_result.cost_basis {
+                                    Some(basis) if pooled && booking_result.matched.len() == 1 => {
+                                        basis.number
+                                    }
+                                    _ => lot_units.checked_mul(cost.number).ok_or_else(|| {
                                         cost_overflow(&posting.account, Some(&cost.currency), units)
-                                    })?;
+                                    })?,
+                                };
                                 // The reduction's sale value (in the sale-price currency).
                                 // A `Unit` (`@`) price is exact per unit. A `Total` (`@@`)
                                 // price is the EXACT pro-rata share `total × units /

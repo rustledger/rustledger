@@ -51,6 +51,22 @@ fn pool_units<'a>(positions: impl IntoIterator<Item = &'a Position>) -> Option<(
         })
 }
 
+/// What a pool's lots cost in total: `Σ |units| × cost`, the basis a sale of
+/// the WHOLE pool takes (#2417).
+///
+/// A sale of part of a pool can only be priced at the average, a quotient
+/// rounded to `Decimal`'s digits. Selling all of it need not be: the lots'
+/// own costs add up to the basis exactly (1 at 100 and 2 at 200 cost 500),
+/// where `3 × 166.66…67` is 500.00…01 and fails to balance against a
+/// whole-dollar sale. `None` on overflow, or when a lot has no cost, so the
+/// caller keeps the average.
+fn pool_total_cost<'a>(positions: impl IntoIterator<Item = &'a Position>) -> Option<Decimal> {
+    positions.into_iter().try_fold(Decimal::ZERO, |acc, p| {
+        let cost = p.cost.as_ref()?;
+        acc.checked_add(p.units.number.abs().checked_mul(cost.number)?)
+    })
+}
+
 /// Weighted-average cost of `positions` over `total_units`:
 /// `Σ units × cost / total_units`, taken over the positions that carry a cost.
 ///
@@ -240,6 +256,9 @@ struct MergePlan {
     total_units: Decimal,
     /// The pool's per-unit cost, or `None` when the lots carry no cost.
     pool: Option<Amount>,
+    /// What the pool's lots cost in total, for a sale that takes all of it
+    /// (see [`pool_total_cost`]).
+    total_cost: Option<Decimal>,
 }
 
 impl Inventory {
@@ -1002,11 +1021,18 @@ impl Inventory {
         }
 
         let avg = weighted_average_cost(&matching, total_units, total_units_exact)?;
+        // The whole pool: what its lots cost, not the rounded average times
+        // the units (#2417).
+        let whole_pool = if reduction == total_units.abs() {
+            pool_total_cost(matching.iter().copied())
+        } else {
+            None
+        };
         let cost_basis = avg
             .as_ref()
             .map(|(avg_cost, currency)| {
-                reduction
-                    .checked_mul(*avg_cost)
+                whole_pool
+                    .or_else(|| reduction.checked_mul(*avg_cost))
                     .map(|n| Amount::new(n, currency.clone()))
                     .ok_or_else(|| {
                         BookingError::Overflow(OverflowError {
@@ -1188,6 +1214,7 @@ impl Inventory {
             matching_indices: matching.iter().map(|(i, _)| *i).collect(),
             total_units,
             pool,
+            total_cost: pool_total_cost(matching_refs.iter().copied()),
         })
     }
 
@@ -1216,6 +1243,7 @@ impl Inventory {
             matching_indices,
             total_units,
             pool: Some(pool),
+            total_cost,
         } = plan
         else {
             // Cost-less lots: there is no pool to build (`plan_merge` says so),
@@ -1225,12 +1253,18 @@ impl Inventory {
         let reduction = units.number.abs();
         let (avg_cost, cost_currency) = (pool.number, pool.currency);
 
+        // The whole pool: what its lots cost, not the rounded average times
+        // the units (#2417).
+        let whole_pool = total_cost.filter(|_| reduction == total_units.abs());
         let cost_basis = Some(Amount::new(
-            reduction.checked_mul(avg_cost).ok_or_else(|| {
-                BookingError::Overflow(OverflowError {
-                    currency: cost_currency.clone(),
-                })
-            })?,
+            match whole_pool {
+                Some(total) => total,
+                None => reduction.checked_mul(avg_cost).ok_or_else(|| {
+                    BookingError::Overflow(OverflowError {
+                        currency: cost_currency.clone(),
+                    })
+                })?,
+            },
             cost_currency.clone(),
         ));
 
@@ -1674,6 +1708,39 @@ mod reduction_tests {
 
     fn sell_stk(n: i64) -> Amount {
         Amount::new(d(-n), "STK")
+    }
+
+    /// Selling a whole pool takes what its lots cost, not the rounded
+    /// average times the units (#2417): 1 at 100 and 2 at 200 cost 500,
+    /// where `3 × 166.66…67` is 500.00…01. A partial sale still takes the
+    /// average, the only figure there is.
+    #[test]
+    fn a_whole_pool_sale_takes_the_lots_exact_cost() {
+        let pool = || {
+            let mut i = Inventory::new();
+            i.add(lot(1, 100, 1)).expect("fixture fits in Decimal");
+            i.add(lot(2, 200, 2)).expect("fixture fits in Decimal");
+            i
+        };
+        for (method, spec) in [
+            (BookingMethod::Average, CostSpec::default()),
+            (BookingMethod::Fifo, CostSpec::default().with_merge()),
+        ] {
+            let whole = pool().reduce(&sell_stk(3), Some(&spec), method).unwrap();
+            assert_eq!(
+                whole.cost_basis.unwrap().number,
+                d(500),
+                "{method:?}: whole pool"
+            );
+
+            let part = pool().reduce(&sell_stk(2), Some(&spec), method).unwrap();
+            let average = d(500) / d(3);
+            assert_eq!(
+                part.cost_basis.unwrap().number,
+                d(2) * average,
+                "{method:?}: a partial sale is priced at the average"
+            );
+        }
     }
 
     /// A cost-basis overflow part-way through a multi-lot reduction must leave

@@ -149,3 +149,22 @@ fn cost_of_an_expression_is_still_units_times_per_unit() {
     let per_unit = Decimal::from(500) / Decimal::from(3);
     assert_eq!(number(&rows[0][0]), Decimal::from(3) * per_unit);
 }
+
+/// Per row, too: `cost(units(position))` is `COST` of an amount, which is
+/// the amount itself, not the posting's cost. Only the bare position column
+/// takes the posting route.
+#[test]
+fn cost_of_another_row_expression_is_not_the_postings_cost() {
+    let directives = booked(LEDGER);
+    let rows = query(
+        &directives,
+        "SELECT cost(units(position)) WHERE narration = 'total lot' AND account = 'Assets:T'",
+    );
+    match &rows[0][0] {
+        Value::Amount(a) => {
+            assert_eq!(a.number, Decimal::from(3));
+            assert_eq!(a.currency.as_str(), "X");
+        }
+        other => panic!("expected an amount, got {other:?}"),
+    }
+}

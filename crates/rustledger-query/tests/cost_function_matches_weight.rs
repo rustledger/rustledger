@@ -187,3 +187,24 @@ fn balances_at_cost_values_a_held_total_cost_lot_at_its_total() {
     let rows = query(&directives, "BALANCES AT COST WHERE account = 'Assets:H'");
     assert_eq!(number(&rows[0][1]), Decimal::from(500));
 }
+
+/// `JOURNAL ... AT COST`: each row's position is its posting's cost, and the
+/// balance is the running sum of those, exact for a `{{T}}` lot. It was
+/// `at_cost` of the running balance, which multiplied the rounded per-unit
+/// cost back out: 500.00…01 on the buy and on its balance.
+#[test]
+fn journal_at_cost_is_exact_for_a_total_cost_lot() {
+    let directives = booked(LEDGER);
+    let rows = query(&directives, "JOURNAL 'Assets:T' AT COST");
+    let columns: Vec<(Decimal, Decimal)> = rows
+        .iter()
+        .map(|r| (number(&r[5]), number(&r[6])))
+        .collect();
+    assert_eq!(
+        columns,
+        vec![
+            (Decimal::from(500), Decimal::from(500)),
+            (Decimal::from(-500), Decimal::ZERO)
+        ]
+    );
+}

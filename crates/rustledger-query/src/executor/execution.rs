@@ -982,6 +982,13 @@ impl Executor<'_> {
         // in PR #940; the JOURNAL command was missed in that change. Issue #955.
         // Same row-per-snapshot shape as `running_balance` above.
         let mut cumulative_balance = rustledger_core::Inventory::new_shared();
+        // `AT COST`'s running balance: the sum of each row's cost, which is
+        // what `at_cost` of the cumulative balance is, but exact. A lot bought
+        // as `{{500 USD}}` of 3 costs 500 on its row (`compute_posting_cost`),
+        // while `at_cost` of a balance holding it multiplies the rounded
+        // per-unit cost back out to 500.00…01 (#2425). Shared for the same
+        // reason `cumulative_balance` is (#1086).
+        let mut cost_balance = rustledger_core::Inventory::new_shared();
 
         // Normalize the AT mode once per query rather than calling
         // to_uppercase() per row (which would allocate twice — once for
@@ -1049,18 +1056,33 @@ impl Executor<'_> {
                             .as_ref()
                             .map_or(Value::Null, |p| Value::Position(Box::new(p.clone()))),
                         AtMode::Cost => {
-                            if let Some(units) = posting.amount() {
+                            // The posting's booked cost, as `cost(position)`
+                            // gives it: exact for a `{{T}}` lot (#2425).
+                            let value = if let Some(cost) = super::compute_posting_cost(posting) {
+                                cost?
+                            } else if let Some(units) = posting.amount() {
+                                // A cost not booked to a number and currency:
+                                // resolve it, checked (this was a bare `*`).
                                 if let Some(cost_spec) = &posting.cost
                                     && let Some(cost) = cost_spec.resolve(units.number, txn.date)
                                 {
-                                    let total = units.number * cost.number;
+                                    let total = units
+                                        .number
+                                        .checked_mul(cost.number)
+                                        .ok_or_else(|| super::overflow_err(&cost.currency))?;
                                     Value::Amount(Amount::new(total, &cost.currency))
                                 } else {
                                     Value::Amount(units.clone())
                                 }
                             } else {
                                 Value::Null
+                            };
+                            if let Value::Amount(amount) = &value {
+                                cost_balance
+                                    .add(Position::simple(amount.clone()))
+                                    .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                             }
+                            value
                         }
                         AtMode::Units | AtMode::Other => posting
                             .amount()
@@ -1078,9 +1100,7 @@ impl Executor<'_> {
                     // clamped: a query cell showing a saturated total is
                     // indistinguishable from a real one (#1863).
                     let balance_for_row = match at_mode {
-                        AtMode::Cost => cumulative_balance
-                            .at_cost()
-                            .map_err(|e| QueryError::Evaluation(e.to_string()))?,
+                        AtMode::Cost => cost_balance.clone(),
                         AtMode::Units => cumulative_balance
                             .at_units()
                             .map_err(|e| QueryError::Evaluation(e.to_string()))?,

@@ -54,11 +54,13 @@ fn a_wildcard_merge_loads_without_errors() {
 /// `{110.00 USD, *}` is a merge. It used to parse as a plain per-unit spec,
 /// so this sale looked for a lot at 110, found none, and failed; written
 /// `{100.00 USD, *}` it silently sold from the 100 lot instead of the pool.
-/// Both now merge, and book from the pool at 110 like `{*}`.
+/// Both now merge. `{110.00 USD, *}` books from the pool at 110 like `{*}`;
+/// `{100.00 USD, *}` states a cost the pool does not have, and is refused
+/// rather than booked at 110 with the 100 dropped (#2398).
 #[test]
 fn a_trailing_star_component_merges_like_a_leading_one() {
     use rustledger_core::Directive;
-    for spec in ["{*}", "{110.00 USD, *}", "{100.00 USD, *}"] {
+    let load_with = |spec: &str| {
         let source = MERGE_SOURCE.replace("-5 X {*}", &format!("-5 X {spec}"));
         assert!(
             source.contains(&format!("-5 X {spec}")),
@@ -70,7 +72,20 @@ fn a_trailing_star_component_merges_like_a_leading_one() {
             .tempfile()
             .expect("create tempfile");
         f.write_all(source.as_bytes()).expect("write fixture");
-        let ledger = load(f.path(), &LoadOptions::default()).expect("the ledger loads");
+        load(f.path(), &LoadOptions::default()).expect("the ledger loads")
+    };
+
+    let refused = load_with("{100.00 USD, *}");
+    assert!(
+        refused.errors.iter().any(|e| e
+            .message
+            .contains("the merged pool costs 110.00 USD per unit")),
+        "a merge of a 110 pool stating 100 must be refused: {:?}",
+        refused.errors,
+    );
+
+    for spec in ["{*}", "{110.00 USD, *}"] {
+        let ledger = load_with(spec);
         assert!(ledger.errors.is_empty(), "{spec}: got {:?}", ledger.errors);
 
         let sale = ledger

@@ -187,6 +187,20 @@ pub enum BookingError {
         /// the COST currency, which is not the commodity in `currency`.
         got: crate::Amount,
     },
+    /// A `{*}` merge's cost spec states something the merged pool is not
+    /// (#2398).
+    ///
+    /// `{*}` computes its cost, so anything else the spec names can only be a
+    /// claim about the result: a cost or currency asserts the pool's, and a
+    /// date or label describes a lot the merge never builds (the pool is
+    /// undated and unlabeled). Dropping the claim silently hid exactly the
+    /// case it exists to catch: a ledger whose author expected another pool.
+    MergeSpecMismatch {
+        /// The commodity being reduced (e.g. `AAPL`).
+        currency: crate::Currency,
+        /// Which part of the spec disagrees, and with what.
+        detail: MergeSpecMismatch,
+    },
     /// The arithmetic left `rust_decimal`'s ~±7.9e28 range (#1863).
     ///
     /// Reported rather than clamped: `Decimal::MIN == -Decimal::MAX`, so
@@ -194,6 +208,67 @@ pub enum BookingError {
     /// arbitrarily unbalanced ledger certifies as clean. Reported rather than
     /// panicked because ledger input must never abort the CLI.
     Overflow(OverflowError),
+}
+
+/// What a `{*}` merge spec states that the merged pool is not; see
+/// [`BookingError::MergeSpecMismatch`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MergeSpecMismatch {
+    /// A per-unit cost, `{*, 100.00 USD}`, that is not the pool's per-unit
+    /// cost at the precision written.
+    PerUnit {
+        /// The per-unit cost the spec states.
+        stated: crate::Amount,
+        /// The pool's per-unit cost, rounded to the places `stated` writes.
+        pool: crate::Amount,
+    },
+    /// A total, `{{*, 550.00 USD}}` or `{*, 100 # 50 USD}`, that is not what
+    /// the reduced units cost at the pool's price.
+    Total {
+        /// The total the spec states, compound costs combined.
+        stated: crate::Amount,
+        /// What the reduced units cost at the pool's per-unit cost, rounded
+        /// to the places `stated` writes.
+        pool: crate::Amount,
+    },
+    /// A cost currency the pool is not held in.
+    Currency {
+        /// The currency the spec states.
+        stated: crate::Currency,
+        /// The pool's cost currency.
+        pool: crate::Currency,
+    },
+    /// A date or label, rendered as written (`2024-01-02`, `"lot-a"`).
+    DateOrLabel {
+        /// The date or label as the spec writes it.
+        stated: String,
+    },
+}
+
+impl fmt::Display for MergeSpecMismatch {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::PerUnit { stated, pool } => write!(
+                f,
+                "the merged pool costs {pool} per unit, not the {stated} the cost spec states"
+            ),
+            Self::Total { stated, pool } => write!(
+                f,
+                "the reduced units cost {pool} at the merged pool's price, not the total \
+                 {stated} the cost spec states"
+            ),
+            Self::Currency { stated, pool } => write!(
+                f,
+                "the merged pool is held at a cost in {pool}, not the {stated} the cost spec \
+                 states"
+            ),
+            Self::DateOrLabel { stated } => write!(
+                f,
+                "the merge builds one lot with no date or label, so the cost spec's {stated} \
+                 describes no lot; remove it"
+            ),
+        }
+    }
 }
 
 /// A `Decimal` computation whose result cannot be represented.
@@ -271,6 +346,9 @@ impl fmt::Display for BookingError {
             Self::CurrencyMismatch { expected, got } => {
                 write!(f, "Currency mismatch: expected {expected}, got {got}")
             }
+            Self::MergeSpecMismatch { currency, detail } => {
+                write!(f, "{{*}} merge of {currency}: {detail}")
+            }
             Self::Overflow(e) => write!(f, "{e}"),
         }
     }
@@ -323,7 +401,9 @@ impl fmt::Display for AccountedBookingError {
             // The currency is already named in the inner message; the account
             // is the context this wrapper exists to add.
             BookingError::Overflow(e) => write!(f, "{}: {e}", self.account),
-            BookingError::MergeMismatch { .. } => write!(f, "{}: {}", self.account, self.error),
+            BookingError::MergeMismatch { .. } | BookingError::MergeSpecMismatch { .. } => {
+                write!(f, "{}: {}", self.account, self.error)
+            }
             BookingError::InsufficientUnits {
                 requested,
                 available,
@@ -3562,6 +3642,52 @@ mod tests {
 
         let s = format!("{inv}");
         assert!(s.contains("100 USD"));
+    }
+
+    /// Each way a `{*}` spec can disagree with its pool says which part, and
+    /// the account wrapper adds the account (#2398).
+    #[test]
+    fn merge_spec_mismatch_messages() {
+        let err = |detail| {
+            BookingError::MergeSpecMismatch {
+                currency: "X".into(),
+                detail,
+            }
+            .with_account("Assets:Broker".into())
+            .to_string()
+        };
+        let usd = |n| Amount::new(n, "USD");
+        assert_eq!(
+            err(MergeSpecMismatch::PerUnit {
+                stated: usd(dec!(100.00)),
+                pool: usd(dec!(110.00)),
+            }),
+            "Assets:Broker: {*} merge of X: the merged pool costs 110.00 USD per unit, \
+             not the 100.00 USD the cost spec states"
+        );
+        assert_eq!(
+            err(MergeSpecMismatch::Total {
+                stated: usd(dec!(600.00)),
+                pool: usd(dec!(550.00)),
+            }),
+            "Assets:Broker: {*} merge of X: the reduced units cost 550.00 USD at the merged \
+             pool's price, not the total 600.00 USD the cost spec states"
+        );
+        assert_eq!(
+            err(MergeSpecMismatch::Currency {
+                stated: "EUR".into(),
+                pool: "USD".into(),
+            }),
+            "Assets:Broker: {*} merge of X: the merged pool is held at a cost in USD, not the \
+             EUR the cost spec states"
+        );
+        assert_eq!(
+            err(MergeSpecMismatch::DateOrLabel {
+                stated: "2024-01-01".into(),
+            }),
+            "Assets:Broker: {*} merge of X: the merge builds one lot with no date or label, so \
+             the cost spec's 2024-01-01 describes no lot; remove it"
+        );
     }
 
     #[test]

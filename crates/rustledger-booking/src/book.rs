@@ -409,6 +409,10 @@ impl BookingEngine {
                 // Compound form deliberately exposes neither component as
                 // an effective value. Combined total N*a + b is preserved
                 // exactly for residual math, same as the {{T}} conversion.
+                // As written, for the `{*}` check below: normalizing folds a
+                // compound cost into one total and loses the precision each
+                // part was written to (#2398).
+                let written_number = cost_spec.number;
                 let normalized_compound: Option<CostSpec> = match cost_spec.number {
                     Some(rustledger_core::CostNumber::Compound { per_unit, total })
                         if !units.number.is_zero() =>
@@ -606,6 +610,14 @@ impl BookingEngine {
                             ),
                         }
                         .map_err(|e| convert_core_booking_error(e, &posting.account))?;
+                        // Only here: `apply`, the validator and the query
+                        // replay see the BOOKED posting, whose cost is the
+                        // pool's own by then, and a filtered replay builds a
+                        // different pool on purpose (#1985).
+                        if cost_spec.merge {
+                            check_merge_spec(cost_spec, written_number, units, &booking_result)
+                                .map_err(|e| convert_core_booking_error(e, &posting.account))?;
+                        }
                         {
                             // Check if multiple lots were matched
                             if booking_result.matched.len() > 1 {
@@ -1718,6 +1730,192 @@ fn convert_core_booking_error(
     BookingError::Inventory(err.with_account(account.clone()))
 }
 
+/// Check what a `{*}` spec states against the pool the merge built (#2398).
+///
+/// `{*}` computes its cost, so everything else in the spec is a claim about
+/// the result, and a claim is checked rather than dropped: a cost or currency
+/// must be the pool's, and a date or label must not be there at all, since the
+/// merge builds one undated, unlabeled lot. Beancount has no merge to compare
+/// with (`Cost merging is not supported yet`), so this is the reading that
+/// keeps the number the ledger wrote from being thrown away silently.
+///
+/// A stated cost holds when it IS the pool's cost at the precision written.
+/// The pool is a quotient and seldom has a finite decimal a ledger could
+/// write: `{*, 106.67 USD}` for a pool of 106.666… is the pool, to cents. So
+/// the allowance is half a unit in the last place written, and for a compound
+/// cost the sum of both parts' (the per-unit part's times the units). It is
+/// not the ledger's balance tolerance: that bounds how far two sides of a
+/// transaction may disagree, and this compares one number with itself.
+///
+/// Both sides carry rounding once the stated number is as long as `Decimal`
+/// holds, which only an expression produces (`{{*, 1604500/66 USD}}`). The
+/// stated side is then held to the place before its last digit
+/// ([`written_allowance`]), since how often an expression rounded depends on
+/// how it was written. The pool's side adds its own ([`rounding_bound`]): a
+/// total is checked against `units × pool`, and a rounded pool is off by up
+/// to half a unit in its last place, once per unit. Without these, 32 of 150
+/// generated correct totals were refused, and one of 200 summed from parts.
+///
+/// A mismatch reports the pool rounded to the places the spec writes, which
+/// reads as the number the author should have written; being more than half a
+/// unit away, it can never round to the stated one.
+///
+/// Cost-less lots degrade `{*}` to AVERAGE with no pool cost; there is nothing
+/// to hold a stated cost against, so only the date and label are checked.
+fn check_merge_spec(
+    spec: &CostSpec,
+    written: Option<rustledger_core::CostNumber>,
+    units: &rustledger_core::Amount,
+    result: &rustledger_core::BookingResult,
+) -> Result<(), rustledger_core::BookingError> {
+    use rustledger_core::{BookingError as B, CostNumber, MergeSpecMismatch as M};
+    let mismatch = |detail| B::MergeSpecMismatch {
+        currency: units.currency.clone(),
+        detail,
+    };
+    let overflow = |currency: &rustledger_core::Currency| {
+        B::Overflow(rustledger_core::OverflowError {
+            currency: currency.clone(),
+        })
+    };
+    if let Some(pool) = result.matched.first().and_then(|p| p.cost.as_ref()) {
+        let currency = &pool.currency;
+        if let Some(stated) = &spec.currency
+            && stated != currency
+        {
+            return Err(mismatch(M::Currency {
+                stated: stated.clone(),
+                pool: currency.clone(),
+            }));
+        }
+        let reduction = units.number.abs();
+        let pool_total = || {
+            reduction
+                .checked_mul(pool.number)
+                .ok_or_else(|| overflow(currency))
+        };
+        let (stated_total, allowance) = match written {
+            None => (None, Decimal::ZERO),
+            Some(CostNumber::PerUnit { value }) => {
+                let allowance = written_allowance(value)
+                    .checked_add(rounding_bound(pool.number))
+                    .ok_or_else(|| overflow(currency))?;
+                if differ(pool.number, value, allowance) {
+                    return Err(mismatch(M::PerUnit {
+                        stated: Amount::new(value, currency.clone()),
+                        pool: Amount::new(pool.number.round_dp(value.scale()), currency.clone()),
+                    }));
+                }
+                (None, Decimal::ZERO)
+            }
+            Some(CostNumber::Total { value }) => (Some(value), written_allowance(value)),
+            // Not something a ledger writes; booking's own output.
+            Some(CostNumber::PerUnitFromTotal(booked)) => {
+                (Some(booked.total), written_allowance(booked.total))
+            }
+            Some(CostNumber::Compound { per_unit, total }) => {
+                let combined = reduction
+                    .checked_mul(per_unit)
+                    .and_then(|v| v.checked_add(total))
+                    .ok_or_else(|| overflow(currency))?;
+                let allowance = reduction
+                    .checked_mul(written_allowance(per_unit))
+                    .and_then(|v| v.checked_add(written_allowance(total)))
+                    .ok_or_else(|| overflow(currency))?;
+                (Some(combined), allowance)
+            }
+        };
+        if let Some(stated) = stated_total {
+            let got = pool_total()?;
+            // The pool side is `units × pool`: the pool's own rounding,
+            // once per unit, then the product's.
+            let allowance = reduction
+                .checked_mul(rounding_bound(pool.number))
+                .and_then(|v| v.checked_add(rounding_bound(got)))
+                .and_then(|v| v.checked_add(allowance))
+                .ok_or_else(|| overflow(currency))?;
+            if differ(got, stated, allowance) {
+                return Err(mismatch(M::Total {
+                    stated: Amount::new(stated, currency.clone()),
+                    pool: Amount::new(got.round_dp(stated.scale()), currency.clone()),
+                }));
+            }
+        }
+    }
+    if let Some(date) = spec.date {
+        return Err(mismatch(M::DateOrLabel {
+            stated: date.to_string(),
+        }));
+    }
+    if let Some(label) = &spec.label {
+        return Err(mismatch(M::DateOrLabel {
+            stated: format!("\"{label}\""),
+        }));
+    }
+    Ok(())
+}
+
+/// Whether `a` and `b` are more than `allowance` apart. Checked, since a
+/// stated cost is ledger input and `a - b` can leave `Decimal`'s range (a
+/// panic in `rust_decimal`); numbers that far apart differ by any allowance.
+fn differ(a: Decimal, b: Decimal, allowance: Decimal) -> bool {
+    a.checked_sub(b).is_none_or(|d| d.abs() > allowance)
+}
+
+/// Half a unit in the last decimal place of `number`: `0.005` for `106.67`,
+/// `0.5` for `110`. At 28 decimal places the half unit cannot be written, and
+/// it is one unit in the 28th place instead.
+fn half_unit_in_last_place(number: Decimal) -> Decimal {
+    Decimal::try_new(5, number.scale() + 1).unwrap_or(Decimal::new(1, 28))
+}
+
+/// How far a number a spec states may be from the value its author meant.
+///
+/// Half a unit in the last place written, for a number typed to the places
+/// its author chose. A number that fills `Decimal`'s digits was not typed:
+/// it is an expression's result (`{{*, 1604500/66 USD}}`), rounded at every
+/// operation, and how many operations depends on how the expression was
+/// written (`r*S/N` rounds once, `r*a/N + r*b/N` three times). So its last
+/// digit is noise, and it is held to one unit in the place before that: a
+/// correct sum of fractions landed two units out in one of 200 generated
+/// claims, and nothing an author means lives in the 28th digit.
+fn written_allowance(number: Decimal) -> Decimal {
+    if fills_decimal(number) {
+        // At least 28 digits, so there is a place before the last.
+        Decimal::try_new(1, number.scale().saturating_sub(1)).unwrap_or(Decimal::ONE)
+    } else {
+        half_unit_in_last_place(number)
+    }
+}
+
+/// Whether `number` uses all of `Decimal`'s precision: 28 or 29 significant
+/// digits, which is what a rounded result has (106.666… is
+/// `106.66666666666666666666666667`).
+fn fills_decimal(number: Decimal) -> bool {
+    number
+        .mantissa()
+        .unsigned_abs()
+        .checked_ilog10()
+        .is_some_and(|l| l + 1 >= 28)
+}
+
+/// How far a computed `number` may be from the value it stands for.
+///
+/// `Decimal` rounds a result that needs more digits than it holds, and such a
+/// result fills them: 28 or 29 significant digits (106.666… is
+/// `106.66666666666666666666666667`). One that fills them is treated as
+/// rounded, off by up to half a unit in its last place; any shorter one is
+/// exact, and gets no allowance, so an exact pool of 110.00 still refuses a
+/// stated 110.01. An exact result that happens to be 28 digits long gets a
+/// half unit it does not need, at the 28th digit.
+fn rounding_bound(number: Decimal) -> Decimal {
+    if fills_decimal(number) {
+        half_unit_in_last_place(number)
+    } else {
+        Decimal::ZERO
+    }
+}
+
 /// The error for a cost whose per-unit value cannot be represented.
 ///
 /// `total / |units|` leaves `Decimal`'s range (~7.9e28) when the total is large
@@ -2027,6 +2225,49 @@ mod tests {
     use super::*;
     use rust_decimal_macros::dec;
     use rustledger_core::{NaiveDate, Posting, PriceAnnotation};
+
+    #[test]
+    fn half_unit_in_last_place_is_half_the_last_digit_written() {
+        use super::half_unit_in_last_place as half;
+        let d = |s: &str| s.parse::<rust_decimal::Decimal>().unwrap();
+        assert_eq!(half(d("106.67")), d("0.005"));
+        assert_eq!(half(d("110")), d("0.5"));
+        // 28 places: one unit in the 28th, not zero (#2398).
+        let at_limit = d("1") / d("3");
+        assert_eq!(at_limit.scale(), 28);
+        assert_eq!(half(at_limit), rust_decimal::Decimal::new(1, 28));
+    }
+
+    #[test]
+    fn a_written_number_that_fills_decimal_is_held_to_the_place_before_its_last() {
+        use super::written_allowance;
+        let d = |s: &str| s.parse::<rust_decimal::Decimal>().unwrap();
+        // Typed: half a unit in the last place written.
+        assert_eq!(written_allowance(d("106.67")), d("0.005"));
+        // Computed, 29 digits at scale 26: one unit at scale 25.
+        let computed = d("1600") / d("15");
+        assert_eq!(computed.scale(), 26);
+        assert_eq!(
+            written_allowance(computed),
+            rust_decimal::Decimal::new(1, 25)
+        );
+    }
+
+    #[test]
+    fn rounding_bound_is_zero_for_an_exact_quotient() {
+        use super::rounding_bound;
+        let d = |s: &str| s.parse::<rust_decimal::Decimal>().unwrap();
+        // Exact: 2200/20. No allowance, so a stated 110.01 still differs.
+        assert_eq!(rounding_bound(d("2200") / d("20")), d("0"));
+        // Rounded: 1600/15 fills the digits; half a unit in the last place.
+        let pool = d("1600") / d("15");
+        assert_eq!(pool.to_string(), "106.66666666666666666666666667");
+        assert_eq!(rounding_bound(pool), d("0.000000000000000000000000005"));
+        // Exactly 28 digits counts too: 1/3 is rounded at the 28th place.
+        let third = d("1") / d("3");
+        assert_eq!(third.mantissa().to_string().len(), 28);
+        assert_eq!(rounding_bound(third), rust_decimal::Decimal::new(1, 28));
+    }
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         rustledger_core::naive_date(year, month, day).unwrap()

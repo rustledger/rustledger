@@ -173,7 +173,11 @@ use crate::types::{Error, LedgerOptions};
 /// and a set value resolves differently now (`Equity:Anfang` names
 /// `Equity:Equity:Anfang`, as in beancount), so a v27 blob would serve the old
 /// names.
-pub const CACHE_VERSION: u32 = 28;
+/// v29: a `{*}` merge spec's cost, currency, date or label is checked against
+/// the merged pool instead of dropped (#2398). The layout did not move, but a
+/// restored `Ledger` skips booking and serves its cached errors, so a v28 blob
+/// of a ledger stating a wrong pool cost would go on reporting none.
+pub const CACHE_VERSION: u32 = 29;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

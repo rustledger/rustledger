@@ -187,6 +187,13 @@ Or use `rledger doctor missing-open` to generate them.
 
 **Fix**: Check cost basis matches existing lot, or use `{}` for automatic matching.
 
+A `{*}` merge reports it too when the spec states something the merged pool is
+not. `{*}` computes the pool's cost, so a cost beside it is checked as a claim:
+it must be the pool's cost rounded to the decimal places written
+(`{*, 106.67 USD}` for a pool of 106.666… USD), a total or compound cost must
+be what the units sold cost at that price, and a currency must be the pool's.
+A date or label is an error, because the merged lot has neither.
+
 ### E4002: Insufficient Units
 
 **Cause**: Trying to reduce more units than available in the lot.

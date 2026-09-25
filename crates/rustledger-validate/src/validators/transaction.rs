@@ -597,7 +597,8 @@ pub fn process_inventory_reduction(
                 }
                 rustledger_core::BookingError::NoMatchingLot { .. }
                 | rustledger_core::BookingError::CurrencyMismatch { .. }
-                | rustledger_core::BookingError::MergeMismatch { .. } => {
+                | rustledger_core::BookingError::MergeMismatch { .. }
+                | rustledger_core::BookingError::MergeSpecMismatch { .. } => {
                     format!("cost spec: {:?}", posting.cost)
                 }
                 rustledger_core::BookingError::Overflow(e) => {

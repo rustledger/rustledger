@@ -92,3 +92,83 @@ fn a_whole_pool_sale_balances_and_realizes_the_exact_basis() {
         );
     }
 }
+
+/// The same, over 200 generated pools: long and short, AVERAGE and `{*}`,
+/// two to four lots of 1–30 units at 1–999 USD, each sold whole at a price.
+/// About one in twenty of these pools has an average that `3 × 166.66…67`
+/// style rounding throws off; the pre-fix build failed 13 of 240 in the
+/// review sweep. Every sale must balance, and every realized basis must be
+/// the lots' exact total (its proceeds, for a covered short). A fixed linear congruential generator keeps the
+/// ledger the same on every run.
+#[test]
+fn every_generated_whole_pool_sale_balances_and_realizes_its_exact_total() {
+    let mut state: u64 = 0x2417;
+    let mut next = |n: u64| {
+        state = state
+            .wrapping_mul(6_364_136_223_846_793_005)
+            .wrapping_add(1_442_695_040_888_963_407);
+        (state >> 33) % n
+    };
+    let mut source = String::from("2024-01-01 open Assets:C\n2024-01-01 open Income:G\n");
+    let mut expected = std::collections::BTreeMap::new();
+    for i in 0..200 {
+        let (method, spec) = if i % 2 == 0 {
+            ("AVERAGE", "{}")
+        } else {
+            ("FIFO", "{*}")
+        };
+        let sign: i64 = if i % 4 >= 2 { -1 } else { 1 };
+        let lots: Vec<(i64, i64)> = (0..2 + next(3))
+            .map(|_| (1 + next(30) as i64, 1 + next(999) as i64))
+            .collect();
+        let units: i64 = lots.iter().map(|(u, _)| u).sum();
+        let total: i64 = lots.iter().map(|(u, c)| u * c).sum();
+        let account = format!("Assets:P{i}");
+        let commodity = format!(
+            "X{}{}",
+            (b'A' + (i % 26) as u8) as char,
+            (b'A' + (i / 26) as u8) as char
+        );
+        source.push_str(&format!(
+            "2024-01-01 open {account} {commodity} \"{method}\"\n"
+        ));
+        for (k, (u, c)) in lots.iter().enumerate() {
+            source.push_str(&format!(
+                "2024-01-{:02} * \"lot\"\n  {account}  {} {commodity} {{{c} USD}}\n  Assets:C\n",
+                k + 2,
+                sign * u
+            ));
+        }
+        source.push_str(&format!(
+            "2024-02-01 * \"sell {i}\"\n  {account}  {} {commodity} {spec} @ 1000 USD\n  Assets:C  {} USD\n  Income:G\n",
+            -sign * units,
+            sign * units * 1000
+        ));
+        expected.insert(account, rustledger_core::Decimal::from(total));
+    }
+
+    let ledger = load_source(&source);
+    assert!(
+        ledger.errors.is_empty(),
+        "every whole-pool sale balances: {:?}",
+        ledger.errors
+    );
+    // Covering a short swaps the roles: the lot's value is what the short
+    // was sold for, so the pool's total is the gain's PROCEEDS there.
+    let realized: std::collections::BTreeMap<_, _> = ledger
+        .capital_gains
+        .iter()
+        .map(|g| {
+            let lot_value = if g.short_sale {
+                &g.proceeds
+            } else {
+                &g.cost_basis
+            };
+            (g.account.to_string(), lot_value.number)
+        })
+        .collect();
+    assert_eq!(
+        realized, expected,
+        "each realized lot value is the pool's exact total"
+    );
+}

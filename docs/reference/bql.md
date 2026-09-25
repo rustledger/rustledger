@@ -272,12 +272,12 @@ they return `HOOL` and `USD`. `currency(position)` takes a position and always
 answers about its units; it is a rustledger extension that `bean-query`
 rejects. Prefer `commodity()` in queries you want to run under both.
 
-`cost(position)` over the `position` column is what the posting's units cost, signed
-like its units, and matches its `weight`. A lot bought as `3 X {{500 USD}}`
-costs 500, though its per-unit cost is 500/3 rounded, and the sale that empties
-it costs -500, so an emptied account's `sum(cost(position))` is exactly zero.
-bean-query multiplies the rounded per-unit cost back out and gives
-500.0000000000000000000000001. `cost()` of anything else, such as
+`cost(position)` over the `position` column is what the posting's units cost,
+signed like its units, and matches its `weight`. A lot of 3 X bought at a total
+cost of 500 USD costs 500, though its per-unit cost is 500/3 rounded, and the
+sale that empties it costs -500, so an emptied account's `sum(cost(position))`
+is exactly zero. bean-query multiplies the rounded per-unit cost back out and
+gives 500.0000000000000000000000001. `cost()` of anything else, such as
 `cost(sum(position))`, still works from the per-unit cost.
 
 ### String Functions

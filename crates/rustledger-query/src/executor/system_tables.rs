@@ -842,9 +842,13 @@ impl Executor<'_> {
             // (#2429).
             super::POSTING_WEIGHT_COLUMN.to_string(),
             super::POSTING_COST_COLUMN.to_string(),
+            super::POSTING_COST_ERROR_COLUMN.to_string(),
         ];
-        let mut table = Table::new(columns)
-            .with_hidden(&[super::POSTING_WEIGHT_COLUMN, super::POSTING_COST_COLUMN]);
+        let mut table = Table::new(columns).with_hidden(&[
+            super::POSTING_WEIGHT_COLUMN,
+            super::POSTING_COST_COLUMN,
+            super::POSTING_COST_ERROR_COLUMN,
+        ]);
 
         // Single posting-source scan, shared with the default `SELECT` path
         // ([`Self::collect_postings`]): every posting in directive order, with no
@@ -1057,10 +1061,21 @@ impl Executor<'_> {
             // posting's booked cost, else the value path's `COST` of the
             // position, which is what it falls back to there too.
             let cost_of_position = match super::compute_posting_cost(posting) {
-                Some(cost) => cost?,
+                Some(cost) => cost,
                 None => {
-                    self.evaluate_function_on_values("COST", std::slice::from_ref(&position_val))?
+                    self.evaluate_function_on_values("COST", std::slice::from_ref(&position_val))
                 }
+            };
+            // An overflow is raised when a query reads this row's
+            // `cost(position)`, not here (see `POSTING_COST_ERROR_COLUMN`).
+            // It is the only error either path raises for a posting; anything
+            // else still fails the table.
+            let (cost_of_position, cost_error) = match cost_of_position {
+                Ok(cost) => (cost, Value::Null),
+                Err(crate::QueryError::Evaluation(message)) => {
+                    (Value::Null, Value::String(message))
+                }
+                Err(other) => return Err(other),
             };
 
             // The running balances come straight from the shared scan
@@ -1142,6 +1157,7 @@ impl Executor<'_> {
                 },
                 weight_of_position,
                 cost_of_position,
+                cost_error,
             ];
             table.add_row(row);
         }

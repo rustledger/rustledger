@@ -884,6 +884,12 @@ impl Executor<'_> {
                         _ => None,
                     };
                     if let Some(&idx) = hidden.and_then(|name| column_map.get(name)) {
+                        if name_upper == "COST"
+                            && let Some(&err) = column_map.get(super::POSTING_COST_ERROR_COLUMN)
+                            && let Some(Value::String(message)) = row.get(err)
+                        {
+                            return Err(QueryError::Evaluation(message.clone()));
+                        }
                         return Ok(row.get(idx).cloned().unwrap_or(Value::Null));
                     }
                 }

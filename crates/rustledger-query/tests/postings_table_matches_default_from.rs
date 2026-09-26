@@ -108,3 +108,36 @@ fn a_subquery_aliasing_position_takes_the_value_path() {
         other => panic!("expected an amount, got {other:?}"),
     }
 }
+
+/// `#postings` computes every row's `cost(position)` whether or not the query
+/// asks for it, so a lot whose cost overflows must fail only a query that
+/// reads it, as on the default FROM, which computes it only when asked.
+#[test]
+fn an_overflowing_cost_fails_only_the_query_that_reads_it() {
+    let parsed = rustledger_parser::parse(
+        r#"
+2024-01-01 open Assets:A
+2024-01-01 open Assets:C
+
+2024-01-02 * "huge"
+  Assets:A  10 X {79228162514264337593543950335 USD}
+  Assets:C  -1 USD
+"#,
+    );
+    let directives: Vec<Directive> = parsed.directives.iter().map(|d| (**d).clone()).collect();
+    let run = |bql: &str| Executor::new(&directives).execute(&parse(bql).expect("query parses"));
+    for from in ["", " FROM #postings"] {
+        let rows = run(&format!("SELECT account{from}")).expect("no cost is read");
+        assert_eq!(rows.rows.len(), 2, "{from:?}");
+        let rows = run(&format!(
+            "SELECT cost(position){from} WHERE account = 'Assets:C'"
+        ))
+        .expect("the overflowing row is filtered out");
+        assert_eq!(rows.rows.len(), 1, "{from:?}");
+        let err = run(&format!("SELECT cost(position){from}")).expect_err("the lot overflows");
+        assert!(
+            err.to_string().contains("exceeds the representable range"),
+            "{from:?}: {err}"
+        );
+    }
+}

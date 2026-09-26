@@ -113,6 +113,13 @@ pub(super) const POSTING_WEIGHT_COLUMN: &str = "\u{0}weight(position)";
 /// [`POSTING_WEIGHT_COLUMN`] for why the name starts with NUL.
 pub(super) const POSTING_COST_COLUMN: &str = "\u{0}cost(position)";
 
+/// `#postings`' hidden column holding the error `cost(position)` raised for
+/// the row, else NULL. The cost is computed for every row whether or not the
+/// query asks for it, so a lot whose cost overflows must not fail a query that
+/// never reads it (`SELECT account FROM #postings`); the default FROM computes
+/// it only when asked, and raises it then. The route raises it the same way.
+pub(super) const POSTING_COST_ERROR_COLUMN: &str = "\u{0}cost(position) error";
+
 pub(super) fn compute_posting_weight(posting: &rustledger_core::Posting) -> Value {
     rustledger_booking::posting_weight(posting).map_or(Value::Null, Value::Amount)
 }

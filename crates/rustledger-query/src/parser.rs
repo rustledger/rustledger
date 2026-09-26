@@ -272,7 +272,12 @@ fn select_query<'a>() -> impl Parser<'a, ParserInput<'a>, SelectQuery, ParserExt
                 }
             }))
             .then_ignore(
-                // Must be followed by WHERE, GROUP, ORDER, HAVING, LIMIT, PIVOT, or end
+                // Must be followed by WHERE, GROUP, ORDER, HAVING, LIMIT, PIVOT,
+                // or the end of the query: the input's end, the `)` closing a
+                // subquery, or a `;`. Without the last two, a table that ends a
+                // subquery or a statement, `FROM (SELECT ... FROM #postings)`,
+                // failed the lookahead and the parse backtracked to a syntax
+                // error at the outer `(` (#2435).
                 ws().then(choice((
                     kw("WHERE").ignored(),
                     kw("GROUP").ignored(),
@@ -280,6 +285,8 @@ fn select_query<'a>() -> impl Parser<'a, ParserInput<'a>, SelectQuery, ParserExt
                     kw("HAVING").ignored(),
                     kw("LIMIT").ignored(),
                     kw("PIVOT").ignored(),
+                    just(')').ignored(),
+                    just(';').ignored(),
                     end().ignored(),
                 )))
                 .rewind(),
@@ -2195,6 +2202,75 @@ mod tests {
             }
             _ => panic!("Expected SELECT query"),
         }
+    }
+
+    /// A table name can end a subquery or a statement: the `)` or `;` right
+    /// after it ends the FROM clause, as a `WHERE` would (#2435). It failed
+    /// to parse, with an error pointing at the outer `(`.
+    #[test]
+    fn a_table_name_ends_a_subquery_or_statement() {
+        let inner_table = |src: &str| match parse(src) {
+            Ok(Query::Select(outer)) => {
+                let from = outer.from.expect("outer FROM");
+                let inner = from.subquery.expect("a subquery");
+                inner.from.expect("inner FROM").table_name
+            }
+            other => panic!("{src}: expected a SELECT, got {other:?}"),
+        };
+        for (src, table) in [
+            (
+                "SELECT account FROM (SELECT account FROM #postings)",
+                "#postings",
+            ),
+            (
+                "SELECT account FROM (SELECT account FROM #postings )",
+                "#postings",
+            ),
+            (
+                "SELECT account FROM (SELECT account FROM #postings\n)",
+                "#postings",
+            ),
+            (
+                "SELECT count(*) FROM (SELECT * FROM #accounts)",
+                "#accounts",
+            ),
+            ("SELECT x FROM (SELECT x FROM MyTable)", "MyTable"),
+            (
+                "SELECT account FROM (SELECT account FROM (SELECT account FROM #postings))",
+                "",
+            ),
+        ] {
+            if table.is_empty() {
+                // Nested: the innermost query reads the table.
+                let Ok(Query::Select(outer)) = parse(src) else {
+                    panic!("{src}: does not parse");
+                };
+                let middle = outer.from.and_then(|f| f.subquery).expect("middle");
+                let inner = middle.from.and_then(|f| f.subquery).expect("inner");
+                assert_eq!(
+                    inner.from.and_then(|f| f.table_name).as_deref(),
+                    Some("#postings"),
+                    "{src}"
+                );
+            } else {
+                assert_eq!(inner_table(src).as_deref(), Some(table), "{src}");
+            }
+        }
+        for src in [
+            "SELECT account FROM #postings;",
+            "SELECT account FROM #postings ;",
+        ] {
+            match parse(src) {
+                Ok(Query::Select(sel)) => assert_eq!(
+                    sel.from.and_then(|f| f.table_name).as_deref(),
+                    Some("#postings"),
+                    "{src}"
+                ),
+                other => panic!("{src}: expected a SELECT, got {other:?}"),
+            }
+        }
+        // A `)` with nothing to close is still an error.
+        assert!(parse("SELECT account FROM #postings)").is_err());
     }
 
     /// Pathologically deep paren nesting must fail fast with a clean

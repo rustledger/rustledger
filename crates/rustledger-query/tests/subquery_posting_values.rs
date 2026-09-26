@@ -89,10 +89,10 @@ fn a_subquery_passes_the_posting_through() {
          FROM (SELECT date, account, p FROM (SELECT date, account, position AS p)) \
          ORDER BY date, account",
         "SELECT date, account, weight(position), cost(position) \
-         FROM (SELECT date, account, position FROM #postings WHERE true) \
+         FROM (SELECT date, account, position FROM #postings) \
          ORDER BY date, account",
         "SELECT date, account, weight(position), cost(position) \
-         FROM (SELECT * FROM #postings WHERE true) ORDER BY date, account",
+         FROM (SELECT * FROM #postings) ORDER BY date, account",
         "SELECT date, account, weight(position), cost(position) \
          FROM (SELECT * FROM (SELECT date, account, position)) ORDER BY date, account",
     ] {
@@ -168,9 +168,9 @@ fn a_column_the_subquery_does_not_return_is_still_unknown() {
     let directives = booked(LEDGER);
     for inner in [
         "SELECT account",
-        "SELECT account FROM #postings WHERE true",
+        "SELECT account FROM #postings",
         "SELECT * FROM (SELECT account)",
-        "SELECT * FROM #accounts WHERE true",
+        "SELECT * FROM #accounts",
     ] {
         let err = run(
             &directives,
@@ -194,8 +194,8 @@ fn cost_of_the_sum_is_exact_through_nested_subqueries_and_postings() {
     for inner in [
         "SELECT account, position",
         "SELECT account, position FROM (SELECT account, position)",
-        "SELECT account, position FROM #postings WHERE true",
-        "SELECT account, position FROM (SELECT account, position FROM #postings WHERE true)",
+        "SELECT account, position FROM #postings",
+        "SELECT account, position FROM (SELECT account, position FROM #postings)",
     ] {
         let got = rows(
             &directives,
@@ -245,7 +245,7 @@ fn an_overflowing_cost_fails_only_the_query_that_reads_it() {
     .collect();
     for inner in [
         "SELECT account, position",
-        "SELECT account, position FROM #postings WHERE true",
+        "SELECT account, position FROM #postings",
     ] {
         let filtered = run(
             &directives,
@@ -273,7 +273,7 @@ fn an_overflowing_cost_fails_only_the_query_that_reads_it() {
 fn a_failing_value_fails_only_for_a_row_the_outer_query_reads() {
     let directives = booked(LEDGER);
     for function in ["weight", "cost"] {
-        for inner in ["SELECT account", "SELECT account FROM #postings WHERE true"] {
+        for inner in ["SELECT account", "SELECT account FROM #postings"] {
             let filtered = run(
                 &directives,
                 &format!("SELECT {function}(account) FROM ({inner}) WHERE account = 'none'"),

@@ -12,6 +12,18 @@ use super::Executor;
 use super::types::{PostingContext, Row, Value};
 
 impl<'a> Executor<'a> {
+    /// Whether `query` aggregates: a target holds an aggregate, or it has a
+    /// `GROUP BY` or `HAVING`. Its rows are then groups, not one per source
+    /// row.
+    pub(super) fn is_aggregate_query(query: &crate::ast::SelectQuery) -> bool {
+        query
+            .targets
+            .iter()
+            .any(|t| Self::is_aggregate_expr(&t.expr))
+            || query.group_by.is_some()
+            || query.having.is_some()
+    }
+
     pub(super) fn is_aggregate_expr(expr: &Expr) -> bool {
         match expr {
             Expr::Function(func) => {
@@ -876,13 +888,17 @@ impl<'a> Executor<'a> {
                         let mut has_numbers = false;
                         let mut has_booleans = false;
 
-                        // `#postings` carries each row's lot total in a hidden
-                        // column, which `sum(position)` records as the default
-                        // FROM does (#2430). Any other table, a subquery
-                        // included, has none, and adds the value alone.
-                        let lot_total_idx = Self::is_position_column(func)
-                            .then(|| column_map.get(super::POSTING_LOT_TOTAL_COLUMN).copied())
-                            .flatten();
+                        // A table built from postings carries each row's lot
+                        // total in a hidden column beside the posting column,
+                        // which `sum()` of that column records as the default
+                        // FROM does (#2430, #2432). A column with none adds the
+                        // value alone.
+                        let lot_total_idx = match func.args.as_slice() {
+                            [Expr::Column(column)] => {
+                                super::hidden_index(column_map, "lot total", column, "")
+                            }
+                            _ => None,
+                        };
 
                         for row in group {
                             let val =

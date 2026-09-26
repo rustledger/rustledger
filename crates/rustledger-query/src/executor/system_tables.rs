@@ -839,18 +839,14 @@ impl Executor<'_> {
             "_posting_meta".to_string(),
             // Hidden: each row's `weight(position)` and `cost(position)`
             // (#2429) and its lot's exact total (#2430), computed from the
-            // posting, which the row evaluator cannot see.
-            super::POSTING_WEIGHT_COLUMN.to_string(),
-            super::POSTING_COST_COLUMN.to_string(),
-            super::POSTING_COST_ERROR_COLUMN.to_string(),
-            super::POSTING_LOT_TOTAL_COLUMN.to_string(),
+            // posting, which the row evaluator cannot see. NUL-named, so
+            // `SELECT *` omits them (see `hidden_weight_column`).
+            super::hidden_weight_column("position"),
+            super::hidden_cost_column("position"),
+            super::hidden_cost_error_column("position"),
+            super::hidden_lot_total_column("position"),
         ];
-        let mut table = Table::new(columns).with_hidden(&[
-            super::POSTING_WEIGHT_COLUMN,
-            super::POSTING_COST_COLUMN,
-            super::POSTING_COST_ERROR_COLUMN,
-            super::POSTING_LOT_TOTAL_COLUMN,
-        ]);
+        let mut table = Table::new(columns);
 
         // Single posting-source scan, shared with the default `SELECT` path
         // ([`Self::collect_postings`]): every posting in directive order, with no
@@ -1069,7 +1065,7 @@ impl Executor<'_> {
                 }
             };
             // An overflow is raised when a query reads this row's
-            // `cost(position)`, not here (see `POSTING_COST_ERROR_COLUMN`).
+            // `cost(position)`, not here (see `hidden_cost_error_column`).
             // It is the only error either path raises for a posting; anything
             // else still fails the table.
             let (cost_of_position, cost_error) = match cost_of_position {

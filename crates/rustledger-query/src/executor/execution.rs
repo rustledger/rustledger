@@ -9,7 +9,8 @@ use rustledger_core::{Amount, Directive, Inventory, NaiveDate, Position};
 const PARALLEL_THRESHOLD: usize = 1000;
 
 use crate::ast::{
-    CreateTableStmt, Expr, InsertSource, InsertStmt, SelectQuery, Target, UnaryOperator,
+    CreateTableStmt, Expr, FunctionCall, InsertSource, InsertStmt, SelectQuery, Target,
+    UnaryOperator,
 };
 use crate::error::QueryError;
 
@@ -80,12 +81,7 @@ impl Executor<'_> {
         // Check if this is an aggregate query.
         // A query is aggregate if any SELECT target contains an aggregate function,
         // or if it has an explicit GROUP BY or HAVING clause.
-        let is_aggregate = query
-            .targets
-            .iter()
-            .any(|t| Self::is_aggregate_expr(&t.expr))
-            || query.group_by.is_some()
-            || query.having.is_some();
+        let is_aggregate = Self::is_aggregate_query(query);
 
         if is_aggregate {
             // Determine GROUP BY expressions:
@@ -321,14 +317,144 @@ impl Executor<'_> {
         hidden
     }
 
+    /// `inner` with a hidden target for each posting-derived value `outer`
+    /// reads from one of its columns, or `None` when it needs none (#2432).
+    ///
+    /// `weight(c)`, `cost(c)` and `sum(c)` of a posting column need the
+    /// posting, and the outer query sees only the inner query's row values:
+    /// a `Position` without the price `weight` ranks second or the total a
+    /// `{{T}}` cost carries. So when `c` is one of the inner query's columns
+    /// passed straight through (a bare column target, or `position` from its
+    /// `SELECT *`), the inner query computes the value itself,
+    /// where its own routing reaches the posting: from the posting on the
+    /// default FROM, from the hidden columns of `#postings`, or from its own
+    /// subquery by this same rewrite. The result lands in a hidden column
+    /// named for `c` (see `hidden_weight_column`), which the outer row
+    /// evaluator reads in place of the value path. A column the inner query
+    /// computes, such as `units(position) AS position`, gets none.
+    ///
+    /// An inner query that groups, aggregates, pivots or is DISTINCT is left
+    /// alone: an extra column would change which rows it returns.
+    fn with_hidden_posting_columns(
+        &self,
+        outer: &SelectQuery,
+        inner: &SelectQuery,
+    ) -> Option<SelectQuery> {
+        // `PIVOT BY` requires a `GROUP BY`, so it is covered too.
+        if inner.distinct || Self::is_aggregate_query(inner) {
+            return None;
+        }
+
+        // Which values the outer query reads, per column it reads them from.
+        let mut needed: Vec<(String, &str)> = Vec::new();
+        let mut note = |expr: &Expr| {
+            if let Expr::Function(call) = expr
+                && let [Expr::Column(column)] = call.args.as_slice()
+            {
+                let kind = match call.name.to_uppercase().as_str() {
+                    "WEIGHT" | super::WEIGHT_OR_NULL | super::WEIGHT_FAILED => "weight",
+                    "COST" | super::COST_OR_NULL | super::COST_FAILED => "cost",
+                    "SUM" | super::LOT_TOTAL => "lot total",
+                    _ => return,
+                };
+                let key = (column.to_lowercase(), kind);
+                if !needed.contains(&key) {
+                    needed.push(key);
+                }
+            }
+        };
+        for target in &outer.targets {
+            super::visit_expr(&target.expr, &mut note);
+        }
+        for expr in outer
+            .where_clause
+            .iter()
+            .chain(outer.having.iter())
+            .chain(outer.group_by.iter().flatten())
+            .chain(outer.order_by.iter().flatten().map(|o| &o.expr))
+        {
+            super::visit_expr(expr, &mut note);
+        }
+        if needed.is_empty() {
+            return None;
+        }
+
+        // `position` from the inner query's `SELECT *`, which never hides it.
+        // If the inner source has no such column, computing a value from it
+        // fails with the same unknown column the outer query would report.
+        let wildcard = inner
+            .targets
+            .iter()
+            .any(|t| matches!(t.expr, Expr::Wildcard));
+
+        let mut targets = inner.targets.clone();
+        for (column, kind) in needed {
+            // The inner column the outer one names, passed straight through.
+            let mut named = inner.targets.iter().filter(|t| {
+                !matches!(t.expr, Expr::Wildcard)
+                    && t.alias
+                        .as_ref()
+                        .map_or_else(|| self.expr_to_name(&t.expr), |alias| alias.to_lowercase())
+                        == column
+            });
+            let source = match (named.next(), named.next()) {
+                (
+                    Some(Target {
+                        expr: Expr::Column(source),
+                        ..
+                    }),
+                    None,
+                ) => source.clone(),
+                (None, _) if wildcard && column == "position" => column.clone(),
+                _ => continue,
+            };
+            let hidden = |name: &str, alias: String| Target {
+                expr: Expr::Function(FunctionCall {
+                    name: name.to_string(),
+                    args: vec![Expr::Column(source.clone())],
+                }),
+                alias: Some(alias),
+            };
+            let (value, failed, value_column, error_column) = match kind {
+                "weight" => (
+                    super::WEIGHT_OR_NULL,
+                    super::WEIGHT_FAILED,
+                    super::hidden_weight_column(&column),
+                    super::hidden_weight_error_column(&column),
+                ),
+                "cost" => (
+                    super::COST_OR_NULL,
+                    super::COST_FAILED,
+                    super::hidden_cost_column(&column),
+                    super::hidden_cost_error_column(&column),
+                ),
+                _ => {
+                    targets.push(hidden(
+                        super::LOT_TOTAL,
+                        super::hidden_lot_total_column(&column),
+                    ));
+                    continue;
+                }
+            };
+            targets.push(hidden(value, value_column));
+            targets.push(hidden(failed, error_column));
+        }
+        (targets.len() > inner.targets.len()).then(|| SelectQuery {
+            targets,
+            ..inner.clone()
+        })
+    }
+
     /// Execute a SELECT query that sources from a subquery.
     pub(super) fn execute_select_from_subquery(
         &self,
         outer_query: &SelectQuery,
         inner_query: &SelectQuery,
     ) -> Result<QueryResult, QueryError> {
-        // Execute the inner query first
-        let inner_result = self.execute_select(inner_query)?;
+        // Execute the inner query first, with the posting-derived values the
+        // outer query needs carried beside its posting columns (#2432).
+        let with_hidden = self.with_hidden_posting_columns(outer_query, inner_query);
+        let inner_result = self.execute_select(with_hidden.as_ref().unwrap_or(inner_query))?;
 
         // Build a column name -> index mapping for the inner result
         let inner_column_map: FxHashMap<String, usize> = inner_result
@@ -342,12 +468,7 @@ impl Executor<'_> {
         // the table-source path (`execute_select_from_table`). Without this,
         // `SELECT count(*) FROM (SELECT ...)` was evaluated per inner row,
         // yielding one (empty) row per row instead of a single aggregated value.
-        let is_aggregate = outer_query
-            .targets
-            .iter()
-            .any(|t| Self::is_aggregate_expr(&t.expr))
-            || outer_query.group_by.is_some()
-            || outer_query.having.is_some();
+        let is_aggregate = Self::is_aggregate_query(outer_query);
         if is_aggregate {
             let table = Table {
                 columns: inner_result.columns,
@@ -455,12 +576,7 @@ impl Executor<'_> {
         // Check if this is an aggregate query; if so, use the grouping path.
         // A query is aggregate if any SELECT target contains an aggregate function,
         // or if it has an explicit GROUP BY or HAVING clause.
-        let is_aggregate = query
-            .targets
-            .iter()
-            .any(|t| Self::is_aggregate_expr(&t.expr))
-            || query.group_by.is_some()
-            || query.having.is_some();
+        let is_aggregate = Self::is_aggregate_query(query);
 
         if is_aggregate {
             return self.execute_aggregate_from_table(query, table, &column_map);
@@ -803,10 +919,96 @@ impl Executor<'_> {
     /// [`Table::hidden`]. Every hidden column stays addressable by explicit
     /// name. Pinned by `select_star_hides_structured_and_helper_columns`
     /// and `select_star_matches_bean_query_per_table`.
+    ///
+    /// A NUL-prefixed column holds a posting-derived value beside a posting
+    /// column (see `hidden_weight_column`) and is never shown.
     fn wildcard_hidden(name: &str, table_hidden: &[String]) -> bool {
         name.starts_with('_')
+            || name.starts_with('\u{0}')
             || name == "entry"
             || table_hidden.iter().any(|h| h.eq_ignore_ascii_case(name))
+    }
+
+    /// [`Self::evaluate_subquery_expr`] of a call to `func`'s arguments under
+    /// the upper-case `name_upper`, which an attempt (#2432) sets to the
+    /// function it attempts.
+    fn evaluate_subquery_function(
+        &self,
+        name_upper: &str,
+        func: &FunctionCall,
+        row: &[Value],
+        column_map: &FxHashMap<String, usize>,
+    ) -> Result<Value, QueryError> {
+        // Metadata functions need row context — intercept before
+        // generic evaluate_function_on_values which loses row access.
+        if matches!(
+            name_upper,
+            "META" | "ENTRY_META" | "ANY_META" | "POSTING_META"
+        ) {
+            return self.eval_meta_on_table_row(name_upper, func, row, column_map);
+        }
+
+        // `weight`, `cost` and `sum` of a posting column need the
+        // POSTING, as on the default FROM (#1966, #2428, #2430), and a
+        // table row has only values. A table built from postings
+        // carries them in hidden columns beside that column: read them
+        // there (see `hidden_weight_column`). A column with none, an
+        // alias of some other value included, keeps the value path.
+        if let [Expr::Column(column)] = func.args.as_slice() {
+            let cell = |kind: &str, suffix: &str| {
+                super::hidden_index(column_map, kind, column, suffix).and_then(|i| row.get(i))
+            };
+            // The hidden value, unless computing it failed: an error
+            // message is raised (`#postings`), and TRUE takes the
+            // value path, which raises the error itself.
+            let hidden = |kind: &str| {
+                let value = cell(kind, "")?;
+                match cell(kind, " error") {
+                    Some(Value::Boolean(true)) => None,
+                    Some(Value::String(message)) => {
+                        Some(Err(QueryError::Evaluation(message.clone())))
+                    }
+                    _ => Some(Ok(value.clone())),
+                }
+            };
+            match name_upper {
+                "WEIGHT" => {
+                    if let Some(weight) = hidden("weight") {
+                        return weight;
+                    }
+                }
+                "COST" => {
+                    if let Some(cost) = hidden("cost") {
+                        return cost;
+                    }
+                }
+                super::LOT_TOTAL => {
+                    return Ok(cell("lot total", "").cloned().unwrap_or(Value::Null));
+                }
+                _ => {}
+            }
+        }
+        if name_upper == super::LOT_TOTAL {
+            return Ok(Value::Null);
+        }
+        if let Some((function, failed_half)) = Self::attempt_of(name_upper) {
+            let result = self.evaluate_subquery_function(function, func, row, column_map);
+            return Ok(Self::attempt_value(failed_half, result));
+        }
+
+        // Evaluate function arguments.
+        let args: Vec<Value> = func
+            .args
+            .iter()
+            .map(|a| {
+                if matches!(a, Expr::Wildcard) {
+                    Ok(Value::Null)
+                } else {
+                    self.evaluate_subquery_expr(a, row, column_map)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.evaluate_function_on_values(name_upper, &args)
     }
 
     /// Evaluate a filter expression against a subquery row.
@@ -858,55 +1060,7 @@ impl Executor<'_> {
                     ));
                 }
 
-                // Metadata functions need row context — intercept before
-                // generic evaluate_function_on_values which loses row access.
-                let name_upper = func.name.to_uppercase();
-                if matches!(
-                    name_upper.as_str(),
-                    "META" | "ENTRY_META" | "ANY_META" | "POSTING_META"
-                ) {
-                    return self.eval_meta_on_table_row(&name_upper, func, row, column_map);
-                }
-
-                // `weight(position)` and `cost(position)` need the POSTING, as
-                // on the default FROM (#1966, #2428), and a table row has only
-                // values: a `Position` without the price `weight` ranks second
-                // or the total a `{{T}}` cost carries. `#postings` computes both
-                // from the posting into hidden columns that only it can carry
-                // (see `POSTING_WEIGHT_COLUMN`), so read them there. Any other
-                // table, a subquery included, keeps the value path (#2429).
-                if let [Expr::Column(column)] = func.args.as_slice()
-                    && column.eq_ignore_ascii_case("position")
-                {
-                    let hidden = match name_upper.as_str() {
-                        "WEIGHT" => Some(super::POSTING_WEIGHT_COLUMN),
-                        "COST" => Some(super::POSTING_COST_COLUMN),
-                        _ => None,
-                    };
-                    if let Some(&idx) = hidden.and_then(|name| column_map.get(name)) {
-                        if name_upper == "COST"
-                            && let Some(&err) = column_map.get(super::POSTING_COST_ERROR_COLUMN)
-                            && let Some(Value::String(message)) = row.get(err)
-                        {
-                            return Err(QueryError::Evaluation(message.clone()));
-                        }
-                        return Ok(row.get(idx).cloned().unwrap_or(Value::Null));
-                    }
-                }
-
-                // Evaluate function arguments.
-                let args: Vec<Value> = func
-                    .args
-                    .iter()
-                    .map(|a| {
-                        if matches!(a, Expr::Wildcard) {
-                            Ok(Value::Null)
-                        } else {
-                            self.evaluate_subquery_expr(a, row, column_map)
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                self.evaluate_function_on_values(&func.name, &args)
+                self.evaluate_subquery_function(&func.name.to_uppercase(), func, row, column_map)
             }
             Expr::BinaryOp(op) => {
                 let left = self.evaluate_subquery_expr(&op.left, row, column_map)?;

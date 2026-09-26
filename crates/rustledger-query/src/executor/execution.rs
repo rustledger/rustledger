@@ -868,6 +868,26 @@ impl Executor<'_> {
                     return self.eval_meta_on_table_row(&name_upper, func, row, column_map);
                 }
 
+                // `weight(position)` and `cost(position)` need the POSTING, as
+                // on the default FROM (#1966, #2428), and a table row has only
+                // values: a `Position` without the price `weight` ranks second
+                // or the total a `{{T}}` cost carries. `#postings` computes both
+                // from the posting into hidden columns that only it can carry
+                // (see `POSTING_WEIGHT_COLUMN`), so read them there. Any other
+                // table, a subquery included, keeps the value path (#2429).
+                if let [Expr::Column(column)] = func.args.as_slice()
+                    && column.eq_ignore_ascii_case("position")
+                {
+                    let hidden = match name_upper.as_str() {
+                        "WEIGHT" => Some(super::POSTING_WEIGHT_COLUMN),
+                        "COST" => Some(super::POSTING_COST_COLUMN),
+                        _ => None,
+                    };
+                    if let Some(&idx) = hidden.and_then(|name| column_map.get(name)) {
+                        return Ok(row.get(idx).cloned().unwrap_or(Value::Null));
+                    }
+                }
+
                 // Evaluate function arguments.
                 let args: Vec<Value> = func
                     .args

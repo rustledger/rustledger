@@ -279,9 +279,10 @@ sale that empties it costs -500, so an emptied account's `sum(cost(position))`
 is exactly zero. bean-query multiplies the rounded per-unit cost back out and
 gives 500.0000000000000000000000001. `BALANCES AT COST` values a held lot at
 its total the same way, and `JOURNAL ... AT COST` shows each row's exact cost
-and a running balance of them. `cost()` of anything else, such as
-`cost(sum(position))`, and anything over `FROM #postings`, still works from the
-per-unit cost.
+and a running balance of them. `SELECT ... FROM #postings` gives the same
+`cost(position)` and `weight(position)` as the default FROM. `cost()` of
+anything else, such as `cost(sum(position))`, still works from the per-unit
+cost.
 
 ### String Functions
 

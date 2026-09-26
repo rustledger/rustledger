@@ -837,17 +837,19 @@ impl Executor<'_> {
             // Hidden metadata columns for META/ENTRY_META functions
             "_entry_meta".to_string(),
             "_posting_meta".to_string(),
-            // Hidden: each row's `weight(position)` and `cost(position)`,
-            // computed from the posting, which the row evaluator cannot see
-            // (#2429).
+            // Hidden: each row's `weight(position)` and `cost(position)`
+            // (#2429) and its lot's exact total (#2430), computed from the
+            // posting, which the row evaluator cannot see.
             super::POSTING_WEIGHT_COLUMN.to_string(),
             super::POSTING_COST_COLUMN.to_string(),
             super::POSTING_COST_ERROR_COLUMN.to_string(),
+            super::POSTING_LOT_TOTAL_COLUMN.to_string(),
         ];
         let mut table = Table::new(columns).with_hidden(&[
             super::POSTING_WEIGHT_COLUMN,
             super::POSTING_COST_COLUMN,
             super::POSTING_COST_ERROR_COLUMN,
+            super::POSTING_LOT_TOTAL_COLUMN,
         ]);
 
         // Single posting-source scan, shared with the default `SELECT` path
@@ -1077,6 +1079,11 @@ impl Executor<'_> {
                 }
                 Err(other) => return Err(other),
             };
+            // The lot's exact total, for `sum(position)` (#2430).
+            let lot_total = posting
+                .amount()
+                .and_then(|units| rustledger_booking::posting_lot_total(posting, units))
+                .map_or(Value::Null, Value::Number);
 
             // The running balances come straight from the shared scan
             // (`needs_balance`/`needs_account_balance` both `true` above), so they
@@ -1158,6 +1165,7 @@ impl Executor<'_> {
                 weight_of_position,
                 cost_of_position,
                 cost_error,
+                lot_total,
             ];
             table.add_row(row);
         }

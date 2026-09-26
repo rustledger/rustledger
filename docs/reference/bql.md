@@ -280,9 +280,14 @@ is exactly zero. bean-query multiplies the rounded per-unit cost back out and
 gives 500.0000000000000000000000001. `BALANCES AT COST` values a held lot at
 its total the same way, and `JOURNAL ... AT COST` shows each row's exact cost
 and a running balance of them. `SELECT ... FROM #postings` gives the same
-`cost(position)` and `weight(position)` as the default FROM. `cost()` of
-anything else, such as `cost(sum(position))`, still works from the per-unit
-cost.
+`cost(position)` and `weight(position)` as the default FROM.
+
+`cost()` of an inventory, such as `cost(sum(position))`, is an inventory of
+what each lot cost, per currency, as in bean-query: an account holding
+30 USD and 207 EUR of cost gives `207 EUR, 30 USD`. `sum(position)` keeps each
+lot's exact total, so `cost(sum(position))` equals `sum(cost(position))` over
+the same rows. `number()` of it gives the number when there is one currency
+and NULL when there are several.
 
 ### String Functions
 

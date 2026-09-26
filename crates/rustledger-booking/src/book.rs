@@ -1818,11 +1818,18 @@ fn booked_cost_number(
     }
 }
 
-/// The exact total a booked augmentation's lot cost, signed like `units ×
-/// per-unit`: the total a `{{T}}` or compound cost carries once booked, times
-/// the units' sign (#2425). `None`
-/// for a per-unit cost, whose `units × per-unit` is already exact.
-fn posting_lot_total(posting: &Posting, units: &rustledger_core::Amount) -> Option<Decimal> {
+/// The exact total a booked posting's lot cost, signed like its units.
+///
+/// That is the total a `{{T}}` or compound cost carries once booked, times the
+/// units' sign (#2425). `None` for a per-unit cost, whose `units × per-unit`
+/// is already exact.
+///
+/// This is what booking hands [`rustledger_core::Inventory::add_with_total`]
+/// for the posting's lot. A consumer that rebuilds an inventory from booked
+/// postings passes it the same way, or the inventory keeps only the rounded
+/// per-unit cost (BQL's `sum(position)`, #2430).
+#[must_use]
+pub fn posting_lot_total(posting: &Posting, units: &rustledger_core::Amount) -> Option<Decimal> {
     // Signed like `units × per-unit`: the written total times the units'
     // sign. Not `abs`: a negative cost's total (E4005, still booked) keeps
     // its sign, or its sale's gain comes out flipped.

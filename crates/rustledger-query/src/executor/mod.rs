@@ -120,6 +120,12 @@ pub(super) const POSTING_COST_COLUMN: &str = "\u{0}cost(position)";
 /// it only when asked, and raises it then. The route raises it the same way.
 pub(super) const POSTING_COST_ERROR_COLUMN: &str = "\u{0}cost(position) error";
 
+/// `#postings`' hidden column holding the exact total each row's lot cost
+/// (`rustledger_booking::posting_lot_total`), else NULL, so the table's
+/// `sum(position)` records it as the default FROM does (#2430). See
+/// [`POSTING_WEIGHT_COLUMN`] for why the name starts with NUL.
+pub(super) const POSTING_LOT_TOTAL_COLUMN: &str = "\u{0}lot total(position)";
+
 pub(super) fn compute_posting_weight(posting: &rustledger_core::Posting) -> Value {
     rustledger_booking::posting_weight(posting).map_or(Value::Null, Value::Amount)
 }
@@ -1404,35 +1410,17 @@ impl<'a> Executor<'a> {
                         }
                     }
                     Value::Amount(a) => Ok(Value::Amount(a.clone())),
-                    Value::Inventory(inv) => {
-                        let mut total = Decimal::ZERO;
-                        let mut currency: Option<rustledger_core::Currency> = None;
-                        for pos in inv.positions() {
-                            if let Some(cost) = &pos.cost {
-                                total = pos
-                                    .units
-                                    .number
-                                    .checked_mul(cost.number)
-                                    .and_then(|v| total.checked_add(v))
-                                    .ok_or_else(|| overflow_err(&cost.currency))?;
-                                if currency.is_none() {
-                                    currency = Some(cost.currency.clone());
-                                }
-                            } else {
-                                total = total
-                                    .checked_add(pos.units.number)
-                                    .ok_or_else(|| overflow_err(&pos.units.currency))?;
-                                if currency.is_none() {
-                                    currency = Some(pos.units.currency.clone());
-                                }
-                            }
-                        }
-                        if let Some(curr) = currency {
-                            Ok(Value::Amount(Amount::new(total, curr)))
-                        } else {
-                            Ok(Value::Null)
-                        }
-                    }
+                    // What each lot cost, per currency, as bean-query's
+                    // `cost(inventory)` gives it (#2430). This summed every
+                    // lot's cost into ONE number, in whichever currency came
+                    // first: 30 USD and 207 EUR of cost came out `237 USD`.
+                    // `at_cost` also values a lot at the exact total its
+                    // inventory keeps, which `sum(position)` now records, so a
+                    // `{{500 USD}}` lot is 500 and not `3 × 166.66…67`.
+                    Value::Inventory(inv) => inv
+                        .at_cost()
+                        .map(|cost| Value::Inventory(std::sync::Arc::new(cost)))
+                        .map_err(|e| overflow_err(&e.currency)),
                     Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type(
                         "COST expects a position or inventory".to_string(),

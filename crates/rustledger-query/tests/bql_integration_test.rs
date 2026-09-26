@@ -4412,12 +4412,12 @@ fn test_cost_sum_position() {
     );
 
     assert_eq!(result.len(), 1);
-    // Book value should be 10*100 + 5*120 = 1600 USD
-    if let Value::Amount(amt) = &result.rows[0][1] {
-        assert_eq!(amt.number, dec!(1600));
-        assert_eq!(amt.currency.as_str(), "USD");
+    // Book value should be 10*100 + 5*120 = 1600 USD. `cost()` of an
+    // inventory is an inventory, per currency, as in bean-query (#2430).
+    if let Value::Inventory(inv) = &result.rows[0][1] {
+        assert_eq!(inv.to_string(), "1600 USD");
     } else {
-        panic!("Expected Amount value for book_value");
+        panic!("Expected Inventory value for book_value");
     }
 }
 
@@ -4471,10 +4471,10 @@ fn test_parenthesized_aggregate_expression() {
     );
 
     assert_eq!(result.len(), 1);
-    if let Value::Amount(amt) = &result.rows[0][0] {
-        assert_eq!(amt.number, dec!(1600));
+    if let Value::Inventory(inv) = &result.rows[0][0] {
+        assert_eq!(inv.to_string(), "1600 USD");
     } else {
-        panic!("Expected Amount value");
+        panic!("Expected Inventory value");
     }
 }
 

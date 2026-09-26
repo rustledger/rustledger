@@ -82,6 +82,55 @@ fn weight_and_cost_of_position_agree_across_from_clauses() {
     }
 }
 
+/// An inventory's non-zero positions, rendered. A cost-less position that nets
+/// to zero keeps its slot (#2378) where a lot that nets to zero is dropped, so
+/// `sum(cost(position))` of an emptied account holds `0 USD` and
+/// `cost(sum(position))` holds nothing: the same amount.
+fn held_amounts(value: &Value) -> Vec<String> {
+    match value {
+        Value::Inventory(inv) => inv
+            .positions()
+            .filter(|p| !p.units.number.is_zero())
+            .map(ToString::to_string)
+            .collect(),
+        other => panic!("expected an inventory, got {other:?}"),
+    }
+}
+
+/// `cost(sum(position))` too (#2430): the table's `sum(position)` records each
+/// lot's exact total from a hidden column, as the default FROM records it
+/// from the posting.
+#[test]
+fn cost_of_sum_of_position_agrees_across_from_clauses() {
+    let directives = booked();
+    let select = "SELECT account, cost(sum(position)), sum(cost(position))";
+    let tail = "GROUP BY account ORDER BY account";
+    // Before the sales, while the `{{500 USD}}` lot is held, and after.
+    for filter in ["WHERE date < 2024-02-01", ""] {
+        let (_, default_from) = query(&directives, &format!("{select} {filter} {tail}"));
+        let (_, postings) = query(
+            &directives,
+            &format!("{select} FROM #postings {filter} {tail}"),
+        );
+        assert_eq!(postings, default_from, "{filter:?}");
+        for row in &default_from {
+            assert_eq!(
+                held_amounts(&row[1]),
+                held_amounts(&row[2]),
+                "{filter:?}: cost of the sum is the sum of costs"
+            );
+        }
+    }
+    let (_, held) = query(
+        &directives,
+        "SELECT cost(sum(position)) FROM #postings WHERE account = 'Assets:B' AND date < 2024-02-01",
+    );
+    match &held[0][0] {
+        Value::Inventory(inv) => assert_eq!(inv.to_string(), "500 USD"),
+        other => panic!("expected an inventory, got {other:?}"),
+    }
+}
+
 /// The hidden columns stay out of `SELECT *`.
 #[test]
 fn select_star_does_not_show_the_hidden_columns() {

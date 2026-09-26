@@ -315,6 +315,15 @@ impl<'a> Executor<'a> {
                         let mut has_numbers = false;
                         let mut has_booleans = false;
 
+                        // `sum(position)` adds each posting's lot with the
+                        // exact total the posting carries, as booking does, so
+                        // `cost()` of the sum reads what each lot cost, not
+                        // `units × per-unit` rounded (#2430). The `Position`
+                        // value has only the rounded per-unit cost; the
+                        // posting still has a `{{T}}` lot's total. Only the
+                        // bare column: any other argument is a value.
+                        let from_postings = Self::is_position_column(func);
+
                         for ctx in group {
                             let val = self.evaluate_expr(&func.args[0], ctx)?;
                             match val {
@@ -326,8 +335,16 @@ impl<'a> Executor<'a> {
                                     has_positions = true;
                                 }
                                 Value::Position(pos) => {
+                                    let total = from_postings
+                                        .then(|| {
+                                            rustledger_booking::posting_lot_total(
+                                                &ctx.transaction.postings[ctx.posting_index],
+                                                &pos.units,
+                                            )
+                                        })
+                                        .flatten();
                                     total_inventory
-                                        .add(*pos)
+                                        .add_with_total(*pos, total)
                                         .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                                     has_positions = true;
                                 }
@@ -859,6 +876,14 @@ impl<'a> Executor<'a> {
                         let mut has_numbers = false;
                         let mut has_booleans = false;
 
+                        // `#postings` carries each row's lot total in a hidden
+                        // column, which `sum(position)` records as the default
+                        // FROM does (#2430). Any other table, a subquery
+                        // included, has none, and adds the value alone.
+                        let lot_total_idx = Self::is_position_column(func)
+                            .then(|| column_map.get(super::POSTING_LOT_TOTAL_COLUMN).copied())
+                            .flatten();
+
                         for row in group {
                             let val =
                                 self.evaluate_subquery_expr(&func.args[0], row, column_map)?;
@@ -870,8 +895,12 @@ impl<'a> Executor<'a> {
                                     has_positions = true;
                                 }
                                 Value::Position(pos) => {
+                                    let total = match lot_total_idx.and_then(|i| row.get(i)) {
+                                        Some(Value::Number(total)) => Some(*total),
+                                        _ => None,
+                                    };
                                     total_inventory
-                                        .add(*pos)
+                                        .add_with_total(*pos, total)
                                         .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                                     has_positions = true;
                                 }

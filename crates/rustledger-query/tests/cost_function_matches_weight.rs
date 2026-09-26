@@ -137,17 +137,69 @@ fn an_emptied_account_costs_exactly_nothing() {
     }
 }
 
-/// Only the position COLUMN takes the posting route; `COST` of an
-/// expression is still the value path's `units × per-unit`.
+/// `cost(sum(position))` is `sum(cost(position))` (#2430): `sum(position)`
+/// records each lot with the exact total its posting carries, and `cost()` of
+/// the inventory reads it. It multiplied the rounded per-unit cost back out,
+/// 500.00…01 for a `{{500 USD}}` lot.
 #[test]
-fn cost_of_an_expression_is_still_units_times_per_unit() {
+fn cost_of_the_sum_is_the_sum_of_the_costs() {
     let directives = booked(LEDGER);
+    for account in ["Assets:T", "Assets:D", "Assets:U", "Assets:A"] {
+        for (date, lots) in [
+            ("2024-01-31", "held"),
+            ("2024-02-01", "part sold"),
+            ("2025-01-01", "sold"),
+        ] {
+            let filter = format!("WHERE account = '{account}' AND date <= {date}");
+            let of_sum = query(&directives, &format!("SELECT cost(sum(position)) {filter}"));
+            let sum_of = query(&directives, &format!("SELECT sum(cost(position)) {filter}"));
+            assert_eq!(
+                number(&of_sum[0][0]),
+                number(&sum_of[0][0]),
+                "{account}, {lots}"
+            );
+        }
+    }
+    let held = query(
+        &directives,
+        "SELECT cost(sum(position)) WHERE account = 'Assets:T' AND date < 2024-02-01",
+    );
+    assert_eq!(number(&held[0][0]), Decimal::from(500));
+}
+
+/// `cost()` of an inventory is per currency (#2430): it summed every lot's
+/// cost into one number in the first currency it met, so 30 USD and 207 EUR
+/// of cost came out `237 USD`. bean-query's `cost(inventory)` is an inventory.
+#[test]
+fn cost_of_a_mixed_currency_sum_keeps_its_currencies() {
+    let directives = booked(
+        r#"
+2024-01-01 open Assets:M
+2024-01-01 open Assets:C
+
+2024-01-02 * "usd lot"
+  Assets:M  3 X {10 USD}
+  Assets:C
+
+2024-01-03 * "eur lot"
+  Assets:M  2 Y {100 EUR}
+  Assets:C
+
+2024-01-04 * "eur cash"
+  Assets:M  7 EUR
+  Assets:C
+"#,
+    );
     let rows = query(
         &directives,
-        "SELECT cost(sum(position)) WHERE narration = 'total lot' AND account = 'Assets:T'",
+        "SELECT cost(sum(position)), number(cost(sum(position))) WHERE account = 'Assets:M'",
     );
-    let per_unit = Decimal::from(500) / Decimal::from(3);
-    assert_eq!(number(&rows[0][0]), Decimal::from(3) * per_unit);
+    match &rows[0][0] {
+        Value::Inventory(inv) => assert_eq!(inv.to_string(), "207 EUR, 30 USD"),
+        other => panic!("expected an inventory, got {other:?}"),
+    }
+    // One number for two currencies would be meaningless.
+    assert_eq!(rows[0][1], Value::Null);
 }
 
 /// Per row, too: `cost(units(position))` is `COST` of an amount, which is

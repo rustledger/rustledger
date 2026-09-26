@@ -2837,20 +2837,18 @@ impl Inventory {
     pub fn at_cost(&self) -> Result<Self, OverflowError> {
         let mut result = Self::new();
 
-        for pos in self.positions.iter() {
+        for (idx, pos) in self.positions.iter_slots() {
             if pos.is_empty() {
                 continue;
             }
 
             if let Some(cost) = &pos.cost {
-                // Convert to cost basis
-                let total =
-                    pos.units
-                        .number
-                        .checked_mul(cost.number)
-                        .ok_or_else(|| OverflowError {
-                            currency: cost.currency.clone(),
-                        })?;
+                // What the lot cost: its exact total where the inventory keeps
+                // one (#2425), else `units × per-unit`. A `{{500 USD}}` lot of
+                // 3 is 500 here, not `3 × 166.66…67` = 500.00…01.
+                let total = self.lot_total(idx).ok_or_else(|| OverflowError {
+                    currency: cost.currency.clone(),
+                })?;
                 result.add(Position::simple(Amount::new(total, &cost.currency)))?;
             } else {
                 // No cost, keep as-is
@@ -3791,6 +3789,27 @@ mod tests {
 
         let s = format!("{inv}");
         assert!(s.contains("100 USD"));
+    }
+
+    /// `at_cost` values a lot at its exact total where the inventory keeps
+    /// one (#2425): 3 X bought for 500 USD is 500, not `3 × 166.66…67`.
+    #[test]
+    fn at_cost_uses_a_lots_exact_total() {
+        let per_unit = dec!(500) / dec!(3);
+        let mut inv = Inventory::new();
+        inv.add_with_total(
+            Position::with_cost(Amount::new(dec!(3), "X"), Cost::new(per_unit, "USD")),
+            Some(dec!(500)),
+        )
+        .unwrap();
+        inv.add(Position::with_cost(
+            Amount::new(dec!(2), "Y"),
+            Cost::new(dec!(10), "USD"),
+        ))
+        .unwrap();
+        let at_cost = inv.at_cost().unwrap();
+        assert_eq!(at_cost.units("USD"), dec!(520));
+        assert_ne!(dec!(3) * per_unit, dec!(500), "the fixture's premise");
     }
 
     /// A store collected from positions holds them all, live and in order.

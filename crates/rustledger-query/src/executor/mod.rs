@@ -102,6 +102,33 @@ pub(super) fn compute_posting_weight(posting: &rustledger_core::Posting) -> Valu
     rustledger_booking::posting_weight(posting).map_or(Value::Null, Value::Amount)
 }
 
+/// `COST(position)` over the posting column, from the posting's booked cost
+/// (#2425): signed like the units, as the value path's `units × per-unit` is.
+///
+/// Through the canonical `cost_number_weight`, which for a per-unit cost is
+/// that same product and for a total-carrying one (`PerUnitFromTotal`, a
+/// `{{T}}` buy or the sale that empties such a lot) is the total. A
+/// `Value::Position` holds only the resolved per-unit cost, so the value path
+/// gave `3 × 166.66…67` = 500.00…01 for a lot that cost 500, where `weight`
+/// gives 500, and an account's `sum(cost(position))` missed zero by 1E-26.
+///
+/// `None` when the posting's cost is not booked to a number and a currency;
+/// the value path answers then, as it always did.
+pub(super) fn compute_posting_cost(
+    posting: &rustledger_core::Posting,
+) -> Option<Result<Value, QueryError>> {
+    let units = posting.amount()?;
+    let Some(cost) = posting.cost.as_deref() else {
+        return Some(Ok(Value::Amount(units.clone())));
+    };
+    let (number, currency) = (cost.number.as_ref()?, cost.currency.as_ref()?);
+    Some(
+        rustledger_booking::cost_number_weight(units.number, number)
+            .map(|total| Value::Amount(Amount::new(total, currency.clone())))
+            .ok_or_else(|| overflow_err(currency)),
+    )
+}
+
 /// Query executor.
 pub struct Executor<'a> {
     /// All directives to query over.
@@ -1086,6 +1113,16 @@ impl<'a> Executor<'a> {
             "WEIGHT" if Self::is_position_column(func) => Ok(compute_posting_weight(
                 &ctx.transaction.postings[ctx.posting_index],
             )),
+            // `COST(position)` for the same reason (#2425): the posting still
+            // carries a `{{T}}` lot's exact total, which the `Position` value
+            // has already resolved away. Any other argument, or a posting
+            // whose cost is not booked, falls to the value path below.
+            "COST" if Self::is_position_column(func) => {
+                match compute_posting_cost(&ctx.transaction.postings[ctx.posting_index]) {
+                    Some(cost) => cost,
+                    None => self.evaluate_on_argument_values(&name, func, ctx),
+                }
+            }
             // `HAS_ACCOUNT(regex)` asks about the whole ENTRY, so like the META
             // family it needs the row's transaction rather than the evaluated
             // argument list. It was already implemented for the FROM clause in
@@ -1123,15 +1160,26 @@ impl<'a> Executor<'a> {
             // and subqueries. Unknown names fall through to its `UnknownFunction`
             // arm. This is the collapse of the formerly-duplicated lazy dispatch
             // onto `evaluate_function_on_values` (dual-eval-path unification).
-            _ => {
-                let args = func
-                    .args
-                    .iter()
-                    .map(|a| self.evaluate_expr(a, ctx))
-                    .collect::<Result<Vec<_>, _>>()?;
-                self.evaluate_function_on_values(&name, &args)
-            }
+            _ => self.evaluate_on_argument_values(&name, func, ctx),
         }
+    }
+
+    /// The value path: evaluate `func`'s arguments on this row, then the
+    /// function on those values. What every function without a lazy-path arm
+    /// takes, and what `COST(position)` falls back to when the posting's cost
+    /// is not booked.
+    fn evaluate_on_argument_values(
+        &self,
+        name: &str,
+        func: &FunctionCall,
+        ctx: &PostingContext,
+    ) -> Result<Value, QueryError> {
+        let args = func
+            .args
+            .iter()
+            .map(|a| self.evaluate_expr(a, ctx))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.evaluate_function_on_values(name, &args)
     }
 
     /// Evaluate a function with pre-evaluated arguments (for subquery context).

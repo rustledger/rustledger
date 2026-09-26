@@ -894,9 +894,9 @@ impl<'a> Executor<'a> {
                         // FROM does (#2430, #2432). A column with none adds the
                         // value alone.
                         let lot_total_idx = match func.args.as_slice() {
-                            [Expr::Column(column)] => column_map
-                                .get(&super::hidden_lot_total_column(column))
-                                .copied(),
+                            [Expr::Column(column)] => {
+                                super::hidden_index(column_map, "lot total", column, "")
+                            }
                             _ => None,
                         };
 

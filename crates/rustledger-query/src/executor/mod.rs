@@ -114,14 +114,73 @@ fn position_cost_total(units: &Amount, cost: &rustledger_core::Cost) -> Result<A
 /// so a table has one only when it was built to have it, and an alias of some
 /// other value never reaches it. `SELECT *` omits them (`wildcard_hidden`).
 pub(super) fn hidden_weight_column(column: &str) -> String {
-    format!("\u{0}weight({})", column.to_lowercase())
+    hidden_name("weight", column, "")
+}
+
+/// `\0<kind>(<column>)<suffix>`, the one spelling of every hidden column name.
+fn hidden_name(kind: &str, column: &str, suffix: &str) -> String {
+    format!("\u{0}{kind}({}){suffix}", column.to_lowercase())
+}
+
+std::thread_local! {
+    static HIDDEN_KEY: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
+}
+
+/// The index of the hidden column [`hidden_name`] names in `column_map`,
+/// without allocating: the row evaluator looks one up for every `weight`,
+/// `cost` and `sum` call on every row, and a `format!` there cost `#postings`
+/// a quarter of its instructions. `position`, the column `#postings` and most
+/// subqueries carry them for, reads a static key; any other ASCII name is
+/// lowercased into a reused buffer; and a non-ASCII one goes through
+/// [`hidden_name`], so no two paths can spell a name differently.
+pub(super) fn hidden_index(
+    column_map: &rustc_hash::FxHashMap<String, usize>,
+    kind: &str,
+    column: &str,
+    suffix: &str,
+) -> Option<usize> {
+    if column.eq_ignore_ascii_case("position")
+        && let Some(key) = position_hidden_key(kind, suffix)
+    {
+        return column_map.get(key).copied();
+    }
+    if !column.is_ascii() {
+        return column_map.get(&hidden_name(kind, column, suffix)).copied();
+    }
+    HIDDEN_KEY.with(|key| {
+        // Nothing below re-enters: the borrow covers one map lookup.
+        let mut key = key.borrow_mut();
+        key.clear();
+        key.push('\u{0}');
+        key.push_str(kind);
+        key.push('(');
+        let start = key.len();
+        key.push_str(column);
+        key[start..].make_ascii_lowercase();
+        key.push(')');
+        key.push_str(suffix);
+        column_map.get(key.as_str()).copied()
+    })
+}
+
+/// [`hidden_name`] of `position`, spelled out; pinned to it by
+/// `position_hidden_keys_are_hidden_names`.
+fn position_hidden_key(kind: &str, suffix: &str) -> Option<&'static str> {
+    Some(match (kind, suffix) {
+        ("weight", "") => "\u{0}weight(position)",
+        ("weight", " error") => "\u{0}weight(position) error",
+        ("cost", "") => "\u{0}cost(position)",
+        ("cost", " error") => "\u{0}cost(position) error",
+        ("lot total", "") => "\u{0}lot total(position)",
+        _ => return None,
+    })
 }
 
 /// The hidden column holding `cost(<column>)`, from the posting's booked cost
 /// (#2428), or NULL where computing it failed; see [`hidden_weight_column`]
 /// and [`hidden_cost_error_column`].
 pub(super) fn hidden_cost_column(column: &str) -> String {
-    format!("\u{0}cost({})", column.to_lowercase())
+    hidden_name("cost", column, "")
 }
 
 /// The hidden column saying whether computing the row's `cost(<column>)`
@@ -136,19 +195,19 @@ pub(super) fn hidden_cost_column(column: &str) -> String {
 ///   For an overflow it is the same error: the posting's cost overflows only
 ///   when it is `units × per-unit`, which is what the value path computes.
 pub(super) fn hidden_cost_error_column(column: &str) -> String {
-    format!("\u{0}cost({}) error", column.to_lowercase())
+    hidden_name("cost", column, " error")
 }
 
 /// [`hidden_cost_error_column`] for [`hidden_weight_column`].
 pub(super) fn hidden_weight_error_column(column: &str) -> String {
-    format!("\u{0}weight({}) error", column.to_lowercase())
+    hidden_name("weight", column, " error")
 }
 
 /// The hidden column holding the exact total each row's lot cost
 /// (`rustledger_booking::posting_lot_total`), else NULL, so a table's
 /// `sum(<column>)` records it as the default FROM does (#2430).
 pub(super) fn hidden_lot_total_column(column: &str) -> String {
-    format!("\u{0}lot total({})", column.to_lowercase())
+    hidden_name("lot total", column, "")
 }
 
 /// Internal functions a subquery evaluates to fill the hidden columns the
@@ -1175,20 +1234,26 @@ impl<'a> Executor<'a> {
         func: &FunctionCall,
         ctx: &PostingContext,
     ) -> Result<Value, QueryError> {
-        let name = func.name.to_uppercase();
-        match name.as_str() {
+        self.evaluate_function_named(&func.name.to_uppercase(), func, ctx)
+    }
+
+    /// [`Self::evaluate_function`] of `func`'s arguments under the upper-case
+    /// `name`, which an attempt (#2432) sets to the function it attempts.
+    fn evaluate_function_named(
+        &self,
+        name: &str,
+        func: &FunctionCall,
+        ctx: &PostingContext,
+    ) -> Result<Value, QueryError> {
+        match name {
             // The values a subquery carries in hidden columns for its outer
             // query (#2432; see `hidden_weight_column`).
             WEIGHT_OR_NULL | WEIGHT_FAILED | COST_OR_NULL | COST_FAILED => {
                 let (function, failed_half) =
-                    Self::attempt_of(&name).expect("the arm matches only attempt names");
-                let call = FunctionCall {
-                    name: function.to_string(),
-                    args: func.args.clone(),
-                };
+                    Self::attempt_of(name).expect("the arm matches only attempt names");
                 Ok(Self::attempt_value(
                     failed_half,
-                    self.evaluate_function(&call, ctx),
+                    self.evaluate_function_named(function, func, ctx),
                 ))
             }
             LOT_TOTAL => Ok(if Self::is_position_column(func) {
@@ -1203,7 +1268,7 @@ impl<'a> Executor<'a> {
             // Metadata functions read the row's `PostingContext`, so they stay
             // on the lazy path rather than routing through the value registry.
             "META" | "ENTRY_META" | "ANY_META" | "POSTING_META" => {
-                self.eval_meta_function(&name, func, ctx)
+                self.eval_meta_function(name, func, ctx)
             }
             // COALESCE short-circuits on its raw argument expressions and must
             // NOT pre-evaluate every argument, so it stays on the lazy path.
@@ -1235,7 +1300,7 @@ impl<'a> Executor<'a> {
             "COST" if Self::is_position_column(func) => {
                 match compute_posting_cost(&ctx.transaction.postings[ctx.posting_index]) {
                     Some(cost) => cost,
-                    None => self.evaluate_on_argument_values(&name, func, ctx),
+                    None => self.evaluate_on_argument_values(name, func, ctx),
                 }
             }
             // `HAS_ACCOUNT(regex)` asks about the whole ENTRY, so like the META
@@ -1275,7 +1340,7 @@ impl<'a> Executor<'a> {
             // and subqueries. Unknown names fall through to its `UnknownFunction`
             // arm. This is the collapse of the formerly-duplicated lazy dispatch
             // onto `evaluate_function_on_values` (dual-eval-path unification).
-            _ => self.evaluate_on_argument_values(&name, func, ctx),
+            _ => self.evaluate_on_argument_values(name, func, ctx),
         }
     }
 

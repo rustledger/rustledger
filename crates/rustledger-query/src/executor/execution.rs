@@ -929,6 +929,88 @@ impl Executor<'_> {
             || table_hidden.iter().any(|h| h.eq_ignore_ascii_case(name))
     }
 
+    /// [`Self::evaluate_subquery_expr`] of a call to `func`'s arguments under
+    /// the upper-case `name_upper`, which an attempt (#2432) sets to the
+    /// function it attempts.
+    fn evaluate_subquery_function(
+        &self,
+        name_upper: &str,
+        func: &FunctionCall,
+        row: &[Value],
+        column_map: &FxHashMap<String, usize>,
+    ) -> Result<Value, QueryError> {
+        // Metadata functions need row context — intercept before
+        // generic evaluate_function_on_values which loses row access.
+        if matches!(
+            name_upper,
+            "META" | "ENTRY_META" | "ANY_META" | "POSTING_META"
+        ) {
+            return self.eval_meta_on_table_row(name_upper, func, row, column_map);
+        }
+
+        // `weight`, `cost` and `sum` of a posting column need the
+        // POSTING, as on the default FROM (#1966, #2428, #2430), and a
+        // table row has only values. A table built from postings
+        // carries them in hidden columns beside that column: read them
+        // there (see `hidden_weight_column`). A column with none, an
+        // alias of some other value included, keeps the value path.
+        if let [Expr::Column(column)] = func.args.as_slice() {
+            let cell = |kind: &str, suffix: &str| {
+                super::hidden_index(column_map, kind, column, suffix).and_then(|i| row.get(i))
+            };
+            // The hidden value, unless computing it failed: an error
+            // message is raised (`#postings`), and TRUE takes the
+            // value path, which raises the error itself.
+            let hidden = |kind: &str| {
+                let value = cell(kind, "")?;
+                match cell(kind, " error") {
+                    Some(Value::Boolean(true)) => None,
+                    Some(Value::String(message)) => {
+                        Some(Err(QueryError::Evaluation(message.clone())))
+                    }
+                    _ => Some(Ok(value.clone())),
+                }
+            };
+            match name_upper {
+                "WEIGHT" => {
+                    if let Some(weight) = hidden("weight") {
+                        return weight;
+                    }
+                }
+                "COST" => {
+                    if let Some(cost) = hidden("cost") {
+                        return cost;
+                    }
+                }
+                super::LOT_TOTAL => {
+                    return Ok(cell("lot total", "").cloned().unwrap_or(Value::Null));
+                }
+                _ => {}
+            }
+        }
+        if name_upper == super::LOT_TOTAL {
+            return Ok(Value::Null);
+        }
+        if let Some((function, failed_half)) = Self::attempt_of(name_upper) {
+            let result = self.evaluate_subquery_function(function, func, row, column_map);
+            return Ok(Self::attempt_value(failed_half, result));
+        }
+
+        // Evaluate function arguments.
+        let args: Vec<Value> = func
+            .args
+            .iter()
+            .map(|a| {
+                if matches!(a, Expr::Wildcard) {
+                    Ok(Value::Null)
+                } else {
+                    self.evaluate_subquery_expr(a, row, column_map)
+                }
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        self.evaluate_function_on_values(name_upper, &args)
+    }
+
     /// Evaluate a filter expression against a subquery row.
     pub(super) fn evaluate_subquery_filter(
         &self,
@@ -978,85 +1060,7 @@ impl Executor<'_> {
                     ));
                 }
 
-                // Metadata functions need row context — intercept before
-                // generic evaluate_function_on_values which loses row access.
-                let name_upper = func.name.to_uppercase();
-                if matches!(
-                    name_upper.as_str(),
-                    "META" | "ENTRY_META" | "ANY_META" | "POSTING_META"
-                ) {
-                    return self.eval_meta_on_table_row(&name_upper, func, row, column_map);
-                }
-
-                // `weight`, `cost` and `sum` of a posting column need the
-                // POSTING, as on the default FROM (#1966, #2428, #2430), and a
-                // table row has only values. A table built from postings
-                // carries them in hidden columns beside that column: read them
-                // there (see `hidden_weight_column`). A column with none, an
-                // alias of some other value included, keeps the value path.
-                if let [Expr::Column(column)] = func.args.as_slice() {
-                    let cell = |name: String| column_map.get(&name).and_then(|&i| row.get(i));
-                    // The hidden value, unless computing it failed: an error
-                    // message is raised (`#postings`), and TRUE takes the
-                    // value path, which raises the error itself.
-                    let hidden = |value: String, error: String| match (cell(value), cell(error)) {
-                        (None, _) | (_, Some(Value::Boolean(true))) => None,
-                        (_, Some(Value::String(message))) => {
-                            Some(Err(QueryError::Evaluation(message.clone())))
-                        }
-                        (Some(value), _) => Some(Ok(value.clone())),
-                    };
-                    match name_upper.as_str() {
-                        "WEIGHT" => {
-                            if let Some(weight) = hidden(
-                                super::hidden_weight_column(column),
-                                super::hidden_weight_error_column(column),
-                            ) {
-                                return weight;
-                            }
-                        }
-                        "COST" => {
-                            if let Some(cost) = hidden(
-                                super::hidden_cost_column(column),
-                                super::hidden_cost_error_column(column),
-                            ) {
-                                return cost;
-                            }
-                        }
-                        super::LOT_TOTAL => {
-                            return Ok(cell(super::hidden_lot_total_column(column))
-                                .cloned()
-                                .unwrap_or(Value::Null));
-                        }
-                        _ => {}
-                    }
-                }
-                if name_upper == super::LOT_TOTAL {
-                    return Ok(Value::Null);
-                }
-                if let Some((function, failed_half)) = Self::attempt_of(&name_upper) {
-                    let call = FunctionCall {
-                        name: function.to_string(),
-                        args: func.args.clone(),
-                    };
-                    let result =
-                        self.evaluate_subquery_expr(&Expr::Function(call), row, column_map);
-                    return Ok(Self::attempt_value(failed_half, result));
-                }
-
-                // Evaluate function arguments.
-                let args: Vec<Value> = func
-                    .args
-                    .iter()
-                    .map(|a| {
-                        if matches!(a, Expr::Wildcard) {
-                            Ok(Value::Null)
-                        } else {
-                            self.evaluate_subquery_expr(a, row, column_map)
-                        }
-                    })
-                    .collect::<Result<Vec<_>, _>>()?;
-                self.evaluate_function_on_values(&func.name, &args)
+                self.evaluate_subquery_function(&func.name.to_uppercase(), func, row, column_map)
             }
             Expr::BinaryOp(op) => {
                 let left = self.evaluate_subquery_expr(&op.left, row, column_map)?;

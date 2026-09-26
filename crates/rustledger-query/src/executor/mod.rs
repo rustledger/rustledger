@@ -118,18 +118,30 @@ pub(super) fn hidden_weight_column(column: &str) -> String {
 }
 
 /// The hidden column holding `cost(<column>)`, from the posting's booked cost
-/// (#2428), or NULL where computing it overflowed; see
-/// [`hidden_weight_column`] and [`hidden_cost_error_column`].
+/// (#2428), or NULL where computing it failed; see [`hidden_weight_column`]
+/// and [`hidden_cost_error_column`].
 pub(super) fn hidden_cost_column(column: &str) -> String {
     format!("\u{0}cost({})", column.to_lowercase())
 }
 
-/// The hidden column holding the error `cost(<column>)` raised for the row,
-/// else NULL. A table computes every row's cost whether or not a query reads
-/// it, so an overflow must fail only a query that does, as on the default
-/// FROM, which computes it only when asked; the row evaluator raises it then.
+/// The hidden column saying whether computing the row's `cost(<column>)`
+/// failed, else NULL. A table computes every row's value whether or not a
+/// query reads it, so a failure must fail only a query that does, as on the
+/// default FROM, which computes it only when asked. It holds either:
+///
+/// - the message of the overflow `#postings` hit, raised when a query reads
+///   the row's `cost(<column>)`; or
+/// - TRUE, from a subquery: the row evaluator takes the value path instead,
+///   which raises the same error, of the same kind, for a row a query reads.
+///   For an overflow it is the same error: the posting's cost overflows only
+///   when it is `units × per-unit`, which is what the value path computes.
 pub(super) fn hidden_cost_error_column(column: &str) -> String {
     format!("\u{0}cost({}) error", column.to_lowercase())
+}
+
+/// [`hidden_cost_error_column`] for [`hidden_weight_column`].
+pub(super) fn hidden_weight_error_column(column: &str) -> String {
+    format!("\u{0}weight({}) error", column.to_lowercase())
 }
 
 /// The hidden column holding the exact total each row's lot cost
@@ -141,14 +153,18 @@ pub(super) fn hidden_lot_total_column(column: &str) -> String {
 
 /// Internal functions a subquery evaluates to fill the hidden columns the
 /// outer query needs (#2432). NUL-prefixed like the columns, so no query can
-/// call them. [`COST_OR_NULL`] is `cost()` with an overflow as NULL and
-/// [`COST_ERROR`] is that overflow's message, the pair
-/// [`hidden_cost_column`] and [`hidden_cost_error_column`] hold;
-/// [`LOT_TOTAL`] is the posting's lot total.
+/// call them. [`WEIGHT_OR_NULL`] is `weight()`, NULL if it fails, and
+/// [`WEIGHT_FAILED`] is TRUE if it fails, the pair [`hidden_weight_column`]
+/// and [`hidden_weight_error_column`] hold; the `COST` pair likewise.
+/// [`LOT_TOTAL`] is the posting's lot total, which cannot fail.
+pub(super) const WEIGHT_OR_NULL: &str = "\u{0}WEIGHT";
+/// See [`WEIGHT_OR_NULL`].
+pub(super) const WEIGHT_FAILED: &str = "\u{0}WEIGHT FAILED";
+/// See [`WEIGHT_OR_NULL`].
 pub(super) const COST_OR_NULL: &str = "\u{0}COST";
-/// See [`COST_OR_NULL`].
-pub(super) const COST_ERROR: &str = "\u{0}COST ERROR";
-/// See [`COST_OR_NULL`].
+/// See [`WEIGHT_OR_NULL`].
+pub(super) const COST_FAILED: &str = "\u{0}COST FAILED";
+/// See [`WEIGHT_OR_NULL`].
 pub(super) const LOT_TOTAL: &str = "\u{0}LOT TOTAL";
 
 pub(super) fn compute_posting_weight(posting: &rustledger_core::Posting) -> Value {
@@ -1131,23 +1147,26 @@ impl<'a> Executor<'a> {
         )
     }
 
-    /// [`COST_OR_NULL`] or [`COST_ERROR`] of a `cost()` result: an overflow,
-    /// the only error `cost()` of a posting value raises, becomes NULL or its
-    /// message, so the subquery that computes it for a hidden column does not
-    /// fail for a row no one reads (#2432). Any other error still fails.
-    pub(super) fn split_cost(
-        name_upper: &str,
-        cost: Result<Value, QueryError>,
-    ) -> Result<Value, QueryError> {
-        let want_error = name_upper == COST_ERROR;
-        match cost {
-            Ok(cost) => Ok(if want_error { Value::Null } else { cost }),
-            Err(QueryError::Evaluation(message)) => Ok(if want_error {
-                Value::String(message)
-            } else {
-                Value::Null
-            }),
-            Err(other) => Err(other),
+    /// The function one of the attempt pairs ([`WEIGHT_OR_NULL`] and the
+    /// rest) calls, and whether it is the half reporting failure.
+    pub(super) fn attempt_of(name_upper: &str) -> Option<(&'static str, bool)> {
+        match name_upper {
+            WEIGHT_OR_NULL => Some(("WEIGHT", false)),
+            WEIGHT_FAILED => Some(("WEIGHT", true)),
+            COST_OR_NULL => Some(("COST", false)),
+            COST_FAILED => Some(("COST", true)),
+            _ => None,
+        }
+    }
+
+    /// An attempt's value: the result, or NULL if it failed; or, for the half
+    /// reporting failure, TRUE if it failed, else NULL. Never an error, so the
+    /// subquery computing it does not fail for a row no one reads (#2432).
+    pub(super) fn attempt_value(failed_half: bool, result: Result<Value, QueryError>) -> Value {
+        match (result, failed_half) {
+            (Ok(value), false) => value,
+            (Err(_), true) => Value::Boolean(true),
+            (Ok(_), true) | (Err(_), false) => Value::Null,
         }
     }
 
@@ -1160,12 +1179,17 @@ impl<'a> Executor<'a> {
         match name.as_str() {
             // The values a subquery carries in hidden columns for its outer
             // query (#2432; see `hidden_weight_column`).
-            COST_OR_NULL | COST_ERROR => {
-                let cost = FunctionCall {
-                    name: "COST".to_string(),
+            WEIGHT_OR_NULL | WEIGHT_FAILED | COST_OR_NULL | COST_FAILED => {
+                let (function, failed_half) =
+                    Self::attempt_of(&name).expect("the arm matches only attempt names");
+                let call = FunctionCall {
+                    name: function.to_string(),
                     args: func.args.clone(),
                 };
-                Self::split_cost(&name, self.evaluate_function(&cost, ctx))
+                Ok(Self::attempt_value(
+                    failed_half,
+                    self.evaluate_function(&call, ctx),
+                ))
             }
             LOT_TOTAL => Ok(if Self::is_position_column(func) {
                 let posting = &ctx.transaction.postings[ctx.posting_index];

@@ -264,3 +264,28 @@ fn an_overflowing_cost_fails_only_the_query_that_reads_it() {
         );
     }
 }
+
+/// The subquery computes each value for every row, but whether it fails is
+/// the outer query's business: `weight` or `cost` of a column that is no
+/// position fails only for a row the outer query reads, and with the error
+/// it gives without a subquery, not for rows its WHERE drops.
+#[test]
+fn a_failing_value_fails_only_for_a_row_the_outer_query_reads() {
+    let directives = booked(LEDGER);
+    for function in ["weight", "cost"] {
+        for inner in ["SELECT account", "SELECT account FROM #postings WHERE true"] {
+            let filtered = run(
+                &directives,
+                &format!("SELECT {function}(account) FROM ({inner}) WHERE account = 'none'"),
+            )
+            .unwrap_or_else(|e| panic!("{function}, {inner}: {e}"));
+            assert!(filtered.1.is_empty(), "{function}, {inner}");
+            let err = run(
+                &directives,
+                &format!("SELECT {function}(account) FROM ({inner})"),
+            )
+            .expect_err("an account is not a position");
+            assert!(err.starts_with("type error"), "{function}, {inner}: {err}");
+        }
+    }
+}

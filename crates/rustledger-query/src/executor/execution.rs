@@ -352,8 +352,8 @@ impl Executor<'_> {
                 && let [Expr::Column(column)] = call.args.as_slice()
             {
                 let kind = match call.name.to_uppercase().as_str() {
-                    "WEIGHT" => "weight",
-                    "COST" | super::COST_OR_NULL | super::COST_ERROR => "cost",
+                    "WEIGHT" | super::WEIGHT_OR_NULL | super::WEIGHT_FAILED => "weight",
+                    "COST" | super::COST_OR_NULL | super::COST_FAILED => "cost",
                     "SUM" | super::LOT_TOTAL => "lot total",
                     _ => return,
                 };
@@ -415,23 +415,29 @@ impl Executor<'_> {
                 }),
                 alias: Some(alias),
             };
-            match kind {
-                "weight" => targets.push(hidden("WEIGHT", super::hidden_weight_column(&column))),
-                "cost" => {
+            let (value, failed, value_column, error_column) = match kind {
+                "weight" => (
+                    super::WEIGHT_OR_NULL,
+                    super::WEIGHT_FAILED,
+                    super::hidden_weight_column(&column),
+                    super::hidden_weight_error_column(&column),
+                ),
+                "cost" => (
+                    super::COST_OR_NULL,
+                    super::COST_FAILED,
+                    super::hidden_cost_column(&column),
+                    super::hidden_cost_error_column(&column),
+                ),
+                _ => {
                     targets.push(hidden(
-                        super::COST_OR_NULL,
-                        super::hidden_cost_column(&column),
+                        super::LOT_TOTAL,
+                        super::hidden_lot_total_column(&column),
                     ));
-                    targets.push(hidden(
-                        super::COST_ERROR,
-                        super::hidden_cost_error_column(&column),
-                    ));
+                    continue;
                 }
-                _ => targets.push(hidden(
-                    super::LOT_TOTAL,
-                    super::hidden_lot_total_column(&column),
-                )),
-            }
+            };
+            targets.push(hidden(value, value_column));
+            targets.push(hidden(failed, error_column));
         }
         (targets.len() > inner.targets.len()).then(|| SelectQuery {
             targets,
@@ -990,20 +996,31 @@ impl Executor<'_> {
                 // alias of some other value included, keeps the value path.
                 if let [Expr::Column(column)] = func.args.as_slice() {
                     let cell = |name: String| column_map.get(&name).and_then(|&i| row.get(i));
+                    // The hidden value, unless computing it failed: an error
+                    // message is raised (`#postings`), and TRUE takes the
+                    // value path, which raises the error itself.
+                    let hidden = |value: String, error: String| match (cell(value), cell(error)) {
+                        (None, _) | (_, Some(Value::Boolean(true))) => None,
+                        (_, Some(Value::String(message))) => {
+                            Some(Err(QueryError::Evaluation(message.clone())))
+                        }
+                        (Some(value), _) => Some(Ok(value.clone())),
+                    };
                     match name_upper.as_str() {
                         "WEIGHT" => {
-                            if let Some(weight) = cell(super::hidden_weight_column(column)) {
-                                return Ok(weight.clone());
+                            if let Some(weight) = hidden(
+                                super::hidden_weight_column(column),
+                                super::hidden_weight_error_column(column),
+                            ) {
+                                return weight;
                             }
                         }
                         "COST" => {
-                            if let Some(cost) = cell(super::hidden_cost_column(column)) {
-                                if let Some(Value::String(message)) =
-                                    cell(super::hidden_cost_error_column(column))
-                                {
-                                    return Err(QueryError::Evaluation(message.clone()));
-                                }
-                                return Ok(cost.clone());
+                            if let Some(cost) = hidden(
+                                super::hidden_cost_column(column),
+                                super::hidden_cost_error_column(column),
+                            ) {
+                                return cost;
                             }
                         }
                         super::LOT_TOTAL => {
@@ -1017,13 +1034,14 @@ impl Executor<'_> {
                 if name_upper == super::LOT_TOTAL {
                     return Ok(Value::Null);
                 }
-                if name_upper == super::COST_OR_NULL || name_upper == super::COST_ERROR {
-                    let cost = FunctionCall {
-                        name: "COST".to_string(),
+                if let Some((function, failed_half)) = Self::attempt_of(&name_upper) {
+                    let call = FunctionCall {
+                        name: function.to_string(),
                         args: func.args.clone(),
                     };
-                    let cost = self.evaluate_subquery_expr(&Expr::Function(cost), row, column_map);
-                    return Self::split_cost(&name_upper, cost);
+                    let result =
+                        self.evaluate_subquery_expr(&Expr::Function(call), row, column_map);
+                    return Ok(Self::attempt_value(failed_half, result));
                 }
 
                 // Evaluate function arguments.

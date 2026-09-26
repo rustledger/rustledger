@@ -560,9 +560,36 @@ impl Executor<'_> {
             } else {
                 ""
             };
-            return Err(QueryError::Evaluation(format!(
-                "table '{table_name}' does not exist{hint}"
-            )));
+            let missing =
+                || QueryError::Evaluation(format!("table '{table_name}' does not exist{hint}"));
+            // A bare name that is no table is an expression, the FROM filter,
+            // as beanquery reads it: `FROM flag` filters on `flag`. The parser
+            // cannot tell the two apart, so it hands every such name here.
+            // (It read `FROM flag;` and a subquery's `FROM flag)` as filters
+            // only because it could not parse a table there, #2435, and
+            // `FROM flag` alone as a missing table.) A name that is no column
+            // either is still reported as the table it was written as.
+            if !table_name.starts_with('#')
+                && let Some(from) = &query.from
+            {
+                let as_filter = SelectQuery {
+                    from: Some(crate::ast::FromClause {
+                        table_name: None,
+                        filter: Some(Expr::Column(table_name.to_string())),
+                        ..from.clone()
+                    }),
+                    ..query.clone()
+                };
+                return match self.execute_select(&as_filter) {
+                    Err(QueryError::UnknownColumn(column))
+                        if column.eq_ignore_ascii_case(table_name) =>
+                    {
+                        Err(missing())
+                    }
+                    result => result,
+                };
+            }
+            return Err(missing());
         };
 
         // Build a column name -> index mapping for the table

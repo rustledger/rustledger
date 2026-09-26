@@ -98,6 +98,28 @@ fn position_cost_total(units: &Amount, cost: &rustledger_core::Cost) -> Result<A
     Ok(Amount::new(total, cost.currency.clone()))
 }
 
+/// `#postings`' hidden column holding each row's `weight(position)`: the
+/// posting's canonical weight, as the default FROM computes it (#1966, #2429).
+///
+/// Named with a leading NUL, which no query can type and no column header can
+/// contain (a subquery's header is its rendered expression), so a table carries
+/// it only when `build_postings_table` put it there. That is what makes routing
+/// `weight(position)` to it safe: a subquery that aliases some other value as
+/// `weight` or `position` never reaches it.
+pub(super) const POSTING_WEIGHT_COLUMN: &str = "\u{0}weight(position)";
+
+/// `#postings`' hidden column holding each row's `cost(position)`, from the
+/// posting's booked cost as the default FROM computes it (#2428, #2429). See
+/// [`POSTING_WEIGHT_COLUMN`] for why the name starts with NUL.
+pub(super) const POSTING_COST_COLUMN: &str = "\u{0}cost(position)";
+
+/// `#postings`' hidden column holding the error `cost(position)` raised for
+/// the row, else NULL. The cost is computed for every row whether or not the
+/// query asks for it, so a lot whose cost overflows must not fail a query that
+/// never reads it (`SELECT account FROM #postings`); the default FROM computes
+/// it only when asked, and raises it then. The route raises it the same way.
+pub(super) const POSTING_COST_ERROR_COLUMN: &str = "\u{0}cost(position) error";
+
 pub(super) fn compute_posting_weight(posting: &rustledger_core::Posting) -> Value {
     rustledger_booking::posting_weight(posting).map_or(Value::Null, Value::Amount)
 }

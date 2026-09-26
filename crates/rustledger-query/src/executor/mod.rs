@@ -1117,13 +1117,11 @@ impl<'a> Executor<'a> {
             // carries a `{{T}}` lot's exact total, which the `Position` value
             // has already resolved away. Any other argument, or a posting
             // whose cost is not booked, falls to the value path below.
-            "COST"
-                if Self::is_position_column(func)
-                    && compute_posting_cost(&ctx.transaction.postings[ctx.posting_index])
-                        .is_some() =>
-            {
-                compute_posting_cost(&ctx.transaction.postings[ctx.posting_index])
-                    .expect("the guard just computed it")
+            "COST" if Self::is_position_column(func) => {
+                match compute_posting_cost(&ctx.transaction.postings[ctx.posting_index]) {
+                    Some(cost) => cost,
+                    None => self.evaluate_on_argument_values(&name, func, ctx),
+                }
             }
             // `HAS_ACCOUNT(regex)` asks about the whole ENTRY, so like the META
             // family it needs the row's transaction rather than the evaluated
@@ -1162,15 +1160,26 @@ impl<'a> Executor<'a> {
             // and subqueries. Unknown names fall through to its `UnknownFunction`
             // arm. This is the collapse of the formerly-duplicated lazy dispatch
             // onto `evaluate_function_on_values` (dual-eval-path unification).
-            _ => {
-                let args = func
-                    .args
-                    .iter()
-                    .map(|a| self.evaluate_expr(a, ctx))
-                    .collect::<Result<Vec<_>, _>>()?;
-                self.evaluate_function_on_values(&name, &args)
-            }
+            _ => self.evaluate_on_argument_values(&name, func, ctx),
         }
+    }
+
+    /// The value path: evaluate `func`'s arguments on this row, then the
+    /// function on those values. What every function without a lazy-path arm
+    /// takes, and what `COST(position)` falls back to when the posting's cost
+    /// is not booked.
+    fn evaluate_on_argument_values(
+        &self,
+        name: &str,
+        func: &FunctionCall,
+        ctx: &PostingContext,
+    ) -> Result<Value, QueryError> {
+        let args = func
+            .args
+            .iter()
+            .map(|a| self.evaluate_expr(a, ctx))
+            .collect::<Result<Vec<_>, _>>()?;
+        self.evaluate_function_on_values(name, &args)
     }
 
     /// Evaluate a function with pre-evaluated arguments (for subquery context).

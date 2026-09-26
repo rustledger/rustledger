@@ -1033,7 +1033,11 @@ impl Executor<'_> {
                         Position::from_posting(units, posting.cost.as_deref(), txn.date)
                     });
 
-                    if let Some(ref p) = pos {
+                    // `AT COST` shows `cost_balance` instead (see below), so
+                    // this running balance is only kept for the other modes.
+                    if let Some(ref p) = pos
+                        && !matches!(at_mode, AtMode::Cost)
+                    {
                         cumulative_balance
                             .add(p.clone())
                             .map_err(|e| QueryError::Evaluation(e.to_string()))?;

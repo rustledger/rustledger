@@ -285,7 +285,8 @@ subquery that passes the posting column through, as in
 `FROM (SELECT account, position)`, renamed, nested, or from its `SELECT *`.
 A column the subquery computes (`units(position) AS position`), or one from a
 DISTINCT or grouped subquery, is a value and has no posting to read: its
-`weight` is its units and its `cost` is `units × per-unit`.
+`weight` skips any price (`units × per-unit` for a lot held at cost, else its
+units), and its `cost` is `units × per-unit`, rounded as the per-unit cost is.
 
 `cost()` of an inventory, such as `cost(sum(position))`, is an inventory of
 what each lot cost, per currency, as in bean-query: an account holding

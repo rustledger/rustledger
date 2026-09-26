@@ -98,33 +98,58 @@ fn position_cost_total(units: &Amount, cost: &rustledger_core::Cost) -> Result<A
     Ok(Amount::new(total, cost.currency.clone()))
 }
 
-/// `#postings`' hidden column holding each row's `weight(position)`: the
-/// posting's canonical weight, as the default FROM computes it (#1966, #2429).
+/// The hidden column holding `weight(<column>)` for each row of a table: the
+/// posting's canonical weight, as the default FROM computes it (#1966).
 ///
-/// Named with a leading NUL, which no query can type and no column header can
-/// contain (a subquery's header is its rendered expression), so a table carries
-/// it only when `build_postings_table` put it there. That is what makes routing
-/// `weight(position)` to it safe: a subquery that aliases some other value as
-/// `weight` or `position` never reaches it.
-pub(super) const POSTING_WEIGHT_COLUMN: &str = "\u{0}weight(position)";
+/// `weight`, `cost` and `sum` of the posting column need the POSTING, and a
+/// table row has only values: a `Position` has no price, which `weight` ranks
+/// second, and not the total a `{{T}}` cost carries. So a table whose rows
+/// come from postings carries these values beside the column: `#postings`
+/// computes them for `position` (#2429, #2430), and a subquery computes them
+/// for whichever of its columns the outer query asks about (#2432). The row
+/// evaluator reads them in place of the value path.
+///
+/// Every such name starts with NUL, which no query can type and no header
+/// can contain (a column is named by its alias or its rendered expression),
+/// so a table has one only when it was built to have it, and an alias of some
+/// other value never reaches it. `SELECT *` omits them (`wildcard_hidden`).
+pub(super) fn hidden_weight_column(column: &str) -> String {
+    format!("\u{0}weight({})", column.to_lowercase())
+}
 
-/// `#postings`' hidden column holding each row's `cost(position)`, from the
-/// posting's booked cost as the default FROM computes it (#2428, #2429). See
-/// [`POSTING_WEIGHT_COLUMN`] for why the name starts with NUL.
-pub(super) const POSTING_COST_COLUMN: &str = "\u{0}cost(position)";
+/// The hidden column holding `cost(<column>)`, from the posting's booked cost
+/// (#2428), or NULL where computing it overflowed; see
+/// [`hidden_weight_column`] and [`hidden_cost_error_column`].
+pub(super) fn hidden_cost_column(column: &str) -> String {
+    format!("\u{0}cost({})", column.to_lowercase())
+}
 
-/// `#postings`' hidden column holding the error `cost(position)` raised for
-/// the row, else NULL. The cost is computed for every row whether or not the
-/// query asks for it, so a lot whose cost overflows must not fail a query that
-/// never reads it (`SELECT account FROM #postings`); the default FROM computes
-/// it only when asked, and raises it then. The route raises it the same way.
-pub(super) const POSTING_COST_ERROR_COLUMN: &str = "\u{0}cost(position) error";
+/// The hidden column holding the error `cost(<column>)` raised for the row,
+/// else NULL. A table computes every row's cost whether or not a query reads
+/// it, so an overflow must fail only a query that does, as on the default
+/// FROM, which computes it only when asked; the row evaluator raises it then.
+pub(super) fn hidden_cost_error_column(column: &str) -> String {
+    format!("\u{0}cost({}) error", column.to_lowercase())
+}
 
-/// `#postings`' hidden column holding the exact total each row's lot cost
-/// (`rustledger_booking::posting_lot_total`), else NULL, so the table's
-/// `sum(position)` records it as the default FROM does (#2430). See
-/// [`POSTING_WEIGHT_COLUMN`] for why the name starts with NUL.
-pub(super) const POSTING_LOT_TOTAL_COLUMN: &str = "\u{0}lot total(position)";
+/// The hidden column holding the exact total each row's lot cost
+/// (`rustledger_booking::posting_lot_total`), else NULL, so a table's
+/// `sum(<column>)` records it as the default FROM does (#2430).
+pub(super) fn hidden_lot_total_column(column: &str) -> String {
+    format!("\u{0}lot total({})", column.to_lowercase())
+}
+
+/// Internal functions a subquery evaluates to fill the hidden columns the
+/// outer query needs (#2432). NUL-prefixed like the columns, so no query can
+/// call them. [`COST_OR_NULL`] is `cost()` with an overflow as NULL and
+/// [`COST_ERROR`] is that overflow's message, the pair
+/// [`hidden_cost_column`] and [`hidden_cost_error_column`] hold;
+/// [`LOT_TOTAL`] is the posting's lot total.
+pub(super) const COST_OR_NULL: &str = "\u{0}COST";
+/// See [`COST_OR_NULL`].
+pub(super) const COST_ERROR: &str = "\u{0}COST ERROR";
+/// See [`COST_OR_NULL`].
+pub(super) const LOT_TOTAL: &str = "\u{0}LOT TOTAL";
 
 pub(super) fn compute_posting_weight(posting: &rustledger_core::Posting) -> Value {
     rustledger_booking::posting_weight(posting).map_or(Value::Null, Value::Amount)
@@ -1106,6 +1131,26 @@ impl<'a> Executor<'a> {
         )
     }
 
+    /// [`COST_OR_NULL`] or [`COST_ERROR`] of a `cost()` result: an overflow,
+    /// the only error `cost()` of a posting value raises, becomes NULL or its
+    /// message, so the subquery that computes it for a hidden column does not
+    /// fail for a row no one reads (#2432). Any other error still fails.
+    pub(super) fn split_cost(
+        name_upper: &str,
+        cost: Result<Value, QueryError>,
+    ) -> Result<Value, QueryError> {
+        let want_error = name_upper == COST_ERROR;
+        match cost {
+            Ok(cost) => Ok(if want_error { Value::Null } else { cost }),
+            Err(QueryError::Evaluation(message)) => Ok(if want_error {
+                Value::String(message)
+            } else {
+                Value::Null
+            }),
+            Err(other) => Err(other),
+        }
+    }
+
     fn evaluate_function(
         &self,
         func: &FunctionCall,
@@ -1113,6 +1158,24 @@ impl<'a> Executor<'a> {
     ) -> Result<Value, QueryError> {
         let name = func.name.to_uppercase();
         match name.as_str() {
+            // The values a subquery carries in hidden columns for its outer
+            // query (#2432; see `hidden_weight_column`).
+            COST_OR_NULL | COST_ERROR => {
+                let cost = FunctionCall {
+                    name: "COST".to_string(),
+                    args: func.args.clone(),
+                };
+                Self::split_cost(&name, self.evaluate_function(&cost, ctx))
+            }
+            LOT_TOTAL => Ok(if Self::is_position_column(func) {
+                let posting = &ctx.transaction.postings[ctx.posting_index];
+                posting
+                    .amount()
+                    .and_then(|units| rustledger_booking::posting_lot_total(posting, units))
+                    .map_or(Value::Null, Value::Number)
+            } else {
+                Value::Null
+            }),
             // Metadata functions read the row's `PostingContext`, so they stay
             // on the lazy path rather than routing through the value registry.
             "META" | "ENTRY_META" | "ANY_META" | "POSTING_META" => {
@@ -2834,6 +2897,40 @@ fn output_references_column(query: &SelectQuery, name: &str) -> bool {
 /// metadata functions are dispatched by name and then read the hidden
 /// `_entry_meta` / `_posting_meta` columns off the row, so a projection that
 /// gated on column references alone would drop the data they need (#2169).
+/// Call `visit` on `expr` and every expression inside it, in the clauses
+/// [`expr_references_column`] walks.
+fn visit_expr<'e>(expr: &'e Expr, visit: &mut impl FnMut(&'e Expr)) {
+    visit(expr);
+    match expr {
+        Expr::Function(call) => call.args.iter().for_each(|a| visit_expr(a, visit)),
+        Expr::Window(call) => {
+            call.args.iter().for_each(|a| visit_expr(a, visit));
+            for p in call.over.partition_by.iter().flatten() {
+                visit_expr(p, visit);
+            }
+            for o in call.over.order_by.iter().flatten() {
+                visit_expr(&o.expr, visit);
+            }
+        }
+        Expr::Attribute { operand, .. } | Expr::Subscript { operand, .. } => {
+            visit_expr(operand, visit);
+        }
+        Expr::BinaryOp(op) => {
+            visit_expr(&op.left, visit);
+            visit_expr(&op.right, visit);
+        }
+        Expr::UnaryOp(op) => visit_expr(&op.operand, visit),
+        Expr::Paren(inner) => visit_expr(inner, visit),
+        Expr::Between { value, low, high } => {
+            visit_expr(value, visit);
+            visit_expr(low, visit);
+            visit_expr(high, visit);
+        }
+        Expr::Set(items) => items.iter().for_each(|i| visit_expr(i, visit)),
+        Expr::Column(_) | Expr::Wildcard | Expr::Literal(_) => {}
+    }
+}
+
 fn expr_calls_any_function(expr: &Expr, names: &[&str]) -> bool {
     let hit = |e: &Expr| expr_calls_any_function(e, names);
     match expr {

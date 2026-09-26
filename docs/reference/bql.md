@@ -280,7 +280,12 @@ is exactly zero. bean-query multiplies the rounded per-unit cost back out and
 gives 500.0000000000000000000000001. `BALANCES AT COST` values a held lot at
 its total the same way, and `JOURNAL ... AT COST` shows each row's exact cost
 and a running balance of them. `SELECT ... FROM #postings` gives the same
-`cost(position)` and `weight(position)` as the default FROM.
+`cost(position)` and `weight(position)` as the default FROM, and so does a
+subquery that passes the posting column through, as in
+`FROM (SELECT account, position)`, renamed, nested, or from its `SELECT *`.
+A column the subquery computes (`units(position) AS position`), or one from a
+DISTINCT or grouped subquery, is a value and has no posting to read: its
+`weight` is its units and its `cost` is `units × per-unit`.
 
 `cost()` of an inventory, such as `cost(sum(position))`, is an inventory of
 what each lot cost, per currency, as in bean-query: an account holding

@@ -131,14 +131,47 @@ fn cost_of_sum_of_position_agrees_across_from_clauses() {
     }
 }
 
-/// The hidden columns stay out of `SELECT *`.
+/// The hidden columns stay out of `SELECT *`: its columns are exactly the
+/// table's visible ones.
 #[test]
 fn select_star_does_not_show_the_hidden_columns() {
     let directives = booked();
     let (columns, _) = query(&directives, "SELECT * FROM #postings LIMIT 1");
-    assert!(
-        columns.iter().all(|c| !c.starts_with('\u{0}')),
-        "hidden columns leaked into SELECT *: {columns:?}"
+    assert_eq!(
+        columns,
+        [
+            "type",
+            "id",
+            "date",
+            "year",
+            "month",
+            "day",
+            "filename",
+            "lineno",
+            "location",
+            "flag",
+            "payee",
+            "narration",
+            "description",
+            "tags",
+            "links",
+            "posting_flag",
+            "account",
+            "other_accounts",
+            "number",
+            "currency",
+            "cost_number",
+            "cost_currency",
+            "cost_date",
+            "cost_label",
+            "position",
+            "price",
+            "weight",
+            "balance",
+            "account_balance",
+            "meta",
+            "accounts",
+        ]
     );
 }
 

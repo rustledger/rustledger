@@ -4,7 +4,7 @@ use rust_decimal::Decimal;
 
 use crate::ast::{BinaryOp, BinaryOperator, UnaryOp, UnaryOperator};
 use crate::error::QueryError;
-use rustledger_core::NaiveDate;
+use rustledger_core::{Amount, NaiveDate, Position};
 
 use super::Executor;
 use super::types::{DayCount, Interval, PostingContext, Value};
@@ -514,6 +514,38 @@ impl Executor<'_> {
         }
     }
 
+    /// ORDER BY's order for amounts: currency, then number, as beancount's
+    /// `amount.sortkey` orders them (#2445).
+    fn amount_order(a: &Amount, b: &Amount) -> std::cmp::Ordering {
+        a.currency
+            .as_str()
+            .cmp(b.currency.as_str())
+            .then_with(|| a.number.cmp(&b.number))
+    }
+
+    /// ORDER BY's order for positions: units currency, then cost number,
+    /// cost currency, and units number, a position with no cost counting as
+    /// cost `0` in `""`. That is beancount's `Position.sortkey` except its
+    /// first key. beancount ranks the units currency by a fixed list (`USD`,
+    /// `EUR`, `JPY`, `CAD`, `GBP`, `AUD`, `NZD`, `CHF`) and every other
+    /// currency by the LENGTH of its name, which its own comment calls
+    /// alphabetical: all other three-letter currencies tie, and interleave by
+    /// number, the fault this order exists to fix. Plain currency order
+    /// instead, a deliberate divergence (#2445).
+    fn position_order(a: &Position, b: &Position) -> std::cmp::Ordering {
+        fn cost(p: &Position) -> (Decimal, &str) {
+            p.cost
+                .as_ref()
+                .map_or((Decimal::ZERO, ""), |c| (c.number, c.currency.as_str()))
+        }
+        a.units
+            .currency
+            .as_str()
+            .cmp(b.units.currency.as_str())
+            .then_with(|| cost(a).cmp(&cost(b)))
+            .then_with(|| a.units.number.cmp(&b.units.number))
+    }
+
     /// Compare two values for sorting purposes.
     pub(super) fn compare_values_for_sort(
         &self,
@@ -535,16 +567,17 @@ impl Executor<'_> {
             (Value::String(a), Value::String(b)) => a.cmp(b),
             (Value::Date(a), Value::Date(b)) => a.cmp(b),
             (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
-            // Compare amounts by their numeric value (same currency assumed)
-            (Value::Amount(a), Value::Amount(b)) => a.number.cmp(&b.number),
-            // Compare positions by their units' numeric value
-            (Value::Position(a), Value::Position(b)) => a.units.number.cmp(&b.units.number),
-            // Compare inventories by first position's value (for single-currency)
+            // Amounts by currency, then number: beancount's `amount.sortkey`,
+            // and so bean-query's ORDER BY. By number alone, `5 USD` and
+            // `5 EUR` compared equal and one currency's values scattered
+            // through another's (#2445).
+            (Value::Amount(a), Value::Amount(b)) => Self::amount_order(a, b),
+            (Value::Position(a), Value::Position(b)) => Self::position_order(a, b),
+            // Inventories by their first positions, in the position order.
+            // bean-query cannot order them at all.
             (Value::Inventory(a), Value::Inventory(b)) => {
-                let a_val = a.positions().next().map(|p| &p.units.number);
-                let b_val = b.positions().next().map(|p| &p.units.number);
-                match (a_val, b_val) {
-                    (Some(av), Some(bv)) => av.cmp(bv),
+                match (a.positions().next(), b.positions().next()) {
+                    (Some(a), Some(b)) => Self::position_order(a, b),
                     (Some(_), None) => std::cmp::Ordering::Less,
                     (None, Some(_)) => std::cmp::Ordering::Greater,
                     (None, None) => std::cmp::Ordering::Equal,

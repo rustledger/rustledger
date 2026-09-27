@@ -109,11 +109,10 @@ fn a_null_spread_value_is_the_first_column() {
     assert_eq!(row_keys(&rows), vec!["2024", "2025"]);
 }
 
-/// Distinct values that compare equal (amounts of one number in different
-/// currencies) are ordered by their rendering, not by which came first: USD
-/// is written before EUR here, and EUR still sorts first.
+/// Amounts sort by currency, then number, as bean-query's do (#2445): USD is
+/// written first here and EUR still leads.
 #[test]
-fn ties_between_distinct_values_do_not_depend_on_the_data_order() {
+fn amount_spread_values_sort_by_currency_then_number() {
     let ledger = r#"
 2024-01-01 open Assets:A
 2024-01-01 open Assets:B
@@ -132,6 +131,38 @@ fn ties_between_distinct_values_do_not_depend_on_the_data_order() {
     );
     assert_eq!(
         columns,
-        vec!["account/u", "-5 EUR", "-5 USD", "5 EUR", "5 USD"]
+        vec!["account/u", "-5 EUR", "5 EUR", "-5 USD", "5 USD"]
     );
+}
+
+/// Values the ORDER BY comparison cannot order against each other (here a
+/// number and strings, from metadata) are ordered by their rendering, not by
+/// which came first: the number is written second and still sorts first.
+#[test]
+fn ties_between_distinct_values_do_not_depend_on_the_data_order() {
+    let ledger = r#"
+2024-01-01 open Assets:A
+2024-01-01 open Assets:B
+
+2024-03-01 * "b"
+  Assets:A  1 USD
+    key: "b"
+  Assets:B
+
+2024-03-02 * "two"
+  Assets:A  1 USD
+    key: 2
+  Assets:B
+
+2024-03-03 * "a"
+  Assets:A  1 USD
+    key: "a"
+  Assets:B
+"#;
+    let (columns, _) = run_on(
+        ledger,
+        "SELECT account, meta('key') AS k, count(*) WHERE account = 'Assets:A' \
+         GROUP BY account, k PIVOT BY account, k",
+    );
+    assert_eq!(columns, vec!["account/k", "2", "a", "b"]);
 }

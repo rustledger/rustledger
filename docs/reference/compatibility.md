@@ -386,6 +386,27 @@ Pinned by `crates/rustledger-loader/tests/mixed_sign_holdings_test.rs` and the
 core test `a_cost_matching_only_its_own_side_is_an_augmentation` (issue
 #2384).
 
+### 15. ORDER BY on Positions
+
+`ORDER BY` sorts amounts by currency, then number, exactly as bean-query does
+(beancount's `amount.sortkey`). Positions sort by units currency, then cost
+number, cost currency and units number. That is beancount's `Position.sortkey`
+except for its first key:
+
+| | `ORDER BY position` on `5 USD`, `5.00 EUR`, `7 GLD` and their negatives |
+|---|---|
+| rustledger | `-5.00 EUR`, `5.00 EUR`, `-7 GLD`, `7 GLD`, `-5 USD`, `5 USD` |
+| bean-query | `-5 USD`, `5 USD`, `-5.00 EUR`, `5.00 EUR`, then `GLD` |
+
+beancount ranks the units currency by a fixed list (`USD`, `EUR`, `JPY`,
+`CAD`, `GBP`, `AUD`, `NZD`, `CHF`), and every other currency by the LENGTH of
+its name, although its comment says "all the rest in alphabetical order". So
+every other three-letter currency ties, and their positions interleave by
+number: the fault the currency key exists to prevent. rustledger orders the
+units currency alphabetically instead. Inventories, which bean-query cannot
+order, sort by their first position. Pinned by
+`crates/rustledger-query/tests/order_by_amounts.rs` (issue #2445).
+
 ## BQL Query Compatibility
 
 BQL (Beancount Query Language) compatibility was tested with 11 standard queries on 50 files:

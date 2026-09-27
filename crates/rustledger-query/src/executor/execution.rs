@@ -534,6 +534,25 @@ impl Executor<'_> {
         Ok(result)
     }
 
+    /// Whether `name` is a column a FROM filter can read: evaluated on a
+    /// one-posting sample transaction by the FROM filter itself, so the
+    /// answer cannot drift from what the filter resolves (#2435).
+    fn is_from_filter_column(&self, name: &str) -> bool {
+        let Some(date) = rustledger_core::naive_date(2000, 1, 1) else {
+            return true;
+        };
+        let sample = rustledger_core::Transaction::new(date, "").with_synthesized_posting(
+            rustledger_core::Posting::new(
+                "Assets:Sample",
+                rustledger_core::Amount::new(rust_decimal::Decimal::ONE, "SAMPLE"),
+            ),
+        );
+        !matches!(
+            self.evaluate_from_filter(&Expr::Column(name.to_string()), &sample),
+            Err(QueryError::UnknownColumn(_))
+        )
+    }
+
     /// Execute a SELECT query that sources from a user-created or built-in table.
     ///
     /// Built-in tables (system tables) start with `#`:
@@ -568,8 +587,11 @@ impl Executor<'_> {
             // (It read `FROM flag;` and a subquery's `FROM flag)` as filters
             // only because it could not parse a table there, #2435, and
             // `FROM flag` alone as a missing table.) A name that is no column
-            // either is still reported as the table it was written as.
+            // either is the table it was written as, and missing, decided
+            // before running anything, so a ledger with no transaction to
+            // evaluate it on reports it too, as beanquery's compiler does.
             if !table_name.starts_with('#')
+                && self.is_from_filter_column(table_name)
                 && let Some(from) = &query.from
             {
                 let as_filter = SelectQuery {
@@ -580,14 +602,7 @@ impl Executor<'_> {
                     }),
                     ..query.clone()
                 };
-                return match self.execute_select(&as_filter) {
-                    Err(QueryError::UnknownColumn(column))
-                        if column.eq_ignore_ascii_case(table_name) =>
-                    {
-                        Err(missing())
-                    }
-                    result => result,
-                };
+                return self.execute_select(&as_filter);
             }
             return Err(missing());
         };

@@ -104,3 +104,33 @@ fn another_unknown_column_keeps_its_own_error() {
     assert!(err.contains("nosuchcol"), "{err}");
     assert!(!err.contains("table 'payee'"), "{err}");
 }
+
+/// Whether the name is a column is decided before anything runs, so a
+/// ledger with no transaction to evaluate it on still reports a missing
+/// table, as beanquery's compiler does, rather than an empty result.
+#[test]
+fn a_missing_table_is_reported_on_a_ledger_without_transactions() {
+    let directives: Vec<Directive> = rustledger_parser::parse("2024-01-01 open Assets:A\n")
+        .directives
+        .iter()
+        .map(|d| (**d).clone())
+        .collect();
+    let run = |bql: &str| {
+        Executor::new(&directives)
+            .execute(&parse(bql).expect("parses"))
+            .map(|r| r.rows.len())
+            .map_err(|e| e.to_string())
+    };
+    for bql in [
+        "SELECT count(*) FROM nosuchthing",
+        "SELECT account FROM (SELECT account FROM nosuchthing)",
+    ] {
+        let err = run(bql).expect_err("no table and no column has that name");
+        assert!(
+            err.contains("table 'nosuchthing' does not exist"),
+            "{bql}: {err}"
+        );
+    }
+    // A column is still a filter there, with nothing to pass it.
+    assert_eq!(run("SELECT account FROM payee"), Ok(0));
+}

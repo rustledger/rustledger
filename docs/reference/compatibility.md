@@ -389,23 +389,29 @@ core test `a_cost_matching_only_its_own_side_is_an_augmentation` (issue
 ### 15. ORDER BY on Positions
 
 `ORDER BY` sorts amounts by currency, then number, exactly as bean-query does
-(beancount's `amount.sortkey`). Positions sort by units currency, then cost
-number, cost currency and units number. That is beancount's `Position.sortkey`
-except for its first key:
+(beancount's `amount.sortkey`). Positions sort by beancount's
+`Position.sortkey`: units currency rank, then cost number, cost currency and
+units number. The rank puts a fixed list first, in order (`USD`, `EUR`, `JPY`,
+`CAD`, `GBP`, `AUD`, `NZD`, `CHF`), so an operating currency sorts before the
+commodities held against it. It differs in how it ranks every OTHER currency:
 
-| | `ORDER BY position` on `5 USD`, `5.00 EUR`, `7 GLD` and their negatives |
+| | `ORDER BY position` on `2 GLD {130 USD}`, `2 VHT {40 USD}`, `1 GLD {10 USD}` |
 |---|---|
-| rustledger | `-5.00 EUR`, `5.00 EUR`, `-7 GLD`, `7 GLD`, `-5 USD`, `5 USD` |
-| bean-query | `-5 USD`, `5 USD`, `-5.00 EUR`, `5.00 EUR`, then `GLD` |
+| rustledger | `1 GLD {10}`, `2 GLD {130}`, `2 VHT {40}` |
+| bean-query | `1 GLD {10}`, `2 VHT {40}`, `2 GLD {130}` |
 
-beancount ranks the units currency by a fixed list (`USD`, `EUR`, `JPY`,
-`CAD`, `GBP`, `AUD`, `NZD`, `CHF`), and every other currency by the LENGTH of
-its name, although its comment says "all the rest in alphabetical order". So
-every other three-letter currency ties, and their positions interleave by
-number: the fault the currency key exists to prevent. rustledger orders the
-units currency alphabetically instead. Inventories sort as beancount's
-`Inventory.__lt__` does, by their positions sorted, compared in turn, with this
-position order. Pinned by
+beancount ranks an unlisted currency by the LENGTH of its name, although its
+comment says "all the rest in alphabetical order". So all unlisted currencies
+of one length tie, and their lots interleave by cost, the fault a currency key
+exists to prevent; longer names also sort after shorter ones (`HOOL` before
+`BRICKHOME`). rustledger ranks unlisted currencies alphabetically. Over the
+repository's test ledgers, inventory `ORDER BY` agrees with bean-query on 143
+of 148, and the five that differ are exactly this.
+
+Inventories sort as beancount's `Inventory.__lt__` does, by their positions
+sorted, compared in turn, with this position order. A position of zero units,
+which rustledger keeps for a cost-less holding that nets to zero, holds nothing
+and is left out, as beancount has none. Pinned by
 `crates/rustledger-query/tests/order_by_amounts.rs` (issue #2445).
 
 ## BQL Query Compatibility

@@ -525,23 +525,30 @@ impl Executor<'_> {
 
     /// ORDER BY's order for positions: units currency, then cost number,
     /// cost currency, and units number, a position with no cost counting as
-    /// cost `0` in `""`. That is beancount's `Position.sortkey` except its
-    /// first key. beancount ranks the units currency by a fixed list (`USD`,
-    /// `EUR`, `JPY`, `CAD`, `GBP`, `AUD`, `NZD`, `CHF`) and every other
-    /// currency by the LENGTH of its name, which its own comment calls
-    /// alphabetical: all other three-letter currencies tie, and interleave by
-    /// number, the fault this order exists to fix. Plain currency order
-    /// instead, a deliberate divergence (#2445).
+    /// cost `0` in `""`. That is beancount's `Position.sortkey`, whose first
+    /// key ranks the units currency: `USD`, `EUR`, `JPY`, `CAD`, `GBP`,
+    /// `AUD`, `NZD`, `CHF` first, in that order, so an operating currency sorts
+    /// before the commodities held against it. It ranks every other currency
+    /// by the LENGTH of its name, though its comment says alphabetical, so all
+    /// other currencies of one length tie and their positions interleave by
+    /// cost: `GLD` and `VHT` lots mixed. Those sort alphabetically here, a
+    /// deliberate divergence (#2445).
     pub(super) fn position_order(a: &Position, b: &Position) -> std::cmp::Ordering {
         fn cost(p: &Position) -> (Decimal, &str) {
             p.cost
                 .as_ref()
                 .map_or((Decimal::ZERO, ""), |c| (c.number, c.currency.as_str()))
         }
-        a.units
-            .currency
-            .as_str()
-            .cmp(b.units.currency.as_str())
+        /// beancount's `CURRENCY_ORDER`, then the rest alphabetically.
+        fn rank(currency: &str) -> (usize, &str) {
+            const LISTED: [&str; 8] = ["USD", "EUR", "JPY", "CAD", "GBP", "AUD", "NZD", "CHF"];
+            LISTED
+                .iter()
+                .position(|listed| *listed == currency)
+                .map_or((LISTED.len(), currency), |i| (i, ""))
+        }
+        rank(a.units.currency.as_str())
+            .cmp(&rank(b.units.currency.as_str()))
             .then_with(|| cost(a).cmp(&cost(b)))
             .then_with(|| a.units.number.cmp(&b.units.number))
     }
@@ -560,9 +567,14 @@ impl Executor<'_> {
         Self::position_lists_order(&Self::sorted_positions(a), &Self::sorted_positions(b))
     }
 
-    /// An inventory's positions in the position order.
+    /// An inventory's positions in the position order, leaving out those of
+    /// zero units: an inventory keeps a cost-less position that nets to zero
+    /// (#2378), which holds nothing, and beancount has none to sort.
     pub(super) fn sorted_positions(inv: &rustledger_core::Inventory) -> Vec<&Position> {
-        let mut positions: Vec<&Position> = inv.positions().collect();
+        let mut positions: Vec<&Position> = inv
+            .positions()
+            .filter(|p| !p.units.number.is_zero())
+            .collect();
         positions.sort_by(|x, y| Self::position_order(x, y));
         positions
     }

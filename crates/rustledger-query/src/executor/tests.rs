@@ -2820,8 +2820,9 @@ fn position_hidden_keys_are_hidden_names() {
 /// ORDER BY and every other sort (PIVOT BY, window ORDER BY) order
 /// inventories alike (#2445): `sort_results` prepares each row's sorted
 /// positions once, `compare_values_for_sort` sorts them per comparison, and
-/// the two must agree. Over NULL, an empty inventory, one that got USD before
-/// EUR, and two equal ones a second key has to split.
+/// the two must agree. Over NULL, an empty inventory, one whose only position
+/// netted to zero, one that got USD before EUR, and two equal ones a second
+/// key has to split.
 #[test]
 fn inventory_sort_paths_agree() {
     use crate::ast::{Expr, OrderSpec, SortDirection};
@@ -2842,11 +2843,15 @@ fn inventory_sort_paths_agree() {
         ("null", Value::Null),
         ("eur-then-usd-b", inventory(&[(1, "EUR"), (2, "USD")])),
         ("empty", inventory(&[])),
+        // A cost-less position that nets to zero keeps its slot (#2378), and
+        // holds nothing: it sorts as empty, split from "empty" by the name.
+        ("empty-netted", inventory(&[(4, "XYZ"), (-4, "XYZ")])),
         ("eur-then-usd-a", inventory(&[(1, "EUR"), (2, "USD")])),
     ];
     let want = vec![
         "null",
         "empty",
+        "empty-netted",
         "eur-then-usd-a",
         "eur-then-usd-b",
         "usd-then-eur",

@@ -3,10 +3,10 @@
 //! Amounts sorted by number alone, so `5 USD` and `5 EUR` compared equal and
 //! one currency's values scattered through another's. Amounts now sort by
 //! currency, then number, as beancount's `amount.sortkey` and so bean-query
-//! do. Positions sort by units currency, cost number, cost currency, then
-//! units number: beancount's `Position.sortkey` but for its first key, which
-//! ranks a fixed currency list and then the rest by name LENGTH (a deliberate
-//! divergence; see `position_order`).
+//! do. Positions sort by units currency rank (beancount's eight listed
+//! currencies first, then the rest alphabetically), cost, then units:
+//! beancount's `Position.sortkey`, except that it ranks unlisted currencies
+//! by name LENGTH (a deliberate divergence; see `position_order`).
 
 use rustledger_booking::BookingEngine;
 use rustledger_core::{BookingMethod, Directive};
@@ -104,16 +104,17 @@ fn positions_sort_by_currency_then_cost_then_units() {
     assert_eq!(got.len(), 2);
     assert!(got[0].contains("10 USD"), "{got:?}");
     assert!(got[1].contains("20 USD"), "{got:?}");
+    // USD and EUR are listed, in that order; GLD is not, so it comes last.
     let legs = rows("SELECT position WHERE narration ~ '^(usd|eur|gld)$' ORDER BY position");
     assert_eq!(
         legs,
         vec![
+            "-5 USD",
+            "5 USD",
             "-5.00 EUR",
             "5.00 EUR",
             "-7 GLD",
-            "7 GLD",
-            "-5 USD",
-            "5 USD"
+            "7 GLD"
         ]
     );
 }
@@ -174,4 +175,53 @@ fn inventories_sort_by_their_positions_sorted() {
     };
     assert_eq!(accounts(""), vec!["Assets:C", "Assets:A", "Assets:B"]);
     assert_eq!(accounts("DESC"), vec!["Assets:B", "Assets:A", "Assets:C"]);
+}
+
+/// Currencies outside beancount's list sort alphabetically, whatever their
+/// cost: `GLD` before `VHT` though the VHT lot is cheaper. bean-query ranks
+/// them by name LENGTH, so the two tie and it sorts VHT first by cost, which
+/// interleaves the two commodities' lots (a deliberate divergence, #2445).
+#[test]
+fn unlisted_currencies_sort_alphabetically_not_by_cost() {
+    let ledger = r#"
+2024-01-01 open Assets:S
+2024-01-01 open Assets:C
+
+2024-02-01 * "gld"
+  Assets:S  2 GLD {130 USD}
+  Assets:C
+
+2024-02-02 * "vht"
+  Assets:S  2 VHT {40 USD}
+  Assets:C
+
+2024-02-03 * "gld again"
+  Assets:S  1 GLD {10 USD}
+  Assets:C
+"#;
+    let parsed = rustledger_parser::parse(ledger);
+    let mut directives: Vec<Directive> = parsed.directives.iter().map(|d| (**d).clone()).collect();
+    let mut engine = BookingEngine::with_method(BookingMethod::Fifo);
+    engine.register_account_methods(directives.iter());
+    for directive in &mut directives {
+        if let Directive::Transaction(txn) = directive {
+            engine
+                .book_interpolate_apply(txn)
+                .expect("the fixture books");
+        }
+    }
+    let got: Vec<String> = Executor::new(&directives)
+        .execute(
+            &parse("SELECT position WHERE account = 'Assets:S' ORDER BY position").expect("parses"),
+        )
+        .expect("runs")
+        .rows
+        .iter()
+        .map(|r| match &r[0] {
+            Value::Position(p) => p.units.currency.to_string(),
+            other => panic!("unexpected {other:?}"),
+        })
+        .collect();
+    // Both GLD lots, cheapest first, then VHT.
+    assert_eq!(got, vec!["GLD", "GLD", "VHT"]);
 }

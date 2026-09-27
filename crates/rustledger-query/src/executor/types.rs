@@ -263,7 +263,7 @@ pub type Row = Vec<Value>;
 /// Uses `FxHasher` (the same non-cryptographic hash backing every
 /// `FxHashMap` in the workspace). DISTINCT / GROUP BY keys are internal
 /// dedup tokens — they need speed, not DoS-resistance.
-pub fn hash_row(row: &Row) -> u64 {
+pub fn hash_row(row: &[Value]) -> u64 {
     let mut hasher = rustc_hash::FxHasher::default();
     for value in row {
         value.hash_value(&mut hasher);

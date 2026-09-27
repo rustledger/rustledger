@@ -479,9 +479,19 @@ impl Executor<'_> {
             return self.execute_aggregate_from_table(outer_query, &table, &inner_column_map);
         }
 
-        // Determine outer column names
+        // ORDER BY expressions the outer query does not select, such as a
+        // subquery column it leaves out (`SELECT account FROM (SELECT date,
+        // account) ORDER BY date`), are evaluated as hidden trailing columns
+        // and stripped after sorting, as `execute_select` and the table path
+        // do (#2436).
+        let hidden_targets = self.find_hidden_order_by_targets(outer_query);
+        let num_hidden = hidden_targets.len();
+        let mut extended_targets = outer_query.targets.clone();
+        extended_targets.extend(hidden_targets);
+
+        // Determine outer column names (including hidden columns)
         let outer_column_names =
-            self.resolve_subquery_column_names(&outer_query.targets, &inner_result.columns, &[])?;
+            self.resolve_subquery_column_names(&extended_targets, &inner_result.columns, &[])?;
         let mut result = QueryResult::new(outer_column_names);
 
         // Use FxHashSet for O(1) DISTINCT deduplication
@@ -500,9 +510,9 @@ impl Executor<'_> {
                 continue;
             }
 
-            // Evaluate outer targets
+            // Evaluate outer targets (including hidden columns)
             let outer_row = self.evaluate_subquery_row(
-                &outer_query.targets,
+                &extended_targets,
                 inner_row,
                 &inner_column_map,
                 &inner_result.columns,
@@ -510,8 +520,9 @@ impl Executor<'_> {
             )?;
 
             if outer_query.distinct {
-                // O(1) hash-based deduplication
-                let row_hash = hash_row(&outer_row);
+                // O(1) hash-based deduplication, over the visible columns
+                // only: a hidden sort column must not split duplicates.
+                let row_hash = hash_row(&outer_row[..outer_row.len() - num_hidden]);
                 if seen_hashes.insert(row_hash) {
                     result.add_row(outer_row);
                 }
@@ -520,10 +531,14 @@ impl Executor<'_> {
             }
         }
 
-        // Apply ORDER BY
+        // Apply ORDER BY, then remove the hidden columns
+        let visible_cols = result.columns.len() - num_hidden;
         if let Some(order_by) = &outer_query.order_by {
-            let visible_cols = result.columns.len();
             self.sort_results(&mut result, order_by, visible_cols)?;
+        }
+        result.columns.truncate(visible_cols);
+        for row in &mut result.rows {
+            row.truncate(visible_cols);
         }
 
         // Apply LIMIT
@@ -774,9 +789,19 @@ impl Executor<'_> {
     ) -> Result<QueryResult, QueryError> {
         use rustc_hash::FxHashMap as HashMap;
 
-        // Determine column names for the result
+        // ORDER BY expressions the query does not select, such as an
+        // aggregate (`GROUP BY account ORDER BY count(*)`), are evaluated per
+        // group as hidden trailing columns and stripped after sorting, as
+        // `execute_select` does. Without them the sort could not find the
+        // expression (#2436).
+        let hidden_targets = self.find_hidden_order_by_targets(query);
+        let num_hidden = hidden_targets.len();
+        let mut extended_targets = query.targets.clone();
+        extended_targets.extend(hidden_targets);
+
+        // Determine column names for the result (including hidden columns)
         let column_names =
-            self.resolve_subquery_column_names(&query.targets, &table.columns, &table.hidden)?;
+            self.resolve_subquery_column_names(&extended_targets, &table.columns, &table.hidden)?;
         let mut result = QueryResult::new(column_names.clone());
 
         // Determine GROUP BY expressions.
@@ -835,7 +860,7 @@ impl Executor<'_> {
             // reporting the un-pivoted header while the same query emptied by
             // HAVING reported the pivoted one. bean-query gives the pivoted
             // shape for both (#2216).
-            return self.finish_aggregate_result(result, query);
+            return self.finish_aggregate_result(result, query, num_hidden);
         }
 
         // Build alias map once (used by HAVING evaluation).
@@ -856,7 +881,7 @@ impl Executor<'_> {
         for key in key_order {
             let (_, group_rows) = group_map.remove(&key).expect("key must exist in group_map");
             let mut row = Vec::new();
-            for target in &query.targets {
+            for target in &extended_targets {
                 let val =
                     self.evaluate_aggregate_table_expr(&target.expr, &group_rows, column_map)?;
                 row.push(val);
@@ -886,7 +911,7 @@ impl Executor<'_> {
             result.add_row(row);
         }
 
-        self.finish_aggregate_result(result, query)
+        self.finish_aggregate_result(result, query, num_hidden)
     }
 
     /// ORDER BY, then PIVOT BY, then LIMIT -- the tail every aggregate result
@@ -898,18 +923,22 @@ impl Executor<'_> {
     /// reported the un-pivoted header while the same query emptied by HAVING
     /// reported the pivoted one. bean-query gives the pivoted shape for both.
     ///
-    /// No hidden-column strip here, unlike the other two execution paths:
-    /// `find_hidden_order_by_targets` materializes nothing for an aggregate
-    /// query, because an ORDER BY target there must already be in GROUP BY or
-    /// be an aggregate, so it is projected already.
+    /// The last `num_hidden` columns are ORDER BY expressions the query does
+    /// not select: they are sorted on, then stripped before PIVOT, the slot
+    /// `execute_select` strips them in.
     fn finish_aggregate_result(
         &self,
         mut result: QueryResult,
         query: &SelectQuery,
+        num_hidden: usize,
     ) -> Result<QueryResult, QueryError> {
+        let visible_cols = result.columns.len() - num_hidden;
         if let Some(order_by) = &query.order_by {
-            let visible_cols = result.columns.len();
             self.sort_results(&mut result, order_by, visible_cols)?;
+        }
+        result.columns.truncate(visible_cols);
+        for row in &mut result.rows {
+            row.truncate(visible_cols);
         }
 
         if let Some(pivot_exprs) = &query.pivot_by {

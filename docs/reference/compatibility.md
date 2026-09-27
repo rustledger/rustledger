@@ -403,8 +403,9 @@ beancount ranks the units currency by a fixed list (`USD`, `EUR`, `JPY`,
 its name, although its comment says "all the rest in alphabetical order". So
 every other three-letter currency ties, and their positions interleave by
 number: the fault the currency key exists to prevent. rustledger orders the
-units currency alphabetically instead. Inventories, which bean-query cannot
-order, sort by their first position. Pinned by
+units currency alphabetically instead. Inventories sort as beancount's
+`Inventory.__lt__` does, by their positions sorted, compared in turn, with this
+position order. Pinned by
 `crates/rustledger-query/tests/order_by_amounts.rs` (issue #2445).
 
 ## BQL Query Compatibility

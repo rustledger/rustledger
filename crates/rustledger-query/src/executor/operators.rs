@@ -532,7 +532,7 @@ impl Executor<'_> {
     /// alphabetical: all other three-letter currencies tie, and interleave by
     /// number, the fault this order exists to fix. Plain currency order
     /// instead, a deliberate divergence (#2445).
-    fn position_order(a: &Position, b: &Position) -> std::cmp::Ordering {
+    pub(super) fn position_order(a: &Position, b: &Position) -> std::cmp::Ordering {
         fn cost(p: &Position) -> (Decimal, &str) {
             p.cost
                 .as_ref()
@@ -544,6 +544,40 @@ impl Executor<'_> {
             .cmp(b.units.currency.as_str())
             .then_with(|| cost(a).cmp(&cost(b)))
             .then_with(|| a.units.number.cmp(&b.units.number))
+    }
+
+    /// ORDER BY's order for inventories: each one's positions sorted in the
+    /// position order, then compared in turn, a shorter list that agrees so
+    /// far sorting first (so an empty inventory sorts first). That is
+    /// beancount's `Inventory.__lt__`, `sorted(self) < sorted(other)`, with
+    /// this file's position order. It compared their FIRST positions, in the
+    /// order the ledger added them, so a group's place depended on which of
+    /// its lots came first in the ledger (#2445).
+    fn inventory_order(
+        a: &rustledger_core::Inventory,
+        b: &rustledger_core::Inventory,
+    ) -> std::cmp::Ordering {
+        Self::position_lists_order(&Self::sorted_positions(a), &Self::sorted_positions(b))
+    }
+
+    /// An inventory's positions in the position order.
+    pub(super) fn sorted_positions(inv: &rustledger_core::Inventory) -> Vec<&Position> {
+        let mut positions: Vec<&Position> = inv.positions().collect();
+        positions.sort_by(|x, y| Self::position_order(x, y));
+        positions
+    }
+
+    /// Two sorted position lists compared in turn, a shorter list that agrees
+    /// so far sorting first: the inventory order, over positions sorted once.
+    pub(super) fn position_lists_order<P: std::borrow::Borrow<Position>>(
+        a: &[P],
+        b: &[P],
+    ) -> std::cmp::Ordering {
+        a.iter()
+            .zip(b)
+            .map(|(x, y)| Self::position_order(x.borrow(), y.borrow()))
+            .find(|ord| ord.is_ne())
+            .unwrap_or_else(|| a.len().cmp(&b.len()))
     }
 
     /// Compare two values for sorting purposes.
@@ -573,16 +607,7 @@ impl Executor<'_> {
             // through another's (#2445).
             (Value::Amount(a), Value::Amount(b)) => Self::amount_order(a, b),
             (Value::Position(a), Value::Position(b)) => Self::position_order(a, b),
-            // Inventories by their first positions, in the position order.
-            // bean-query cannot order them at all.
-            (Value::Inventory(a), Value::Inventory(b)) => {
-                match (a.positions().next(), b.positions().next()) {
-                    (Some(a), Some(b)) => Self::position_order(a, b),
-                    (Some(_), None) => std::cmp::Ordering::Less,
-                    (None, Some(_)) => std::cmp::Ordering::Greater,
-                    (None, None) => std::cmp::Ordering::Equal,
-                }
-            }
+            (Value::Inventory(a), Value::Inventory(b)) => Self::inventory_order(a, b),
             // Compare intervals by approximate days
             (Value::Interval(a), Value::Interval(b)) => a.to_approx_days().cmp(&b.to_approx_days()),
             _ => std::cmp::Ordering::Equal, // Can't compare other types

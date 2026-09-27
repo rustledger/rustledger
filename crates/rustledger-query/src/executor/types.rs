@@ -413,6 +413,39 @@ impl QueryResult {
         }
     }
 
+    /// Sort the rows by comparing their indices, keeping `row_group_keys` in
+    /// lockstep as [`Self::sort_by`] does. For a comparison that reads keys
+    /// prepared per row ahead of the sort rather than the rows themselves.
+    pub(crate) fn sort_by_row_index<F>(&mut self, mut compare: F)
+    where
+        F: FnMut(usize, usize) -> std::cmp::Ordering,
+    {
+        assert_eq!(
+            self.rows.len(),
+            self.row_group_keys.len(),
+            "QueryResult invariant violated: rows.len() must equal row_group_keys.len()"
+        );
+        let mut order: Vec<usize> = (0..self.rows.len()).collect();
+        order.sort_by(|&i, &j| compare(i, j));
+        let mut rows: Vec<Option<Row>> = std::mem::take(&mut self.rows)
+            .into_iter()
+            .map(Some)
+            .collect();
+        let mut keys: Vec<Option<Option<Vec<Value>>>> = std::mem::take(&mut self.row_group_keys)
+            .into_iter()
+            .map(Some)
+            .collect();
+        self.rows.reserve_exact(order.len());
+        self.row_group_keys.reserve_exact(order.len());
+        for i in order {
+            // `order` is a permutation of `0..n`, so each slot is taken once.
+            self.rows
+                .push(rows[i].take().expect("each row is taken once"));
+            self.row_group_keys
+                .push(keys[i].take().expect("each key is taken once"));
+        }
+    }
+
     /// Number of rows.
     pub const fn len(&self) -> usize {
         self.rows.len()

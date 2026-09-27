@@ -2816,3 +2816,77 @@ fn position_hidden_keys_are_hidden_names() {
         }
     }
 }
+
+/// ORDER BY and every other sort (PIVOT BY, window ORDER BY) order
+/// inventories alike (#2445): `sort_results` prepares each row's sorted
+/// positions once, `compare_values_for_sort` sorts them per comparison, and
+/// the two must agree. Over NULL, an empty inventory, one that got USD before
+/// EUR, and two equal ones a second key has to split.
+#[test]
+fn inventory_sort_paths_agree() {
+    use crate::ast::{Expr, OrderSpec, SortDirection};
+    use rustledger_core::{Inventory, Position};
+
+    let inventory = |amounts: &[(i64, &str)]| {
+        let mut inv = Inventory::new();
+        for (n, c) in amounts {
+            inv.add(Position::simple(Amount::new((*n).into(), *c)))
+                .expect("fixture fits in Decimal");
+        }
+        Value::Inventory(std::sync::Arc::new(inv))
+    };
+    // (name, value), written in no useful order.
+    let rows: Vec<(&str, Value)> = vec![
+        ("usd-then-eur", inventory(&[(9, "USD"), (1, "EUR")])),
+        ("eur-only", inventory(&[(3, "EUR")])),
+        ("null", Value::Null),
+        ("eur-then-usd-b", inventory(&[(1, "EUR"), (2, "USD")])),
+        ("empty", inventory(&[])),
+        ("eur-then-usd-a", inventory(&[(1, "EUR"), (2, "USD")])),
+    ];
+    let want = vec![
+        "null",
+        "empty",
+        "eur-then-usd-a",
+        "eur-then-usd-b",
+        "usd-then-eur",
+        "eur-only",
+    ];
+
+    let executor = Executor::new(&[]);
+    let mut result = QueryResult::new(vec!["s".to_string(), "name".to_string()]);
+    for (name, value) in &rows {
+        result.add_row(vec![value.clone(), Value::String((*name).to_string())]);
+    }
+    let order_by = [
+        OrderSpec {
+            expr: Expr::Column("s".to_string()),
+            direction: SortDirection::Asc,
+        },
+        OrderSpec {
+            expr: Expr::Column("name".to_string()),
+            direction: SortDirection::Asc,
+        },
+    ];
+    executor
+        .sort_results(&mut result, &order_by, 2)
+        .expect("sorts");
+    let prepared: Vec<String> = result
+        .rows
+        .iter()
+        .map(|r| match &r[1] {
+            Value::String(s) => s.clone(),
+            other => panic!("unexpected {other:?}"),
+        })
+        .collect();
+    assert_eq!(prepared, want, "sort_results");
+
+    let mut direct = rows.clone();
+    direct.sort_by(|a, b| {
+        executor
+            .compare_values_for_sort(&a.1, &b.1)
+            .then_with(|| a.0.cmp(b.0))
+    });
+    let direct: Vec<&str> = direct.iter().map(|(name, _)| *name).collect();
+    assert_eq!(direct, want, "compare_values_for_sort");
+}

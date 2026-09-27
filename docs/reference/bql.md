@@ -201,7 +201,8 @@ ORDER BY sum(position) DESC
 
 Amounts sort by currency, then number, so each currency's values stay
 together: `-5.00 EUR`, `5.00 EUR`, `-5 USD`, `5 USD`. Positions sort by units
-currency, then cost, then units; an inventory by its first position. NULL sorts
+currency, then cost, then units; an inventory by its positions sorted, compared
+in turn. NULL sorts
 first in ascending order.
 
 ## LIMIT Clause

@@ -118,12 +118,60 @@ fn positions_sort_by_currency_then_cost_then_units() {
     );
 }
 
-/// Inventories by their first positions, in the position order.
+/// Inventories by their positions sorted, compared in turn, as beancount's
+/// `Inventory.__lt__` (`sorted(self) < sorted(other)`). They compared their
+/// FIRST positions in ledger order, so `Assets:A`, which got USD before EUR,
+/// sorted after `Assets:B`'s lone `3 EUR`. bean-query gives C, A, B here.
 #[test]
-fn inventories_sort_by_their_first_position() {
-    let got = rows(
-        "SELECT sum(position) AS s, narration WHERE narration ~ '^(usd|eur|gld)$' \
-         AND account = 'Assets:A' GROUP BY narration ORDER BY s",
-    );
-    assert_eq!(got, vec!["5.00 EUR", "7 GLD", "5 USD"]);
+fn inventories_sort_by_their_positions_sorted() {
+    let ledger = r#"
+2024-01-01 open Assets:A
+2024-01-01 open Assets:B
+2024-01-01 open Assets:C
+2024-01-01 open Assets:D
+2024-01-01 open Equity:O
+
+2024-02-01 * "A gets USD first"
+  Assets:A  9 USD
+  Equity:O
+
+2024-02-02 * "A gets EUR second"
+  Assets:A  1 EUR
+  Equity:O
+
+2024-02-03 * "B gets only EUR"
+  Assets:B  3 EUR
+  Equity:O
+
+2024-02-04 * "C gets EUR first"
+  Assets:C  1 EUR
+  Equity:O
+
+2024-02-05 * "C gets USD second"
+  Assets:C  2 USD
+  Equity:O
+"#;
+    let directives: Vec<Directive> = rustledger_parser::parse(ledger)
+        .directives
+        .iter()
+        .map(|d| (**d).clone())
+        .collect();
+    let accounts = |order: &str| -> Vec<String> {
+        let bql = format!(
+            "SELECT account, sum(position) AS s WHERE account ~ '^Assets' \
+             GROUP BY account ORDER BY s {order}"
+        );
+        Executor::new(&directives)
+            .execute(&parse(&bql).expect("parses"))
+            .expect("runs")
+            .rows
+            .iter()
+            .map(|r| match &r[0] {
+                Value::String(a) => a.clone(),
+                other => panic!("unexpected {other:?}"),
+            })
+            .collect()
+    };
+    assert_eq!(accounts(""), vec!["Assets:C", "Assets:A", "Assets:B"]);
+    assert_eq!(accounts("DESC"), vec!["Assets:B", "Assets:A", "Assets:C"]);
 }

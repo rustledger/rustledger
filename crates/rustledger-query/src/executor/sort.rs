@@ -117,6 +117,59 @@ impl Executor<'_> {
             sort_specs.push((idx, ascending));
         }
 
+        // An inventory sorts by its positions sorted, compared in turn (#2445).
+        // Sorting them inside the comparison would sort each row's inventory
+        // O(log n) times; `ORDER BY balance` over the example ledger took
+        // twice as long. So when a sort column holds inventories, prepare
+        // every row's keys once and sort the row indices by them.
+        let sorts_inventories = sort_specs.iter().any(|(idx, _)| {
+            result
+                .rows
+                .iter()
+                .any(|row| matches!(row.get(*idx), Some(Value::Inventory(_))))
+        });
+        if sorts_inventories {
+            enum Key {
+                Positions(Vec<rustledger_core::Position>),
+                Value(Value),
+                Missing,
+            }
+            let keys: Vec<Vec<Key>> = result
+                .rows
+                .iter()
+                .map(|row| {
+                    sort_specs
+                        .iter()
+                        .map(|(idx, _)| match row.get(*idx) {
+                            Some(Value::Inventory(inv)) => Key::Positions(
+                                Self::sorted_positions(inv).into_iter().cloned().collect(),
+                            ),
+                            Some(value) => Key::Value(value.clone()),
+                            None => Key::Missing,
+                        })
+                        .collect()
+                })
+                .collect();
+            result.sort_by_row_index(|i, j| {
+                for (k, (_, ascending)) in sort_specs.iter().enumerate() {
+                    let ord = match (&keys[i][k], &keys[j][k]) {
+                        (Key::Positions(a), Key::Positions(b)) => Self::position_lists_order(a, b),
+                        (Key::Value(a), Key::Value(b)) => self.compare_values_for_sort(a, b),
+                        // NULL sorts before an inventory, as before any value;
+                        // anything else against one is unordered.
+                        (Key::Value(Value::Null), Key::Positions(_)) => std::cmp::Ordering::Less,
+                        (Key::Positions(_), Key::Value(Value::Null)) => std::cmp::Ordering::Greater,
+                        _ => std::cmp::Ordering::Equal,
+                    };
+                    if ord != std::cmp::Ordering::Equal {
+                        return if *ascending { ord } else { ord.reverse() };
+                    }
+                }
+                std::cmp::Ordering::Equal
+            });
+            return Ok(());
+        }
+
         // Sort the rows. Use `QueryResult::sort_by` (not `result.rows.sort_by`)
         // so the per-row `row_group_keys` sidecar stays in lockstep — without
         // this, the renderer would apply a row's currency hint to a different

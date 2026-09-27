@@ -246,7 +246,12 @@ impl Executor<'_> {
         // shape: only visible select targets, sorted as the user
         // requested.
         if let Some(pivot_exprs) = &query.pivot_by {
-            result = self.apply_pivot(&result, pivot_exprs, &query.group_by)?;
+            result = self.apply_pivot(
+                &result,
+                pivot_exprs,
+                &query.group_by,
+                query.order_by.is_some(),
+            )?;
         }
 
         // Apply LIMIT
@@ -766,7 +771,12 @@ impl Executor<'_> {
         // always ends in `PivotWithoutGroupBy`. That is the point: the clause
         // is refused out loud rather than dropped.
         if let Some(pivot_exprs) = &query.pivot_by {
-            result = self.apply_pivot(&result, pivot_exprs, &query.group_by)?;
+            result = self.apply_pivot(
+                &result,
+                pivot_exprs,
+                &query.group_by,
+                query.order_by.is_some(),
+            )?;
         }
 
         // Apply LIMIT
@@ -942,7 +952,12 @@ impl Executor<'_> {
         }
 
         if let Some(pivot_exprs) = &query.pivot_by {
-            result = self.apply_pivot(&result, pivot_exprs, &query.group_by)?;
+            result = self.apply_pivot(
+                &result,
+                pivot_exprs,
+                &query.group_by,
+                query.order_by.is_some(),
+            )?;
         }
 
         if let Some(limit) = query.limit {

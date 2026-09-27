@@ -136,6 +136,15 @@ impl Executor<'_> {
 
         Ok(())
     }
+    /// The order PIVOT BY lays its values out in: ORDER BY's ascending
+    /// comparison, NULL first, with ties between distinct values (amounts
+    /// in different currencies, values of different types) broken by
+    /// their rendering, so the order depends on the values alone (#2440).
+    fn pivot_order(&self, a: &Value, b: &Value) -> std::cmp::Ordering {
+        self.compare_values_for_sort(a, b)
+            .then_with(|| Self::value_to_string(a).cmp(&Self::value_to_string(b)))
+    }
+
     /// Apply the PIVOT BY transformation, matching bean-query semantics
     /// (issue #1034).
     ///
@@ -175,11 +184,19 @@ impl Executor<'_> {
     /// holds only the visible select targets in the user-requested
     /// sort order. That contract is what makes the strip+pivot
     /// interaction (item #4 of #1034) cleanly disappear.
+    ///
+    /// **Axis order** (#2440): the new COLUMNS are the spread values sorted
+    /// by value, as bean-query's `sorted(keys)` and `DuckDB`'s `PIVOT` order
+    /// them, whatever the ORDER BY: a column layout that followed the rows'
+    /// first appearance moved whenever the data did. The ROWS keep the
+    /// query's ORDER BY (`ordered`), which bean-query sorts away by the key
+    /// column; with no ORDER BY they are sorted by that key, as there.
     pub(super) fn apply_pivot(
         &self,
         result: &QueryResult,
         pivot_exprs: &[Expr],
         group_by: &Option<Vec<Expr>>,
+        ordered: bool,
     ) -> Result<QueryResult, QueryError> {
         // The parser uses `at_least(1)` for the PIVOT BY clause and
         // execute_select only calls this fn inside `if let Some(pivot_exprs)`,
@@ -227,9 +244,7 @@ impl Executor<'_> {
             return Err(QueryError::PivotSecondNotInGroupBy);
         }
 
-        // Collect unique pivot values, preserving the row-order they
-        // appear in (which post-sort means the user's ORDER BY drives
-        // the new column order). Linear-scan dedup via structural
+        // Collect unique pivot values. Linear-scan dedup via structural
         // PartialEq — pivot values are typically small (handful of
         // currencies), and `Value` doesn't implement `Hash` because
         // some inner types (Decimal, Inventory) don't, so a pure
@@ -243,6 +258,15 @@ impl Executor<'_> {
                 pivot_values.push(v);
             }
         }
+        // Then sort them by value, so the column layout is a property of
+        // the values alone (#2440): it used to be their first appearance
+        // in the sorted rows, so an ORDER BY on anything else, or none,
+        // laid the columns out in ledger order, and one new transaction
+        // could reorder them. bean-query sorts them the same way, but
+        // crashes on a NULL among them (`'<' not supported between
+        // 'str' and 'NoneType'`); here NULL sorts first, as ORDER BY
+        // puts it.
+        pivot_values.sort_by(|a, b| self.pivot_order(a, b));
 
         // The "value" cells to place at each (key, pivot_value)
         // intersection are EVERY OTHER column that's not the pivot and
@@ -321,6 +345,13 @@ impl Executor<'_> {
                 bucket.push(groups.len());
                 groups.push((key, vec![row]));
             }
+        }
+        // With no ORDER BY, the rows are the row keys sorted by value, as
+        // bean-query sorts them. With one, they keep it: bean-query sorts
+        // the rows by key regardless and drops the ORDER BY it accepted,
+        // which is a bug not to copy (#2440).
+        if !ordered {
+            groups.sort_by(|a, b| self.pivot_order(&a.0, &b.0));
         }
 
         // Build pivoted rows.

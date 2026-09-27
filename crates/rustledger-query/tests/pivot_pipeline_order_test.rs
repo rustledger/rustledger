@@ -183,11 +183,14 @@ fn the_no_from_pipeline_orders_and_limits_the_same_way() {
         );
     }
 
-    // With no ORDER BY at all, grouped rows come back in first-appearance
-    // order -- which is what bean-query returns, and what BOTH paths now do.
+    // With no ORDER BY at all, the pivoted rows are the row keys sorted, as
+    // bean-query's `EvalPivot` sorts them (`rows.sort(key=itemgetter(col1))`)
+    // -- measured on this ledger: `Assets:A, Assets:B, Equity:O`. They were
+    // first-appearance (`Assets:A, Equity:O, Assets:B`), which is bean-query's
+    // order for a GROUPED query but not for a pivoted one (#2440).
     assert_eq!(
         keys(&run(&query("", ""))),
-        vec!["Assets:A", "Equity:O", "Assets:B"],
-        "grouped rows keep first-appearance order, as bean-query does",
+        vec!["Assets:A", "Assets:B", "Equity:O"],
+        "pivoted rows with no ORDER BY are sorted by key, as bean-query's are",
     );
 }

@@ -287,6 +287,17 @@ So matching bean-query here is a package deal that includes silently ignoring
 an explicit clause. Pinned by
 `crates/rustledger-query/tests/pivot_pipeline_order_test.rs` (issue #2219).
 
+The other axes match bean-query (issue #2440). The COLUMNS are the spread
+values sorted by value, whatever the `ORDER BY`, as bean-query's
+`sorted(keys)` and DuckDB's `PIVOT` lay them out; they used to follow the
+order values first appeared in the sorted rows, so with no `ORDER BY` on the
+spread column the layout was ledger order and one new transaction could
+reorder it. With no `ORDER BY`, the ROWS are the row keys sorted, as
+bean-query's are. One deliberate difference: a NULL spread value is a column
+of its own, sorted first as `ORDER BY` sorts NULL, where bean-query fails with
+`TypeError: '<' not supported between instances of 'str' and 'NoneType'`.
+Pinned by `crates/rustledger-query/tests/pivot_axis_order.rs`.
+
 ### 12. SUM Over a Boolean
 
 `sum(number > 0)` counts the rows where the comparison is true. Python sums

@@ -220,6 +220,11 @@ PIVOT BY 2
 
 Note: PIVOT BY must reference a SELECT output column, either by name or by its 1-indexed position; pivoting by an arbitrary expression (for example, `PIVOT BY YEAR(date)`) is not supported.
 
+The new columns are the second column's values sorted by value, NULL first, as
+bean-query sorts them. The rows follow the query's `ORDER BY`, applied before
+the pivot, and are sorted by the first column's values when there is none.
+`LIMIT` counts the pivoted rows.
+
 ## Aggregate Functions
 
 | Function | Description |

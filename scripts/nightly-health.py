@@ -46,9 +46,9 @@ MARKER = "<!-- nightly-health -->"
 # published as a SUSPICION, which is both honest and self-clearing -- if the
 # next run disagrees the entry simply disappears.
 #
-# This is the part that does not depend on knowing the mechanism. The
-# `created>=` count defeats one specific way the listing can lie; this defeats
-# any way it can lie briefly, which is every way observed so far.
+# This is the part that does not depend on knowing the mechanism. Asking for
+# the runs in a `created>=` window (see `latest_scheduled_run`) defeats the one
+# way the old listing was seen to lie; this defeats any way it can lie briefly.
 SUSPECT_MARKER = "<!-- suspect:"
 
 # Multiples of the nominal period before a workflow counts as stale. Generous
@@ -137,63 +137,75 @@ def scheduled_workflows() -> dict[str, str]:
     return out
 
 
-# How many recent scheduled runs to fetch before picking the newest.
-#
-# More than one because the newest is chosen by comparing timestamps rather
-# than by trusting list order (see `latest_scheduled_run`).
-_RUN_PAGE = 10
-
 # Pause before re-asking whether a workflow has run. Long enough to outlast a
 # momentary blip, short enough not to matter in a nightly job.
 _REQUERY_DELAY_S = 5
 
 
-def latest_scheduled_run(workflow: str) -> dict | None:
-    """The most recent scheduled run of `workflow`, by `createdAt`.
+def latest_scheduled_run(workflow: str, since: datetime) -> dict | None:
+    """The newest scheduled run of `workflow` created since `since`, or None.
 
-    Fetches a page and takes the MAXIMUM rather than the first element. On
-    2026-09-03 this reported `bench.yml` as ten days stale while it had in fact
-    run six hours earlier, and the run it linked was a real but old one -- so
-    the lookup returned a stale entry rather than failing. The cause was not
-    reproducible afterwards (the same `gh run list --limit 1` returned the
-    correct run by hand), so this does not claim to fix a diagnosed bug: it
-    removes the dependence on list ORDER, which is the only assumption that
-    could have produced that output.
+    Asks for EVERY scheduled run in the window (`created>=`, paginated) and
+    picks the newest by timestamp. That one answer settles both questions the
+    report asks: whether the cron fired within its cadence (any run at all),
+    and whether it passed (the newest run's conclusion).
 
-    That matters more here than the code size suggests. A health reporter
-    exists to be believed; one that cries wolf gets muted, which is the failure
-    it was written to prevent.
+    It used to ask `gh run list --workflow W --event schedule --limit 10` for
+    the newest runs instead, and that listing returns an arbitrary set of
+    scheduled runs, not the newest ten. Three calls in a row on 2026-09-28 for
+    `bench.yml`, a DAILY job, returned pages whose newest run was 09-25, 09-25
+    and 09-28 (the right one), spanning up to two and a half months (#2462).
+    Every false stale alarm this reporter filed came from such a page
+    (#2232, #2281, #2301, #2356, #2448), and taking the max of the page or
+    asking twice could not help: a max over the wrong rows is still wrong. The
+    same page also decided the conclusion, so a newest run that FAILED could be
+    left off it and an older success reported in its place -- a failure hidden,
+    with nothing checking a success.
+
+    The windowed query was right on every try of the same test, and it is what
+    the stale verdict's second opinion already used. Asking it directly removes
+    that second opinion: there is no longer a listing for it to contradict.
+
+    The filter is date-granular, so the window is up to a day wider than asked.
+    That errs toward NOT claiming staleness, the right direction for a report
+    whose credibility is the thing being protected. It does not defeat a
+    lagged view of the runs table, which is why a stale claim must also survive
+    a night; see `SUSPECT_MARKER`.
     """
+    day = since.strftime("%Y-%m-%d")
+
     def query() -> list[dict]:
         raw = gh(
-            "run", "list", "--repo", REPO, "--workflow", workflow,
-            "--event", "schedule", "--limit", str(_RUN_PAGE),
-            "--json", "conclusion,status,createdAt,databaseId,url",
+            "api", "--paginate",
+            f"repos/{REPO}/actions/workflows/{workflow}/runs"
+            f"?event=schedule&created=%3E%3D{day}&per_page=100",
+            "--jq",
+            ".workflow_runs[] | {conclusion, status, createdAt: .created_at, "
+            "databaseId: .id, url: .html_url}",
             tolerate_missing=True,
         )
-        # A tolerated 404 returns "". That genuinely means "has not run yet",
-        # which the stale path already reports correctly, so it is an empty
-        # list rather than an error.
-        if not raw.strip():
-            return []
-        # Non-empty output that will not parse is a different thing entirely.
-        # Reading it as "no runs" would put an invalid response through the
-        # same path as a dead cron, which is the confusion this whole change
-        # is about.
-        try:
-            return json.loads(raw)
-        except json.JSONDecodeError as e:
-            raise GhError(f"unparsable `gh run list` output: {raw[:120]!r}") from e
+        # One JSON object per line. A tolerated 404 returns "", which genuinely
+        # means "has not run yet": the stale path reports that correctly, so it
+        # is an empty list rather than an error.
+        runs = []
+        for line in raw.splitlines():
+            if not line.strip():
+                continue
+            # Output that will not parse is a different thing entirely. Reading
+            # it as "no runs" would put an invalid response through the same
+            # path as a dead cron.
+            try:
+                runs.append(json.loads(line))
+            except json.JSONDecodeError as e:
+                raise GhError(f"unparsable scheduled-run output: {line[:120]!r}") from e
+        return runs
 
     # Ask twice before concluding anything. An empty first answer is the input
-    # to the report's most serious claim, and on 2026-09-03 and 2026-09-08 that
-    # claim was wrong both times: `bench.yml` had run hours earlier and the same
-    # query returned it correctly by hand afterwards. A second call costs one
-    # API round trip; a false alarm costs the report its credibility.
-    #
-    # A failed or unparsable answer is retried on the same reasoning, and
-    # raised only if it persists, so it lands in "could not be checked" rather
-    # than in a claim about the workflow.
+    # to the report's most serious claim, and a second call costs one round
+    # trip where a false alarm costs the report its credibility. A failed or
+    # unparsable answer is retried on the same reasoning, and raised only if it
+    # persists, so it lands in "could not be checked" rather than in a claim
+    # about the workflow.
     runs: list[dict] = []
     error: GhError | None = None
     for attempt in (1, 2):
@@ -210,58 +222,6 @@ def latest_scheduled_run(workflow: str) -> dict | None:
     if not runs:
         return None
     return max(runs, key=lambda r: r["createdAt"])
-
-
-def scheduled_runs_since(workflow: str, since: datetime) -> int:
-    """How many scheduled runs of `workflow` exist since `since`, counted server-side.
-
-    This is the second opinion the stale verdict is checked against, and it is
-    deliberately a DIFFERENT question than `latest_scheduled_run` asks. That one
-    fetches a page and picks the newest from it, so it is only ever as good as
-    the page it was handed; every false alarm so far (2026-09-03, -09-08, -09-11,
-    all on `bench.yml`) came from a page whose newest entry was weeks old while
-    the cron had in fact fired that morning. Taking the max instead of the first
-    element, then asking twice, did not stop it — both retries can be handed the
-    same lagged page, and a max over stale rows is still stale.
-
-    `total_count` with a `created>=` filter has no such dependence: no ordering,
-    no pagination, no "newest of what I was given". It answers "did it fire in
-    the window" directly, which is the only thing the stale claim rests on.
-
-    Be precise about how much that buys, because it is less than it looks.
-    `gh run list --workflow F --event schedule` resolves F to an id and then
-    GETs `/actions/workflows/<id>/runs?event=schedule`; this asks the SAME
-    endpoint with different parameters, so it is not an independent source. It
-    defeats a bad page — wrong order, wrong window, rows that should not be
-    newest — which is the only mechanism anyone has actually named. It does NOT
-    defeat a lagged view of the runs table, because a count computed against
-    that same lagged view would agree with the wrong answer.
-
-    That remaining hole is why the stale claim must also survive a night; see
-    `SUSPECT_MARKER`.
-
-    Note the filter is date-granular, so the window is up to a day wider than
-    asked. That errs toward NOT claiming staleness, which is the right direction
-    for a report whose credibility is the thing being protected.
-    """
-    day = since.strftime("%Y-%m-%d")
-    raw = gh(
-        "api",
-        f"repos/{REPO}/actions/workflows/{workflow}/runs"
-        f"?event=schedule&created=%3E%3D{day}&per_page=1",
-        "--jq", ".total_count",
-        tolerate_missing=True,
-    )
-    # A tolerated 404 is "no such workflow / never run", which is genuinely zero
-    # runs in the window rather than a failed check.
-    if not raw.strip():
-        return 0
-    try:
-        return int(raw.strip())
-    except ValueError as e:
-        # Same reasoning as the run listing: an answer that will not parse must
-        # not be read as "no runs", because that is the input to the stale claim.
-        raise GhError(f"unparsable total_count: {raw.strip()[:80]!r}") from e
 
 
 def later_successful_manual_run(workflow: str, after: datetime) -> dict | None:
@@ -383,45 +343,61 @@ def self_test() -> int:
         failures += not ok
         print(f"  {'ok  ' if ok else 'FAIL'} query passes {flag} {value}")
 
-    # `latest_scheduled_run` must pick by TIMESTAMP, not by position. The
-    # 2026-09-03 report called `bench.yml` ten days stale while it had run six
-    # hours earlier, linking a real but older run -- consistent with taking
-    # element zero of a list that was not newest-first. Fed deliberately
-    # out-of-order here, since a correctly-ordered fixture cannot tell the two
-    # implementations apart.
-    out_of_order = (
-        '[{"conclusion":"success","status":"completed",'
-        '"createdAt":"2026-08-24T02:52:42Z","databaseId":1,"url":"old"},'
-        '{"conclusion":"success","status":"completed",'
-        '"createdAt":"2026-09-03T06:34:44Z","databaseId":2,"url":"new"}]'
-    )
-    gh = stub(out_of_order)
-    picked = latest_scheduled_run("bench.yml")
+    # `latest_scheduled_run` reads one JSON object per line, which is what
+    # `gh api --jq '.workflow_runs[] | {...}'` prints.
+    def run_line(created: str, url: str, concl: str = "success",
+                 status: str = "completed") -> str:
+        return json.dumps({"conclusion": concl, "status": status,
+                           "createdAt": created, "databaseId": 1, "url": url})
+
+    since_t = datetime(2026, 9, 8, tzinfo=timezone.utc)
+
+    # It must pick by TIMESTAMP, not by position: nothing promises the order,
+    # so a fixture in the right order could not tell the two apart.
+    gh = stub("\n".join([
+        run_line("2026-09-08T02:52:42Z", "old"),
+        run_line("2026-09-10T06:34:44Z", "new"),
+        run_line("2026-09-09T02:00:00Z", "middle"),
+    ]))
+    picked = latest_scheduled_run("bench.yml", since_t)
     ok = picked is not None and picked["url"] == "new"
     failures += not ok
-    print(f"  {'ok  ' if ok else 'FAIL'} newest scheduled run wins regardless of list order")
+    print(f"  {'ok  ' if ok else 'FAIL'} newest scheduled run wins regardless of order")
 
-    gh = stub("[]")
-    ok = latest_scheduled_run("bench.yml") is None
+    gh = stub("")
+    ok = latest_scheduled_run("bench.yml", since_t) is None
     failures += not ok
-    print(f"  {'ok  ' if ok else 'FAIL'} no scheduled runs reports None")
+    print(f"  {'ok  ' if ok else 'FAIL'} no scheduled run in the window reports None")
+
+    # The query's SHAPE is what makes the answer trustworthy (#2462): the
+    # windowed endpoint, every page of it, scheduled runs only. `gh run list
+    # --event schedule` is the query that returned arbitrary pages; a
+    # regression back to it, or one dropping the window or `--paginate`, must
+    # fail here rather than resurface as a false alarm a week later.
+    seen_args.clear()
+    gh = stub(run_line("2026-09-10T06:34:44Z", "u"))
+    latest_scheduled_run("bench.yml", since_t)
+    argv = seen_args[-1] if seen_args else ()
+    url = next((a for a in argv if "actions/workflows" in a), "")
+    for ok, label in [
+        (bool(argv) and argv[0] == "api", "asks the API, not `gh run list`"),
+        ("--paginate" in argv, "reads every page of the window"),
+        ("workflows/bench.yml/runs" in url, "names the workflow it was asked about"),
+        ("event=schedule" in url, "counts scheduled runs only"),
+        ("created=%3E%3D2026-09-08" in url, "limits to the staleness window"),
+    ]:
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'} scheduled-run query {label}")
 
     # An empty first answer must be re-asked before concluding a cron stopped.
-    # This is the 2026-09-03 and 2026-09-08 `bench.yml` false alarm: the run
-    # existed, the first query did not show it.
     calls = {"n": 0}
 
     def flaky(*_args: str, **_kw: object) -> str:
         calls["n"] += 1
-        if calls["n"] == 1:
-            return "[]"
-        return (
-            '[{"conclusion":"success","status":"completed",'
-            '"createdAt":"2026-09-08T06:37:00Z","databaseId":9,"url":"real"}]'
-        )
+        return "" if calls["n"] == 1 else run_line("2026-09-10T06:37:00Z", "real")
 
     gh = flaky
-    picked = latest_scheduled_run("bench.yml")
+    picked = latest_scheduled_run("bench.yml", since_t)
     ok = calls["n"] == 2 and picked is not None and picked["url"] == "real"
     failures += not ok
     print(f"  {'ok  ' if ok else 'FAIL'} an empty answer is re-queried before reporting stale")
@@ -463,7 +439,7 @@ def self_test() -> int:
     # invalid response through the same path as a dead cron.
     gh = lambda *_a, **_k: "<!DOCTYPE html><html>upstream error page</html>"  # noqa: E731
     try:
-        latest_scheduled_run("bench.yml")
+        latest_scheduled_run("bench.yml", since_t)
         ok = False
     except GhError:
         ok = True
@@ -475,7 +451,7 @@ def self_test() -> int:
     # "could not be checked" instead of reporting it correctly as stale.
     gh = lambda *_a, **_k: ""  # noqa: E731
     try:
-        ok = latest_scheduled_run("brand-new.yml") is None
+        ok = latest_scheduled_run("brand-new.yml", since_t) is None
     except GhError:
         # Without the guard this raises. Catch it so the case reports FAIL
         # rather than aborting the whole self-test on the way past.
@@ -483,66 +459,63 @@ def self_test() -> int:
     failures += not ok
     print(f"  {'ok  ' if ok else 'FAIL'} an empty answer still reports no runs, not a failed check")
 
-    # --- the cross-check that decides whether a stale verdict is published ---
+    # --- the two ways the old listing lied, through main() (#2462) ---
     #
-    # This is the part that would have stopped all three `bench.yml` false
-    # alarms, so it is checked in both directions: it must suppress a wrong
-    # stale claim, and it must NOT suppress a right one.
-    now_t = datetime(2026, 9, 11, 12, 30, tzinfo=timezone.utc)
+    # Both drive the real main() with `gh run list --event schedule` answering
+    # the way it was observed to: an old page missing the newest runs. Each
+    # fails on the code before #2462, which trusted that page.
+    def drive(api_runs: dict[str, str], listed: str) -> dict[str, str]:
+        seen: dict[str, str] = {"ops": ""}
 
-    gh = stub("5")
-    claim, note = confirm_stale("bench.yml", "daily", now_t, timedelta(days=16))
-    ok = claim is False and "not claimed stale" in note
+        def fake(*args: str, **_kw: object) -> str:
+            a = list(args)
+            if a[0] == "issue" and a[1] == "list":
+                return "[]"
+            if a[0] == "issue":
+                seen["ops"] += a[1] + ","
+                if "--body" in a:
+                    seen["body"] = a[a.index("--body") + 1]
+                return "https://example/1"
+            if a[0] == "run" and a[1] == "list":
+                event = a[a.index("--event") + 1] if "--event" in a else ""
+                return listed if event == "schedule" else "[]"
+            if a[0] == "api":
+                url = next(x for x in a if "actions/workflows" in x)
+                wf = url.split("/workflows/")[1].split("/")[0]
+                return api_runs.get(wf, run_line(fresh_run, "fresh"))
+            return ""
+
+        global gh
+        gh = fake
+        with contextlib.redirect_stdout(io.StringIO()):
+            main()
+        return seen
+
+    old_page = json.dumps([{
+        "conclusion": "success", "status": "completed",
+        "createdAt": stale_run, "databaseId": 1, "url": "old",
+    }])
+
+    # 1. A cron that fired is healthy, whatever the listing says. Before #2462
+    # this read the old page as stale, the second opinion contradicted it, and
+    # the contradiction was filed under "could not be checked", which opened
+    # the tracking issue (#2301, #2448).
+    seen = drive({}, old_page)
+    ok = "create" not in seen["ops"] and "body" not in seen
     failures += not ok
-    print(f"  {'ok  ' if ok else 'FAIL'} a contradicting count suppresses the stale claim")
+    print(f"  {'ok  ' if ok else 'FAIL'} an old listing page does not raise a false alarm")
 
-    gh = stub("0")
-    claim, _ = confirm_stale("dead.yml", "daily", now_t, timedelta(days=16))
-    ok = claim is True
+    # 2. A failed newest run is reported, though the listing shows an older
+    # success. Before #2462 the page decided the conclusion, so this read as
+    # healthy: a real failure hidden.
+    seen = drive({"bench.yml": "\n".join([
+        run_line(ago(days=2), "older-success"),
+        run_line(ago(hours=6), "newest-failure", concl="failure"),
+    ])}, old_page)
+    body = seen.get("body", "")
+    ok = "### Failing" in body and "newest-failure" in body
     failures += not ok
-    print(f"  {'ok  ' if ok else 'FAIL'} an agreeing count still reports a genuinely dead cron")
-
-    # The count query is the whole second opinion, so its SHAPE is the thing
-    # worth pinning: filtered to scheduled runs, and to the staleness window.
-    # A regression dropping either flag would count every run ever and silence
-    # the report permanently -- failing open, in the direction nobody notices.
-    seen_args.clear()
-    gh = stub("3")
-    confirm_stale("bench.yml", "daily", now_t, timedelta(days=16))
-    argv = seen_args[-1] if seen_args else ()
-    url = next((a for a in argv if "actions/workflows" in a), "")
-    for fragment, label in [
-        ("bench.yml", "the workflow it was asked about"),
-        ("event=schedule", "scheduled runs only"),
-        ("created=%3E%3D2026-09-08", "the staleness window, not all time"),
-    ]:
-        ok = fragment in url
-        failures += not ok
-        print(f"  {'ok  ' if ok else 'FAIL'} count query names {label}")
-
-    # An unreachable cross-check must not become an assertion in either
-    # direction: not a stale claim, and not a clean bill of health.
-    def raiser(*_a: object, **_k: object) -> str:
-        raise GhError("HTTP 502")
-
-    gh = raiser
-    with contextlib.redirect_stdout(io.StringIO()):
-        claim, note = confirm_stale("bench.yml", "daily", now_t, timedelta(days=16))
-    ok = claim is False and "could not be fetched" in note
-    failures += not ok
-    print(f"  {'ok  ' if ok else 'FAIL'} an unreachable cross-check claims nothing")
-
-    # A count that will not parse is the same hazard as an unparsable listing:
-    # read as zero it would CONFIRM a false stale claim, which is worse than
-    # not checking at all.
-    gh = stub("<!DOCTYPE html>")
-    try:
-        scheduled_runs_since("bench.yml", now_t - timedelta(days=3))
-        ok = False
-    except GhError:
-        ok = True
-    failures += not ok
-    print(f"  {'ok  ' if ok else 'FAIL'} an unparsable count raises rather than confirming stale")
+    print(f"  {'ok  ' if ok else 'FAIL'} a failed newest run is reported, not hidden by an older success")
 
     # --- the suspicion round-trip ---
     #
@@ -603,8 +576,8 @@ def self_test() -> int:
     # --- escalation, end to end through main() ---
     #
     # The pieces above are each checked in isolation, and that is not the same
-    # as checking the behavior: the round trip could work, `confirm_stale`
-    # could work, and main() could still put every entry in the wrong section.
+    # as checking the behavior: the round trip could work, the query could
+    # work, and main() could still put every entry in the wrong section.
     # This drives the real main() over a stubbed API and reads the body it
     # would publish, which is the only thing a person ever sees.
     def report_body(prior_body: str) -> str:
@@ -620,17 +593,11 @@ def self_test() -> int:
                 if "--body" in a:
                     written["body"] = a[a.index("--body") + 1]
                 return "https://example/1"
-            if a[0] == "run" and a[1] == "list":
-                wf = a[a.index("--workflow") + 1]
-                when = stale_run if wf == "bench.yml" else fresh_run
-                return json.dumps([{
-                    "conclusion": "success", "status": "completed",
-                    "createdAt": when, "databaseId": 1, "url": "u",
-                }])
             if a[0] == "api":
-                # The count AGREES that bench.yml really has not run, so the
-                # only thing holding the claim back is the one-night rule.
-                return "0" if "bench.yml" in a[1] else "4"
+                # bench.yml has no scheduled run in its window, so the only
+                # thing holding the stale claim back is the one-night rule.
+                url = next(x for x in a if "actions/workflows" in x)
+                return "" if "/bench.yml/" in url else run_line(fresh_run, "u")
             return ""
 
         global gh
@@ -679,13 +646,8 @@ def self_test() -> int:
             if a[1] == "edit" and "--body" in a:
                 closed["body"] = a[a.index("--body") + 1]
             return "u"
-        if a[0] == "run" and a[1] == "list":
-            return json.dumps([{
-                "conclusion": "success", "status": "completed",
-                "createdAt": fresh_run, "databaseId": 1, "url": "u",
-            }])
         if a[0] == "api":
-            return "4"
+            return run_line(fresh_run, "u")
         return ""
 
     gh = fake_green
@@ -814,47 +776,6 @@ def tracking_issue() -> dict | None:
     return issues[0] if issues else None
 
 
-def confirm_stale(
-    workflow: str, period: str, now: datetime, age: timedelta | None
-) -> tuple[bool, str]:
-    """Second-opinion a stale verdict. Returns (claim_it, note_if_not).
-
-    The run listing has now produced three false stale reports, so its verdict
-    alone is not enough to publish. A count that contradicts it means the cron
-    is alive and the listing was wrong, which is the case actually observed; a
-    count that agrees turns a single lookup into two independent ones.
-
-    A cross-check that cannot be reached decides nothing either way, so it lands
-    in "could not be checked" rather than becoming an assertion about the cron.
-    That is the same call the surrounding code already makes for an unanswered
-    listing, and it is the safer one: this report has three false alarms on
-    record and no missed dead cron.
-    """
-    window = STALENESS[period]
-    try:
-        recent = scheduled_runs_since(workflow, now - window)
-    except GhError as e:
-        print(f"::error::could not confirm staleness of {workflow}: {e}")
-        return False, (
-            f"- `{workflow}` ({period}) — looks stale, but the confirming count "
-            f"could not be fetched ({e}), so nothing is claimed"
-        )
-
-    if recent > 0:
-        observed = (
-            "no scheduled run at all" if age is None
-            else f"its newest scheduled run {age.days}d old"
-        )
-        print(f"::warning::{workflow}: listing said stale, count says {recent} recent run(s)")
-        return False, (
-            f"- `{workflow}` ({period}) — **not claimed stale**: the run listing "
-            f"reported {observed}, but {recent} scheduled run(s) exist in the last "
-            f"{window.days}d. The listing was wrong, not the cron "
-            f"(see `scheduled_runs_since`)"
-        )
-    return True, ""
-
-
 def main() -> int:
     now = datetime.now(timezone.utc)
     failing: list[str] = []
@@ -886,8 +807,9 @@ def main() -> int:
         )
 
     for wf, period in sorted(workflows.items()):
+        window = STALENESS[period]
         try:
-            run = latest_scheduled_run(wf)
+            run = latest_scheduled_run(wf, now - window)
         except GhError as e:
             # An unanswered query is not evidence that a cron stopped. Say the
             # check did not happen rather than assert something about the
@@ -897,13 +819,12 @@ def main() -> int:
             unchecked.append(f"- `{wf}` ({period}) — could not be checked: {e}")
             continue
         if run is None:
-            confirmed, note = confirm_stale(wf, period, now, None)
-            if not confirmed:
-                unchecked.append(note)
-                continue
+            # No scheduled run in the window: the stale candidate. Published as
+            # fact only if the previous report already suspected it.
             suspects_now.append(wf)
-            entry = f"- `{wf}` ({period}) — no scheduled run found at all"
+            entry = f"- `{wf}` ({period}) — no scheduled run in the last {window.days}d"
             (stale if wf in prior else suspected).append(entry)
+            print(f"{wf:24} {period:8} {'none':12} in {window.days}d")
             continue
         created = datetime.fromisoformat(run["createdAt"].replace("Z", "+00:00"))
         age = now - created
@@ -919,18 +840,9 @@ def main() -> int:
             print(f"{wf:24} {period:8} {'in flight':12} {age.days}d ago")
             continue
 
-        if age > STALENESS[period]:
-            confirmed, note = confirm_stale(wf, period, now, age)
-            if not confirmed:
-                unchecked.append(note)
-            else:
-                suspects_now.append(wf)
-                entry = (
-                    f"- `{wf}` ({period}) — last scheduled run {age.days}d ago "
-                    f"([{concl}]({run['url']}))"
-                )
-                (stale if wf in prior else suspected).append(entry)
-        elif concl != "success":
+        # A run inside the window means the cron is firing; whether it is
+        # healthy is now the newest run's conclusion, from the same answer.
+        if concl != "success":
             entry = f"- `{wf}` ({period}) — last scheduled run **{concl}** ([log]({run['url']}))"
             try:
                 manual = later_successful_manual_run(wf, created)

@@ -180,14 +180,16 @@ def latest_scheduled_run(workflow: str, since: datetime) -> dict | None:
             f"repos/{REPO}/actions/workflows/{workflow}/runs"
             f"?event=schedule&created=%3E%3D{day}&per_page=100",
             "--jq",
-            ".workflow_runs[] | {conclusion, status, createdAt: .created_at, "
-            "databaseId: .id, url: .html_url}",
+            "{total: .total_count, runs: [.workflow_runs[] | {conclusion, status, "
+            "createdAt: .created_at, databaseId: .id, url: .html_url}]}",
             tolerate_missing=True,
         )
-        # One JSON object per line. A tolerated 404 returns "", which genuinely
-        # means "has not run yet": the stale path reports that correctly, so it
-        # is an empty list rather than an error.
-        runs = []
+        # One JSON object per PAGE, each carrying the query's `total_count`.
+        # A tolerated 404 returns "", which genuinely means "has not run yet":
+        # the stale path reports that correctly, so it is an empty list rather
+        # than an error.
+        runs: list[dict] = []
+        total = 0
         for line in raw.splitlines():
             if not line.strip():
                 continue
@@ -195,9 +197,18 @@ def latest_scheduled_run(workflow: str, since: datetime) -> dict | None:
             # it as "no runs" would put an invalid response through the same
             # path as a dead cron.
             try:
-                runs.append(json.loads(line))
-            except json.JSONDecodeError as e:
+                page = json.loads(line)
+                runs.extend(page["runs"])
+                total = max(total, int(page["total"]))
+            except (json.JSONDecodeError, KeyError, TypeError, ValueError) as e:
                 raise GhError(f"unparsable scheduled-run output: {line[:120]!r}") from e
+        # The answer checks itself. Fewer rows than the API says exist is the
+        # old listing's failure -- runs left out -- and the rows it did return
+        # would decide both verdicts: a missing newest run is a false stale
+        # claim or a hidden failure. So an incomplete answer is not an answer.
+        # (More rows than `total` is a run created mid-pagination, and harmless.)
+        if len(runs) < total:
+            raise GhError(f"incomplete answer: {len(runs)} of {total} scheduled run(s)")
         return runs
 
     # Ask twice before concluding anything. An empty first answer is the input
@@ -343,31 +354,56 @@ def self_test() -> int:
         failures += not ok
         print(f"  {'ok  ' if ok else 'FAIL'} query passes {flag} {value}")
 
-    # `latest_scheduled_run` reads one JSON object per line, which is what
-    # `gh api --jq '.workflow_runs[] | {...}'` prints.
-    def run_line(created: str, url: str, concl: str = "success",
-                 status: str = "completed") -> str:
-        return json.dumps({"conclusion": concl, "status": status,
-                           "createdAt": created, "databaseId": 1, "url": url})
+    # `latest_scheduled_run` reads one JSON object per PAGE, `{total, runs}`,
+    # which is what its `gh api --paginate --jq` prints.
+    def run(created: str, url: str, concl: str = "success",
+            status: str = "completed") -> dict:
+        return {"conclusion": concl, "status": status,
+                "createdAt": created, "databaseId": 1, "url": url}
+
+    def page(*runs: dict, total: int | None = None) -> str:
+        return json.dumps({"total": len(runs) if total is None else total,
+                           "runs": list(runs)})
+
+    def run_line(created: str, url: str, concl: str = "success") -> str:
+        return page(run(created, url, concl))
 
     since_t = datetime(2026, 9, 8, tzinfo=timezone.utc)
 
     # It must pick by TIMESTAMP, not by position: nothing promises the order,
     # so a fixture in the right order could not tell the two apart.
+    # Two pages, the newest on neither's first row.
     gh = stub("\n".join([
-        run_line("2026-09-08T02:52:42Z", "old"),
-        run_line("2026-09-10T06:34:44Z", "new"),
-        run_line("2026-09-09T02:00:00Z", "middle"),
+        page(run("2026-09-08T02:52:42Z", "old"), run("2026-09-10T06:34:44Z", "new"),
+             total=3),
+        page(run("2026-09-09T02:00:00Z", "middle"), total=3),
     ]))
     picked = latest_scheduled_run("bench.yml", since_t)
     ok = picked is not None and picked["url"] == "new"
     failures += not ok
     print(f"  {'ok  ' if ok else 'FAIL'} newest scheduled run wins regardless of order")
 
-    gh = stub("")
+    gh = stub(page())
     ok = latest_scheduled_run("bench.yml", since_t) is None
     failures += not ok
     print(f"  {'ok  ' if ok else 'FAIL'} no scheduled run in the window reports None")
+
+    # The answer checks itself: fewer rows than `total_count` is the old
+    # listing's failure, runs left out, so it must not become a verdict --
+    # not "stale" when the page is empty, not "healthy" off an older row.
+    for label, answer in [
+        ("rows missing from a non-empty answer", page(run("2026-09-09T02:00:00Z", "old"),
+                                                       total=4)),
+        ("an empty answer that says runs exist", page(total=3)),
+    ]:
+        gh = stub(answer)
+        try:
+            latest_scheduled_run("bench.yml", since_t)
+            ok = False
+        except GhError:
+            ok = True
+        failures += not ok
+        print(f"  {'ok  ' if ok else 'FAIL'} an incomplete answer raises: {label}")
 
     # The query's SHAPE is what makes the answer trustworthy (#2462): the
     # windowed endpoint, every page of it, scheduled runs only. `gh run list
@@ -394,7 +430,7 @@ def self_test() -> int:
 
     def flaky(*_args: str, **_kw: object) -> str:
         calls["n"] += 1
-        return "" if calls["n"] == 1 else run_line("2026-09-10T06:37:00Z", "real")
+        return page() if calls["n"] == 1 else run_line("2026-09-10T06:37:00Z", "real")
 
     gh = flaky
     picked = latest_scheduled_run("bench.yml", since_t)
@@ -464,7 +500,8 @@ def self_test() -> int:
     # Both drive the real main() with `gh run list --event schedule` answering
     # the way it was observed to: an old page missing the newest runs. Each
     # fails on the code before #2462, which trusted that page.
-    def drive(api_runs: dict[str, str], listed: str) -> dict[str, str]:
+    def drive(api_runs: dict[str, str], listed: str,
+              unreachable: frozenset[str] = frozenset()) -> dict[str, str]:
         seen: dict[str, str] = {"ops": ""}
 
         def fake(*args: str, **_kw: object) -> str:
@@ -482,6 +519,8 @@ def self_test() -> int:
             if a[0] == "api":
                 url = next(x for x in a if "actions/workflows" in x)
                 wf = url.split("/workflows/")[1].split("/")[0]
+                if wf in unreachable:
+                    raise GhError("HTTP 504")
                 return api_runs.get(wf, run_line(fresh_run, "fresh"))
             return ""
 
@@ -508,14 +547,26 @@ def self_test() -> int:
     # 2. A failed newest run is reported, though the listing shows an older
     # success. Before #2462 the page decided the conclusion, so this read as
     # healthy: a real failure hidden.
-    seen = drive({"bench.yml": "\n".join([
-        run_line(ago(days=2), "older-success"),
-        run_line(ago(hours=6), "newest-failure", concl="failure"),
-    ])}, old_page)
+    seen = drive({"bench.yml": page(
+        run(ago(days=2), "older-success"),
+        run(ago(hours=6), "newest-failure", concl="failure"),
+    )}, old_page)
     body = seen.get("body", "")
     ok = "### Failing" in body and "newest-failure" in body
     failures += not ok
     print(f"  {'ok  ' if ok else 'FAIL'} a failed newest run is reported, not hidden by an older success")
+
+    # 3. A query that cannot be answered claims nothing either way: it lands in
+    # "Could not be checked", and is neither suspected stale nor healthy. The
+    # 2026-09-28 review hit a live HTTP 504 on exactly this call.
+    seen = drive({}, old_page, unreachable=frozenset({"bench.yml"}))
+    body = seen.get("body", "")
+    ok = (
+        "### Could not be checked" in body and "`bench.yml`" in body
+        and f"{SUSPECT_MARKER}  -->" in body and "### Suspected stale" not in body
+    )
+    failures += not ok
+    print(f"  {'ok  ' if ok else 'FAIL'} an unreachable query claims nothing about the workflow")
 
     # --- the suspicion round-trip ---
     #
@@ -597,7 +648,7 @@ def self_test() -> int:
                 # bench.yml has no scheduled run in its window, so the only
                 # thing holding the stale claim back is the one-night rule.
                 url = next(x for x in a if "actions/workflows" in x)
-                return "" if "/bench.yml/" in url else run_line(fresh_run, "u")
+                return page() if "/bench.yml/" in url else run_line(fresh_run, "u")
             return ""
 
         global gh

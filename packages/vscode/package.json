@@ -120,10 +120,10 @@
     "test": "esbuild src/extension.ts --bundle --outfile=out/extension.test.cjs --external:vscode --external:vscode-languageclient/node --format=cjs --platform=node && node --test test/*.test.cjs"
   },
   "dependencies": {
-    "vscode-languageclient": "^10.1.1"
+    "vscode-languageclient": "^10.1.2"
   },
   "devDependencies": {
-    "@types/node": "^26.6.1",
+    "@types/node": "^26.6.2",
     "@types/vscode": "1.91.0",
     "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.28.2",

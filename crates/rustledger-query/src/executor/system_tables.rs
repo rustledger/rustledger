@@ -720,19 +720,32 @@ impl Executor<'_> {
                 // about the same directive (#2154). A column-presence census
                 // cannot see this: `tags` IS registered on `#entries`, it was
                 // just wrong for every directive except transactions.
-                let (tags, links) = match directive {
+                let (tags, links, accounts) = match directive {
+                    Directive::Open(open) => {
+                        (Vec::new(), Vec::new(), vec![open.account.to_string()])
+                    }
+                    Directive::Close(close) => {
+                        (Vec::new(), Vec::new(), vec![close.account.to_string()])
+                    }
+                    Directive::Balance(bal) => {
+                        (Vec::new(), Vec::new(), vec![bal.account.to_string()])
+                    }
                     Directive::Document(doc) => (
                         doc.tags.iter().map(ToString::to_string).collect(),
                         doc.links.iter().map(ToString::to_string).collect(),
+                        vec![doc.account.to_string()],
                     ),
-                    // `note` carries them too, since #2160 gave `Note` the
-                    // fields. This arm was Document-only because a note's
-                    // tags did not survive parsing; the comment above said so.
                     Directive::Note(note) => (
                         note.tags.iter().map(ToString::to_string).collect(),
                         note.links.iter().map(ToString::to_string).collect(),
+                        vec![note.account.to_string()],
                     ),
-                    _ => (Vec::new(), Vec::new()),
+                    Directive::Pad(pad) => (
+                        Vec::new(),
+                        Vec::new(),
+                        vec![pad.account.to_string(), pad.source_account.to_string()],
+                    ),
+                    _ => (Vec::new(), Vec::new(), Vec::new()),
                 };
                 (
                     Value::Null,
@@ -741,7 +754,7 @@ impl Executor<'_> {
                     Value::Null,
                     Value::StringSet(tags),
                     Value::StringSet(links),
-                    Value::StringSet(vec![]),
+                    Value::StringSet(accounts),
                 )
             };
 

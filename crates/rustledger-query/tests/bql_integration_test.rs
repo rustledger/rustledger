@@ -10485,6 +10485,45 @@ fn test_open_meta_from_postings_table() {
 }
 
 #[test]
+fn test_open_entry_accounts_populated() {
+    let mut open = Open::new(date(2024, 1, 1), "Assets:Bank:Checking");
+    open.meta.insert(
+        "institution".to_string(),
+        rustledger_core::MetaValue::String("Chase".to_string()),
+    );
+
+    let directives = vec![Directive::Open(open)];
+    let result = execute_query(
+        "SELECT accounts FROM #entries WHERE type = 'open'",
+        &directives,
+    );
+    assert_eq!(result.rows.len(), 1);
+    assert_eq!(
+        result.rows[0][0],
+        Value::StringSet(vec!["Assets:Bank:Checking".to_string()])
+    );
+}
+
+#[test]
+fn test_pad_entry_accounts_include_source() {
+    let directives = vec![Directive::Pad(rustledger_core::Pad::new(
+        date(2024, 1, 1),
+        "Assets:Bank",
+        "Equity:Opening",
+    ))];
+    let result = execute_query(
+        "SELECT accounts FROM #entries WHERE type = 'pad'",
+        &directives,
+    );
+    assert_eq!(result.rows.len(), 1);
+    let Value::StringSet(accounts) = &result.rows[0][0] else {
+        panic!("accounts should be a set");
+    };
+    assert!(accounts.contains(&"Assets:Bank".to_string()));
+    assert!(accounts.contains(&"Equity:Opening".to_string()));
+}
+
+#[test]
 fn test_entry_meta_from_postings_table() {
     let directives = vec![
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),

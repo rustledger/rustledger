@@ -34,15 +34,40 @@ use std::path::PathBuf;
 
 use rustledger_plugin::{PluginManager, RuntimeConfig};
 use rustledger_plugin_types::{
-    DirectiveData, DirectiveWrapper, OpenData, PluginInput, PluginOp, PluginOptions,
-    TransactionData,
+    AmountData, DirectiveData, DirectiveWrapper, OpenData, PluginInput, PluginOp, PluginOptions,
+    PostingData, TransactionData,
 };
 
-/// Absolute path to the fixture wasm produced by `build.rs`. Returns
-/// `None` when the sentinel is missing (wasm32 target unavailable).
-fn fixture_wasm_path() -> Option<PathBuf> {
-    let p = PathBuf::from(env!("OUT_DIR")).join("sample_stub.wasm");
-    p.exists().then_some(p)
+/// Bytes of the fixture wasm produced by `build.rs`, or `None` when the
+/// test must skip: under cargo-llvm-cov, or locally when the sentinel is
+/// missing (wasm32 target unavailable). Panics when missing in CI.
+fn fixture_wasm_bytes() -> Option<Vec<u8>> {
+    // cargo-llvm-cov can't be overridden in our wasm32 sub-cargo (see
+    // build.rs). The Test job exercises these tests for real; coverage
+    // skips them.
+    if std::env::var_os("CARGO_LLVM_COV").is_some() {
+        eprintln!(
+            "skip: running under cargo-llvm-cov; wasm32 fixture skipped by build.rs (Test job covers e2e)"
+        );
+        return None;
+    }
+
+    let path = PathBuf::from(env!("OUT_DIR")).join("sample_stub.wasm");
+    if !path.exists() {
+        assert!(
+            std::env::var_os("CI").is_none(),
+            "sample_stub.wasm sentinel missing in CI — wasm32-unknown-unknown \
+             target not installed, build.rs gracefully skipped. Install it via \
+             `targets: wasm32-unknown-unknown` on the rust-toolchain step in \
+             .github/workflows/ci.yml + quality.yml."
+        );
+        eprintln!(
+            "skip: sample_stub.wasm sentinel missing — wasm32-unknown-unknown not installed?"
+        );
+        return None;
+    }
+
+    Some(std::fs::read(&path).expect("read stub wasm"))
 }
 
 fn txn_wrapper(narration: &str) -> DirectiveWrapper {
@@ -78,33 +103,44 @@ fn open_wrapper(account: &str) -> DirectiveWrapper {
     }
 }
 
+fn expense_wrapper(n: usize) -> DirectiveWrapper {
+    let posting = |account: &str, number: &str| PostingData {
+        account: account.to_string(),
+        units: Some(AmountData {
+            number: number.to_string(),
+            currency: "USD".to_string(),
+        }),
+        cost: None,
+        price: None,
+        flag: None,
+        metadata: vec![],
+        span: None,
+    };
+    DirectiveWrapper {
+        directive_type: String::new(),
+        date: "2024-01-15".to_string(),
+        filename: Some("ledger.beancount".to_string()),
+        lineno: Some(u32::try_from(n).expect("small index")),
+        data: DirectiveData::Transaction(TransactionData {
+            flag: "*".to_string(),
+            payee: Some("Grocery store".to_string()),
+            narration: format!("Groceries #{n}"),
+            tags: vec![],
+            links: vec![],
+            metadata: vec![],
+            postings: vec![
+                posting("Liabilities:CreditCard", "-42.10"),
+                posting("Expenses:Food:Groceries", "42.10"),
+            ],
+        }),
+    }
+}
+
 #[test]
 fn stub_wasm_plugin_round_trips_process() {
-    // cargo-llvm-cov can't be overridden in our wasm32 sub-cargo (see
-    // build.rs). The Test job exercises this test for real; coverage
-    // skips it.
-    if std::env::var_os("CARGO_LLVM_COV").is_some() {
-        eprintln!(
-            "skip: running under cargo-llvm-cov; wasm32 fixture skipped by build.rs (Test job covers e2e)"
-        );
-        return;
-    }
-
-    let Some(wasm_path) = fixture_wasm_path() else {
-        assert!(
-            std::env::var_os("CI").is_none(),
-            "sample_stub.wasm sentinel missing in CI — wasm32-unknown-unknown \
-             target not installed, build.rs gracefully skipped. Install it via \
-             `targets: wasm32-unknown-unknown` on the rust-toolchain step in \
-             .github/workflows/ci.yml + quality.yml."
-        );
-        eprintln!(
-            "skip: sample_stub.wasm sentinel missing — wasm32-unknown-unknown not installed?"
-        );
+    let Some(bytes) = fixture_wasm_bytes() else {
         return;
     };
-
-    let bytes = std::fs::read(&wasm_path).expect("read stub wasm");
     let mut manager = PluginManager::with_config(RuntimeConfig::default());
     let index = manager
         .load_bytes("sample-stub", &bytes)
@@ -147,5 +183,45 @@ fn stub_wasm_plugin_round_trips_process() {
     match &output.ops[1] {
         PluginOp::Keep(i) => assert_eq!(*i, 1),
         other => panic!("expected Keep on non-transaction, got {other:?}"),
+    }
+}
+
+/// The default time budget covers a ledger-sized input. It used to be
+/// converted to fuel at 1M per second, so the default 30 seconds were
+/// 30M fuel; decoding one two-posting transaction costs the stub ~67k
+/// fuel, so it trapped on a ledger of a few hundred transactions.
+#[test]
+fn stub_wasm_plugin_processes_ledger_sized_input_within_default_budget() {
+    const TRANSACTIONS: usize = 5_000;
+
+    let Some(bytes) = fixture_wasm_bytes() else {
+        return;
+    };
+    let mut manager = PluginManager::with_config(RuntimeConfig::default());
+    let index = manager
+        .load_bytes("sample-stub", &bytes)
+        .expect("load stub wasm");
+
+    let input = PluginInput {
+        directives: (0..TRANSACTIONS).map(expense_wrapper).collect(),
+        options: PluginOptions::default(),
+        config: None,
+    };
+
+    let output = manager
+        .execute(index, &input)
+        .expect("default budget covers a 5,000-transaction input");
+
+    assert!(
+        output.errors.is_empty(),
+        "stub plugin should not emit errors, got: {:?}",
+        output.errors,
+    );
+    assert_eq!(output.ops.len(), TRANSACTIONS);
+    for (i, op) in output.ops.iter().enumerate() {
+        assert!(
+            matches!(op, PluginOp::Modify(j, _) if *j == i),
+            "expected Modify({i}, _), got {op:?}"
+        );
     }
 }

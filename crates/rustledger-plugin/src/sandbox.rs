@@ -77,10 +77,9 @@ pub const DEFAULT_SANDBOX_MAX_MEMORY: usize = 256 * 1024 * 1024;
 /// Default per-call CPU-time budget (in seconds) for sandboxed
 /// wasmtime calls in rustledger.
 ///
-/// Combined with the "1M wasmtime fuel ~ 1 second of wasm
-/// execution" convention used by [`make_sandboxed_store`], this
-/// gives every sandboxed call ~30 million fuel before exhaustion
-/// trips a trap. Generous enough for legitimate plugins (booking
+/// Converted at [`FUEL_PER_SECOND`] by [`make_sandboxed_store`], this
+/// gives every sandboxed call 30 billion fuel before exhaustion trips
+/// a trap. Generous enough for legitimate plugins (booking
 /// transactions, classifying entries) and importers (parsing
 /// CSV/OFX statements) while small enough that a runaway call
 /// surfaces as an error within a sensible interactive window
@@ -104,6 +103,17 @@ pub const DEFAULT_SANDBOX_MAX_MEMORY: usize = 256 * 1024 * 1024;
 /// overhead is a structural property of CPython-on-wasm, not an
 /// oversight.
 pub const DEFAULT_SANDBOX_MAX_TIME_SECS: u64 = 30;
+
+/// wasmtime fuel granted per second of a sandbox time budget.
+///
+/// wasmtime charges roughly one unit of fuel per wasm operator, and
+/// Cranelift-compiled code runs several billion operators per second:
+/// 5-17 billion fuel per second measured on an x86-64 desktop, both
+/// for a tight arithmetic loop and for a plugin decoding its
+/// `PluginInput` (~67k fuel per two-posting transaction). At one
+/// billion, a budget of N seconds stops a call within N seconds of
+/// wall-clock time on any host running wasm at least that fast.
+pub const FUEL_PER_SECOND: u64 = 1_000_000_000;
 
 /// Hard cap on the number of elements in any single WASM table.
 ///
@@ -227,9 +237,7 @@ pub fn make_sandboxed_store(
 ) -> wasmtime::Result<Store<StoreState>> {
     let mut store = Store::new(engine, StoreState::new(max_memory));
     store.limiter(|s| &mut s.limiter);
-    // 1M instructions per second is the same rough budget used
-    // across the workspace.
-    let fuel = max_time_secs.max(1).saturating_mul(1_000_000);
+    let fuel = max_time_secs.max(1).saturating_mul(FUEL_PER_SECOND);
     store.set_fuel(fuel)?;
     Ok(store)
 }
@@ -429,7 +437,7 @@ mod tests {
     #[test]
     fn make_sandboxed_store_saturates_huge_max_time_secs() {
         // Regression: max_time_secs = u64::MAX would overflow the
-        // `* 1_000_000` calc (debug panic, release silent wrap).
+        // `* FUEL_PER_SECOND` calc (debug panic, release silent wrap).
         let engine = shared_engine();
         let store = make_sandboxed_store(&engine, 1024 * 1024, u64::MAX)
             .expect("huge secs saturates, doesn't overflow");

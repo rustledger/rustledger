@@ -74,7 +74,7 @@ pub struct WasmRuntimeConfig {
     /// Maximum memory in bytes (default 256 MiB).
     pub max_memory: usize,
     /// Maximum execution time in seconds (default 30). Converted to a
-    /// fuel budget at roughly 1M instructions per second.
+    /// fuel budget at [`sandbox::FUEL_PER_SECOND`].
     pub max_time_secs: u64,
 }
 

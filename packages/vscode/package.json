@@ -123,7 +123,7 @@
     "vscode-languageclient": "^10.1.2"
   },
   "devDependencies": {
-    "@types/node": "^26.6.2",
+    "@types/node": "^26.6.3",
     "@types/vscode": "1.91.0",
     "@vscode/vsce": "^4.0.0",
     "esbuild": "^0.28.2",

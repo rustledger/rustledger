@@ -113,7 +113,7 @@ version = "0.23.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.bigdecimal]]
-version = "0.4.10"
+version = "0.4.11"
 criteria = "safe-to-deploy"
 
 [[exemptions.bitflags]]

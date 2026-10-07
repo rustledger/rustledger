@@ -68,7 +68,12 @@ struct Cli {
 
     /// Seconds of CPU each WASM plugin or importer call may use (default:
     /// 30, or `[plugins] max_time_secs` from the config file)
-    #[arg(long, global = true, value_name = "SECS")]
+    #[arg(
+        long,
+        global = true,
+        value_name = "SECS",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
     plugin_max_time_secs: Option<u64>,
 
     #[command(subcommand)]
@@ -334,7 +339,8 @@ fn main() -> ExitCode {
     // The WASM plugin and importer time budget: the flag, else the config
     // file. Set once, before any command runs a plugin.
     rustledger::plugin_budget::set_max_time_secs(
-        cli.plugin_max_time_secs.or(config.plugins.max_time_secs),
+        cli.plugin_max_time_secs
+            .or(config.plugins.max_time_secs.map(std::num::NonZeroU64::get)),
     );
 
     // Get effective profile: CLI flag takes precedence, then env var

@@ -89,7 +89,7 @@ max_time_secs = 120
 
 ### Plugin Time Budget
 
-Each call into a WASM plugin or WASM importer gets a CPU budget, 30 seconds by default, after which it is stopped with `all fuel consumed by WebAssembly`. A plugin doing real work over a large ledger can need more. Raise it with `[plugins] max_time_secs` in any config file, or for one run with the global `--plugin-max-time-secs <SECS>` flag, which overrides the config:
+Each call into a WASM plugin or WASM importer gets a CPU budget, 30 seconds by default, after which it is stopped with `all fuel consumed by WebAssembly`. A plugin doing real work over a large ledger can need more. Raise it with `[plugins] max_time_secs` in any config file, or for one run with the global `--plugin-max-time-secs <SECS>` flag, which overrides the config. The value must be at least 1:
 
 ```bash
 rledger check --plugin-max-time-secs 120 ledger.beancount

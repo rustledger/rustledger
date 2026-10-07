@@ -227,9 +227,8 @@ impl ResolvedPlugin<'_> {
 
     /// [`Self::run`] with a host-chosen time budget for a WASM plugin.
     ///
-    /// `max_time_secs` replaces the default
-    /// [`crate::sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS`] for a WASM plugin;
-    /// `None` keeps the default. It is the HOST's setting (the CLI's config
+    /// `max_time_secs` replaces a WASM plugin's default budget (30 seconds,
+    /// `sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS`); `None` keeps the default. It is the HOST's setting (the CLI's config
     /// file or flag, an embedder's choice), never the ledger's: a ledger
     /// that could raise its own plugins' budget would let its author spend
     /// unbounded CPU on any service that loads it. Native plugins have no

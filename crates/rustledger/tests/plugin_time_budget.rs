@@ -145,3 +145,26 @@ fn budget_reaches_query_too() {
     );
     assert!(out.contains(TRAP), "{out}");
 }
+
+#[test]
+fn zero_is_refused_not_read_as_one_second() {
+    // The sandbox floors a budget at one second, so zero would quietly mean
+    // "one second" where a user might expect "no limit".
+    let bin = require_rledger!();
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = setup(dir.path(), None);
+    let out = run(
+        &bin,
+        dir.path(),
+        &["--plugin-max-time-secs", "0", "check"],
+        &ledger,
+    );
+    assert!(out.contains("--plugin-max-time-secs"), "{out}");
+    assert!(!out.contains(TRAP), "the plugin must not run:\n{out}");
+
+    let dir = tempfile::tempdir().unwrap();
+    let ledger = setup(dir.path(), Some("[plugins]\nmax_time_secs = 0\n"));
+    let out = run(&bin, dir.path(), &["check"], &ledger);
+    assert!(out.contains("nonzero"), "{out}");
+    assert!(!out.contains(TRAP), "the plugin must not run:\n{out}");
+}

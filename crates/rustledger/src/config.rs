@@ -81,7 +81,10 @@ pub struct Config {
 pub struct PluginsConfig {
     /// Time budget, in seconds, for each call into a WASM plugin or WASM
     /// importer (default: 30). `--plugin-max-time-secs` overrides it.
-    pub max_time_secs: Option<u64>,
+    ///
+    /// Zero is refused when the file is parsed: the sandbox would treat it
+    /// as one second, and many tools read zero as "no limit".
+    pub max_time_secs: Option<std::num::NonZeroU64>,
 }
 
 impl PluginsConfig {
@@ -979,6 +982,7 @@ mod shellexpand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZeroU64;
 
     #[test]
     fn test_parse_minimal_config() {
@@ -1182,13 +1186,27 @@ backup = true
         assert_eq!(unset.plugins.max_time_secs, None);
 
         let user: Config = toml::from_str("[plugins]\nmax_time_secs = 120\n").unwrap();
-        assert_eq!(user.plugins.max_time_secs, Some(120));
+        assert_eq!(user.plugins.max_time_secs, NonZeroU64::new(120));
 
         // A later layer (project over user) overrides; one that leaves it
         // unset keeps the earlier value.
         let project: Config = toml::from_str("[plugins]\nmax_time_secs = 5\n").unwrap();
-        assert_eq!(user.clone().merge(project).plugins.max_time_secs, Some(5));
-        assert_eq!(user.merge(unset).plugins.max_time_secs, Some(120));
+        assert_eq!(
+            user.clone().merge(project).plugins.max_time_secs,
+            NonZeroU64::new(5)
+        );
+        assert_eq!(
+            user.merge(unset).plugins.max_time_secs,
+            NonZeroU64::new(120)
+        );
+    }
+
+    #[test]
+    fn test_plugins_max_time_secs_rejects_zero() {
+        // Zero would silently mean one second (the sandbox's floor), where
+        // a user might expect "no limit".
+        let err = toml::from_str::<Config>("[plugins]\nmax_time_secs = 0\n").unwrap_err();
+        assert!(err.to_string().contains("nonzero"), "{err}");
     }
 
     #[test]

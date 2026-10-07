@@ -1262,7 +1262,9 @@ fn load_config() -> Config {
         .unwrap_or_default();
     // The WASM plugin and importer time budget, as `rledger` applies it
     // (first call wins, so every command sees the same value).
-    rustledger::plugin_budget::set_max_time_secs(config.plugins.max_time_secs);
+    rustledger::plugin_budget::set_max_time_secs(
+        config.plugins.max_time_secs.map(std::num::NonZeroU64::get),
+    );
     config
 }
 

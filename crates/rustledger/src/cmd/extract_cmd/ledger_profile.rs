@@ -141,6 +141,31 @@ pub(super) fn load_profiles(path: &Path) -> Result<Vec<(glob::Pattern, LedgerPro
     Ok(out)
 }
 
+/// The currencies the ledger's `open` directive for `account` declares, or
+/// `None` when the ledger never opens it.
+///
+/// Used to fill in a CSV importer entry that names no currency (#2464): the
+/// `open` directive is where the account's currency is declared, so it is
+/// the authority a missing config value defers to.
+pub(super) fn open_currencies(path: &Path, account: &str) -> Result<Option<Vec<String>>> {
+    let options = rustledger_loader::LoadOptions {
+        run_plugins: false,
+        validate: false,
+        ..Default::default()
+    };
+    let ledger = rustledger_loader::load(path, &options)
+        .map_err(|e| anyhow!("failed to load ledger {}: {e}", path.display()))?;
+    Ok(ledger.directives.iter().find_map(|d| match &d.value {
+        Directive::Open(open) if open.account.as_str() == account => Some(
+            open.currencies
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+        ),
+        _ => None,
+    }))
+}
+
 /// The profile whose pattern matches `filename`.
 ///
 /// Ambiguity is an error, matching how `importers.toml` resolves a file that

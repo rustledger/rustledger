@@ -767,6 +767,95 @@ fn overlay_cli_args(entry: &ImporterEntry, args: &Args) -> ImporterEntry {
     merged
 }
 
+/// Give a CSV entry that names no `currency` the one its account is opened
+/// with, or refuse.
+///
+/// Every other source of a CSV config states a currency: `--currency`, a
+/// `--ledger` profile, and the raw-argument and `--auto` paths (whose
+/// `--currency` default is documented). An `importers.toml` entry that left it
+/// out used to get `USD` from deep inside the importer, so a euro account was
+/// silently booked in dollars (#2464). The account's `open` directive is the
+/// next best authority: when `--ledger` (or, failing that, `--existing`)
+/// opens the account with exactly one currency, that is the currency. With
+/// none, or several, nothing can say which one the statement is in, and
+/// guessing is the bug, so the import stops and says how to fix it.
+///
+/// An entry with a `currency_column` may still have no default; its rows
+/// carry their own currency, and a row with a blank cell is refused by the
+/// importer rather than defaulted.
+fn resolve_entry_currency(
+    config: ImporterConfig,
+    entry_name: Option<&str>,
+    args: &Args,
+) -> Result<ImporterConfig> {
+    if config.currency.is_some() {
+        return Ok(config);
+    }
+    let mut ledgers: Vec<&Path> = Vec::new();
+    for path in [args.ledger.as_deref(), args.existing.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        if !ledgers.contains(&path) {
+            ledgers.push(path);
+        }
+    }
+    let mut why = Vec::new();
+    for path in &ledgers {
+        match ledger_profile::open_currencies(path, &config.account)? {
+            Some(currencies) => match currencies.as_slice() {
+                [one] => {
+                    eprintln!(
+                        "Using currency {one} from the `open {}` directive in {}",
+                        config.account,
+                        path.display()
+                    );
+                    return Ok(ImporterConfig {
+                        currency: Some(one.clone()),
+                        ..config
+                    });
+                }
+                [] => why.push(format!(
+                    "`open {}` in {} declares no currency",
+                    config.account,
+                    path.display()
+                )),
+                many => why.push(format!(
+                    "`open {}` in {} declares {}, more than one",
+                    config.account,
+                    path.display(),
+                    many.join(", ")
+                )),
+            },
+            None => why.push(format!(
+                "{} has no `open {}` directive",
+                path.display(),
+                config.account
+            )),
+        }
+    }
+
+    let rustledger_importer::config::ImporterType::Csv(csv) = &config.importer_type;
+    if csv.currency_column.is_some() {
+        return Ok(config);
+    }
+    if why.is_empty() {
+        why.push(
+            "no --ledger or --existing ledger was given to read the account's \
+             `open` directive from"
+                .to_string(),
+        );
+    }
+    let name = entry_name.unwrap_or("(unnamed)");
+    anyhow::bail!(
+        "importer '{name}' does not set `currency`, and it cannot be taken from \
+         the ledger: {}\n  \
+         set `currency = \"...\"` in the '{name}' entry of importers.toml, or \
+         pass --currency",
+        why.join("; ")
+    )
+}
+
 /// The fields a non-CSV dispatcher can take from an `importers.toml` entry.
 ///
 /// Deliberately not the whole `ImporterEntry`: the column-mapping fields
@@ -1333,6 +1422,10 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
     } else {
         // CSV branch: determine import config from --importer flag,
         // explicit --config, --auto, or raw CLI args.
+        //
+        // `used_entry` names the `importers.toml` entry the config came from,
+        // for the missing-currency error below.
+        let mut used_entry: Option<String> = None;
         let config = if let Some(ref importer_name) = effective_entry_name {
             // A named entry, from `--importer` or from a `--ledger` profile's
             // `importer:` key: require a config file and find that entry.
@@ -1364,6 +1457,7 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
                 importer_name,
                 config_path.display()
             );
+            used_entry = Some(entry.name.clone());
             build_config_from_entry(&overlay_cli_args(entry, args))?
         } else if args.config.is_some() {
             // Explicit --config without --importer: try auto-identification by filename
@@ -1392,6 +1486,7 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
                 entry.name,
                 config_path.display()
             );
+            used_entry = Some(entry.name.clone());
             build_config_from_entry(&overlay_cli_args(entry, args))?
         } else if args.auto {
             // Auto-detect CSV format
@@ -1543,6 +1638,7 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
             },
             None => config,
         };
+        let config = resolve_entry_currency(config, used_entry.as_deref(), args)?;
 
         (config, fallbacks)
     };
@@ -1870,6 +1966,7 @@ amount_column = "Amount"
 name = "pdf-bank"
 filename_pattern = "*.pdf"
 account = "Assets:Bank"
+currency = "USD"
 date_column = "Date"
 narration_column = "Description"
 amount_column = "Amount"
@@ -1961,6 +2058,7 @@ preprocess = ["touch", "{}"]
 name = "pdf-bank"
 filename_pattern = "*.pdf"
 account = "Assets:Bank"
+currency = "USD"
 date_column = "Date"
 narration_column = "Description"
 amount_column = "Amount"
@@ -2059,7 +2157,7 @@ preprocess = ["cat", "{input}"]
         std::fs::write(
             &config,
             "[[importers]]\nname = \"pdf\"\nfilename_pattern = \"*.pdf\"\n\
-             account = \"Assets:Bank\"\ndate_column = \"Date\"\n\
+             account = \"Assets:Bank\"\ncurrency = \"USD\"\ndate_column = \"Date\"\n\
              narration_column = \"Description\"\namount_column = \"Amount\"\n\
              preprocess = [\"sh\", \"-c\", \"cat \\\"$1\\\"\", \"_\", \"{input}\"]\n",
         )
@@ -3792,6 +3890,88 @@ default_expense = "Expenses:Uncategorized"
         assert_eq!(parse_column_value(&toml::Value::Float(1.5)), None);
     }
 
+    /// Run `--importer bank` from an entry with no `currency` (#2464), with
+    /// `ledger` (if any) passed as `ledger_flag`. Returns the written output
+    /// or the error text.
+    fn run_entry_without_currency(
+        ledger: Option<&str>,
+        ledger_flag: &str,
+    ) -> std::result::Result<String, String> {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("importers.toml");
+        std::fs::write(
+            &config_path,
+            "[[importers]]\nname = \"bank\"\naccount = \"Assets:Bank:Euro\"\n\
+             date_column = \"Date\"\nnarration_column = \"Description\"\namount_column = \"Amount\"\n",
+        )
+        .unwrap();
+        let csv_path = dir.path().join("statement.csv");
+        std::fs::write(
+            &csv_path,
+            "Date,Description,Amount\n2024-01-15,Coffee,-5.00\n",
+        )
+        .unwrap();
+        let output_path = dir.path().join("output.beancount");
+        let mut argv = vec![
+            "extract".to_string(),
+            csv_path.to_str().unwrap().to_string(),
+            "--importer".to_string(),
+            "bank".to_string(),
+            "--config".to_string(),
+            config_path.to_str().unwrap().to_string(),
+            "-o".to_string(),
+            output_path.to_str().unwrap().to_string(),
+        ];
+        if let Some(text) = ledger {
+            let ledger_path = dir.path().join("ledger.beancount");
+            std::fs::write(&ledger_path, text).unwrap();
+            argv.push(ledger_flag.to_string());
+            argv.push(ledger_path.to_str().unwrap().to_string());
+        }
+        let args = Args::parse_from(argv);
+        run(&args, &csv_path).map_err(|e| format!("{e:#}"))?;
+        Ok(std::fs::read_to_string(&output_path).unwrap())
+    }
+
+    /// #2464: an entry without `currency` takes the account's sole `open`
+    /// currency from the ledger, through either `--existing` or `--ledger`,
+    /// instead of silently booking USD.
+    #[test]
+    fn entry_without_currency_uses_the_open_directive() {
+        let ledger = "2024-01-01 open Assets:Bank:Euro EUR\n";
+        for flag in ["--existing", "--ledger"] {
+            let out = run_entry_without_currency(Some(ledger), flag).unwrap();
+            assert!(out.contains("-5.00 EUR"), "{flag}: {out}");
+            assert!(!out.contains("USD"), "{flag}: {out}");
+        }
+    }
+
+    /// #2464: with nothing to say which currency the statement is in, the
+    /// import stops and names the importer, rather than guessing USD.
+    #[test]
+    fn entry_without_currency_and_no_single_open_currency_is_an_error() {
+        let err = run_entry_without_currency(None, "--existing").unwrap_err();
+        assert!(
+            err.contains("importer 'bank' does not set `currency`"),
+            "{err}"
+        );
+        assert!(err.contains("no --ledger or --existing"), "{err}");
+
+        let err = run_entry_without_currency(
+            Some("2024-01-01 open Assets:Bank:Euro EUR,CHF\n"),
+            "--existing",
+        )
+        .unwrap_err();
+        assert!(err.contains("declares EUR, CHF, more than one"), "{err}");
+
+        let err = run_entry_without_currency(Some("2024-01-01 open Assets:Other\n"), "--existing")
+            .unwrap_err();
+        assert!(
+            err.contains("has no `open Assets:Bank:Euro` directive"),
+            "{err}"
+        );
+    }
+
     #[test]
     fn test_run_with_importer_config() {
         let dir = tempfile::tempdir().unwrap();
@@ -4019,6 +4199,7 @@ amount_column = "Amount"
 [[importers]]
 name = "test"
 account = "Assets:Bank"
+currency = "USD"
 date_column = "Date"
 narration_column = "Description"
 amount_column = "Amount"
@@ -4243,6 +4424,7 @@ NEWFILEUID:NONE
 [[importers]]
 name = "mybank"
 account = "Assets:Bank:Auto"
+currency = "USD"
 date_column = "Date"
 narration_column = "Description"
 amount_column = "Amount"

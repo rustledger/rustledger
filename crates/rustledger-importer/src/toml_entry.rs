@@ -555,6 +555,63 @@ mod tests {
         assert_eq!(patterns, ["long one", "zz", "aa"]);
     }
 
+    /// File order must survive every TOML spelling of the table, in an
+    /// `[[importers]]` array with several entries as the CLI loads it.
+    #[test]
+    fn mappings_keep_file_order_in_every_toml_spelling() {
+        #[derive(Deserialize)]
+        struct File {
+            importers: Vec<ImporterEntry>,
+        }
+        let keys = |e: &ImporterEntry| -> Vec<String> {
+            e.mappings.iter().map(|(k, _)| k.clone()).collect()
+        };
+        let text = r#"
+[[importers]]
+name = "subtable"
+[importers.mappings]
+"zz" = "A:Z"
+'mm literal' = "A:M"
+aa = "A:A"
+
+[[importers]]
+name = "inline"
+mappings = { "zz" = "A:Z", "mm" = "A:M", "aa" = "A:A" }
+
+[[importers]]
+name = "dotted"
+mappings."zz" = "A:Z"
+mappings.mm = "A:M"
+mappings."a a" = "A:A"
+
+[[importers]]
+name = "unicode"
+[importers.mappings]
+"ü" = "A:U"
+"é" = "A:E"
+"a" = "A:A"
+"#;
+        let file: File = toml::from_str(text).unwrap();
+        assert_eq!(keys(&file.importers[0]), ["zz", "mm literal", "aa"]);
+        assert_eq!(keys(&file.importers[1]), ["zz", "mm", "aa"]);
+        assert_eq!(keys(&file.importers[2]), ["zz", "mm", "a a"]);
+        assert_eq!(keys(&file.importers[3]), ["ü", "é", "a"]);
+
+        // An empty table, and an entry without one, are both empty.
+        let file: File = toml::from_str(
+            "[[importers]]\nname = \"a\"\nmappings = {}\n[[importers]]\nname = \"b\"\n",
+        )
+        .unwrap();
+        assert!(file.importers[0].mappings.is_empty());
+        assert!(file.importers[1].mappings.is_empty());
+
+        // A non-string account is still an error, not a silent skip.
+        assert!(
+            toml::from_str::<File>("[[importers]]\nname = \"a\"\n[importers.mappings]\nx = 1\n")
+                .is_err()
+        );
+    }
+
     #[test]
     fn entry_format_defaults_to_csv_and_reads_ofx() {
         let csv: ImporterEntry = toml::from_str("name = \"a\"").unwrap();

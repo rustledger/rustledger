@@ -810,6 +810,11 @@ pub struct AmountValue {
 pub struct PositionValue {
     /// The units.
     pub units: AmountValue,
+    /// The lot's cost, absent for a position held without one. Omitted
+    /// from the JSON rather than `null`, as in a `Position` cell.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts-export", ts(optional))]
+    pub cost: Option<CostValue>,
 }
 
 /// Cost value for serialization.

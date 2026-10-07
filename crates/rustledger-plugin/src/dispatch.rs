@@ -105,6 +105,46 @@ pub enum PluginRunError {
     },
 }
 
+/// What a plugin reference that is NOT native names.
+///
+/// Judged from its text alone: no filesystem access, no registry, no
+/// runtime. This is the classification [`resolve_plugin`] applies after its native lookup fails, so
+/// a host that wants to skip external plugins without resolving them (the
+/// LSP, #2486) can tell a WASM or Python reference from an unknown name
+/// exactly the way resolution would.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalPluginKind {
+    /// A `.wasm` reference (checked first, so `python:x.wasm` is WASM).
+    Wasm,
+    /// A `python:`-forced name, a `.py` file, or a path- or module-shaped
+    /// name (contains a path separator or a `.`).
+    Python,
+    /// Anything else: a bare name the native registry does not hold, such
+    /// as a misspelled native plugin.
+    Unknown,
+}
+
+/// Classify a non-native plugin reference; see [`ExternalPluginKind`].
+#[must_use]
+pub fn classify_external_plugin(name: &str, force_python: bool) -> ExternalPluginKind {
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if ext == "wasm" {
+        ExternalPluginKind::Wasm
+    } else if force_python
+        || ext == "py"
+        || name.contains(std::path::MAIN_SEPARATOR)
+        || name.contains('.')
+    {
+        ExternalPluginKind::Python
+    } else {
+        ExternalPluginKind::Unknown
+    }
+}
+
 /// Classify a plugin invocation into a runnable [`ResolvedPlugin`].
 ///
 /// Native plugins resolve through the typed registry keyed on `pass`; everything
@@ -143,13 +183,9 @@ pub fn resolve_plugin<'a>(
     }
 
     // Not native — classify by extension / shape.
-    let ext = Path::new(name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
+    let kind = classify_external_plugin(name, force_python);
 
-    if ext == "wasm" {
+    if kind == ExternalPluginKind::Wasm {
         #[cfg(feature = "wasm-runtime")]
         {
             return Ok(ResolvedPlugin::Wasm(resolve_path(
@@ -164,8 +200,7 @@ pub fn resolve_plugin<'a>(
         });
     }
 
-    if force_python || ext == "py" || name.contains(std::path::MAIN_SEPARATOR) || name.contains('.')
-    {
+    if kind == ExternalPluginKind::Python {
         // Python module or file-based plugin (or `python:`-prefixed force_python).
         #[cfg(feature = "python-plugins")]
         {

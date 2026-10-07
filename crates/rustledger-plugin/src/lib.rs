@@ -58,7 +58,8 @@ pub use convert::{
     directives_to_wrappers, wrapper_to_directive, wrappers_to_directives,
 };
 pub use dispatch::{
-    PluginPass, PluginResolveError, PluginRunError, ResolvedPlugin, resolve_plugin,
+    ExternalPluginKind, PluginPass, PluginResolveError, PluginRunError, ResolvedPlugin,
+    classify_external_plugin, resolve_plugin,
 };
 pub use native::{
     AUTO_ACCOUNTS_NAME, DOCUMENT_DISCOVERY_NAME, NativePlugin, NativePluginRegistry, RegularPlugin,

@@ -49,8 +49,10 @@ pub struct LoadOptions {
     /// the sandbox's 30 seconds). The host's setting, never the ledger's:
     /// see `ResolvedPlugin::run_with_max_time_secs`.
     pub plugin_max_time_secs: Option<u64>,
-    /// Run only native plugins, skipping WASM and Python ones and any other
-    /// name the native registry does not hold (default: false).
+    /// Run only native plugins, skipping WASM and Python ones (default: false).
+    /// A name that is neither native nor a WASM/Python reference (see
+    /// `rustledger_plugin::classify_external_plugin`) is still reported as
+    /// E8001 "Plugin not found".
     ///
     /// Which runtimes are compiled in is decided by Cargo feature
     /// unification, so a host that must never run external plugins cannot
@@ -1189,11 +1191,26 @@ pub fn run_plugins(
         PluginPass::PostBooking => rustledger_plugin::PluginPass::Regular,
     };
     for invocation in &entries {
-        // A native-only host skips everything else BEFORE resolution, so the
-        // result cannot depend on which runtimes were compiled in: resolving
-        // would run a WASM or Python plugin in one build and report a
-        // "requires the ... feature" error in another (#2486).
+        // A native-only host skips WASM and Python references BEFORE
+        // resolution, so the result cannot depend on which runtimes were
+        // compiled in: resolving would run such a plugin in one build and
+        // report a "requires the ... feature" error in another (#2486). A
+        // name that is neither native nor WASM/Python shaped -- typically a
+        // misspelled native plugin -- is still an error, reported as E8001
+        // without consulting system Python, so it is the same in every build.
         if options.native_plugins_only && !is_native(invocation, pass_kind, registry) {
+            if rustledger_plugin::classify_external_plugin(
+                &invocation.name,
+                invocation.force_python,
+            ) == rustledger_plugin::ExternalPluginKind::Unknown
+            {
+                errors.push(resolve_error_to_ledger(
+                    &rustledger_plugin::PluginResolveError::NotFound {
+                        name: invocation.name.clone(),
+                        suggested_file: None,
+                    },
+                ));
+            }
             continue;
         }
         // Resolution (classify + path-security + feature-gate + #1432 reject)

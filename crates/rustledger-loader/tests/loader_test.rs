@@ -2665,44 +2665,61 @@ fn test_booking_error_points_at_the_failing_posting() {
     );
 }
 
-/// `native_plugins_only` skips every plugin that is not native, before
-/// resolution, so the outcome is the same whichever plugin runtimes Cargo
-/// feature unification compiled in (#2486). The LSP relies on it: built with
-/// the CLI it gets `wasm-plugins` and `python-plugins` too, and ran their
-/// plugins on every reload while telling the user (E8006) it skipped them.
+/// `native_plugins_only` skips WASM and Python plugins before resolution, so
+/// the outcome is the same whichever plugin runtimes Cargo feature
+/// unification compiled in (#2486). The LSP relies on it: built with the CLI
+/// it gets `wasm-plugins` and `python-plugins` too, and ran their plugins on
+/// every reload while telling the user (E8006) it skipped them.
 ///
-/// The WASM module is garbage on purpose: anything that resolves it reports
-/// an error, a compile failure where the runtime is compiled in and "requires
-/// the wasm-plugins feature" where it is not, so the absence of an error is
-/// proof it was never touched. A native plugin still runs: `auto_accounts`
-/// opens `Expenses:Food`, so there is no E1001.
+/// Every reference shape: the WASM module is garbage and the other
+/// references do not exist, so anything that resolved one would report an
+/// error (a load failure where the runtime is compiled in, "requires the
+/// ... feature" where it is not); no error means none was touched. A native
+/// plugin still runs (`auto_accounts` opens `Expenses:Food`, so no E1001),
+/// and a name that is neither native nor WASM/Python shaped -- a typo -- is
+/// still E8001 "Plugin not found", the same in every build.
 #[test]
 fn native_plugins_only_skips_wasm_and_python_plugins_2486() {
     let dir = tempfile::tempdir().unwrap();
     std::fs::write(dir.path().join("bad.wasm"), b"not a wasm module").unwrap();
     std::fs::write(dir.path().join("bad_plugin.py"), "raise SystemExit(3)\n").unwrap();
     let path = dir.path().join("main.beancount");
-    std::fs::write(
-        &path,
-        "plugin \"auto_accounts\"\n\
-         plugin \"bad.wasm\"\n\
-         plugin \"bad_plugin.py\"\n\
-         plugin \"python:noduplicates\"\n\
-         2024-01-01 open Assets:Bank USD\n\
+    let mut source = String::from("plugin \"auto_accounts\"\nplugin \"autoaccounts\"\n");
+    for name in [
+        "bad.wasm",
+        "missing.wasm",
+        "/nonexistent/dir/plug.wasm",
+        "bad_plugin.py",
+        "missing.py",
+        "/nonexistent/dir/plug.py",
+        "./plugins/myplug",
+        "pkg.module",
+        "python:noduplicates",
+        "python:some_mod",
+    ] {
+        source.push_str(&format!("plugin \"{name}\"\n"));
+    }
+    source.push_str(
+        "2024-01-01 open Assets:Bank USD\n\
          2024-01-15 * \"Grocery\"\n  Expenses:Food  50.00 USD\n  Assets:Bank\n",
-    )
-    .unwrap();
+    );
+    std::fs::write(&path, source).unwrap();
 
     let native_only = LoadOptions {
         native_plugins_only: true,
         ..LoadOptions::default()
     };
     let ledger = load(&path, &native_only).expect("load");
-    assert!(
-        ledger.errors.is_empty(),
-        "native-only must skip the WASM and Python plugins without resolving \
-         them, and still run auto_accounts: {:?}",
-        ledger.errors
+    let errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .map(|e| (e.code.as_str(), e.message.as_str()))
+        .collect();
+    assert_eq!(
+        errors,
+        [("E8001", "Plugin not found: \"autoaccounts\"")],
+        "native-only must skip every WASM and Python reference without \
+         resolving it, still run auto_accounts, and still report the typo"
     );
 
     // The control: by default the same ledger resolves `bad.wasm` and

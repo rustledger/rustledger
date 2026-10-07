@@ -740,7 +740,17 @@ fn currency_slots(posting: &rustledger_core::Posting) -> (Option<Slot<'_>>, Slot
 /// `held` is `|_| None` for a caller with no running balances (the free
 /// [`interpolate`] function), which leaves step 1 alone. The booking engine
 /// passes its inventories, and must resolve BEFORE booking a reduction, which
-/// needs the commodity to find the lot.
+/// needs the commodity to find the lot. The two can only differ by the free
+/// function refusing what the engine resolves from a balance, never by a
+/// different currency, because step 1 outranks step 2. The LSP's inlay hints
+/// (`rustledger-lsp/src/handlers/inlay_hints.rs`) are the one consumer of the
+/// free function that sees unbooked input, and document that they show no
+/// hint in that case.
+///
+/// Tolerances must still be inferred from the transaction as WRITTEN, before
+/// this fills anything in: beancount's tolerance for the posting's precision
+/// lands under its MISSING currency, so it never loosens the currency the
+/// posting resolves to (see `BookingEngine::book_interpolate_apply`).
 ///
 /// # Errors
 ///

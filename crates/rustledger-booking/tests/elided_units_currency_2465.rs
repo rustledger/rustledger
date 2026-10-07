@@ -380,6 +380,92 @@ fn another_undetermined_posting_disables_the_group_rule() {
     assert_eq!(got[1], "Assets:Bar 1500.00 USD");
 }
 
+/// The posting's own precision must not loosen the tolerance of the currency
+/// it resolves to. Beancount infers tolerances from the postings as written,
+/// where this one's currency is still MISSING, so the auto-posting is
+/// quantized to `10.123`'s 0.0005 and books `-32.377 USD`. Inferring them
+/// after resolving let `42.5`'s 0.05 in, and the auto-posting was rounded to
+/// `-32.400 USD` — a wrong amount that the same loose tolerance then let
+/// balance.
+#[test]
+fn the_resolved_posting_does_not_set_the_tolerance() {
+    let got = book(
+        vec![opening(2, "Assets:Foo", "100.00", "USD")],
+        txn(
+            3,
+            vec![
+                number("Assets:Foo", "42.5"),
+                amount("Assets:Bar", "-10.123", "USD"),
+                Posting::auto("Assets:Baz"),
+            ],
+        ),
+    )
+    .expect("beancount accepts this");
+    assert_eq!(
+        got,
+        [
+            "Assets:Foo 42.5 USD",
+            "Assets:Bar -10.123 USD",
+            "Assets:Baz -32.377 USD"
+        ]
+    );
+}
+
+/// The same account posted twice: the other posting's currency (EUR) is the
+/// one group, so it wins over the USD the account held, as in beancount.
+#[test]
+fn a_second_posting_to_the_same_account_is_an_ordinary_group() {
+    let got = book(
+        vec![opening(2, "Assets:Foo", "100.00", "USD")],
+        txn(
+            3,
+            vec![
+                amount("Assets:Foo", "5", "EUR"),
+                number("Assets:Foo", "42.50"),
+                Posting::auto("Assets:Bar"),
+            ],
+        ),
+    )
+    .expect("beancount accepts this");
+    assert_eq!(
+        got,
+        [
+            "Assets:Foo 5 EUR",
+            "Assets:Foo 42.50 EUR",
+            "Assets:Bar -47.50 EUR"
+        ]
+    );
+}
+
+/// Two currency-less postings whose accounts hold DIFFERENT currencies each
+/// take their own. The transaction is then out of balance in both, which
+/// interpolation leaves for the balance check to report (beancount:
+/// "Transaction does not balance: (42.50 USD, -42.50 EUR)") — never silently
+/// booked as one currency.
+#[test]
+fn two_postings_resolving_to_different_currencies_stay_unbalanced() {
+    let mut engine = BookingEngine::new();
+    for mut t in [
+        opening(2, "Assets:Foo", "100.00", "USD"),
+        opening(2, "Assets:Bar", "100.00", "EUR"),
+    ] {
+        engine
+            .book_interpolate_apply(&mut t)
+            .expect("history books");
+    }
+    let result = engine
+        .book_and_interpolate(&txn(
+            3,
+            vec![
+                number("Assets:Foo", "42.50"),
+                number("Assets:Bar", "-42.50"),
+            ],
+        ))
+        .expect("each posting resolves; the imbalance is the validator's to report");
+    assert_eq!(result.residuals.get("USD").copied(), Some(dec("42.50")));
+    assert_eq!(result.residuals.get("EUR").copied(), Some(dec("-42.50")));
+}
+
 /// A refused transaction is left exactly as written.
 #[test]
 fn a_refusal_leaves_the_transaction_untouched() {

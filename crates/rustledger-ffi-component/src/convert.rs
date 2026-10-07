@@ -1923,8 +1923,11 @@ impl SessionState {
     /// batch canonical (`rustledger_ops::dedup::find_fuzzy_duplicates`),
     /// which precomputes each held transaction's comparison key once —
     /// per-candidate matching would rebuild every key for every candidate.
-    /// Same matcher as `rledger extract --existing`: same date, same
-    /// first-posting amount, similar payee/narration text. One bool per
+    /// Same matcher as `rledger extract --existing`, unscoped (the session
+    /// has no importer account): a shared id link, or same date and same
+    /// first-posting account, commodity and amount with similar
+    /// payee/narration text. Held transactions are a multiset — each flags
+    /// at most one candidate (#2421). One bool per
     /// candidate, in input order; a candidate that fails conversion (or
     /// isn't a transaction) is never flagged, mirroring the documented
     /// `from-entries` drop policy for the held side.

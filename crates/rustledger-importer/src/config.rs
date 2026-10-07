@@ -96,6 +96,11 @@ pub struct CsvConfig {
     /// stays the directive date; this column's value is attached as metadata so
     /// it isn't silently discarded (#1623).
     pub secondary_date: Option<SecondaryDate>,
+    /// The column holding a source-assigned transaction id (e.g. a bank's
+    /// "Transaction ID"). When set, each row's id becomes a `^csv-<id>` link,
+    /// which `extract --existing` treats as identity when deduplicating
+    /// (#2387). A blank cell adds no link.
+    pub transaction_id_column: Option<ColumnSpec>,
 }
 
 /// A secondary date column preserved as directive metadata.
@@ -138,6 +143,7 @@ impl Default for CsvConfig {
             use_merchant_dict: false,
             skip_zero_amounts: true,
             secondary_date: None,
+            transaction_id_column: None,
         }
     }
 }
@@ -444,6 +450,19 @@ impl CsvConfigBuilder {
     /// Set the per-row currency column by index.
     pub fn currency_column_index(mut self, index: usize) -> Self {
         self.config.currency_column = Some(ColumnSpec::Index(index));
+        self
+    }
+
+    /// Set the transaction-id column by name (see
+    /// [`CsvConfig::transaction_id_column`]).
+    pub fn transaction_id_column(mut self, name: impl Into<String>) -> Self {
+        self.config.transaction_id_column = Some(ColumnSpec::Name(name.into()));
+        self
+    }
+
+    /// Set the transaction-id column by index.
+    pub fn transaction_id_column_index(mut self, index: usize) -> Self {
+        self.config.transaction_id_column = Some(ColumnSpec::Index(index));
         self
     }
 

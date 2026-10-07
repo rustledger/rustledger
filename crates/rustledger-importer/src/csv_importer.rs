@@ -367,6 +367,21 @@ impl CsvImporter {
             }
         }
 
+        // A source-assigned transaction id becomes a `^csv-<id>` link (#2387),
+        // the CSV counterpart of OFX's `^ofx-<FITID>`: dedup trusts an equal
+        // id link as identity. A configured column that cannot be read is a
+        // config error, like `currency_column`; a blank cell adds no link.
+        if let Some(col) = &csv_config.transaction_id_column {
+            let cell = self
+                .get_column(record, col, header_map)
+                .context("failed to read configured transaction id column")?;
+            if let Some(link) =
+                rustledger_ops::dedup::id_link(rustledger_ops::dedup::CSV_ID_LINK_PREFIX, cell)
+            {
+                txn = txn.with_link(link);
+            }
+        }
+
         Ok(Some(txn))
     }
 
@@ -560,6 +575,52 @@ mod tests {
             Some(rustledger_core::MetaValue::Date(d)) => assert_eq!(d.to_string(), "2024-01-17"),
             other => panic!("expected value_date metadata, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_csv_import_transaction_id_becomes_a_link() {
+        // #2387: the id column becomes a `^csv-` link, sanitized to the link
+        // charset; a blank cell adds none.
+        let config = ImporterConfig::csv()
+            .account("Assets:Monzo")
+            .currency("GBP")
+            .transaction_id_column("Transaction ID")
+            .build()
+            .unwrap();
+        let csv_content = "Transaction ID,Date,Description,Amount\n\
+                           tx_00A1,2024-01-15,Coffee,-4.50\n\
+                           a b:c,2024-01-15,Tea,-2.00\n\
+                           ,2024-01-16,Cake,-3.00\n";
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
+        let links: Vec<Vec<String>> = result
+            .directives
+            .iter()
+            .map(|d| match d {
+                Directive::Transaction(t) => {
+                    t.links.iter().map(|l| l.as_str().to_string()).collect()
+                }
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            links,
+            vec![
+                vec!["csv-tx_00A1".to_string()],
+                vec!["csv-a-b-c".to_string()],
+                vec![]
+            ]
+        );
+
+        // A configured column the file does not have is a config error per
+        // row, not a silent "no ids".
+        let csv_content = "Date,Description,Amount\n2024-01-15,Coffee,-4.50\n";
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
+        assert!(result.directives.is_empty());
+        assert!(
+            result.warnings[0].contains("transaction id column"),
+            "{:?}",
+            result.warnings
+        );
     }
 
     #[test]
@@ -1216,6 +1277,7 @@ not-a-date,Coffee,-5.00
             use_merchant_dict: false,
             skip_zero_amounts: true,
             secondary_date: None,
+            transaction_id_column: None,
         };
 
         let importer = CsvImporter;

@@ -106,6 +106,28 @@ secondary_date_column = "Value Date"
 The value is stored as a typed `date` metadatum, so it round-trips through the
 ledger and is queryable in BQL via `meta("value_date")`.
 
+### Transaction ids
+
+If the bank's CSV has a unique id per transaction (Monzo's `Transaction ID`,
+for example), name the column and every imported transaction carries it as a
+`^csv-<id>` link, the CSV counterpart of OFX's `^ofx-<FITID>`:
+
+```toml
+[[importers]]
+name = "monzo"
+transaction_id_column = "Transaction ID"
+```
+
+```beancount
+2024-01-15 * "Bakery" "Croissant" ^csv-tx_0000A1b2C3
+  Assets:Monzo  -2.50 GBP
+  Expenses:Unknown
+```
+
+Characters a link may not contain become `-`, and a blank cell adds no link.
+Duplicate detection treats the id as identity, so a re-import with
+`--existing` is exact rather than a fuzzy guess (see below).
+
 ### Account Mapping
 
 Map transaction descriptions to accounts automatically:
@@ -264,11 +286,20 @@ Avoid importing the same transactions twice:
 rledger extract statement.csv -a Assets:Bank --existing ledger.beancount
 ```
 
-Duplicates are detected by matching:
+Only transactions posting to the importer's account, in the same commodity,
+are compared. A new transaction is a duplicate when:
 
-- Date
-- Amount
-- Payee/narration (fuzzy match)
+1. it shares an id link (`^ofx-…` from OFX, `^csv-…` from
+   `transaction_id_column`) with an existing transaction, whatever the date,
+   amount or text say; or
+1. it has the same date and amount as an existing transaction and the same
+   or a similar payee/narration — unless both carry ids of the same kind and
+   those ids differ, which makes them two different transactions.
+
+Each existing transaction absorbs at most one new one, so two identical
+coffees on the same day are both kept when the ledger holds only one of them.
+Every skipped transaction is listed on stderr with the reason and the existing
+entry it matched.
 
 ## Workflow
 

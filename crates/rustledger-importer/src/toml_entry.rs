@@ -70,6 +70,10 @@ pub struct ImporterEntry {
     pub amount_column: Option<toml::Value>,
     /// Per-row currency column name or index.
     pub currency_column: Option<toml::Value>,
+    /// Column holding a source-assigned transaction id, by name or index.
+    /// Each row's id becomes a `^csv-<id>` link that `extract --existing`
+    /// treats as identity when deduplicating (#2387).
+    pub transaction_id_column: Option<toml::Value>,
     /// Debit column name or index.
     pub debit_column: Option<toml::Value>,
     /// Credit column name or index.
@@ -313,6 +317,15 @@ pub fn build_config_from_entry(entry: &ImporterEntry) -> Result<ImporterConfig> 
             &col,
             CsvConfigBuilder::currency_column_index,
             |b, n| b.currency_column(n),
+        );
+    }
+    if let Some(ref val) = entry.transaction_id_column {
+        let col = require_column_value("transaction_id_column", val)?;
+        builder = apply_column(
+            builder,
+            &col,
+            CsvConfigBuilder::transaction_id_column_index,
+            |b, n| b.transaction_id_column(n),
         );
     }
     if let Some(ref val) = entry.debit_column {

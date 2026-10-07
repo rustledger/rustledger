@@ -628,10 +628,13 @@ interface ledger {
     clamp: func(begin-date: string, end-date: string) -> list<directive>;
     /// Flag which candidate entries duplicate one already HELD in this
     /// session — one bool per candidate, in order (added in 3.6.0 for the
-    /// import review flow). Uses the same fuzzy matcher as
-    /// `rledger extract --existing`: same date, same first-posting amount,
-    /// and similar payee/narration text — so a host review UI and the CLI
-    /// agree on what counts as a duplicate. Living on the session avoids
+    /// import review flow). Uses the same matcher as
+    /// `rledger extract --existing`, unscoped by importer account: a shared
+    /// `^ofx-`/`^csv-` id link, or same date, same first-posting account,
+    /// commodity and amount, and similar payee/narration text — so a host
+    /// review UI and the CLI agree on what counts as a duplicate. Held
+    /// transactions are a multiset: each one flags at most one candidate, so
+    /// two identical candidates against one held entry flag only the first. Living on the session avoids
     /// re-marshaling the full ledger per import, and the session's
     /// documented conversion-drop policy (see `from-entries`) covers the
     /// comparison set. Candidates that fail conversion, and

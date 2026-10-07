@@ -258,6 +258,23 @@ Rules worth knowing:
 rledger extract statement.csv -a Assets:Bank --existing ledger.beancount
 ```
 
+Only transactions in `ledger.beancount` that post to the importer's account,
+in the same commodity, are candidates. A new transaction is a duplicate when it
+shares an id link with one (`^ofx-…`, or `^csv-…` from
+`transaction_id_column`), or when it has the same date and amount and the same
+or a similar payee/narration. Ids of the same kind that differ mean two
+different transactions, however alike they look; when only one side has an id
+(a ledger imported before ids existed), the text decides.
+
+Each existing transaction absorbs at most one new one: two identical coffees on
+one day both import when the ledger already holds only one. Every skipped
+transaction is listed on stderr:
+
+```text
+Filtered 1 duplicate transaction(s) already in the existing ledger (0 by id link, 1 by date, amount and text):
+  skipped 2024-01-15 "Bakery" "Croissant" -2.50 EUR (same date, amount and text; existing: 2024-01-15 "Bakery" "Croissant" -2.50 EUR)
+```
+
 ## Importer Configuration
 
 ### CSV Options
@@ -279,6 +296,10 @@ amount_column = "Amount"
 
 # Date parsing
 date_format = "%Y-%m-%d"  # or "%m/%d/%Y", "%d.%m.%Y"
+
+# A unique per-transaction id from the bank, added as a `^csv-<id>` link
+# that `--existing` uses as identity when deduplicating
+transaction_id_column = "Transaction ID"
 
 # The file has NO header row. Columns must then be 0-based indices,
 # and the first row is read as data. Leave this out when the file has

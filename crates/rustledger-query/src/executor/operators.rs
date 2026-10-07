@@ -183,6 +183,10 @@ impl Executor<'_> {
     /// supported`. Collapsing the three would either accept a query it rejects
     /// or reject two it answers.
     ///
+    /// On amounts, positions and inventories `value_less_than` and
+    /// `compare_values_for_sort` agree, so `MIN`/`MAX` are `ORDER BY`'s first
+    /// and last values (#2447); `compare_values` still refuses them.
+    ///
     /// `compare_values_for_sort` is also total where the other two are
     /// fallible: sorting cannot fail partway through a result set, so it
     /// orders NULL rather than erroring on it.
@@ -208,6 +212,22 @@ impl Executor<'_> {
             // so defining the order there would accept a query it rejects.
             // The order exists for the aggregates and stops there.
             (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
+            // Amounts, positions and inventories in `ORDER BY`'s order, so
+            // `MIN` and `MAX` are the first and last value `ORDER BY` gives
+            // (#2447). They used to fail with "cannot compare values".
+            //
+            // MIN agrees with bean-query. MAX deliberately does NOT always:
+            // bean-query's `Max` updates on `value > cur`, and beancount's
+            // `Amount` and `Position` are NamedTuples defining only `__lt__`,
+            // so `>` falls back to plain tuple comparison, NUMBER first. Over
+            // `5 EUR` and `3 USD` it answers `5 EUR` for both MIN and MAX,
+            // while its own ORDER BY puts `5 EUR` first. We answer MAX with
+            // the last value in ORDER BY's order, `3 USD`. Within one
+            // currency the two rules agree. Documented in
+            // docs/reference/compatibility.md section 15.
+            (Value::Amount(a), Value::Amount(b)) => Self::amount_order(a, b),
+            (Value::Position(a), Value::Position(b)) => Self::position_order(a, b),
+            (Value::Inventory(a), Value::Inventory(b)) => Self::inventory_order(a, b),
             _ => return Err(QueryError::Type("cannot compare values".to_string())),
         };
         Ok(ord.is_lt())

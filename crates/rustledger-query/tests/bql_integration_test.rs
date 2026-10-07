@@ -8648,6 +8648,52 @@ fn test_postings_table_accounts_column() {
     );
 }
 
+/// `accounts` is a sorted SET and `other_accounts` drops only the current
+/// posting, by identity, not every posting sharing its account (#2483). Values
+/// match bean-query 0.2.0 on the same ledger, on the default table and
+/// `#postings` alike.
+#[test]
+fn test_accounts_and_other_accounts_with_repeated_account() {
+    let directives = vec![
+        Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+        Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Food")),
+        Directive::Transaction(
+            Transaction::new(date(2024, 1, 5), "x")
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(5), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(5), "USD"),
+                ))
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(dec!(-10), "USD"),
+                )),
+        ),
+    ];
+    let set = |names: &[&str]| Value::StringSet(names.iter().map(|s| (*s).to_string()).collect());
+    let both = set(&["Assets:Bank", "Expenses:Food"]);
+    for from in ["", " FROM #postings"] {
+        let result = execute_query(
+            &format!("SELECT account, accounts, other_accounts{from}"),
+            &directives,
+        );
+        let expected = [
+            ("Expenses:Food", both.clone(), both.clone()),
+            ("Expenses:Food", both.clone(), both.clone()),
+            ("Assets:Bank", both.clone(), set(&["Expenses:Food"])),
+        ];
+        assert_eq!(result.rows.len(), expected.len(), "FROM `{from}`");
+        for (row, (account, accounts, others)) in result.rows.iter().zip(expected) {
+            assert_eq!(row[0], Value::String(account.to_string()), "FROM `{from}`");
+            assert_eq!(row[1], accounts, "accounts on {account}, FROM `{from}`");
+            assert_eq!(row[2], others, "other_accounts on {account}, FROM `{from}`");
+        }
+    }
+}
+
 #[test]
 fn test_postings_table_tags_links_columns() {
     let directives = vec![

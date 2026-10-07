@@ -548,14 +548,7 @@ impl Executor<'_> {
         for txn in transactions {
             let tags: Vec<String> = txn.tags.iter().map(ToString::to_string).collect();
             let links: Vec<String> = txn.links.iter().map(ToString::to_string).collect();
-            let mut accounts: Vec<String> = txn
-                .postings
-                .iter()
-                .map(|p| p.account.to_string())
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect();
-            accounts.sort(); // Ensure deterministic ordering
+            let accounts = Self::posting_account_set(txn, None);
 
             let row = vec![
                 Value::Date(txn.date),
@@ -599,6 +592,31 @@ impl Executor<'_> {
             Some(payee) => format!("{payee} | {}", txn.narration),
             None => txn.narration.to_string(),
         }
+    }
+
+    /// The accounts of a transaction's postings as a sorted, deduped set,
+    /// skipping the posting at index `exclude` when one is given.
+    ///
+    /// ONE implementation for every `accounts` / `other_accounts` column:
+    /// the default postings table, `#postings`, `#entries` and
+    /// `#transactions`. bean-query builds these as Python sets
+    /// (`{p.account for p in entry.postings}`, and for `other_accounts`
+    /// `if p is not context.posting`), so a transaction posting twice to one
+    /// account lists it once, and `other_accounts` drops only the CURRENT
+    /// posting, never a different posting that shares its account (#2483).
+    pub(super) fn posting_account_set(
+        txn: &rustledger_core::Transaction,
+        exclude: Option<usize>,
+    ) -> Vec<String> {
+        txn.postings
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| Some(*i) != exclude)
+            .map(|(_, p)| p.account.as_ref())
+            .collect::<std::collections::BTreeSet<&str>>()
+            .into_iter()
+            .map(str::to_string)
+            .collect()
     }
 
     /// Build the #entries table from all directives.
@@ -689,14 +707,7 @@ impl Executor<'_> {
             if let Directive::Transaction(txn) = directive {
                 let tags: Vec<String> = txn.tags.iter().map(ToString::to_string).collect();
                 let links: Vec<String> = txn.links.iter().map(ToString::to_string).collect();
-                let mut accounts: Vec<String> = txn
-                    .postings
-                    .iter()
-                    .map(|p| p.account.to_string())
-                    .collect::<std::collections::HashSet<_>>()
-                    .into_iter()
-                    .collect();
-                accounts.sort(); // Ensure deterministic ordering
+                let accounts = Self::posting_account_set(txn, None);
                 let description = Self::transaction_description(txn);
                 (
                     Value::String(txn.flag.to_string()),
@@ -1002,14 +1013,7 @@ impl Executor<'_> {
             let tags: Vec<String> = txn.tags.iter().map(ToString::to_string).collect();
             let links: Vec<String> = txn.links.iter().map(ToString::to_string).collect();
 
-            let mut all_accounts: Vec<String> = txn
-                .postings
-                .iter()
-                .map(|p| p.account.to_string())
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect();
-            all_accounts.sort();
+            let all_accounts = Self::posting_account_set(txn, None);
 
             let description = Self::transaction_description(txn);
 
@@ -1111,12 +1115,9 @@ impl Executor<'_> {
             });
             let account_balance_val = ctx.account_balance.map_or(Value::Null, Value::Inventory);
 
-            // Other accounts: all accounts in the transaction except this posting's.
-            let other_accounts: Vec<String> = all_accounts
-                .iter()
-                .filter(|a| a.as_str() != posting.account.as_ref())
-                .cloned()
-                .collect();
+            // Other accounts: every posting's account except THIS posting's,
+            // by index, so a second posting to the same account still counts.
+            let other_accounts = Self::posting_account_set(txn, Some(ctx.posting_index));
 
             let posting_flag = posting
                 .flag

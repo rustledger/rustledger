@@ -465,26 +465,20 @@ impl Executor<'_> {
                     .and_then(IncompleteAmount::as_amount)
                     .map_or(Value::Null, |a| Value::Amount(a.clone())))
             }
-            // All accounts in the transaction
-            "accounts" => Ok(Value::StringSet(
-                ctx.transaction
-                    .postings
-                    .iter()
-                    .map(|p| p.account.to_string())
-                    .collect(),
-            )),
-            // All accounts except the current posting's account
-            "other_accounts" => {
-                let current = &posting.account;
-                Ok(Value::StringSet(
-                    ctx.transaction
-                        .postings
-                        .iter()
-                        .filter(|p| &p.account != current)
-                        .map(|p| p.account.to_string())
-                        .collect(),
-                ))
-            }
+            // All accounts in the transaction, as a sorted set
+            // (bean-query: `{p.account for p in entry.postings}`).
+            "accounts" => Ok(Value::StringSet(Self::posting_account_set(
+                &ctx.transaction,
+                None,
+            ))),
+            // The accounts of every OTHER posting, as a sorted set. Only this
+            // posting is excluded, by index: another posting to the same
+            // account still counts (bean-query: `sorted({p.account for p in
+            // entry.postings if p is not context.posting})`, #2483).
+            "other_accounts" => Ok(Value::StringSet(Self::posting_account_set(
+                &ctx.transaction,
+                Some(ctx.posting_index),
+            ))),
             // Posting metadata as dictionary
             "meta" => Ok(Value::Metadata(Box::new(Self::augmented_meta(
                 &posting.meta,

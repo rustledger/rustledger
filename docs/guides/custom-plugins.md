@@ -12,7 +12,7 @@ WASM plugins let you extend rustledger without modifying its source code. You wr
 
 **Why WASM?**
 
-- **Sandboxed**: Plugins run in isolation, can't access your filesystem or network, and each call has a CPU budget (30 seconds by default; see [Plugin Time Budget](../getting-started/configuration.md#plugin-time-budget))
+- **Sandboxed**: Plugins run in isolation, can't access your filesystem or network, and each call has a time budget (at most 30 seconds by default; see [Plugin Time Budget](../getting-started/configuration.md#plugin-time-budget))
 - **Portable**: Same binary works on any platform
 - **Fast**: Near-native performance after compilation
 - **Safe**: Memory-safe by design

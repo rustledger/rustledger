@@ -78,6 +78,7 @@ pub struct Config {
 /// plugins get.
 #[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
 #[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
 pub struct PluginsConfig {
     /// Time budget, in seconds, for each call into a WASM plugin or WASM
     /// importer (default: 30). `--plugin-max-time-secs` overrides it.
@@ -617,7 +618,8 @@ impl Config {
 # bs = "report balance-sheet"
 
 # [plugins]
-# Seconds of CPU each WASM plugin or importer call may use (default 30)
+# Time budget for each WASM plugin or importer call (default 30). A call is
+# stopped within at most this many seconds, usually far sooner.
 # max_time_secs = 120
 "#
         .to_string()

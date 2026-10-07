@@ -72,6 +72,10 @@ fn run(bin: &Path, dir: &Path, args: &[&str], ledger: &Path) -> String {
 
 const TRAP: &str = "all fuel consumed";
 
+/// What the plugin's empty output fails with once `process` returns: proof
+/// it ran to completion, not merely that it did not trap.
+const RAN_TO_COMPLETION: &str = "reading marker";
+
 #[test]
 fn default_budget_covers_the_burn() {
     let bin = require_rledger!();
@@ -79,7 +83,7 @@ fn default_budget_covers_the_burn() {
     let ledger = setup(dir.path(), None);
     let out = run(&bin, dir.path(), &["check"], &ledger);
     assert!(
-        out.contains("burn.wasm"),
+        out.contains(RAN_TO_COMPLETION),
         "the plugin should run and fail to decode:\n{out}"
     );
     assert!(!out.contains(TRAP), "{out}");
@@ -119,6 +123,7 @@ fn flag_overrides_the_config_file() {
         &["check", "--plugin-max-time-secs", "60"],
         &ledger,
     );
+    assert!(out.contains(RAN_TO_COMPLETION), "{out}");
     assert!(!out.contains(TRAP), "{out}");
 }
 

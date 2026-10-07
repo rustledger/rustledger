@@ -504,6 +504,11 @@ mod tests {
         path
     }
 
+    /// What the burn plugin's empty output fails with once `process`
+    /// returns: proof the call ran to completion, not merely that it did
+    /// not trap.
+    const RAN_TO_COMPLETION: &str = "reading marker";
+
     fn run(path: &Path, max_time_secs: Option<u64>) -> String {
         let err = ResolvedPlugin::Wasm(path.to_path_buf())
             .run_with_max_time_secs(
@@ -528,9 +533,9 @@ mod tests {
         let path = burn_three_seconds_plugin(dir.path());
 
         // The default 30 seconds covers the burn; the call gets as far as
-        // decoding the output.
+        // decoding the (empty) output, which is where rmp-serde fails.
         let default = run(&path, None);
-        assert!(!default.contains("fuel"), "{default}");
+        assert!(default.contains(RAN_TO_COMPLETION), "{default}");
 
         // A 1-second budget stops it partway.
         let tight = run(&path, Some(1));
@@ -538,6 +543,6 @@ mod tests {
 
         // An explicit budget above the default also covers it.
         let generous = run(&path, Some(60));
-        assert!(!generous.contains("fuel"), "{generous}");
+        assert!(generous.contains(RAN_TO_COMPLETION), "{generous}");
     }
 }

@@ -42,23 +42,23 @@ const PYTHON_MAX_MEMORY: usize = crate::sandbox::DEFAULT_SANDBOX_MAX_MEMORY;
 
 /// Per-call fuel budget for the Python plugin runtime.
 ///
-/// Roughly "~10 minutes of `CPython` at 1M instructions/second on the
-/// reference fixtures". Fuel exhaustion surfaces as a wasmtime trap
+/// Sized as "~10 minutes of `CPython` at 1M instructions/second on the
+/// reference fixtures", a rate wasm runs several thousand times faster
+/// than (see below). Fuel exhaustion surfaces as a wasmtime trap
 /// that the caller in `execute_plugin` translates into a
 /// `PythonError::Execution` (the existing error path).
 ///
 /// # Why this isn't [`sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS`]
 ///
-/// The shared sandbox default is 30 seconds (= 30M fuel via the 1M-
-/// fuel-per-second convention used by [`sandbox::make_sandboxed_store`]).
-/// `CPython` compiled to WASI runs as an interpreter that emits many
-/// wasm instructions per Python-source operation, so the same
-/// wall-clock budget needs ~10-100x more wasmtime fuel for a Python
-/// workload than for equivalent native wasm. Reusing the shared
-/// 30-second default would leave Python plugins fuel-starved before
-/// `CPython` finished its own startup. The opt-out is principled:
-/// interpreter overhead is a structural property of
-/// `CPython`-on-wasm, not a budget choice.
+/// This value was sized when [`sandbox::make_sandboxed_store`] granted
+/// 1M fuel per second, on the reasoning that `CPython` compiled to WASI
+/// emits many wasm instructions per Python-source operation and would
+/// be fuel-starved by the shared 30-second default (then 30M fuel).
+/// The shared rate is now [`sandbox::FUEL_PER_SECOND`], measured at
+/// 5-17G fuel per second of real wasm, so the shared default is 30G
+/// fuel, 50x this budget, and 600M is under a second of execution.
+/// It has not been re-measured against a Python plugin since; until
+/// it is, it stays a separate, deliberately small budget.
 ///
 /// Kept as a module-level `const` rather than a free-floating literal
 /// inside [`PythonRuntime::execute_plugin`] so the value is grep-
@@ -340,7 +340,7 @@ with open('/work/output.json', 'w') as f:
         // Run Python
         start
             .call(&mut store, ())
-            .map_err(|e| PythonError::Execution(format!("Python execution failed: {e}")))?;
+            .map_err(|e| PythonError::Execution(format!("Python execution failed: {e:#}")))?;
 
         // Read output from file
         let output_path = work_dir.path().join("output.json");
@@ -1000,8 +1000,7 @@ mod tests {
     // the drift the test was guarding against is unrepresentable. The
     // type system enforces what the runtime assertion used to.
 
-    /// Pin `PYTHON_FUEL` at its documented "~10 minutes of `CPython` at
-    /// 1M instructions/second" budget. Hoisted from an inline literal
+    /// Pin `PYTHON_FUEL` at its documented 600M budget. Hoisted from an inline literal
     /// in #1234; this test makes a future change to the value a
     /// conscious edit. Doesn't pin the wasmtime-side wiring (that's
     /// covered by `make_sandboxed_python_store_caps_memory_growth_via_wasmtime`,
@@ -1011,7 +1010,7 @@ mod tests {
         assert_eq!(
             PYTHON_FUEL, 600_000_000,
             "PYTHON_FUEL changed without updating the rustdoc; bumping the budget \
-             should also update the \"~10 minutes at 1M instructions/sec\" doc claim."
+             should also update its doc, which compares it to the shared default."
         );
     }
 

@@ -246,7 +246,7 @@ impl ResolvedPlugin<'_> {
                 )
                 .map_err(|e| PluginRunError::WasmFailed {
                     path: path.clone(),
-                    message: format!("execution failed: {e}"),
+                    message: format!("execution failed: {e:#}"),
                 })
             }
             #[cfg(feature = "python-plugins")]

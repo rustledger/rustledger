@@ -913,7 +913,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                     }
                 }
                 Err(e) => {
-                    let msg = format!("WASM plugin execution failed: {e}");
+                    let msg = format!("WASM plugin execution failed: {e:#}");
                     // Tally and filter like every other diagnostic, so
                     // --show-summary counts this and --exclude-rules can hide it.
                     // The count below is deliberately outside: hiding a

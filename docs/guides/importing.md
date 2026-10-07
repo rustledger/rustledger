@@ -290,11 +290,16 @@ Only transactions posting to the importer's account, in the same commodity,
 are compared. A new transaction is a duplicate when:
 
 1. it shares an id link (`^ofx-…` from OFX, `^csv-…` from
-   `transaction_id_column`) with an existing transaction, whatever the date,
-   amount or text say; or
+   `transaction_id_column`) with an existing transaction and moves the same
+   amount, whatever the date or text say; or
 1. it has the same date and amount as an existing transaction and the same
    or a similar payee/narration — unless both carry ids of the same kind and
    those ids differ, which makes them two different transactions.
+
+A ledger entry that splits the account's leg over several postings is
+compared by its net movement too, and a transfer you already imported from the
+other account's statement counts as a duplicate, since it already records this
+account's leg.
 
 Each existing transaction absorbs at most one new one, so two identical
 coffees on the same day are both kept when the ledger holds only one of them.

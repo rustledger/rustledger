@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.12.0;
+package rustledger:ledger@3.13.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -630,11 +630,15 @@ interface ledger {
     /// session — one bool per candidate, in order (added in 3.6.0 for the
     /// import review flow). Uses the same matcher as
     /// `rledger extract --existing`, unscoped by importer account: a shared
-    /// `^ofx-`/`^csv-` id link, or same date, same first-posting account,
-    /// commodity and amount, and similar payee/narration text — so a host
+    /// `^ofx-`/`^csv-` id link with the same first-posting account,
+    /// commodity and amount, or the same date and first-posting account,
+    /// commodity and amount with similar payee/narration text — so a host
     /// review UI and the CLI agree on what counts as a duplicate. Held
     /// transactions are a multiset: each one flags at most one candidate, so
-    /// two identical candidates against one held entry flag only the first. Living on the session avoids
+    /// two identical candidates against one held entry flag only the first.
+    /// Changed in 3.13.0 (#2421): before it, held transactions were a set,
+    /// only the first posting's number was compared (no account or
+    /// commodity), and id links were ignored. Living on the session avoids
     /// re-marshaling the full ledger per import, and the session's
     /// documented conversion-drop policy (see `from-entries`) covers the
     /// comparison set. Candidates that fail conversion, and

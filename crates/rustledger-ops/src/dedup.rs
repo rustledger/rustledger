@@ -147,7 +147,8 @@ impl Default for FuzzyDedupConfig {
 /// Why a new transaction was matched to an existing one.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DuplicateReason {
-    /// Both carry this id link (`^ofx-…`, `^csv-…`). Decisive on its own.
+    /// Both carry this id link (`^ofx-…`, `^csv-…`) and the same account,
+    /// commodity and amount; the date and text may differ.
     IdLink(String),
     /// Same date, account, commodity and amount, and identical payee/narration.
     ExactText,
@@ -186,7 +187,10 @@ pub struct ImportDuplicate {
 /// `account` scopes the comparison to the posting each transaction makes to
 /// the importer's account: its commodity and amount are what is compared, and
 /// an existing transaction that never touches the account is not a candidate.
-/// With `None` (a caller with no importer account, such as the component's
+/// When the account's leg is split over several postings, its net movement
+/// per commodity is compared too. A new transaction that itself never touches
+/// `account` (a WASM importer may post elsewhere) is compared unscoped, as
+/// below, rather than skipping dedup. With `None` (a caller with no importer account, such as the component's
 /// `session.dedup`), each transaction's first posting — its account,
 /// commodity and amount — is compared instead.
 ///
@@ -194,7 +198,9 @@ pub struct ImportDuplicate {
 /// can never claim an existing transaction a stronger one needed:
 ///
 /// 1. **Id links.** A shared `^ofx-…` / `^csv-…` link is a duplicate whatever
-///    the date, amount or text say.
+///    the date or text say, provided the account, commodity and amount agree
+///    (so two different ids that sanitize to the same link cannot drop a
+///    different transaction).
 /// 2. **Exact text.** Same date, commodity and amount, identical
 ///    (case-insensitive) payee + narration.
 /// 3. **Fuzzy text.** Same date, commodity and amount, similar payee +
@@ -219,51 +225,74 @@ pub fn find_import_duplicates(
 ) -> Vec<ImportDuplicate> {
     let threshold = config.text_similarity_threshold;
 
-    let existing_keys: Vec<Option<TxnKey<'_>>> =
-        existing.iter().map(|t| TxnKey::of(t, account)).collect();
-    let mut by_amount: HashMap<AmountKey<'_>, Vec<usize>> = HashMap::default();
-    let mut by_id: HashMap<&str, Vec<usize>> = HashMap::default();
-    for (i, key) in existing_keys.iter().enumerate() {
-        let Some(key) = key else { continue };
-        for amount in &key.amounts {
-            by_amount.entry(amount.clone()).or_default().push(i);
-        }
-        for id in &key.ids {
-            by_id.entry(id).or_default().push(i);
-        }
+    let scoped = Index::build(existing, account);
+    // Built only if some new transaction never touches `account` (a WASM
+    // importer may post elsewhere): such a row falls back to the unscoped
+    // first-posting key rather than silently escaping dedup altogether.
+    let mut unscoped: Option<Index<'_>> = None;
+    let new_keys: Vec<Option<(TxnKey<'_>, bool)>> = new
+        .iter()
+        .map(|t| match TxnKey::of(t, account) {
+            Some(key) => Some((key, true)),
+            None if account.is_some() => TxnKey::of(t, None).map(|key| (key, false)),
+            None => None,
+        })
+        .collect();
+    if new_keys.iter().flatten().any(|(_, in_scope)| !in_scope) {
+        unscoped = Some(Index::build(existing, None));
     }
+    let index_for = |in_scope: bool| -> &Index<'_> {
+        if in_scope {
+            &scoped
+        } else {
+            unscoped.as_ref().unwrap_or(&scoped)
+        }
+    };
 
-    let new_keys: Vec<Option<TxnKey<'_>>> = new.iter().map(|t| TxnKey::of(t, account)).collect();
     let mut consumed = vec![false; existing.len()];
     let mut matched: Vec<Option<(usize, DuplicateReason)>> = vec![None; new.len()];
 
-    // Pass 1: shared id links.
-    for (new_i, key) in new_keys.iter().enumerate() {
-        let Some(key) = key else { continue };
+    // Pass 1: shared id links. The id decides whatever the date or text say,
+    // but the money must agree: a sanitized link can collide (`a b` and `a:b`
+    // both become `…-a-b`), and a collision must not drop a different
+    // transaction. A bank's id for one transaction does not change amount.
+    for (new_i, entry) in new_keys.iter().enumerate() {
+        let Some((key, in_scope)) = entry else {
+            continue;
+        };
+        let index = index_for(*in_scope);
         'ids: for id in &key.ids {
-            for &ex in by_id.get(id).map_or(&[][..], Vec::as_slice) {
-                if !consumed[ex] {
-                    consumed[ex] = true;
-                    matched[new_i] = Some((ex, DuplicateReason::IdLink((*id).to_string())));
-                    break 'ids;
+            for &ex in index.by_id.get(id).map_or(&[][..], Vec::as_slice) {
+                if consumed[ex] {
+                    continue;
                 }
+                let Some(ek) = &index.keys[ex] else { continue };
+                if !same_money(&key.amounts, &ek.amounts) {
+                    continue;
+                }
+                consumed[ex] = true;
+                matched[new_i] = Some((ex, DuplicateReason::IdLink((*id).to_string())));
+                break 'ids;
             }
         }
     }
 
     // Passes 2 and 3: same amount bucket, text decides.
     for exact in [true, false] {
-        for (new_i, key) in new_keys.iter().enumerate() {
+        for (new_i, entry) in new_keys.iter().enumerate() {
             if matched[new_i].is_some() {
                 continue;
             }
-            let Some(key) = key else { continue };
+            let Some((key, in_scope)) = entry else {
+                continue;
+            };
+            let index = index_for(*in_scope);
             'amounts: for amount in &key.amounts {
-                for &ex in by_amount.get(amount).map_or(&[][..], Vec::as_slice) {
+                for &ex in index.by_amount.get(amount).map_or(&[][..], Vec::as_slice) {
                     if consumed[ex] {
                         continue;
                     }
-                    let Some(ek) = &existing_keys[ex] else {
+                    let Some(ek) = &index.keys[ex] else {
                         continue;
                     };
                     if ids_conflict(&key.ids, &ek.ids) {
@@ -300,6 +329,44 @@ pub fn find_import_duplicates(
             })
         })
         .collect()
+}
+
+/// Existing transactions keyed once for one scope.
+struct Index<'a> {
+    keys: Vec<Option<TxnKey<'a>>>,
+    by_amount: HashMap<AmountKey<'a>, Vec<usize>>,
+    by_id: HashMap<&'a str, Vec<usize>>,
+}
+
+impl<'a> Index<'a> {
+    fn build(existing: &[&'a Transaction], account: Option<&str>) -> Self {
+        let keys: Vec<Option<TxnKey<'a>>> =
+            existing.iter().map(|t| TxnKey::of(t, account)).collect();
+        let mut by_amount: HashMap<AmountKey<'a>, Vec<usize>> = HashMap::default();
+        let mut by_id: HashMap<&'a str, Vec<usize>> = HashMap::default();
+        for (i, key) in keys.iter().enumerate() {
+            let Some(key) = key else { continue };
+            for amount in &key.amounts {
+                by_amount.entry(amount.clone()).or_default().push(i);
+            }
+            for id in &key.ids {
+                by_id.entry(id).or_default().push(i);
+            }
+        }
+        Self {
+            keys,
+            by_amount,
+            by_id,
+        }
+    }
+}
+
+/// Whether two keys share an account, commodity and amount, on any date.
+fn same_money(a: &[AmountKey<'_>], b: &[AmountKey<'_>]) -> bool {
+    a.iter().any(|x| {
+        b.iter()
+            .any(|y| x.account == y.account && x.currency == y.currency && x.number == y.number)
+    })
 }
 
 /// Result of a fuzzy duplicate match.
@@ -381,15 +448,37 @@ impl<'a> TxnKey<'a> {
                 number: units.number()?.normalize(),
             })
         };
-        let mut amounts: Vec<AmountKey<'a>> = match account {
+        let amounts: Vec<AmountKey<'a>> = match account {
             Some(account) => {
-                let mut on_account = txn
+                let on_account: Vec<&'a rustledger_core::Posting> = txn
                     .postings
                     .iter()
+                    .map(|p| &**p)
                     .filter(|p| p.account.as_str() == account)
-                    .peekable();
-                on_account.peek()?;
-                on_account.filter_map(|p| amount_of(p)).collect()
+                    .collect();
+                if on_account.is_empty() {
+                    return None;
+                }
+                let mut amounts: Vec<AmountKey<'a>> =
+                    on_account.iter().filter_map(|p| amount_of(p)).collect();
+                // A ledger entry may split the account's leg across several
+                // postings (`-6.00` and `-4.00` for one `-10.00` statement
+                // row), so the account's net movement per commodity is a key
+                // too.
+                if amounts.len() > 1 {
+                    let mut nets: Vec<AmountKey<'a>> = Vec::new();
+                    for a in &amounts {
+                        match nets.iter_mut().find(|n| n.currency == a.currency) {
+                            Some(n) => n.number += a.number,
+                            None => nets.push(a.clone()),
+                        }
+                    }
+                    for mut n in nets {
+                        n.number = n.number.normalize();
+                        amounts.push(n);
+                    }
+                }
+                amounts
             }
             None => txn
                 .postings
@@ -398,7 +487,13 @@ impl<'a> TxnKey<'a> {
                 .into_iter()
                 .collect(),
         };
-        amounts.dedup();
+        let mut unique: Vec<AmountKey<'a>> = Vec::with_capacity(amounts.len());
+        for a in amounts {
+            if !unique.contains(&a) {
+                unique.push(a);
+            }
+        }
+        let amounts = unique;
         let ids = txn
             .links
             .iter()
@@ -923,7 +1018,8 @@ mod tests {
 
     #[test]
     fn a_shared_id_link_is_decisive() {
-        // Same id: a duplicate even though date, amount and text all differ.
+        // Same id and money: a duplicate even though date and text differ (a
+        // pending row re-posted on another day, a rewritten narration).
         let existing = txn(
             "2024-01-14",
             "POS 4411 BAKERY",
@@ -932,7 +1028,7 @@ mod tests {
             "EUR",
             &["ofx-77"],
         );
-        let new = txn("2024-01-15", "Croissant", BANK, "-2.49", "EUR", &["ofx-77"]);
+        let new = txn("2024-01-15", "Croissant", BANK, "-2.50", "EUR", &["ofx-77"]);
         let dups = import(&[new], std::slice::from_ref(&existing));
         assert_eq!(dups.len(), 1);
         assert_eq!(dups[0].reason, DuplicateReason::IdLink("ofx-77".into()));
@@ -1027,5 +1123,69 @@ mod tests {
         assert_eq!(id_link("csv-", "a b:c"), Some("csv-a-b-c".into()));
         assert_eq!(id_link("csv-", "  "), None);
         assert_eq!(id_link("csv-", "./_"), None);
+    }
+
+    #[test]
+    fn an_id_collision_with_a_different_amount_is_not_a_duplicate() {
+        // `a b` and `a:b` both sanitize to `csv-a-b`. Equal links but different
+        // money: two transactions, kept — not a silent drop.
+        assert_eq!(id_link("csv-", "a b"), id_link("csv-", "a:b"));
+        let existing = txn("2024-01-15", "Coffee", BANK, "-4.00", "EUR", &["csv-a-b"]);
+        let new = txn("2024-01-15", "Rent", BANK, "-900.00", "EUR", &["csv-a-b"]);
+        assert!(import(&[new], std::slice::from_ref(&existing)).is_empty());
+    }
+
+    #[test]
+    fn a_split_account_leg_matches_its_net_movement() {
+        let mut existing = txn("2024-01-15", "Shop", BANK, "-6.00", "EUR", &[]);
+        existing.postings.insert(
+            1,
+            rustledger_core::Spanned::synthesized(rustledger_core::Posting::new(
+                BANK,
+                rustledger_core::Amount::new(Decimal::new(-400, 2), "EUR"),
+            )),
+        );
+        let new = txn("2024-01-15", "Shop", BANK, "-10.00", "EUR", &[]);
+        assert_eq!(import(&[new], &[existing]).len(), 1);
+    }
+
+    #[test]
+    fn a_transfer_already_booked_from_the_other_statement_is_a_duplicate() {
+        // Imported first from the savings statement; the checking statement's
+        // row for the same transfer would double-count the checking leg.
+        let existing = txn(
+            "2024-01-15",
+            "Transfer to savings",
+            "Assets:Savings",
+            "100.00",
+            "EUR",
+            &[],
+        );
+        let mut existing = existing;
+        existing.postings[1] =
+            rustledger_core::Spanned::synthesized(rustledger_core::Posting::new(
+                BANK,
+                rustledger_core::Amount::new(Decimal::new(-10000, 2), "EUR"),
+            ));
+        let new = txn(
+            "2024-01-15",
+            "Transfer to savings",
+            BANK,
+            "-100.00",
+            "EUR",
+            &[],
+        );
+        assert_eq!(import(&[new], &[existing]).len(), 1);
+    }
+
+    #[test]
+    fn a_new_transaction_outside_the_account_falls_back_to_unscoped() {
+        // A WASM importer that posts somewhere other than the configured
+        // account must still be deduplicated, by its first posting.
+        let other = txn("2024-01-15", "Coffee", "Assets:Wallet", "-4.00", "EUR", &[]);
+        assert_eq!(
+            import(std::slice::from_ref(&other), std::slice::from_ref(&other)).len(),
+            1
+        );
     }
 }

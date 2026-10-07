@@ -95,7 +95,7 @@ Each call into a WASM plugin or WASM importer gets a CPU budget, 30 seconds by d
 rledger check --plugin-max-time-secs 120 ledger.beancount
 ```
 
-The budget is a setting of whoever runs rustledger, never of the ledger: nothing in a beancount file can raise it, so a service that loads ledgers it did not write keeps control of how much CPU their plugins get. Python plugins keep their own fixed budget.
+The budget is a setting of whoever runs rustledger, never of the ledger: nothing in a beancount file can raise it, so a service that loads ledgers it did not write keeps control of how much CPU their plugins get. A project `.rledger.toml` is found from the directory rledger runs in, not from where the ledger is. So running rledger inside someone else's repository applies their `max_time_secs`, as it applies their aliases and default file; run it from a directory you control to keep your own. Python plugins keep their own fixed budget.
 
 ### Using Profiles
 

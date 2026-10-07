@@ -89,6 +89,7 @@ pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<Ex
     let options = LoadOptions {
         run_plugins: true,
         validate: true,
+        plugin_max_time_secs: crate::plugin_budget::max_time_secs(),
         ..Default::default()
     };
     for path in &args.files {

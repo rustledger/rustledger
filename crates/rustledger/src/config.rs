@@ -65,6 +65,34 @@ pub struct Config {
     /// Price fetching configuration.
     #[serde(default)]
     pub price: PriceConfig,
+
+    /// WASM plugin and importer limits.
+    #[serde(default)]
+    pub plugins: PluginsConfig,
+}
+
+/// WASM plugin and importer limits.
+///
+/// These are the host's settings. A ledger cannot raise them, so a service
+/// that loads ledgers it did not write keeps control of how much CPU their
+/// plugins get.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct PluginsConfig {
+    /// Time budget, in seconds, for each call into a WASM plugin or WASM
+    /// importer (default: 30). `--plugin-max-time-secs` overrides it.
+    pub max_time_secs: Option<u64>,
+}
+
+impl PluginsConfig {
+    /// Merge another plugins config into this one.
+    #[must_use]
+    const fn merge(mut self, other: Self) -> Self {
+        if other.max_time_secs.is_some() {
+            self.max_time_secs = other.max_time_secs;
+        }
+        self
+    }
 }
 
 /// Price fetching configuration.
@@ -482,6 +510,9 @@ impl Config {
         // Merge price config
         self.price = self.price.merge(other.price);
 
+        // Merge plugin limits
+        self.plugins = self.plugins.merge(other.plugins);
+
         self
     }
 
@@ -581,6 +612,10 @@ impl Config {
 # bal = "report balances"
 # is = "report income-statement"
 # bs = "report balance-sheet"
+
+# [plugins]
+# Seconds of CPU each WASM plugin or importer call may use (default 30)
+# max_time_secs = 120
 "#
         .to_string()
     }
@@ -1139,6 +1174,28 @@ backup = true
         assert_eq!(merged.commands.query.output.format, Some("csv".to_string()));
         // Base verbose should remain (override was None)
         assert_eq!(merged.commands.query.verbose, Some(false));
+    }
+
+    #[test]
+    fn test_plugins_max_time_secs_parses_and_merges() {
+        let unset: Config = toml::from_str("").unwrap();
+        assert_eq!(unset.plugins.max_time_secs, None);
+
+        let user: Config = toml::from_str("[plugins]\nmax_time_secs = 120\n").unwrap();
+        assert_eq!(user.plugins.max_time_secs, Some(120));
+
+        // A later layer (project over user) overrides; one that leaves it
+        // unset keeps the earlier value.
+        let project: Config = toml::from_str("[plugins]\nmax_time_secs = 5\n").unwrap();
+        assert_eq!(user.clone().merge(project).plugins.max_time_secs, Some(5));
+        assert_eq!(user.merge(unset).plugins.max_time_secs, Some(120));
+    }
+
+    #[test]
+    fn test_plugins_section_rejects_unknown_keys() {
+        // A misspelled budget must fail loudly, not fall back to 30 s.
+        let err = toml::from_str::<Config>("[plugins]\nmax_time_sec = 120\n").unwrap_err();
+        assert!(err.to_string().contains("max_time_sec"), "{err}");
     }
 
     #[test]

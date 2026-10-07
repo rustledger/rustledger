@@ -138,7 +138,9 @@ pub enum WasmImporterError {
     MissingExport(&'static str),
     /// Runtime error during a wasmtime call (trap, fuel exhausted,
     /// memory limit, etc.).
-    #[error("WASM importer runtime error: {0}")]
+    // `{0:#}` prints the anyhow chain: a fuel trap's cause, `all fuel consumed
+    // by WebAssembly`, is its innermost layer, below the wasm backtrace.
+    #[error("WASM importer runtime error: {0:#}")]
     Runtime(#[source] anyhow::Error),
     /// `MessagePack` decode error on the WASM-returned bytes.
     #[error("WASM importer returned malformed MessagePack: {0}")]
@@ -1228,6 +1230,66 @@ mod tests {
     // itself was hoisted there. The integration test below
     // (`initial_memory_above_cap_is_rejected_via_limiter_wiring`)
     // still proves the importer's load path wires it correctly.
+
+    /// `roundtrip_wat` with a `metadata` export that first burns about three
+    /// seconds of fuel (`3 * FUEL_PER_SECOND`, at ~6 per loop iteration).
+    /// Loading calls `metadata`, so the load fits the default 30-second
+    /// budget and traps on a 1-second one, whatever the host's speed: it
+    /// burns about three times the smaller budget and a tenth of the larger.
+    fn burn_three_seconds_importer_wat() -> String {
+        let iterations = 3 * sandbox::FUEL_PER_SECOND / 6;
+        let original = r#"(func (export "metadata") (result i64)
+                i64.const 9)"#;
+        let burning = format!(
+            r#"(func (export "metadata") (result i64) (local $n i32)
+                (local.set $n (i32.const {iterations}))
+                (loop
+                    (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+                    (br_if 0 (local.get $n)))
+                i64.const 9)"#
+        );
+        assert!(roundtrip_wat().contains(original), "fixture changed shape");
+        roundtrip_wat().replace(original, &burning)
+    }
+
+    #[test]
+    fn registry_loads_importers_under_the_host_time_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("burn.wasm");
+        std::fs::write(
+            &path,
+            wat::parse_str(burn_three_seconds_importer_wat()).unwrap(),
+        )
+        .unwrap();
+        let budget = |secs| WasmRuntimeConfig {
+            max_time_secs: secs,
+            ..WasmRuntimeConfig::default()
+        };
+
+        let mut registry = crate::ImporterRegistry::new();
+        registry
+            .register_wasm_from_path_with_config(&path, WasmRuntimeConfig::default())
+            .expect("the default 30 seconds covers the burn");
+
+        let err = registry
+            .register_wasm_from_path_with_config(&path, budget(1))
+            .expect_err("a 1-second budget stops it");
+        assert!(err.to_string().contains("all fuel consumed"), "{err}");
+
+        let report = registry
+            .register_wasm_dir_with_config(dir.path(), budget(1))
+            .expect("the directory itself is readable");
+        assert!(report.loaded.is_empty(), "{:?}", report.loaded);
+        assert_eq!(report.failures.len(), 1);
+        assert!(
+            report.failures[0]
+                .1
+                .to_string()
+                .contains("all fuel consumed"),
+            "{}",
+            report.failures[0].1
+        );
+    }
 
     #[test]
     fn zero_max_time_secs_does_not_starve_fuel() {

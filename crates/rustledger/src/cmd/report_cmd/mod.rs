@@ -490,6 +490,7 @@ fn load(
         // Only the capgains report reads `Ledger::capital_gains`; opt in so no other
         // report pays to retain the vector.
         collect_capital_gains: matches!(report, Report::Capgains { .. }),
+        plugin_max_time_secs: crate::plugin_budget::max_time_secs(),
         ..Default::default()
     };
 

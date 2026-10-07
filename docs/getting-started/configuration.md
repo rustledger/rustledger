@@ -80,7 +80,22 @@ file = "~/finances/business.beancount"
 bal = "report balances"
 is = "report income"
 bs = "report balsheet"
+
+# WASM plugin and importer limits
+[plugins]
+# Seconds of CPU each plugin or importer call may use (default: 30)
+max_time_secs = 120
 ```
+
+### Plugin Time Budget
+
+Each call into a WASM plugin or WASM importer gets a CPU budget, 30 seconds by default, after which it is stopped with `all fuel consumed by WebAssembly`. A plugin doing real work over a large ledger can need more. Raise it with `[plugins] max_time_secs` in any config file, or for one run with the global `--plugin-max-time-secs <SECS>` flag, which overrides the config:
+
+```bash
+rledger check --plugin-max-time-secs 120 ledger.beancount
+```
+
+The budget is a setting of whoever runs rustledger, never of the ledger: nothing in a beancount file can raise it, so a service that loads ledgers it did not write keeps control of how much CPU their plugins get. Python plugins keep their own fixed budget.
 
 ### Using Profiles
 

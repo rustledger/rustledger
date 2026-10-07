@@ -992,13 +992,20 @@ fn build_registry(args: &Args) -> Result<ImporterRegistry> {
     //    `--wasm-importer`/`--wasm-importer-dir` flags are accepted but inert.
     #[cfg(feature = "python-plugin-wasm")]
     {
+        // The host's time budget, if one is configured (`[plugins]
+        // max_time_secs` / `--plugin-max-time-secs`), for every importer.
+        let mut runtime = rustledger_importer::WasmRuntimeConfig::default();
+        if let Some(secs) = crate::plugin_budget::max_time_secs() {
+            runtime.max_time_secs = secs;
+        }
+
         // 1. CLI --wasm-importer paths (explicit precedence — registered
         //    first so they win identify()). Single-file failures abort
         //    because the user explicitly named this path; if it's wrong,
         //    silently skipping would be worse than erroring out.
         for path in &args.wasm_importer {
             let name = registry
-                .register_wasm_from_path(path)
+                .register_wasm_from_path_with_config(path, runtime)
                 .with_context(|| format!("failed to load WASM importer {}", path.display()))?;
             eprintln!("loaded WASM importer `{name}` from {}", path.display());
         }
@@ -1008,9 +1015,11 @@ fn build_registry(args: &Args) -> Result<ImporterRegistry> {
         //    toml-supplied paths (CLI paths get shell expansion).
         let scan_dirs: Vec<PathBuf> = resolve_scan_dirs(args)?;
         for dir in &scan_dirs {
-            let report = registry.register_wasm_dir(dir).with_context(|| {
-                format!("failed to scan WASM importer directory {}", dir.display())
-            })?;
+            let report = registry
+                .register_wasm_dir_with_config(dir, runtime)
+                .with_context(|| {
+                    format!("failed to scan WASM importer directory {}", dir.display())
+                })?;
             if !report.loaded.is_empty() || !report.failures.is_empty() {
                 eprintln!(
                     "WASM importer scan {}: loaded {}, failed {}",

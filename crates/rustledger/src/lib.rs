@@ -40,4 +40,5 @@
 pub mod cmd;
 pub mod config;
 pub mod pager;
+pub mod plugin_budget;
 pub mod report;

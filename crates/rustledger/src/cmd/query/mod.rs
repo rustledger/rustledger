@@ -161,6 +161,7 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
     // bean-query likewise reports a failing assertion before its results.
     let options = LoadOptions {
         validate: true,
+        plugin_max_time_secs: crate::plugin_budget::max_time_secs(),
         ..Default::default()
     };
 

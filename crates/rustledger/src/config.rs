@@ -65,6 +65,38 @@ pub struct Config {
     /// Price fetching configuration.
     #[serde(default)]
     pub price: PriceConfig,
+
+    /// WASM plugin and importer limits.
+    #[serde(default)]
+    pub plugins: PluginsConfig,
+}
+
+/// WASM plugin and importer limits.
+///
+/// These are the host's settings. A ledger cannot raise them, so a service
+/// that loads ledgers it did not write keeps control of how much CPU their
+/// plugins get.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+#[non_exhaustive]
+pub struct PluginsConfig {
+    /// Time budget, in seconds, for each call into a WASM plugin or WASM
+    /// importer (default: 30). `--plugin-max-time-secs` overrides it.
+    ///
+    /// Zero is refused when the file is parsed: the sandbox would treat it
+    /// as one second, and many tools read zero as "no limit".
+    pub max_time_secs: Option<std::num::NonZeroU64>,
+}
+
+impl PluginsConfig {
+    /// Merge another plugins config into this one.
+    #[must_use]
+    const fn merge(mut self, other: Self) -> Self {
+        if other.max_time_secs.is_some() {
+            self.max_time_secs = other.max_time_secs;
+        }
+        self
+    }
 }
 
 /// Price fetching configuration.
@@ -482,6 +514,9 @@ impl Config {
         // Merge price config
         self.price = self.price.merge(other.price);
 
+        // Merge plugin limits
+        self.plugins = self.plugins.merge(other.plugins);
+
         self
     }
 
@@ -581,6 +616,11 @@ impl Config {
 # bal = "report balances"
 # is = "report income-statement"
 # bs = "report balance-sheet"
+
+# [plugins]
+# Time budget for each WASM plugin or importer call (default 30). A call is
+# stopped within at most this many seconds, usually far sooner.
+# max_time_secs = 120
 "#
         .to_string()
     }
@@ -944,6 +984,7 @@ mod shellexpand {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::num::NonZeroU64;
 
     #[test]
     fn test_parse_minimal_config() {
@@ -1139,6 +1180,42 @@ backup = true
         assert_eq!(merged.commands.query.output.format, Some("csv".to_string()));
         // Base verbose should remain (override was None)
         assert_eq!(merged.commands.query.verbose, Some(false));
+    }
+
+    #[test]
+    fn test_plugins_max_time_secs_parses_and_merges() {
+        let unset: Config = toml::from_str("").unwrap();
+        assert_eq!(unset.plugins.max_time_secs, None);
+
+        let user: Config = toml::from_str("[plugins]\nmax_time_secs = 120\n").unwrap();
+        assert_eq!(user.plugins.max_time_secs, NonZeroU64::new(120));
+
+        // A later layer (project over user) overrides; one that leaves it
+        // unset keeps the earlier value.
+        let project: Config = toml::from_str("[plugins]\nmax_time_secs = 5\n").unwrap();
+        assert_eq!(
+            user.clone().merge(project).plugins.max_time_secs,
+            NonZeroU64::new(5)
+        );
+        assert_eq!(
+            user.merge(unset).plugins.max_time_secs,
+            NonZeroU64::new(120)
+        );
+    }
+
+    #[test]
+    fn test_plugins_max_time_secs_rejects_zero() {
+        // Zero would silently mean one second (the sandbox's floor), where
+        // a user might expect "no limit".
+        let err = toml::from_str::<Config>("[plugins]\nmax_time_secs = 0\n").unwrap_err();
+        assert!(err.to_string().contains("nonzero"), "{err}");
+    }
+
+    #[test]
+    fn test_plugins_section_rejects_unknown_keys() {
+        // A misspelled budget must fail loudly, not fall back to 30 s.
+        let err = toml::from_str::<Config>("[plugins]\nmax_time_sec = 120\n").unwrap_err();
+        assert!(err.to_string().contains("max_time_sec"), "{err}");
     }
 
     #[test]

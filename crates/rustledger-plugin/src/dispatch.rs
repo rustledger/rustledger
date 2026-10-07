@@ -215,13 +215,41 @@ impl ResolvedPlugin<'_> {
     /// Returns a [`PluginRunError`] only for a runtime-level failure (a WASM
     /// load/execution error or a Python execution error). Per-directive plugin
     /// diagnostics travel in `PluginOutput::errors`, not as an `Err`.
-    #[cfg_attr(not(feature = "python-plugins"), allow(unused_variables))]
     pub fn run(
         &self,
         wrappers: Vec<DirectiveWrapper>,
         options: &PluginOptions,
         config: &Option<String>,
         base_dir: &Path,
+    ) -> Result<PluginOutput, PluginRunError> {
+        self.run_with_max_time_secs(wrappers, options, config, base_dir, None)
+    }
+
+    /// [`Self::run`] with a host-chosen time budget for a WASM plugin.
+    ///
+    /// `max_time_secs` replaces a WASM plugin's default budget (30 seconds,
+    /// `sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS`); `None` keeps the default. It is the HOST's setting (the CLI's config
+    /// file or flag, an embedder's choice), never the ledger's: a ledger
+    /// that could raise its own plugins' budget would let its author spend
+    /// unbounded CPU on any service that loads it. Native plugins have no
+    /// budget, and Python plugins keep their own fixed budget.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run`].
+    // `base_dir` is read only by the Python arm, `max_time_secs` only by
+    // the WASM arm.
+    #[cfg_attr(
+        not(all(feature = "python-plugins", feature = "wasm-runtime")),
+        allow(unused_variables)
+    )]
+    pub fn run_with_max_time_secs(
+        &self,
+        wrappers: Vec<DirectiveWrapper>,
+        options: &PluginOptions,
+        config: &Option<String>,
+        base_dir: &Path,
+        max_time_secs: Option<u64>,
     ) -> Result<PluginOutput, PluginRunError> {
         match self {
             ResolvedPlugin::Native(plugin) => Ok(plugin.process(PluginInput {
@@ -231,7 +259,11 @@ impl ResolvedPlugin<'_> {
             })),
             #[cfg(feature = "wasm-runtime")]
             ResolvedPlugin::Wasm(path) => {
-                let mut mgr = crate::PluginManager::new();
+                let mut runtime = crate::RuntimeConfig::default();
+                if let Some(secs) = max_time_secs {
+                    runtime.max_time_secs = secs;
+                }
+                let mut mgr = crate::PluginManager::with_config(runtime);
                 let idx = mgr.load(path).map_err(|e| PluginRunError::WasmFailed {
                     path: path.clone(),
                     message: format!("failed to load: {e}"),
@@ -438,5 +470,79 @@ mod module_name_tests {
         std::fs::write(&file, "").unwrap();
         // A real file named like a module is still a file reference.
         assert!(!is_python_module_name(&file, "pkg.mod"));
+    }
+}
+
+#[cfg(all(test, feature = "wasm-runtime"))]
+mod tests {
+    use super::*;
+    use crate::sandbox::FUEL_PER_SECOND;
+
+    /// A WASM plugin whose `process` burns about three seconds of fuel
+    /// (`3 * FUEL_PER_SECOND`, at ~6 fuel per loop iteration) and then
+    /// returns `(ptr=0, len=0)`, which fails to decode as a `PluginOutput`.
+    ///
+    /// So it ends in a decode error under the default 30-second budget and
+    /// in a fuel trap under a 1-second one, whatever the host's speed: it
+    /// burns about three times the smaller budget and a tenth of the larger.
+    fn burn_three_seconds_plugin(dir: &Path) -> std::path::PathBuf {
+        let iterations = 3 * FUEL_PER_SECOND / 6;
+        let wat = format!(
+            r#"(module
+                (memory (export "memory") 1)
+                (func (export "alloc") (param i32) (result i32) i32.const 0)
+                (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+                (func (export "process") (param i32 i32) (result i64) (local $n i32)
+                    (local.set $n (i32.const {iterations}))
+                    (loop
+                        (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+                        (br_if 0 (local.get $n)))
+                    i64.const 0))"#
+        );
+        let path = dir.join("burn.wasm");
+        std::fs::write(&path, wat::parse_str(wat).expect("WAT parses")).expect("write wasm");
+        path
+    }
+
+    /// What the burn plugin's empty output fails with once `process`
+    /// returns: proof the call ran to completion, not merely that it did
+    /// not trap.
+    const RAN_TO_COMPLETION: &str = "reading marker";
+
+    fn run(path: &Path, max_time_secs: Option<u64>) -> String {
+        let err = ResolvedPlugin::Wasm(path.to_path_buf())
+            .run_with_max_time_secs(
+                Vec::new(),
+                &PluginOptions::default(),
+                &None,
+                path.parent().unwrap(),
+                max_time_secs,
+            )
+            .expect_err("the plugin's empty output never decodes");
+        match err {
+            PluginRunError::WasmFailed { message, .. } => message,
+            other @ PluginRunError::PythonFailed { .. } => {
+                panic!("expected a WASM failure, got {other:?}")
+            }
+        }
+    }
+
+    #[test]
+    fn wasm_plugin_runs_under_the_host_time_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = burn_three_seconds_plugin(dir.path());
+
+        // The default 30 seconds covers the burn; the call gets as far as
+        // decoding the (empty) output, which is where rmp-serde fails.
+        let default = run(&path, None);
+        assert!(default.contains(RAN_TO_COMPLETION), "{default}");
+
+        // A 1-second budget stops it partway.
+        let tight = run(&path, Some(1));
+        assert!(tight.contains("all fuel consumed"), "{tight}");
+
+        // An explicit budget above the default also covers it.
+        let generous = run(&path, Some(60));
+        assert!(generous.contains(RAN_TO_COMPLETION), "{generous}");
     }
 }

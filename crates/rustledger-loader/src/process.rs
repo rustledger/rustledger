@@ -45,6 +45,10 @@ pub struct LoadOptions {
     /// that never read them (`check`, BQL, holdings, the FFI component) don't carry
     /// the vector — only the capgains report opts in.
     pub collect_capital_gains: bool,
+    /// Time budget, in seconds, for each WASM plugin call (default: `None`,
+    /// the sandbox's 30 seconds). The host's setting, never the ledger's:
+    /// see `ResolvedPlugin::run_with_max_time_secs`.
+    pub plugin_max_time_secs: Option<u64>,
 }
 
 impl Default for LoadOptions {
@@ -57,6 +61,7 @@ impl Default for LoadOptions {
             validate: true,
             path_security: false,
             collect_capital_gains: false,
+            plugin_max_time_secs: None,
         }
     }
 }
@@ -76,6 +81,7 @@ impl LoadOptions {
             validate: false,
             path_security: false,
             collect_capital_gains: false,
+            plugin_max_time_secs: None,
         }
     }
 }
@@ -1194,7 +1200,13 @@ pub fn run_plugins(
         // plugin-set source location is preserved (the old WASM/Python runner
         // conversions dropped it; native always kept it).
         let wrappers = build_wrappers(directives, source_map);
-        match resolved.run(wrappers, &plugin_options, &invocation.config, base_dir) {
+        match resolved.run_with_max_time_secs(
+            wrappers,
+            &plugin_options,
+            &invocation.config,
+            base_dir,
+            options.plugin_max_time_secs,
+        ) {
             Ok(output) => {
                 record_plugin_errors(errors, output.errors, source_map);
                 apply_plugin_ops(directives, output.ops, errors, source_map)?;

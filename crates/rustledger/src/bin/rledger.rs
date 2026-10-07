@@ -66,6 +66,17 @@ struct Cli {
     #[arg(long, short = 'P', global = true)]
     profile: Option<String>,
 
+    /// Time budget for each WASM plugin or importer call: it is stopped
+    /// within at most this many seconds, usually far sooner (default: 30, or
+    /// `[plugins] max_time_secs` from the config file)
+    #[arg(
+        long,
+        global = true,
+        value_name = "SECS",
+        value_parser = clap::value_parser!(u64).range(1..)
+    )]
+    plugin_max_time_secs: Option<u64>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -200,18 +211,20 @@ fn require_file(
 ///
 /// If the first non-flag argument matches an alias, expand it.
 /// Returns the expanded arguments.
+/// Global flags written before the command that take their value as a
+/// separate argument (`-P work`). Alias expansion must skip that value, or
+/// it reads it as the command. A new value-taking global flag goes here.
+const GLOBAL_VALUE_FLAGS: &[&str] = &["-P", "--profile", "--plugin-max-time-secs"];
+
 fn expand_aliases(args: Vec<String>, config: &Config) -> Vec<String> {
     // Find the first non-flag argument (the potential command/alias)
     let mut cmd_index = None;
     for (i, arg) in args.iter().enumerate().skip(1) {
-        // Skip global flags
-        if arg == "-P" || arg == "--profile" {
-            continue;
-        }
-        // Skip the value after -P/--profile
+        // Skip the value after a value-taking global flag
         if i > 1
-            && (args.get(i - 1) == Some(&"-P".to_string())
-                || args.get(i - 1) == Some(&"--profile".to_string()))
+            && args
+                .get(i - 1)
+                .is_some_and(|prev| GLOBAL_VALUE_FLAGS.contains(&prev.as_str()))
         {
             continue;
         }
@@ -325,6 +338,13 @@ fn main() -> ExitCode {
         eprintln!("error: {e:#}");
         return ExitCode::from(2);
     }
+
+    // The WASM plugin and importer time budget: the flag, else the config
+    // file. Set once, before any command runs a plugin.
+    rustledger::plugin_budget::set_max_time_secs(
+        cli.plugin_max_time_secs
+            .or(config.plugins.max_time_secs.map(std::num::NonZeroU64::get)),
+    );
 
     // Get effective profile: CLI flag takes precedence, then env var
     let profile = cli
@@ -695,6 +715,43 @@ mod tests {
         let args = vec!["rledger".to_string(), "--help".to_string()];
         let expanded = expand_aliases(args.clone(), &config);
         assert_eq!(expanded, args);
+    }
+
+    #[test]
+    fn test_expand_aliases_skips_plugin_budget_value() {
+        // `--plugin-max-time-secs 120 bal`: `120` is the flag's value, not
+        // the command, so `bal` must still expand.
+        let config = Config {
+            aliases: {
+                let mut aliases = std::collections::HashMap::new();
+                aliases.insert("bal".to_string(), "report balances".to_string());
+                aliases
+            },
+            ..Default::default()
+        };
+        let args: Vec<String> = [
+            "rledger",
+            "--plugin-max-time-secs",
+            "120",
+            "-P",
+            "work",
+            "bal",
+        ]
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+        assert_eq!(
+            expand_aliases(args, &config),
+            vec![
+                "rledger",
+                "--plugin-max-time-secs",
+                "120",
+                "-P",
+                "work",
+                "report",
+                "balances"
+            ]
+        );
     }
 
     #[test]

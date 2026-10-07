@@ -709,6 +709,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
             })
             .collect(),
         validate: true,
+        plugin_max_time_secs: crate::plugin_budget::max_time_secs(),
         ..Default::default()
     };
 
@@ -843,7 +844,11 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
             config: None,
         };
 
-        let mut wasm_mgr = PluginManager::new();
+        let mut runtime = rustledger_plugin::RuntimeConfig::default();
+        if let Some(secs) = crate::plugin_budget::max_time_secs() {
+            runtime.max_time_secs = secs;
+        }
+        let mut wasm_mgr = PluginManager::with_config(runtime);
         for plugin_path in &args.plugins {
             if let Err(e) = wasm_mgr.load(plugin_path) {
                 let msg = format!("failed to load WASM plugin {}: {e}", plugin_path.display());

@@ -1257,9 +1257,15 @@ fn looks_like_ledger_path(candidate: &str) -> bool {
 }
 
 fn load_config() -> Config {
-    Config::load()
+    let config = Config::load()
         .map(|loaded| loaded.config)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    // The WASM plugin and importer time budget, as `rledger` applies it
+    // (first call wins, so every command sees the same value).
+    rustledger::plugin_budget::set_max_time_secs(
+        config.plugins.max_time_secs.map(std::num::NonZeroU64::get),
+    );
+    config
 }
 
 fn default_file(config: &Config, profile: Option<&str>) -> Option<PathBuf> {

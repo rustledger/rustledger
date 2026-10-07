@@ -4,7 +4,7 @@ use crate::config::ImporterConfig;
 use crate::csv_importer::CsvImporter;
 use crate::ofx_importer::OfxImporter;
 #[cfg(feature = "wasm-importer")]
-use crate::wasm::{WasmImporter, WasmImporterError};
+use crate::wasm::{WasmImporter, WasmImporterError, WasmRuntimeConfig};
 use crate::{ImportResult, Importer};
 use anyhow::{Context, Result};
 use std::path::Path;
@@ -60,7 +60,22 @@ impl ImporterRegistry {
         &mut self,
         path: impl Into<PathBuf>,
     ) -> Result<String, WasmImporterError> {
-        let importer = WasmImporter::load(path)?;
+        self.register_wasm_from_path_with_config(path, WasmRuntimeConfig::default())
+    }
+
+    /// [`Self::register_wasm_from_path`] with the sandbox limits the
+    /// importer runs under, such as a host-configured time budget.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::register_wasm_from_path`].
+    #[cfg(feature = "wasm-importer")]
+    pub fn register_wasm_from_path_with_config(
+        &mut self,
+        path: impl Into<PathBuf>,
+        config: WasmRuntimeConfig,
+    ) -> Result<String, WasmImporterError> {
+        let importer = WasmImporter::load_with_config(path, config)?;
         let name = importer.name().to_string();
         self.register(importer);
         Ok(name)
@@ -105,6 +120,21 @@ impl ImporterRegistry {
         &mut self,
         dir: impl AsRef<Path>,
     ) -> Result<WasmDirScanReport, WasmImporterError> {
+        self.register_wasm_dir_with_config(dir, WasmRuntimeConfig::default())
+    }
+
+    /// [`Self::register_wasm_dir`] with the sandbox limits every importer
+    /// in `dir` runs under.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::register_wasm_dir`].
+    #[cfg(feature = "wasm-importer")]
+    pub fn register_wasm_dir_with_config(
+        &mut self,
+        dir: impl AsRef<Path>,
+        config: WasmRuntimeConfig,
+    ) -> Result<WasmDirScanReport, WasmImporterError> {
         let dir = dir.as_ref();
         // Listing/filtering/sorting is shared with
         // `PluginManager::register_wasm_dir` — see
@@ -134,7 +164,7 @@ impl ImporterRegistry {
             ));
         }
         for path in scan.sorted_paths {
-            match self.register_wasm_from_path(&path) {
+            match self.register_wasm_from_path_with_config(&path, config) {
                 Ok(name) => report.loaded.push(name),
                 Err(e) => report.failures.push((path, e)),
             }

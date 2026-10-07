@@ -138,7 +138,8 @@ preserve_order = true
 [[query]]
 name = "balances-by-account"
 query = "BALANCES FROM has_account('Assets')"
-notes = "BALANCES form — different code path from SELECT"
+notes = "BALANCES form — different code path from SELECT; rows ordered by account_sortkey (#2409)"
+preserve_order = true
 
 [[query]]
 name = "journal-assets"

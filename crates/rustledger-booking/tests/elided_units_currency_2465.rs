@@ -466,6 +466,59 @@ fn two_postings_resolving_to_different_currencies_stay_unbalanced() {
     assert_eq!(result.residuals.get("EUR").copied(), Some(dec("-42.50")));
 }
 
+/// Under `infer_tolerance_from_cost`, the posting's units precision widens
+/// its COST currency's tolerance exactly as it would with the commodity
+/// written. Beancount reads `units.number` whatever the currency, so
+/// `-5.5 {10 USD}` contributes `0.05 x 10 = 0.5 USD` and the auto-posting is
+/// quantized to `45`; with the contribution skipped it stayed `44.75`, where
+/// rledger books `45` for `-5.5 HOOL {10 USD}`.
+#[test]
+fn infer_tolerance_from_cost_counts_the_currency_less_posting() {
+    let policy = rustledger_booking::TolerancePolicy {
+        infer_from_cost: true,
+        ..rustledger_booking::TolerancePolicy::default()
+    };
+    let ten_usd = || {
+        CostSpec::empty()
+            .with_number(CostNumber::PerUnit { value: dec("10") })
+            .with_currency("USD")
+    };
+    let book_sale = |units: Posting| {
+        let mut engine = BookingEngine::new().with_tolerance_policy(policy.clone());
+        let mut history = txn(
+            2,
+            vec![
+                amount("Assets:Foo", "10", "HOOL").with_cost(ten_usd()),
+                Posting::auto("Equity:Opening"),
+            ],
+        );
+        engine
+            .book_interpolate_apply(&mut history)
+            .expect("history books");
+        let mut sale = txn(
+            3,
+            vec![
+                units.with_cost(ten_usd()),
+                amount("Assets:Bar", "10.25", "USD"),
+                Posting::auto("Equity:Opening"),
+            ],
+        );
+        engine.book_interpolate_apply(&mut sale).expect("books");
+        sale.postings[2].amount().expect("filled").number
+    };
+    let written = book_sale(amount("Assets:Foo", "-5.5", "HOOL"));
+    let elided = book_sale(number("Assets:Foo", "-5.5"));
+    assert_eq!(
+        written,
+        dec("45"),
+        "beancount quantizes to the cost tolerance"
+    );
+    assert_eq!(
+        elided, written,
+        "the elided commodity must not change the answer"
+    );
+}
+
 /// A refused transaction is left exactly as written.
 #[test]
 fn a_refusal_leaves_the_transaction_untouched() {

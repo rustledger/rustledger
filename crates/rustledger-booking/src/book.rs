@@ -1691,6 +1691,34 @@ impl BookingEngine {
         Ok(())
     }
 
+    /// What both booking entry points need before they book `txn`, computed
+    /// in one place so they cannot drift: its tolerances, and `txn` with any
+    /// currency-less units number given its currency (`None` when there is
+    /// none, which is almost always).
+    ///
+    /// The order is the point. Tolerances come from the transaction AS
+    /// WRITTEN, matching beancount's `booking_full.book`, which infers them
+    /// from `entry.postings` before resolving any `{}` and before such a
+    /// posting gets its currency. Deriving them after booking would feed the
+    /// lot's 26-digit per-unit cost into the tolerance and silently disable
+    /// quantization (see `interpolate_with_tolerance_map`); deriving them
+    /// after resolving let the posting's own precision loosen its currency,
+    /// so an auto-posting beside `42.5` booked `-32.400 USD` where beancount
+    /// books `-32.377 USD` (#2465).
+    fn prepare(
+        &self,
+        txn: &Transaction,
+    ) -> Result<
+        (
+            FxHashMap<rustledger_core::Currency, Decimal>,
+            Option<Transaction>,
+        ),
+        InterpolationError,
+    > {
+        let tolerances = crate::transaction_tolerances(txn, &self.tolerance.options());
+        Ok((tolerances, self.resolve_elided_units_currencies(txn)?))
+    }
+
     /// `txn` with every units number written without a currency
     /// (`Assets:Foo  42.50`) given one, or `None` when it has no such posting.
     ///
@@ -1758,18 +1786,11 @@ impl BookingEngine {
         &mut self,
         txn: &mut Transaction,
     ) -> Result<Vec<CapitalGain>, BookingError> {
-        // Tolerances come from the transaction AS WRITTEN, before a
-        // currency-less units number is given its currency below: beancount's
-        // `booking_full.book` infers them from `entry.postings`, where such a
-        // posting's currency is still MISSING, so its precision does not
-        // loosen the currency it later lands in. Deriving them from the
-        // resolved copy quantized an auto-posting to that looser precision —
-        // `-32.400 USD` where beancount books `-32.377 USD` (#2465 review).
-        let tolerances = crate::transaction_tolerances(txn, &self.tolerance.options());
         // A units number written without its currency is rare, and resolving
         // it rewrites the posting, so that path works on a copy and commits it
         // only once everything has succeeded (#2465).
-        if let Some(mut resolved) = self.resolve_elided_units_currencies(txn)? {
+        let (tolerances, resolved) = self.prepare(txn)?;
+        if let Some(mut resolved) = resolved {
             let gains = self.book_interpolate_apply_with(&mut resolved, &tolerances)?;
             *txn = resolved;
             return Ok(gains);
@@ -1821,17 +1842,7 @@ impl BookingEngine {
         &self,
         txn: &Transaction,
     ) -> Result<(InterpolationResult, Vec<CapitalGain>), BookingError> {
-        // Tolerances come from the PRE-booking transaction, matching
-        // beancount's `booking_full.book`, which infers them from
-        // `entry.postings` before resolving any `{}` — and before a
-        // currency-less units number is given its currency (#2465). Deriving
-        // them after booking would feed the lot's 26-digit per-unit cost into
-        // the tolerance and silently disable quantization — see
-        // `interpolate_with_tolerance_map`.
-        let tolerances = crate::transaction_tolerances(txn, &self.tolerance.options());
-        // See `book_interpolate_apply`: resolve a currency-less units number
-        // against the running balances first (#2465).
-        let resolved = self.resolve_elided_units_currencies(txn)?;
+        let (tolerances, resolved) = self.prepare(txn)?;
         let txn = resolved.as_ref().unwrap_or(txn);
         // Fast path: with no cost specs, `book` is an identity that only clones
         // `txn` verbatim (profiling flagged that clone as ~6 MB / 10k txns — the

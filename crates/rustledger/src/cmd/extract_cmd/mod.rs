@@ -775,8 +775,9 @@ fn overlay_cli_args(entry: &ImporterEntry, args: &Args) -> ImporterEntry {
 /// `--currency` default is documented). An `importers.toml` entry that left it
 /// out used to get `USD` from deep inside the importer, so a euro account was
 /// silently booked in dollars (#2464). The account's `open` directive is the
-/// next best authority: when `--ledger` (or, failing that, `--existing`)
-/// opens the account with exactly one currency, that is the currency. With
+/// next best authority: when `--ledger` (or, if it never opens the account,
+/// `--existing`) opens the account with exactly one currency, that is the
+/// currency. Includes are followed, and a later `close` does not matter. With
 /// none, or several, nothing can say which one the statement is in, and
 /// guessing is the bug, so the import stops and says how to fix it.
 ///
@@ -815,17 +816,25 @@ fn resolve_entry_currency(
                         ..config
                     });
                 }
-                [] => why.push(format!(
-                    "`open {}` in {} declares no currency",
-                    config.account,
-                    path.display()
-                )),
-                many => why.push(format!(
-                    "`open {}` in {} declares {}, more than one",
-                    config.account,
-                    path.display(),
-                    many.join(", ")
-                )),
+                // The first ledger that opens the account is the authority:
+                // an ambiguous `open` there is not overruled by another file.
+                [] => {
+                    why.push(format!(
+                        "`open {}` in {} declares no currency",
+                        config.account,
+                        path.display()
+                    ));
+                    break;
+                }
+                many => {
+                    why.push(format!(
+                        "`open {}` in {} declares {}, more than one",
+                        config.account,
+                        path.display(),
+                        many.join(", ")
+                    ));
+                    break;
+                }
             },
             None => why.push(format!(
                 "{} has no `open {}` directive",
@@ -3897,6 +3906,16 @@ default_expense = "Expenses:Uncategorized"
         ledger: Option<&str>,
         ledger_flag: &str,
     ) -> std::result::Result<String, String> {
+        match ledger {
+            Some(text) => run_entry_without_currency_with(&[(ledger_flag, text)]),
+            None => run_entry_without_currency_with(&[]),
+        }
+    }
+
+    /// As [`run_entry_without_currency`], with any number of `(flag, ledger)`.
+    fn run_entry_without_currency_with(
+        ledgers: &[(&str, &str)],
+    ) -> std::result::Result<String, String> {
         let dir = tempfile::tempdir().unwrap();
         let config_path = dir.path().join("importers.toml");
         std::fs::write(
@@ -3922,10 +3941,10 @@ default_expense = "Expenses:Uncategorized"
             "-o".to_string(),
             output_path.to_str().unwrap().to_string(),
         ];
-        if let Some(text) = ledger {
-            let ledger_path = dir.path().join("ledger.beancount");
+        for (i, (flag, text)) in ledgers.iter().enumerate() {
+            let ledger_path = dir.path().join(format!("ledger{i}.beancount"));
             std::fs::write(&ledger_path, text).unwrap();
-            argv.push(ledger_flag.to_string());
+            argv.push((*flag).to_string());
             argv.push(ledger_path.to_str().unwrap().to_string());
         }
         let args = Args::parse_from(argv);
@@ -3944,6 +3963,54 @@ default_expense = "Expenses:Uncategorized"
             assert!(out.contains("-5.00 EUR"), "{flag}: {out}");
             assert!(!out.contains("USD"), "{flag}: {out}");
         }
+    }
+
+    /// #2464: the `open` may live in an included file, and an account closed
+    /// later still has its currency.
+    #[test]
+    fn entry_without_currency_follows_includes_and_ignores_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let inc = dir.path().join("accounts.beancount");
+        std::fs::write(
+            &inc,
+            "2024-01-01 open Assets:Bank:Euro EUR\n2024-06-01 close Assets:Bank:Euro\n",
+        )
+        .unwrap();
+        let ledger = format!("include \"{}\"\n", inc.display());
+        let out = run_entry_without_currency(Some(&ledger), "--existing").unwrap();
+        assert!(out.contains("-5.00 EUR"), "{out}");
+    }
+
+    /// #2464: `--ledger` is the authority when it opens the account; an
+    /// ambiguous `open` there is not overruled by `--existing`, which is only
+    /// consulted when `--ledger` never opens the account.
+    #[test]
+    fn ledger_open_outranks_existing_open() {
+        let err = run_entry_without_currency_with(&[
+            ("--ledger", "2024-01-01 open Assets:Bank:Euro EUR,CHF\n"),
+            ("--existing", "2024-01-01 open Assets:Bank:Euro EUR\n"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("more than one"), "{err}");
+        let out = run_entry_without_currency_with(&[
+            ("--ledger", "2024-01-01 open Assets:Other EUR\n"),
+            ("--existing", "2024-01-01 open Assets:Bank:Euro CHF\n"),
+        ])
+        .unwrap();
+        assert!(out.contains("-5.00 CHF"), "{out}");
+    }
+
+    /// #2464: an `open` with no currency constraint cannot answer either.
+    #[test]
+    fn entry_without_currency_and_an_unconstrained_open_is_an_error() {
+        let err =
+            run_entry_without_currency(Some("2024-01-01 open Assets:Bank:Euro\n"), "--existing")
+                .unwrap_err();
+        assert!(err.contains("declares no currency"), "{err}");
+        assert!(
+            err.contains("in the 'bank' entry of importers.toml, or pass --currency"),
+            "{err}"
+        );
     }
 
     /// #2464: with nothing to say which currency the statement is in, the

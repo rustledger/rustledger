@@ -1694,6 +1694,38 @@ impl BookingEngine {
         Ok(())
     }
 
+    /// `txn` with every units number written without a currency
+    /// (`Assets:Foo  42.50`) given one, or `None` when it has no such posting.
+    ///
+    /// The rule is beancount's — see
+    /// [`crate::interpolate::resolve_elided_units_currencies`] — and this is
+    /// the only caller that can apply all of it, because its second step reads
+    /// the account's running balance (#2465). It runs before booking, because
+    /// booking a reduction needs the commodity to find the lot.
+    fn resolve_elided_units_currencies(
+        &self,
+        txn: &Transaction,
+    ) -> Result<Option<Transaction>, InterpolationError> {
+        if !txn
+            .postings
+            .iter()
+            .any(|p| matches!(p.units, Some(IncompleteAmount::NumberOnly(_))))
+        {
+            return Ok(None);
+        }
+        let resolved = crate::interpolate::resolve_elided_units_currencies(txn, |account| {
+            self.inventories.get(account).map(AsRef::as_ref)
+        })?;
+        let mut txn = txn.clone();
+        for (idx, currency) in resolved {
+            let posting = &mut txn.postings[idx];
+            if let Some(IncompleteAmount::NumberOnly(number)) = posting.units {
+                posting.units = Some(IncompleteAmount::Complete(Amount::new(number, currency)));
+            }
+        }
+        Ok(Some(txn))
+    }
+
     /// Book and interpolate a transaction.
     ///
     /// This fills in empty cost specs, then interpolates any missing amounts. Thin
@@ -1729,6 +1761,14 @@ impl BookingEngine {
         &mut self,
         txn: &mut Transaction,
     ) -> Result<Vec<CapitalGain>, BookingError> {
+        // A units number written without its currency is rare, and resolving
+        // it rewrites the posting, so that path works on a copy and commits it
+        // only once everything has succeeded (#2465).
+        if let Some(mut resolved) = self.resolve_elided_units_currencies(txn)? {
+            let gains = self.book_interpolate_apply(&mut resolved)?;
+            *txn = resolved;
+            return Ok(gains);
+        }
         // Fast path, as in `book_and_interpolate_with_gains`: with no cost
         // specs `book` is an identity, so interpolate the transaction itself.
         if !txn.postings.iter().any(|p| p.cost.is_some()) {
@@ -1768,6 +1808,11 @@ impl BookingEngine {
         &self,
         txn: &Transaction,
     ) -> Result<(InterpolationResult, Vec<CapitalGain>), BookingError> {
+        // See `book_interpolate_apply`: resolve a currency-less units number
+        // against the running balances first (#2465).
+        if let Some(resolved) = self.resolve_elided_units_currencies(txn)? {
+            return self.book_and_interpolate_with_gains(&resolved);
+        }
         // Fast path: with no cost specs, `book` is an identity that only clones
         // `txn` verbatim (profiling flagged that clone as ~6 MB / 10k txns — the
         // common case), and it realizes no gains. In the fast path `book(txn)`'s

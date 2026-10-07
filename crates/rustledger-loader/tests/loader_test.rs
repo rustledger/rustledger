@@ -2664,3 +2664,56 @@ fn test_booking_error_points_at_the_failing_posting() {
         "and carry a span, so a rich renderer can draw a snippet around it",
     );
 }
+
+/// `native_plugins_only` skips every plugin that is not native, before
+/// resolution, so the outcome is the same whichever plugin runtimes Cargo
+/// feature unification compiled in (#2486). The LSP relies on it: built with
+/// the CLI it gets `wasm-plugins` and `python-plugins` too, and ran their
+/// plugins on every reload while telling the user (E8006) it skipped them.
+///
+/// The WASM module is garbage on purpose: anything that resolves it reports
+/// an error, a compile failure where the runtime is compiled in and "requires
+/// the wasm-plugins feature" where it is not, so the absence of an error is
+/// proof it was never touched. A native plugin still runs: `auto_accounts`
+/// opens `Expenses:Food`, so there is no E1001.
+#[test]
+fn native_plugins_only_skips_wasm_and_python_plugins_2486() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("bad.wasm"), b"not a wasm module").unwrap();
+    std::fs::write(dir.path().join("bad_plugin.py"), "raise SystemExit(3)\n").unwrap();
+    let path = dir.path().join("main.beancount");
+    std::fs::write(
+        &path,
+        "plugin \"auto_accounts\"\n\
+         plugin \"bad.wasm\"\n\
+         plugin \"bad_plugin.py\"\n\
+         plugin \"python:noduplicates\"\n\
+         2024-01-01 open Assets:Bank USD\n\
+         2024-01-15 * \"Grocery\"\n  Expenses:Food  50.00 USD\n  Assets:Bank\n",
+    )
+    .unwrap();
+
+    let native_only = LoadOptions {
+        native_plugins_only: true,
+        ..LoadOptions::default()
+    };
+    let ledger = load(&path, &native_only).expect("load");
+    assert!(
+        ledger.errors.is_empty(),
+        "native-only must skip the WASM and Python plugins without resolving \
+         them, and still run auto_accounts: {:?}",
+        ledger.errors
+    );
+
+    // The control: by default the same ledger resolves `bad.wasm` and
+    // reports it, so the assertion above is not vacuous.
+    let ledger = load(&path, &LoadOptions::default()).expect("load");
+    assert!(
+        ledger
+            .errors
+            .iter()
+            .any(|e| e.phase == "plugin" && e.message.contains("bad.wasm")),
+        "by default the WASM plugin is resolved and reported: {:?}",
+        ledger.errors
+    );
+}

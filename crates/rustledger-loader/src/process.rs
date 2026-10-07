@@ -49,6 +49,18 @@ pub struct LoadOptions {
     /// the sandbox's 30 seconds). The host's setting, never the ledger's:
     /// see `ResolvedPlugin::run_with_max_time_secs`.
     pub plugin_max_time_secs: Option<u64>,
+    /// Run only native plugins, skipping WASM and Python ones and any other
+    /// name the native registry does not hold (default: false).
+    ///
+    /// Which runtimes are compiled in is decided by Cargo feature
+    /// unification, so a host that must never run external plugins cannot
+    /// rely on being built without them: the LSP is built with the CLI by a
+    /// plain workspace `cargo build`, which turns `wasm-plugins` and
+    /// `python-plugins` on for it too (#2486). With this set, the outcome is
+    /// the same in every build: a skipped plugin is neither resolved nor run,
+    /// and reports no error, so the host is responsible for telling the user
+    /// (the LSP's E8006).
+    pub native_plugins_only: bool,
 }
 
 impl Default for LoadOptions {
@@ -62,6 +74,7 @@ impl Default for LoadOptions {
             path_security: false,
             collect_capital_gains: false,
             plugin_max_time_secs: None,
+            native_plugins_only: false,
         }
     }
 }
@@ -82,6 +95,7 @@ impl LoadOptions {
             path_security: false,
             collect_capital_gains: false,
             plugin_max_time_secs: None,
+            native_plugins_only: false,
         }
     }
 }
@@ -1175,6 +1189,13 @@ pub fn run_plugins(
         PluginPass::PostBooking => rustledger_plugin::PluginPass::Regular,
     };
     for invocation in &entries {
+        // A native-only host skips everything else BEFORE resolution, so the
+        // result cannot depend on which runtimes were compiled in: resolving
+        // would run a WASM or Python plugin in one build and report a
+        // "requires the ... feature" error in another (#2486).
+        if options.native_plugins_only && !is_native(invocation, pass_kind, registry) {
+            continue;
+        }
         // Resolution (classify + path-security + feature-gate + #1432 reject)
         // lives in `rustledger_plugin::resolve_plugin`; execution in
         // `ResolvedPlugin::run`. The loader keeps wrapper building, op
@@ -1220,6 +1241,25 @@ pub fn run_plugins(
     // original spans on Keep/Modify ops. Plugin-synthesized directives
     // (Insert ops) get `SYNTHESIZED_FILE_ID` and a zero span.
     Ok(())
+}
+
+/// Whether `invocation` resolves to a native plugin in `pass`: the same
+/// registry lookup `rustledger_plugin::resolve_plugin` tries first, so a
+/// plugin this accepts is exactly one that would resolve to
+/// `ResolvedPlugin::Native`.
+#[cfg(feature = "plugins")]
+fn is_native(
+    invocation: &PluginInvocation,
+    pass: rustledger_plugin::PluginPass,
+    registry: &rustledger_plugin::NativePluginRegistry,
+) -> bool {
+    !invocation.force_python
+        && match pass {
+            rustledger_plugin::PluginPass::Synth => registry.find_synth(&invocation.name).is_some(),
+            rustledger_plugin::PluginPass::Regular => {
+                registry.find_regular(&invocation.name).is_some()
+            }
+        }
 }
 
 /// Build a fresh `Vec<DirectiveWrapper>` from the current directives,

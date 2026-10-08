@@ -277,6 +277,8 @@ fn filter_existing_duplicates(
     account: &str,
     report: &mut impl Write,
 ) -> Result<Vec<Directive>> {
+    use rustledger_ops::dedup::DuplicateReason;
+
     let new: Vec<&rustledger_core::Transaction> = directives
         .iter()
         .filter_map(|d| match d {
@@ -295,22 +297,34 @@ fn filter_existing_duplicates(
         return Ok(directives);
     }
 
-    let by_id = matches
-        .iter()
-        .filter(|m| matches!(m.reason, rustledger_ops::dedup::DuplicateReason::IdLink(_)))
-        .count();
+    let (mut by_id, mut amount_only) = (0, 0);
+    for m in &matches {
+        match m.reason {
+            DuplicateReason::IdLink(_) => by_id += 1,
+            DuplicateReason::AmountOnly => amount_only += 1,
+            _ => {}
+        }
+    }
     writeln!(
         report,
         "Filtered {} duplicate transaction(s) already in the existing ledger \
-         ({by_id} by id link, {} by date, amount and text):",
+         ({by_id} by id link, {} by date, amount and text{}):",
         matches.len(),
-        matches.len() - by_id,
+        matches.len() - by_id - amount_only,
+        if amount_only > 0 {
+            format!(", {amount_only} by date and amount alone")
+        } else {
+            String::new()
+        },
     )?;
     let describe = |t: &rustledger_core::Transaction| {
         let amount = t
             .postings
             .iter()
             .find(|p| p.account.as_str() == account)
+            // A row matched unscoped (it never posts to `account`) shows its
+            // first posting, which is what it was compared on.
+            .or_else(|| t.postings.first())
             .and_then(|p| p.units.as_ref())
             .and_then(|u| Some(format!(" {} {}", u.number()?, u.currency()?)))
             .unwrap_or_default();
@@ -322,9 +336,17 @@ fn filter_existing_duplicates(
     let mut dropped = vec![false; new.len()];
     for m in &matches {
         dropped[m.new_index] = true;
+        // A match with no text on either side rests on the money alone; two
+        // different description-less rows on one day for one amount look the
+        // same, so say so where the user will see it.
+        let check = if m.reason == DuplicateReason::AmountOnly {
+            " -- check: nothing but the date and amount ties these together"
+        } else {
+            ""
+        };
         writeln!(
             report,
-            "  skipped {} ({}; existing: {})",
+            "  skipped {} ({}; existing: {}){check}",
             describe(new[m.new_index]),
             m.reason,
             describe(&existing[m.existing_index]),
@@ -3957,6 +3979,40 @@ default_expense = "Expenses:Uncategorized"
         let out = extract_against_existing(csv, existing, &flags);
         assert_eq!(out.len(), 1, "{out:?}");
         assert!(out[0].ends_with("^csv-tx_2"), "{out:?}");
+    }
+
+    /// Two cash withdrawals with no description, same day and amount, one
+    /// already booked: one is skipped, and the report says that only the
+    /// date and amount tie it to the ledger entry, so a user can check it.
+    #[test]
+    fn existing_dedup_flags_drops_resting_on_the_amount_alone() {
+        use rustledger_core::{Amount, Posting, Transaction};
+        let t = || {
+            Transaction::new("2024-01-15".parse().unwrap(), "")
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(rust_decimal::Decimal::new(-6000, 2), "EUR"),
+                ))
+                .with_synthesized_posting(Posting::auto("Expenses:Cash"))
+        };
+        let new = vec![Directive::Transaction(t()), Directive::Transaction(t())];
+        let mut report = Vec::new();
+        let kept = filter_existing_duplicates(new, &[t()], "Assets:Bank", &mut report).unwrap();
+        assert_eq!(kept.len(), 1);
+        let report = String::from_utf8(report).unwrap();
+        assert!(
+            report
+                .contains("(0 by id link, 0 by date, amount and text, 1 by date and amount alone)"),
+            "{report}"
+        );
+        assert!(
+            report.contains("neither has a payee or narration to compare"),
+            "{report}"
+        );
+        assert!(
+            report.contains("-- check: nothing but the date and amount ties these together"),
+            "{report}"
+        );
     }
 
     #[test]

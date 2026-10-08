@@ -279,6 +279,16 @@ Filtered 1 duplicate transaction(s) already in the existing ledger (0 by id link
   skipped 2024-01-15 "Bakery" "Croissant" -2.50 EUR (same date, amount and text; existing: 2024-01-15 "Bakery" "Croissant" -2.50 EUR)
 ```
 
+Rows with no payee or narration on either side match on date and amount alone
+(so a statement without a description column re-imports to nothing), and each
+such skip is flagged, since two different description-less rows on one day for
+one amount look identical:
+
+```text
+Filtered 1 duplicate transaction(s) already in the existing ledger (0 by id link, 0 by date, amount and text, 1 by date and amount alone):
+  skipped 2024-01-15 "" -60.00 EUR (same date and amount, and neither has a payee or narration to compare; existing: 2024-01-15 "" -60.00 EUR) -- check: nothing but the date and amount ties these together
+```
+
 ## Importer Configuration
 
 ### CSV Options

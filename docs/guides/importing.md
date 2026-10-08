@@ -303,7 +303,12 @@ other account's statement counts as a duplicate, since it already records this
 account's leg. A row from a custom (WASM) importer that does not post to the
 importer's account at all is compared by its first posting instead. Two rows
 with no payee or narration match when date and amount do, so a statement with
-no description column still re-imports to nothing. Which rows are kept does
+no description column still re-imports to nothing; such a skip is flagged on
+stderr (`-- check: nothing but the date and amount ties these together`),
+because two different description-less rows on one day for one amount cannot
+be told apart. Text is compared case-insensitively but is not Unicode
+normalized: `é` written as one character and as `e` plus a combining accent
+differ. Which rows are kept does
 not depend on the order the statement or the ledger lists them in.
 
 Each existing transaction absorbs at most one new one, so two identical

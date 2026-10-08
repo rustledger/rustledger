@@ -125,7 +125,10 @@ transaction_id_column = "Transaction ID"
 ```
 
 Characters a link may not contain become `-`, and a blank cell adds no link.
-A column the file does not have is an error naming the file's columns. Ids
+A column the file does not have is an error naming the file's columns (with a
+hint when the name differs from a header only in case or spaces), as is an
+index past the last column or a column the importer already reads as
+`amount_column`, `date_column` and so on. Ids
 that repeat within one statement get a warning: the column must be unique per
 transaction, since `--existing` treats an equal id with an equal amount as the
 same transaction on any date.

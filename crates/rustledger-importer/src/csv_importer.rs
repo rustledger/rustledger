@@ -115,20 +115,8 @@ impl CsvImporter {
             HashMap::default()
         };
 
-        // A configured id column the header does not have would fail every
-        // row with the same warning and then report "no transactions"; say
-        // what is wrong once, up front.
-        if let Some(ColumnSpec::Name(name)) = &csv_config.transaction_id_column
-            && csv_config.has_header
-            && !header_map.contains_key(name)
-        {
-            let mut columns: Vec<(&String, &usize)> = header_map.iter().collect();
-            columns.sort_by_key(|(_, i)| **i);
-            let columns: Vec<&str> = columns.iter().map(|(n, _)| n.as_str()).collect();
-            anyhow::bail!(
-                "transaction_id_column {name:?} is not a column of this file (its columns: {})",
-                columns.join(", ")
-            );
+        if let Some(id_col) = &csv_config.transaction_id_column {
+            Self::check_transaction_id_column(id_col, csv_config, &header_map)?;
         }
 
         let mut directives = Vec::new();
@@ -437,6 +425,84 @@ impl CsvImporter {
         Ok(Some(txn))
     }
 
+    /// Misconfigurations of `transaction_id_column` caught once, up front,
+    /// with a message naming the key, rather than as one context-free warning
+    /// per row followed by "no transactions were extracted" (or, worse, as
+    /// links that make `extract --existing` match the wrong rows):
+    ///
+    /// - a name the header lacks, with a hint when it differs from a header
+    ///   only in case or surrounding whitespace;
+    /// - an index past the header's last column;
+    /// - the same column as one the importer already reads for something else
+    ///   (`amount_column`, `date_column`, ...): those values are not unique per
+    ///   transaction, and id dedup trusts an equal id with equal money as the
+    ///   same transaction on any date.
+    fn check_transaction_id_column(
+        id_col: &ColumnSpec,
+        csv_config: &CsvConfig,
+        header_map: &HashMap<String, usize>,
+    ) -> Result<()> {
+        if !csv_config.has_header {
+            return Ok(());
+        }
+        let mut columns: Vec<(&String, &usize)> = header_map.iter().collect();
+        columns.sort_by_key(|(_, i)| **i);
+        let names: Vec<&str> = columns.iter().map(|(n, _)| n.as_str()).collect();
+        let index = match id_col {
+            ColumnSpec::Name(name) => {
+                let Some(i) = header_map.get(name) else {
+                    let close = names
+                        .iter()
+                        .find(|h| h.trim().eq_ignore_ascii_case(name.trim()));
+                    let hint = close.map_or(String::new(), |h| format!("; did you mean {h:?}?"));
+                    anyhow::bail!(
+                        "transaction_id_column {name:?} is not a column of this file \
+                         (its columns: {}){hint}",
+                        names.join(", ")
+                    );
+                };
+                *i
+            }
+            ColumnSpec::Index(i) => {
+                if *i >= names.len() {
+                    anyhow::bail!(
+                        "transaction_id_column {i} is past the last column of this file \
+                         (it has {} columns, numbered from 0)",
+                        names.len()
+                    );
+                }
+                *i
+            }
+        };
+        let resolve = |spec: &ColumnSpec| match spec {
+            ColumnSpec::Name(n) => header_map.get(n).copied(),
+            ColumnSpec::Index(i) => Some(*i),
+        };
+        let others = [
+            ("date_column", Some(&csv_config.date_column)),
+            ("amount_column", csv_config.amount_column.as_ref()),
+            ("debit_column", csv_config.debit_column.as_ref()),
+            ("credit_column", csv_config.credit_column.as_ref()),
+            ("narration_column", csv_config.narration_column.as_ref()),
+            ("payee_column", csv_config.payee_column.as_ref()),
+            ("currency_column", csv_config.currency_column.as_ref()),
+            (
+                "secondary_date_column",
+                csv_config.secondary_date.as_ref().map(|s| &s.column),
+            ),
+        ];
+        for (key, spec) in others {
+            if spec.and_then(resolve) == Some(index) {
+                anyhow::bail!(
+                    "transaction_id_column names the same column as `{key}` ({:?}); \
+                     it must be a column whose value is unique per transaction",
+                    names[index]
+                );
+            }
+        }
+        Ok(())
+    }
+
     /// Build the categorization [`rustledger_ops::categorize::RulesEngine`] from
     /// a CSV config — the single source consulted by BOTH the plain
     /// (`extract`/`extract_string`) and enriched (`extract_string_enriched`)
@@ -710,6 +776,48 @@ mod tests {
         assert!(
             err.contains("transaction_id_column \"Id\" is not a column of this file (its columns: Date, Description, Amount)"),
             "{err}"
+        );
+    }
+
+    /// Misconfigured id columns fail once with a message naming the key: a
+    /// near-miss name gets a hint, an index past the end is caught, and a
+    /// column already read for something else is refused.
+    #[test]
+    fn test_csv_import_misconfigured_transaction_id_column() {
+        let csv = "Id,Date,Description,Amount\nt1,2024-01-15,Coffee,-4.50\n";
+        let err = |col: ColumnSpec| {
+            let mut config = ImporterConfig::csv()
+                .account("Assets:Bank")
+                .currency("EUR")
+                .build()
+                .unwrap();
+            let ImporterType::Csv(c) = &mut config.importer_type;
+            c.transaction_id_column = Some(col);
+            CsvImporter
+                .extract_string(csv, &config)
+                .unwrap_err()
+                .to_string()
+        };
+        let e = err(ColumnSpec::Name(" id".into()));
+        assert!(e.ends_with("; did you mean \"Id\"?"), "{e}");
+        let e = err(ColumnSpec::Index(9));
+        assert!(
+            e.contains(
+                "transaction_id_column 9 is past the last column of this file (it has 4 columns"
+            ),
+            "{e}"
+        );
+        let e = err(ColumnSpec::Name("Amount".into()));
+        assert!(
+            e.contains(
+                "transaction_id_column names the same column as `amount_column` (\"Amount\")"
+            ),
+            "{e}"
+        );
+        let e = err(ColumnSpec::Index(1));
+        assert!(
+            e.contains("the same column as `date_column` (\"Date\")"),
+            "{e}"
         );
     }
 

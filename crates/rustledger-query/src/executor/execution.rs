@@ -1440,9 +1440,13 @@ impl Executor<'_> {
             .map(|(i, c)| (c.to_lowercase(), i))
             .collect();
 
-        // Sort accounts for consistent output
+        // Order rows by `account_sortkey`: account type first (Assets,
+        // Liabilities, Equity, Income, Expenses, honoring `name_*` renames),
+        // then name. beanquery's BALANCES is sugar for `... GROUP BY account
+        // ORDER BY account_sortkey(account)`; plain name order put Expenses
+        // before Liabilities (#2409).
         let mut accounts: Vec<_> = balances.keys().collect();
-        accounts.sort();
+        accounts.sort_by_cached_key(|account| (self.account_type_index(account), *account));
 
         for account in accounts {
             // Safety: account comes from balances.keys(), so it's guaranteed to exist

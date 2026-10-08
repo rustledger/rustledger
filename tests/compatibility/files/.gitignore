@@ -37,3 +37,11 @@
 !interpolation/**/
 !interpolation/**/*.beancount
 !interpolation/*.beancount
+
+# In-tree BQL differential fixtures (#2409): ledgers built so an order-
+# sensitive query can tell two orders apart, which the downloaded corpus
+# rarely does. Same recursion note as above.
+!bql/
+!bql/**/
+!bql/**/*.beancount
+!bql/*.beancount

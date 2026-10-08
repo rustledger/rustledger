@@ -214,6 +214,39 @@ refuses every `{*}` (`Cost merging is not supported yet`).
 
 **Fix**: Specify the exact lot using cost basis `{cost}` or date `{date}`.
 
+### BOOK: Cannot Infer Currency
+
+**Cause**: A posting writes a number but no currency (`Assets:Cash  42.50`),
+and nothing determines which currency it is in. Reported as
+`interpolation failed: cannot infer currency for posting to account Expenses:Food`
+(for the example below). rledger reads the currency the
+same way Python beancount does, in this order:
+
+1. If the posting has no cost and no price, is the only posting in the
+   transaction whose currency is still open, and every other posting is in one
+   currency, it takes that currency.
+2. Otherwise it takes the currency the account already holds, if the account
+   held exactly one currency before this transaction.
+
+Neither an `open` directive's currency list nor a `pad` counts: pads are
+expanded after booking, so an account funded only by a pad holds nothing yet.
+The currency the transaction is out of balance in is not used either.
+
+**Example**:
+
+```beancount
+2024-01-01 open Assets:Cash
+2024-01-01 open Expenses:Food
+
+2024-01-15 * "Lunch"
+  Expenses:Food   12.50   ; Expenses:Food holds nothing yet
+  Assets:Cash
+```
+
+**Fix**: Write the currency (`12.50 USD`). A posting with a cost or price
+(`-5 {300 USD}`) can only take its commodity from the account, because the cost
+or price names its own currency, not the commodity being counted.
+
 ### E4005: Negative Cost
 
 **Cause**: A cost specification resolves to a negative amount.

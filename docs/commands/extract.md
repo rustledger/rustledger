@@ -299,6 +299,16 @@ Filtered 1 duplicate transaction(s) already in the existing ledger (0 by id link
 name = "my_bank"
 account = "Assets:Bank:MyBank"
 
+# Currency of the amounts. There is no default: when this is left out,
+# extract uses the currency of the account's `open` directive in the
+# --ledger ledger (or in --existing, if --ledger does not open the
+# account), when that `open` names exactly one, and otherwise stops with
+# an error rather than guess. Precedence, highest first: a --ledger
+# profile, --currency, this key, the account's `open`. A value that is not
+# a commodity (`usd`, `€`, "") is an error naming where it came from, and
+# a value the account's `open` does not allow is a warning.
+currency = "EUR"
+
 # Column mapping (0-indexed)
 date_column = 0
 payee_column = 1

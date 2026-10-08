@@ -49,7 +49,7 @@ Each row in a default `SELECT` is one posting from one transaction. The columns 
 | `description` | String | `"payee \| narration"` if payee set, else `narration` |
 | `tags` | StringSet | All `#tag` values on the transaction |
 | `links` | StringSet | All `^link` values on the transaction |
-| `accounts` | StringSet | All accounts in the transaction (every posting) |
+| `accounts` | StringSet | The accounts of every posting in the transaction, sorted, each once |
 | `year`, `month`, `day` | Integer | Date parts (shortcuts for `year(date)` etc.) |
 | `id` | Integer? | Stable directive index (matches Python beancount's `id`) |
 | `type` | String | Always `"Transaction"` for default `SELECT` |
@@ -60,7 +60,7 @@ Each row in a default `SELECT` is one posting from one transaction. The columns 
 | Column | Type | Description |
 |--------|------|-------------|
 | `account` | String | This posting's account |
-| `other_accounts` | StringSet | Every account in the transaction except `account` |
+| `other_accounts` | StringSet | The accounts of every *other* posting in the transaction, sorted, each once |
 | `position` | Position? | Units + cost (when present) |
 | `units` | Amount? | Just the units (number + currency) |
 | `number` | Number? | The numeric part of `units` |
@@ -168,7 +168,7 @@ WHERE account ~ '^Income:Investment:Dividend'
   AND 'Assets:Investments:Cash-USD' IN other_accounts
 ```
 
-`other_accounts` is the set of every account in the same transaction *except* the current posting's own account, which is what makes the "find rows where this posting was paired with X" query work.
+`other_accounts` is the set of the accounts of every *other* posting in the same transaction: only the current posting is left out, so its own account still appears when another posting in the transaction also uses it, as in bean-query. That is what makes the "find rows where this posting was paired with X" query work.
 
 ## GROUP BY Clause
 

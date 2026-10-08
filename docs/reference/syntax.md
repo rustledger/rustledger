@@ -94,6 +94,13 @@ DATE [FLAG] ["PAYEE"] "NARRATION" [TAGS] [LINKS]
   ACCOUNT  [AMOUNT] [COST] [PRICE]
 ```
 
+One posting per currency may leave its amount out entirely; it is filled in
+to balance the transaction. A posting may also write a number without a
+currency (`Expenses:Food  12.50`). The currency is then taken from the other
+postings when they are all in one currency, or else from the one currency the
+account already holds, as in Python beancount; see
+[Cannot Infer Currency](errors.md#book-cannot-infer-currency).
+
 #### Flags
 
 | Flag | Meaning |

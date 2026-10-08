@@ -8,6 +8,7 @@ use crate::ast::{Expr, Literal, Target};
 use crate::error::QueryError;
 
 use super::Executor;
+use super::system_tables::TxnAccounts;
 use super::types::{PostingContext, Row, Value, WindowContext};
 
 impl Executor<'_> {
@@ -465,26 +466,23 @@ impl Executor<'_> {
                     .and_then(IncompleteAmount::as_amount)
                     .map_or(Value::Null, |a| Value::Amount(a.clone())))
             }
-            // All accounts in the transaction
+            // All accounts in the transaction, as a sorted set
+            // (bean-query: `{p.account for p in entry.postings}`).
             "accounts" => Ok(Value::StringSet(
-                ctx.transaction
-                    .postings
-                    .iter()
-                    .map(|p| p.account.to_string())
-                    .collect(),
+                TxnAccounts::of(&ctx.transaction).accounts(),
             )),
-            // All accounts except the current posting's account
-            "other_accounts" => {
-                let current = &posting.account;
-                Ok(Value::StringSet(
-                    ctx.transaction
-                        .postings
-                        .iter()
-                        .filter(|p| &p.account != current)
-                        .map(|p| p.account.to_string())
-                        .collect(),
-                ))
-            }
+            // The accounts of every OTHER posting, as a sorted set. Only this
+            // posting is excluded: another posting to the same account still
+            // counts (bean-query: `sorted({p.account for p in entry.postings
+            // if p is not context.posting})`, #2483).
+            //
+            // Built per row, so one transaction of n postings costs O(n^2)
+            // on this table, where `#postings` builds it once per
+            // transaction. Sharing one set across a transaction's rows here
+            // means carrying it on `PostingContext`, which is public API.
+            "other_accounts" => Ok(Value::StringSet(
+                TxnAccounts::of(&ctx.transaction).others(posting.account.as_ref()),
+            )),
             // Posting metadata as dictionary
             "meta" => Ok(Value::Metadata(Box::new(Self::augmented_meta(
                 &posting.meta,

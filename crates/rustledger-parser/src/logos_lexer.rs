@@ -596,6 +596,20 @@ pub fn is_valid_account_name(name: &str) -> bool {
     lexer.span() == (0..name.len()) && lexer.next().is_none()
 }
 
+/// Whether `name` is a valid commodity (currency) name.
+///
+/// Implemented by running the lexer, so it is the same rule the parser
+/// applies: a configured currency the parser would reject is caught where it
+/// is configured rather than when the emitted ledger fails to re-parse.
+#[must_use]
+pub fn is_valid_currency(name: &str) -> bool {
+    let mut lexer = Token::lexer(name);
+    let Some(Ok(Token::Currency(_))) = lexer.next() else {
+        return false;
+    };
+    lexer.span() == (0..name.len()) && lexer.next().is_none()
+}
+
 /// Tokenize source code into a vector of (Token, Span) pairs for the
 /// AST-style parser.
 ///
@@ -1356,6 +1370,17 @@ mod tests {
         assert!(token_types.contains(&Token::AtAt));
         assert!(token_types.contains(&Token::Comma));
         assert!(token_types.contains(&Token::Tilde));
+    }
+
+    #[test]
+    fn is_valid_currency_matches_lexer_rule() {
+        use super::is_valid_currency as ok;
+        for good in ["USD", "EUR", "T", "VTI", "BRK.B", "ETH-2"] {
+            assert!(ok(good), "{good}");
+        }
+        for bad in ["", "usd", "€", " USD", "USD ", "US D", "1USD"] {
+            assert!(!ok(bad), "{bad:?}");
+        }
     }
 
     #[test]

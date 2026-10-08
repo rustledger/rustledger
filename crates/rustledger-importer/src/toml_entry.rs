@@ -55,7 +55,10 @@ pub struct ImporterEntry {
     pub filename_pattern: Option<String>,
     /// Target account for imported transactions.
     pub account: Option<String>,
-    /// Currency (default: USD).
+    /// Currency of the imported amounts. Required for CSV unless every row
+    /// carries one in `currency_column`; the CLI can also take it from the
+    /// account's `open` directive (`--ledger` / `--existing`). There is no
+    /// default: a guessed currency silently corrupts the ledger (#2464).
     pub currency: Option<String>,
     /// Date column name or 0-based index.
     pub date_column: Option<toml::Value>,

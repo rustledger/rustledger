@@ -98,6 +98,15 @@ impl CsvImporter {
         // compile thousands of times if we did it inside the loop.
         let amount_format = csv_config.compile_amount_format()?;
 
+        // Refuse up front rather than once per row: with no `currency` and no
+        // `currency_column`, no row can say what it is denominated in.
+        if config.currency.is_none() && csv_config.currency_column.is_none() {
+            anyhow::bail!(
+                "no currency configured: set `currency` on the importer (or a \
+                 `currency_column`); there is no default currency"
+            );
+        }
+
         let mut reader = csv::ReaderBuilder::new()
             .has_headers(csv_config.has_header)
             .delimiter(csv_config.delimiter as u8)
@@ -337,7 +346,17 @@ impl CsvImporter {
         // (wrong name/index) — surface it rather than silently falling back,
         // which would reintroduce the "multi-currency becomes mono-currency"
         // bug. A blank cell is legitimate and falls back to the default.
-        let default_currency = || config.currency.clone().unwrap_or_else(|| "USD".to_string());
+        //
+        // There is no built-in default currency. One used to be `USD`, which
+        // booked every row of a euro account's statement in dollars without a
+        // word when the config named no currency (#2464). A row whose currency
+        // nothing states is refused instead.
+        let default_currency = || {
+            config
+                .currency
+                .clone()
+                .context("no currency: the row has none and the importer config sets no `currency`")
+        };
         let currency = match &csv_config.currency_column {
             Some(col) => {
                 let cell = self
@@ -345,12 +364,12 @@ impl CsvImporter {
                     .context("failed to read configured currency column")?;
                 let cell = cell.trim();
                 if cell.is_empty() {
-                    default_currency()
+                    default_currency()?
                 } else {
                     cell.to_string()
                 }
             }
-            None => default_currency(),
+            None => default_currency()?,
         };
 
         // Create the transaction posting
@@ -693,6 +712,41 @@ mod tests {
             Some(rustledger_core::MetaValue::Date(d)) => assert_eq!(d.to_string(), "2024-01-17"),
             other => panic!("expected value_date metadata, got {other:?}"),
         }
+    }
+
+    /// #2464: there is no built-in currency. A config naming none, with no
+    /// currency column, is refused; a blank currency cell with no default is
+    /// a row error. Neither becomes USD.
+    #[test]
+    fn test_csv_import_without_a_currency_is_refused() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .build()
+            .unwrap();
+        let csv = "Date,Description,Amount\n2024-01-15,Coffee,-4.50\n";
+        let err = CsvImporter.extract_string(csv, &config).unwrap_err();
+        assert!(err.to_string().contains("no currency configured"), "{err}");
+
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .currency_column("Ccy")
+            .build()
+            .unwrap();
+        let csv =
+            "Date,Description,Amount,Ccy\n2024-01-15,Coffee,-4.50,EUR\n2024-01-16,Tea,-2.00,\n";
+        let result = CsvImporter.extract_string(csv, &config).unwrap();
+        assert_eq!(result.directives.len(), 1);
+        assert!(
+            result.warnings[0].contains("no currency"),
+            "{:?}",
+            result.warnings
+        );
     }
 
     #[test]
@@ -1224,6 +1278,7 @@ More info
     fn test_csv_importer_new() {
         let config = ImporterConfig::csv()
             .account("Assets:Bank")
+            .currency("USD")
             .build()
             .unwrap();
         let importer = CsvImporter;
@@ -1343,30 +1398,6 @@ not-a-date,Coffee,-5.00
         assert_eq!(result.directives.len(), 2, "both rows should be kept");
         if let Directive::Transaction(txn) = &result.directives[0] {
             assert_eq!(txn.narration.as_str(), "Zero balance marker");
-        }
-    }
-
-    #[test]
-    fn test_csv_import_default_currency() {
-        // No currency specified - should default to USD
-        let config = ImporterConfig::csv()
-            .account("Assets:Bank")
-            .date_column("Date")
-            .narration_column("Description")
-            .amount_column("Amount")
-            .build()
-            .unwrap();
-
-        let csv_content = r"Date,Description,Amount
-2024-01-15,Coffee,-5.00
-";
-
-        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
-        assert_eq!(result.directives.len(), 1);
-
-        if let Directive::Transaction(txn) = &result.directives[0] {
-            let amount = txn.postings[0].amount().unwrap();
-            assert_eq!(amount.currency.as_str(), "USD");
         }
     }
 

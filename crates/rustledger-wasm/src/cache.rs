@@ -186,7 +186,15 @@ use crate::types::{Error, LedgerOptions};
 /// v32: a lot keeps its exact total, so a sale that empties a `{{T}}` lot
 /// books that total, and a partial sale of such a lot or of a pool books a
 /// basis fitted to it (#2425). A v31 blob serves the old booked costs.
-pub const CACHE_VERSION: u32 = 32;
+/// v33: a units number written without its currency (`Assets:Foo  42.50`)
+/// takes its currency by beancount's rule, including from the account's
+/// running balance (#2465). Loader v37, unchanged -- the loader archives
+/// parsed directives, and those did not move. The booked ones did, in both
+/// directions: a ledger that failed with "cannot infer currency" now books,
+/// and one whose currency was read off the residual now fails. `ParsedLedger`
+/// and `Ledger` archive booked directives and their errors, so a v32 blob
+/// would keep serving the old answer.
+pub const CACHE_VERSION: u32 = 33;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

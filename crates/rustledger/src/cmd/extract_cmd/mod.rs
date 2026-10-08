@@ -1871,7 +1871,14 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
 
     // `importer` was selected earlier so we could route config-
     // building correctly; here it's used for the actual dispatch.
-    let result = importer.extract(file, &config)?;
+    let mut result = importer.extract(file, &config)?;
+
+    // Oldest first, keeping the export's sequence within a day, for every
+    // importer type (#2319). Once, here: after the importer, so a CSV, OFX
+    // and WASM statement are ordered by the same rule, and before dedup, so
+    // the skip report lists rows in the order they are written. The
+    // `--balance` assertion is appended after both and so stays last.
+    result.directives = rustledger_importer::order::chronological(result.directives);
 
     // Print warnings
     for warning in &result.warnings {

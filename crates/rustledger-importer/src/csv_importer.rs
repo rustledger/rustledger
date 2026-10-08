@@ -115,9 +115,19 @@ impl CsvImporter {
             HashMap::default()
         };
 
+        if let Some(id_col) = &csv_config.transaction_id_column {
+            Self::check_transaction_id_column(id_col, csv_config, &header_map)?;
+        }
+
         let mut directives = Vec::new();
         let mut warnings = Vec::new();
         let mut row_num = csv_config.skip_rows;
+        // Rows per id link, to catch a `transaction_id_column` whose values
+        // repeat. Dedup treats an equal id (with equal money) as the same
+        // transaction on any date, so a column that is not unique per
+        // transaction (a category, a type, a date) would make it match the
+        // wrong rows.
+        let mut id_rows: HashMap<String, Vec<usize>> = HashMap::default();
 
         for result in reader.records().skip(csv_config.skip_rows) {
             row_num += 1;
@@ -137,12 +147,42 @@ impl CsvImporter {
                 &header_map,
                 engine,
             ) {
-                Ok(Some(txn)) => directives.push(Directive::Transaction(txn)),
+                Ok(Some(txn)) => {
+                    if csv_config.transaction_id_column.is_some()
+                        && let Some(link) = txn.links.iter().find(|l| {
+                            l.as_str()
+                                .starts_with(rustledger_ops::dedup::CSV_ID_LINK_PREFIX)
+                        })
+                    {
+                        id_rows
+                            .entry(link.as_str().to_string())
+                            .or_default()
+                            .push(row_num);
+                    }
+                    directives.push(Directive::Transaction(txn));
+                }
                 Ok(None) => {} // Skip empty rows
                 Err(e) => {
                     warnings.push(format!("Row {row_num}: {e}"));
                 }
             }
+        }
+
+        let mut repeated: Vec<(String, Vec<usize>)> = id_rows
+            .into_iter()
+            .filter(|(_, rows)| rows.len() > 1)
+            .collect();
+        if !repeated.is_empty() {
+            repeated.sort_by_key(|(_, rows)| rows[0]);
+            let (link, rows) = &repeated[0];
+            let rows: Vec<String> = rows.iter().take(5).map(ToString::to_string).collect();
+            warnings.push(format!(
+                "{} transaction id(s) appear on more than one row (e.g. ^{link} on rows {}); \
+                 `transaction_id_column` should name a column that is unique per \
+                 transaction, or `extract --existing` may match the wrong rows",
+                repeated.len(),
+                rows.join(", "),
+            ));
         }
 
         let mut result = ImportResult::new(directives);
@@ -367,7 +407,100 @@ impl CsvImporter {
             }
         }
 
+        // A source-assigned transaction id becomes a `^csv-<id>` link (#2387),
+        // the CSV counterpart of OFX's `^ofx-<FITID>`: dedup trusts an equal
+        // id link as identity. A configured column that cannot be read is a
+        // config error, like `currency_column`; a blank cell adds no link.
+        if let Some(col) = &csv_config.transaction_id_column {
+            let cell = self
+                .get_column(record, col, header_map)
+                .context("failed to read configured transaction id column")?;
+            if let Some(link) =
+                rustledger_ops::dedup::id_link(rustledger_ops::dedup::CSV_ID_LINK_PREFIX, cell)
+            {
+                txn = txn.with_link(link);
+            }
+        }
+
         Ok(Some(txn))
+    }
+
+    /// Misconfigurations of `transaction_id_column` caught once, up front,
+    /// with a message naming the key, rather than as one context-free warning
+    /// per row followed by "no transactions were extracted" (or, worse, as
+    /// links that make `extract --existing` match the wrong rows):
+    ///
+    /// - a name the header lacks, with a hint when it differs from a header
+    ///   only in case or surrounding whitespace;
+    /// - an index past the header's last column;
+    /// - the same column as one the importer already reads for something else
+    ///   (`amount_column`, `date_column`, ...): those values are not unique per
+    ///   transaction, and id dedup trusts an equal id with equal money as the
+    ///   same transaction on any date.
+    fn check_transaction_id_column(
+        id_col: &ColumnSpec,
+        csv_config: &CsvConfig,
+        header_map: &HashMap<String, usize>,
+    ) -> Result<()> {
+        if !csv_config.has_header {
+            return Ok(());
+        }
+        let mut columns: Vec<(&String, &usize)> = header_map.iter().collect();
+        columns.sort_by_key(|(_, i)| **i);
+        let names: Vec<&str> = columns.iter().map(|(n, _)| n.as_str()).collect();
+        let index = match id_col {
+            ColumnSpec::Name(name) => {
+                let Some(i) = header_map.get(name) else {
+                    let close = names
+                        .iter()
+                        .find(|h| h.trim().eq_ignore_ascii_case(name.trim()));
+                    let hint = close.map_or(String::new(), |h| format!("; did you mean {h:?}?"));
+                    anyhow::bail!(
+                        "transaction_id_column {name:?} is not a column of this file \
+                         (its columns: {}){hint}",
+                        names.join(", ")
+                    );
+                };
+                *i
+            }
+            ColumnSpec::Index(i) => {
+                if *i >= names.len() {
+                    anyhow::bail!(
+                        "transaction_id_column {i} is past the last column of this file \
+                         (it has {} columns, numbered from 0)",
+                        names.len()
+                    );
+                }
+                *i
+            }
+        };
+        let resolve = |spec: &ColumnSpec| match spec {
+            ColumnSpec::Name(n) => header_map.get(n).copied(),
+            ColumnSpec::Index(i) => Some(*i),
+        };
+        let others = [
+            ("date_column", Some(&csv_config.date_column)),
+            ("amount_column", csv_config.amount_column.as_ref()),
+            ("debit_column", csv_config.debit_column.as_ref()),
+            ("credit_column", csv_config.credit_column.as_ref()),
+            ("narration_column", csv_config.narration_column.as_ref()),
+            ("payee_column", csv_config.payee_column.as_ref()),
+            ("currency_column", csv_config.currency_column.as_ref()),
+            (
+                "secondary_date_column",
+                csv_config.secondary_date.as_ref().map(|s| &s.column),
+            ),
+        ];
+        for (key, spec) in others {
+            if spec.and_then(resolve) == Some(index) {
+                anyhow::bail!(
+                    "transaction_id_column names the same column as `{key}` ({:?}); \
+                     it must be a column whose value is unique per transaction",
+                    names[index]
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Build the categorization [`rustledger_ops::categorize::RulesEngine`] from
@@ -560,6 +693,166 @@ mod tests {
             Some(rustledger_core::MetaValue::Date(d)) => assert_eq!(d.to_string(), "2024-01-17"),
             other => panic!("expected value_date metadata, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_csv_import_transaction_id_becomes_a_link() {
+        // #2387: the id column becomes a `^csv-` link, sanitized to the link
+        // charset; a blank cell adds none.
+        let config = ImporterConfig::csv()
+            .account("Assets:Monzo")
+            .currency("GBP")
+            .transaction_id_column("Transaction ID")
+            .build()
+            .unwrap();
+        let csv_content = "Transaction ID,Date,Description,Amount\n\
+                           tx_00A1,2024-01-15,Coffee,-4.50\n\
+                           a b:c,2024-01-15,Tea,-2.00\n\
+                           ,2024-01-16,Cake,-3.00\n";
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
+        let links: Vec<Vec<String>> = result
+            .directives
+            .iter()
+            .map(|d| match d {
+                Directive::Transaction(t) => {
+                    t.links.iter().map(|l| l.as_str().to_string()).collect()
+                }
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            links,
+            vec![
+                vec!["csv-tx_00A1".to_string()],
+                vec!["csv-a-b-c".to_string()],
+                vec![]
+            ]
+        );
+
+        // A configured column the file does not have is a config error, not
+        // a silent "no ids" (see the up-front check's own test).
+        let csv_content = "Date,Description,Amount\n2024-01-15,Coffee,-4.50\n";
+        assert!(CsvImporter.extract_string(csv_content, &config).is_err());
+    }
+
+    /// A CSV saved on Windows (CRLF line ends, a stray trailing space) still
+    /// yields clean id links: no `\r` and no separator leaks into the link.
+    #[test]
+    fn test_csv_import_transaction_id_survives_crlf() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Monzo")
+            .currency("GBP")
+            .transaction_id_column("Id")
+            .build()
+            .unwrap();
+        let csv_content = "Id,Date,Description,Amount\r\ntx_1,2024-01-15,Coffee,-4.50\r\ntx_2 ,2024-01-15,Tea,-2.00\r\n";
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
+        let links: Vec<String> = result
+            .directives
+            .iter()
+            .filter_map(|d| match d {
+                Directive::Transaction(t) => t.links.first().map(|l| l.as_str().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(links, ["csv-tx_1", "csv-tx_2"]);
+    }
+
+    /// A `transaction_id_column` the header lacks fails once, naming the
+    /// column and the file's columns, instead of one warning per row.
+    #[test]
+    fn test_csv_import_missing_transaction_id_column_fails_up_front() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("EUR")
+            .transaction_id_column("Id")
+            .build()
+            .unwrap();
+        let csv = "Date,Description,Amount\n2024-01-15,Coffee,-4.50\n2024-01-16,Tea,-2.00\n";
+        let err = CsvImporter
+            .extract_string(csv, &config)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("transaction_id_column \"Id\" is not a column of this file (its columns: Date, Description, Amount)"),
+            "{err}"
+        );
+    }
+
+    /// Misconfigured id columns fail once with a message naming the key: a
+    /// near-miss name gets a hint, an index past the end is caught, and a
+    /// column already read for something else is refused.
+    #[test]
+    fn test_csv_import_misconfigured_transaction_id_column() {
+        let csv = "Id,Date,Description,Amount\nt1,2024-01-15,Coffee,-4.50\n";
+        let err = |col: ColumnSpec| {
+            let mut config = ImporterConfig::csv()
+                .account("Assets:Bank")
+                .currency("EUR")
+                .build()
+                .unwrap();
+            let ImporterType::Csv(c) = &mut config.importer_type;
+            c.transaction_id_column = Some(col);
+            CsvImporter
+                .extract_string(csv, &config)
+                .unwrap_err()
+                .to_string()
+        };
+        let e = err(ColumnSpec::Name(" id".into()));
+        assert!(e.ends_with("; did you mean \"Id\"?"), "{e}");
+        let e = err(ColumnSpec::Index(9));
+        assert!(
+            e.contains(
+                "transaction_id_column 9 is past the last column of this file (it has 4 columns"
+            ),
+            "{e}"
+        );
+        let e = err(ColumnSpec::Name("Amount".into()));
+        assert!(
+            e.contains(
+                "transaction_id_column names the same column as `amount_column` (\"Amount\")"
+            ),
+            "{e}"
+        );
+        let e = err(ColumnSpec::Index(1));
+        assert!(
+            e.contains("the same column as `date_column` (\"Date\")"),
+            "{e}"
+        );
+    }
+
+    /// Ids that repeat within one statement are reported: a column that is
+    /// not unique per transaction would make id dedup match the wrong rows.
+    #[test]
+    fn test_csv_import_warns_on_repeated_transaction_ids() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("EUR")
+            .transaction_id_column("Kind")
+            .build()
+            .unwrap();
+        let csv = "Kind,Date,Description,Amount\nfood,2024-01-15,Coffee,-4.50\nrent,2024-01-15,Rent,-900\n\
+                   food,2024-01-16,Tea,-2.00\nrent,2024-02-15,Rent,-900\nx1,2024-02-16,Cake,-3\n";
+        let result = CsvImporter.extract_string(csv, &config).unwrap();
+        assert_eq!(result.directives.len(), 5);
+        assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+        assert!(
+            result.warnings[0].starts_with(
+                "2 transaction id(s) appear on more than one row (e.g. ^csv-food on rows 1, 3)"
+            ),
+            "{:?}",
+            result.warnings
+        );
+
+        // Unique ids, and blank cells, warn about nothing.
+        let csv = "Kind,Date,Description,Amount\na,2024-01-15,Coffee,-4.50\n,2024-01-16,Tea,-2.00\n,2024-01-17,Cake,-3\n";
+        assert!(
+            CsvImporter
+                .extract_string(csv, &config)
+                .unwrap()
+                .warnings
+                .is_empty()
+        );
     }
 
     #[test]
@@ -1216,6 +1509,7 @@ not-a-date,Coffee,-5.00
             use_merchant_dict: false,
             skip_zero_amounts: true,
             secondary_date: None,
+            transaction_id_column: None,
         };
 
         let importer = CsvImporter;

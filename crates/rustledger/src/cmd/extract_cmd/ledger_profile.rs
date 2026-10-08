@@ -47,6 +47,19 @@ pub(super) struct LedgerProfile {
     pub currency: Option<String>,
 }
 
+/// Load a ledger for reading its `open` directives: includes resolved,
+/// plugins and validation skipped (neither changes which accounts are opened
+/// with which currencies, and both cost time on every import).
+fn load_unvalidated(path: &Path) -> Result<rustledger_loader::Ledger> {
+    let options = rustledger_loader::LoadOptions {
+        run_plugins: false,
+        validate: false,
+        ..Default::default()
+    };
+    rustledger_loader::load(path, &options)
+        .map_err(|e| anyhow!("failed to load ledger {}: {e}", path.display()))
+}
+
 /// Read every importer profile from a ledger.
 ///
 /// Directives without an `importer` key are ignored, so this is safe to run
@@ -55,13 +68,7 @@ pub(super) struct LedgerProfile {
 /// a typo or an unfinished edit, and staying quiet about it is how a user ends
 /// up believing their profile works.
 pub(super) fn load_profiles(path: &Path) -> Result<Vec<(glob::Pattern, LedgerProfile)>> {
-    let options = rustledger_loader::LoadOptions {
-        run_plugins: false,
-        validate: false,
-        ..Default::default()
-    };
-    let ledger = rustledger_loader::load(path, &options)
-        .map_err(|e| anyhow!("failed to load ledger {}: {e}", path.display()))?;
+    let ledger = load_unvalidated(path)?;
 
     // `load` reports parse failures through `Ledger::errors` rather than an
     // `Err`, so a ledger that does not parse arrives here looking like a
@@ -139,6 +146,44 @@ pub(super) fn load_profiles(path: &Path) -> Result<Vec<(glob::Pattern, LedgerPro
         }
     }
     Ok(out)
+}
+
+/// What a ledger says about one account's `open`.
+pub(super) struct OpenLookup {
+    /// The currencies its `open` declares, or `None` when no `open` for the
+    /// account loaded.
+    pub currencies: Option<Vec<String>>,
+    /// The ledger's load errors (count and first message), if any. When no
+    /// `open` was found they may be why: an `open` inside an include that
+    /// failed to load is not "missing", and saying so would send the user
+    /// looking in the wrong place.
+    pub load_errors: Option<(usize, String)>,
+}
+
+/// Look up the `open` directive for `account` in a ledger.
+///
+/// Used to fill in a CSV importer entry that names no currency (#2464): the
+/// `open` directive is where the account's currency is declared, so it is
+/// the authority a missing config value defers to.
+pub(super) fn open_currencies(path: &Path, account: &str) -> Result<OpenLookup> {
+    let ledger = load_unvalidated(path)?;
+    let errors: Vec<&rustledger_loader::LedgerError> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.severity == rustledger_loader::ErrorSeverity::Error)
+        .collect();
+    Ok(OpenLookup {
+        currencies: ledger.directives.iter().find_map(|d| match &d.value {
+            Directive::Open(open) if open.account.as_str() == account => Some(
+                open.currencies
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
+            ),
+            _ => None,
+        }),
+        load_errors: errors.first().map(|e| (errors.len(), e.message.clone())),
+    })
 }
 
 /// The profile whose pattern matches `filename`.

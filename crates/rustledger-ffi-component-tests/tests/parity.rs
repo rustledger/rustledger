@@ -1299,24 +1299,13 @@ fn importer_extract_matches_native_engine() -> Result<()> {
     if let rustledger_core::Directive::Transaction(t) = &mut native_reworded[0] {
         t.narration = "Coffee Shop purchase".into();
     }
-    let native_txns: Vec<_> = native
-        .directives
-        .iter()
-        .filter_map(|d| match d {
-            rustledger_core::Directive::Transaction(t) => Some(t.clone()),
-            _ => None,
-        })
-        .collect();
-    let native_flags: Vec<bool> = native_reworded
-        .iter()
-        .map(|d| match d {
-            rustledger_core::Directive::Transaction(t) => rustledger_ops::dedup::is_duplicate(
-                t,
-                &native_txns,
-                &rustledger_ops::dedup::FuzzyDedupConfig::default(),
-            ),
-            _ => false,
-        })
+    let dups = rustledger_ops::dedup::find_fuzzy_duplicates(
+        &native_reworded,
+        &native.directives,
+        &rustledger_ops::dedup::FuzzyDedupConfig::default(),
+    );
+    let native_flags: Vec<bool> = (0..native_reworded.len())
+        .map(|i| dups.iter().any(|m| m.new_index == i))
         .collect();
     assert_eq!(
         component_flags, native_flags,

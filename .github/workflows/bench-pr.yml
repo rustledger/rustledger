@@ -63,12 +63,22 @@ jobs:
           # Hyperfine — use authenticated `gh api` (5000/hr rate limit
           # vs 60/hr unauth) and `curl -f` so an HTTP error fails the
           # step rather than piping a 404 page into tar.
-          HYPERFINE_VERSION=$(gh api repos/sharkdp/hyperfine/releases/latest --jq '.tag_name')
+          # Pinned: hyperfine v2.0.0 (2026-10-07) moved `mean`/`stddev` under
+          # `summary.time_wall_clock` and `memory_usage_byte` to
+          # `summary.memory_peak_resident` in --export-json, which the parsers
+          # below read as `entry['mean']` (KeyError on v2). Bump deliberately,
+          # with the parsers, rather than tracking `latest`.
+          HYPERFINE_VERSION=v1.21.0
+          # sha256 of the x86_64-unknown-linux-gnu tarball; matches the digest
+          # GitHub publishes for the release asset. Update it with the version.
+          HYPERFINE_SHA256=60b70eb01e1a4dce1bf56a38393e1e2c2e79ed95a4ba711feb5c993f382604ab
           if [ -z "${HYPERFINE_VERSION:-}" ] || [ "$HYPERFINE_VERSION" = "null" ]; then
-            echo "::error::Failed to fetch hyperfine latest release tag" >&2
+            echo "::error::HYPERFINE_VERSION is not set" >&2
             exit 1
           fi
-          curl -sSfL "https://github.com/sharkdp/hyperfine/releases/download/${HYPERFINE_VERSION}/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C /tmp
+          curl -sSfL -o /tmp/hyperfine.tar.gz "https://github.com/sharkdp/hyperfine/releases/download/${HYPERFINE_VERSION}/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
+          echo "${HYPERFINE_SHA256}  /tmp/hyperfine.tar.gz" | sha256sum -c -
+          tar xzf /tmp/hyperfine.tar.gz -C /tmp
           sudo mv "/tmp/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu/hyperfine" /usr/local/bin/
       - name: Build rustledger (PR and base)
         run: |

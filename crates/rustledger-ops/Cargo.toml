@@ -19,6 +19,7 @@ bench = false
 rustledger-core.workspace = true
 rustledger-plugin-types.workspace = true
 rust_decimal.workspace = true
+rustc-hash.workspace = true
 jiff.workspace = true
 blake3.workspace = true
 regex.workspace = true

@@ -1923,8 +1923,12 @@ impl SessionState {
     /// batch canonical (`rustledger_ops::dedup::find_fuzzy_duplicates`),
     /// which precomputes each held transaction's comparison key once —
     /// per-candidate matching would rebuild every key for every candidate.
-    /// Same matcher as `rledger extract --existing`: same date, same
-    /// first-posting amount, similar payee/narration text. One bool per
+    /// Same matcher as `rledger extract --existing`, unscoped (the session
+    /// has no importer account): a shared id link with the same first-posting
+    /// account, commodity and amount, or the same date and the same
+    /// first-posting account, commodity and amount with similar
+    /// payee/narration text. Held transactions are a multiset — each flags
+    /// at most one candidate (#2421). One bool per
     /// candidate, in input order; a candidate that fails conversion (or
     /// isn't a transaction) is never flagged, mirroring the documented
     /// `from-entries` drop policy for the held side.
@@ -3047,6 +3051,33 @@ mod importer_tests {
             t.narration = Some("Coffee Shop purchase".to_string());
         }
         assert_eq!(held.dedup(&reworded), vec![true, true]);
+
+        // The WIT contract for `session.dedup` (3.13.0), claim by claim.
+        // Held transactions are a multiset: two identical candidates against
+        // one held entry flag only the first.
+        let one = SessionState::from_entries(&first.entries[..1]);
+        let twice = vec![first.entries[0].clone(), first.entries[0].clone()];
+        assert_eq!(one.dedup(&twice), vec![true, false]);
+        // Another first-posting commodity is a different transaction.
+        let mut other_ccy = first.entries[..1].to_vec();
+        if let wit::Directive::Transaction(t) = &mut other_ccy[0]
+            && let Some(units) = t.postings[0].units.as_mut()
+        {
+            units.currency = "XYZ".to_string();
+        }
+        assert_eq!(one.dedup(&other_ccy), vec![false]);
+        // A shared `^ofx-`/`^csv-` id link with the same first-posting money
+        // flags a candidate whatever its text says.
+        let mut linked = first.entries[..1].to_vec();
+        if let wit::Directive::Transaction(t) = &mut linked[0] {
+            t.links.push("csv-tx1".to_string());
+        }
+        let held_linked = SessionState::from_entries(&linked);
+        let mut renamed = linked.clone();
+        if let wit::Directive::Transaction(t) = &mut renamed[0] {
+            t.narration = Some("Completely different text".to_string());
+        }
+        assert_eq!(held_linked.dedup(&renamed), vec![true]);
 
         // The extracted entries render to canonical text a host can write
         // into the ledger file.

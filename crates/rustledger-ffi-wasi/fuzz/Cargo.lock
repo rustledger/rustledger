@@ -1131,6 +1131,7 @@ dependencies = [
 name = "rustledger-core"
 version = "0.24.0"
 dependencies = [
+ "bigdecimal",
  "imbl",
  "jiff",
  "rkyv",
@@ -1199,6 +1200,7 @@ dependencies = [
  "jiff",
  "regex",
  "rust_decimal",
+ "rustc-hash 2.1.3",
  "rustledger-core",
  "rustledger-plugin-types",
 ]
@@ -1283,6 +1285,7 @@ dependencies = [
  "rustledger-budget",
  "rustledger-core",
  "rustledger-parser",
+ "smallvec",
  "thiserror",
 ]
 

@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 import { initSync } from '@rustledger/wasm';
 import * as rustledger from '@rustledger/wasm';
 import { handleToolCall } from '../handlers.js';
-import { validateArgs, formatErrors, formatValidation, fatalErrors, formatQueryResult, textResponse, errorResponse, jsonResponse, collectLedgerFiles, withIncludedContext } from '../helpers.js';
+import { validateArgs, formatErrors, formatValidation, fatalErrors, formatQueryResult, formatCell, textResponse, errorResponse, jsonResponse, collectLedgerFiles, withIncludedContext } from '../helpers.js';
 import { TOOLS } from '../tools.js';
 import { RESOURCES, getResourceContents } from '../resources.js';
 import { PROMPTS, getPrompt } from '../prompts.js';
@@ -373,6 +373,36 @@ describe('Helper Functions', () => {
     it('should handle empty results', () => {
       const result = formatQueryResult({ columns: [], rows: [] });
       expect(result).toBe('No results.');
+    });
+  });
+
+  // #2402: inventory cells carry each position's cost, as position cells do.
+  describe('formatCell', () => {
+    const lot = (n: string, cost?: Record<string, string>) => ({
+      units: { number: n, currency: 'X' },
+      ...(cost ? { cost: { currency: 'USD', ...cost } } : {}),
+    });
+
+    it('renders each inventory position with its cost', () => {
+      const cell = {
+        positions: [
+          lot('5', { number: '100', date: '2020-01-02' }),
+          lot('-2', { number: '90', date: '2020-01-03', label: 'b' }),
+          { units: { number: '7', currency: 'USD' } },
+        ],
+      };
+      expect(formatCell(cell)).toBe(
+        '5 X {100 USD, 2020-01-02}, -2 X {90 USD, 2020-01-03, "b"}, 7 USD'
+      );
+    });
+
+    it('renders an inventory without costs as bare units, as before', () => {
+      expect(formatCell({ positions: [lot('5'), lot('-2')] })).toBe('5 X, -2 X');
+    });
+
+    it('renders a position cell instead of dumping its JSON', () => {
+      expect(formatCell(lot('5', { number: '100' }))).toBe('5 X {100 USD}');
+      expect(formatCell(lot('5'))).toBe('5 X');
     });
   });
 

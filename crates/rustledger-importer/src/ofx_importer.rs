@@ -342,47 +342,14 @@ fn parse_statement_balance(content: &str) -> Option<StatementBalance> {
     })
 }
 
-/// Prefix marking a link as a bank-assigned OFX transaction id.
+/// Render a `FITID` as a `^ofx-…` link, or `None` if nothing usable survives.
 ///
-/// Namespaced so it cannot collide with a link the user wrote, and so dedup
-/// can tell "this is an id I can trust" from "this is someone's invoice tag".
-const FITID_LINK_PREFIX: &str = "ofx-";
-
-/// Render a `FITID` as a beancount link, or `None` if nothing usable survives.
-///
-/// Links lex as `\^[a-zA-Z0-9-_/.]+`, and a `FITID` is an opaque bank string
-/// that need not respect that. Anything outside the set becomes `-`, so the
-/// emitted ledger re-parses; without this an id containing a space or a colon
-/// would produce a file rustledger itself could not read.
-///
-/// Distinctness is preserved for the ids this matters for: two different ids
-/// only collide after sanitizing if they differ *only* in characters that all
-/// map to `-`, which no real FITID scheme does. Dedup treats a link as strong
-/// evidence, not proof, so a pathological collision degrades to the fuzzy
-/// match rather than silently dropping a transaction.
+/// The prefix and the sanitizing rules are shared with the CSV importer's
+/// `transaction_id_column` and with `extract --existing` dedup, which treats
+/// an equal id link as identity — so they live in one place,
+/// [`rustledger_ops::dedup::id_link`].
 fn fitid_link(fitid: &str) -> Option<String> {
-    let cleaned: String = fitid
-        .trim()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.') {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-
-    // An id that sanitizes to only separators carries no information, and the
-    // resulting link would be one every such transaction shares — worse than
-    // no link at all. `-` is not the only separator that survives: `.`, `_`
-    // and `/` are all in the link charset, so `...` and `__/__` pass a
-    // `trim_matches('-')` check while meaning exactly as little. Require a
-    // character that actually identifies something.
-    if !cleaned.chars().any(|c| c.is_ascii_alphanumeric()) {
-        return None;
-    }
-    Some(format!("{FITID_LINK_PREFIX}{cleaned}"))
+    rustledger_ops::dedup::id_link(rustledger_ops::dedup::OFX_ID_LINK_PREFIX, fitid)
 }
 
 /// Which side of the balance sheet an OFX statement describes.

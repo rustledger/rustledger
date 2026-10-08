@@ -220,6 +220,10 @@ class PositionValue(BaseModel):
     Position value for serialization.
     """
 
+    cost: CostValue | None = Field(
+        None,
+        description="The lot's cost, absent for a position held without one. Omitted\nfrom the JSON rather than `null`, as in a `Position` cell.",
+    )
     units: AmountValue = Field(..., description="The units.")
 
 

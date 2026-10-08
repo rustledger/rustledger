@@ -234,6 +234,24 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
     }
 }
 
+/// The wire form of one position: units, and the cost when it has one.
+///
+/// Shared by the `Position` and `Inventory` cells of [`value_to_cell`].
+fn position_value(p: &rustledger_core::Position) -> PositionValue {
+    PositionValue {
+        units: AmountValue {
+            number: p.units.number.to_string(),
+            currency: p.units.currency.to_string(),
+        },
+        cost: p.cost.as_ref().map(|c| CostValue {
+            number: c.number.to_string(),
+            currency: c.currency.to_string(),
+            date: c.date.map(|d| d.to_string()),
+            label: c.label.clone(),
+        }),
+    }
+}
+
 /// Convert a query Value to a `CellValue` for JSON serialization.
 pub fn value_to_cell(value: &rustledger_query::Value) -> CellValue {
     use rustledger_query::Value;
@@ -248,28 +266,16 @@ pub fn value_to_cell(value: &rustledger_query::Value) -> CellValue {
             number: a.number.to_string(),
             currency: a.currency.to_string(),
         },
-        Value::Position(p) => CellValue::Position {
-            units: AmountValue {
-                number: p.units.number.to_string(),
-                currency: p.units.currency.to_string(),
-            },
-            cost: p.cost.as_ref().map(|c| CostValue {
-                number: c.number.to_string(),
-                currency: c.currency.to_string(),
-                date: c.date.map(|d| d.to_string()),
-                label: c.label.clone(),
-            }),
-        },
+        Value::Position(p) => {
+            let PositionValue { units, cost } = position_value(p);
+            CellValue::Position { units, cost }
+        }
+        // Each position carries its cost, exactly as a single position cell
+        // does: both arms go through `position_value`, so they cannot drift.
+        // An inventory of lots at different costs is otherwise bare units
+        // side by side, with no basis (#2402).
         Value::Inventory(inv) => CellValue::Inventory {
-            positions: inv
-                .positions()
-                .map(|p| PositionValue {
-                    units: AmountValue {
-                        number: p.units.number.to_string(),
-                        currency: p.units.currency.to_string(),
-                    },
-                })
-                .collect(),
+            positions: inv.positions().map(position_value).collect(),
         },
         Value::StringSet(set) => CellValue::StringSet(set.clone()),
         Value::Set(values) => {
@@ -693,5 +699,66 @@ mod tests {
         assert!(matches!(values[1].value, MetaValueJson::Null));
         assert_eq!(values[2].value_type, "number");
         assert!(matches!(values[2].value, MetaValueJson::String(ref s) if s == "100.00"));
+    }
+
+    /// An inventory cell carries each position's cost, in the same shape a
+    /// single position cell does (#2402). It used to carry units only, so
+    /// two lots of X at different costs were indistinguishable on the wire.
+    #[test]
+    fn inventory_cell_keeps_each_position_cost_2402() {
+        use rustledger_core::{Amount, Cost, Decimal, Inventory, Position};
+        use rustledger_query::Value;
+
+        let lot = |units: i64, cost: i64, day: u32| {
+            Position::with_cost(
+                Amount::new(Decimal::from(units), "X"),
+                Cost::new(Decimal::from(cost), "USD")
+                    .with_date(rustledger_core::naive_date(2020, 1, day).unwrap()),
+            )
+        };
+        let mut inv = Inventory::new();
+        inv.add(lot(5, 100, 2)).unwrap();
+        inv.add(lot(-2, 90, 3)).unwrap();
+        inv.add(Position::simple(Amount::new(Decimal::from(7), "USD")))
+            .unwrap();
+
+        let cell = value_to_cell(&Value::Inventory(std::sync::Arc::new(inv)));
+        let json = serde_json::to_value(&cell).unwrap();
+        let positions = json["positions"].as_array().expect("positions array");
+        let x_lots: Vec<_> = positions
+            .iter()
+            .filter(|p| p["units"]["currency"] == "X")
+            .collect();
+        assert_eq!(
+            x_lots,
+            [
+                &serde_json::json!({
+                    "units": {"number": "5", "currency": "X"},
+                    "cost": {"number": "100", "currency": "USD", "date": "2020-01-02"},
+                }),
+                &serde_json::json!({
+                    "units": {"number": "-2", "currency": "X"},
+                    "cost": {"number": "90", "currency": "USD", "date": "2020-01-03"},
+                }),
+            ],
+            "{json}"
+        );
+        // A position held without a cost omits the key, as a single
+        // position cell does, rather than sending `"cost": null`.
+        let cash = positions
+            .iter()
+            .find(|p| p["units"]["currency"] == "USD")
+            .expect("cash position");
+        assert_eq!(
+            cash,
+            &serde_json::json!({"units": {"number": "7", "currency": "USD"}})
+        );
+
+        // And each inventory element is exactly what that position alone
+        // would serialize to as a `Position` cell.
+        let single =
+            serde_json::to_value(value_to_cell(&Value::Position(Box::new(lot(5, 100, 2)))))
+                .unwrap();
+        assert_eq!(x_lots[0], &single);
     }
 }

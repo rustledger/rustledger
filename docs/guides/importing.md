@@ -39,6 +39,7 @@ For non-standard formats, create `importers.toml`:
 [[importers]]
 name = "chase"
 account = "Assets:Bank:Chase"
+currency = "USD"  # required unless the ledger's `open` names one (see below)
 
 # Column mapping (0-indexed or by header name)
 date_column = 0
@@ -62,6 +63,17 @@ Use with:
 ```bash
 rledger extract --importer chase chase-statement.csv
 ```
+
+An entry without `currency` takes the currency from the account's `open`
+directive when you pass the ledger with `--ledger` or `--existing` and that
+directive names exactly one currency (`2024-01-01 open Assets:Bank:Chase USD`).
+`--ledger` decides when it opens the account; `--existing` is read only when it
+does not. Included files are followed. Otherwise extract stops with an error
+naming the importer. A configured `currency` (or `--currency`) always wins
+over the `open`, but if the `open` does not allow it, extract warns, since
+`rledger check` would reject every imported posting. A value that is not a
+commodity at all (`usd`, `€`, an empty string) is an error naming its source. It never guesses a
+currency, since amounts booked in the wrong one corrupt the ledger silently.
 
 The `importers.toml` file is searched for automatically in these locations (first found wins):
 
@@ -105,6 +117,47 @@ secondary_date_column = "Value Date"
 
 The value is stored as a typed `date` metadatum, so it round-trips through the
 ledger and is queryable in BQL via `meta("value_date")`.
+
+### Transaction ids
+
+If the bank's CSV has a unique id per transaction (Monzo's `Transaction ID`,
+for example), name the column and every imported transaction carries it as a
+`^csv-<id>` link, the CSV counterpart of OFX's `^ofx-<FITID>`. For a
+Monzo-style export (`Transaction ID,Date,Time,Type,Name,…,Amount,Currency,…,Description,…`,
+dates like `15/01/2024`):
+
+```toml
+[[importers]]
+name = "monzo"
+account = "Assets:Monzo"
+currency = "GBP"
+date_column = "Date"
+date_format = "%d/%m/%Y"
+payee_column = "Name"
+narration_column = "Description"
+amount_column = "Amount"
+transaction_id_column = "Transaction ID"
+```
+
+`rledger extract --importer monzo monzo.csv` then writes:
+
+```beancount
+2024-01-15 * "Bakery" "Croissant" ^csv-tx_0000A1b2C3
+  Assets:Monzo  -2.50 GBP
+  Expenses:Unknown
+```
+
+Characters a link may not contain become `-`, and a blank cell adds no link.
+A column the file does not have is an error naming the file's columns (with a
+hint when the name differs from a header only in case or spaces), as is an
+index past the last column or a column the importer already reads as
+`amount_column`, `date_column` and so on. Ids
+that repeat within one statement get a warning: the column must be unique per
+transaction, since `--existing` treats an equal id with an equal amount as the
+same transaction on any date.
+Duplicate detection treats the id, together with the amount, as identity, so a
+re-import with `--existing` matches a transaction even after you rename its
+payee or narration, rather than relying on a fuzzy guess (see below).
 
 ### Account Mapping
 
@@ -267,11 +320,38 @@ Avoid importing the same transactions twice:
 rledger extract statement.csv -a Assets:Bank --existing ledger.beancount
 ```
 
-Duplicates are detected by matching:
+Only transactions posting to the importer's account, in the same commodity,
+are compared. A new transaction is a duplicate when:
 
-- Date
-- Amount
-- Payee/narration (fuzzy match)
+1. it shares an id link (`^ofx-…` from OFX, `^csv-…` from
+   `transaction_id_column`) with an existing transaction and moves the same
+   amount, whatever the date or text say; or
+1. it has the same date and amount as an existing transaction and the same
+   or a similar payee/narration — unless both carry ids of the same kind and
+   those ids differ, which makes them two different transactions.
+
+A ledger entry that splits the account's leg over several postings is
+compared by its net movement too, and a transfer you already imported from the
+other account's statement counts as a duplicate, since it already records this
+account's leg. A row from a custom (WASM) importer that does not post to the
+importer's account at all is compared by its first posting instead. Two rows
+with no payee or narration match when date and amount do, so a statement with
+no description column still re-imports to nothing; such a skip is flagged on
+stderr (`-- check: nothing but the date and amount ties these together`),
+because two different description-less rows on one day for one amount cannot
+be told apart. Text is compared case-insensitively but is not Unicode
+normalized: `é` written as one character and as `e` plus a combining accent
+differ. Which rows are kept does
+not depend on the order the statement or the ledger lists them in.
+
+Each existing transaction absorbs at most one new one, so two identical
+coffees on the same day are both kept when the ledger holds only one of them.
+Skips are counted on stderr by kind, and up to 20 of each kind (ordinary, and
+the flagged date-and-amount-only ones) are listed with the reason and the
+existing entry they matched; the rest are summarized as `... and N more`. If
+the `--existing` ledger has errors, a warning says so: transactions in the
+parts that failed to load cannot be compared, so their duplicates may be
+imported again.
 
 ## Workflow
 

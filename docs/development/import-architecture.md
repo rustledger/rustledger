@@ -1529,8 +1529,9 @@ pub struct TransactionFingerprint {
 > `confidence`, `method`, `alternatives`, `fingerprint`), produced via
 > `extract_enriched`. Extract's duplicate filtering does not use those
 > fingerprints; it matches in `rustledger-ops::dedup` on id links
-> (`^ofx-`/`^csv-`), then on date + the importer account's commodity and
-> amount + identical or fuzzy payee/narration text.
+> (`^ofx-`/`^csv-`) with the same account, commodity and amount, then on
+> date + the importer account's commodity and amount + identical or fuzzy
+> payee/narration text.
 >
 > The `source_id` field above is the design the
 > [stable source IDs roadmap item](../roadmap/importing.md#now--in-progress)

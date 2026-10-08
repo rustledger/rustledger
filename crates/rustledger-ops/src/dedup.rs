@@ -101,6 +101,16 @@ const ID_LINK_PREFIXES: &[&str] = &[OFX_ID_LINK_PREFIX, CSV_ID_LINK_PREFIX];
 /// characters that all map to `-` (`a b` and `a:b`). Dedup therefore treats an
 /// equal id link as identity only when the account, commodity and amount also
 /// agree, so a collision cannot drop a different transaction.
+///
+/// # Example
+///
+/// ```
+/// use rustledger_ops::dedup::{CSV_ID_LINK_PREFIX, id_link};
+///
+/// assert_eq!(id_link(CSV_ID_LINK_PREFIX, " tx_00A1 ").as_deref(), Some("csv-tx_00A1"));
+/// assert_eq!(id_link(CSV_ID_LINK_PREFIX, "a b:c").as_deref(), Some("csv-a-b-c"));
+/// assert_eq!(id_link(CSV_ID_LINK_PREFIX, "  "), None);
+/// ```
 #[must_use]
 pub fn id_link(prefix: &str, raw: &str) -> Option<String> {
     let cleaned: String = raw
@@ -232,6 +242,35 @@ pub struct ImportDuplicate {
 /// their product (#2422).
 ///
 /// The result is ordered by `new_index`.
+///
+/// # Example
+///
+/// ```
+/// use rust_decimal::Decimal;
+/// use rustledger_core::{Amount, Posting, Transaction};
+/// use rustledger_ops::dedup::{DuplicateReason, FuzzyDedupConfig, find_import_duplicates};
+///
+/// let coffee = || {
+///     Transaction::new("2024-01-15".parse().unwrap(), "Coffee")
+///         .with_synthesized_posting(Posting::new(
+///             "Assets:Bank",
+///             Amount::new(Decimal::new(-450, 2), "EUR"),
+///         ))
+///         .with_synthesized_posting(Posting::auto("Expenses:Food"))
+/// };
+/// // Two identical coffees on the statement, one already in the ledger.
+/// let (a, b, booked) = (coffee(), coffee(), coffee());
+/// let dups = find_import_duplicates(
+///     &[&a, &b],
+///     &[&booked],
+///     Some("Assets:Bank"),
+///     &FuzzyDedupConfig::default(),
+/// );
+/// // The booked one absorbs exactly one row; the other is new.
+/// assert_eq!(dups.len(), 1);
+/// assert_eq!(dups[0].new_index, 0);
+/// assert_eq!(dups[0].reason, DuplicateReason::ExactText);
+/// ```
 #[must_use]
 pub fn find_import_duplicates(
     new: &[&Transaction],

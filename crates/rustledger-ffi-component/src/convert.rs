@@ -3051,6 +3051,33 @@ mod importer_tests {
         }
         assert_eq!(held.dedup(&reworded), vec![true, true]);
 
+        // The WIT contract for `session.dedup` (3.13.0), claim by claim.
+        // Held transactions are a multiset: two identical candidates against
+        // one held entry flag only the first.
+        let one = SessionState::from_entries(&first.entries[..1]);
+        let twice = vec![first.entries[0].clone(), first.entries[0].clone()];
+        assert_eq!(one.dedup(&twice), vec![true, false]);
+        // Another first-posting commodity is a different transaction.
+        let mut other_ccy = first.entries[..1].to_vec();
+        if let wit::Directive::Transaction(t) = &mut other_ccy[0]
+            && let Some(units) = t.postings[0].units.as_mut()
+        {
+            units.currency = "XYZ".to_string();
+        }
+        assert_eq!(one.dedup(&other_ccy), vec![false]);
+        // A shared `^ofx-`/`^csv-` id link with the same first-posting money
+        // flags a candidate whatever its text says.
+        let mut linked = first.entries[..1].to_vec();
+        if let wit::Directive::Transaction(t) = &mut linked[0] {
+            t.links.push("csv-tx1".to_string());
+        }
+        let held_linked = SessionState::from_entries(&linked);
+        let mut renamed = linked.clone();
+        if let wit::Directive::Transaction(t) = &mut renamed[0] {
+            t.narration = Some("Completely different text".to_string());
+        }
+        assert_eq!(held_linked.dedup(&renamed), vec![true]);
+
         // The extracted entries render to canonical text a host can write
         // into the ledger file.
         let text = format_loaded(&first.entries).expect("renders");

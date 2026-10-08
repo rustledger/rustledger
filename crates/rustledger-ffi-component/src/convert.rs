@@ -1924,7 +1924,8 @@ impl SessionState {
     /// which precomputes each held transaction's comparison key once —
     /// per-candidate matching would rebuild every key for every candidate.
     /// Same matcher as `rledger extract --existing`, unscoped (the session
-    /// has no importer account): a shared id link, or same date and same
+    /// has no importer account): a shared id link with the same first-posting
+    /// account, commodity and amount, or the same date and the same
     /// first-posting account, commodity and amount with similar
     /// payee/narration text. Held transactions are a multiset — each flags
     /// at most one candidate (#2421). One bool per

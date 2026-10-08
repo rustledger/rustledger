@@ -30,7 +30,7 @@ pub(super) struct ExistingLedger {
 ///   transactions in included ledgers were invisible at dedup time and genuine
 ///   duplicates got re-imported into the user's real ledger.
 /// - Elided amounts are interpolated by booking — a raw parse leaves them `None`,
-///   so `first_posting_amount` returned `None` and the amount comparison broke.
+///   so the account posting had no amount to compare and the match broke.
 ///
 /// Plugins and validation are intentionally skipped: dedup only needs the booked
 /// transaction set, and the existing ledger's own diagnostics aren't this

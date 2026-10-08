@@ -6,9 +6,10 @@
 //!   Finds transactions that are byte-for-byte identical (excluding metadata).
 //!
 //! - **Import** — [`find_import_duplicates`] matches imported transactions
-//!   against an existing ledger: shared id links (`^ofx-…`, `^csv-…`) first,
-//!   then same date + account + commodity + amount with identical or similar
-//!   payee/narration text. Existing transactions are a multiset, so each
+//!   against an existing ledger: shared id links (`^ofx-…`, `^csv-…`) with
+//!   the same account, commodity and amount first, then the same date,
+//!   account, commodity and amount with identical or similar payee/narration
+//!   text. Existing transactions are a multiset, so each
 //!   absorbs at most one new transaction.
 //!
 //! - **Fingerprint** (future, Phase 1) — stable BLAKE3 fingerprint match for

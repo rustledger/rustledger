@@ -312,11 +312,10 @@ impl CsvImporter {
         // word when the config named no currency (#2464). A row whose currency
         // nothing states is refused instead.
         let default_currency = || {
-            config.currency.clone().with_context(|| {
-                "no currency: the row has none and the importer config sets no \
-                 `currency`"
-                    .to_string()
-            })
+            config
+                .currency
+                .clone()
+                .context("no currency: the row has none and the importer config sets no `currency`")
         };
         let currency = match &csv_config.currency_column {
             Some(col) => {

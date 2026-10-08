@@ -3949,7 +3949,8 @@ default_expense = "Expenses:Uncategorized"
         }
         let args = Args::parse_from(argv);
         run(&args, &csv_path).map_err(|e| format!("{e:#}"))?;
-        Ok(std::fs::read_to_string(&output_path).unwrap())
+        // Absent when every row was a duplicate: extract leaves it unwritten.
+        Ok(std::fs::read_to_string(&output_path).unwrap_or_default())
     }
 
     /// #2464: an entry without `currency` takes the account's sole `open`
@@ -3998,6 +3999,21 @@ default_expense = "Expenses:Uncategorized"
         ])
         .unwrap();
         assert!(out.contains("-5.00 CHF"), "{out}");
+    }
+
+    /// #2464 with #2421: the currency taken from the `open` is the one the
+    /// imported rows carry, so `--existing` dedup (scoped by commodity once
+    /// #2421 lands) compares the right commodity: the EUR row already in the
+    /// ledger is recognized, not re-imported as a USD row.
+    #[test]
+    fn the_resolved_currency_is_what_dedup_compares() {
+        let ledger = "2024-01-01 open Assets:Bank:Euro EUR\n2024-01-01 open Expenses:X\n\
+                      2024-01-15 * \"Coffee\"\n  Assets:Bank:Euro  -5.00 EUR\n  Expenses:X\n";
+        let out = run_entry_without_currency(Some(ledger), "--existing").unwrap();
+        assert!(
+            !out.contains("Coffee"),
+            "the EUR duplicate must be skipped: {out}"
+        );
     }
 
     /// #2464: an `open` with no currency constraint cannot answer either.

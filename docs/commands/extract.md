@@ -269,8 +269,9 @@ account = "Assets:Bank:MyBank"
 
 # Currency of the amounts. There is no default: when this is left out,
 # extract uses the currency of the account's `open` directive in the
-# --ledger or --existing ledger, if it names exactly one, and otherwise
-# stops with an error rather than guess.
+# --ledger ledger (or in --existing, if --ledger does not open the
+# account), when that `open` names exactly one, and otherwise stops with
+# an error rather than guess.
 currency = "EUR"
 
 # Column mapping (0-indexed)

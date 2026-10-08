@@ -226,13 +226,14 @@ A WASM importer can give each transaction the source format's own id, so
 `^wasm-<importer>/<id>`:
 
 ```beancount
-2024-01-15 * "Bakery" "Croissant" ^wasm-mt940/2024-0001
+2024-01-15 * "Bakery" "Croissant" ^wasm-MT940/2024-0001
   Assets:Bank  -2.50 EUR
   Expenses:Unknown
 ```
 
-The importer name is lowercased and the id is sanitized as for CSV ids. Each
-importer is its own namespace: ids are only compared with ids from the same
+The importer name is encoded so that two different names never share a
+namespace (`My Bank` becomes `My_20Bank`), and the id is sanitized as for CSV
+ids. Each importer is its own namespace: ids are only compared with ids from the same
 importer, so moving a bank's statements to a different importer or format
 falls back to comparing text. An importer that adds no such link dedups by
 date, amount and text.

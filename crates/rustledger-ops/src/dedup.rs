@@ -1161,6 +1161,35 @@ mod tests {
         let ofx = txn("2024-01-15", "Croissant", BANK, "-2.50", "EUR", &["ofx-2"]);
         assert_eq!(import(&[ofx], std::slice::from_ref(&a)).len(), 1);
 
+        // Importers whose names differ only in characters a lossy sanitizer
+        // would merge are separate namespaces: one's id never matches the
+        // other's, so a different transaction with the same id and amount
+        // is not dropped.
+        let mut namespaces: Vec<String> = ["My Bank", "My-Bank", "My_Bank", "My/Bank", "my-bank"]
+            .iter()
+            .map(|name| id(name, "7"))
+            .collect();
+        namespaces.sort();
+        namespaces.dedup();
+        assert_eq!(namespaces.len(), 5, "{namespaces:?}");
+        let mine = txn(
+            "2024-01-15",
+            "Rent",
+            BANK,
+            "-9.00",
+            "EUR",
+            &[&id("My Bank", "7")],
+        );
+        let theirs = txn(
+            "2024-01-15",
+            "Gym",
+            BANK,
+            "-9.00",
+            "EUR",
+            &[&id("My-Bank", "7")],
+        );
+        assert!(import(&[theirs], std::slice::from_ref(&mine)).is_empty());
+
         // `wasm-` without an importer namespace is not an id: two such links
         // that differ do not make the rows distinct.
         let bare1 = txn("2024-01-15", "Croissant", BANK, "-2.50", "EUR", &["wasm-1"]);

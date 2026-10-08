@@ -1305,11 +1305,18 @@ pub fn id_link(prefix: &str, raw: &str) -> Option<String> {
 /// re-import (#2519): `wasm-<importer>/<id>`.
 ///
 /// `importer` names the namespace and should be the importer's `name` (the
-/// one given to `wasm_importer_main!`). It is lowercased, and any character
-/// other than an ASCII letter, digit, `-`, `_` or `.` becomes `-` (a `/`
-/// included, since the first `/` ends the namespace). `raw` is sanitized as
-/// [`id_link`] does. `None` when either has no letter or digit, in which
-/// case add no link: the transaction then dedups by date, amount and text.
+/// one given to `wasm_importer_main!`). It is encoded **injectively**, so two
+/// different names can never share a namespace: ASCII letters (case kept),
+/// digits, `-` and `.` are kept, and every other byte, `_` and `/` included,
+/// becomes `_` and two hex digits (`My Bank` is `My_20Bank`, `a/b` is
+/// `a_2Fb`, `a_b` is `a_5Fb`). A sanitizing map that turned all of those into
+/// `-` would put `My Bank` and `my-bank` in one namespace, where one
+/// importer's id could match the other's and drop a different transaction.
+/// `raw` is sanitized as [`id_link`] does (ids that differ only in
+/// characters it maps to `-` can collide; dedup then still requires the same
+/// account, commodity and amount). `None` when the name is empty or the id
+/// has no letter or digit, in which case add no link: the transaction then
+/// dedups by date, amount and text.
 ///
 /// Push the result onto the transaction's `links` (without a `^`):
 ///
@@ -1318,9 +1325,10 @@ pub fn id_link(prefix: &str, raw: &str) -> Option<String> {
 ///
 /// assert_eq!(
 ///     wasm_id_link("MT940", " 2024/0001 ").as_deref(),
-///     Some("wasm-mt940/2024/0001")
+///     Some("wasm-MT940/2024/0001")
 /// );
-/// assert_eq!(wasm_id_link("My Bank", "a:b").as_deref(), Some("wasm-my-bank/a-b"));
+/// assert_eq!(wasm_id_link("My Bank", "a:b").as_deref(), Some("wasm-My_20Bank/a-b"));
+/// assert_ne!(wasm_id_link("My Bank", "1"), wasm_id_link("My-Bank", "1"));
 /// assert_eq!(wasm_id_link("MT940", "--"), None);
 /// assert_eq!(wasm_id_link("", "123"), None);
 /// ```
@@ -1330,19 +1338,18 @@ pub fn id_link(prefix: &str, raw: &str) -> Option<String> {
 /// transaction on any date.
 #[must_use]
 pub fn wasm_id_link(importer: &str, raw: &str) -> Option<String> {
-    let name: String = importer
-        .trim()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect();
-    if !name.chars().any(|c| c.is_ascii_alphanumeric()) {
+    use std::fmt::Write as _;
+    if importer.is_empty() {
         return None;
+    }
+    let mut name = String::with_capacity(importer.len());
+    for byte in importer.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.') {
+            name.push(char::from(byte));
+        } else {
+            // Infallible: writing to a String.
+            let _ = write!(name, "_{byte:02X}");
+        }
     }
     id_link(&format!("{WASM_ID_LINK_PREFIX}{name}/"), raw)
 }

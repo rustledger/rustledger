@@ -84,7 +84,7 @@
 //!
 //! let mut links = Vec::new();
 //! if let Some(link) = wasm_id_link("MT940", &reference) {
-//!     links.push(link); // `wasm-mt940/<reference>`, no `^`
+//!     links.push(link); // `wasm-MT940/<reference>`, no `^`
 //! }
 //! // ... TransactionData { links, .. }
 //! ```

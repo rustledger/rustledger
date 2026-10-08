@@ -568,7 +568,7 @@ impl Executor<'_> {
             ),
         );
         !matches!(
-            self.evaluate_from_filter(&Expr::Column(name.to_string()), &sample),
+            self.evaluate_from_filter(&Expr::Column(name.to_string()), &sample, 0, None),
             Err(QueryError::UnknownColumn(_))
         )
     }
@@ -1271,23 +1271,36 @@ impl Executor<'_> {
         // one definition `SELECT` iterates too. JOURNAL used to walk the
         // ledger itself and applied only the filter expression, so `OPEN ON`
         // and `CLOSE ON` were silently ignored here (#2401).
-        for (_, txn) in
+        //
+        // A FROM filter that reads a posting column is a row filter, joined
+        // with AND to the account match, as beanquery's `transform_journal` makes
+        // it (#2414); an entry-level one keeps or drops the transaction.
+        let from_filter = query.from.as_ref().and_then(|f| f.filter.as_ref());
+        let row_filter = from_filter.is_some_and(super::evaluation::from_filter_reads_postings);
+        for (directive_index, txn) in
             self.window_transactions(query.from.as_ref(), self.resolved_directives().enumerate())?
         {
-            if let Some(from) = &query.from
-                && let Some(filter) = &from.filter
-                && !self.evaluate_from_filter(filter, &txn)?
+            if let Some(filter) = from_filter
+                && !row_filter
+                && (txn.postings.is_empty()
+                    || !self.evaluate_from_filter(filter, &txn, 0, directive_index)?)
             {
                 continue;
             }
 
-            for posting in &txn.postings {
+            for (i, posting) in txn.postings.iter().enumerate() {
                 // Match account using regex or substring
-                let matches = if let Some(ref regex) = account_regex {
+                let mut matches = if let Some(ref regex) = account_regex {
                     regex.is_match(&posting.account)
                 } else {
                     posting.account.contains(account_pattern)
                 };
+                if matches
+                    && row_filter
+                    && let Some(filter) = from_filter
+                {
+                    matches = self.evaluate_from_filter(filter, &txn, i, directive_index)?;
+                }
 
                 if matches {
                     // Resolve the posting into a Position once. Used for
@@ -1507,14 +1520,25 @@ impl Executor<'_> {
         // `spanned_directives`.
         let all_directives = self.resolved_directives();
 
-        for directive in all_directives {
+        // PRINT prints entries, so its FROM filter is entry-level, and a
+        // posting column in it is an error, as in both bean-query versions:
+        // which entries would `account ~ 'Bank'` print? `has_account()` says
+        // it (#2414).
+        let filter = query.from.as_ref().and_then(|f| f.filter.as_ref());
+        if let Some(column) = filter.and_then(super::evaluation::print_filter_posting_column) {
+            return Err(QueryError::Evaluation(format!(
+                "column \"{column}\" is a posting column, and PRINT prints entries: \
+                 to print the entries with a posting to an account, \
+                 use FROM has_account('<regex>')"
+            )));
+        }
+
+        for (directive_index, directive) in all_directives.enumerate() {
             // Apply FROM clause filter if present
-            if let Some(from) = &query.from
-                && let Some(filter) = &from.filter
-            {
+            if let Some(filter) = filter {
                 // PRINT filters at transaction level
                 if let Directive::Transaction(txn) = directive
-                    && !self.evaluate_from_filter(filter, txn)?
+                    && !self.evaluate_from_filter(filter, txn, 0, Some(directive_index))?
                 {
                     continue;
                 }

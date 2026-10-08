@@ -266,12 +266,17 @@ impl<'a> Executor<'a> {
                 _ => {}
             }
         }
-        account.is_some_and(|a| {
-            self.account_info
-                .get(a)
-                .and_then(|info| info.booking.as_deref())
-                .is_some_and(|b| b.eq_ignore_ascii_case("AVERAGE"))
-        })
+        account.is_some_and(|a| self.account_is_average(a))
+    }
+
+    /// Is `account` opened with the AVERAGE booking method? A sum of its
+    /// positions is then merged into one weighted-average pool, here and in
+    /// a row-filtered BALANCES (`scan_postings`).
+    pub(super) fn account_is_average(&self, account: &str) -> bool {
+        self.account_info
+            .get(account)
+            .and_then(|info| info.booking.as_deref())
+            .is_some_and(|b| b.eq_ignore_ascii_case("AVERAGE"))
     }
 
     pub(super) fn evaluate_aggregate_expr(

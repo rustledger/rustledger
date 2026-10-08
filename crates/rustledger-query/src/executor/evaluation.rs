@@ -12,12 +12,29 @@ use super::system_tables::TxnAccounts;
 use super::types::{PostingContext, Row, Value, WindowContext};
 
 impl Executor<'_> {
-    /// Evaluate a FROM filter on a transaction.
+    /// Evaluate a FROM filter on one posting of a transaction.
+    ///
+    /// `posting_index` is the posting a posting column reads. An
+    /// entry-level filter ([`from_filter_reads_postings`] is false) answers
+    /// the same for every posting, so the posting sources evaluate it once
+    /// per transaction; a posting-level one is evaluated per posting and
+    /// filters ROWS (#2414). This used to be evaluated once per
+    /// transaction against its FIRST posting, so `FROM account ~ 'Bank'`
+    /// kept the transactions whose first posting was the bank's.
     pub(super) fn evaluate_from_filter(
         &self,
         filter: &Expr,
         txn: &Transaction,
+        posting_index: usize,
+        directive_index: Option<usize>,
     ) -> Result<bool, QueryError> {
+        let ctx = || PostingContext {
+            transaction: txn.into(),
+            posting_index,
+            balance: None,
+            account_balance: None,
+            directive_index,
+        };
         // Handle special FROM predicates
         match filter {
             Expr::Function(func) => {
@@ -41,22 +58,20 @@ impl Executor<'_> {
                     // cannot drift.
                     self.entry_has_account(txn, &pattern)
                 } else {
-                    // For other functions, create a dummy context and evaluate
-                    let dummy_ctx = PostingContext {
-                        transaction: txn.into(),
-                        posting_index: 0,
-                        balance: None,
-                        account_balance: None,
-                        directive_index: None,
-                    };
-                    self.evaluate_predicate(filter, &dummy_ctx)
+                    self.evaluate_predicate(filter, &ctx())
                 }
             }
             Expr::BinaryOp(op) => {
                 use crate::ast::BinaryOperator;
-                // Handle YEAR = N, MONTH = N, etc.
+                // Handle YEAR = N, MONTH = N, etc. Only `=` and `!=`: these
+                // arms answer `!matches` for any other operator, so
+                // `FROM year > 2014` read as `year != 2014`. The rest go to
+                // the general evaluation.
+                let eq_or_ne = matches!(op.op, BinaryOperator::Eq | BinaryOperator::Ne);
                 match (&op.left, &op.right) {
-                    (Expr::Column(col), Expr::Literal(lit)) if col.to_uppercase() == "YEAR" => {
+                    (Expr::Column(col), Expr::Literal(lit))
+                        if eq_or_ne && col.to_uppercase() == "YEAR" =>
+                    {
                         // Handle both Integer and Number for year comparison
                         let year_val = match lit {
                             Literal::Integer(n) => Some(*n as i32),
@@ -74,7 +89,9 @@ impl Executor<'_> {
                             Ok(false)
                         }
                     }
-                    (Expr::Column(col), Expr::Literal(lit)) if col.to_uppercase() == "MONTH" => {
+                    (Expr::Column(col), Expr::Literal(lit))
+                        if eq_or_ne && col.to_uppercase() == "MONTH" =>
+                    {
                         // Handle both Integer and Number for month comparison
                         let month_val = match lit {
                             Literal::Integer(n) => Some(*n as u32),
@@ -106,30 +123,10 @@ impl Executor<'_> {
                         };
                         Ok(matches)
                     }
-                    _ => {
-                        // Fall back to posting-level evaluation
-                        let dummy_ctx = PostingContext {
-                            transaction: txn.into(),
-                            posting_index: 0,
-                            balance: None,
-                            account_balance: None,
-                            directive_index: None,
-                        };
-                        self.evaluate_predicate(filter, &dummy_ctx)
-                    }
+                    _ => self.evaluate_predicate(filter, &ctx()),
                 }
             }
-            _ => {
-                // For other expressions, create a dummy context
-                let dummy_ctx = PostingContext {
-                    transaction: txn.into(),
-                    posting_index: 0,
-                    balance: None,
-                    account_balance: None,
-                    directive_index: None,
-                };
-                self.evaluate_predicate(filter, &dummy_ctx)
-            }
+            _ => self.evaluate_predicate(filter, &ctx()),
         }
     }
 
@@ -305,7 +302,17 @@ impl Executor<'_> {
         name: &str,
         ctx: &PostingContext,
     ) -> Result<Value, QueryError> {
-        let posting = &ctx.transaction.postings[ctx.posting_index];
+        let placeholder;
+        let posting = if let Some(posting) = ctx.transaction.postings.get(ctx.posting_index) {
+            posting
+        } else {
+            // A transaction without postings, under an entry-level FROM
+            // filter (`PRINT FROM narration ~ ...`). Its entry columns are
+            // read; a posting column reads a posting with nothing in it.
+            // This indexed the postings and panicked.
+            placeholder = rustledger_core::Posting::auto("");
+            &placeholder
+        };
 
         match name {
             "date" => Ok(Value::Date(ctx.transaction.date)),
@@ -581,5 +588,137 @@ impl Executor<'_> {
             }
         }
         Ok(row)
+    }
+}
+
+/// Columns a `FROM` filter can read with one value per transaction: the
+/// entry's own, which every posting row of a transaction shares.
+///
+/// An allowlist on purpose. A filter reading only these is evaluated once per
+/// transaction and keeps or drops it whole; any other filter is evaluated per
+/// posting and filters rows. Leaving an entry column off this list only costs
+/// an evaluation per posting, with the same answer; putting a posting column
+/// on it brings back #2414, where the first posting answered for all of them.
+/// `filename`, `lineno` and `meta` are absent: on a posting row they are the
+/// posting's.
+const FROM_ENTRY_COLUMNS: &[&str] = &[
+    "date",
+    "year",
+    "month",
+    "day",
+    "flag",
+    "payee",
+    "narration",
+    "description",
+    "tags",
+    "links",
+    "accounts",
+    "type",
+    "id",
+    "entry",
+];
+
+/// Does this `FROM` filter read anything that differs between the postings of
+/// one transaction (#2414)?
+///
+/// beanquery compiles the `FROM` expression into the `WHERE` clause
+/// (`compiler.py`, `_select`: `c_where = EvalAnd([c_from_expr, c_where])`), so
+/// on the posting sources a posting column in it filters rows, after
+/// `OPEN` / `CLOSE` / `CLEAR` have rewritten the stream. A filter that reads
+/// only entry columns gives every row of a transaction the same answer, which
+/// is why evaluating it once per transaction is the same thing.
+pub(super) fn from_filter_reads_postings(expr: &Expr) -> bool {
+    match expr {
+        Expr::Column(name) => !FROM_ENTRY_COLUMNS
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(name)),
+        Expr::Function(func) => match func.name.to_uppercase().as_str() {
+            // Asks about the whole entry; its argument is a pattern, and a
+            // bare word there is the pattern, not a column.
+            "HAS_ACCOUNT" => false,
+            // Read the row's posting metadata (`ENTRY_META` reads the entry's).
+            "META" | "POSTING_META" | "ANY_META" => true,
+            _ => func.args.iter().any(from_filter_reads_postings),
+        },
+        Expr::Attribute { operand, .. } | Expr::Subscript { operand, .. } => {
+            from_filter_reads_postings(operand)
+        }
+        Expr::BinaryOp(op) => {
+            from_filter_reads_postings(&op.left) || from_filter_reads_postings(&op.right)
+        }
+        Expr::UnaryOp(op) => from_filter_reads_postings(&op.operand),
+        Expr::Paren(inner) => from_filter_reads_postings(inner),
+        Expr::Between { value, low, high } => {
+            from_filter_reads_postings(value)
+                || from_filter_reads_postings(low)
+                || from_filter_reads_postings(high)
+        }
+        Expr::Set(items) => items.iter().any(from_filter_reads_postings),
+        Expr::Literal(_) => false,
+        // Neither belongs in a FROM filter; answering per posting is the
+        // reading that cannot be wrong.
+        Expr::Wildcard | Expr::Window(_) => true,
+    }
+}
+
+/// Columns of a posting row that the entries `PRINT` prints do not have:
+/// beanquery's `postings` columns that its `entries` table lacks, plus
+/// rledger's own posting columns.
+const POSTING_ONLY_COLUMNS: &[&str] = &[
+    "account",
+    "other_accounts",
+    "position",
+    "units",
+    "cost",
+    "weight",
+    "balance",
+    "account_balance",
+    "number",
+    "currency",
+    "posting_flag",
+    "cost_number",
+    "cost_currency",
+    "cost_date",
+    "cost_label",
+    "price",
+    "has_cost",
+    "location",
+    "entry",
+];
+
+/// The first posting-only column this `PRINT` `FROM` filter reads, if any.
+///
+/// `PRINT` returns whole entries, and a posting predicate does not say which
+/// entries to print, so both bean-query versions reject it: beanquery 0.2
+/// compiles `PRINT`'s `FROM` against its `entries` table (`column "account"
+/// not found in table "entries"`), beancount v2 against its FROM context. This
+/// used to read the entry's first posting instead (#2414).
+pub(super) fn print_filter_posting_column(expr: &Expr) -> Option<&str> {
+    match expr {
+        Expr::Column(name) => POSTING_ONLY_COLUMNS
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(name))
+            .then_some(name.as_str()),
+        Expr::Function(func) => {
+            if func.name.eq_ignore_ascii_case("HAS_ACCOUNT") {
+                None
+            } else {
+                func.args.iter().find_map(print_filter_posting_column)
+            }
+        }
+        Expr::Attribute { operand, .. } | Expr::Subscript { operand, .. } => {
+            print_filter_posting_column(operand)
+        }
+        Expr::BinaryOp(op) => {
+            print_filter_posting_column(&op.left).or_else(|| print_filter_posting_column(&op.right))
+        }
+        Expr::UnaryOp(op) => print_filter_posting_column(&op.operand),
+        Expr::Paren(inner) => print_filter_posting_column(inner),
+        Expr::Between { value, low, high } => print_filter_posting_column(value)
+            .or_else(|| print_filter_posting_column(low))
+            .or_else(|| print_filter_posting_column(high)),
+        Expr::Set(items) => items.iter().find_map(print_filter_posting_column),
+        Expr::Window(call) => call.args.iter().find_map(print_filter_posting_column),
+        Expr::Literal(_) | Expr::Wildcard => None,
     }
 }

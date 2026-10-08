@@ -34,7 +34,15 @@ impl Executor<'_> {
             }
         };
 
-        let posting = &ctx.transaction.postings[ctx.posting_index];
+        // A transaction without postings has no posting metadata to read
+        // (see `evaluate_column`).
+        let placeholder;
+        let posting = if let Some(posting) = ctx.transaction.postings.get(ctx.posting_index) {
+            posting
+        } else {
+            placeholder = rustledger_core::Posting::auto("");
+            &placeholder
+        };
 
         // beanquery exposes `filename`/`lineno` as members of a posting's /
         // entry's metadata. Resolve them per scope: posting metadata carries

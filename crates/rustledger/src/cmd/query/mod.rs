@@ -20,6 +20,7 @@ use clap::Parser;
 use rustledger_booking::merge_with_padding_spanned;
 use rustledger_core::DisplayContext;
 use rustledger_loader::LoadOptions;
+use rustledger_validate::is_advisory_only_code;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -192,9 +193,20 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
     crate::cmd::loadcache::bail_on_booking_errors(&ledger, file)?;
 
     // Report errors to stderr (matching bean-query behavior)
-    // Continue with successfully parsed directives rather than bailing
-    if !ledger.errors.is_empty() && !args.no_errors {
-        for err in &ledger.errors {
+    // Continue with successfully parsed directives rather than bailing.
+    //
+    // Advisory-only codes are skipped, as `check` skips them: beancount does
+    // not flag closing an account that still holds a balance (E1004), so
+    // bean-query prints nothing for it. They are `rledger lint`'s to report.
+    // #2238 turned validation on here without this skip, so `query` printed
+    // an E1004 that `check` and bean-query both stay silent on.
+    let reported: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|err| !is_advisory_only_code(&err.code))
+        .collect();
+    if !reported.is_empty() && !args.no_errors {
+        for err in reported {
             eprintln!("{}: {}", err.code, err.message);
         }
         eprintln!();

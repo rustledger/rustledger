@@ -444,27 +444,40 @@ and `10 EUR` is `-30 USD`, the last value in currency order. Pinned by
 
 ### 16. PRINT Output Layout
 
-`PRINT` writes each entry the way `rledger format` writes it, so the
-spacing comes from rustledger's formatter, not beancount's printer. This
-section covers layout only. Transactions are laid out the same way in both,
-and the other directives differ in spacing:
+`PRINT` writes each entry the way `rledger format` writes it, so the layout
+comes from rustledger's formatter, not beancount's printer. The entries are
+the same; how they are written differs:
 
 | | rustledger | bean-query |
 |---|---|---|
 | `open` | `2024-01-01 open Assets:Cash USD` | account padded to a fixed column, then `USD` |
 | `price` | `2024-01-03 price X 110 USD` | number right-aligned at a fixed column |
 | `balance` | `2024-01-04 balance Assets:Cash -300 USD` | number right-aligned at a fixed column |
+| failing `balance` | the assertion only | adds `; Diff: <amount>` |
 | postings | aligned within each entry | aligned within each entry |
 | `render_commas` | no separators | separators |
+| comments inside a transaction | kept | dropped |
+| empty payee or narration | `""` kept | omitted |
+| metadata | keys sorted | source order |
+| tags and links | source order | sorted |
+| newline in a string | `\n` escape | raw newline |
 
 The fixed columns are beancount's printer layout. rustledger keeps one
 canonical form for every directive it writes as text (`rledger format`,
 `rledger add`, `rledger extract`, the component's `format.entry`), so
-anything `PRINT` prints is already formatted. One layout difference
-remains: `rledger format` aligns postings across a whole file, and `PRINT`,
-like bean-query, aligns each entry on its own. Thousands separators would
-need the ledger's display context in the query engine, which `PRINT` does
-not have yet. Pinned by
+anything `PRINT` prints is already formatted. Metadata is sorted because
+rustledger stores it unordered, so source order is not available. One
+difference from `rledger format` remains: `rledger format` aligns postings
+across a whole file, and `PRINT`, like bean-query, aligns each entry on its
+own. Thousands separators would need the ledger's display context in the
+query engine, which `PRINT` does not have yet.
+
+Over the 742 files of the downloaded compatibility corpus, 342 of the 615
+that both tools print (bean-query fails on 45 more, and rustledger declines
+82 that did not parse or book, #1908) come out identical, or identical but
+for spacing. The rest differ by the rows above, or by the loader differences
+listed elsewhere on this page (decimal precision, booking, plugins), which
+`SELECT` shows as well. Pinned by
 `crates/rustledger-query/tests/print_entry_stream.rs` (issue #2426).
 
 ## BQL Query Compatibility

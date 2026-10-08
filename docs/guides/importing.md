@@ -125,6 +125,10 @@ transaction_id_column = "Transaction ID"
 ```
 
 Characters a link may not contain become `-`, and a blank cell adds no link.
+A column the file does not have is an error naming the file's columns. Ids
+that repeat within one statement get a warning: the column must be unique per
+transaction, since `--existing` treats an equal id with an equal amount as the
+same transaction on any date.
 Duplicate detection treats the id, together with the amount, as identity, so a
 re-import with `--existing` matches a transaction even after you rename its
 payee or narration, rather than relying on a fuzzy guess (see below).

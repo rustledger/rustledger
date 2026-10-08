@@ -115,9 +115,31 @@ impl CsvImporter {
             HashMap::default()
         };
 
+        // A configured id column the header does not have would fail every
+        // row with the same warning and then report "no transactions"; say
+        // what is wrong once, up front.
+        if let Some(ColumnSpec::Name(name)) = &csv_config.transaction_id_column
+            && csv_config.has_header
+            && !header_map.contains_key(name)
+        {
+            let mut columns: Vec<(&String, &usize)> = header_map.iter().collect();
+            columns.sort_by_key(|(_, i)| **i);
+            let columns: Vec<&str> = columns.iter().map(|(n, _)| n.as_str()).collect();
+            anyhow::bail!(
+                "transaction_id_column {name:?} is not a column of this file (its columns: {})",
+                columns.join(", ")
+            );
+        }
+
         let mut directives = Vec::new();
         let mut warnings = Vec::new();
         let mut row_num = csv_config.skip_rows;
+        // Rows per id link, to catch a `transaction_id_column` whose values
+        // repeat. Dedup treats an equal id (with equal money) as the same
+        // transaction on any date, so a column that is not unique per
+        // transaction (a category, a type, a date) would make it match the
+        // wrong rows.
+        let mut id_rows: HashMap<String, Vec<usize>> = HashMap::default();
 
         for result in reader.records().skip(csv_config.skip_rows) {
             row_num += 1;
@@ -137,12 +159,42 @@ impl CsvImporter {
                 &header_map,
                 engine,
             ) {
-                Ok(Some(txn)) => directives.push(Directive::Transaction(txn)),
+                Ok(Some(txn)) => {
+                    if csv_config.transaction_id_column.is_some()
+                        && let Some(link) = txn.links.iter().find(|l| {
+                            l.as_str()
+                                .starts_with(rustledger_ops::dedup::CSV_ID_LINK_PREFIX)
+                        })
+                    {
+                        id_rows
+                            .entry(link.as_str().to_string())
+                            .or_default()
+                            .push(row_num);
+                    }
+                    directives.push(Directive::Transaction(txn));
+                }
                 Ok(None) => {} // Skip empty rows
                 Err(e) => {
                     warnings.push(format!("Row {row_num}: {e}"));
                 }
             }
+        }
+
+        let mut repeated: Vec<(String, Vec<usize>)> = id_rows
+            .into_iter()
+            .filter(|(_, rows)| rows.len() > 1)
+            .collect();
+        if !repeated.is_empty() {
+            repeated.sort_by_key(|(_, rows)| rows[0]);
+            let (link, rows) = &repeated[0];
+            let rows: Vec<String> = rows.iter().take(5).map(ToString::to_string).collect();
+            warnings.push(format!(
+                "{} transaction id(s) appear on more than one row (e.g. ^{link} on rows {}); \
+                 `transaction_id_column` should name a column that is unique per \
+                 transaction, or `extract --existing` may match the wrong rows",
+                repeated.len(),
+                rows.join(", "),
+            ));
         }
 
         let mut result = ImportResult::new(directives);
@@ -611,16 +663,10 @@ mod tests {
             ]
         );
 
-        // A configured column the file does not have is a config error per
-        // row, not a silent "no ids".
+        // A configured column the file does not have is a config error, not
+        // a silent "no ids" (see the up-front check's own test).
         let csv_content = "Date,Description,Amount\n2024-01-15,Coffee,-4.50\n";
-        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
-        assert!(result.directives.is_empty());
-        assert!(
-            result.warnings[0].contains("transaction id column"),
-            "{:?}",
-            result.warnings
-        );
+        assert!(CsvImporter.extract_string(csv_content, &config).is_err());
     }
 
     /// A CSV saved on Windows (CRLF line ends, a stray trailing space) still
@@ -644,6 +690,61 @@ mod tests {
             })
             .collect();
         assert_eq!(links, ["csv-tx_1", "csv-tx_2"]);
+    }
+
+    /// A `transaction_id_column` the header lacks fails once, naming the
+    /// column and the file's columns, instead of one warning per row.
+    #[test]
+    fn test_csv_import_missing_transaction_id_column_fails_up_front() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("EUR")
+            .transaction_id_column("Id")
+            .build()
+            .unwrap();
+        let csv = "Date,Description,Amount\n2024-01-15,Coffee,-4.50\n2024-01-16,Tea,-2.00\n";
+        let err = CsvImporter
+            .extract_string(csv, &config)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("transaction_id_column \"Id\" is not a column of this file (its columns: Date, Description, Amount)"),
+            "{err}"
+        );
+    }
+
+    /// Ids that repeat within one statement are reported: a column that is
+    /// not unique per transaction would make id dedup match the wrong rows.
+    #[test]
+    fn test_csv_import_warns_on_repeated_transaction_ids() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("EUR")
+            .transaction_id_column("Kind")
+            .build()
+            .unwrap();
+        let csv = "Kind,Date,Description,Amount\nfood,2024-01-15,Coffee,-4.50\nrent,2024-01-15,Rent,-900\n\
+                   food,2024-01-16,Tea,-2.00\nrent,2024-02-15,Rent,-900\nx1,2024-02-16,Cake,-3\n";
+        let result = CsvImporter.extract_string(csv, &config).unwrap();
+        assert_eq!(result.directives.len(), 5);
+        assert_eq!(result.warnings.len(), 1, "{:?}", result.warnings);
+        assert!(
+            result.warnings[0].starts_with(
+                "2 transaction id(s) appear on more than one row (e.g. ^csv-food on rows 1, 3)"
+            ),
+            "{:?}",
+            result.warnings
+        );
+
+        // Unique ids, and blank cells, warn about nothing.
+        let csv = "Kind,Date,Description,Amount\na,2024-01-15,Coffee,-4.50\n,2024-01-16,Tea,-2.00\n,2024-01-17,Cake,-3\n";
+        assert!(
+            CsvImporter
+                .extract_string(csv, &config)
+                .unwrap()
+                .warnings
+                .is_empty()
+        );
     }
 
     #[test]

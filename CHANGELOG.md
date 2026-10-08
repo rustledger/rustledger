@@ -128,7 +128,7 @@ Shipped work, by area. Forward-looking plans live in [docs/roadmap/](docs/roadma
 
 ### Importing & Ingestion
 
-- CSV `transaction_id_column`: a bank's per-transaction id becomes a `^csv-<id>` link (sanitized like OFX's `^ofx-<FITID>`), which `extract --existing` treats as identity (issue #2387)
+- CSV `transaction_id_column`: a bank's per-transaction id becomes a `^csv-<id>` link (sanitized like OFX's `^ofx-<FITID>`), which `extract --existing` treats as identity; a column the file lacks is an error naming its columns, and ids repeating within one statement are warned about (issue #2387)
 - Import trait system (`Importer` trait, `ImportResult`, registry)
 - CSV importer with column mapping, date formats, and debit/credit split
 - OFX/QFX importer

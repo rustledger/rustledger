@@ -125,8 +125,9 @@ transaction_id_column = "Transaction ID"
 ```
 
 Characters a link may not contain become `-`, and a blank cell adds no link.
-Duplicate detection treats the id as identity, so a re-import with
-`--existing` is exact rather than a fuzzy guess (see below).
+Duplicate detection treats the id, together with the amount, as identity, so a
+re-import with `--existing` matches a transaction even after you rename its
+payee or narration, rather than relying on a fuzzy guess (see below).
 
 ### Account Mapping
 
@@ -299,7 +300,11 @@ are compared. A new transaction is a duplicate when:
 A ledger entry that splits the account's leg over several postings is
 compared by its net movement too, and a transfer you already imported from the
 other account's statement counts as a duplicate, since it already records this
-account's leg.
+account's leg. A row from a custom (WASM) importer that does not post to the
+importer's account at all is compared by its first posting instead. Two rows
+with no payee or narration match when date and amount do, so a statement with
+no description column still re-imports to nothing. Which rows are kept does
+not depend on the order the statement or the ledger lists them in.
 
 Each existing transaction absorbs at most one new one, so two identical
 coffees on the same day are both kept when the ledger holds only one of them.

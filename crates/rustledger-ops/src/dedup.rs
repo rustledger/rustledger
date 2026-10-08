@@ -211,6 +211,12 @@ pub struct ImportDuplicate {
 /// distinct transactions however alike they look. When only one side has an
 /// id (a ledger imported before ids were emitted), the text passes decide.
 ///
+/// Rows are visited, and candidates offered, in a canonical content order, so
+/// which transactions survive depends only on the contents of the statement
+/// and the ledger, never on the order either lists them in. Identical empty
+/// text counts as identical, so a statement with no description column still
+/// re-imports to nothing.
+///
 /// Existing keys are computed once and bucketed by date, account, commodity
 /// and amount, so the cost is near-linear in `new + existing` rather than
 /// their product (#2422).
@@ -252,12 +258,24 @@ pub fn find_import_duplicates(
     let mut consumed = vec![false; existing.len()];
     let mut matched: Vec<Option<(usize, DuplicateReason)>> = vec![None; new.len()];
 
+    // Visit new rows in a canonical content order (input order only among
+    // identical rows), and candidates likewise (see `Index::build`), so the
+    // rows that survive are a function of the two statements' CONTENTS: the
+    // order rows appear in the file or the ledger cannot change which
+    // transactions are kept. Without this, the greedy fuzzy pass let an
+    // earlier row claim the entry a later, better row needed.
+    let mut order: Vec<usize> = (0..new.len()).collect();
+    order.sort_by(|&a, &b| {
+        canonical(new_keys[a].as_ref().map(|(k, _)| k))
+            .cmp(&canonical(new_keys[b].as_ref().map(|(k, _)| k)))
+    });
+
     // Pass 1: shared id links. The id decides whatever the date or text say,
     // but the money must agree: a sanitized link can collide (`a b` and `a:b`
     // both become `…-a-b`), and a collision must not drop a different
     // transaction. A bank's id for one transaction does not change amount.
-    for (new_i, entry) in new_keys.iter().enumerate() {
-        let Some((key, in_scope)) = entry else {
+    for &new_i in &order {
+        let Some((key, in_scope)) = &new_keys[new_i] else {
             continue;
         };
         let index = index_for(*in_scope);
@@ -279,11 +297,11 @@ pub fn find_import_duplicates(
 
     // Passes 2 and 3: same amount bucket, text decides.
     for exact in [true, false] {
-        for (new_i, entry) in new_keys.iter().enumerate() {
+        for &new_i in &order {
             if matched[new_i].is_some() {
                 continue;
             }
-            let Some((key, in_scope)) = entry else {
+            let Some((key, in_scope)) = &new_keys[new_i] else {
                 continue;
             };
             let index = index_for(*in_scope);
@@ -299,7 +317,9 @@ pub fn find_import_duplicates(
                         continue;
                     }
                     let hit = if exact {
-                        !key.text.is_empty() && key.text == ek.text
+                        // Equal text, empty included: a statement with no
+                        // description column still re-imports to nothing.
+                        key.text == ek.text
                     } else {
                         fuzzy_text_match(&key.text, &ek.text, threshold)
                     };
@@ -353,11 +373,36 @@ impl<'a> Index<'a> {
                 by_id.entry(id).or_default().push(i);
             }
         }
+        // Candidates in canonical content order (index order among equals),
+        // so the ledger's directive order cannot decide which entry a row
+        // claims.
+        let rank = |i: &usize| (canonical(keys[*i].as_ref()), *i);
+        for bucket in by_amount.values_mut().chain(by_id.values_mut()) {
+            bucket.sort_by(|a, b| rank(a).cmp(&rank(b)));
+        }
         Self {
             keys,
             by_amount,
             by_id,
         }
+    }
+}
+
+/// A content-only ordering key for a transaction's dedup key.
+fn canonical<'k>(
+    key: Option<&'k TxnKey<'_>>,
+) -> (bool, &'k str, Vec<&'k str>, Vec<(&'k str, &'k str, String)>) {
+    match key {
+        None => (false, "", Vec::new(), Vec::new()),
+        Some(k) => (
+            true,
+            k.text.as_str(),
+            k.ids.clone(),
+            k.amounts
+                .iter()
+                .map(|a| (a.account, a.currency, format!("{} {}", a.date, a.number)))
+                .collect(),
+        ),
     }
 }
 
@@ -1187,5 +1232,20 @@ mod tests {
             import(std::slice::from_ref(&other), std::slice::from_ref(&other)).len(),
             1
         );
+    }
+
+    #[test]
+    fn row_order_does_not_decide_which_row_a_fuzzy_match_claims() {
+        // "coffee" and "shop" both fuzzily match the one "coffee shop" entry.
+        // Which survives must not depend on which the statement lists first.
+        let existing = txn("2024-01-15", "coffee shop", BANK, "-4.00", "EUR", &[]);
+        let a = txn("2024-01-15", "coffee", BANK, "-4.00", "EUR", &[]);
+        let b = txn("2024-01-15", "shop", BANK, "-4.00", "EUR", &[]);
+        let dropped = |new: &[Transaction]| {
+            let d = import(new, std::slice::from_ref(&existing));
+            assert_eq!(d.len(), 1);
+            new[d[0].new_index].narration.as_str().to_string()
+        };
+        assert_eq!(dropped(&[a.clone(), b.clone()]), dropped(&[b, a]));
     }
 }

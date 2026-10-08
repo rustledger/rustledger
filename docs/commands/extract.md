@@ -261,10 +261,14 @@ rledger extract statement.csv -a Assets:Bank --existing ledger.beancount
 Only transactions in `ledger.beancount` that post to the importer's account,
 in the same commodity, are candidates. A new transaction is a duplicate when it
 shares an id link with one (`^ofx-…`, or `^csv-…` from
-`transaction_id_column`) and moves the same amount, or when it has the same date and amount and the same
-or a similar payee/narration. Ids of the same kind that differ mean two
-different transactions, however alike they look; when only one side has an id
-(a ledger imported before ids existed), the text decides.
+`transaction_id_column`) and moves the same amount on any date, or when it has
+the same date and amount and the same or a similar payee/narration. Ids of the
+same kind that differ mean two different transactions, however alike they
+look; when only one side has an id (a ledger imported before ids existed), the
+text decides. An entry that splits the account's leg over several postings is
+also compared by its net movement, so a transfer already imported from the
+other account's statement is recognized. Which rows are kept does not depend
+on the order the statement or the ledger lists them in.
 
 Each existing transaction absorbs at most one new one: two identical coffees on
 one day both import when the ledger already holds only one. Every skipped

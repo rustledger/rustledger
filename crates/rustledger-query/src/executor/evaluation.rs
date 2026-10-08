@@ -8,6 +8,7 @@ use crate::ast::{Expr, Literal, Target};
 use crate::error::QueryError;
 
 use super::Executor;
+use super::system_tables::TxnAccounts;
 use super::types::{PostingContext, Row, Value, WindowContext};
 
 impl Executor<'_> {
@@ -467,18 +468,21 @@ impl Executor<'_> {
             }
             // All accounts in the transaction, as a sorted set
             // (bean-query: `{p.account for p in entry.postings}`).
-            "accounts" => Ok(Value::StringSet(Self::posting_account_set(
-                &ctx.transaction,
-                None,
-            ))),
+            "accounts" => Ok(Value::StringSet(
+                TxnAccounts::of(&ctx.transaction).accounts(),
+            )),
             // The accounts of every OTHER posting, as a sorted set. Only this
-            // posting is excluded, by index: another posting to the same
-            // account still counts (bean-query: `sorted({p.account for p in
-            // entry.postings if p is not context.posting})`, #2483).
-            "other_accounts" => Ok(Value::StringSet(Self::posting_account_set(
-                &ctx.transaction,
-                Some(ctx.posting_index),
-            ))),
+            // posting is excluded: another posting to the same account still
+            // counts (bean-query: `sorted({p.account for p in entry.postings
+            // if p is not context.posting})`, #2483).
+            //
+            // Built per row, so one transaction of n postings costs O(n^2)
+            // on this table, where `#postings` builds it once per
+            // transaction. Sharing one set across a transaction's rows here
+            // means carrying it on `PostingContext`, which is public API.
+            "other_accounts" => Ok(Value::StringSet(
+                TxnAccounts::of(&ctx.transaction).others(posting.account.as_ref()),
+            )),
             // Posting metadata as dictionary
             "meta" => Ok(Value::Metadata(Box::new(Self::augmented_meta(
                 &posting.meta,

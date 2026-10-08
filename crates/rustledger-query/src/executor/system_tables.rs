@@ -548,7 +548,7 @@ impl Executor<'_> {
         for txn in transactions {
             let tags: Vec<String> = txn.tags.iter().map(ToString::to_string).collect();
             let links: Vec<String> = txn.links.iter().map(ToString::to_string).collect();
-            let accounts = Self::posting_account_set(txn, None);
+            let accounts = TxnAccounts::of(txn).accounts();
 
             let row = vec![
                 Value::Date(txn.date),
@@ -592,34 +592,6 @@ impl Executor<'_> {
             Some(payee) => format!("{payee} | {}", txn.narration),
             None => txn.narration.to_string(),
         }
-    }
-
-    /// The accounts of a transaction's postings as a sorted, deduped set,
-    /// skipping the posting at index `exclude` when one is given.
-    ///
-    /// ONE implementation for every `accounts` / `other_accounts` column:
-    /// the default postings table, `#postings`, `#entries` and
-    /// `#transactions`. bean-query builds these as Python sets
-    /// (`{p.account for p in entry.postings}`, and for `other_accounts`
-    /// `if p is not context.posting`), so a transaction posting twice to one
-    /// account lists it once, and `other_accounts` drops only the CURRENT
-    /// posting, never a different posting that shares its account (#2483).
-    pub(super) fn posting_account_set(
-        txn: &rustledger_core::Transaction,
-        exclude: Option<usize>,
-    ) -> Vec<String> {
-        // Sort-and-dedup a Vec of borrowed names rather than build a tree
-        // set: transactions are small, and this runs per row.
-        let mut names: Vec<&str> = txn
-            .postings
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| Some(*i) != exclude)
-            .map(|(_, p)| p.account.as_ref())
-            .collect();
-        names.sort_unstable();
-        names.dedup();
-        names.into_iter().map(str::to_string).collect()
     }
 
     /// Build the #entries table from all directives.
@@ -710,7 +682,7 @@ impl Executor<'_> {
             if let Directive::Transaction(txn) = directive {
                 let tags: Vec<String> = txn.tags.iter().map(ToString::to_string).collect();
                 let links: Vec<String> = txn.links.iter().map(ToString::to_string).collect();
-                let accounts = Self::posting_account_set(txn, None);
+                let accounts = TxnAccounts::of(txn).accounts();
                 let description = Self::transaction_description(txn);
                 (
                     Value::String(txn.flag.to_string()),
@@ -988,9 +960,10 @@ impl Executor<'_> {
         // rebuilding (strings, tags/links vectors, full meta conversion) for
         // every posting (#1800 review).
         let mut last_entry: Option<(usize, Value)> = None;
-        // Keyed by the transaction's address, which is stable for the whole
-        // loop (`contexts` owns or borrows every transaction until it ends).
-        let mut last_accounts: Option<(*const rustledger_core::Transaction, TxnAccounts)> = None;
+        // One account set per transaction, keyed like `last_entry` by the
+        // directive index (unique per transaction here: this scan has no
+        // FROM, so nothing is synthesized).
+        let mut last_accounts: Option<(usize, TxnAccounts<String>)> = None;
 
         for ctx in contexts {
             let txn: &rustledger_core::Transaction = &ctx.transaction;
@@ -1021,15 +994,14 @@ impl Executor<'_> {
 
             // Built once per transaction, not per posting: rebuilding the set
             // for every row made a transaction of n postings cost O(n^2).
-            let txn_key = std::ptr::from_ref(txn);
             if last_accounts
                 .as_ref()
-                .is_none_or(|(key, _)| *key != txn_key)
+                .is_none_or(|(idx, _)| *idx != dir_idx)
             {
-                last_accounts = Some((txn_key, TxnAccounts::of(txn)));
+                last_accounts = Some((dir_idx, TxnAccounts::of(txn).into_owned()));
             }
             let txn_accounts = &last_accounts.as_ref().expect("set just above").1;
-            let all_accounts = txn_accounts.all.clone();
+            let all_accounts = txn_accounts.accounts();
 
             let description = Self::transaction_description(txn);
 
@@ -1208,47 +1180,73 @@ impl Executor<'_> {
     }
 }
 
-/// A transaction's account set, plus which accounts more than one of its
-/// postings uses, so each posting's `other_accounts` is derived without
-/// re-walking the postings.
-struct TxnAccounts {
-    /// Sorted, deduped: [`Executor::posting_account_set`] with nothing excluded.
-    all: Vec<String>,
-    /// Sorted accounts at least two postings use. Excluding ONE posting to
-    /// such an account leaves the account in `other_accounts` (#2483).
-    repeated: Vec<String>,
+/// A transaction's `accounts` set, and what each posting's `other_accounts`
+/// is derived from.
+///
+/// ONE implementation for every `accounts` / `other_accounts` column: the
+/// default postings table, `#postings`, `#entries` and `#transactions`.
+/// bean-query builds these as Python sets (`{p.account for p in
+/// entry.postings}`, and for `other_accounts` `if p is not
+/// context.posting`), so a transaction posting twice to one account lists it
+/// once, and `other_accounts` drops only the CURRENT posting, never a
+/// different posting that shares its account (#2483).
+///
+/// Generic over how the names are held: [`TxnAccounts::of`] borrows them
+/// from the transaction (one set per row, no copies until output), and
+/// [`TxnAccounts::into_owned`] keeps a set across rows (`#postings` builds
+/// one per transaction).
+pub(super) struct TxnAccounts<S> {
+    /// Every posting's account, sorted and deduped.
+    all: Vec<S>,
+    /// The accounts, sorted, that at least two postings use. Excluding ONE
+    /// posting to such an account leaves the account in `other_accounts`.
+    repeated: Vec<S>,
 }
 
-impl TxnAccounts {
-    fn of(txn: &rustledger_core::Transaction) -> Self {
-        let mut names: Vec<&str> = txn.postings.iter().map(|p| p.account.as_ref()).collect();
-        names.sort_unstable();
-        let mut all: Vec<String> = Vec::new();
-        let mut repeated: Vec<String> = Vec::new();
-        for run in names.chunk_by(|a, b| a == b) {
-            all.push(run[0].to_string());
-            if run.len() > 1 {
-                repeated.push(run[0].to_string());
-            }
-        }
+impl<'t> TxnAccounts<&'t str> {
+    /// Sort `txn`'s posting accounts once, then read off the distinct ones
+    /// and the repeated ones.
+    pub(super) fn of(txn: &'t rustledger_core::Transaction) -> Self {
+        let mut all: Vec<&str> = txn.postings.iter().map(|p| p.account.as_ref()).collect();
+        all.sort_unstable();
+        // Usually empty, so usually no allocation.
+        let repeated: Vec<&str> = all
+            .chunk_by(|a, b| a == b)
+            .filter(|run| run.len() > 1)
+            .map(|run| run[0])
+            .collect();
+        all.dedup();
         Self { all, repeated }
     }
 
-    /// `other_accounts` for a posting to `account`: the same set as
-    /// `Executor::posting_account_set(txn, Some(index))`.
-    fn others(&self, account: &str) -> Vec<String> {
-        if self
-            .repeated
-            .binary_search_by(|a| a.as_str().cmp(account))
-            .is_ok()
-        {
-            self.all.clone()
-        } else {
-            self.all
-                .iter()
-                .filter(|a| a.as_str() != account)
-                .cloned()
-                .collect()
+    /// The same set, holding its own copies of the names.
+    pub(super) fn into_owned(self) -> TxnAccounts<String> {
+        TxnAccounts {
+            all: self.all.into_iter().map(str::to_string).collect(),
+            repeated: self.repeated.into_iter().map(str::to_string).collect(),
         }
+    }
+}
+
+impl<S: AsRef<str>> TxnAccounts<S> {
+    /// The `accounts` column: every posting's account, sorted and deduped.
+    pub(super) fn accounts(&self) -> Vec<String> {
+        self.all.iter().map(|a| a.as_ref().to_string()).collect()
+    }
+
+    /// `other_accounts` for a posting to `account` in this transaction: every
+    /// OTHER posting's account. `account` drops out unless another posting
+    /// also uses it.
+    pub(super) fn others(&self, account: &str) -> Vec<String> {
+        let shared = self
+            .repeated
+            .binary_search_by(|a| a.as_ref().cmp(account))
+            .is_ok();
+        self.all
+            .iter()
+            .map(AsRef::as_ref)
+            .filter(|a| shared || *a != account)
+            .map(str::to_string)
+            .collect()
     }
 }

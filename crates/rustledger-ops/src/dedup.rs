@@ -632,14 +632,36 @@ fn ids_conflict(a: &[&str], b: &[&str]) -> bool {
 }
 
 /// Build a lowercase string combining payee and narration for fuzzy matching.
+///
+/// Folded so that two spellings of the same text compare equal (#2507):
+/// `é` stored as one code point (NFC) and as `e` plus a combining accent
+/// (NFD) are the same text, but bank exports and editors differ in which
+/// they write, so the row was re-imported as a visible duplicate. The text is
+/// decomposed, lowercased, then recomposed: Unicode's canonical caseless
+/// match (D145) with `to_lowercase` in place of full case folding, so the
+/// result is the same whichever form either side was stored in.
+///
+/// Canonical (NFC), deliberately not compatibility (NFKC), equivalence.
+/// Canonical forms are the same characters by definition; compatibility
+/// forms are not always the same text (`²` and `2`, `½` and `1⁄2`, `ﬁ` and
+/// `fi`, full-width and ASCII letters). A false text match here drops a row
+/// the user never sees, while a missed one leaves a duplicate they can
+/// delete, so only the folding that can never merge different text is done.
+/// Whitespace variants need no folding: matching splits on
+/// `char::is_whitespace`, which already covers a no-break space.
 fn txn_text(txn: &Transaction) -> String {
+    use unicode_normalization::UnicodeNormalization;
     let mut text = String::new();
     if let Some(ref payee) = txn.payee {
         text.push_str(payee.as_str());
         text.push(' ');
     }
     text.push_str(txn.narration.as_str());
-    text.to_lowercase()
+    text.nfd()
+        .collect::<String>()
+        .to_lowercase()
+        .nfc()
+        .collect()
 }
 
 /// Fuzzy text match: returns true if either string contains the other,
@@ -1318,6 +1340,37 @@ mod tests {
         // Text on one side only is not a match at all.
         let b = txn("2024-01-15", "ATM", BANK, "-60.00", "EUR", &[]);
         assert!(import(&[b], &[a]).is_empty());
+    }
+
+    /// #2507: the same text in NFC and NFD (and in either case) is the same
+    /// transaction, so the statement row is recognized, not re-imported.
+    #[test]
+    fn nfc_and_nfd_spellings_of_the_same_text_match() {
+        let nfc = "Ren\u{e9}e Lumi\u{e8}re";
+        let nfd = "Rene\u{301}e Lumie\u{300}re";
+        let upper_nfd = "RENE\u{301}E LUMIE\u{300}RE";
+        for (new_text, existing_text) in [(nfd, nfc), (nfc, nfd), (upper_nfd, nfc)] {
+            let new = txn("2024-01-15", new_text, BANK, "-4.50", "EUR", &[]);
+            let existing = txn("2024-01-15", existing_text, BANK, "-4.50", "EUR", &[]);
+            let dups = import(&[new], &[existing]);
+            assert_eq!(dups.len(), 1, "{new_text:?} vs {existing_text:?}");
+            assert_ne!(dups[0].reason, DuplicateReason::AmountOnly);
+        }
+    }
+
+    /// #2507: compatibility forms are NOT folded (NFC, not NFKC). `ﬁ` and
+    /// `fi`, or `²` and `2`, are not the same text, and a false match drops
+    /// a row silently, so they stay distinct.
+    #[test]
+    fn compatibility_forms_are_not_folded() {
+        for (new_text, existing_text) in [("\u{fb01}sh", "fish"), ("Unit\u{b2}", "Unit2")] {
+            let new = txn("2024-01-15", new_text, BANK, "-4.50", "EUR", &[]);
+            let existing = txn("2024-01-15", existing_text, BANK, "-4.50", "EUR", &[]);
+            assert!(
+                import(&[new], &[existing]).is_empty(),
+                "{new_text:?} vs {existing_text:?}"
+            );
+        }
     }
 
     #[test]

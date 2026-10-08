@@ -105,13 +105,39 @@ pub enum PluginRunError {
     },
 }
 
+/// The native plugin `name` resolves to in `pass`, if any.
+///
+/// This is the first step of [`resolve_plugin`] and the one definition of
+/// "native" a host should use (#2486). A `python:`-forced name is never
+/// native. Prefixed names resolve via their short last segment inside the
+/// registry.
+#[must_use]
+pub fn find_native_plugin<'a>(
+    name: &str,
+    force_python: bool,
+    pass: PluginPass,
+    registry: &'a NativePluginRegistry,
+) -> Option<&'a dyn NativePlugin> {
+    if force_python {
+        return None;
+    }
+    match pass {
+        PluginPass::Synth => registry.find_synth(name).map(|p| p as &dyn NativePlugin),
+        PluginPass::Regular => registry.find_regular(name).map(|p| p as &dyn NativePlugin),
+    }
+}
+
 /// What a plugin reference that is NOT native names.
 ///
 /// Judged from its text alone: no filesystem access, no registry, no
-/// runtime. This is the classification [`resolve_plugin`] applies after its native lookup fails, so
-/// a host that wants to skip external plugins without resolving them (the
-/// LSP, #2486) can tell a WASM or Python reference from an unknown name
-/// exactly the way resolution would.
+/// runtime. This is the classification [`resolve_plugin`] applies after
+/// [`find_native_plugin`] finds nothing, so a host that wants to skip
+/// external plugins without resolving them (the LSP, #2486) can tell a WASM
+/// or Python reference from an unknown name exactly the way resolution would.
+///
+/// Deliberately not `#[non_exhaustive]`: a caller decides per kind whether
+/// to skip or report (the LSP skips `Wasm`/`Python`, reports `Unknown`), so a
+/// new kind must fail its build rather than fall into a wildcard arm.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExternalPluginKind {
     /// A `.wasm` reference (checked first, so `python:x.wasm` is WASM).
@@ -123,10 +149,6 @@ pub enum ExternalPluginKind {
     /// as a misspelled native plugin.
     Unknown,
 }
-
-// Deliberately not `#[non_exhaustive]`: a caller decides per kind whether to
-// skip or report (the LSP skips `Wasm`/`Python`, reports `Unknown`), so a new
-// kind must fail its build rather than fall into a wildcard arm.
 
 /// Classify a non-native plugin reference; see [`ExternalPluginKind`].
 ///
@@ -176,17 +198,7 @@ pub fn resolve_plugin<'a>(
     base_dir: &Path,
     path_security: bool,
 ) -> Result<ResolvedPlugin<'a>, PluginResolveError> {
-    // Native plugins resolve through the typed registry keyed on the pass.
-    // Prefixed names resolve via the short last segment inside the registry.
-    let native: Option<&dyn NativePlugin> = if force_python {
-        None
-    } else {
-        match pass {
-            PluginPass::Synth => registry.find_synth(name).map(|p| p as &dyn NativePlugin),
-            PluginPass::Regular => registry.find_regular(name).map(|p| p as &dyn NativePlugin),
-        }
-    };
-    if let Some(plugin) = native {
+    if let Some(plugin) = find_native_plugin(name, force_python, pass, registry) {
         return Ok(ResolvedPlugin::Native(plugin));
     }
 

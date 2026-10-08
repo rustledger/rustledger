@@ -1198,7 +1198,15 @@ pub fn run_plugins(
         // name that is neither native nor WASM/Python shaped -- typically a
         // misspelled native plugin -- is still an error, reported as E8001
         // without consulting system Python, so it is the same in every build.
-        if options.native_plugins_only && !is_native(invocation, pass_kind, registry) {
+        if options.native_plugins_only
+            && rustledger_plugin::find_native_plugin(
+                &invocation.name,
+                invocation.force_python,
+                pass_kind,
+                registry,
+            )
+            .is_none()
+        {
             if rustledger_plugin::classify_external_plugin(
                 &invocation.name,
                 invocation.force_python,
@@ -1258,25 +1266,6 @@ pub fn run_plugins(
     // original spans on Keep/Modify ops. Plugin-synthesized directives
     // (Insert ops) get `SYNTHESIZED_FILE_ID` and a zero span.
     Ok(())
-}
-
-/// Whether `invocation` resolves to a native plugin in `pass`: the same
-/// registry lookup `rustledger_plugin::resolve_plugin` tries first, so a
-/// plugin this accepts is exactly one that would resolve to
-/// `ResolvedPlugin::Native`.
-#[cfg(feature = "plugins")]
-fn is_native(
-    invocation: &PluginInvocation,
-    pass: rustledger_plugin::PluginPass,
-    registry: &rustledger_plugin::NativePluginRegistry,
-) -> bool {
-    !invocation.force_python
-        && match pass {
-            rustledger_plugin::PluginPass::Synth => registry.find_synth(&invocation.name).is_some(),
-            rustledger_plugin::PluginPass::Regular => {
-                registry.find_regular(&invocation.name).is_some()
-            }
-        }
 }
 
 /// Build a fresh `Vec<DirectiveWrapper>` from the current directives,

@@ -498,7 +498,23 @@ pub(crate) fn map_validation_to_diagnostics(
             // name is native. A name that is neither native nor WASM/Python
             // shaped (a typo of a native plugin) gets no E8006: the loader
             // reports it as E8001 "Plugin not found" instead (#2486).
-            if !plugin.force_python && registry.has(&plugin.name) {
+            // A plugin's pass is not known here, so it is native if it is
+            // native in either; same lookup as resolution.
+            let is_native = [
+                rustledger_plugin::PluginPass::Synth,
+                rustledger_plugin::PluginPass::Regular,
+            ]
+            .into_iter()
+            .any(|pass| {
+                rustledger_plugin::find_native_plugin(
+                    &plugin.name,
+                    plugin.force_python,
+                    pass,
+                    registry,
+                )
+                .is_some()
+            });
+            if is_native {
                 continue;
             }
             let kind = match rustledger_plugin::classify_external_plugin(

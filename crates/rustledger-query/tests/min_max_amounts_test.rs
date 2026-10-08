@@ -1,7 +1,9 @@
 //! `MIN` and `MAX` over amounts, positions and inventories follow `ORDER BY`'s
 //! order (#2447). They failed with "cannot compare values".
 //!
-//! MIN agrees with bean-query everywhere. MAX deliberately diverges where
+//! MIN agrees with bean-query, except over positions in unlisted currencies,
+//! which follow ORDER BY's own alphabetical currency rank (see the last
+//! test). MAX deliberately diverges where
 //! bean-query's `>` falls back to plain tuple comparison (number first) on
 //! beancount's `Amount` / `Position` named tuples, which define only `__lt__`:
 //! over `5 EUR` and `3 USD` bean-query answers `5 EUR` for BOTH MIN and MAX,
@@ -76,6 +78,8 @@ fn render(value: &Value) -> String {
         Value::Position(p) => p.to_string(),
         Value::Inventory(i) => i.to_string(),
         Value::String(s) => s.clone(),
+        Value::Date(d) => d.to_string(),
+        Value::Boolean(b) => b.to_string(),
         Value::Null => "NULL".to_string(),
         other => panic!("unexpected {other:?}"),
     }
@@ -241,4 +245,57 @@ fn max_over_amounts_in_having() {
             vec!["Equity:Open", "-6 USD"]
         ],
     );
+}
+
+/// Strings, accounts, dates and booleans keep their order; only amounts,
+/// positions and inventories are new (#2447). Values are bean-query's.
+#[test]
+fn min_max_over_other_types_unchanged() {
+    assert_eq!(
+        rows(
+            LOTS,
+            "SELECT min(account), max(account), min(date), max(date), \
+             min(narration), max(narration), max(number > 0), min(number > 0)"
+        ),
+        vec![vec![
+            "Assets:Cash",
+            "Equity:Open",
+            "2024-02-01",
+            "2024-02-05",
+            "buy1",
+            "fx2",
+            "true",
+            "false",
+        ]],
+    );
+}
+
+/// MIN over positions follows ORDER BY's position order, divergence included:
+/// unlisted currencies rank alphabetically here and by name LENGTH in
+/// beancount (compatibility.md section 15), so `X` sorts before `Y` and the
+/// `X` lot is the minimum. bean-query ties `X` and `Y`, compares the cost,
+/// and answers `1 Y {5 USD}`.
+#[test]
+fn min_over_positions_inherits_order_by_currency_rank() {
+    const UNLISTED: &str = r#"
+2024-01-01 open Assets:Stock
+2024-01-01 open Assets:Cash
+2024-02-01 * "x"
+  Assets:Stock  2 X {20 USD}
+  Assets:Cash  -40 USD
+2024-02-02 * "y"
+  Assets:Stock  1 Y {5 USD}
+  Assets:Cash  -5 USD
+"#;
+    let bql = "SELECT min(position), max(position) WHERE account = 'Assets:Stock'";
+    let got = rows(UNLISTED, bql);
+    let ordered = rows(
+        UNLISTED,
+        "SELECT position WHERE account = 'Assets:Stock' ORDER BY position",
+    );
+    assert_eq!(
+        got,
+        vec![vec![ordered[0][0].clone(), ordered[1][0].clone()]]
+    );
+    assert!(got[0][0].starts_with("2 X"), "{got:?}");
 }

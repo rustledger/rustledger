@@ -416,7 +416,10 @@ and is left out, as beancount has none. Pinned by
 
 `MIN` and `MAX` over amounts, positions and inventories use this same order:
 they return the first and last value `ORDER BY` would. `MIN` agrees with
-bean-query. `MAX` differs where values span currencies, deliberately:
+bean-query, except over positions whose currencies the rank above orders
+differently: `min(position)` over `2 X {20 USD}` and `1 Y {5 USD}` is
+`2 X {20 USD}` here and `1 Y {5 USD}` in bean-query, as with `ORDER BY`. `MAX`
+differs where values span currencies, deliberately:
 bean-query's `MAX` keeps a value when `value > current`, and beancount's
 `Amount` and `Position` define only `<`, so `>` falls back to plain tuple
 comparison, number first.

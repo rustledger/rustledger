@@ -216,7 +216,10 @@ impl Executor<'_> {
             // `MIN` and `MAX` are the first and last value `ORDER BY` gives
             // (#2447). They used to fail with "cannot compare values".
             //
-            // MIN agrees with bean-query. MAX deliberately does NOT always:
+            // MIN agrees with bean-query, except that positions inherit
+            // `position_order`'s own divergence (unlisted currencies ranked
+            // alphabetically, not by name length). MAX deliberately does NOT
+            // always agree:
             // bean-query's `Max` updates on `value > cur`, and beancount's
             // `Amount` and `Position` are NamedTuples defining only `__lt__`,
             // so `>` falls back to plain tuple comparison, NUMBER first. Over

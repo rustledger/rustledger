@@ -414,6 +414,29 @@ which rustledger keeps for a cost-less holding that nets to zero, holds nothing
 and is left out, as beancount has none. Pinned by
 `crates/rustledger-query/tests/order_by_amounts.rs` (issue #2445).
 
+`MIN` and `MAX` over amounts, positions and inventories use this same order:
+they return the first and last value `ORDER BY` would. `MIN` agrees with
+bean-query, except over positions whose currencies the rank above orders
+differently: `min(position)` over `2 X {20 USD}` and `1 Y {5 USD}` is
+`2 X {20 USD}` here and `1 Y {5 USD}` in bean-query, as with `ORDER BY`. `MAX`
+differs where values span currencies, deliberately:
+bean-query's `MAX` keeps a value when `value > current`, and beancount's
+`Amount` and `Position` define only `<`, so `>` falls back to plain tuple
+comparison, number first.
+
+| | over `Assets:A` holding `5 EUR` and `3 USD` |
+|---|---|
+| `SELECT units(position) AS u ORDER BY u` (both) | `5 EUR`, `3 USD` |
+| rustledger `min(units(position)), max(units(position))` | `5 EUR`, `3 USD` |
+| bean-query `min(units(position)), max(units(position))` | `5 EUR`, `5 EUR` |
+
+bean-query's `MAX` names as largest the value its own `ORDER BY` sorts first.
+Under beancount's comparisons `5 EUR < 3 USD` and `5 EUR > 3 USD` are both
+true, so its `MAX` follows no order at all. Within one currency the two agree.
+Across currencies neither rule measures size: rustledger's `MAX` of `-30 USD`
+and `10 EUR` is `-30 USD`, the last value in currency order. Pinned by
+`crates/rustledger-query/tests/min_max_amounts_test.rs` (issue #2447).
+
 ## BQL Query Compatibility
 
 BQL (Beancount Query Language) compatibility was tested with 11 standard queries on 50 files:

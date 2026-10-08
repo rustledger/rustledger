@@ -55,68 +55,17 @@ See [Plugins Reference](../reference/plugins.md) for full list.
 
 1. **Plugin loading**: Python plugins require WASM compilation.
 
-1. **Repeated same-day lots**: buying the same holding twice on one day at
-   the same cost can produce a different cost basis and different realized
-   gains than Python beancount. Python's inventory is keyed by
-   `(currency, cost)`, so two acquisitions sharing a cost, date and label
-   collapse into a single position; rustledger keeps one lot per
-   acquisition. When a third lot at a different cost was acquired between
-   them, the two engines then consume in different orders.
-
-   ```beancount
-   option "booking_method" "FIFO"
-
-   2020-01-01 open Assets:Stock  ACME
-   2020-01-01 open Assets:Cash   USD
-   2020-01-01 open Income:Gains  USD
-
-   2020-01-02 * "buy A"
-     Assets:Stock  10 ACME {10.00 USD}
-     Assets:Cash  -100.00 USD
-
-   2020-01-02 * "buy B"
-     Assets:Stock  10 ACME {20.00 USD}
-     Assets:Cash  -200.00 USD
-
-   2020-01-02 * "buy C"          ; same cost and date as A
-     Assets:Stock  10 ACME {10.00 USD}
-     Assets:Cash  -100.00 USD
-
-   2020-03-01 * "sell 15"
-     Assets:Stock  -15 ACME {}
-     Assets:Cash   300.00 USD
-     Income:Gains
-   ```
-
-   Under FIFO, rustledger consumes A then B, leaving `10 @10.00` and
-   `5 @20.00`. Python pools A and C into one `20 @10.00` position and drains
-   it, consuming A then **C** and leaving `5 @10.00` and `10 @20.00` — B
-   untouched despite being acquired before C.
-
-   rustledger's answer respects acquisition order, which is why it is not
-   being changed to match. Python is not being careless: `Cost` carries only
-   a date, not a time, so A and C are genuinely the same lot under its model
-   and pooling is the only thing its inventory can represent.
-
-   It can also make a ledger **fail to load**, in either direction, not just
-   report different figures. Pooling changes which lots survive a reduction,
-   so a later reduction naming an explicit cost may find its lot already
-   drained on one engine and still present on the other:
-
-   ```
-   error[BOOK]: Not enough units in Assets:Stock: requested 14, available 6;
-   not enough to reduce (2020-02-04, "sell")
-   ```
-
-   Nothing in that message points at same-day repeated lots, so it is worth
-   knowing about before you meet it. The reverse happens too — a ledger
-   rustledger accepts can be one Python rejects.
-
-   If you reconcile figures against Python and see a difference on a holding
-   you bought more than once in a day, or a reduction fails on a lot you
-   believe you still hold, this is the likely cause. Give the
-   repeated purchases distinct labels (`{10.00 USD, "morning"}`) to make
-   them separate lots in both engines. Tracked in
+1. **Repeated same-day lots** (no longer a difference since v0.23.0):
+   buying the same holding more than once on one day at the same cost and
+   label creates **one** lot in both engines, as Python beancount always
+   has. Earlier rustledger releases kept one lot per purchase. When a lot at
+   another cost was bought between two such purchases, FIFO and LIFO then
+   consumed the lots in a different order from Python, so cost basis and
+   realized gains could differ, or a later reduction naming an explicit cost
+   could fail on one engine only. If you compared figures with an older
+   release and saw that kind of difference on a holding bought several times
+   in one day, upgrade. Use distinct labels (`{10.00 USD, "morning"}`) to
+   keep same-day purchases apart. Fixed in
    [#2118](https://github.com/rustledger/rustledger/issues/2118).
 
 1. **Adding to one side of a long-and-short holding**: if an account holds a

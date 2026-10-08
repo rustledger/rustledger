@@ -73,7 +73,31 @@
 //! construct typed [`crate::PluginError`]s into [`ImporterOutput::errors`].
 //! The host renders both into the user-visible extract output.
 //!
-//! # Sharing state across exports
+//! # Transaction ids for duplicate detection
+//!
+//! When the source format gives each transaction a stable, unique id (an
+//! MT940 `:61:` reference, a CAMT `AcctSvcrRef`), put it on the transaction
+//! as a link built by [`crate::wasm_id_link`]:
+//!
+//! ```ignore
+//! use rustledger_plugin_types::wasm_id_link;
+//!
+//! let mut links = Vec::new();
+//! if let Some(link) = wasm_id_link("MT940", &reference) {
+//!     links.push(link); // `wasm-mt940/<reference>`, no `^`
+//! }
+//! // ... TransactionData { links, .. }
+//! ```
+//!
+//! `rledger extract --existing` then treats a shared id (with the same
+//! account, commodity and amount) as the same transaction whatever its date
+//! or text say, as it does `^ofx-<FITID>` and `^csv-<id>`. Each importer
+//! name is its own namespace. Use the same name you give
+//! [`wasm_importer_main!`](crate::wasm_importer_main) and never change it, or ids already in users'
+//! ledgers stop matching. Without a link, the transaction dedups by date,
+//! amount and text.
+//!
+//! # Sharing state across exports//! # Sharing state across exports
 //!
 //! The macro takes three free functions, so there's no `&self` to
 //! cache parser state on. If a guest needs shared state (a
@@ -293,6 +317,14 @@ pub fn default_enriched_from(out: ImporterOutput) -> EnrichedImporterOutput {
 ///     extract_enriched: extract_enriched,
 /// }
 /// ```
+///
+/// # Transaction ids
+///
+/// The macro does not touch the directives `extract` returns. To let
+/// `rledger extract --existing` recognize a re-imported transaction by the
+/// source's own id, add a [`crate::wasm_id_link`] link to it (see "Transaction
+/// ids for duplicate detection" in the [module docs](crate::guest)), with `name:` as
+/// the importer argument.
 ///
 /// # Compile-time signature checks
 ///

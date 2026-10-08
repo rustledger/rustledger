@@ -81,7 +81,7 @@ bal = "report balances"
 is = "report income"
 bs = "report balsheet"
 
-# WASM plugin and importer limits
+# Plugin and importer limits
 [plugins]
 # Time budget for each plugin or importer call (default: 30)
 max_time_secs = 120
@@ -89,13 +89,15 @@ max_time_secs = 120
 
 ### Plugin Time Budget
 
-Each call into a WASM plugin or WASM importer gets a time budget, 30 seconds by default, after which it is stopped with `all fuel consumed by WebAssembly`. The budget is counted in wasm work, not on a clock, and is sized so that a call never runs longer than its budget even on a slow machine. So on a typical machine a call runs out much sooner: most code gets one twentieth to one fifth of the stated seconds. A plugin doing real work over a large ledger can need more. Raise it with `[plugins] max_time_secs` in any config file, or for one run with the global `--plugin-max-time-secs <SECS>` flag, which overrides the config. The value must be at least 1:
+Each call into a WASM plugin, Python plugin, or WASM importer gets a time budget, 30 seconds by default, after which it is stopped with `all fuel consumed by WebAssembly`. The budget is counted in wasm work, not on a clock, and is sized so that a call never runs longer than its budget even on a slow machine. So on a typical machine a call runs out much sooner: most code gets one twentieth to one fifth of the stated seconds. A plugin doing real work over a large ledger can need more. Raise it with `[plugins] max_time_secs` in any config file, or for one run with the global `--plugin-max-time-secs <SECS>` flag, which overrides the config. The value must be at least 1:
 
 ```bash
 rledger check --plugin-max-time-secs 120 ledger.beancount
 ```
 
-The budget is a setting of whoever runs rustledger, never of the ledger: nothing in a beancount file can raise it, so a service that loads ledgers it did not write keeps control of how much CPU their plugins get. A project `.rledger.toml` is found from the directory rledger runs in, not from where the ledger is. So running rledger inside someone else's repository applies their `max_time_secs`, as it applies their aliases and default file; run it from a directory you control to keep your own. Python plugins keep their own fixed budget.
+The budget is a setting of whoever runs rustledger, never of the ledger: nothing in a beancount file can raise it, so a service that loads ledgers it did not write keeps control of how much CPU their plugins get. A project `.rledger.toml` is found from the directory rledger runs in, not from where the ledger is. So running rledger inside someone else's repository applies their `max_time_secs`, as it applies their aliases and default file; run it from a directory you control to keep your own.
+
+Python plugins get the same budget, counted the same way. Starting the Python interpreter costs about 1.2 seconds of it on every call, so a Python plugin needs a budget of at least 2. On top of that, moving each transaction to Python and back costs about 0.4 milliseconds of budget: the default 30 seconds covers a plugin over roughly 65,000 transactions, and a plugin over a larger ledger, or one doing heavy work per entry, needs a higher `max_time_secs`.
 
 ### Using Profiles
 

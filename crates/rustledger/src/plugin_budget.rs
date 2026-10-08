@@ -1,8 +1,8 @@
-//! The host's time budget for WASM plugins and importers.
+//! The host's time budget for WASM and Python plugins and WASM importers.
 //!
 //! `rledger` sets it once at startup from the `[plugins] max_time_secs`
 //! config key, overridden by `--plugin-max-time-secs`. Every command that
-//! runs a WASM plugin or importer reads it from here, so the setting
+//! runs a WASM or Python plugin or importer reads it from here, so the setting
 //! applies to all of them rather than to whichever commands thread an
 //! argument through.
 //!

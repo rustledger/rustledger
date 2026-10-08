@@ -66,7 +66,8 @@ struct Cli {
     #[arg(long, short = 'P', global = true)]
     profile: Option<String>,
 
-    /// Time budget for each WASM plugin or importer call: it is stopped
+    /// Time budget for each WASM or Python plugin call and WASM importer
+    /// call: it is stopped
     /// within at most this many seconds, usually far sooner (default: 30, or
     /// `[plugins] max_time_secs` from the config file)
     #[arg(

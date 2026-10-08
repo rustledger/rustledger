@@ -1576,7 +1576,11 @@ jobs:
   # 2. run the python-gated suites — keep the list in sync with
   #    `grep -rl 'Command::new("bean-' crates/*/tests` (currently:
   #    rustledger integration_test + bean_price_compat,
-  #    rustledger-core synthetic_generation);
+  #    rustledger-core synthetic_generation), plus rustledger
+  #    python_plugin_wasi, which runs Python plugins through the
+  #    CPython-on-WASI runtime and skips where the runtime cannot be
+  #    downloaded (#2500); RLEDGER_REQUIRE_PYTHON_WASI=1 makes that
+  #    skip a failure here;
   # 3. grep the captured output for every suite's skip marker, so a new
   #    availability probe (different binary, a container check) can't
   #    quietly reintroduce the green-skip.
@@ -1609,19 +1613,20 @@ jobs:
       - name: Run python-gated test suites
         env:
           CARGO_TERM_COLOR: always
+          RLEDGER_REQUIRE_PYTHON_WASI: '1'
         run: |
           # tee the output so the skip-marker check below inspects THIS
           # run (a rerun inside an `if` would mask test failures and
           # cover only one suite — review catch).
           set -o pipefail
-          cargo test -p rustledger --test integration_test --test bean_price_compat -- --nocapture 2>&1 | tee /tmp/gated-tests.log
+          cargo test -p rustledger --test integration_test --test bean_price_compat --test python_plugin_wasi -- --nocapture 2>&1 | tee /tmp/gated-tests.log
           cargo test -p rustledger-core --test synthetic_generation -- --nocapture 2>&1 | tee -a /tmp/gated-tests.log
       - name: Fail on silent skips
         run: |
           # Every gated suite prints a recognizable marker when it skips;
           # any of them appearing means an availability probe drifted
           # despite the assert step above.
-          if grep -Eq "Skipping: Python beancount not available|bean-check not found, skipping|skipping bean-price compat" /tmp/gated-tests.log; then
+          if grep -Eq "Skipping: Python beancount not available|bean-check not found, skipping|skipping bean-price compat|Skipping: CPython WASI runtime unavailable" /tmp/gated-tests.log; then
             echo "::error::python-gated tests skipped despite the tools being installed — availability probe drifted"
             exit 1
           fi

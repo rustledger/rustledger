@@ -581,33 +581,100 @@ def serialize_errors(errors):
     return json.dumps(error_list)
 
 
-def run_plugin(plugin_func, entries_json, options_json, config=None):
+def _host_diagnostic(message, severity='error'):
+    """A diagnostic about the plugin module itself, not about an entry."""
+    return json.dumps([{
+        'message': message,
+        'source_file': None,
+        'line_number': None,
+        'severity': severity,
+    }])
+
+
+def _entry_point_name(item):
+    return item if isinstance(item, str) else getattr(item, '__name__', repr(item))
+
+
+def run_plugin(module, plugin_name, entries_json, options_json, config=None,
+               entry_points=None):
     """
-    Execute a beancount plugin function.
+    Run a plugin module the way beancount's loader does.
+
+    Mirrors `beancount.loader.run_transformations`: every item of the
+    module's `__plugins__` is applied in order, a string naming a function
+    of the module (looked up with getattr) and anything else being the
+    callable itself. Each one receives the entries the previous one
+    returned, plus the config string when the `plugin` directive has one.
+    An exception in one function is reported and the next function gets
+    the entries as they were before it, as in beancount.
+
+    Where this differs from beancount, it reports instead of passing or
+    crashing:
+    - A module with no `__plugins__` runs nothing (beancount skips it
+      silently); it is reported as a warning so a forgotten `__plugins__`
+      is not mistaken for a plugin that ran and found nothing.
+    - A listed name the module does not define is an error naming it
+      (beancount raises AttributeError and aborts the whole load), and
+      nothing in the module runs.
 
     Args:
-        plugin_func: The plugin function to call
+        module: The plugin's module object
+        plugin_name: The plugin reference, for messages
         entries_json: JSON-serialized directives
         options_json: JSON-serialized options dict
         config: Optional plugin config string
+        entry_points: Names of the functions to run instead of
+            `__plugins__` (None: use `__plugins__`)
 
     Returns:
-        Tuple of (serialized_entries, serialized_errors)
+        Tuple of (serialized_entries, serialized_errors).
+        serialized_entries is None when nothing ran, so the input entries
+        stand unchanged.
     """
+    if entry_points is None:
+        if not hasattr(module, '__plugins__'):
+            return None, _host_diagnostic(
+                f'Python plugin "{plugin_name}" has no __plugins__, so it ran nothing; '
+                f'list its entry points, e.g. __plugins__ = ["my_plugin"] '
+                f'(beancount skips such a module silently)',
+                'warning')
+        entry_points = module.__plugins__
+        if isinstance(entry_points, (str, bytes)):
+            return None, _host_diagnostic(
+                f'__plugins__ of Python plugin "{plugin_name}" must be a list or '
+                f'tuple of function names, not the string {entry_points!r}')
+
+    _missing = object()
+    callbacks = []
+    for item in entry_points:
+        callback = getattr(module, item, _missing) if isinstance(item, str) else item
+        if callback is _missing:
+            return None, _host_diagnostic(
+                f'__plugins__ of Python plugin "{plugin_name}" lists "{item}", '
+                f'which the plugin does not define')
+        if not callable(callback):
+            return None, _host_diagnostic(
+                f'__plugins__ of Python plugin "{plugin_name}" lists '
+                f'"{_entry_point_name(item)}", which is not a function')
+        callbacks.append((_entry_point_name(item), callback))
+
     entries = deserialize_entries(entries_json)
     options = json.loads(options_json) if options_json else {}
+    args = () if config is None else (config,)
 
-    try:
-        if config is not None:
-            new_entries, errors = plugin_func(entries, options, config)
-        else:
-            new_entries, errors = plugin_func(entries, options)
-    except Exception as e:
-        # Return original entries with the exception as an error
-        error = ValidationError(None, f"Plugin error: {e}", None)
-        return serialize_entries(entries), serialize_errors([error])
+    errors = []
+    for name, callback in callbacks:
+        try:
+            entries, plugin_errors = callback(entries, options, *args)
+        except Exception as e:
+            errors.append(ValidationError(
+                None,
+                f'Error applying plugin "{plugin_name}" ({name}): {type(e).__name__}: {e}',
+                None))
+            continue
+        errors.extend(plugin_errors or [])
 
-    return serialize_entries(new_entries), serialize_errors(errors or [])
+    return serialize_entries(entries), serialize_errors(errors)
 
 
 # =============================================================================

@@ -280,20 +280,23 @@ impl ResolvedPlugin<'_> {
         self.run_with_max_time_secs(wrappers, options, config, base_dir, None)
     }
 
-    /// [`Self::run`] with a host-chosen time budget for a WASM plugin.
+    /// [`Self::run`] with a host-chosen time budget for a WASM or Python
+    /// plugin.
     ///
-    /// `max_time_secs` replaces a WASM plugin's default budget (30 seconds,
-    /// `sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS`); `None` keeps the default. It is the HOST's setting (the CLI's config
-    /// file or flag, an embedder's choice), never the ledger's: a ledger
-    /// that could raise its own plugins' budget would let its author spend
-    /// unbounded CPU on any service that loads it. Native plugins have no
-    /// budget, and Python plugins keep their own fixed budget.
+    /// `max_time_secs` replaces the default budget (30 seconds,
+    /// `sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS`); `None` keeps the default.
+    /// It is the HOST's setting (the CLI's config file or flag, an
+    /// embedder's choice), never the ledger's: a ledger that could raise
+    /// its own plugins' budget would let its author spend unbounded CPU on
+    /// any service that loads it. Native plugins have no budget. Both
+    /// runtimes convert seconds to fuel by `sandbox::fuel_for_secs`; a
+    /// Python plugin also spends ~1.2 of them starting `CPython` (#2500).
     ///
     /// # Errors
     ///
     /// As [`Self::run`].
     // `base_dir` is read only by the Python arm, `max_time_secs` only by
-    // the WASM arm.
+    // the WASM and Python arms.
     #[cfg_attr(
         not(all(feature = "python-plugins", feature = "wasm-runtime")),
         allow(unused_variables)
@@ -338,11 +341,14 @@ impl ResolvedPlugin<'_> {
             }
             #[cfg(feature = "python-plugins")]
             ResolvedPlugin::Python { raw, resolved } => {
-                let runtime = crate::python::PythonRuntime::new().map_err(|e| {
+                let mut runtime = crate::python::PythonRuntime::new().map_err(|e| {
                     PluginRunError::PythonFailed {
                         message: format!("Python runtime unavailable: {e}"),
                     }
                 })?;
+                if let Some(secs) = max_time_secs {
+                    runtime = runtime.with_max_time_secs(secs);
+                }
                 let input = PluginInput {
                     directives: wrappers,
                     options: options.clone(),

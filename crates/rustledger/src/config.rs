@@ -80,8 +80,9 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct PluginsConfig {
-    /// Time budget, in seconds, for each call into a WASM plugin or WASM
-    /// importer (default: 30). `--plugin-max-time-secs` overrides it.
+    /// Time budget, in seconds, for each call into a WASM or Python plugin
+    /// or a WASM importer (default: 30). `--plugin-max-time-secs` overrides
+    /// it.
     ///
     /// Zero is refused when the file is parsed: the sandbox would treat it
     /// as one second, and many tools read zero as "no limit".
@@ -618,7 +619,7 @@ impl Config {
 # bs = "report balance-sheet"
 
 # [plugins]
-# Time budget for each WASM plugin or importer call (default 30). A call is
+# Time budget for each WASM or Python plugin or importer call (default 30). A call is
 # stopped within at most this many seconds, usually far sooner.
 # max_time_secs = 120
 "#

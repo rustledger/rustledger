@@ -40,33 +40,45 @@ use wasmtime_wasi::{FsPerms, WasiCtxBuilder};
 /// [`ResourceLimiter::table_growing`]: wasmtime::ResourceLimiter::table_growing
 const PYTHON_MAX_MEMORY: usize = crate::sandbox::DEFAULT_SANDBOX_MAX_MEMORY;
 
-/// Per-call fuel budget for the Python plugin runtime.
+/// Fuel for one Python plugin call under a time budget of `max_time_secs`.
 ///
-/// Sized as "~10 minutes of `CPython` at 1M instructions/second on the
-/// reference fixtures", a rate wasm runs several thousand times faster
-/// than (see below). Fuel exhaustion surfaces as a wasmtime trap
-/// that the caller in `execute_plugin` translates into a
-/// `PythonError::Execution` (the existing error path).
+/// The same conversion as a WASM plugin's
+/// ([`sandbox::fuel_for_secs`]), with no Python-specific multiplier,
+/// because measurement does not call for one (#2500). Fuel counts wasm
+/// operators, and `CPython` compiled to WASI is wasm; measured on an
+/// x86-64 host (debug `rledger`, whose dependencies wasmtime and
+/// Cranelift are built at `opt-level = 3`), fuel per call is:
 ///
-/// # Why this isn't [`sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS`]
+/// | Workload                                   | Fuel  | CPU time |
+/// |--------------------------------------------|-------|----------|
+/// | `CPython` startup + passthrough, 3 entries | 1.22G | 0.4 s    |
+/// | passthrough, 5k transactions               | 3.36G | 1.3 s    |
+/// | tag every transaction, 5k transactions     | 3.47G | 1.3 s    |
+/// | passthrough, 20k transactions              | 9.84G | 4.1 s    |
+/// | tag every transaction, 20k transactions    | 10.5G | 4.6 s    |
+/// | 5M-iteration Python loop                   | 6.81G | 1.1 s    |
 ///
-/// This value was sized when [`sandbox::make_sandboxed_store`] granted
-/// 1M fuel per second, on the reasoning that `CPython` compiled to WASI
-/// emits many wasm instructions per Python-source operation and would
-/// be fuel-starved by the shared 30-second default (then 30M fuel).
-/// The shared rate is now [`sandbox::FUEL_PER_SECOND`], measured at
-/// 5-17G fuel per second of real wasm, so the shared default is 30G
-/// fuel, 50x this budget, and 600M is under a second of execution.
-/// It has not been re-measured against a Python plugin since; until
-/// it is, it stays a separate, deliberately small budget.
+/// (CPU time is the whole `rledger check` process.) That is 3-6G fuel
+/// per CPU-second, the range other wasm runs at, so
+/// [`sandbox::FUEL_PER_SECOND`]'s conservative 1G keeps its promise
+/// for Python too: a budget of N seconds stops the call within N
+/// seconds. A multiplier would break that promise without being
+/// needed: the default 30 seconds (30G) is 25x `CPython`'s startup and
+/// covers a plugin over about 65k transactions (~0.43M fuel each, the
+/// cost of moving them through JSON both ways). A larger ledger, or a
+/// heavier plugin, needs the host to raise the budget
+/// (`[plugins] max_time_secs`, `--plugin-max-time-secs`).
 ///
-/// Kept as a module-level `const` rather than a free-floating literal
-/// inside [`PythonRuntime::execute_plugin`] so the value is grep-
-/// discoverable next to [`PYTHON_MAX_MEMORY`].
+/// Startup costs ~1.2 budget-seconds on every call, so a budget of one
+/// second cannot run a Python plugin at all. Before #2500 the budget
+/// was a fixed 600M fuel, sized for an assumed 1M fuel per second:
+/// half of what `CPython` needs to start, so no Python plugin ran.
 ///
-/// [`sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS`]: crate::sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS
-/// [`sandbox::make_sandboxed_store`]: crate::sandbox::make_sandboxed_store
-const PYTHON_FUEL: u64 = 600_000_000;
+/// [`sandbox::fuel_for_secs`]: crate::sandbox::fuel_for_secs
+/// [`sandbox::FUEL_PER_SECOND`]: crate::sandbox::FUEL_PER_SECOND
+const fn python_fuel(max_time_secs: u64) -> u64 {
+    crate::sandbox::fuel_for_secs(max_time_secs)
+}
 
 /// Store state for the Python plugin runtime.
 ///
@@ -92,6 +104,56 @@ struct PythonStoreState {
     limiter: MemoryLimiter,
 }
 
+/// The script `CPython` runs: load the compat layer, load the plugin file
+/// as a module of its own, run it, and write the result.
+///
+/// Inputs arrive as files in `/work` (see [`PythonRuntime::execute`]), so
+/// no value is ever spliced into Python source. The plugin module starts
+/// with the compat layer's names (`Transaction`, `ValidationError`, ...)
+/// already defined, as when plugin code was exec'd into the compat
+/// namespace, but keeps its own namespace, so `__plugins__` and the
+/// functions it names are looked up on the module, as beancount does.
+const PLUGIN_SCRIPT: &str = r"
+import json
+import sys
+import types
+
+sys.path.insert(0, '/work')
+
+# Load compatibility layer (defines types like ValidationError, Transaction, etc.)
+exec(open('/work/compat.py').read())
+
+with open('/work/invocation.json') as f:
+    _invocation = json.load(f)
+
+_plugin_module = types.ModuleType(_invocation['module_name'])
+_plugin_module.__dict__.update(
+    {k: v for k, v in globals().items() if not (k.startswith('__') and k.endswith('__'))})
+_plugin_module.__file__ = '/work/plugin.py'
+with open('/work/plugin.py') as f:
+    exec(compile(f.read(), '/work/plugin.py', 'exec'), _plugin_module.__dict__)
+
+with open('/work/entries.json') as f:
+    _entries_json = f.read()
+with open('/work/options.json') as f:
+    _options_json = f.read()
+
+entries_out, errors_out = run_plugin(
+    _plugin_module,
+    _invocation['plugin_name'],
+    _entries_json,
+    _options_json,
+    _invocation['config'],
+    _invocation['entry_points'],
+)
+
+# Write output to file. `null` means nothing ran: the input stands.
+with open('/work/output.json', 'w') as f:
+    f.write('null' if entries_out is None else entries_out)
+    f.write('\n---SEPARATOR---\n')
+    f.write(errors_out)
+";
+
 /// Python plugin runtime.
 ///
 /// This runtime uses `CPython` compiled to WASI to execute Python beancount
@@ -100,6 +162,7 @@ pub struct PythonRuntime {
     engine: Arc<Engine>,
     module: Module,
     stdlib_path: std::path::PathBuf,
+    max_time_secs: u64,
 }
 
 impl PythonRuntime {
@@ -136,10 +199,30 @@ impl PythonRuntime {
             engine,
             module,
             stdlib_path,
+            max_time_secs: crate::sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS,
         })
     }
 
-    /// Execute a Python plugin.
+    /// Set the per-call time budget, in seconds, like a WASM plugin's
+    /// [`crate::RuntimeConfig::max_time_secs`]: the host's setting
+    /// (`[plugins] max_time_secs`, `--plugin-max-time-secs`,
+    /// `LoadOptions::plugin_max_time_secs`), never the ledger's. It becomes
+    /// fuel as a WASM plugin's does ([`crate::sandbox::fuel_for_secs`]). The default is
+    /// [`sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS`].
+    ///
+    /// [`sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS`]: crate::sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS
+    #[must_use]
+    pub const fn with_max_time_secs(mut self, secs: u64) -> Self {
+        self.max_time_secs = secs;
+        self
+    }
+
+    /// Execute Python plugin source by calling one named function.
+    ///
+    /// This bypasses `__plugins__`: `plugin_func` is called directly, with
+    /// `(entries, options_map)` plus the config string when there is one.
+    /// A `plugin "file.py"` directive goes through [`Self::execute_module`],
+    /// which resolves entry points from `__plugins__` the way beancount does.
     ///
     /// # Arguments
     ///
@@ -150,58 +233,59 @@ impl PythonRuntime {
     /// # Returns
     ///
     /// Returns the plugin output with modified directives and any errors.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`PythonError`] when the interpreter cannot run (including a
+    /// fuel trap) or its output cannot be decoded.
     pub fn execute_plugin(
         &self,
         plugin_code: &str,
         plugin_func: &str,
         input: &PluginInput,
     ) -> Result<PluginOutput, PythonError> {
-        // Serialize input to JSON
-        let directives_json = serialize_directives_to_json(&input.directives)?;
+        self.execute(plugin_code, plugin_func, Some(&[plugin_func]), input)
+    }
+
+    /// Run `plugin_code` as a module named `plugin_name`.
+    ///
+    /// `entry_points` names the functions to call; `None` means the
+    /// module's `__plugins__`, resolved by the compat layer's `run_plugin`
+    /// exactly as beancount's loader does (see its docstring for the two
+    /// places it reports where beancount does not).
+    fn execute(
+        &self,
+        plugin_code: &str,
+        plugin_name: &str,
+        entry_points: Option<&[&str]>,
+        input: &PluginInput,
+    ) -> Result<PluginOutput, PythonError> {
+        // Everything the script needs goes through files, so nothing is
+        // spliced into Python source: a narration with a quote or a
+        // backslash once broke the JSON embedded in a string literal.
+        let entries_json = serialize_directives_to_json(&input.directives)?;
         let options_json = serde_json::to_string(&input.options)
             .map_err(|e| PythonError::Serialization(e.to_string()))?;
+        let module_name = std::path::Path::new(plugin_name)
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("plugin");
+        let invocation = serde_json::json!({
+            "plugin_name": plugin_name,
+            "module_name": module_name,
+            "config": input.config,
+            "entry_points": entry_points,
+        })
+        .to_string();
 
-        let config_arg = input.config.as_ref().map_or_else(
-            || "None".to_string(),
-            |c| format!("'{}'", c.replace('\'', "\\'")),
-        );
-
-        // Build the main Python script
-        // Note: We exec() the plugin code in the same namespace as compat
-        // so that types like ValidationError, Transaction, etc. are available
-        let script = format!(
-            r"
-import sys
-sys.path.insert(0, '/work')
-
-# Load compatibility layer (defines types like ValidationError, Transaction, etc.)
-exec(open('/work/compat.py').read())
-
-# Load plugin code in same namespace so it has access to compat types
-exec(open('/work/plugin.py').read())
-
-# Input data
-entries_json = '''{entries_json}'''
-options_json = '''{options_json}'''
-
-# Run the plugin
-config = {config_arg}
-entries_out, errors_out = run_plugin({plugin_func}, entries_json, options_json, config)
-
-# Write output to file
-with open('/work/output.json', 'w') as f:
-    f.write(entries_out)
-    f.write('\n---SEPARATOR---\n')
-    f.write(errors_out)
-",
-            entries_json = directives_json.replace('\'', "\\'"),
-            options_json = options_json.replace('\'', "\\'"),
-            plugin_func = plugin_func,
-            config_arg = config_arg,
-        );
-
-        // Execute Python
-        let output = self.run_python(&script, BEANCOUNT_COMPAT_PY, plugin_code)?;
+        let output = self.run_python(&[
+            ("script.py", PLUGIN_SCRIPT),
+            ("compat.py", BEANCOUNT_COMPAT_PY),
+            ("plugin.py", plugin_code),
+            ("entries.json", &entries_json),
+            ("options.json", &options_json),
+            ("invocation.json", &invocation),
+        ])?;
 
         // Parse output (pass input length so the Python bridge can
         // encode the opaque rebuild as `Delete(all-input) + Insert(all-output)`).
@@ -214,6 +298,11 @@ with open('/work/output.json', 'w') as f:
     ///
     /// * `module_name` - The module name (e.g., "`beancount.plugins.check_commodity`")
     /// * `input` - Plugin input
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::execute_plugin`], and [`PythonError::Execution`] for a
+    /// module with no Python implementation here.
     pub fn execute_builtin(
         &self,
         module_name: &str,
@@ -231,14 +320,14 @@ with open('/work/output.json', 'w') as f:
             }
         };
 
-        self.execute_plugin(plugin_code, "plugin", input)
+        self.execute_module_source(plugin_code, module_name, input)
     }
 
     /// Execute a Python plugin by module name.
     ///
-    /// This method discovers the module on the host filesystem (using the host
-    /// Python interpreter), reads its source code, and executes it in the WASI
-    /// sandbox.
+    /// This method reads the plugin file's source and executes it in the
+    /// WASI sandbox, running the functions its `__plugins__` lists, in
+    /// order, as beancount's loader does.
     ///
     /// # Arguments
     ///
@@ -258,32 +347,32 @@ with open('/work/output.json', 'w') as f:
     ) -> Result<PluginOutput, PythonError> {
         // Discover and read the module source
         let source = discover_module_source(module_name, beancount_dir)?;
-
-        // Execute the plugin using the discovered source
-        self.execute_plugin(&source, "plugin", input)
+        self.execute_module_source(&source, module_name, input)
     }
 
-    /// Run a Python script and return output via file.
-    fn run_python(
+    /// Execute `source` as the module `module_name`, running the functions
+    /// its `__plugins__` lists (see [`Self::execute_module`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::execute_plugin`].
+    pub fn execute_module_source(
         &self,
-        script: &str,
-        compat_code: &str,
-        plugin_code: &str,
-    ) -> Result<String, PythonError> {
+        source: &str,
+        module_name: &str,
+        input: &PluginInput,
+    ) -> Result<PluginOutput, PythonError> {
+        self.execute(source, module_name, None, input)
+    }
+
+    /// Run `/work/script.py` with `files` written into `/work`, and return
+    /// what it wrote to `/work/output.json`.
+    fn run_python(&self, files: &[(&str, &str)]) -> Result<String, PythonError> {
         // Create a work directory for script and output
         let work_dir = tempfile::tempdir().map_err(PythonError::Io)?;
-
-        // Write the compatibility layer to a file
-        let compat_path = work_dir.path().join("compat.py");
-        std::fs::write(&compat_path, compat_code)?;
-
-        // Write the user plugin to a file
-        let plugin_path = work_dir.path().join("plugin.py");
-        std::fs::write(&plugin_path, plugin_code)?;
-
-        // Write the main script to a file
-        let script_path = work_dir.path().join("script.py");
-        std::fs::write(&script_path, script)?;
+        for (name, contents) in files {
+            std::fs::write(work_dir.path().join(name), contents)?;
+        }
 
         // Build WASI context
         let mut wasi_builder = WasiCtxBuilder::new();
@@ -319,7 +408,8 @@ with open('/work/output.json', 'w') as f:
         // and the `make_sandboxed_python_store_caps_memory_growth_via_wasmtime`
         // regression test exercise the same wiring (issue #1234).
         let mut store =
-            make_sandboxed_python_store(&self.engine, wasi_ctx).map_err(PythonError::Wasm)?;
+            make_sandboxed_python_store(&self.engine, wasi_ctx, python_fuel(self.max_time_secs))
+                .map_err(PythonError::Wasm)?;
 
         // Create linker and add WASI. The closure reaches through the
         // state wrapper to the inner `p1::WasiP1Ctx` that the WASI
@@ -338,9 +428,20 @@ with open('/work/output.json', 'w') as f:
             .map_err(PythonError::Wasm)?;
 
         // Run Python
-        start
-            .call(&mut store, ())
-            .map_err(|e| PythonError::Execution(format!("Python execution failed: {e:#}")))?;
+        start.call(&mut store, ()).map_err(|e| {
+            // `PythonError::Execution` already reads "Python execution
+            // failed: ", so the message is just the cause.
+            let budget = if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
+                format!(
+                    "the plugin exceeded its {}-second time budget (rledger raises it with \
+                     --plugin-max-time-secs or [plugins] max_time_secs): ",
+                    self.max_time_secs.max(1)
+                )
+            } else {
+                String::new()
+            };
+            PythonError::Execution(format!("{budget}{e:#}"))
+        })?;
 
         // Read output from file
         let output_path = work_dir.path().join("output.json");
@@ -358,7 +459,7 @@ with open('/work/output.json', 'w') as f:
 /// - `Store::limiter` is set so wasmtime's `memory.grow` and
 ///   `table.grow` checks call back into [`MemoryLimiter`] with the
 ///   `PYTHON_MAX_MEMORY` ceiling (issue #1234).
-/// - `set_fuel(PYTHON_FUEL)` caps per-call CPU consumption.
+/// - `set_fuel(fuel)` caps per-call CPU consumption ([`python_fuel`]).
 ///
 /// Extracted so the production path in
 /// [`PythonRuntime::run_python`] and the
@@ -379,6 +480,7 @@ with open('/work/output.json', 'w') as f:
 fn make_sandboxed_python_store(
     engine: &Engine,
     wasi: p1::WasiP1Ctx,
+    fuel: u64,
 ) -> wasmtime::Result<Store<PythonStoreState>> {
     let mut store = Store::new(
         engine,
@@ -388,7 +490,7 @@ fn make_sandboxed_python_store(
         },
     );
     store.limiter(|state| &mut state.limiter);
-    store.set_fuel(PYTHON_FUEL)?;
+    store.set_fuel(fuel)?;
     Ok(store)
 }
 
@@ -686,9 +788,11 @@ fn parse_plugin_output(output: &str, input_len: usize) -> Result<PluginOutput, P
     let entries_json = parts[0].trim();
     let errors_json = parts[1].trim();
 
-    // Parse directives
-    let directives: Vec<crate::types::DirectiveWrapper> = serde_json::from_str(entries_json)
-        .map_err(|e| PythonError::Serialization(format!("failed to parse entries: {e}")))?;
+    // Parse directives. `null`: nothing ran (no `__plugins__`, or an entry
+    // point that does not exist), so every input directive is kept as is.
+    let directives: Option<Vec<crate::types::DirectiveWrapper>> =
+        serde_json::from_str(entries_json)
+            .map_err(|e| PythonError::Serialization(format!("failed to parse entries: {e}")))?;
 
     // Parse errors
     let json_errors: Vec<serde_json::Value> = serde_json::from_str(errors_json)
@@ -698,9 +802,15 @@ fn parse_plugin_output(output: &str, input_len: usize) -> Result<PluginOutput, P
         .into_iter()
         .filter_map(|v| {
             let message = v.get("message")?.as_str()?.to_string();
+            let severity =
+                if v.get("severity").and_then(serde_json::Value::as_str) == Some("warning") {
+                    PluginErrorSeverity::Warning
+                } else {
+                    PluginErrorSeverity::Error
+                };
             Some(PluginError {
                 message,
-                severity: PluginErrorSeverity::Error,
+                severity,
                 source_file: v
                     .get("source_file")
                     .and_then(|v| v.as_str())
@@ -713,10 +823,13 @@ fn parse_plugin_output(output: &str, input_len: usize) -> Result<PluginOutput, P
         })
         .collect();
 
-    let mut ops: Vec<PluginOp> = (0..input_len).map(PluginOp::Delete).collect();
-    for w in directives {
-        ops.push(PluginOp::Insert(w));
-    }
+    let ops = match directives {
+        None => (0..input_len).map(PluginOp::Keep).collect(),
+        Some(directives) => (0..input_len)
+            .map(PluginOp::Delete)
+            .chain(directives.into_iter().map(PluginOp::Insert))
+            .collect(),
+    };
 
     Ok(PluginOutput { ops, errors })
 }
@@ -727,6 +840,8 @@ fn parse_plugin_output(output: &str, input_len: usize) -> Result<PluginOutput, P
 
 /// Python implementation of `check_commodity` plugin.
 const CHECK_COMMODITY_PLUGIN: &str = r#"
+__plugins__ = ('plugin',)
+
 def plugin(entries, options_map, config=None):
     """Check that all used commodities are declared."""
     errors = []
@@ -786,6 +901,8 @@ def plugin(entries, options_map, config=None):
 
 /// Python implementation of leafonly plugin.
 const LEAFONLY_PLUGIN: &str = r#"
+__plugins__ = ('plugin',)
+
 def plugin(entries, options_map, config=None):
     """Check that postings only occur on leaf accounts."""
     errors = []
@@ -953,8 +1070,8 @@ mod tests {
         let engine =
             Engine::new(&engine_config()).expect("engine_config must build a valid Engine");
         let wasi = WasiCtxBuilder::new().build_p1();
-        let mut store =
-            make_sandboxed_python_store(&engine, wasi).expect("store construction must succeed");
+        let mut store = make_sandboxed_python_store(&engine, wasi, python_fuel(1))
+            .expect("store construction must succeed");
 
         // `PYTHON_MAX_MEMORY = 256 MiB = 4096 pages` (1 wasm page = 64 KiB).
         // Initial memory is 1 page; request grow by 5000 pages, which
@@ -1000,17 +1117,34 @@ mod tests {
     // the drift the test was guarding against is unrepresentable. The
     // type system enforces what the runtime assertion used to.
 
-    /// Pin `PYTHON_FUEL` at its documented 600M budget. Hoisted from an inline literal
-    /// in #1234; this test makes a future change to the value a
-    /// conscious edit. Doesn't pin the wasmtime-side wiring (that's
-    /// covered by `make_sandboxed_python_store_caps_memory_growth_via_wasmtime`,
-    /// which constructs the store via the helper that sets fuel).
+    /// A Python plugin's time budget converts to fuel exactly as a WASM
+    /// plugin's does (#2500), so the host's `max_time_secs` means the same
+    /// thing for both and a change to one conversion cannot leave the
+    /// other behind.
     #[test]
-    fn python_fuel_pins_documented_budget() {
-        assert_eq!(
-            PYTHON_FUEL, 600_000_000,
-            "PYTHON_FUEL changed without updating the rustdoc; bumping the budget \
-             should also update its doc, which compares it to the shared default."
+    fn python_fuel_is_the_shared_seconds_conversion() {
+        for secs in [
+            0,
+            1,
+            3,
+            crate::sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS,
+            u64::MAX,
+        ] {
+            assert_eq!(python_fuel(secs), crate::sandbox::fuel_for_secs(secs));
+        }
+    }
+
+    /// The default budget covers `CPython`'s startup many times over. The
+    /// figure is the startup measured in `python_fuel`'s rustdoc; if the
+    /// runtime or the budget changes so this fails, re-measure and update
+    /// that table. (The pre-#2500 budget, 600M, fails this: it is half of
+    /// one startup.)
+    #[test]
+    fn default_python_budget_covers_measured_startup() {
+        const MEASURED_STARTUP_FUEL: u64 = 1_225_000_000;
+        assert!(
+            python_fuel(crate::sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS)
+                >= 20 * MEASURED_STARTUP_FUEL
         );
     }
 
@@ -1020,6 +1154,26 @@ mod tests {
         let result = parse_plugin_output(output, 0).unwrap();
         assert!(result.ops.is_empty());
         assert!(result.errors.is_empty());
+    }
+
+    /// `null` entries (nothing ran) keep every input directive in place,
+    /// rather than deleting and re-inserting them; a `"severity":
+    /// "warning"` diagnostic stays a warning (#2500).
+    #[test]
+    fn parse_plugin_output_null_entries_keep_input_and_warning_severity() {
+        use crate::types::PluginOp;
+        let output = "null\n---SEPARATOR---\n\
+            [{\"message\": \"ran nothing\", \"source_file\": null, \
+              \"line_number\": null, \"severity\": \"warning\"}, \
+             {\"message\": \"bad\", \"source_file\": null, \"line_number\": null}]";
+        let result = parse_plugin_output(output, 2).unwrap();
+        assert!(matches!(
+            result.ops.as_slice(),
+            [PluginOp::Keep(0), PluginOp::Keep(1)]
+        ));
+        assert_eq!(result.errors.len(), 2);
+        assert_eq!(result.errors[0].severity, PluginErrorSeverity::Warning);
+        assert_eq!(result.errors[1].severity, PluginErrorSeverity::Error);
     }
 
     #[test]

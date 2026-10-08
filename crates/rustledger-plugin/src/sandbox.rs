@@ -86,22 +86,21 @@ pub const DEFAULT_SANDBOX_MAX_MEMORY: usize = 256 * 1024 * 1024;
 /// rather than hanging.
 ///
 /// Shared by the WASM plugin runtime
-/// ([`crate::runtime::RuntimeConfig::default`]) and the WASM
-/// importer host
-/// (`rustledger_importer::wasm::WasmRuntimeConfig::default`).
+/// ([`crate::runtime::RuntimeConfig::default`]), the WASM importer
+/// host (`rustledger_importer::wasm::WasmRuntimeConfig::default`), and
+/// the Python plugin runtime (`crate::python::PythonRuntime`), all
+/// converted by [`fuel_for_secs`].
 ///
-/// # Python opts out
+/// # Python uses it too
 ///
-/// The Python plugin runtime does NOT use this constant. `CPython`
-/// compiled to WASI runs as an interpreter that emits many wasm
-/// instructions per Python-source operation, so a Python workload
-/// at "the same wall-clock budget" needs ~10-100x more wasmtime
-/// fuel than equivalent native wasm. The Python path therefore
-/// sets fuel directly via its own `PYTHON_FUEL` constant
-/// (`crate::python::runtime::PYTHON_FUEL`), independent of this
-/// seconds-based default. The opt-out is principled — interpreter
-/// overhead is a structural property of CPython-on-wasm, not an
-/// oversight.
+/// Until #2500 the Python runtime had its own fixed 600M-fuel budget,
+/// on the theory that `CPython` "needs ~10-100x more fuel" than wasm.
+/// Fuel counts wasm operators, and `CPython` compiled to WASI is wasm:
+/// measured, it runs 3-6 billion fuel per CPU-second, the same range
+/// as other wasm. So the same seconds budget converts at the same
+/// rate. What Python does need is a fixed ~1.2G (~1.2 budget-seconds)
+/// for the interpreter to start on every call, which 600M could not
+/// cover, so no Python plugin ran at all.
 pub const DEFAULT_SANDBOX_MAX_TIME_SECS: u64 = 30;
 
 /// wasmtime fuel granted per second of a sandbox time budget.
@@ -215,13 +214,25 @@ impl StoreState {
     }
 }
 
+/// The fuel a time budget of `max_time_secs` grants: [`FUEL_PER_SECOND`]
+/// per second, clamped to at least one second (zero would trap on the
+/// first instruction) and saturating instead of overflowing.
+///
+/// The one conversion for every sandboxed runtime: WASM plugins and
+/// importers through [`make_sandboxed_store`], and Python plugins.
+#[must_use]
+pub const fn fuel_for_secs(max_time_secs: u64) -> u64 {
+    let secs = if max_time_secs == 0 { 1 } else { max_time_secs };
+    secs.saturating_mul(FUEL_PER_SECOND)
+}
+
 /// Create a [`Store`] with rustledger's sandbox enforcement wired in:
 ///
 /// - [`MemoryLimiter`] enforcing `max_memory` on both initial
 ///   allocation and `memory.grow`
-/// - Fuel budget computed from `max_time_secs` (clamped `≥1` to
-///   avoid zero-fuel starvation; `saturating_mul` to avoid overflow
-///   on absurd configurations)
+/// - Fuel budget computed from `max_time_secs` by [`fuel_for_secs`]
+///   (clamped `≥1` to avoid zero-fuel starvation; `saturating_mul` to
+///   avoid overflow on absurd configurations)
 ///
 /// Used by both the WASM importer host and the directive-plugin
 /// runtime so the per-call enforcement is identical across the
@@ -241,8 +252,7 @@ pub fn make_sandboxed_store(
 ) -> wasmtime::Result<Store<StoreState>> {
     let mut store = Store::new(engine, StoreState::new(max_memory));
     store.limiter(|s| &mut s.limiter);
-    let fuel = max_time_secs.max(1).saturating_mul(FUEL_PER_SECOND);
-    store.set_fuel(fuel)?;
+    store.set_fuel(fuel_for_secs(max_time_secs))?;
     Ok(store)
 }
 

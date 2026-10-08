@@ -23,7 +23,7 @@ rledger check [OPTIONS] [FILE]
 | Option | Description |
 |--------|-------------|
 | `-P, --profile <PROFILE>` | Use a profile from config (global flag) |
-| `--plugin-max-time-secs <SECS>` | Time budget for each WASM plugin call, overriding `[plugins] max_time_secs` (default: 30; global flag). See [Plugin Time Budget](../getting-started/configuration.md#plugin-time-budget) |
+| `--plugin-max-time-secs <SECS>` | Time budget for each WASM or Python plugin call, overriding `[plugins] max_time_secs` (default: 30; global flag). See [Plugin Time Budget](../getting-started/configuration.md#plugin-time-budget) |
 | `-v, --verbose` | Show verbose output including timing |
 | `-q, --quiet` | Suppress all output (just use exit code) |
 | `-C, --no-cache` | Disable the binary cache for parsed directives (also: `BEANCOUNT_DISABLE_LOAD_CACHE=1`) |

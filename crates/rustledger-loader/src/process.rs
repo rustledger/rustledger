@@ -45,7 +45,7 @@ pub struct LoadOptions {
     /// that never read them (`check`, BQL, holdings, the FFI component) don't carry
     /// the vector — only the capgains report opts in.
     pub collect_capital_gains: bool,
-    /// Time budget, in seconds, for each WASM plugin call (default: `None`,
+    /// Time budget, in seconds, for each WASM or Python plugin call (default: `None`,
     /// the sandbox's 30 seconds). The host's setting, never the ledger's:
     /// see `ResolvedPlugin::run_with_max_time_secs`.
     pub plugin_max_time_secs: Option<u64>,

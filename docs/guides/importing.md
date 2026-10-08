@@ -39,6 +39,7 @@ For non-standard formats, create `importers.toml`:
 [[importers]]
 name = "chase"
 account = "Assets:Bank:Chase"
+currency = "USD"  # required unless the ledger's `open` names one (see below)
 
 # Column mapping (0-indexed or by header name)
 date_column = 0
@@ -62,6 +63,17 @@ Use with:
 ```bash
 rledger extract --importer chase chase-statement.csv
 ```
+
+An entry without `currency` takes the currency from the account's `open`
+directive when you pass the ledger with `--ledger` or `--existing` and that
+directive names exactly one currency (`2024-01-01 open Assets:Bank:Chase USD`).
+`--ledger` decides when it opens the account; `--existing` is read only when it
+does not. Included files are followed. Otherwise extract stops with an error
+naming the importer. A configured `currency` (or `--currency`) always wins
+over the `open`, but if the `open` does not allow it, extract warns, since
+`rledger check` would reject every imported posting. A value that is not a
+commodity at all (`usd`, `€`, an empty string) is an error naming its source. It never guesses a
+currency, since amounts booked in the wrong one corrupt the ledger silently.
 
 The `importers.toml` file is searched for automatically in these locations (first found wins):
 

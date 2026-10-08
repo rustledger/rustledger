@@ -215,21 +215,106 @@ def _parse_posting(d):
         cost=_parse_cost_spec(d.get('cost')),
         price=_parse_amount(d.get('price')),
         flag=d.get('flag'),
-        meta=d.get('meta', {})
+        meta=_parse_meta(d.get('metadata'))
     )
 
 
-def _parse_meta(d):
-    """Parse metadata dict."""
-    if d is None:
-        return {}
-    return dict(d)
+class _Meta(dict):
+    """A metadata dict that remembers each value's wire form, so a value
+    the plugin leaves alone goes back with its original type (an account
+    stays an account, not a string). A plugin that builds a new dict
+    still works; its values are typed from their Python types."""
+    __slots__ = ('_wire',)
+
+
+def _parse_meta_value(v):
+    t = v.get('type')
+    x = v.get('value')
+    if t == 'number':
+        return _parse_decimal(x)
+    if t == 'date':
+        return _parse_date(x)
+    if t == 'amount':
+        return _parse_amount(x)
+    if t == 'bool':
+        return bool(x)
+    # string, account, currency, tag, link: plain strings, as in beancount.
+    return x
+
+
+def _parse_meta(items, d=None):
+    """Parse the wire's `metadata` (a list of [key, typed value] pairs).
+
+    Before #2500's review this read a `meta` key the wire never has, so
+    every plugin saw empty metadata and every round trip dropped it.
+
+    With `d` (the directive's dict), adds `filename` and `lineno` from its
+    location, as beancount's entries always carry them (plugins read them,
+    and report errors against `entry.meta`). They are not written back.
+    """
+    meta = _Meta()
+    if items:
+        # Only for entries that have metadata of their own: most have
+        # none, and a ledger's worth of empty dicts is memory the
+        # sandbox does not have to spare.
+        wire = meta._wire = {}
+        for item in items:
+            k, v = item[0], item[1]
+            if isinstance(v, dict) and 'type' in v:
+                parsed = _parse_meta_value(v)
+                meta[k] = parsed
+                wire[k] = (parsed, v)
+            else:
+                meta[k] = v
+    if d is not None:
+        if d.get('filename') is not None and 'filename' not in meta:
+            # One string per file, not one per entry.
+            meta['filename'] = sys.intern(d['filename'])
+        if d.get('lineno') is not None and 'lineno' not in meta:
+            meta['lineno'] = d['lineno']
+    return meta
+
+
+def _serialize_meta_value(v):
+    if isinstance(v, bool):
+        return {'type': 'bool', 'value': v}
+    if isinstance(v, (Decimal, int, float)):
+        return {'type': 'number', 'value': str(v)}
+    if isinstance(v, date):
+        return {'type': 'date', 'value': _serialize_date(v)}
+    if isinstance(v, Amount):
+        return {'type': 'amount', 'value': _serialize_amount(v)}
+    return {'type': 'string', 'value': str(v)}
+
+
+def _serialize_meta(meta):
+    """Metadata to the wire: [key, typed value] pairs.
+
+    Skips the `filename` / `lineno` location keys `_parse_meta` added, and
+    beancount-internal `__key__`s, neither of which is user metadata, and
+    None values, which the wire cannot carry.
+    """
+    if not meta:
+        return []
+    wire = getattr(meta, '_wire', None) or {}
+    out = []
+    for k, v in meta.items():
+        original = wire.get(k)
+        if original is not None and original[0] == v:
+            out.append([k, original[1]])
+            continue
+        if original is None and (k in ('filename', 'lineno') or str(k).startswith('__')):
+            continue
+        if v is None:
+            continue
+        out.append([str(k), _serialize_meta_value(v)])
+    return out
 
 
 def _dict_to_directive(d):
     """Convert a dict to the appropriate directive namedtuple."""
     dtype = d.get('type', '')
-    meta = _parse_meta(d.get('meta'))
+    meta = _parse_meta(d.get('metadata'), d)
     date_val = _parse_date(d.get('date'))
 
     if dtype == 'transaction':
@@ -433,7 +518,7 @@ def _serialize_posting(p):
         'cost': _serialize_cost_spec(p.cost),
         'price': _serialize_amount(p.price),
         'flag': p.flag,
-        'metadata': list(p.meta.items()) if p.meta else []
+        'metadata': _serialize_meta(p.meta)
     }
 
 
@@ -442,7 +527,7 @@ def _directive_to_dict(entry):
     if isinstance(entry, Transaction):
         return {
             'type': 'transaction',
-            'metadata': list(entry.meta.items()) if entry.meta else [],
+            'metadata': _serialize_meta(entry.meta),
             'date': _serialize_date(entry.date),
             'flag': entry.flag,
             'payee': entry.payee,
@@ -454,7 +539,7 @@ def _directive_to_dict(entry):
     elif isinstance(entry, Balance):
         return {
             'type': 'balance',
-            'metadata': list(entry.meta.items()) if entry.meta else [],
+            'metadata': _serialize_meta(entry.meta),
             'date': _serialize_date(entry.date),
             'account': entry.account,
             'amount': _serialize_amount(entry.amount),
@@ -464,7 +549,7 @@ def _directive_to_dict(entry):
     elif isinstance(entry, Open):
         return {
             'type': 'open',
-            'metadata': list(entry.meta.items()) if entry.meta else [],
+            'metadata': _serialize_meta(entry.meta),
             'date': _serialize_date(entry.date),
             'account': entry.account,
             'currencies': list(entry.currencies) if entry.currencies else [],
@@ -473,21 +558,21 @@ def _directive_to_dict(entry):
     elif isinstance(entry, Close):
         return {
             'type': 'close',
-            'metadata': list(entry.meta.items()) if entry.meta else [],
+            'metadata': _serialize_meta(entry.meta),
             'date': _serialize_date(entry.date),
             'account': entry.account
         }
     elif isinstance(entry, Commodity):
         return {
             'type': 'commodity',
-            'metadata': list(entry.meta.items()) if entry.meta else [],
+            'metadata': _serialize_meta(entry.meta),
             'date': _serialize_date(entry.date),
             'currency': entry.currency
         }
     elif isinstance(entry, Pad):
         return {
             'type': 'pad',
-            'metadata': list(entry.meta.items()) if entry.meta else [],
+            'metadata': _serialize_meta(entry.meta),
             'date': _serialize_date(entry.date),
             'account': entry.account,
             'source_account': entry.source_account
@@ -495,7 +580,7 @@ def _directive_to_dict(entry):
     elif isinstance(entry, Event):
         return {
             'type': 'event',
-            'metadata': list(entry.meta.items()) if entry.meta else [],
+            'metadata': _serialize_meta(entry.meta),
             'date': _serialize_date(entry.date),
             'event_type': entry.type,
             'description': entry.description
@@ -503,7 +588,7 @@ def _directive_to_dict(entry):
     elif isinstance(entry, Note):
         return {
             'type': 'note',
-            'metadata': list(entry.meta.items()) if entry.meta else [],
+            'metadata': _serialize_meta(entry.meta),
             'date': _serialize_date(entry.date),
             'account': entry.account,
             'comment': entry.comment
@@ -511,7 +596,7 @@ def _directive_to_dict(entry):
     elif isinstance(entry, Document):
         return {
             'type': 'document',
-            'metadata': list(entry.meta.items()) if entry.meta else [],
+            'metadata': _serialize_meta(entry.meta),
             'date': _serialize_date(entry.date),
             'account': entry.account,
             'filename': entry.filename,
@@ -521,7 +606,7 @@ def _directive_to_dict(entry):
     elif isinstance(entry, Price):
         return {
             'type': 'price',
-            'metadata': list(entry.meta.items()) if entry.meta else [],
+            'metadata': _serialize_meta(entry.meta),
             'date': _serialize_date(entry.date),
             'currency': entry.currency,
             'amount': _serialize_amount(entry.amount)
@@ -529,7 +614,7 @@ def _directive_to_dict(entry):
     elif isinstance(entry, Query):
         return {
             'type': 'query',
-            'metadata': list(entry.meta.items()) if entry.meta else [],
+            'metadata': _serialize_meta(entry.meta),
             'date': _serialize_date(entry.date),
             'name': entry.name,
             'query_string': entry.query_string
@@ -537,7 +622,7 @@ def _directive_to_dict(entry):
     elif isinstance(entry, Custom):
         return {
             'type': 'custom',
-            'metadata': list(entry.meta.items()) if entry.meta else [],
+            'metadata': _serialize_meta(entry.meta),
             'date': _serialize_date(entry.date),
             'custom_type': entry.type,
             'values': entry.values
@@ -562,23 +647,74 @@ def serialize_entries(entries):
     return json.dumps([_directive_to_dict(e) for e in entries], default=str)
 
 
+def load_entries(path):
+    """Read directives written one JSON object per line.
+
+    Line by line, so the whole input never sits in memory as one string
+    next to the objects parsed from it (#2500 review: a 100k-transaction
+    ledger exhausted the sandbox's memory that way).
+    """
+    with open(path) as f:
+        return [_dict_to_directive(json.loads(line)) for line in f if line.strip()]
+
+
+def dump_entries(entries, f, inputs=()):
+    """Write the plugin's output to the file object `f`, one line per
+    entry, one at a time.
+
+    An entry that is one of `inputs`, or was rebuilt from one (it still
+    holds that input's `meta` dict, as `_replace` keeps it), is written
+    as `{"modify": i, "entry": {...}}`, so the host keeps input `i`'s
+    source location; anything else is `{"insert": {...}}`. Before #2500's
+    review every entry was re-inserted, so a Python plugin cost every
+    later diagnostic (from a later plugin or validation) its location.
+    """
+    by_id = {}
+    by_meta = {}
+    for i, e in enumerate(inputs):
+        by_id[id(e)] = i
+        meta = getattr(e, 'meta', None)
+        if meta is not None:
+            by_meta.setdefault(id(meta), i)
+    used = set()
+    for e in entries:
+        i = by_id.get(id(e))
+        if i is None or i in used:
+            i = by_meta.get(id(getattr(e, 'meta', None)))
+        entry = json.dumps(_directive_to_dict(e), default=str)
+        if i is not None and i not in used:
+            used.add(i)
+            f.write('{"modify": %d, "entry": %s}\n' % (i, entry))
+        else:
+            f.write('{"insert": %s}\n' % entry)
+
+
+def _error_to_dict(e):
+    """One plugin error as the host reads it.
+
+    Any object with a `message` counts, as in beancount, whose plugins
+    report errors as namedtuples of their own (`source message entry`):
+    bean-check prints `e.source['filename']:e.source['lineno']` and
+    `e.message`, whatever the error's type. Before #2500's review only
+    this module's `ValidationError` was read that way, and every other
+    error became `str(e)`, the whole tuple, with no location.
+    """
+    message = getattr(e, 'message', None)
+    source = getattr(e, 'source', None)
+    filename = lineno = None
+    if isinstance(source, dict):
+        filename = source.get('filename')
+        lineno = source.get('lineno')
+    return {
+        'message': str(e) if message is None else str(message),
+        'source_file': filename if isinstance(filename, str) else None,
+        'line_number': lineno if isinstance(lineno, int) and lineno > 0 else None,
+    }
+
+
 def serialize_errors(errors):
     """Convert list of errors to JSON string."""
-    error_list = []
-    for e in errors:
-        if isinstance(e, ValidationError):
-            error_list.append({
-                'message': str(e.message),
-                'source_file': e.source.get('filename') if e.source else None,
-                'line_number': e.source.get('lineno') if e.source else None,
-            })
-        else:
-            error_list.append({
-                'message': str(e),
-                'source_file': None,
-                'line_number': None,
-            })
-    return json.dumps(error_list)
+    return json.dumps([_error_to_dict(e) for e in errors])
 
 
 def _host_diagnostic(message, severity='error'):
@@ -595,7 +731,7 @@ def _entry_point_name(item):
     return item if isinstance(item, str) else getattr(item, '__name__', repr(item))
 
 
-def run_plugin(module, plugin_name, entries_json, options_json, config=None,
+def run_plugin(module, plugin_name, entries_path, options_json, config=None,
                entry_points=None):
     """
     Run a plugin module the way beancount's loader does.
@@ -620,16 +756,16 @@ def run_plugin(module, plugin_name, entries_json, options_json, config=None,
     Args:
         module: The plugin's module object
         plugin_name: The plugin reference, for messages
-        entries_json: JSON-serialized directives
+        entries_path: File of directives, one JSON object per line
         options_json: JSON-serialized options dict
         config: Optional plugin config string
         entry_points: Names of the functions to run instead of
             `__plugins__` (None: use `__plugins__`)
 
     Returns:
-        Tuple of (serialized_entries, serialized_errors).
-        serialized_entries is None when nothing ran, so the input entries
-        stand unchanged.
+        Tuple of ((entries, inputs), serialized_errors), where inputs are
+        the entries as loaded, for `dump_entries`. The first item is None
+        when nothing ran, so the input entries stand unchanged.
     """
     if entry_points is None:
         if not hasattr(module, '__plugins__'):
@@ -658,7 +794,8 @@ def run_plugin(module, plugin_name, entries_json, options_json, config=None,
                 f'"{_entry_point_name(item)}", which is not a function')
         callbacks.append((_entry_point_name(item), callback))
 
-    entries = deserialize_entries(entries_json)
+    entries = load_entries(entries_path)
+    inputs = list(entries)
     options = json.loads(options_json) if options_json else {}
     args = () if config is None else (config,)
 
@@ -666,6 +803,13 @@ def run_plugin(module, plugin_name, entries_json, options_json, config=None,
     for name, callback in callbacks:
         try:
             entries, plugin_errors = callback(entries, options, *args)
+        except MemoryError:
+            errors.append(ValidationError(
+                None,
+                f'Error applying plugin "{plugin_name}" ({name}): it ran out of the '
+                f'sandbox memory limit (MemoryError)',
+                None))
+            continue
         except Exception as e:
             errors.append(ValidationError(
                 None,
@@ -674,22 +818,27 @@ def run_plugin(module, plugin_name, entries_json, options_json, config=None,
             continue
         errors.extend(plugin_errors or [])
 
-    return serialize_entries(entries), serialize_errors(errors)
+    return (entries, inputs), serialize_errors(errors)
 
 
 # =============================================================================
 # Create fake beancount module hierarchy
 # =============================================================================
 
-class FakeModule:
-    """A fake module for namespace purposes."""
-    pass
+import types as _types
+
+
+def FakeModule(name):
+    """A stand-in module, named, so a missing name reads as
+    `cannot import name 'x' from 'beancount.core'`, not from
+    `'<unknown module name>'`."""
+    return _types.ModuleType(name)
 
 
 # Create beancount.core.data module
-_beancount = FakeModule()
-_beancount.core = FakeModule()
-_beancount.core.data = FakeModule()
+_beancount = FakeModule('beancount')
+_beancount.core = FakeModule('beancount.core')
+_beancount.core.data = FakeModule('beancount.core.data')
 
 # Populate beancount.core.data with our types
 _beancount.core.data.Transaction = Transaction
@@ -719,12 +868,26 @@ def new_metadata(filename, lineno, kvlist=None):
 
 _beancount.core.data.new_metadata = new_metadata
 
+
+def filter_txns(entries):
+    """Yield only the Transaction entries (beancount.core.data.filter_txns)."""
+    for entry in entries:
+        if isinstance(entry, Transaction):
+            yield entry
+
+_beancount.core.data.filter_txns = filter_txns
+_beancount.core.data.Directives = list
+
 # Create beancount.core.amount module
-_beancount.core.amount = FakeModule()
+_beancount.core.amount = FakeModule('beancount.core.amount')
 _beancount.core.amount.Amount = Amount
+# Verbatim from beancount.core.amount (3.x).
+_beancount.core.amount.CURRENCY_RE = (
+    r"[A-Z][A-Z0-9\'\.\_\-]*[A-Z0-9]?\b|/[A-Z0-9\'\.\_\-]*[A-Z](?:[A-Z0-9\'\.\_\-]*[A-Z0-9])?"
+)
 
 # Create beancount.core.getters module
-_beancount.core.getters = FakeModule()
+_beancount.core.getters = FakeModule('beancount.core.getters')
 
 def get_account_open_close(entries):
     """Get a mapping of account name to Open/Close directives.
@@ -753,7 +916,7 @@ def get_account_open_close(entries):
 _beancount.core.getters.get_account_open_close = get_account_open_close
 
 # Create beancount.core.flags module
-_beancount.core.flags = FakeModule()
+_beancount.core.flags = FakeModule('beancount.core.flags')
 _beancount.core.flags.FLAG_OKAY = '*'
 _beancount.core.flags.FLAG_WARNING = '!'
 _beancount.core.flags.FLAG_PADDING = 'P'
@@ -778,7 +941,7 @@ __all__ = [
     'Commodity', 'Pad', 'Event', 'Note', 'Document', 'Price', 'Query',
     'Custom', 'Cost', 'CostSpec', 'TxnPosting', 'ValidationError',
     'deserialize_entries', 'serialize_entries', 'serialize_errors',
-    'run_plugin',
+    'load_entries', 'dump_entries', 'run_plugin',
 ]
 "#;
 

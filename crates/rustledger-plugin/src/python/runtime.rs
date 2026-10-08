@@ -12,6 +12,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use wasmtime::{Config, Engine, Linker, Module, Store};
 use wasmtime_wasi::p1;
+use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
 use wasmtime_wasi::{FsPerms, WasiCtxBuilder};
 
 /// Per-instance linear-memory cap for the Python plugin runtime.
@@ -49,25 +50,32 @@ const PYTHON_MAX_MEMORY: usize = crate::sandbox::DEFAULT_SANDBOX_MAX_MEMORY;
 /// x86-64 host (debug `rledger`, whose dependencies wasmtime and
 /// Cranelift are built at `opt-level = 3`), fuel per call is:
 ///
-/// | Workload                                   | Fuel  | CPU time |
-/// |--------------------------------------------|-------|----------|
-/// | `CPython` startup + passthrough, 3 entries | 1.22G | 0.4 s    |
-/// | passthrough, 5k transactions               | 3.36G | 1.3 s    |
-/// | tag every transaction, 5k transactions     | 3.47G | 1.3 s    |
-/// | passthrough, 20k transactions              | 9.84G | 4.1 s    |
-/// | tag every transaction, 20k transactions    | 10.5G | 4.6 s    |
-/// | 5M-iteration Python loop                   | 6.81G | 1.1 s    |
+/// | Workload                                  | Fuel  | CPU time | Sandbox memory |
+/// |-------------------------------------------|-------|----------|----------------|
+/// | `CPython` startup + passthrough, 3 entries | 1.24G | 0.2 s    | 40 MiB         |
+/// | passthrough, 5k transactions              | 3.99G | 0.8 s    | 40 MiB         |
+/// | tag every transaction, 5k transactions    | 4.19G | 0.9 s    | 40 MiB         |
+/// | passthrough, 20k transactions             | 12.2G | 3.3 s    | 50 MiB         |
+/// | tag every transaction, 20k transactions   | 13.0G | 3.7 s    | 58 MiB         |
+/// | passthrough, 100k transactions            | 56.7G | 16 s     | 162 MiB        |
+/// | tag every transaction, 100k transactions  | 60.0G | 22 s     | 205 MiB        |
+/// | passthrough, 200k transactions            | -     | -        | over the 256 MiB cap |
+/// | 5M-iteration Python loop                  | 6.81G | 1.1 s    |                |
 ///
 /// (CPU time is the whole `rledger check` process.) That is 3-6G fuel
 /// per CPU-second, the range other wasm runs at, so
 /// [`sandbox::FUEL_PER_SECOND`]'s conservative 1G keeps its promise
 /// for Python too: a budget of N seconds stops the call within N
 /// seconds. A multiplier would break that promise without being
-/// needed: the default 30 seconds (30G) is 25x `CPython`'s startup and
-/// covers a plugin over about 65k transactions (~0.43M fuel each, the
+/// needed: the default 30 seconds (30G) is 24x `CPython`'s startup and
+/// covers a plugin over about 50k transactions (~0.55M fuel each, the
 /// cost of moving them through JSON both ways). A larger ledger, or a
 /// heavier plugin, needs the host to raise the budget
-/// (`[plugins] max_time_secs`, `--plugin-max-time-secs`).
+/// (`[plugins] max_time_secs`, `--plugin-max-time-secs`); the fuel-trap
+/// message quotes [`transfer_secs_estimate`] so the user knows by how
+/// much. Memory is the harder limit: every entry lives in the sandbox as
+/// Python objects (~1.2 KB per transaction), so the 256 MiB cap holds
+/// about 180k transactions, whatever the budget.
 ///
 /// Startup costs ~1.2 budget-seconds on every call, so a budget of one
 /// second cannot run a Python plugin at all. Before #2500 the budget
@@ -78,6 +86,51 @@ const PYTHON_MAX_MEMORY: usize = crate::sandbox::DEFAULT_SANDBOX_MAX_MEMORY;
 /// [`sandbox::FUEL_PER_SECOND`]: crate::sandbox::FUEL_PER_SECOND
 const fn python_fuel(max_time_secs: u64) -> u64 {
     crate::sandbox::fuel_for_secs(max_time_secs)
+}
+
+/// Measured fuel to start `CPython` and run a passthrough plugin over a
+/// tiny ledger (see [`python_fuel`]).
+const STARTUP_FUEL: u64 = 1_240_000_000;
+
+/// Measured fuel to move one transaction into Python and back (parse
+/// its JSON line, build the namedtuples, write it out again; see
+/// [`python_fuel`]), rounded up.
+const TRANSFER_FUEL_PER_ENTRY: u64 = 600_000;
+
+/// About how many budget-seconds a Python plugin over `entries` entries
+/// spends before doing any work: startup plus moving the entries in and
+/// out. A floor for the budget, quoted when a plugin runs out of time.
+const fn transfer_secs_estimate(entries: usize) -> u64 {
+    let fuel = STARTUP_FUEL.saturating_add(TRANSFER_FUEL_PER_ENTRY.saturating_mul(entries as u64));
+    fuel.div_ceil(crate::sandbox::FUEL_PER_SECOND)
+}
+
+/// Cap on what a Python plugin's stdout (its result) may hold: twice the
+/// input plus 64 MiB, room for a plugin that rewrites every entry and
+/// inserts many more, while a plugin cannot use output to exhaust host
+/// memory.
+const fn output_cap(input_bytes: usize) -> usize {
+    input_bytes.saturating_mul(2).saturating_add(64 << 20)
+}
+
+/// Cap on a Python plugin's stderr (tracebacks, its prints).
+const STDERR_CAP: usize = 4 << 20;
+
+/// Show the guest's stderr on the host's.
+fn forward_guest_stderr(bytes: &[u8]) {
+    use std::io::Write;
+    if !bytes.is_empty() {
+        let mut err = std::io::stderr().lock();
+        let _ = err.write_all(bytes);
+        if bytes.len() >= STDERR_CAP {
+            let _ = writeln!(
+                err,
+                "\n(the Python plugin's stderr was cut off at {} MiB)",
+                STDERR_CAP >> 20
+            );
+        }
+        let _ = err.flush();
+    }
 }
 
 /// Store state for the Python plugin runtime.
@@ -113,12 +166,17 @@ struct PythonStoreState {
 /// already defined, as when plugin code was exec'd into the compat
 /// namespace, but keeps its own namespace, so `__plugins__` and the
 /// functions it names are looked up on the module, as beancount does.
-const PLUGIN_SCRIPT: &str = r"
+const PLUGIN_SCRIPT: &str = r#"
 import json
 import sys
 import types
 
 sys.path.insert(0, '/work')
+
+# The result goes to stdout; anything the plugin prints goes to stderr,
+# so it cannot corrupt the result.
+_result_out = sys.stdout
+sys.stdout = sys.stderr
 
 # Load compatibility layer (defines types like ValidationError, Transaction, etc.)
 exec(open('/work/compat.py').read())
@@ -133,26 +191,26 @@ _plugin_module.__file__ = '/work/plugin.py'
 with open('/work/plugin.py') as f:
     exec(compile(f.read(), '/work/plugin.py', 'exec'), _plugin_module.__dict__)
 
-with open('/work/entries.json') as f:
-    _entries_json = f.read()
 with open('/work/options.json') as f:
     _options_json = f.read()
 
 entries_out, errors_out = run_plugin(
     _plugin_module,
     _invocation['plugin_name'],
-    _entries_json,
+    '/work/entries.jsonl',
     _options_json,
     _invocation['config'],
     _invocation['entry_points'],
 )
 
-# Write output to file. `null` means nothing ran: the input stands.
-with open('/work/output.json', 'w') as f:
-    f.write('null' if entries_out is None else entries_out)
-    f.write('\n---SEPARATOR---\n')
-    f.write(errors_out)
-";
+# `None`: nothing ran, the input stands. The result line goes last: its
+# presence tells the host the script finished.
+if entries_out is not None:
+    dump_entries(entries_out[0], _result_out, entries_out[1])
+_result_out.write('{"ran": ' + ('false' if entries_out is None else 'true')
+                  + ', "errors": ' + errors_out + '}\n')
+_result_out.flush()
+"#;
 
 /// Python plugin runtime.
 ///
@@ -263,7 +321,7 @@ impl PythonRuntime {
         // Everything the script needs goes through files, so nothing is
         // spliced into Python source: a narration with a quote or a
         // backslash once broke the JSON embedded in a string literal.
-        let entries_json = serialize_directives_to_json(&input.directives)?;
+        let entries_jsonl = serialize_directives_to_json_lines(&input.directives)?;
         let options_json = serde_json::to_string(&input.options)
             .map_err(|e| PythonError::Serialization(e.to_string()))?;
         let module_name = std::path::Path::new(plugin_name)
@@ -278,18 +336,22 @@ impl PythonRuntime {
         })
         .to_string();
 
-        let output = self.run_python(&[
-            ("script.py", PLUGIN_SCRIPT),
-            ("compat.py", BEANCOUNT_COMPAT_PY),
-            ("plugin.py", plugin_code),
-            ("entries.json", &entries_json),
-            ("options.json", &options_json),
-            ("invocation.json", &invocation),
-        ])?;
+        let output = self.run_python(
+            &[
+                ("script.py", PLUGIN_SCRIPT),
+                ("compat.py", BEANCOUNT_COMPAT_PY),
+                ("plugin.py", plugin_code),
+                ("entries.jsonl", &entries_jsonl),
+                ("options.json", &options_json),
+                ("invocation.json", &invocation),
+            ],
+            input.directives.len(),
+        )?;
+        drop(entries_jsonl);
 
         // Parse output (pass input length so the Python bridge can
         // encode the opaque rebuild as `Delete(all-input) + Insert(all-output)`).
-        parse_plugin_output(&output, input.directives.len())
+        parse_plugin_output(output.as_ref(), input.directives.len())
     }
 
     /// Execute a built-in beancount plugin by module name.
@@ -308,16 +370,11 @@ impl PythonRuntime {
         module_name: &str,
         input: &PluginInput,
     ) -> Result<PluginOutput, PythonError> {
-        // Check if this is one of our implemented built-in plugins
-        let plugin_code = match module_name {
-            "beancount.plugins.check_commodity" | "check_commodity" => CHECK_COMMODITY_PLUGIN,
-            "beancount.plugins.leafonly" | "leafonly" => LEAFONLY_PLUGIN,
-            _ => {
-                return Err(PythonError::Execution(format!(
-                    "built-in plugin '{module_name}' is not available in Python WASI mode. \
-                     Use rustledger's native implementation instead."
-                )));
-            }
+        let Some(plugin_code) = builtin_python_plugin(module_name) else {
+            return Err(PythonError::Execution(format!(
+                "built-in plugin '{module_name}' is not available in Python WASI mode. \
+                 Use rustledger's native implementation instead."
+            )));
         };
 
         self.execute_module_source(plugin_code, module_name, input)
@@ -365,9 +422,17 @@ impl PythonRuntime {
         self.execute(source, module_name, None, input)
     }
 
-    /// Run `/work/script.py` with `files` written into `/work`, and return
-    /// what it wrote to `/work/output.json`.
-    fn run_python(&self, files: &[(&str, &str)]) -> Result<String, PythonError> {
+    /// Run `/work/script.py` with `files` written into `/work` (a fresh
+    /// temp dir, deleted when this returns, on every path, including a
+    /// trap), and return what it wrote to stdout.
+    ///
+    /// `entries` is how many directives the input holds, for the
+    /// messages when the plugin runs out of time or memory.
+    fn run_python(
+        &self,
+        files: &[(&str, &str)],
+        entries: usize,
+    ) -> Result<impl AsRef<[u8]> + use<>, PythonError> {
         // Create a work directory for script and output
         let work_dir = tempfile::tempdir().map_err(PythonError::Io)?;
         for (name, contents) in files {
@@ -377,21 +442,29 @@ impl PythonRuntime {
         // Build WASI context
         let mut wasi_builder = WasiCtxBuilder::new();
 
-        // Inherit stderr for error messages
-        wasi_builder.inherit_stderr();
+        // The guest writes nothing to the host filesystem: its result goes
+        // to stdout, and stdout and stderr go to capped in-memory pipes.
+        // A writable `/work` (as before #2500's review) let a plugin write
+        // gigabytes of host temp space for almost no fuel (1 GiB cost
+        // 0.07G fuel, measured), and an inherited stderr let it flood the
+        // host's. A write past a cap traps the call.
+        let input_bytes: usize = files.iter().map(|(_, contents)| contents.len()).sum();
+        let stdout = MemoryOutputPipe::new(output_cap(input_bytes));
+        let stderr = MemoryOutputPipe::new(STDERR_CAP);
+        wasi_builder.stdout(stdout.clone());
+        wasi_builder.stderr(stderr.clone());
 
-        // Get the python-wasi root directory (parent of lib)
-        let python_root = self.stdlib_path.parent().unwrap_or(&self.stdlib_path);
-
-        // Map the python-wasi directory as "/" (root) so Python can find /lib
-        // This is critical - Python needs absolute paths for PYTHONHOME/PYTHONPATH
+        // Only the standard library, read-only, at `/lib` (PYTHONHOME is
+        // `/`). Before #2500's review the whole cache directory was `/`,
+        // which also showed the guest `python.wasm` and every cached
+        // `.cwasm`; nothing there is secret, but nothing there is needed.
         wasi_builder
-            .preopened_dir(python_root, "/", FsPerms::ReadOnly)
+            .preopened_dir(&self.stdlib_path, "/lib", FsPerms::ReadOnly)
             .map_err(PythonError::Wasm)?;
 
-        // Set up work directory for script and output (read-write)
+        // The inputs, read-only.
         wasi_builder
-            .preopened_dir(work_dir.path(), "/work", FsPerms::ReadWrite)
+            .preopened_dir(work_dir.path(), "/work", FsPerms::ReadOnly)
             .map_err(PythonError::Wasm)?;
 
         // Set environment for Python - use absolute paths from guest perspective
@@ -428,28 +501,66 @@ impl PythonRuntime {
             .map_err(PythonError::Wasm)?;
 
         // Run Python
-        start.call(&mut store, ()).map_err(|e| {
+        let outcome = start.call(&mut store, ());
+        // The interpreter's own diagnostics (a traceback, the plugin's
+        // prints) are the user's to see, whatever the outcome.
+        forward_guest_stderr(&stderr.contents());
+        outcome.map_err(|e| {
             // `PythonError::Execution` already reads "Python execution
             // failed: ", so the message is just the cause.
-            let budget = if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
+            let limiter = &store.data().limiter;
+            let cause = if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
                 format!(
-                    "the plugin exceeded its {}-second time budget (rledger raises it with \
-                     --plugin-max-time-secs or [plugins] max_time_secs): ",
-                    self.max_time_secs.max(1)
+                    "the plugin {}; moving {entries} entries into Python and back takes \
+                     about {} seconds of it before the plugin does any work: ",
+                    crate::sandbox::time_budget_exceeded(self.max_time_secs)
+                        .trim_start_matches("it "),
+                    transfer_secs_estimate(entries),
                 )
+            } else if stdout.contents().len() >= output_cap(input_bytes) {
+                format!(
+                    "the plugin's output exceeded its {} MiB limit: ",
+                    output_cap(input_bytes) >> 20
+                )
+            } else if stderr.contents().len() >= STDERR_CAP {
+                format!(
+                    "the plugin wrote more than {} MiB to stderr: ",
+                    STDERR_CAP >> 20
+                )
+            } else if limiter.growth_denied() {
+                format!(
+                    "the plugin ran out of the {} MiB sandbox memory limit, which is fixed \
+                     (Python holds every entry as objects, about 1 KB per transaction; \
+                     {entries} entries were passed in): ",
+                    limiter.max_memory() >> 20
+                )
+            } else if let Some(exit) = e.downcast_ref::<wasmtime_wasi::I32Exit>() {
+                // An uncaught exception at the top level (an import the
+                // compat layer does not provide, a syntax error): its
+                // traceback went to stderr above, and its last line names
+                // the error.
+                let contents = stderr.contents();
+                let last = String::from_utf8_lossy(&contents)
+                    .lines()
+                    .rev()
+                    .find(|l| !l.trim().is_empty())
+                    .map(|l| l.trim().to_string());
+                return PythonError::Execution(match last {
+                    Some(last) => format!(
+                        "the plugin stopped Python with exit status {}: {last} \
+                         (traceback above)",
+                        exit.0
+                    ),
+                    None => format!("the plugin stopped Python with exit status {}", exit.0),
+                });
             } else {
                 String::new()
             };
-            PythonError::Execution(format!("{budget}{e:#}"))
+            PythonError::Execution(format!("{cause}{e:#}"))
         })?;
 
-        // Read output from file
-        let output_path = work_dir.path().join("output.json");
-        std::fs::read_to_string(&output_path).map_err(|e| {
-            PythonError::Execution(format!(
-                "failed to read Python output: {e}. The plugin may have crashed."
-            ))
-        })
+        drop(work_dir);
+        Ok(stdout.contents())
     }
 }
 
@@ -669,6 +780,18 @@ fn write_cache_atomically(cache_path: &std::path::Path, module: &Module) {
     }
 }
 
+/// The source of the built-in Python plugin `name` (with or without the
+/// `beancount.plugins.` prefix), if there is one. `plugin "python:<name>"`
+/// runs it instead of the native plugin of that name.
+#[must_use]
+pub fn builtin_python_plugin(name: &str) -> Option<&'static str> {
+    match name.strip_prefix("beancount.plugins.").unwrap_or(name) {
+        "check_commodity" => Some(CHECK_COMMODITY_PLUGIN),
+        "leafonly" => Some(LEAFONLY_PLUGIN),
+        _ => None,
+    }
+}
+
 /// Classify a Python plugin reference as a FILE path vs a dotted module name.
 ///
 /// A file when it ends in `.py` (case-insensitive) or contains a path separator.
@@ -757,46 +880,95 @@ pub fn is_python_available() -> bool {
         .is_ok_and(|o| o.status.success())
 }
 
-/// Serialize directives to JSON for Python consumption.
-fn serialize_directives_to_json(
+/// Serialize directives for Python, one JSON object per line, so the
+/// compat layer can parse them one at a time (`load_entries`) instead of
+/// holding the whole input as one string beside the objects parsed from it.
+/// `serde_json` escapes newlines inside strings, so a line is a directive.
+fn serialize_directives_to_json_lines(
     directives: &[crate::types::DirectiveWrapper],
 ) -> Result<String, PythonError> {
-    serde_json::to_string(directives).map_err(|e| PythonError::Serialization(e.to_string()))
+    let mut out = String::new();
+    for d in directives {
+        out.push_str(
+            &serde_json::to_string(d).map_err(|e| PythonError::Serialization(e.to_string()))?,
+        );
+        out.push('\n');
+    }
+    Ok(out)
 }
 
-/// Parse the plugin output from the output file.
+/// One output line: an input the plugin returned (possibly rebuilt),
+/// or a new entry.
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum OutputEntry {
+    Modify {
+        modify: usize,
+        entry: crate::types::DirectiveWrapper,
+    },
+    Insert {
+        insert: crate::types::DirectiveWrapper,
+    },
+}
+
+/// Parse the plugin's stdout: one directive per line when it ran, then a
+/// last line `{"ran": bool, "errors": [...]}` (written last, so a stream
+/// without it means the script died before finishing).
 ///
-/// `input_len` is the length of the **plugin's** input directive list;
-/// the Python plugin returns a full replacement list (opaque to us),
-/// so we encode the result as a rebuild: `Delete(0..input_len)`
-/// followed by `Insert(...)` for every directive Python returned. This
-/// satisfies the ops protocol invariant (each input index appears
-/// exactly once) without forcing the Python bridge to track which
-/// input indices it preserved.
-fn parse_plugin_output(output: &str, input_len: usize) -> Result<PluginOutput, PythonError> {
+/// `input_len` is the length of the **plugin's** input directive list.
+/// An output entry the compat layer traced to input `i` (see its
+/// `dump_entries`) becomes `Modify(i)`, keeping that input's source
+/// location; any other is an `Insert`, and every input index no output
+/// claimed is a `Delete`, so each index appears exactly once, as the ops
+/// protocol requires. When nothing ran (no `__plugins__`, or an entry
+/// point that does not exist) every input is kept as is.
+fn parse_plugin_output(output: &[u8], input_len: usize) -> Result<PluginOutput, PythonError> {
     use crate::types::PluginOp;
 
-    let separator = "---SEPARATOR---";
-    let parts: Vec<&str> = output.split(separator).collect();
+    let output = std::str::from_utf8(output)
+        .map_err(|e| PythonError::Serialization(format!("plugin output is not UTF-8: {e}")))?;
+    let mut lines: Vec<&str> = output.lines().filter(|l| !l.trim().is_empty()).collect();
+    let result = lines.pop().ok_or_else(|| {
+        PythonError::Execution("the plugin wrote no result; it may have crashed".to_string())
+    })?;
+    let result: serde_json::Value = serde_json::from_str(result)
+        .map_err(|e| PythonError::Serialization(format!("failed to parse result: {e}")))?;
+    let ran = result
+        .get("ran")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false);
+    let json_errors = match result.get("errors") {
+        Some(serde_json::Value::Array(errors)) => errors.clone(),
+        _ => Vec::new(),
+    };
 
-    if parts.len() < 2 {
-        return Err(PythonError::Execution(format!(
-            "unexpected output format from Python plugin: {output}"
-        )));
-    }
-
-    let entries_json = parts[0].trim();
-    let errors_json = parts[1].trim();
-
-    // Parse directives. `null`: nothing ran (no `__plugins__`, or an entry
-    // point that does not exist), so every input directive is kept as is.
-    let directives: Option<Vec<crate::types::DirectiveWrapper>> =
-        serde_json::from_str(entries_json)
-            .map_err(|e| PythonError::Serialization(format!("failed to parse entries: {e}")))?;
-
-    // Parse errors
-    let json_errors: Vec<serde_json::Value> = serde_json::from_str(errors_json)
-        .map_err(|e| PythonError::Serialization(format!("failed to parse errors: {e}")))?;
+    let ops = if ran {
+        let mut ops = Vec::with_capacity(input_len.max(lines.len()));
+        let mut claimed = vec![false; input_len];
+        for line in lines {
+            let entry: OutputEntry = serde_json::from_str(line)
+                .map_err(|e| PythonError::Serialization(format!("failed to parse entries: {e}")))?;
+            match entry {
+                OutputEntry::Modify { modify, entry } if modify < input_len && !claimed[modify] => {
+                    claimed[modify] = true;
+                    ops.push(PluginOp::Modify(modify, entry));
+                }
+                OutputEntry::Modify { entry, .. } | OutputEntry::Insert { insert: entry } => {
+                    ops.push(PluginOp::Insert(entry));
+                }
+            }
+        }
+        ops.extend(
+            claimed
+                .iter()
+                .enumerate()
+                .filter(|(_, claimed)| !**claimed)
+                .map(|(i, _)| PluginOp::Delete(i)),
+        );
+        ops
+    } else {
+        (0..input_len).map(PluginOp::Keep).collect()
+    };
 
     let errors: Vec<PluginError> = json_errors
         .into_iter()
@@ -823,14 +995,6 @@ fn parse_plugin_output(output: &str, input_len: usize) -> Result<PluginOutput, P
         })
         .collect();
 
-    let ops = match directives {
-        None => (0..input_len).map(PluginOp::Keep).collect(),
-        Some(directives) => (0..input_len)
-            .map(PluginOp::Delete)
-            .chain(directives.into_iter().map(PluginOp::Insert))
-            .collect(),
-    };
-
     Ok(PluginOutput { ops, errors })
 }
 
@@ -839,98 +1003,89 @@ fn parse_plugin_output(output: &str, input_len: usize) -> Result<PluginOutput, P
 // =============================================================================
 
 /// Python implementation of `check_commodity` plugin.
+///
+/// Behaves as beancount's `beancount.plugins.check_commodity` (without
+/// its config-string ignore map): a currency counts as declared only by
+/// a `commodity` directive, and each undeclared one is reported once,
+/// with the first account it appears in (in sorted order), or `Price Directive Context`
+/// when it appears only in price directives. Before #2500's review this
+/// counted an `open`'s currencies as declarations, so it reported
+/// nothing for most ledgers that beancount flags.
 const CHECK_COMMODITY_PLUGIN: &str = r#"
 __plugins__ = ('plugin',)
 
 def plugin(entries, options_map, config=None):
-    """Check that all used commodities are declared."""
-    errors = []
+    """Find commodities used without a Commodity directive."""
     declared = set()
-
-    # Collect declared commodities
+    occurrences = set()
+    anonymous = set()
     for entry in entries:
         if isinstance(entry, Commodity):
             declared.add(entry.currency)
         elif isinstance(entry, Open):
-            if entry.currencies:
-                declared.update(entry.currencies)
-
-    # Check all used commodities
-    for entry in entries:
-        if isinstance(entry, Transaction):
+            for currency in entry.currencies or ():
+                occurrences.add((entry.account, currency))
+        elif isinstance(entry, Transaction):
             for posting in entry.postings:
-                if posting.units and posting.units.currency:
-                    if posting.units.currency not in declared:
-                        errors.append(ValidationError(
-                            entry.meta,
-                            f"Commodity '{posting.units.currency}' is not declared",
-                            entry
-                        ))
-                if posting.cost and posting.cost.currency:
-                    if posting.cost.currency not in declared:
-                        errors.append(ValidationError(
-                            entry.meta,
-                            f"Commodity '{posting.cost.currency}' is not declared",
-                            entry
-                        ))
+                for amount in (posting.units, posting.cost, posting.price):
+                    if amount is not None and amount.currency:
+                        occurrences.add((posting.account, amount.currency))
         elif isinstance(entry, Balance):
-            if entry.amount and entry.amount.currency:
-                if entry.amount.currency not in declared:
-                    errors.append(ValidationError(
-                        entry.meta,
-                        f"Commodity '{entry.amount.currency}' is not declared",
-                        entry
-                    ))
+            occurrences.add((entry.account, entry.amount.currency))
         elif isinstance(entry, Price):
-            if entry.currency and entry.currency not in declared:
-                errors.append(ValidationError(
-                    entry.meta,
-                    f"Commodity '{entry.currency}' is not declared",
-                    entry
-                ))
-            if entry.amount and entry.amount.currency:
-                if entry.amount.currency not in declared:
-                    errors.append(ValidationError(
-                        entry.meta,
-                        f"Commodity '{entry.amount.currency}' is not declared",
-                        entry
-                    ))
+            anonymous.add(('Price Directive Context', entry.currency))
+            anonymous.add(('Price Directive Context', entry.amount.currency))
 
+    errors = []
+    issued = set()
+    for context, currency in sorted(occurrences) + sorted(anonymous):
+        if currency in declared or currency in issued:
+            continue
+        errors.append(ValidationError(
+            new_metadata('<check_commodity>', 0),
+            f"Missing Commodity directive for '{currency}' in '{context}'",
+            None))
+        issued.add(currency)
     return entries, errors
 "#;
 
 /// Python implementation of leafonly plugin.
+///
+/// Behaves as beancount's `beancount.plugins.leafonly`: one error per
+/// account that has child accounts and is posted to by a transaction,
+/// located at the account's `open` (beancount reports it there, once).
+/// Before #2500's review this reported every posting separately.
 const LEAFONLY_PLUGIN: &str = r#"
 __plugins__ = ('plugin',)
 
 def plugin(entries, options_map, config=None):
-    """Check that postings only occur on leaf accounts."""
-    errors = []
-
-    # Build account tree
-    account_children = {}
+    """Check for non-leaf accounts that have postings on them."""
+    accounts = set()
+    posted = set()
+    opens = {}
     for entry in entries:
         if isinstance(entry, Open):
-            parts = entry.account.split(':')
-            for i in range(len(parts)):
-                parent = ':'.join(parts[:i+1])
-                child = ':'.join(parts[:i+2]) if i+1 < len(parts) else None
-                if parent not in account_children:
-                    account_children[parent] = set()
-                if child:
-                    account_children[parent].add(child)
-
-    # Check postings
-    for entry in entries:
-        if isinstance(entry, Transaction):
+            accounts.add(entry.account)
+            opens.setdefault(entry.account, entry)
+        elif isinstance(entry, Balance):
+            accounts.add(entry.account)
+        elif isinstance(entry, Transaction):
             for posting in entry.postings:
-                if posting.account in account_children and account_children[posting.account]:
-                    errors.append(ValidationError(
-                        entry.meta,
-                        f"Posting to non-leaf account '{posting.account}'",
-                        entry
-                    ))
+                accounts.add(posting.account)
+                posted.add(posting.account)
+    parents = set()
+    for account in accounts:
+        parts = account.split(':')
+        for i in range(1, len(parts)):
+            parents.add(':'.join(parts[:i]))
 
+    errors = []
+    for account in sorted(posted & parents):
+        open_entry = opens.get(account)
+        errors.append(ValidationError(
+            open_entry.meta if open_entry else new_metadata('<leafonly>', 0),
+            f"Non-leaf account '{account}' has postings on it",
+            open_entry))
     return entries, errors
 "#;
 
@@ -1141,7 +1296,7 @@ mod tests {
     /// one startup.)
     #[test]
     fn default_python_budget_covers_measured_startup() {
-        const MEASURED_STARTUP_FUEL: u64 = 1_225_000_000;
+        const MEASURED_STARTUP_FUEL: u64 = 1_240_000_000;
         assert!(
             python_fuel(crate::sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS)
                 >= 20 * MEASURED_STARTUP_FUEL
@@ -1150,22 +1305,50 @@ mod tests {
 
     #[test]
     fn test_parse_plugin_output() {
-        let output = "[]\n---SEPARATOR---\n[]";
-        let result = parse_plugin_output(output, 0).unwrap();
+        let result = parse_plugin_output(br#"{"ran": true, "errors": []}"#, 0).unwrap();
         assert!(result.ops.is_empty());
         assert!(result.errors.is_empty());
     }
 
-    /// `null` entries (nothing ran) keep every input directive in place,
+    /// Output traced to an input is `Modify(i)` (keeping its location),
+    /// the rest `Insert`, unclaimed inputs `Delete`, and a second claim on
+    /// one input an `Insert` (#2500 review).
+    #[test]
+    fn parse_plugin_output_traces_entries_to_inputs() {
+        use crate::types::PluginOp;
+        let entry =
+            r#"{"date": "2024-01-01", "type": "close", "account": "Assets:A", "metadata": []}"#;
+        let output = format!(
+            "{{\"modify\": 2, \"entry\": {entry}}}\n{{\"insert\": {entry}}}\n\
+             {{\"modify\": 2, \"entry\": {entry}}}\n{{\"ran\": true, \"errors\": []}}\n"
+        );
+        let result = parse_plugin_output(output.as_bytes(), 3).unwrap();
+        let shape: Vec<String> = result
+            .ops
+            .iter()
+            .map(|op| match op {
+                PluginOp::Modify(i, _) => format!("M{i}"),
+                PluginOp::Insert(_) => "I".to_string(),
+                PluginOp::Delete(i) => format!("D{i}"),
+                PluginOp::Keep(i) => format!("K{i}"),
+            })
+            .collect();
+        assert_eq!(shape, ["M2", "I", "I", "D0", "D1"]);
+    }
+
+    /// `"ran": false` (nothing ran) keeps every input directive in place,
     /// rather than deleting and re-inserting them; a `"severity":
     /// "warning"` diagnostic stays a warning (#2500).
     #[test]
-    fn parse_plugin_output_null_entries_keep_input_and_warning_severity() {
+    fn parse_plugin_output_not_ran_keeps_input_and_warning_severity() {
         use crate::types::PluginOp;
-        let output = "null\n---SEPARATOR---\n\
-            [{\"message\": \"ran nothing\", \"source_file\": null, \
-              \"line_number\": null, \"severity\": \"warning\"}, \
-             {\"message\": \"bad\", \"source_file\": null, \"line_number\": null}]";
+        let output = concat!(
+            r#"{"ran": false, "errors": ["#,
+            r#"{"message": "ran nothing", "source_file": null, "line_number": null, "severity": "warning"}, "#,
+            r#"{"message": "bad", "source_file": null, "line_number": null}]}"#,
+            "\n"
+        )
+        .as_bytes();
         let result = parse_plugin_output(output, 2).unwrap();
         assert!(matches!(
             result.ops.as_slice(),

@@ -97,7 +97,7 @@ rledger check --plugin-max-time-secs 120 ledger.beancount
 
 The budget is a setting of whoever runs rustledger, never of the ledger: nothing in a beancount file can raise it, so a service that loads ledgers it did not write keeps control of how much CPU their plugins get. A project `.rledger.toml` is found from the directory rledger runs in, not from where the ledger is. So running rledger inside someone else's repository applies their `max_time_secs`, as it applies their aliases and default file; run it from a directory you control to keep your own.
 
-Python plugins get the same budget, counted the same way. Starting the Python interpreter costs about 1.2 seconds of it on every call, so a Python plugin needs a budget of at least 2. On top of that, moving each transaction to Python and back costs about 0.4 milliseconds of budget: the default 30 seconds covers a plugin over roughly 65,000 transactions, and a plugin over a larger ledger, or one doing heavy work per entry, needs a higher `max_time_secs`.
+Python plugins get the same budget, counted the same way. Starting the Python interpreter costs about 1.2 seconds of it on every call, so a Python plugin needs a budget of at least 2. On top of that, moving each transaction to Python and back costs about 0.5 milliseconds of budget: the default 30 seconds covers a plugin over roughly 50,000 transactions, and a plugin over a larger ledger, or one doing heavy work per entry, needs a higher `max_time_secs`. When a plugin runs out, the message says how many seconds moving its entries took, so you know how much to add.
 
 ### Using Profiles
 

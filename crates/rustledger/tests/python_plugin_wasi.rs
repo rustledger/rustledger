@@ -11,7 +11,7 @@
 //! These tests need the `CPython` WASI runtime, which `rledger` downloads
 //! and caches on first use (`python/download.rs`). Where it cannot be
 //! fetched (the offline nix build sandbox) they skip with
-//! [`SKIP_MARKER`]; the `python-gated-cargo-tests` CI job sets
+//! `common::PYTHON_WASI_SKIP_MARKER`; the `python-gated-cargo-tests` CI job sets
 //! `RLEDGER_REQUIRE_PYTHON_WASI=1`, which turns the skip into a failure,
 //! and greps its log for the marker as well, so they cannot skip there.
 #![cfg(feature = "python-plugin-wasm")]
@@ -20,10 +20,6 @@ mod common;
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::OnceLock;
-
-/// Printed when the runtime is unavailable; CI fails on it.
-const SKIP_MARKER: &str = "Skipping: CPython WASI runtime unavailable";
 
 /// What a fuel trap reads like.
 const TRAP: &str = "all fuel consumed";
@@ -76,33 +72,11 @@ fn setup(plugin: &str, directive: &str) -> (tempfile::TempDir, PathBuf) {
     (dir, ledger)
 }
 
-/// The `rledger` binary, or `None` (after printing [`SKIP_MARKER`]) when
-/// the `CPython` runtime cannot be made available.
-///
-/// The first call runs one passthrough plugin, so the one-time download
-/// and compile happen once, not in every parallel test at the same time
-/// (the download writes to one fixed temp file).
+/// The `rledger` binary, or `None` when the `CPython` runtime cannot be
+/// made available (see [`common::python_wasi_ready`]).
 fn rledger_with_python() -> Option<PathBuf> {
-    static READY: OnceLock<Option<PathBuf>> = OnceLock::new();
-    let ready = READY.get_or_init(|| {
-        let bin = common::rledger_binary().expect("rledger binary");
-        let (dir, ledger) = setup(PASSTHROUGH, "plugin \"plugin.py\"");
-        let r = run(&bin, dir.path(), &["check", ledger.to_str().unwrap()]);
-        if r.out.contains("Python runtime unavailable") {
-            assert!(
-                std::env::var_os("RLEDGER_REQUIRE_PYTHON_WASI").is_none(),
-                "RLEDGER_REQUIRE_PYTHON_WASI is set but the CPython WASI runtime \
-                 is unavailable:\n{}",
-                r.out
-            );
-            return None;
-        }
-        Some(bin)
-    });
-    if ready.is_none() {
-        eprintln!("{SKIP_MARKER}");
-    }
-    ready.clone()
+    let bin = common::rledger_binary().expect("rledger binary");
+    common::python_wasi_ready(&bin).then_some(bin)
 }
 
 /// `rledger query <ledger> <q>` output.

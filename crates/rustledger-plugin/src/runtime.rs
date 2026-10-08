@@ -285,7 +285,11 @@ impl Plugin {
             .context("plugin export `alloc` has wrong signature")?;
 
         // Allocate space for input
-        let input_ptr = alloc.call(&mut store, input_bytes.len() as u32)?;
+        let input_ptr = alloc
+            .call(&mut store, input_bytes.len() as u32)
+            .map_err(|e| {
+                sandbox::with_limit_context(e, store.data().limiter(), config.max_time_secs)
+            })?;
 
         // Write input to WASM memory
         memory.write(&mut store, input_ptr as usize, &input_bytes)?;
@@ -296,7 +300,11 @@ impl Plugin {
             .map_err(anyhow::Error::from)
             .context("plugin export `process` has wrong signature")?;
 
-        let result = process.call(&mut store, (input_ptr, input_bytes.len() as u32))?;
+        let result = process
+            .call(&mut store, (input_ptr, input_bytes.len() as u32))
+            .map_err(|e| {
+                sandbox::with_limit_context(e, store.data().limiter(), config.max_time_secs)
+            })?;
 
         // Parse result (packed as ptr << 32 | len)
         let output_ptr = (result >> 32) as u32;

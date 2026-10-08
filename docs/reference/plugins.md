@@ -779,9 +779,15 @@ Python plugins run in a pinned CPython-WASI sandbox (wasmtime). On `sys.path` it
 - the **plugin source file**, plus a bundled `beancount.core.data` **compatibility shim**, and
 - the **bundled CPython standard library**.
 
+The plugin sees exactly two directories, both read-only: `/lib` (the standard library) and `/work` (its own inputs). It cannot write files, read the ledger's directory or anything else of the host, or open network connections. What it prints goes to rledger's stderr (up to 4 MiB); its result travels back separately, so a `print` cannot corrupt it.
+
 The host's virtualenv / `site-packages` is **never** mounted — there is no `VIRTUAL_ENV` or `site-packages` handling, by design (the sandbox has no host filesystem access). So even with the correct file-path reference, a plugin only loads if it is **self-contained**: standard library plus whatever the compat shim provides.
 
-The compat shim covers the common beancount plugin surface — the `beancount.core.data` namedtuples (`Transaction`, `Posting`, `Amount`, `Open`, `Close`, `Balance`, `Price`, `Custom`, `Cost`, …) and the `beancount.core.{amount,getters,flags}` helpers. A plugin that imports third-party packages, C extensions, or unbundled stdlib modules will not load — rewrite it as a [native Rust plugin](../guides/custom-plugins.md) instead.
+The compat shim covers the common beancount plugin surface — the `beancount.core.data` namedtuples (`Transaction`, `Posting`, `Amount`, `Open`, `Close`, `Balance`, `Price`, `Custom`, `Cost`, …), `data.new_metadata` and `data.filter_txns`, `amount.CURRENCY_RE`, and the `beancount.core.{getters,flags}` helpers. Entries carry their metadata, including `filename` and `lineno`, as in beancount, and an error a plugin returns (any object with `message` and `source`, such as a beancount-style namedtuple) is reported at its entry's location. Modules the shim does not provide, such as `beancount.core.realization` or `beancount.core.compare` (used by beancount's own `leafonly` and `noduplicates`), fail with an `ImportError` naming them. A plugin that imports third-party packages, C extensions, or unbundled stdlib modules will not load — rewrite it as a [native Rust plugin](../guides/custom-plugins.md) instead.
+
+### Built-in Python Plugins
+
+`check_commodity` and `leafonly` also have Python implementations that behave as beancount's do (same checks, same messages). `plugin "python:leafonly"` (or `"python:beancount.plugins.leafonly"`) runs that instead of the native plugin. `python:` before any other bare name is refused, like a module name; before a file path, it runs the file in Python.
 
 ### Supported Python Plugins
 
@@ -814,6 +820,7 @@ Most Python beancount plugins have native equivalents:
 - **First run**: Downloads ~14MB CPython-WASI runtime
 - **Compilation**: First execution compiles WASM (~30 seconds)
 - **Time budget**: each call has the same time budget as a WASM plugin (30 seconds by default), of which starting the interpreter takes about 1.2; a plugin over a very large ledger can need more. See [Plugin Time Budget](../getting-started/configuration.md#plugin-time-budget)
+- **Memory**: the interpreter, and every entry as Python objects (about 1 KB per transaction), must fit in the 256 MiB sandbox memory limit, which holds roughly 150,000 transactions; no setting raises it
 - **Not all plugins work**: C extensions and some stdlib modules unavailable
 - **File-path references only**: custom Python plugins must be referenced by file path and be self-contained — see [Referencing a Python Plugin](#referencing-a-python-plugin)
 - **Debugging**: Error messages may be less helpful

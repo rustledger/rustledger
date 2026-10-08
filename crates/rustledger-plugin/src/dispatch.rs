@@ -228,7 +228,12 @@ pub fn resolve_plugin<'a>(
             // A bare module name (`plugin "pkg.mod"`) is unsupported by design —
             // reject it up front with an actionable message rather than spinning
             // up the runtime just to fail and relabel the error (#1432).
-            if is_python_module_name(&resolved, name) {
+            // `python:<name>` for a plugin with a built-in Python
+            // implementation runs that, not the native plugin (#2500
+            // review: nothing reached `execute_builtin` before).
+            if is_python_module_name(&resolved, name)
+                && !(force_python && crate::python::builtin_python_plugin(name).is_some())
+            {
                 return Err(PluginResolveError::PythonModuleName {
                     name: name.to_string(),
                     suggested_file: crate::python::suggest_module_path(name),
@@ -324,7 +329,7 @@ impl ResolvedPlugin<'_> {
                 let mut mgr = crate::PluginManager::with_config(runtime);
                 let idx = mgr.load(path).map_err(|e| PluginRunError::WasmFailed {
                     path: path.clone(),
-                    message: format!("failed to load: {e}"),
+                    message: format!("failed to load: {e:#}"),
                 })?;
                 mgr.execute(
                     idx,
@@ -355,7 +360,17 @@ impl ResolvedPlugin<'_> {
                     config: config.clone(),
                 };
                 // File-vs-module classifier matches the up-front #1432 rejection.
-                if is_python_plugin_file(resolved, raw) {
+                if !is_python_plugin_file(resolved, raw)
+                    && crate::python::builtin_python_plugin(raw).is_some()
+                {
+                    // Only a `python:`-forced built-in name gets here; see
+                    // `resolve_plugin`.
+                    runtime
+                        .execute_builtin(raw, &input)
+                        .map_err(|e| PluginRunError::PythonFailed {
+                            message: format!("Python plugin '{raw}' execution failed: {e}"),
+                        })
+                } else if is_python_plugin_file(resolved, raw) {
                     runtime
                         .execute_module(raw, &input, Some(base_dir))
                         .map_err(|e| PluginRunError::PythonFailed {

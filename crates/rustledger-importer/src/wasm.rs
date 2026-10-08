@@ -486,7 +486,16 @@ fn call_msgpack_with<I: Serialize, O: DeserializeOwned>(
             source: anyhow::Error::from(e),
         })?;
 
-    let input_ptr = alloc.call(&mut store, input_len).map_err(runtime_err)?;
+    let limited = |e: wasmtime::Error, store: &wasmtime::Store<sandbox::StoreState>| {
+        WasmImporterError::Runtime(sandbox::with_limit_context(
+            e,
+            store.data().limiter(),
+            config.max_time_secs,
+        ))
+    };
+    let input_ptr = alloc
+        .call(&mut store, input_len)
+        .map_err(|e| limited(e, &store))?;
     memory
         .write(&mut store, input_ptr as usize, &input_bytes)
         .map_err(|e| WasmImporterError::Runtime(e.into()))?;
@@ -500,7 +509,7 @@ fn call_msgpack_with<I: Serialize, O: DeserializeOwned>(
 
     let packed = func
         .call(&mut store, (input_ptr, input_len))
-        .map_err(runtime_err)?;
+        .map_err(|e| limited(e, &store))?;
 
     let out_bytes = read_packed_output(&store, &memory, packed)?;
     rmp_serde::from_slice(&out_bytes).map_err(WasmImporterError::Decode)

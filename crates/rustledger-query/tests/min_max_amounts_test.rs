@@ -195,7 +195,8 @@ fn min_max_over_no_rows_is_null() {
 }
 
 /// MIN and MAX over lots held at cost, and over running-balance inventories
-/// of those lots, are exactly the first and last value ORDER BY gives.
+/// of those lots, are exactly the first and last value ORDER BY gives (no two
+/// values tie here; see `min_max_order_by_property_test.rs` for ties).
 #[test]
 fn min_max_are_order_by_first_and_last_for_lots_and_inventories() {
     for column in ["position", "balance", "cost(position)", "units(position)"] {
@@ -433,4 +434,38 @@ fn min_max_over_converted_amounts_and_subquery_inventories() {
     );
     assert!(got[0][0].starts_with("-70 USD"), "{got:?}");
     assert!(got[0][1].contains("1 Y"), "{got:?}");
+}
+
+/// Two lots that differ only in date tie under the position order (beancount's
+/// `Position.sortkey` ignores the date). MIN and MAX both return the FIRST of
+/// them in input order, which is the first row `ORDER BY` gives in each
+/// direction. bean-query's MIN agrees; its MAX compares the dates and picks
+/// the later lot (the documented MAX divergence).
+#[test]
+fn min_max_return_the_first_of_tied_lots() {
+    const TIED: &str = r#"
+2024-01-01 open Equity:Open
+2024-01-01 open Assets:G0
+2024-02-02 * "t"
+  Assets:G0  8 X {18 USD, 2024-01-01}
+  Equity:Open
+2024-02-03 * "t"
+  Assets:G0  8 X {18 USD}
+  Equity:Open
+"#;
+    let first = "8 X { 18 USD, 2024-01-01}";
+    assert_eq!(
+        rows(
+            TIED,
+            "SELECT min(position), max(position) WHERE account = 'Assets:G0'"
+        ),
+        vec![vec![first, first]],
+    );
+    for direction in ["ASC", "DESC"] {
+        let ordered = rows(
+            TIED,
+            &format!("SELECT position AS p WHERE account = 'Assets:G0' ORDER BY p {direction}"),
+        );
+        assert_eq!(ordered[0][0], first, "ORDER BY p {direction}");
+    }
 }

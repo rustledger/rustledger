@@ -608,15 +608,18 @@ impl Executor<'_> {
         txn: &rustledger_core::Transaction,
         exclude: Option<usize>,
     ) -> Vec<String> {
-        txn.postings
+        // Sort-and-dedup a Vec of borrowed names rather than build a tree
+        // set: transactions are small, and this runs per row.
+        let mut names: Vec<&str> = txn
+            .postings
             .iter()
             .enumerate()
             .filter(|(i, _)| Some(*i) != exclude)
             .map(|(_, p)| p.account.as_ref())
-            .collect::<std::collections::BTreeSet<&str>>()
-            .into_iter()
-            .map(str::to_string)
-            .collect()
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        names.into_iter().map(str::to_string).collect()
     }
 
     /// Build the #entries table from all directives.
@@ -985,6 +988,9 @@ impl Executor<'_> {
         // rebuilding (strings, tags/links vectors, full meta conversion) for
         // every posting (#1800 review).
         let mut last_entry: Option<(usize, Value)> = None;
+        // Keyed by the transaction's address, which is stable for the whole
+        // loop (`contexts` owns or borrows every transaction until it ends).
+        let mut last_accounts: Option<(*const rustledger_core::Transaction, TxnAccounts)> = None;
 
         for ctx in contexts {
             let txn: &rustledger_core::Transaction = &ctx.transaction;
@@ -1013,7 +1019,17 @@ impl Executor<'_> {
             let tags: Vec<String> = txn.tags.iter().map(ToString::to_string).collect();
             let links: Vec<String> = txn.links.iter().map(ToString::to_string).collect();
 
-            let all_accounts = Self::posting_account_set(txn, None);
+            // Built once per transaction, not per posting: rebuilding the set
+            // for every row made a transaction of n postings cost O(n^2).
+            let txn_key = std::ptr::from_ref(txn);
+            if last_accounts
+                .as_ref()
+                .is_none_or(|(key, _)| *key != txn_key)
+            {
+                last_accounts = Some((txn_key, TxnAccounts::of(txn)));
+            }
+            let txn_accounts = &last_accounts.as_ref().expect("set just above").1;
+            let all_accounts = txn_accounts.all.clone();
 
             let description = Self::transaction_description(txn);
 
@@ -1117,7 +1133,7 @@ impl Executor<'_> {
 
             // Other accounts: every posting's account except THIS posting's,
             // by index, so a second posting to the same account still counts.
-            let other_accounts = Self::posting_account_set(txn, Some(ctx.posting_index));
+            let other_accounts = txn_accounts.others(posting.account.as_ref());
 
             let posting_flag = posting
                 .flag
@@ -1189,5 +1205,50 @@ impl Executor<'_> {
         }
 
         Ok(table)
+    }
+}
+
+/// A transaction's account set, plus which accounts more than one of its
+/// postings uses, so each posting's `other_accounts` is derived without
+/// re-walking the postings.
+struct TxnAccounts {
+    /// Sorted, deduped: [`Executor::posting_account_set`] with nothing excluded.
+    all: Vec<String>,
+    /// Sorted accounts at least two postings use. Excluding ONE posting to
+    /// such an account leaves the account in `other_accounts` (#2483).
+    repeated: Vec<String>,
+}
+
+impl TxnAccounts {
+    fn of(txn: &rustledger_core::Transaction) -> Self {
+        let mut names: Vec<&str> = txn.postings.iter().map(|p| p.account.as_ref()).collect();
+        names.sort_unstable();
+        let mut all: Vec<String> = Vec::new();
+        let mut repeated: Vec<String> = Vec::new();
+        for run in names.chunk_by(|a, b| a == b) {
+            all.push(run[0].to_string());
+            if run.len() > 1 {
+                repeated.push(run[0].to_string());
+            }
+        }
+        Self { all, repeated }
+    }
+
+    /// `other_accounts` for a posting to `account`: the same set as
+    /// `Executor::posting_account_set(txn, Some(index))`.
+    fn others(&self, account: &str) -> Vec<String> {
+        if self
+            .repeated
+            .binary_search_by(|a| a.as_str().cmp(account))
+            .is_ok()
+        {
+            self.all.clone()
+        } else {
+            self.all
+                .iter()
+                .filter(|a| a.as_str() != account)
+                .cloned()
+                .collect()
+        }
     }
 }

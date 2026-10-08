@@ -299,3 +299,28 @@ fn min_over_positions_inherits_order_by_currency_rank() {
     );
     assert!(got[0][0].starts_with("2 X"), "{got:?}");
 }
+
+/// The table aggregation path (`FROM #postings`, and a subquery's rows) is a
+/// separate MIN/MAX implementation from the default table's; both compare
+/// with the same function, so both follow ORDER BY. Over `5 EUR` and `3 USD`
+/// MIN is `5 EUR` (bean-query too) and MAX is `3 USD` (bean-query: `5 EUR`,
+/// the documented divergence).
+#[test]
+fn min_max_over_amounts_on_tables_and_subqueries() {
+    for bql in [
+        "SELECT min(units(position)), max(units(position)) FROM #postings \
+         WHERE account = 'Assets:A'",
+        "SELECT min(u), max(u) FROM (SELECT units(position) AS u WHERE account = 'Assets:A')",
+    ] {
+        assert_eq!(rows(DIVERGENT, bql), vec![vec!["5 EUR", "3 USD"]], "{bql}");
+    }
+    assert_eq!(
+        rows(
+            DIVERGENT,
+            "SELECT account, max(units(position)) FROM #postings GROUP BY account ORDER BY account"
+        ),
+        // Assets:B holds `-5 EUR` and `-3 USD`: amounts sort by currency, so
+        // `-3 USD` is last here, and bean-query agrees (number first).
+        vec![vec!["Assets:A", "3 USD"], vec!["Assets:B", "-3 USD"]],
+    );
+}

@@ -37,15 +37,15 @@ under HIFO, or two lots on the same date under STRICT, essentially never
 appeared. `TIES` now constructs each configuration deliberately, and the tie
 mode is reported with every divergence so the classes stay separable.
 
-One divergence class is KNOWN and deliberately not fixed: beancount pools
-acquisitions sharing (cost, date, label) into a single inventory position,
-while rustledger keeps a slot per acquisition, so the two consume in
-different orders once a lot identity repeats non-contiguously within a date
-(#2118). rustledger's answer respects acquisition order and beancount's
-cannot, so we keep ours. Those runs are still compared and still printed —
-only their verdict changes, and they are tallied on their own line. The exit
-code tracks UNEXPLAINED divergences alone: a permanently red run teaches
-everyone to ignore it, which is how the next real regression gets missed.
+Repeated lot identities within a date used to be the one KNOWN divergence:
+beancount pools acquisitions sharing (cost, date, label) into a single
+inventory position, while rustledger kept a slot per acquisition, so the two
+consumed in different orders once an identity repeated non-contiguously
+within a date (#2118). rustledger now merges interchangeable lots the same
+way, so that bucket is empty, and it is a TRIPWIRE rather than a tolerance:
+a divergence on a ledger with that shape is reported as a likely #2118
+regression, tallied on its own line, and fails the run like any other
+unexplained divergence.
 
 Usage:
     scripts/compat-booking-fuzz.py --runs 200
@@ -90,19 +90,20 @@ PRICES = ["12.00", "13.00", "14.50"]
 def pooling_shape(
     days: list[int], costs: list[Decimal], labels: list[str | None]
 ) -> bool:
-    """True when beancount's lot pooling could reorder consumption (#2118).
+    """True when the lots take the shape #2118 used to diverge on.
 
     beancount's `Inventory` is keyed by `(currency, cost)`, so acquisitions
     sharing `(cost, date, label)` collapse into ONE position, sitting where
-    the FIRST of them sat. rustledger keeps a slot per acquisition. That only
-    changes the consumption ORDER when a repeated identity is NON-CONTIGUOUS
-    within its date: `[a, b, a]` pools `a`'s later units forward, ahead of
-    `b`, while `[a, a, b]` pools into the order it already had.
+    the FIRST of them sat. rustledger used to keep a slot per acquisition,
+    which changed the consumption ORDER when a repeated identity was
+    NON-CONTIGUOUS within its date: `[a, b, a]` pools `a`'s later units
+    forward, ahead of `b`, while `[a, a, b]` pools into the order it already
+    had. Since #2118 rustledger merges them too.
 
-    Deliberately narrow. This downgrades a real divergence to an expected one,
-    so every case it matches is a case this harness stops guarding. Requiring
-    the non-contiguous repeat -- rather than merely "some identity repeats" --
-    keeps it to the shape #2118 actually describes.
+    This no longer excuses anything. It only labels a divergence as the shape
+    #2118 fixed, so a reappearance names its likely cause. Requiring the
+    non-contiguous repeat -- rather than merely "some identity repeats" --
+    keeps the label to the shape #2118 actually describes.
     """
     by_day: dict[int, list[tuple[Decimal, str | None]]] = {}
     for day, cost, label in zip(days, costs, labels, strict=True):
@@ -122,8 +123,8 @@ def gen_ledger(rng: random.Random) -> tuple[str, str, str, bool, bool]:
     """A ledger exercising lot selection.
 
     Returns source, booking method, tie mode, whether the lots take the shape
-    beancount's pooling reorders (#2118), and whether any reduction carried a
-    price annotation.
+    #2118 used to diverge on, and whether any reduction carried a price
+    annotation.
     """
     method = rng.choice(METHODS)
     tie = rng.choice(TIES)
@@ -368,46 +369,23 @@ def compare(rl: Booked | str, bq: Booked | str) -> list[str]:
     return diffs
 
 
-def same_totals(rl: Booked | str, bq: Booked | str) -> bool:
-    """True when both engines hold the same units per LOT-BEARING holding.
+def classify(diffs: list[str], pooled: bool) -> str:
+    """Verdict for one seed: "agree", "regression:2118", or "real".
 
-    Pooling moves units BETWEEN lot identities of one account; it cannot
-    create or destroy them. So matching totals is a necessary condition for
-    #2118 to be the explanation, and a mismatch means something else is
-    wrong no matter how the lots are shaped.
-
-    Cost-less positions are excluded, and that is not a loophole: consuming a
-    different lot changes the COST BASIS, so the cash and income legs
-    legitimately differ under this divergence -- that difference is the whole
-    reason #2118 matters. Including them rejected all five known cases.
-    Restricting to lots keeps the guard on the only quantity pooling must
-    leave alone, the units held per commodity.
+    Both non-agreeing verdicts FAIL the run. "regression:2118" exists only to
+    name the likely cause: until #2118 these were waived as a known
+    divergence, and the shape is computed from the GENERATOR, not from the
+    divergence, so it says where to look first, never that a case is fine.
     """
-    if isinstance(rl, str) or isinstance(bq, str):
-        return False
-
-    def totals(b: Booked) -> dict[tuple[str, str], Decimal]:
-        out: dict[tuple[str, str], Decimal] = {}
-        for (account, currency, cost, *_), units in b.items():
-            if not cost:
-                continue
-            out[(account, currency)] = out.get((account, currency), Decimal(0)) + units
-        return out
-
-    return totals(rl) == totals(bq)
+    if not diffs:
+        return "agree"
+    return "regression:2118" if pooled else "real"
 
 
 def check_one(rledger: str, python: str, seed: int) -> tuple[str, list[str]]:
     """Run one generated ledger through both engines.
 
-    Returns a verdict -- "agree", "expected", or "real" -- and the report.
-
-    "expected" is #2118 and nothing else: a KNOWN divergence we have decided
-    not to fix, because rustledger's answer respects acquisition order and
-    beancount's cannot. It is still compared, never skipped; only its verdict
-    changes. An unexplained divergence stays "real" and still fails the run,
-    which is the whole point of separating them -- five permanent reds is how
-    a genuine regression goes unnoticed.
+    Returns a verdict (see `classify`) and the report.
     """
     rng = random.Random(seed)
     source, method, tie, pooled, priced = gen_ledger(rng)
@@ -422,37 +400,15 @@ def check_one(rledger: str, python: str, seed: int) -> tuple[str, list[str]]:
         diffs = compare(rl, bq)
     finally:
         Path(path).unlink(missing_ok=True)
-    if not diffs:
-        return "agree", []
-    # The shape is computed from the GENERATOR and not from the divergence,
-    # so a ledger can take the pooling shape and still diverge for an
-    # unrelated reason. `same_totals` guards that: pooling moves units BETWEEN
-    # lot identities of a holding and can neither create nor destroy them, so
-    # a divergence that moves the totals is something else.
-    #
-    # An acceptance divergence is waived too, which reverses what this said
-    # first. The original reasoning was that pooling "can never" make one
-    # engine reject a ledger the other accepts. That is false: pooling changes
-    # which lots SURVIVE a reduction, so a later reduction naming an explicit
-    # cost can find its lot drained on one engine and present on the other.
-    # Seeds 117 and 394 show it in both directions, and 211 lands inside the
-    # window CI runs on a PR.
-    #
-    # Since #2118 provably causes them, refusing to waive them means this gate
-    # can NEVER be green -- and a permanently red gate is the exact thing this
-    # classifier exists to prevent. They are waived, not hidden: tallied on
-    # their own line, printed in full like any other divergence, and named as
-    # the more serious face of #2118, a ledger that fails to LOAD rather than
-    # one that reports different figures.
-    rejected = ERROR in (rl, bq)
-    if pooled and rejected:
-        verdict, kind = "expected", "acceptance"
-    elif pooled and same_totals(rl, bq):
-        verdict, kind = "expected", "units"
-    else:
-        verdict, kind = "real", ""
-    tag = f" [expected: #2118 lot pooling, {kind}]" if kind else ""
-    return f"expected:{kind}" if verdict == "expected" else "real", [
+    verdict = classify(diffs, pooled)
+    if verdict == "agree":
+        return verdict, []
+    tag = (
+        " [#2118 REGRESSION? repeated lot identity within a date]"
+        if verdict == "regression:2118"
+        else ""
+    )
+    return verdict, [
         f"seed={seed} method={method} tie={tie} "
         f"price={'yes' if priced else 'no'}{tag}",
         *diffs,
@@ -490,9 +446,22 @@ def self_test(rledger: str, python: str) -> int:
         print("FAIL self-test: engines disagreed on seed=1")
         ok = False
 
-    # The #2118 classifier decides which divergences stop being guarded, so
-    # it needs its own evidence that it can still say "no". Shapes it must
-    # match, and near-misses it must NOT.
+    # The #2118 tripwire must FAIL a pooled-shape divergence, not waive it as
+    # it did before #2118 was fixed -- and must not mislabel other cases.
+    verdicts = [
+        ("pooled shape diverges", ["x"], True, "regression:2118"),
+        ("other shape diverges", ["x"], False, "real"),
+        ("pooled shape agrees", [], True, "agree"),
+    ]
+    for name, diffs, pooled, want in verdicts:
+        got = classify(diffs, pooled)
+        if got != want:
+            print(f"FAIL self-test 'classify: {name}': {got}, want {want}")
+            ok = False
+
+    # The shape label names a regression's likely cause, so it needs its own
+    # evidence that it can still say "no". Shapes it must match, and
+    # near-misses it must NOT.
     d = [Decimal(x) for x in ("10", "11")]
     shapes = [
         ("non-contiguous repeat, one date", [2, 2, 2], [d[0], d[1], d[0]],
@@ -509,32 +478,6 @@ def self_test(rledger: str, python: str) -> int:
         got = pooling_shape(days, costs, labels)
         if got != want:
             print(f"FAIL self-test 'pooling_shape: {name}': {got}, want {want}")
-            ok = False
-
-    # The totals guard is the other half of the waiver, so it needs its own
-    # evidence that it can refuse.
-    k_a = ("Assets:Stock", "HOOL", "10", "USD", "2020-01-02", "")
-    k_b = ("Assets:Stock", "HOOL", "11", "USD", "2020-01-02", "")
-    k_cash = ("Income:Gains", "USD", "", "", "", "")
-    totals_cases = [
-        ("units moved between lots, same total", {k_a: Decimal(3), k_b: Decimal(7)},
-         {k_a: Decimal(7), k_b: Decimal(3)}, True),
-        ("a unit went missing", {k_a: Decimal(3), k_b: Decimal(7)},
-         {k_a: Decimal(3), k_b: Decimal(6)}, False),
-        ("one side rejected", ERROR, {k_a: Decimal(3)}, False),
-        # The income leg legitimately differs under #2118, so it must not
-        # decide the verdict -- while the lots themselves still must match.
-        ("cost-less leg differs, lots agree",
-         {k_a: Decimal(3), k_cash: Decimal("-21.50")},
-         {k_a: Decimal(3), k_cash: Decimal("-39.00")}, True),
-        ("cost-less leg agrees, lots do not",
-         {k_a: Decimal(3), k_cash: Decimal("-21.50")},
-         {k_a: Decimal(4), k_cash: Decimal("-21.50")}, False),
-    ]
-    for name, rl, bq, want in totals_cases:
-        got = same_totals(rl, bq)
-        if got != want:
-            print(f"FAIL self-test 'same_totals: {name}': {got}, want {want}")
             ok = False
 
     print("self-test passed" if ok else "self-test FAILED")
@@ -569,32 +512,25 @@ def main() -> int:
         else list(range(args.start_seed, args.start_seed + args.runs))
     )
     total = len(seeds)
-    real = expected_units = expected_acceptance = 0
+    real = regressions = 0
     for seed in seeds:
         verdict, report = check_one(args.rledger, args.python, seed)
         if verdict == "agree":
             continue
-        if verdict == "expected:acceptance":
-            expected_acceptance += 1
-        elif verdict.startswith("expected"):
-            expected_units += 1
+        if verdict == "regression:2118":
+            regressions += 1
         else:
             real += 1
         print("\n".join(report))
         print("-" * 60)
-    expected = expected_units + expected_acceptance
-    agreed = total - real - expected
+    agreed = total - real - regressions
     print(f"{agreed}/{total} agreed")
-    # Printed unconditionally, including the zero. A count that only appears
-    # when non-zero reads as "nothing was waived" when the line is simply
-    # absent, and waived cases are exactly the ones worth keeping in view.
-    print(f"{expected} expected divergence(s) (#2118 lot pooling)")
-    # Broken out because it is the more serious face of #2118: not a figure
-    # that differs but a ledger one engine refuses to LOAD. Waived so the gate
-    # can be green, never silent.
-    print(f"  of which {expected_acceptance} are ACCEPTANCE differences")
-    print(f"{real} unexplained divergence(s)")
-    return 1 if real else 0
+    # Printed unconditionally, including the zero: this line is the #2118
+    # tripwire, and a count that only appears when non-zero reads the same
+    # as a tripwire that was removed.
+    print(f"{regressions} #2118-shaped divergence(s) (repeated lot identity within a date)")
+    print(f"{real} other unexplained divergence(s)")
+    return 1 if real or regressions else 0
 
 
 if __name__ == "__main__":

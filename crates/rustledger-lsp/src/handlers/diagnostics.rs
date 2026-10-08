@@ -375,7 +375,7 @@ pub(crate) fn run_ledger_validation(
     // regular plugins (effective_date, etc.) transform directives before
     // validation.
     if let Some(ctx) = plugin_ctx {
-        let load_options = LoadOptions::default();
+        let load_options = lsp_load_options();
         let mut plugin_errors = Vec::new();
         // Run synth pass first so auto_accounts can synthesize Opens
         // for accounts referenced without explicit declaration; this
@@ -451,6 +451,20 @@ pub(crate) fn run_ledger_validation(
     }
 }
 
+/// The loader options every LSP plugin and load path uses.
+///
+/// `native_plugins_only` is what makes E8006 ("skipped in LSP") true. Without
+/// it, whether the LSP ran WASM and Python plugins depended on Cargo feature
+/// unification: built alone it could not, built with the CLI (a plain
+/// workspace `cargo build`, or the flake's package) it ran them on every
+/// reload, with no way to give them a time budget (#2486).
+pub(crate) fn lsp_load_options() -> LoadOptions {
+    LoadOptions {
+        native_plugins_only: true,
+        ..LoadOptions::default()
+    }
+}
+
 /// Map a shared [`LedgerValidation`] to the diagnostics for ONE file: the
 /// validation errors whose `file_id` matches (plus global `None`-file errors),
 /// mapped to positions in this file's `source`, plus this file's non-native
@@ -466,9 +480,11 @@ pub(crate) fn map_validation_to_diagnostics(
     let mut extra_diagnostics = Vec::new();
 
     if let Some(ctx) = plugin_ctx {
-        // Emit info diagnostics for non-native plugins. The loader's run_plugins()
-        // only executes native plugins — Python/WASM plugins are not run in the LSP.
-        // Warn users so they understand why the LSP may disagree with `rledger check`.
+        // Emit info diagnostics for non-native plugins. The LSP loads with
+        // `native_plugins_only` (see `lsp_load_options`), so Python/WASM
+        // plugins are never run here, whatever runtimes this binary was
+        // compiled with. Warn users so they understand why the LSP may
+        // disagree with `rledger check`.
         let registry = NativePluginRegistry::global();
         for plugin in ctx.plugins {
             // Only show the diagnostic for plugins declared in the current file.
@@ -477,33 +493,60 @@ pub(crate) fn map_validation_to_diagnostics(
             {
                 continue;
             }
-            let is_native = registry.has(&plugin.name);
-            if !is_native {
-                let (start_line, start_col) = line_index.offset_to_position(plugin.span.start);
-                let (end_line, end_col) = line_index.offset_to_position(plugin.span.end);
-                let kind = if plugin.name.ends_with(".wasm") {
-                    "WASM"
-                } else {
-                    "Python"
-                };
-                extra_diagnostics.push(Diagnostic {
-                    range: Range {
-                        start: Position::new(start_line, start_col),
-                        end: Position::new(end_line, end_col),
-                    },
-                    severity: Some(DiagnosticSeverity::INFORMATION),
-                    code: Some(lsp_types::NumberOrString::String("E8006".to_string())),
-                    source: Some("rustledger".to_string()),
-                    message: format!(
-                        "Plugin \"{}\" is a {kind} plugin — skipped in LSP, validation may differ from `rledger check`",
-                        plugin.name
-                    ),
-                    related_information: None,
-                    tags: None,
-                    code_description: None,
-                    data: None,
-                });
+            // Only a real WASM or Python reference is "skipped". `python:`
+            // names are forced onto the Python runtime even when the short
+            // name is native. A name that is neither native nor WASM/Python
+            // shaped (a typo of a native plugin) gets no E8006: the loader
+            // reports it as E8001 "Plugin not found" instead (#2486).
+            // A plugin's pass is not known here, so it is native if it is
+            // native in either; same lookup as resolution.
+            let is_native = [
+                rustledger_plugin::PluginPass::Synth,
+                rustledger_plugin::PluginPass::Regular,
+            ]
+            .into_iter()
+            .any(|pass| {
+                rustledger_plugin::find_native_plugin(
+                    &plugin.name,
+                    plugin.force_python,
+                    pass,
+                    registry,
+                )
+                .is_some()
+            });
+            if is_native {
+                continue;
             }
+            let kind = match rustledger_plugin::classify_external_plugin(
+                &plugin.name,
+                plugin.force_python,
+            ) {
+                rustledger_plugin::ExternalPluginKind::Wasm => "WASM",
+                rustledger_plugin::ExternalPluginKind::Python => "Python",
+                rustledger_plugin::ExternalPluginKind::Unknown => continue,
+            };
+            let (start_line, start_col) = line_index.offset_to_position(plugin.span.start);
+            let (end_line, end_col) = line_index.offset_to_position(plugin.span.end);
+            extra_diagnostics.push(Diagnostic {
+                range: Range {
+                    start: Position::new(start_line, start_col),
+                    end: Position::new(end_line, end_col),
+                },
+                severity: Some(DiagnosticSeverity::INFORMATION),
+                code: Some(lsp_types::NumberOrString::String("E8006".to_string())),
+                source: Some("rustledger".to_string()),
+                message: format!(
+                    "Plugin \"{}{}\" is a {kind} plugin — skipped in LSP, validation may differ from `rledger check`",
+                    // As written: `python:auto_accounts`, not the bare native
+                    // name, which would read as the native plugin skipped.
+                    if plugin.force_python { "python:" } else { "" },
+                    plugin.name
+                ),
+                related_information: None,
+                tags: None,
+                code_description: None,
+                data: None,
+            });
         }
 
         // Plugin errors don't carry file_id, so we only show them in the main
@@ -2478,6 +2521,110 @@ include "credit_card.beancount"
         assert!(
             info_diags.is_empty(),
             "Native plugins should NOT emit E8006 info diagnostic. Got: {info_diags:?}"
+        );
+    }
+
+    /// Every shape of plugin reference, in the LSP (#2486). Built with the
+    /// CLI, Cargo feature unification compiles the WASM and Python runtimes
+    /// into the LSP, which then ran these plugins on every reload; the LSP
+    /// now skips them in every build, and E8006 says so only for references
+    /// that really are WASM or Python. A name that is neither -- a typo of a
+    /// native plugin -- is still E8001, not a "skipped Python plugin".
+    /// `cargo test --workspace --all-features` runs this with both runtimes
+    /// compiled in; `cargo test -p rustledger-lsp` without them.
+    ///
+    /// Resolving any of the WASM/Python references reports an error in any
+    /// build (a load failure with the runtime, a missing-feature error
+    /// without), so "E8006 and nothing else" means it was never touched. The
+    /// names are relative or `/`-separated so no Windows path needs quoting.
+    #[test]
+    fn plugin_reference_shapes_in_the_lsp_2486() {
+        const WASM: &[&str] = &["bad.wasm", "missing.wasm", "/nonexistent/dir/plug.wasm"];
+        const PYTHON: &[&str] = &[
+            "missing.py",
+            "/nonexistent/dir/plug.py",
+            "./plugins/myplug",
+            "pkg.module",
+            "python:auto_accounts",
+            "python:some_mod",
+        ];
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("bad.wasm"), b"not a wasm module").unwrap();
+        let mut source = String::from("plugin \"auto_accounts\"\nplugin \"autoaccounts\"\n");
+        for name in WASM.iter().chain(PYTHON) {
+            source.push_str(&format!("plugin \"{name}\"\n"));
+        }
+        // No `open`: auto_accounts, a native plugin, must still run.
+        source.push_str("\n2024-01-15 * \"t\"\n  Assets:Cash  1 USD\n  Income:Gift\n");
+        let result = parse(&source);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+
+        let diagnostics = all_diagnostics(
+            &result,
+            &source,
+            None,
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
+        let mut skipped: Vec<String> = diagnostics
+            .iter()
+            .filter(|d| get_code(d) == "E8006")
+            .map(|d| d.message.clone())
+            .collect();
+        skipped.sort();
+        let mut want: Vec<String> = WASM
+            .iter()
+            .map(|n| (n, "WASM"))
+            .chain(PYTHON.iter().map(|n| (n, "Python")))
+            .map(|(n, k)| {
+                format!(
+                    "Plugin \"{n}\" is a {k} plugin — skipped in LSP, validation may differ from `rledger check`"
+                )
+            })
+            .collect();
+        want.sort();
+        assert_eq!(
+            skipped, want,
+            "exactly the WASM/Python references get E8006"
+        );
+
+        let others: Vec<_> = diagnostics
+            .iter()
+            .filter(|d| get_code(d) != "E8006")
+            .map(|d| (get_code(d), d.message.clone()))
+            .collect();
+        assert_eq!(
+            others,
+            [(
+                "E8001".to_string(),
+                "Plugin not found: \"autoaccounts\"".to_string()
+            )],
+            "only the typo is an error; nothing skipped was resolved or run, \
+             and auto_accounts ran (no E1001)"
+        );
+
+        // The journal load (`LedgerState::load`) uses the same options.
+        let path = dir.path().join("main.beancount");
+        std::fs::write(&path, &source).unwrap();
+        let mut state = crate::ledger_state::LedgerState::new();
+        state.load(&path).expect("load");
+        let plugin_errors: Vec<_> = state
+            .ledger()
+            .expect("ledger")
+            .errors
+            .iter()
+            .filter(|e| e.phase == "plugin")
+            .map(|e| (e.code.clone(), e.message.clone()))
+            .collect();
+        assert_eq!(
+            plugin_errors,
+            [(
+                "E8001".to_string(),
+                "Plugin not found: \"autoaccounts\"".to_string()
+            )],
+            "the journal load must skip them too"
         );
     }
 

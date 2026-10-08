@@ -803,7 +803,8 @@ fn resolve_entry_currency(
     }
     let mut why = Vec::new();
     for path in &ledgers {
-        match ledger_profile::open_currencies(path, &config.account)? {
+        let lookup = ledger_profile::open_currencies(path, &config.account)?;
+        match lookup.currencies {
             Some(currencies) => match currencies.as_slice() {
                 [one] => {
                     eprintln!(
@@ -836,11 +837,19 @@ fn resolve_entry_currency(
                     break;
                 }
             },
-            None => why.push(format!(
-                "{} has no `open {}` directive",
-                path.display(),
-                config.account
-            )),
+            None => why.push(match &lookup.load_errors {
+                Some((count, first)) => format!(
+                    "no `open {}` directive loaded from {}, which has {count} load \
+                     error(s) (first: {first}); the `open` may be in the part that failed",
+                    config.account,
+                    path.display(),
+                ),
+                None => format!(
+                    "{} has no `open {}` directive",
+                    path.display(),
+                    config.account
+                ),
+            }),
         }
     }
 
@@ -4071,6 +4080,20 @@ default_expense = "Expenses:Uncategorized"
             !out.contains("Coffee"),
             "the EUR duplicate must be skipped: {out}"
         );
+    }
+
+    /// #2464: when the `open` is in an include that failed to load, the error
+    /// says the ledger did not load, not that the account was never opened.
+    #[test]
+    fn entry_without_currency_reports_a_ledger_that_failed_to_load() {
+        let err = run_entry_without_currency(Some("include \"missing.beancount\"\n"), "--existing")
+            .unwrap_err();
+        assert!(
+            err.contains("no `open Assets:Bank:Euro` directive loaded from"),
+            "{err}"
+        );
+        assert!(err.contains("which has 1 load error(s)"), "{err}");
+        assert!(err.contains("may be in the part that failed"), "{err}");
     }
 
     /// #2464: an `open` with no currency constraint cannot answer either.

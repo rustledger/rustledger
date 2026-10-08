@@ -148,23 +148,42 @@ pub(super) fn load_profiles(path: &Path) -> Result<Vec<(glob::Pattern, LedgerPro
     Ok(out)
 }
 
-/// The currencies the ledger's `open` directive for `account` declares, or
-/// `None` when the ledger never opens it.
+/// What a ledger says about one account's `open`.
+pub(super) struct OpenLookup {
+    /// The currencies its `open` declares, or `None` when no `open` for the
+    /// account loaded.
+    pub currencies: Option<Vec<String>>,
+    /// The ledger's load errors (count and first message), if any. When no
+    /// `open` was found they may be why: an `open` inside an include that
+    /// failed to load is not "missing", and saying so would send the user
+    /// looking in the wrong place.
+    pub load_errors: Option<(usize, String)>,
+}
+
+/// Look up the `open` directive for `account` in a ledger.
 ///
 /// Used to fill in a CSV importer entry that names no currency (#2464): the
 /// `open` directive is where the account's currency is declared, so it is
 /// the authority a missing config value defers to.
-pub(super) fn open_currencies(path: &Path, account: &str) -> Result<Option<Vec<String>>> {
+pub(super) fn open_currencies(path: &Path, account: &str) -> Result<OpenLookup> {
     let ledger = load_unvalidated(path)?;
-    Ok(ledger.directives.iter().find_map(|d| match &d.value {
-        Directive::Open(open) if open.account.as_str() == account => Some(
-            open.currencies
-                .iter()
-                .map(std::string::ToString::to_string)
-                .collect(),
-        ),
-        _ => None,
-    }))
+    let errors: Vec<&rustledger_loader::LedgerError> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.severity == rustledger_loader::ErrorSeverity::Error)
+        .collect();
+    Ok(OpenLookup {
+        currencies: ledger.directives.iter().find_map(|d| match &d.value {
+            Directive::Open(open) if open.account.as_str() == account => Some(
+                open.currencies
+                    .iter()
+                    .map(std::string::ToString::to_string)
+                    .collect(),
+            ),
+            _ => None,
+        }),
+        load_errors: errors.first().map(|e| (errors.len(), e.message.clone())),
+    })
 }
 
 /// The profile whose pattern matches `filename`.

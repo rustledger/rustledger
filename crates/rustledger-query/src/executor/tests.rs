@@ -3008,6 +3008,22 @@ fn from_filter_column_lists_match_the_executor() {
         "the arms came back: {evaluator_columns:?}",
     );
 
+    // Not vacuous if the `match` is reshaped (`"a" | "b" =>`, a helper, a
+    // table): every schema column and every listed name must be among the
+    // arms found, so an arm the pattern stops seeing fails here instead of
+    // quietly leaving its column unchecked.
+    for name in postings_schema
+        .iter()
+        .map(String::as_str)
+        .chain(FROM_ENTRY_COLUMNS.iter().copied())
+        .chain(POSTING_ONLY_COLUMNS.iter().copied())
+    {
+        assert!(
+            evaluator_columns.iter().any(|c| c == name),
+            "`{name}` was not found among evaluate_column's arms; update how this test reads them",
+        );
+    }
+
     let names: BTreeSet<String> = postings_schema
         .into_iter()
         .chain(evaluator_columns)

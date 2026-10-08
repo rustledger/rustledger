@@ -43,6 +43,25 @@ pub(super) fn execute_query<W: Write>(
     // Output results using display context for consistent number formatting.
     // `render_commas` is resolved ONCE here, against the surface being written,
     // so each writer receives a context it can use verbatim (#1892).
+    // PRINT's rows are ledger text, each already ending in its newline and
+    // starting with the blank line beancount's printer puts before it, so
+    // the text and beancount outputs write them as they are: the entries as
+    // bean-query prints them, not a one-column table with a row count
+    // (#2426). CSV and JSON keep the rows as data.
+    if matches!(query, rustledger_query::ast::Query::Print(_))
+        && matches!(
+            settings.format,
+            super::OutputFormat::Text | super::OutputFormat::Beancount
+        )
+    {
+        for row in &result.rows {
+            if let Some(Value::String(text)) = row.first() {
+                writer.write_all(text.as_bytes())?;
+            }
+        }
+        return Ok(());
+    }
+
     let ctx = &settings.display_context.for_surface(settings.format.into());
     match settings.format {
         super::OutputFormat::Text => write_text(&result, writer, settings.numberify, ctx)?,

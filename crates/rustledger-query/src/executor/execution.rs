@@ -1034,6 +1034,40 @@ impl Executor<'_> {
             return self.eval_meta_on_table_row(name_upper, func, row, column_map);
         }
 
+        // `has_account(regex)` on a table with an `accounts` column, such as
+        // `#entries` and the entries `PRINT` filters: beanquery compiles it
+        // to `regex ~? any(accounts)`, so an `open` or a `note` has the
+        // accounts it names. Its argument is a pattern, and a bare word there
+        // is the pattern, as in the FROM filter (`evaluate_from_filter`).
+        if name_upper == "HAS_ACCOUNT"
+            && let Some(&accounts) = column_map.get("accounts")
+        {
+            let [arg] = func.args.as_slice() else {
+                return Err(QueryError::InvalidArguments(
+                    "has_account".to_string(),
+                    "expected 1 argument".to_string(),
+                ));
+            };
+            let pattern = match arg {
+                Expr::Column(name) if !column_map.contains_key(&name.to_lowercase()) => {
+                    name.clone()
+                }
+                _ => match self.evaluate_subquery_expr(arg, row, column_map)? {
+                    Value::String(s) => s,
+                    _ => {
+                        return Err(QueryError::Type(
+                            "has_account expects a string pattern".to_string(),
+                        ));
+                    }
+                },
+            };
+            let regex = self.require_regex(&pattern)?;
+            return Ok(Value::Boolean(match row.get(accounts) {
+                Some(Value::StringSet(set)) => set.iter().any(|a| regex.is_match(a)),
+                _ => false,
+            }));
+        }
+
         // `weight`, `cost` and `sum` of a posting column need the
         // POSTING, as on the default FROM (#1966, #2428, #2430), and a
         // table row has only values. A table built from postings
@@ -1506,25 +1540,34 @@ impl Executor<'_> {
     }
 
     /// Execute a PRINT query.
+    ///
+    /// PRINT prints the entry stream the `FROM` clause gives, the one the
+    /// posting sources iterate the transactions of: `OPEN ON` / `CLOSE` /
+    /// `CLEAR` applied ([`Self::window_entries`], #2411), then the filter
+    /// expression, evaluated on each entry as beanquery evaluates it on its
+    /// `entries` table. Each entry is rendered by the canonical formatter,
+    /// `rustledger_core::format`, so a cost, price, metadata, booking method
+    /// or escaped string prints as `rledger format` writes it and the output
+    /// loads back (#2426). This used to print every directive of the ledger
+    /// through a formatter of its own, which dropped all of those.
+    ///
+    /// One row per entry, in a `directive` column. A row's text ends with a
+    /// newline and starts with one where beancount's `print_entries` puts a
+    /// blank line (before a transaction or a commodity, and between runs of
+    /// different directive types), so the rows concatenated are bean-query's
+    /// `PRINT` output; the CLI writes them that way.
     pub(super) fn execute_print(
         &self,
         query: &crate::ast::PrintQuery,
     ) -> Result<QueryResult, QueryError> {
-        // PRINT outputs directives in Beancount format
-        let columns = vec!["directive".to_string()];
-        let mut result = QueryResult::new(columns);
-
-        // Iterate whichever directive source is populated (see
-        // `resolved_directives`): under `new_with_sources` (CLI / source-mapped
-        // queries) `self.directives` is empty and the data is in
-        // `spanned_directives`.
-        let all_directives = self.resolved_directives();
+        let mut result = QueryResult::new(vec!["directive".to_string()]);
 
         // PRINT prints entries, so its FROM filter is entry-level, and a
         // posting column in it is an error, as in both bean-query versions:
         // which entries would `account ~ 'Bank'` print? `has_account()` says
         // it (#2414).
-        let filter = query.from.as_ref().and_then(|f| f.filter.as_ref());
+        let from = query.from.as_ref();
+        let filter = from.and_then(|f| f.filter.as_ref());
         if let Some(column) = filter.and_then(super::evaluation::print_filter_posting_column) {
             return Err(QueryError::Evaluation(format!(
                 "column \"{column}\" is a posting column, and PRINT prints entries: \
@@ -1532,104 +1575,58 @@ impl Executor<'_> {
                  use FROM has_account('<regex>')"
             )));
         }
+        // The filter reads an entry as a row of `#entries`, whatever its
+        // type: `narration` is NULL on an `open`, and `has_account()` asks
+        // about the entry's `accounts`, as beanquery's `entries` table does.
+        let entry_columns: FxHashMap<String, usize> = super::system_tables::ENTRY_TABLE_COLUMNS
+            .iter()
+            .enumerate()
+            .map(|(i, name)| ((*name).to_string(), i))
+            .collect();
 
-        for (directive_index, directive) in all_directives.enumerate() {
-            // Apply FROM clause filter if present
+        let config = rustledger_core::format::FormatConfig::default();
+        let mut previous: Option<std::mem::Discriminant<Directive>> = None;
+        for (index, entry) in self.window_entries(from, self.resolved_directives().enumerate())? {
+            let synthesized;
+            let directive = match &entry {
+                super::types::EntryRef::Ledger(directive) => *directive,
+                super::types::EntryRef::Synthesized(txn) => {
+                    synthesized = Directive::Transaction((**txn).clone());
+                    &synthesized
+                }
+            };
             if let Some(filter) = filter {
-                // PRINT filters at transaction level
-                if let Directive::Transaction(txn) = directive
-                    && !self.evaluate_from_filter(filter, txn, 0, Some(directive_index))?
-                {
+                let row = self.directive_to_entry_row(
+                    index,
+                    directive,
+                    index.and_then(|i| self.get_source_location(i)),
+                );
+                if !self.evaluate_subquery_filter(filter, &row, &entry_columns)? {
                     continue;
                 }
             }
 
-            // Format the directive as a string
-            let formatted = self.format_directive(directive);
-            result.add_row(vec![Value::String(formatted)]);
+            // beancount's `print_entries`: a blank line before every
+            // transaction and commodity, and where the directive type
+            // changes; the first entry is compared with its own type.
+            let kind = std::mem::discriminant(directive);
+            let blank = matches!(
+                directive,
+                Directive::Transaction(_) | Directive::Commodity(_)
+            ) || previous.is_some_and(|p| p != kind);
+            previous = Some(kind);
+            let mut text = String::new();
+            if blank {
+                text.push('\n');
+            }
+            text.push_str(&rustledger_core::format::format_directives(
+                std::iter::once(directive),
+                &config,
+            ));
+            result.add_row(vec![Value::String(text)]);
         }
 
         Ok(result)
-    }
-
-    /// Format a directive for PRINT output.
-    pub(super) fn format_directive(&self, directive: &Directive) -> String {
-        match directive {
-            Directive::Transaction(txn) => {
-                let mut out = format!("{} {} ", txn.date, txn.flag);
-                if let Some(payee) = &txn.payee {
-                    out.push_str(&format!("\"{payee}\" "));
-                }
-                out.push_str(&format!("\"{}\"", txn.narration));
-
-                for tag in &txn.tags {
-                    out.push_str(&format!(" #{tag}"));
-                }
-                for link in &txn.links {
-                    out.push_str(&format!(" ^{link}"));
-                }
-                out.push('\n');
-
-                for posting in &txn.postings {
-                    out.push_str(&format!("  {}", posting.account));
-                    if let Some(units) = posting.amount() {
-                        out.push_str(&format!("  {} {}", units.number, units.currency));
-                    }
-                    out.push('\n');
-                }
-                out
-            }
-            Directive::Balance(bal) => {
-                format!(
-                    "{} balance {} {} {}\n",
-                    bal.date, bal.account, bal.amount.number, bal.amount.currency
-                )
-            }
-            Directive::Open(open) => {
-                let mut out = format!("{} open {}", open.date, open.account);
-                if !open.currencies.is_empty() {
-                    out.push_str(&format!(" {}", open.currencies.join(",")));
-                }
-                out.push('\n');
-                out
-            }
-            Directive::Close(close) => {
-                format!("{} close {}\n", close.date, close.account)
-            }
-            Directive::Commodity(comm) => {
-                format!("{} commodity {}\n", comm.date, comm.currency)
-            }
-            Directive::Pad(pad) => {
-                format!("{} pad {} {}\n", pad.date, pad.account, pad.source_account)
-            }
-            Directive::Event(event) => {
-                format!(
-                    "{} event \"{}\" \"{}\"\n",
-                    event.date, event.event_type, event.value
-                )
-            }
-            Directive::Query(query) => {
-                format!(
-                    "{} query \"{}\" \"{}\"\n",
-                    query.date, query.name, query.query
-                )
-            }
-            Directive::Note(note) => {
-                format!("{} note {} \"{}\"\n", note.date, note.account, note.comment)
-            }
-            Directive::Document(doc) => {
-                format!("{} document {} \"{}\"\n", doc.date, doc.account, doc.path)
-            }
-            Directive::Price(price) => {
-                format!(
-                    "{} price {} {} {}\n",
-                    price.date, price.currency, price.amount.number, price.amount.currency
-                )
-            }
-            Directive::Custom(custom) => {
-                format!("{} custom \"{}\"\n", custom.date, custom.custom_type)
-            }
-        }
     }
 
     /// Execute a CREATE TABLE statement.

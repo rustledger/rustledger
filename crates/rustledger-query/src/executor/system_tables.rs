@@ -11,6 +11,28 @@ use super::{Executor, compute_posting_weight};
 use rustc_hash::FxHashMap;
 use rustledger_core::{Amount, Directive, Position};
 
+/// The columns of the `#entries` table, in order: one row per directive,
+/// whatever its type, as beanquery's `entries` table. `PRINT`'s FROM filter
+/// reads an entry through them too.
+pub(super) const ENTRY_TABLE_COLUMNS: &[&str] = &[
+    "id",
+    "type",
+    "filename",
+    "lineno",
+    "date",
+    "year",
+    "month",
+    "day",
+    "flag",
+    "payee",
+    "narration",
+    "description",
+    "tags",
+    "links",
+    "meta",
+    "accounts",
+];
+
 impl Executor<'_> {
     /// Build the #prices table from price directives.
     ///
@@ -609,24 +631,10 @@ impl Executor<'_> {
     /// POSTING's metadata and `_entry_meta` the TRANSACTION's, two different
     /// maps on one row (#2154).
     pub(super) fn build_entries_table(&self) -> Table {
-        let columns = vec![
-            "id".to_string(),
-            "type".to_string(),
-            "filename".to_string(),
-            "lineno".to_string(),
-            "date".to_string(),
-            "year".to_string(),
-            "month".to_string(),
-            "day".to_string(),
-            "flag".to_string(),
-            "payee".to_string(),
-            "narration".to_string(),
-            "description".to_string(),
-            "tags".to_string(),
-            "links".to_string(),
-            "meta".to_string(),
-            "accounts".to_string(),
-        ];
+        let columns = ENTRY_TABLE_COLUMNS
+            .iter()
+            .map(ToString::to_string)
+            .collect();
         let mut table = Table::new(columns);
 
         // Process directives with optional source locations. `get_source_location`
@@ -634,17 +642,19 @@ impl Executor<'_> {
         // single loop covers both.
         for (idx, directive) in self.resolved_directives().enumerate() {
             let source_loc = self.get_source_location(idx);
-            let row = self.directive_to_entry_row(idx, directive, source_loc);
+            let row = self.directive_to_entry_row(Some(idx), directive, source_loc);
             table.add_row(row);
         }
 
         table
     }
 
-    /// Convert a directive to a row for the #entries table.
-    fn directive_to_entry_row(
+    /// Convert a directive to a row for the #entries table, whose columns are
+    /// [`ENTRY_TABLE_COLUMNS`]. `idx` is its directive index, the `id`; an
+    /// entry a query synthesized has none.
+    pub(super) fn directive_to_entry_row(
         &self,
-        idx: usize,
+        idx: Option<usize>,
         directive: &Directive,
         source_loc: Option<&SourceLocation>,
     ) -> Vec<Value> {
@@ -768,7 +778,7 @@ impl Executor<'_> {
         };
 
         vec![
-            Value::Integer(idx as i64), // id
+            idx.map_or(Value::Null, |idx| Value::Integer(idx as i64)), // id
             Value::String(type_name.to_string()),
             filename,
             lineno,

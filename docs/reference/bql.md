@@ -470,6 +470,22 @@ WHERE "project" IN tags
 WHERE "trip-2024" IN links
 ```
 
+## PRINT
+
+`PRINT` writes entries back as ledger text, as `rledger format` writes them:
+
+```sql
+PRINT FROM has_account('Assets:Bank') OPEN ON 2024-01-01
+```
+
+It prints the entries the `FROM` clause leaves. `OPEN ON` gives the `open`
+directives still active at the date, the last price of each currency pair,
+the opening-balance summaries, and every entry from the date on. `CLOSE ON`
+cuts off at the date, and `CLOSE` and `CLEAR` add their conversion and
+transfer entries. The filter reads each entry, whatever its type, the way the
+`#entries` table does: `narration` is NULL on an `open`, and
+`has_account(regex)` matches the accounts the entry names.
+
 ## Subqueries
 
 A subquery can be used as the source of a `FROM` clause:

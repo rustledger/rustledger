@@ -174,12 +174,25 @@ pub fn transaction_tolerances(
             FxHashMap::with_capacity_and_hasher(txn.postings.len().min(4), Default::default());
 
         for posting in &txn.postings {
-            if let Some(units) = posting.amount() {
+            // A units number written without its currency counts here too
+            // (#2465): beancount's `infer_tolerances` reads `units.number`
+            // whatever the currency, and only the units tolerance lands under
+            // the MISSING currency (which is why the loop above skips it). The
+            // cost or price tolerance it implies is keyed by the cost or price
+            // currency, which is written. Skipping it left an auto-posting
+            // beside `-5.5 {10 USD}` unquantized (`44.75` where beancount, and
+            // rledger with `HOOL` written, book `45`).
+            let units_number = match &posting.units {
+                Some(rustledger_core::IncompleteAmount::Complete(units)) => Some(units.number),
+                Some(rustledger_core::IncompleteAmount::NumberOnly(number)) => Some(*number),
+                _ => None,
+            };
+            if let Some(units_number) = units_number {
                 // Only process postings with decimal amounts (Python: if expo < 0)
-                if units.number.scale() == 0 {
+                if units_number.scale() == 0 {
                     continue;
                 }
-                let units_quantum = decimal_quantum(units.number);
+                let units_quantum = decimal_quantum(units_number);
                 let tolerance = units_quantum * opts.multiplier;
 
                 // Cost contribution — only per-unit cost feeds into

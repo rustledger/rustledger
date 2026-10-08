@@ -71,6 +71,7 @@ use config::{
 // Used only by the WASM-importer-dir resolution path (gated below).
 #[cfg(feature = "python-plugin-wasm")]
 use config::expand_tilde;
+#[cfg(test)]
 use duplicate::load_existing_transactions;
 use rustledger_core::{Directive, FormatConfig};
 use rustledger_importer::config::CsvConfigBuilder;
@@ -260,6 +261,140 @@ pub struct Args {
     /// silently skipped; subdirectories are not recursed into.
     #[arg(long, value_name = "DIR")]
     pub wasm_importer_dir: Vec<PathBuf>,
+}
+
+/// Drop the transactions `--existing` already holds, reporting each one.
+///
+/// Matching is [`rustledger_ops::dedup::find_import_duplicates`], scoped to the
+/// importer's `account`: existing transactions are a multiset (each absorbs at
+/// most one new row, so two identical coffees on one day survive a ledger that
+/// holds one), a shared `^ofx-…` / `^csv-…` id link is decisive, and only
+/// transactions posting to that account in the same commodity are compared
+/// (#2421). The counts of every skip, and a bounded sample of skipped rows
+/// with their reasons, are written to `report`, so a transaction never
+/// disappears silently.
+/// How many skipped rows of each kind (ordinary, flagged money-only) the
+/// `--existing` report lists before summarizing the rest.
+const MAX_LISTED_SKIPS: usize = 20;
+
+fn filter_existing_duplicates(
+    directives: Vec<Directive>,
+    existing: &[rustledger_core::Transaction],
+    account: &str,
+    report: &mut impl Write,
+) -> Result<Vec<Directive>> {
+    use rustledger_ops::dedup::DuplicateReason;
+
+    let new: Vec<&rustledger_core::Transaction> = directives
+        .iter()
+        .filter_map(|d| match d {
+            Directive::Transaction(t) => Some(t),
+            _ => None,
+        })
+        .collect();
+    let existing_refs: Vec<&rustledger_core::Transaction> = existing.iter().collect();
+    let matches = rustledger_ops::dedup::find_import_duplicates(
+        &new,
+        &existing_refs,
+        Some(account),
+        &rustledger_ops::dedup::FuzzyDedupConfig::default(),
+    );
+    if matches.is_empty() {
+        return Ok(directives);
+    }
+
+    let (mut by_id, mut amount_only) = (0, 0);
+    for m in &matches {
+        match m.reason {
+            DuplicateReason::IdLink(_) => by_id += 1,
+            DuplicateReason::AmountOnly => amount_only += 1,
+            _ => {}
+        }
+    }
+    writeln!(
+        report,
+        "Filtered {} duplicate transaction(s) already in the existing ledger \
+         ({by_id} by id link, {} by date, amount and text{}):",
+        matches.len(),
+        matches.len() - by_id - amount_only,
+        if amount_only > 0 {
+            format!(", {amount_only} by date and amount alone")
+        } else {
+            String::new()
+        },
+    )?;
+    let describe = |t: &rustledger_core::Transaction| {
+        let amount = t
+            .postings
+            .iter()
+            .find(|p| p.account.as_str() == account)
+            // A row matched unscoped (it never posts to `account`) shows its
+            // first posting, which is what it was compared on.
+            .or_else(|| t.postings.first())
+            .and_then(|p| p.units.as_ref())
+            .and_then(|u| Some(format!(" {} {}", u.number()?, u.currency()?)))
+            .unwrap_or_default();
+        match &t.payee {
+            Some(payee) => format!("{} \"{payee}\" \"{}\"{amount}", t.date, t.narration),
+            None => format!("{} \"{}\"{amount}", t.date, t.narration),
+        }
+    };
+    // A full re-import skips every row, so listing them all buries the
+    // terminal in tens of thousands of lines nobody reads. List a bounded
+    // sample of each kind instead: the flagged money-only matches are the ones
+    // worth checking, so they get their own allowance and never hide behind
+    // ordinary ones. The summary line above always has the full counts.
+    let mut dropped = vec![false; new.len()];
+    let (mut listed, mut listed_flagged, mut unlisted) = (0usize, 0usize, 0usize);
+    for m in &matches {
+        dropped[m.new_index] = true;
+        let flagged = m.reason == DuplicateReason::AmountOnly;
+        let shown = if flagged {
+            &mut listed_flagged
+        } else {
+            &mut listed
+        };
+        if *shown == MAX_LISTED_SKIPS {
+            unlisted += 1;
+            continue;
+        }
+        *shown += 1;
+        // A match with no text on either side rests on the money alone; two
+        // different description-less rows on one day for one amount look the
+        // same, so say so where the user will see it.
+        let check = if m.reason == DuplicateReason::AmountOnly {
+            " -- check: nothing but the date and amount ties these together"
+        } else {
+            ""
+        };
+        writeln!(
+            report,
+            "  skipped {} ({}; existing: {}){check}",
+            describe(new[m.new_index]),
+            m.reason,
+            describe(&existing[m.existing_index]),
+        )?;
+    }
+    if unlisted > 0 {
+        writeln!(
+            report,
+            "  ... and {unlisted} more skipped transaction(s) not listed \
+             (at most {MAX_LISTED_SKIPS} of each kind are shown)"
+        )?;
+    }
+
+    let mut txn_index = 0;
+    Ok(directives
+        .into_iter()
+        .filter(|d| {
+            if matches!(d, Directive::Transaction(_)) {
+                txn_index += 1;
+                !dropped[txn_index - 1]
+            } else {
+                true
+            }
+        })
+        .collect())
 }
 
 /// List available importers — both TOML profiles and engines.
@@ -765,6 +900,174 @@ fn overlay_cli_args(entry: &ImporterEntry, args: &Args) -> ImporterEntry {
         merged.use_merchant_dict = Some(true);
     }
     merged
+}
+
+/// A `--ledger` profile's currency outranks `--currency` (the `open` is the
+/// account's declaration). When the two disagree the flag is not used, which
+/// must be said rather than dropped silently.
+fn profile_overrides_currency_flag(
+    profile: &ledger_profile::LedgerProfile,
+    args: &Args,
+) -> Option<String> {
+    let declared = profile.currency.as_deref()?;
+    let flag = args.currency.as_deref()?;
+    (declared != flag).then(|| {
+        format!(
+            "--currency {flag} is not used: the --ledger profile for {} declares {declared}",
+            profile.account
+        )
+    })
+}
+
+/// Give a CSV entry that names no `currency` the one its account is opened
+/// with, or refuse; and check a currency that IS configured (from the entry,
+/// `--currency` or the default) is a valid commodity, warning when the
+/// account's `open` does not allow it.
+///
+/// Precedence, highest first: a `--ledger` profile, `--currency`, the entry's
+/// `currency`, the account's single `open` currency, else an error. The
+/// configured value always wins over a disagreeing `open`; the warning makes
+/// the disagreement visible before `rledger check` does.
+///
+/// Every other source of a CSV config states a currency: `--currency`, a
+/// `--ledger` profile, and the raw-argument and `--auto` paths (whose
+/// `--currency` default is documented). An `importers.toml` entry that left it
+/// out used to get `USD` from deep inside the importer, so a euro account was
+/// silently booked in dollars (#2464). The account's `open` directive is the
+/// next best authority: when `--ledger` (or, if it never opens the account,
+/// `--existing`) opens the account with exactly one currency, that is the
+/// currency. Includes are followed, and a later `close` does not matter. With
+/// none, or several, nothing can say which one the statement is in, and
+/// guessing is the bug, so the import stops and says how to fix it.
+///
+/// An entry with a `currency_column` may still have no default; its rows
+/// carry their own currency, and a row with a blank cell is refused by the
+/// importer rather than defaulted.
+fn resolve_entry_currency(
+    config: ImporterConfig,
+    entry_name: Option<&str>,
+    args: &Args,
+    report: &mut impl Write,
+) -> Result<ImporterConfig> {
+    let mut ledgers: Vec<&Path> = Vec::new();
+    for path in [args.ledger.as_deref(), args.existing.as_deref()]
+        .into_iter()
+        .flatten()
+    {
+        if !ledgers.contains(&path) {
+            ledgers.push(path);
+        }
+    }
+    if let Some(currency) = &config.currency {
+        // Where the value came from, for the messages below.
+        let source = match (args.currency.as_deref(), entry_name) {
+            (Some(flag), _) if flag == currency => "--currency".to_string(),
+            (_, Some(name)) => format!("`currency` in the '{name}' entry of importers.toml"),
+            _ => "the default currency".to_string(),
+        };
+        // A value the parser cannot read (`usd`, `€`, ``) used to surface as
+        // "canonical formatter failed to re-parse", or, for an empty string,
+        // as amounts with no commodity at all.
+        if !rustledger_parser::is_valid_currency(currency) {
+            anyhow::bail!(
+                "{source} is {currency:?}, which is not a valid commodity \
+                 (commodities are upper-case, like `USD` or `EUR`)"
+            );
+        }
+        // A configured currency the account's `open` does not allow is a
+        // misconfiguration `rledger check` would reject on every imported
+        // posting. The configured value still wins (it is what the user
+        // asked for), but say so now rather than after the import.
+        for path in &ledgers {
+            let lookup = ledger_profile::open_currencies(path, &config.account)?;
+            if let Some(allowed) = lookup.currencies {
+                if !allowed.is_empty() && !allowed.contains(currency) {
+                    writeln!(
+                        report,
+                        "warning: {source} books {currency}, but `open {}` in {} allows \
+                         only {}; `rledger check` will reject these postings",
+                        config.account,
+                        path.display(),
+                        allowed.join(", ")
+                    )?;
+                }
+                break;
+            }
+        }
+        return Ok(config);
+    }
+    let mut why = Vec::new();
+    for path in &ledgers {
+        let lookup = ledger_profile::open_currencies(path, &config.account)?;
+        match lookup.currencies {
+            Some(currencies) => match currencies.as_slice() {
+                [one] => {
+                    writeln!(
+                        report,
+                        "Using currency {one} from the `open {}` directive in {}",
+                        config.account,
+                        path.display()
+                    )?;
+                    return Ok(ImporterConfig {
+                        currency: Some(one.clone()),
+                        ..config
+                    });
+                }
+                // The first ledger that opens the account is the authority:
+                // an ambiguous `open` there is not overruled by another file.
+                [] => {
+                    why.push(format!(
+                        "`open {}` in {} declares no currency",
+                        config.account,
+                        path.display()
+                    ));
+                    break;
+                }
+                many => {
+                    why.push(format!(
+                        "`open {}` in {} declares {}, more than one",
+                        config.account,
+                        path.display(),
+                        many.join(", ")
+                    ));
+                    break;
+                }
+            },
+            None => why.push(match &lookup.load_errors {
+                Some((count, first)) => format!(
+                    "no `open {}` directive loaded from {}, which has {count} load \
+                     error(s) (first: {first}); the `open` may be in the part that failed",
+                    config.account,
+                    path.display(),
+                ),
+                None => format!(
+                    "{} has no `open {}` directive",
+                    path.display(),
+                    config.account
+                ),
+            }),
+        }
+    }
+
+    let rustledger_importer::config::ImporterType::Csv(csv) = &config.importer_type;
+    if csv.currency_column.is_some() {
+        return Ok(config);
+    }
+    if why.is_empty() {
+        why.push(
+            "no --ledger or --existing ledger was given to read the account's \
+             `open` directive from"
+                .to_string(),
+        );
+    }
+    let name = entry_name.unwrap_or("(unnamed)");
+    anyhow::bail!(
+        "importer '{name}' does not set `currency`, and it cannot be taken from \
+         the ledger: {}\n  \
+         set `currency = \"...\"` in the '{name}' entry of importers.toml, or \
+         pass --currency",
+        why.join("; ")
+    )
 }
 
 /// The fields a non-CSV dispatcher can take from an `importers.toml` entry.
@@ -1333,6 +1636,10 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
     } else {
         // CSV branch: determine import config from --importer flag,
         // explicit --config, --auto, or raw CLI args.
+        //
+        // `used_entry` names the `importers.toml` entry the config came from,
+        // for the missing-currency error below.
+        let mut used_entry: Option<String> = None;
         let config = if let Some(ref importer_name) = effective_entry_name {
             // A named entry, from `--importer` or from a `--ledger` profile's
             // `importer:` key: require a config file and find that entry.
@@ -1364,6 +1671,7 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
                 importer_name,
                 config_path.display()
             );
+            used_entry = Some(entry.name.clone());
             build_config_from_entry(&overlay_cli_args(entry, args))?
         } else if args.config.is_some() {
             // Explicit --config without --importer: try auto-identification by filename
@@ -1392,6 +1700,7 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
                 entry.name,
                 config_path.display()
             );
+            used_entry = Some(entry.name.clone());
             build_config_from_entry(&overlay_cli_args(entry, args))?
         } else if args.auto {
             // Auto-detect CSV format
@@ -1536,13 +1845,26 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
         // declaration. Applied after the chain so every arm above is covered,
         // including `--auto` and raw CLI arguments.
         let config = match profile.as_ref() {
-            Some(p) => ImporterConfig {
-                account: p.account.clone(),
-                currency: p.currency.clone().or(config.currency),
-                ..config
-            },
+            Some(p) => {
+                // The profile's `open` outranks `--currency` too; a flag that
+                // loses must not be dropped silently.
+                if let Some(warning) = profile_overrides_currency_flag(p, args) {
+                    eprintln!("warning: {warning}");
+                }
+                ImporterConfig {
+                    account: p.account.clone(),
+                    currency: p.currency.clone().or(config.currency),
+                    ..config
+                }
+            }
             None => config,
         };
+        let config = resolve_entry_currency(
+            config,
+            used_entry.as_deref(),
+            args,
+            &mut io::stderr().lock(),
+        )?;
 
         (config, fallbacks)
     };
@@ -1582,25 +1904,18 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
     // ML-based account suggestions for transactions the rules engine left
     // pointing at a fallback account.
     let directives = if let Some(ref existing_path) = args.existing {
-        let existing_txns = load_existing_transactions(existing_path)?;
-        let before_count = result.directives.len();
-        // Build the dedup config once, not once per filtered directive.
-        let dedup_config = rustledger_ops::dedup::FuzzyDedupConfig::default();
-        let mut filtered: Vec<_> = result
-            .directives
-            .into_iter()
-            .filter(|d| {
-                if let Directive::Transaction(txn) = d {
-                    !rustledger_ops::dedup::is_duplicate(txn, &existing_txns, &dedup_config)
-                } else {
-                    true
-                }
-            })
-            .collect();
-        let dupes = before_count - filtered.len();
-        if dupes > 0 {
-            eprintln!("Filtered {dupes} duplicate transaction(s)");
+        let existing = duplicate::load_existing(existing_path)?;
+        if let Some(warning) = &existing.warning {
+            eprintln!("warning: {warning}");
         }
+        let existing_txns = existing.transactions;
+        let filtered = filter_existing_duplicates(
+            result.directives,
+            &existing_txns,
+            &config.account,
+            &mut io::stderr().lock(),
+        )?;
+        let mut filtered = filtered;
         if args.suggest_categories {
             suggest::apply_ml_suggestions_with_summary(
                 &mut filtered,
@@ -1924,6 +2239,7 @@ amount_column = "Amount"
 name = "pdf-bank"
 filename_pattern = "*.pdf"
 account = "Assets:Bank"
+currency = "USD"
 date_column = "Date"
 narration_column = "Description"
 amount_column = "Amount"
@@ -2015,6 +2331,7 @@ preprocess = ["touch", "{}"]
 name = "pdf-bank"
 filename_pattern = "*.pdf"
 account = "Assets:Bank"
+currency = "USD"
 date_column = "Date"
 narration_column = "Description"
 amount_column = "Amount"
@@ -2113,7 +2430,7 @@ preprocess = ["cat", "{input}"]
         std::fs::write(
             &config,
             "[[importers]]\nname = \"pdf\"\nfilename_pattern = \"*.pdf\"\n\
-             account = \"Assets:Bank\"\ndate_column = \"Date\"\n\
+             account = \"Assets:Bank\"\ncurrency = \"USD\"\ndate_column = \"Date\"\n\
              narration_column = \"Description\"\namount_column = \"Amount\"\n\
              preprocess = [\"sh\", \"-c\", \"cat \\\"$1\\\"\", \"_\", \"{input}\"]\n",
         )
@@ -2321,6 +2638,7 @@ preprocess = ["cat", "{input}"]
             payee_column: None,
             amount_column: Some(toml::Value::String("Amount".to_string())),
             currency_column: None,
+            transaction_id_column: None,
             debit_column: None,
             credit_column: None,
             secondary_date_column: None,
@@ -2365,6 +2683,7 @@ preprocess = ["cat", "{input}"]
             payee_column: None,
             amount_column: None,
             currency_column: None,
+            transaction_id_column: None,
             debit_column: None,
             credit_column: None,
             secondary_date_column: None,
@@ -2405,6 +2724,7 @@ preprocess = ["cat", "{input}"]
             payee_column: None,
             amount_column: None,
             currency_column: None,
+            transaction_id_column: None,
             debit_column: None,
             credit_column: None,
             secondary_date_column: None,
@@ -2446,6 +2766,7 @@ preprocess = ["cat", "{input}"]
             payee_column: Some(toml::Value::String("Payee".to_string())),
             amount_column: None,
             currency_column: None,
+            transaction_id_column: None,
             debit_column: Some(toml::Value::String("Debit".to_string())),
             credit_column: Some(toml::Value::String("Credit".to_string())),
             secondary_date_column: Some("Settle Date".to_string()),
@@ -3841,12 +4162,514 @@ default_expense = "Expenses:Uncategorized"
         assert!(output.contains("Lunch"));
     }
 
+    /// Extract `csv` with `extra` args against `existing`, returning the
+    /// transactions written (one line per `^2024` header).
+    fn extract_against_existing(csv: &str, existing: &str, extra: &[&str]) -> Vec<String> {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger_path = dir.path().join("ledger.beancount");
+        std::fs::write(&ledger_path, existing).unwrap();
+        let csv_path = dir.path().join("statement.csv");
+        std::fs::write(&csv_path, csv).unwrap();
+        let output_path = dir.path().join("output.beancount");
+        let mut argv = vec![
+            "extract".to_string(),
+            csv_path.to_str().unwrap().to_string(),
+            "--existing".to_string(),
+            ledger_path.to_str().unwrap().to_string(),
+            "-o".to_string(),
+            output_path.to_str().unwrap().to_string(),
+        ];
+        argv.extend(extra.iter().map(ToString::to_string));
+        let args = Args::parse_from(argv);
+        run(&args, &csv_path).unwrap();
+        std::fs::read_to_string(&output_path)
+            .unwrap_or_default()
+            .lines()
+            .filter(|l| l.starts_with("2024"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// The #2421 reproduction: one croissant already booked, two on the
+    /// statement. Exactly one must import, and a ledger in another account or
+    /// currency must not suppress anything.
+    #[test]
+    fn existing_dedup_respects_multiplicity_account_and_commodity() {
+        let existing = "2024-01-15 * \"Bakery\" \"Croissant\"\n  Assets:Bank:Checking  -2.50 EUR\n  Expenses:Unknown\n";
+        let pair = "Date,Payee,Description,Amount\n2024-01-15,Bakery,Croissant,-2.50\n2024-01-15,Bakery,Croissant,-2.50\n";
+        let one = "Date,Payee,Description,Amount\n2024-01-15,Bakery,Croissant,-2.50\n";
+        let flags = [
+            "-a",
+            "Assets:Bank:Checking",
+            "-c",
+            "EUR",
+            "--payee-column",
+            "Payee",
+        ];
+        assert_eq!(extract_against_existing(pair, existing, &flags).len(), 1);
+
+        let other = [
+            "-a",
+            "Assets:Other:Bank",
+            "-c",
+            "USD",
+            "--payee-column",
+            "Payee",
+        ];
+        assert_eq!(extract_against_existing(one, existing, &other).len(), 1);
+        let other_ccy = [
+            "-a",
+            "Assets:Bank:Checking",
+            "-c",
+            "USD",
+            "--payee-column",
+            "Payee",
+        ];
+        assert_eq!(extract_against_existing(one, existing, &other_ccy).len(), 1);
+    }
+
+    /// `transaction_id_column` emits a `^csv-` link, and dedup trusts it:
+    /// a re-import with the same ids drops everything even after the user
+    /// rewrote the narration, while distinct ids keep identical-looking rows.
+    #[test]
+    fn csv_transaction_id_link_drives_existing_dedup() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("importers.toml");
+        std::fs::write(
+            &config_path,
+            "[[importers]]\nname = \"monzo\"\naccount = \"Assets:Monzo\"\ncurrency = \"GBP\"\n\
+             transaction_id_column = \"Transaction ID\"\n",
+        )
+        .unwrap();
+        let config = config_path.to_str().unwrap();
+        let flags = ["--config", config, "--importer", "monzo"];
+        let csv = "Transaction ID,Date,Description,Amount\n\
+                   tx_1,2024-01-15,Croissant,-2.50\n\
+                   tx_2,2024-01-15,Croissant,-2.50\n";
+
+        // Fresh import: both rows, each with its id link.
+        let fresh = extract_against_existing(csv, "", &flags);
+        assert_eq!(fresh.len(), 2, "{fresh:?}");
+        assert!(fresh[0].ends_with("^csv-tx_1"), "{fresh:?}");
+        assert!(fresh[1].ends_with("^csv-tx_2"), "{fresh:?}");
+
+        // tx_1 is booked under a rewritten narration: tx_1 drops by id,
+        // tx_2 (same text, different id) is new.
+        let existing = "2024-01-15 * \"Morning pastry\" ^csv-tx_1\n  Assets:Monzo  -2.50 GBP\n  Expenses:Food\n";
+        let out = extract_against_existing(csv, existing, &flags);
+        assert_eq!(out.len(), 1, "{out:?}");
+        assert!(out[0].ends_with("^csv-tx_2"), "{out:?}");
+    }
+
+    /// Two cash withdrawals with no description, same day and amount, one
+    /// already booked: one is skipped, and the report says that only the
+    /// date and amount tie it to the ledger entry, so a user can check it.
+    #[test]
+    fn existing_dedup_flags_drops_resting_on_the_amount_alone() {
+        use rustledger_core::{Amount, Posting, Transaction};
+        let t = || {
+            Transaction::new("2024-01-15".parse().unwrap(), "")
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(rust_decimal::Decimal::new(-6000, 2), "EUR"),
+                ))
+                .with_synthesized_posting(Posting::auto("Expenses:Cash"))
+        };
+        let new = vec![Directive::Transaction(t()), Directive::Transaction(t())];
+        let mut report = Vec::new();
+        let kept = filter_existing_duplicates(new, &[t()], "Assets:Bank", &mut report).unwrap();
+        assert_eq!(kept.len(), 1);
+        let report = String::from_utf8(report).unwrap();
+        assert!(
+            report
+                .contains("(0 by id link, 0 by date, amount and text, 1 by date and amount alone)"),
+            "{report}"
+        );
+        assert!(
+            report.contains("neither has a payee or narration to compare"),
+            "{report}"
+        );
+        assert!(
+            report.contains("-- check: nothing but the date and amount ties these together"),
+            "{report}"
+        );
+    }
+
+    /// A full re-import must not bury the terminal: at most
+    /// `MAX_LISTED_SKIPS` rows of each kind are listed, the rest are counted,
+    /// and flagged money-only skips keep their own allowance so ordinary ones
+    /// cannot hide them.
+    #[test]
+    fn existing_dedup_report_is_bounded_and_keeps_flagged_rows_visible() {
+        use rustledger_core::{Amount, Posting, Transaction};
+        let t = |n: &str, cents: i64| {
+            Transaction::new("2024-01-15".parse().unwrap(), n)
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(rust_decimal::Decimal::new(cents, 2), "EUR"),
+                ))
+                .with_synthesized_posting(Posting::auto("Expenses:Food"))
+        };
+        let mut rows: Vec<Transaction> = (0..30).map(|i| t("Coffee", -100 - i)).collect();
+        rows.extend((0..5).map(|i| t("", -900 - i)));
+        let new: Vec<Directive> = rows.iter().cloned().map(Directive::Transaction).collect();
+        let mut report = Vec::new();
+        let kept = filter_existing_duplicates(new, &rows, "Assets:Bank", &mut report).unwrap();
+        assert!(kept.is_empty());
+        let report = String::from_utf8(report).unwrap();
+        assert!(
+            report.starts_with("Filtered 35 duplicate transaction(s)"),
+            "{report}"
+        );
+        let skipped = report
+            .lines()
+            .filter(|l| l.starts_with("  skipped"))
+            .count();
+        let flagged = report
+            .lines()
+            .filter(|l| l.ends_with("ties these together"))
+            .count();
+        assert_eq!((skipped, flagged), (MAX_LISTED_SKIPS + 5, 5), "{report}");
+        assert!(
+            report.contains("... and 10 more skipped transaction(s) not listed"),
+            "{report}"
+        );
+    }
+
+    /// An `--existing` ledger that partly fails to load still dedups what
+    /// loaded, and says the rest was not compared instead of staying silent.
+    #[test]
+    fn a_partly_broken_existing_ledger_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = dir.path().join("ledger.beancount");
+        std::fs::write(
+            &ledger,
+            "2024-01-15 * \"Coffee\"\n  Assets:Bank  -4.00 EUR\n  Expenses:X\n\n\
+             2024-01-16 * \"Tea\n  Assets:Bank  -2.00 EUR\n  Expenses:X\n",
+        )
+        .unwrap();
+        let existing = duplicate::load_existing(&ledger).unwrap();
+        assert!(
+            existing
+                .transactions
+                .iter()
+                .any(|t| t.narration.as_str() == "Coffee"),
+            "the part that parsed still dedups"
+        );
+        let warning = existing.warning.expect("a broken ledger must be reported");
+        assert!(warning.contains("has 1 error(s)"), "{warning}");
+        assert!(warning.contains("may be imported again"), "{warning}");
+
+        std::fs::write(
+            &ledger,
+            "2024-01-15 * \"Coffee\"\n  Assets:Bank  -4.00 EUR\n  Expenses:X\n",
+        )
+        .unwrap();
+        assert!(duplicate::load_existing(&ledger).unwrap().warning.is_none());
+    }
+
+    #[test]
+    fn existing_dedup_reports_each_dropped_transaction() {
+        use rustledger_core::{Amount, Posting, Transaction};
+        let t = |n: &str| {
+            Transaction::new("2024-01-15".parse().unwrap(), n)
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(rust_decimal::Decimal::new(-250, 2), "EUR"),
+                ))
+                .with_synthesized_posting(Posting::auto("Expenses:Food"))
+        };
+        let new = vec![
+            Directive::Transaction(t("Croissant")),
+            Directive::Transaction(t("Croissant")),
+        ];
+        let mut report = Vec::new();
+        let kept =
+            filter_existing_duplicates(new, &[t("Croissant")], "Assets:Bank", &mut report).unwrap();
+        assert_eq!(kept.len(), 1);
+        let report = String::from_utf8(report).unwrap();
+        assert!(
+            report.starts_with("Filtered 1 duplicate transaction(s)"),
+            "{report}"
+        );
+        assert!(
+            report
+                .contains("skipped 2024-01-15 \"Croissant\" -2.50 EUR (same date, amount and text"),
+            "{report}"
+        );
+    }
+
     #[test]
     fn test_parse_column_value_unsupported_type() {
         // Boolean TOML values should return None
         assert_eq!(parse_column_value(&toml::Value::Boolean(true)), None);
         // Float TOML values should return None
         assert_eq!(parse_column_value(&toml::Value::Float(1.5)), None);
+    }
+
+    /// Run `--importer bank` from an entry with no `currency` (#2464), with
+    /// `ledger` (if any) passed as `ledger_flag`. Returns the written output
+    /// or the error text.
+    fn run_entry_without_currency(
+        ledger: Option<&str>,
+        ledger_flag: &str,
+    ) -> std::result::Result<String, String> {
+        match ledger {
+            Some(text) => run_entry_without_currency_with(&[(ledger_flag, text)]),
+            None => run_entry_without_currency_with(&[]),
+        }
+    }
+
+    /// As [`run_entry_without_currency`], with any number of `(flag, ledger)`.
+    fn run_entry_without_currency_with(
+        ledgers: &[(&str, &str)],
+    ) -> std::result::Result<String, String> {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("importers.toml");
+        std::fs::write(
+            &config_path,
+            "[[importers]]\nname = \"bank\"\naccount = \"Assets:Bank:Euro\"\n\
+             date_column = \"Date\"\nnarration_column = \"Description\"\namount_column = \"Amount\"\n",
+        )
+        .unwrap();
+        let csv_path = dir.path().join("statement.csv");
+        std::fs::write(
+            &csv_path,
+            "Date,Description,Amount\n2024-01-15,Coffee,-5.00\n",
+        )
+        .unwrap();
+        let output_path = dir.path().join("output.beancount");
+        let mut argv = vec![
+            "extract".to_string(),
+            csv_path.to_str().unwrap().to_string(),
+            "--importer".to_string(),
+            "bank".to_string(),
+            "--config".to_string(),
+            config_path.to_str().unwrap().to_string(),
+            "-o".to_string(),
+            output_path.to_str().unwrap().to_string(),
+        ];
+        for (i, (flag, text)) in ledgers.iter().enumerate() {
+            let ledger_path = dir.path().join(format!("ledger{i}.beancount"));
+            std::fs::write(&ledger_path, text).unwrap();
+            argv.push((*flag).to_string());
+            argv.push(ledger_path.to_str().unwrap().to_string());
+        }
+        let args = Args::parse_from(argv);
+        run(&args, &csv_path).map_err(|e| format!("{e:#}"))?;
+        // Absent when every row was a duplicate: extract leaves it unwritten.
+        Ok(std::fs::read_to_string(&output_path).unwrap_or_default())
+    }
+
+    /// #2464: an entry without `currency` takes the account's sole `open`
+    /// currency from the ledger, through either `--existing` or `--ledger`,
+    /// instead of silently booking USD.
+    #[test]
+    fn entry_without_currency_uses_the_open_directive() {
+        let ledger = "2024-01-01 open Assets:Bank:Euro EUR\n";
+        for flag in ["--existing", "--ledger"] {
+            let out = run_entry_without_currency(Some(ledger), flag).unwrap();
+            assert!(out.contains("-5.00 EUR"), "{flag}: {out}");
+            assert!(!out.contains("USD"), "{flag}: {out}");
+        }
+    }
+
+    /// #2464: the `open` may live in an included file, and an account closed
+    /// later still has its currency.
+    #[test]
+    fn entry_without_currency_follows_includes_and_ignores_close() {
+        let dir = tempfile::tempdir().unwrap();
+        let inc = dir.path().join("accounts.beancount");
+        std::fs::write(
+            &inc,
+            "2024-01-01 open Assets:Bank:Euro EUR\n2024-06-01 close Assets:Bank:Euro\n",
+        )
+        .unwrap();
+        let ledger = format!("include \"{}\"\n", inc.display());
+        let out = run_entry_without_currency(Some(&ledger), "--existing").unwrap();
+        assert!(out.contains("-5.00 EUR"), "{out}");
+    }
+
+    /// #2464: `--ledger` is the authority when it opens the account; an
+    /// ambiguous `open` there is not overruled by `--existing`, which is only
+    /// consulted when `--ledger` never opens the account.
+    #[test]
+    fn ledger_open_outranks_existing_open() {
+        let err = run_entry_without_currency_with(&[
+            ("--ledger", "2024-01-01 open Assets:Bank:Euro EUR,CHF\n"),
+            ("--existing", "2024-01-01 open Assets:Bank:Euro EUR\n"),
+        ])
+        .unwrap_err();
+        assert!(err.contains("more than one"), "{err}");
+        let out = run_entry_without_currency_with(&[
+            ("--ledger", "2024-01-01 open Assets:Other EUR\n"),
+            ("--existing", "2024-01-01 open Assets:Bank:Euro CHF\n"),
+        ])
+        .unwrap();
+        assert!(out.contains("-5.00 CHF"), "{out}");
+    }
+
+    /// #2464 with #2421: the currency taken from the `open` is the one the
+    /// imported rows carry, so `--existing` dedup (scoped by commodity once
+    /// #2421 lands) compares the right commodity: the EUR row already in the
+    /// ledger is recognized, not re-imported as a USD row.
+    #[test]
+    fn the_resolved_currency_is_what_dedup_compares() {
+        let ledger = "2024-01-01 open Assets:Bank:Euro EUR\n2024-01-01 open Expenses:X\n\
+                      2024-01-15 * \"Coffee\"\n  Assets:Bank:Euro  -5.00 EUR\n  Expenses:X\n";
+        let out = run_entry_without_currency(Some(ledger), "--existing").unwrap();
+        assert!(
+            !out.contains("Coffee"),
+            "the EUR duplicate must be skipped: {out}"
+        );
+    }
+
+    /// #2464: when the `open` is in an include that failed to load, the error
+    /// says the ledger did not load, not that the account was never opened.
+    #[test]
+    fn entry_without_currency_reports_a_ledger_that_failed_to_load() {
+        let err = run_entry_without_currency(Some("include \"missing.beancount\"\n"), "--existing")
+            .unwrap_err();
+        assert!(
+            err.contains("no `open Assets:Bank:Euro` directive loaded from"),
+            "{err}"
+        );
+        assert!(err.contains("which has 1 load error(s)"), "{err}");
+        assert!(err.contains("may be in the part that failed"), "{err}");
+    }
+
+    /// Run `resolve_entry_currency` for an account `Assets:Bank:Euro` whose
+    /// config carries `currency`, with extra CLI flags; returns the result
+    /// and what it reported.
+    fn resolve_with(
+        currency: Option<&str>,
+        flags: &[&str],
+        ledger: Option<&str>,
+    ) -> (std::result::Result<Option<String>, String>, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut argv = vec!["extract".to_string(), "x.csv".to_string()];
+        argv.extend(flags.iter().map(ToString::to_string));
+        if let Some(text) = ledger {
+            let path = dir.path().join("l.beancount");
+            std::fs::write(&path, text).unwrap();
+            argv.push("--existing".to_string());
+            argv.push(path.to_str().unwrap().to_string());
+        }
+        let args = Args::parse_from(argv);
+        let mut builder = ImporterConfig::csv().account("Assets:Bank:Euro");
+        if let Some(c) = currency {
+            builder = builder.currency(c);
+        }
+        let mut report = Vec::new();
+        let out =
+            resolve_entry_currency(builder.build().unwrap(), Some("bank"), &args, &mut report)
+                .map(|c| c.currency)
+                .map_err(|e| format!("{e:#}"));
+        (out, String::from_utf8(report).unwrap())
+    }
+
+    /// A configured currency the parser cannot read fails where it is
+    /// configured, naming the key, instead of "canonical formatter failed to
+    /// re-parse" (or, for `""`, amounts with no commodity at all).
+    #[test]
+    fn an_invalid_configured_currency_is_named() {
+        for bad in ["usd", "€", ""] {
+            let (out, _) = resolve_with(Some(bad), &[], None);
+            let err = out.unwrap_err();
+            assert!(
+                err.contains(&format!("`currency` in the 'bank' entry of importers.toml is {bad:?}, which is not a valid commodity")),
+                "{err}"
+            );
+        }
+        let (out, _) = resolve_with(Some("usd"), &["--currency", "usd"], None);
+        assert!(out.unwrap_err().starts_with("--currency is \"usd\""));
+    }
+
+    /// The configured currency wins over a disagreeing `open`, with a warning
+    /// naming both; an agreeing or unconstrained `open` says nothing.
+    #[test]
+    fn a_configured_currency_the_open_disallows_is_warned() {
+        let ledger = Some("2024-01-01 open Assets:Bank:Euro CHF\n");
+        let (out, report) = resolve_with(Some("EUR"), &[], ledger);
+        assert_eq!(out.unwrap().as_deref(), Some("EUR"));
+        assert!(
+            report.contains("warning: `currency` in the 'bank' entry of importers.toml books EUR, but `open Assets:Bank:Euro` in"),
+            "{report}"
+        );
+        assert!(report.contains("allows only CHF"), "{report}");
+
+        let (_, report) = resolve_with(Some("GBP"), &["--currency", "GBP"], ledger);
+        assert!(
+            report.starts_with("warning: --currency books GBP"),
+            "{report}"
+        );
+
+        for quiet in [
+            "2024-01-01 open Assets:Bank:Euro EUR,CHF\n",
+            "2024-01-01 open Assets:Bank:Euro\n",
+        ] {
+            let (_, report) = resolve_with(Some("EUR"), &[], Some(quiet));
+            assert!(report.is_empty(), "{quiet}: {report}");
+        }
+    }
+
+    /// A `--ledger` profile's currency outranks `--currency`; a flag that
+    /// loses is reported, one that agrees is not.
+    #[test]
+    fn a_profile_overriding_currency_flag_is_reported() {
+        let profile = ledger_profile::LedgerProfile {
+            account: "Liabilities:Card".to_string(),
+            importer: "ofx".to_string(),
+            currency: Some("USD".to_string()),
+        };
+        let args = Args::parse_from(["extract", "x.qfx", "--currency", "EUR"]);
+        assert_eq!(
+            profile_overrides_currency_flag(&profile, &args).as_deref(),
+            Some(
+                "--currency EUR is not used: the --ledger profile for Liabilities:Card declares USD"
+            )
+        );
+        let args = Args::parse_from(["extract", "x.qfx", "--currency", "USD"]);
+        assert!(profile_overrides_currency_flag(&profile, &args).is_none());
+    }
+
+    /// #2464: an `open` with no currency constraint cannot answer either.
+    #[test]
+    fn entry_without_currency_and_an_unconstrained_open_is_an_error() {
+        let err =
+            run_entry_without_currency(Some("2024-01-01 open Assets:Bank:Euro\n"), "--existing")
+                .unwrap_err();
+        assert!(err.contains("declares no currency"), "{err}");
+        assert!(
+            err.contains("in the 'bank' entry of importers.toml, or pass --currency"),
+            "{err}"
+        );
+    }
+
+    /// #2464: with nothing to say which currency the statement is in, the
+    /// import stops and names the importer, rather than guessing USD.
+    #[test]
+    fn entry_without_currency_and_no_single_open_currency_is_an_error() {
+        let err = run_entry_without_currency(None, "--existing").unwrap_err();
+        assert!(
+            err.contains("importer 'bank' does not set `currency`"),
+            "{err}"
+        );
+        assert!(err.contains("no --ledger or --existing"), "{err}");
+
+        let err = run_entry_without_currency(
+            Some("2024-01-01 open Assets:Bank:Euro EUR,CHF\n"),
+            "--existing",
+        )
+        .unwrap_err();
+        assert!(err.contains("declares EUR, CHF, more than one"), "{err}");
+
+        let err = run_entry_without_currency(Some("2024-01-01 open Assets:Other\n"), "--existing")
+            .unwrap_err();
+        assert!(
+            err.contains("has no `open Assets:Bank:Euro` directive"),
+            "{err}"
+        );
     }
 
     #[test]
@@ -4076,6 +4899,7 @@ amount_column = "Amount"
 [[importers]]
 name = "test"
 account = "Assets:Bank"
+currency = "USD"
 date_column = "Date"
 narration_column = "Description"
 amount_column = "Amount"
@@ -4300,6 +5124,7 @@ NEWFILEUID:NONE
 [[importers]]
 name = "mybank"
 account = "Assets:Bank:Auto"
+currency = "USD"
 date_column = "Date"
 narration_column = "Description"
 amount_column = "Amount"

@@ -258,6 +258,38 @@ Rules worth knowing:
 rledger extract statement.csv -a Assets:Bank --existing ledger.beancount
 ```
 
+Only transactions in `ledger.beancount` that post to the importer's account,
+in the same commodity, are candidates. A new transaction is a duplicate when it
+shares an id link with one (`^ofx-…`, or `^csv-…` from
+`transaction_id_column`) and moves the same amount on any date, or when it has
+the same date and amount and the same or a similar payee/narration. Ids of the
+same kind that differ mean two different transactions, however alike they
+look; when only one side has an id (a ledger imported before ids existed), the
+text decides. An entry that splits the account's leg over several postings is
+also compared by its net movement, so a transfer already imported from the
+other account's statement is recognized. Which rows are kept does not depend
+on the order the statement or the ledger lists them in.
+
+Each existing transaction absorbs at most one new one: two identical coffees on
+one day both import when the ledger already holds only one. Skips are counted
+on stderr, and up to 20 of each kind are listed (the rest are summarized as
+`... and N more`):
+
+```text
+Filtered 1 duplicate transaction(s) already in the existing ledger (0 by id link, 1 by date, amount and text):
+  skipped 2024-01-15 "Bakery" "Croissant" -2.50 EUR (same date, amount and text; existing: 2024-01-15 "Bakery" "Croissant" -2.50 EUR)
+```
+
+Rows with no payee or narration on either side match on date and amount alone
+(so a statement without a description column re-imports to nothing), and each
+such skip is flagged, since two different description-less rows on one day for
+one amount look identical:
+
+```text
+Filtered 1 duplicate transaction(s) already in the existing ledger (0 by id link, 0 by date, amount and text, 1 by date and amount alone):
+  skipped 2024-01-15 "" -60.00 EUR (same date and amount, and neither has a payee or narration to compare; existing: 2024-01-15 "" -60.00 EUR) -- check: nothing but the date and amount ties these together
+```
+
 ## Importer Configuration
 
 ### CSV Options
@@ -267,18 +299,33 @@ rledger extract statement.csv -a Assets:Bank --existing ledger.beancount
 name = "my_bank"
 account = "Assets:Bank:MyBank"
 
+# Currency of the amounts. There is no default: when this is left out,
+# extract uses the currency of the account's `open` directive in the
+# --ledger ledger (or in --existing, if --ledger does not open the
+# account), when that `open` names exactly one, and otherwise stops with
+# an error rather than guess. Precedence, highest first: a --ledger
+# profile, --currency, this key, the account's `open`. A value that is not
+# a commodity (`usd`, `€`, "") is an error naming where it came from, and
+# a value the account's `open` does not allow is a warning.
+currency = "EUR"
+
 # Column mapping (0-indexed)
 date_column = 0
 payee_column = 1
 narration_column = 2
 amount_column = 3
 
-# Or use column names (if CSV has header)
-date_column = "Date"
-amount_column = "Amount"
+# Or use column names (if CSV has header) instead of the indices above;
+# each key may appear only once
+# date_column = "Date"
+# amount_column = "Amount"
 
 # Date parsing
 date_format = "%Y-%m-%d"  # or "%m/%d/%Y", "%d.%m.%Y"
+
+# A unique per-transaction id from the bank, added as a `^csv-<id>` link
+# that `--existing` uses as identity when deduplicating
+transaction_id_column = "Transaction ID"
 
 # The file has NO header row. Columns must then be 0-based indices,
 # and the first row is read as data. Leave this out when the file has

@@ -664,6 +664,158 @@ fn bare_price_currency(
     }
 }
 
+/// One of a posting's three currencies, as beancount's `categorize_by_currency`
+/// sees it: not written at all, written without a currency, or known.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Slot<'a> {
+    /// The annotation is not there (no cost spec, no price).
+    Absent,
+    /// The annotation is there but its currency was elided.
+    Missing,
+    /// The currency is written.
+    Known(&'a Currency),
+}
+
+/// A posting's (units, cost, price) currency [`Slot`]s, with beancount's rule
+/// that a cost and a price must agree filling one from the other. Units are
+/// `None` for an auto-posting (no units at all).
+fn currency_slots(posting: &rustledger_core::Posting) -> (Option<Slot<'_>>, Slot<'_>, Slot<'_>) {
+    let units = posting.units.as_ref().map(|units| match units {
+        IncompleteAmount::Complete(amount) => Slot::Known(&amount.currency),
+        IncompleteAmount::CurrencyOnly(currency) => Slot::Known(currency),
+        IncompleteAmount::NumberOnly(_) => Slot::Missing,
+    });
+    let mut cost = posting.cost.as_ref().map_or(Slot::Absent, |spec| {
+        spec.currency.as_ref().map_or(Slot::Missing, Slot::Known)
+    });
+    let mut price =
+        posting
+            .price
+            .as_ref()
+            .map_or(Slot::Absent, |price| match price.amount.as_ref() {
+                Some(IncompleteAmount::Complete(amount)) => Slot::Known(&amount.currency),
+                Some(IncompleteAmount::CurrencyOnly(currency)) => Slot::Known(currency),
+                Some(IncompleteAmount::NumberOnly(_)) | None => Slot::Missing,
+            });
+    if let (Slot::Missing, Slot::Known(c)) = (cost, price) {
+        cost = Slot::Known(c);
+    }
+    if let (Slot::Missing, Slot::Known(c)) = (price, cost) {
+        price = Slot::Known(c);
+    }
+    (units, cost, price)
+}
+
+/// The currency a units number written WITHOUT one (`Assets:Foo  42.50`) is
+/// in, for every such posting of `txn` (#2465).
+///
+/// **This is Python beancount's rule, ported from `booking_full.
+/// categorize_by_currency`, not a rule of our own.** For each such posting:
+///
+/// 1. If it carries no cost and no price, it is the transaction's ONLY
+///    posting whose currency is still undetermined, and every other posting
+///    (auto-postings aside) falls in ONE currency group, it takes that
+///    group's currency. A posting's group is its cost currency, else its
+///    price currency, else its units currency.
+/// 2. Otherwise it takes the currency the account already holds, if the
+///    account's balance before this transaction holds exactly one currency
+///    (`held` returns that balance; zero positions do not count).
+/// 3. Otherwise it is refused with [`InterpolationError::CannotInferCurrency`].
+///
+/// Step 2 is what lets a posting carrying a cost or price resolve: the cost
+/// or price names ITS OWN currency, never the commodity being counted, so
+/// `-5 {300 USD}` is five of something and only the account can say what.
+///
+/// Both the residual and an `open` directive's currency list are deliberately
+/// NOT consulted, because beancount consults neither. An earlier rule here
+/// (#1920) read the currency off the one non-zero residual; that accepted
+/// `5.00` as EUR in a transaction whose other postings span USD and EUR, which
+/// beancount refuses, and it is a guess at a typo rather than a reading of
+/// anything the author wrote.
+///
+/// Running balances do not include `pad` postings, because padding runs after
+/// booking — in beancount and here alike — so an account funded only by a pad
+/// holds nothing at this point.
+///
+/// `held` is `|_| None` for a caller with no running balances (the free
+/// [`interpolate`] function), which leaves step 1 alone. The booking engine
+/// passes its inventories, and must resolve BEFORE booking a reduction, which
+/// needs the commodity to find the lot. The two can only differ by the free
+/// function refusing what the engine resolves from a balance, never by a
+/// different currency, because step 1 outranks step 2. The LSP's inlay hints
+/// (`rustledger-lsp/src/handlers/inlay_hints.rs`) are the one consumer of the
+/// free function that sees unbooked input, and document that they show no
+/// hint in that case.
+///
+/// Tolerances must still be inferred from the transaction as WRITTEN, before
+/// this fills anything in: beancount's tolerance for the posting's precision
+/// lands under its MISSING currency, so it never loosens the currency the
+/// posting resolves to (see `BookingEngine::book_interpolate_apply`).
+///
+/// # Errors
+///
+/// [`InterpolationError::CannotInferCurrency`] for the first such posting no
+/// step resolves.
+pub fn resolve_elided_units_currencies<'a>(
+    txn: &Transaction,
+    held: impl Fn(&rustledger_core::Account) -> Option<&'a rustledger_core::Inventory>,
+) -> Result<Vec<(usize, Currency)>, InterpolationError> {
+    let mut targets: Vec<(usize, bool)> = Vec::new();
+    let mut group: Option<&Currency> = None;
+    let mut several_groups = false;
+    let mut unknowns = 0usize;
+    for (i, posting) in txn.postings.iter().enumerate() {
+        let (units, cost, price) = currency_slots(posting);
+        if units.is_none() && price == Slot::Absent {
+            // An auto-posting: grouped separately, never a candidate.
+            continue;
+        }
+        let bucket = match (cost, price, units) {
+            (Slot::Known(c), _, _) | (_, Slot::Known(c), _) => Some(c),
+            (Slot::Absent, Slot::Absent, Some(Slot::Known(c))) => Some(c),
+            _ => None,
+        };
+        match bucket {
+            Some(c) => match group {
+                None => group = Some(c),
+                Some(g) if g != c => several_groups = true,
+                Some(_) => {}
+            },
+            None => unknowns += 1,
+        }
+        if units == Some(Slot::Missing) {
+            let plain = cost == Slot::Absent && price == Slot::Absent;
+            targets.push((i, plain && bucket.is_none()));
+        }
+    }
+
+    let mut resolved = Vec::with_capacity(targets.len());
+    for (i, plain_unknown) in targets {
+        let posting = &txn.postings[i];
+        let from_group = if plain_unknown && unknowns == 1 && !several_groups {
+            group.cloned()
+        } else {
+            None
+        };
+        let currency = from_group.or_else(|| {
+            let inventory = held(&posting.account)?;
+            match inventory.currencies().as_slice() {
+                [only] => Some(Currency::from(*only)),
+                _ => None,
+            }
+        });
+        match currency {
+            Some(currency) => resolved.push((i, currency)),
+            None => {
+                return Err(InterpolationError::CannotInferCurrency {
+                    account: posting.account.clone(),
+                });
+            }
+        }
+    }
+    Ok(resolved)
+}
+
 /// Which residual an elided posting's unknown will be solved from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UnknownGroup {
@@ -728,9 +880,10 @@ pub fn elided_unknown_groups(txn: &Transaction) -> Vec<(usize, UnknownGroup)> {
             // Never an unknown for this rule. The number is written, so such a
             // posting contributes a KNOWN weight once its currency is read off
             // the balance; it does not compete for a residual the way an elided
-            // posting does (#1920). With a cost or price present the currency is
-            // unknowable and `interpolate` refuses outright, which again is not
-            // this rule's business.
+            // posting does (#1920). Its currency comes from
+            // `resolve_elided_units_currencies` (#2465), and one that cannot be
+            // resolved is refused there, which again is not this rule's
+            // business.
             Some(IncompleteAmount::NumberOnly(_)) => {}
             // A cost spec here is refused by `interpolate` (no commodity to
             // write the solved number in), so it is not grouped.
@@ -1318,9 +1471,12 @@ fn interpolate_inner<S: std::hash::BuildHasher>(
                 //
                 // A cost or price names ITS OWN currency, never the commodity
                 // being counted: `10 {300.00 USD}` is ten of something, and
-                // nothing in the transaction says what. Refuse rather than
-                // guess, which is what beancount does too
-                // ("Failed to categorize posting").
+                // nothing in the transaction says what. Only the account's
+                // running balance can, which this function does not have: the
+                // booking engine resolves those from it before calling in
+                // (#2465, `resolve_elided_units_currencies`), so one reaching
+                // here is unresolvable and refused, as beancount refuses it
+                // ("Could not resolve units currency").
                 if posting.cost.is_some() || posting.price.is_some() {
                     return Err(InterpolationError::CannotInferCurrency {
                         account: posting.account.clone(),
@@ -1382,27 +1538,30 @@ fn interpolate_inner<S: std::hash::BuildHasher>(
     // is still to be computed contributes an unknown weight to that currency
     // exactly as an empty `{}` cost spec does (#1915).
     // Give each number-with-no-currency posting its currency, keeping the
-    // number the author wrote (#1920). The currency is the one the transaction
-    // is out of balance in, which is the only thing that can identify it.
+    // number the author wrote (#1920). The currency comes from
+    // `resolve_elided_units_currencies`, beancount's rule (#2465). With no
+    // running balances here only its first step applies: the one currency
+    // group the other postings fall in. The booking engine resolves these
+    // against the accounts' balances before calling in, so on that path none
+    // is left by now.
     //
     // Runs BEFORE the bare-price resolution below, because these postings
     // contribute a KNOWN weight and a sigil should see the residual that is
-    // actually left over once they have.
+    // actually left over once they have. Resolved before the first write
+    // below, so it reads the transaction as handed in.
+    let number_only_currencies = if number_only.is_empty() {
+        Vec::new()
+    } else {
+        resolve_elided_units_currencies(transaction, |_| None)?
+    };
     for (idx, number) in number_only {
-        // Scoped so the borrow ends before `accumulate_residual` below wants
-        // `residuals` mutably.
-        let currency = {
-            let mut nonzero = residuals.iter().filter(|(_, value)| !value.is_zero());
-            match (nonzero.next(), nonzero.next()) {
-                (Some((currency, _)), None) => currency.clone(),
-                // Nothing to read the currency off, or more than one candidate.
-                _ => {
-                    return Err(InterpolationError::CannotInferCurrency {
-                        account: transaction.postings[idx].account.clone(),
-                    });
-                }
-            }
-        };
+        let currency = number_only_currencies
+            .iter()
+            .find(|(i, _)| *i == idx)
+            .map(|(_, currency)| currency.clone())
+            .ok_or_else(|| InterpolationError::CannotInferCurrency {
+                account: transaction.postings[idx].account.clone(),
+            })?;
         rollback.touch(transaction, idx);
         transaction.postings[idx].units =
             Some(IncompleteAmount::Complete(Amount::new(number, &currency)));
@@ -4586,6 +4745,27 @@ mod tests {
             other => panic!("expected CannotInferCurrency, got {other:?}"),
         }
     }
+    /// The residual is not where the currency comes from (#2465). The other
+    /// postings span USD and EUR and only EUR is out of balance; the rule
+    /// this replaced read `5.00` as EUR. Beancount's rule finds two currency
+    /// groups, has no balance to fall back on, and refuses ("Failed to
+    /// categorize posting 4").
+    #[test]
+    fn number_only_does_not_read_the_residual_currency() {
+        let txn = Transaction::new(date(2026, 10, 1), "residual in one currency only")
+            .with_synthesized_posting(Posting::new("Assets:A", Amount::new(dec!(100), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:B", Amount::new(dec!(-100), "USD")))
+            .with_synthesized_posting(Posting::new("Assets:C", Amount::new(dec!(-5), "EUR")))
+            .with_synthesized_posting(number_only("Equity:D", dec!(5.00)));
+
+        match interpolate(&txn) {
+            Err(InterpolationError::CannotInferCurrency { account }) => {
+                assert_eq!(account.as_str(), "Equity:D");
+            }
+            other => panic!("expected CannotInferCurrency, got {other:?}"),
+        }
+    }
+
     /// Solving a cost from a residual divides, and that division panicked.
     ///
     /// `total / units_number.abs()` had no check, so a residual far larger

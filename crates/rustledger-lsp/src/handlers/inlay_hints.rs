@@ -69,6 +69,17 @@ pub fn handle_inlay_hints(
         // `InterpolationError` (e.g. MultipleMissing, unbalanced) is
         // silently dropped: no hints for an under-specified
         // transaction is the right outcome.
+        //
+        // Deliberate divergence from booking (#2465): this has no running
+        // balances, so a units number written without its currency
+        // (`Assets:Foo  42.50`) is resolved only from the other postings'
+        // currency, never from the account's balance as the booking engine
+        // does (`rustledger_booking::interpolate::
+        // resolve_elided_units_currencies`, which names this site). Where the
+        // engine needs the balance this errors and the transaction gets no
+        // hint; it never gets a DIFFERENT one, because the other-postings step
+        // outranks the balance in the engine too. Revisit if hints start
+        // reading the booked ledger.
         let Ok(filled) = interpolate(txn) else {
             continue;
         };

@@ -37,12 +37,11 @@ fn stringify(value: &JsValue) -> String {
         .unwrap_or_default()
 }
 
-/// Assert a `BALANCES` result has no errors and holds both lots of `X`.
-///
-/// The wire's inventory cell carries units only (`PositionValue` has no
-/// cost), so the two lots show as `5 X` and `-2 X` side by side. That is still
-/// the booked shape: a STRICT replay errored instead, and a replay that
-/// reduced would have left one netted `3 X`.
+/// Assert a `BALANCES` result has no errors and holds both lots of `X`, each
+/// with its own cost: `5 X {100 USD}` and `-2 X {90 USD}`, as beancount holds
+/// them. A STRICT replay errored instead, and a replay that reduced would
+/// have left one netted `3 X`. The costs are what make the two lots
+/// distinguishable at all; the inventory cell dropped them before #2402.
 fn assert_both_lots(result: &JsValue, surface: &str) {
     let errors = get_field(result, "errors");
     assert_eq!(
@@ -52,10 +51,15 @@ fn assert_both_lots(result: &JsValue, surface: &str) {
         stringify(&errors)
     );
     let rows = stringify(&get_field(result, "rows"));
-    let stock = r#"["Assets:Stock",{"positions":[{"units":{"number":"5","currency":"X"}},{"units":{"number":"-2","currency":"X"}}]}]"#;
+    let stock = concat!(
+        r#"["Assets:Stock",{"positions":["#,
+        r#"{"units":{"number":"5","currency":"X"},"cost":{"number":"100","currency":"USD","date":"2020-01-02"}},"#,
+        r#"{"units":{"number":"-2","currency":"X"},"cost":{"number":"90","currency":"USD","date":"2020-01-03"}}"#,
+        r#"]}]"#,
+    );
     assert!(
         rows.contains(stock),
-        "{surface}: BALANCES must hold the 5 X and -2 X lots apart: {rows}"
+        "{surface}: BALANCES must hold the 5 X {{100 USD}} and -2 X {{90 USD}} lots apart: {rows}"
     );
 }
 

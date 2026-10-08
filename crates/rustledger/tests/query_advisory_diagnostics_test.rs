@@ -7,7 +7,8 @@
 //! so the same ledger came out of `check` clean and out of `query` with an
 //! error on stderr.
 //!
-//! Real diagnostics on the same load are still printed.
+//! Real diagnostics on the same load are still printed, including the option
+//! diagnostics (E7xxx), which live apart from the validation errors.
 
 mod common;
 
@@ -60,4 +61,23 @@ fn query_still_prints_real_diagnostics_next_to_an_advisory_one() {
         "the failing balance is reported: {stderr}"
     );
     assert!(!stderr.contains("E1004"), "the advisory is not: {stderr}");
+}
+
+/// An option diagnostic is printed, as `check` and bean-query print it. They
+/// are kept on the options, apart from the validation errors, and `query` used
+/// to print the errors only: a misspelled option went unreported.
+#[test]
+fn query_prints_option_diagnostics() {
+    let bin = require_rledger!();
+    let src = format!("option \"not_a_real_option\" \"x\"\n{CLOSED_WITH_BALANCE}");
+    let stderr = query_stderr(&bin, &src);
+    assert!(
+        stderr.contains("E7001"),
+        "the unknown option is reported: {stderr}"
+    );
+    assert!(stderr.contains("not_a_real_option"), "{stderr}");
+    assert!(
+        !stderr.contains("E1004"),
+        "the advisory still is not: {stderr}"
+    );
 }

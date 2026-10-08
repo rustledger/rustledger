@@ -150,7 +150,10 @@ account = "Assets:Bank:Checking"
 
 Patterns are matched case-insensitively against the payee field first, then the
 narration. Longer patterns are matched first, so more specific patterns take
-priority over shorter ones. The first match wins.
+priority over shorter ones. Patterns of the same length are tried in the order
+the file lists them, so when two equally long patterns both match (`"foo"` and
+`"bar"` against `FOOBAR`), the one written first wins, on every run. The first
+match wins.
 
 ## OFX Import
 

@@ -1864,8 +1864,7 @@ mod tests {
 
     use super::*;
     use rustledger_importer::config::ImporterType;
-    use rustledger_importer::toml_entry::{ImporterEntry, parse_column_value};
-    use std::collections::HashMap;
+    use rustledger_importer::toml_entry::{ImporterEntry, Mappings, parse_column_value};
 
     fn write_temp_config(content: &str) -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
@@ -1915,6 +1914,61 @@ account = "Assets:Bank:Checking"
             config.importers[0].mappings.get("AMAZON"),
             Some(&"Expenses:Shopping".to_string())
         );
+    }
+
+    /// #2423: two equal-length patterns that both match must resolve the same
+    /// way on every run, and the tie-break is file order — the first written
+    /// wins. Exercised end to end (TOML text → entry → config → extract), many
+    /// times, with the file order reversed to prove order is what decides.
+    #[test]
+    fn equal_length_mappings_resolve_deterministically_in_file_order() {
+        let csv = "Date,Description,Amount\n2024-01-15,foobar,-1.00\n";
+        for (first, second, expected) in [
+            ("foo", "bar", "Expenses:Foo"),
+            ("bar", "foo", "Expenses:Bar"),
+        ] {
+            let account = |p: &str| format!("Expenses:{}{}", p[..1].to_uppercase(), &p[1..]);
+            let toml = format!(
+                "[[importers]]\nname = \"t\"\naccount = \"Assets:Bank\"\ncurrency = \"EUR\"\n\
+                 date_column = \"Date\"\nnarration_column = \"Description\"\namount_column = \"Amount\"\n\n\
+                 [importers.mappings]\n\"{first}\" = \"{}\"\n\"{second}\" = \"{}\"\n",
+                account(first),
+                account(second),
+            );
+            let (_dir, path) = write_temp_config(&toml);
+            for _ in 0..200 {
+                let file = load_importers_config(&path).unwrap();
+                let config = build_config_from_entry(&file.importers[0]).unwrap();
+                let result = rustledger_importer::csv_importer::CsvImporter
+                    .extract_string(csv, &config)
+                    .unwrap();
+                let Directive::Transaction(txn) = &result.directives[0] else {
+                    panic!("expected a transaction");
+                };
+                assert_eq!(
+                    txn.postings[1].account.as_str(),
+                    expected,
+                    "file order {first}, {second}"
+                );
+            }
+        }
+    }
+
+    /// Keys come back in the order the file wrote them, not sorted: the
+    /// reverse-alphabetical file here would read `aaa` first if the table went
+    /// through a sorted map anywhere on the way.
+    #[test]
+    fn mappings_keep_file_order() {
+        let (_dir, path) = write_temp_config(
+            "[[importers]]\nname = \"t\"\n\n[importers.mappings]\n\"zzz\" = \"A:Z\"\n\"mmm\" = \"A:M\"\n\"aaa\" = \"A:A\"\n",
+        );
+        let file = load_importers_config(&path).unwrap();
+        let keys: Vec<&str> = file.importers[0]
+            .mappings
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .collect();
+        assert_eq!(keys, ["zzz", "mmm", "aaa"]);
     }
 
     #[test]
@@ -2409,7 +2463,7 @@ preprocess = ["cat", "{input}"]
             invert_amounts: None,
             default_expense: None,
             default_income: None,
-            mappings: HashMap::new(),
+            mappings: Mappings::default(),
             filename_pattern: None,
             use_merchant_dict: None,
             preprocess: None,
@@ -2422,9 +2476,12 @@ preprocess = ["cat", "{input}"]
 
     #[test]
     fn test_build_config_from_entry_with_mappings() {
-        let mut mappings = HashMap::new();
-        mappings.insert("AMAZON".to_string(), "Expenses:Shopping".to_string());
-        mappings.insert("WHOLE FOODS".to_string(), "Expenses:Groceries".to_string());
+        let mappings: Mappings = [
+            ("AMAZON".to_string(), "Expenses:Shopping".to_string()),
+            ("WHOLE FOODS".to_string(), "Expenses:Groceries".to_string()),
+        ]
+        .into_iter()
+        .collect();
 
         let entry = ImporterEntry {
             format: None,
@@ -2492,7 +2549,7 @@ preprocess = ["cat", "{input}"]
             invert_amounts: None,
             default_expense: Some("Expenses:Uncategorized".to_string()),
             default_income: Some("Income:Other".to_string()),
-            mappings: HashMap::new(),
+            mappings: Mappings::default(),
             filename_pattern: None,
             use_merchant_dict: None,
             preprocess: None,
@@ -2534,7 +2591,7 @@ preprocess = ["cat", "{input}"]
             invert_amounts: Some(true),
             default_expense: None,
             default_income: None,
-            mappings: HashMap::new(),
+            mappings: Mappings::default(),
             filename_pattern: None,
             use_merchant_dict: None,
             preprocess: None,

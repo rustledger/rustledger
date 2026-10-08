@@ -668,6 +668,11 @@ export type PositionValue = {
    * The units.
    */
   units: AmountValue;
+  /**
+   * The lot's cost, absent for a position held without one. Omitted
+   * from the JSON rather than `null`, as in a `Position` cell.
+   */
+  cost?: CostValue;
 };
 
 /**

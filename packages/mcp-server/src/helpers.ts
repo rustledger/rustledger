@@ -417,6 +417,29 @@ export function formatQueryResult(result: QueryResult): string {
   return [header, separator, ...formattedRows].join("\n");
 }
 
+/** A position as the wasm query wire sends it: units, and its cost if any. */
+interface PositionCell {
+  units: { number: string; currency: string };
+  cost?: { number: string; currency: string; date?: string; label?: string };
+}
+
+/**
+ * Render one position the way `rledger query` does: `5 X {100 USD}`, with the
+ * lot date and label inside the braces when present. A position without a
+ * cost is bare units. Inventory cells carry `cost` since #2402; older wasm
+ * packages omit it, which renders as before.
+ */
+function formatPosition(p: PositionCell): string {
+  const units = `${p.units.number} ${p.units.currency}`;
+  if (!p.cost) {
+    return units;
+  }
+  const parts = [`${p.cost.number} ${p.cost.currency}`];
+  if (p.cost.date) parts.push(p.cost.date);
+  if (p.cost.label) parts.push(JSON.stringify(p.cost.label));
+  return `${units} {${parts.join(", ")}}`;
+}
+
 /**
  * Format a single cell value for display.
  */
@@ -430,14 +453,14 @@ export function formatCell(value: unknown): string {
       const amount = value as { number: string; currency: string };
       return `${amount.number} ${amount.currency}`;
     }
+    // Handle Position type (units + optional cost)
+    if ("units" in value) {
+      return formatPosition(value as PositionCell);
+    }
     // Handle Inventory type
     if ("positions" in value) {
-      const inv = value as {
-        positions: Array<{ units: { number: string; currency: string } }>;
-      };
-      return inv.positions
-        .map((p) => `${p.units.number} ${p.units.currency}`)
-        .join(", ");
+      const inv = value as { positions: PositionCell[] };
+      return inv.positions.map(formatPosition).join(", ");
     }
     return JSON.stringify(value);
   }

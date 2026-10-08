@@ -431,6 +431,53 @@ The `importers.toml` file is auto-discovered from the current directory or the u
 rledger extract --config path/to/importers.toml --importer checking statement.csv
 ```
 
+### Choosing an Entry by the File's Columns
+
+Without `--importer`, the entry is chosen by `filename_pattern`. When several
+entries match a file's name, `extract` reads that file's header and keeps only
+the entries whose columns are all there. Each entry's header is read the way
+that entry would read it (its own `delimiter` and header setting).
+
+This tells apart statements that share a filename and differ only in their
+columns, such as a multi-currency account's exports:
+
+```toml
+[[importers]]
+name = "starling-gbp"
+filename_pattern = "StarlingStatement_*.csv"
+account = "Assets:Starling"
+currency = "GBP"
+amount_column = "Amount (GBP)"
+
+[[importers]]
+name = "starling-eur"
+filename_pattern = "StarlingStatement_*.csv"
+account = "Assets:Starling"
+currency = "EUR"
+amount_column = "Amount (EUR)"
+```
+
+A statement whose header has `Amount (EUR)` uses `starling-eur`, and one with
+`Amount (GBP)` uses `starling-gbp`.
+
+Only a column the entry names (a `*_column` key set to a header name) can rule
+it out. An entry is never ruled out when the header cannot speak to it: one
+whose columns are all indices or left to the defaults, a headerless one
+(`skip_header = true`), an OFX entry, or one that runs `preprocess` (its
+columns describe the command's output, not this file). When exactly one entry
+is left it is used; otherwise `extract` still refuses, and lists for each
+entry which of its columns the header lacks:
+
+```console
+error: Multiple importers match file 'StarlingStatement_2023.csv': starling-gbp, starling-eur. Use --importer to select one.
+  the file's header did not settle it:
+    'starling-gbp': header has no amount_column "Amount (GBP)"
+    'starling-eur': header has no amount_column "Amount (EUR)"
+```
+
+A file matched by one entry's `filename_pattern` uses that entry, as before,
+without reading its header.
+
 ### List Available Importers
 
 Lists both TOML profiles (for `--importer <name>`) and registered importer engines (built-in CSV/OFX plus any WASM modules from `--wasm-importer`/`--wasm-importer-dir`):

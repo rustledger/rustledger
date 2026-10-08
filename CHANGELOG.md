@@ -134,6 +134,7 @@ Shipped work, by area. Forward-looking plans live in [docs/roadmap/](docs/roadma
 
 ### Importing & Ingestion
 
+- **`rledger extract` chooses between importer entries by the file's columns** — when several `[[importers]]` entries matched a file by `filename_pattern`, extract refused with "Multiple importers match file", so statements that share a filename and differ only in their columns (a multi-currency account's `Amount (GBP)` and `Amount (EUR)` exports) needed `--importer` or separate directories. Extract now reads the file's header, as each entry would read it, and keeps only the entries whose named columns are all present; one left is used. Entries the header cannot judge (index or default columns only, headerless, OFX, `preprocess`) are never ruled out, so those cases still refuse, and the refusal now lists, per entry, which of its columns the header lacks. A file matched by a single entry is unchanged. (issue #2295)
 - CSV `transaction_id_column`: a bank's per-transaction id becomes a `^csv-<id>` link (sanitized like OFX's `^ofx-<FITID>`), which `extract --existing` treats as identity; a column the file lacks (with a hint for a case or whitespace near-miss), an index past the last column, or a column already used as `amount_column`, `date_column` and the like is an error naming the key, and ids repeating within one statement are warned about (issue #2387)
 - Import trait system (`Importer` trait, `ImportResult`, registry)
 - CSV importer with column mapping, date formats, and debit/credit split

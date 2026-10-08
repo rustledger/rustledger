@@ -428,7 +428,10 @@ comparison, number first.
 | bean-query `min(units(position)), max(units(position))` | `5 EUR`, `5 EUR` |
 
 bean-query's `MAX` names as largest the value its own `ORDER BY` sorts first.
-Within one currency the two agree. Pinned by
+Under beancount's comparisons `5 EUR < 3 USD` and `5 EUR > 3 USD` are both
+true, so its `MAX` follows no order at all. Within one currency the two agree.
+Across currencies neither rule measures size: rustledger's `MAX` of `-30 USD`
+and `10 EUR` is `-30 USD`, the last value in currency order. Pinned by
 `crates/rustledger-query/tests/min_max_amounts_test.rs` (issue #2447).
 
 ## BQL Query Compatibility

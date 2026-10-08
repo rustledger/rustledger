@@ -42,11 +42,41 @@ const DIVERGENT: &str = r#"
   Assets:B  -3 USD
 "#;
 
+/// Lots at cost, an EUR lot among USD ones, and one posting with a price
+/// annotations (so `price` is NULL on every other posting).
+const LOTS: &str = r#"
+2024-01-01 open Assets:Cash
+2024-01-01 open Assets:Stock "FIFO"
+2024-01-01 open Equity:Open
+
+2024-02-01 * "buy1"
+  Assets:Stock  2 X {20 USD}
+  Assets:Cash  -40 USD
+
+2024-02-02 * "buy2"
+  Assets:Stock  3 X {10 USD}
+  Assets:Cash  -30 USD
+
+2024-02-03 * "buy3"
+  Assets:Stock  1 Y {15 EUR}
+  Assets:Cash  -15 EUR
+
+2024-02-04 * "fx"
+  Assets:Cash  10 EUR @ 1.1 USD
+  Equity:Open  -11 USD
+
+2024-02-05 * "fx2"
+  Assets:Cash  5 EUR @ 1.2 USD
+  Equity:Open  -6 USD
+"#;
+
 fn render(value: &Value) -> String {
     match value {
         Value::Amount(a) => a.to_string(),
         Value::Position(p) => p.to_string(),
         Value::Inventory(i) => i.to_string(),
+        Value::String(s) => s.clone(),
+        Value::Null => "NULL".to_string(),
         other => panic!("unexpected {other:?}"),
     }
 }
@@ -123,4 +153,92 @@ fn max_follows_order_by_not_beanquery_tuple_fallback() {
         "SELECT units(position) AS u WHERE account = 'Assets:A' ORDER BY u",
     );
     assert_eq!(ordered, vec![vec!["5 EUR"], vec!["3 USD"]]);
+}
+
+/// NULLs are skipped, so a column that is mostly NULL still answers; a group
+/// holding only NULLs answers NULL. Matches bean-query.
+#[test]
+fn min_max_skip_nulls_among_amounts() {
+    assert_eq!(
+        rows(LOTS, "SELECT min(price), max(price)"),
+        vec![vec!["1.1 USD", "1.2 USD"]],
+    );
+    assert_eq!(
+        rows(
+            LOTS,
+            "SELECT account, min(price), max(price) GROUP BY account ORDER BY account"
+        ),
+        vec![
+            vec!["Assets:Cash", "1.1 USD", "1.2 USD"],
+            vec!["Assets:Stock", "NULL", "NULL"],
+            vec!["Equity:Open", "NULL", "NULL"],
+        ],
+    );
+}
+
+/// No rows at all: NULL, not an error. (bean-query returns no row for an
+/// aggregate over nothing, for every aggregate; rustledger returns one row,
+/// as SQL does. That is not specific to amounts.)
+#[test]
+fn min_max_over_no_rows_is_null() {
+    assert_eq!(
+        rows(
+            LOTS,
+            "SELECT min(position), max(position) WHERE account = 'Nope'"
+        ),
+        vec![vec!["NULL", "NULL"]],
+    );
+}
+
+/// MIN and MAX over lots held at cost, and over running-balance inventories
+/// of those lots, are exactly the first and last value ORDER BY gives.
+#[test]
+fn min_max_are_order_by_first_and_last_for_lots_and_inventories() {
+    for column in ["position", "balance", "cost(position)", "units(position)"] {
+        let ordered = rows(
+            LOTS,
+            &format!("SELECT {column} AS v WHERE account = 'Assets:Stock' ORDER BY v"),
+        );
+        let first = ordered.first().unwrap()[0].clone();
+        let last = ordered.last().unwrap()[0].clone();
+        assert_eq!(
+            rows(
+                LOTS,
+                &format!("SELECT min({column}), max({column}) WHERE account = 'Assets:Stock'"),
+            ),
+            vec![vec![first, last]],
+            "{column}",
+        );
+    }
+    // The values themselves, so the loop above cannot pass vacuously.
+    // bean-query answers `3 X {10 USD}` for BOTH (its MAX compares the units
+    // number first), though its own ORDER BY puts `3 X {10 USD}` first.
+    assert_eq!(
+        rows(
+            LOTS,
+            "SELECT min(position), max(position) WHERE account = 'Assets:Stock'"
+        ),
+        vec![vec![
+            "3 X { 10 USD, 2024-02-02}",
+            "1 Y { 15 EUR, 2024-02-03}"
+        ]],
+    );
+}
+
+/// The aggregate also works where HAVING evaluates it.
+#[test]
+fn max_over_amounts_in_having() {
+    assert_eq!(
+        rows(
+            LOTS,
+            "SELECT account, max(units(position)) GROUP BY account \
+             HAVING currency(max(units(position))) = 'USD' ORDER BY account"
+        ),
+        // bean-query keeps only Equity:Open: its MAX for Assets:Cash is
+        // `10 EUR` (number first), ours is `-30 USD` (currency first).
+        vec![
+            vec!["Assets:Cash", "-30 USD"],
+            vec!["Equity:Open", "-6 USD"]
+        ],
+    );
 }

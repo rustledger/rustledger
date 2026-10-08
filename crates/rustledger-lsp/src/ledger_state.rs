@@ -206,7 +206,7 @@ impl LedgerState {
         // the whole ledger twice. See diagnostics::all_diagnostics.
         let options = LoadOptions {
             validate: false,
-            ..LoadOptions::default()
+            ..crate::handlers::diagnostics::lsp_load_options()
         };
         match load(journal_path, &options) {
             Ok(ledger) => {

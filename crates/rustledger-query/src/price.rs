@@ -316,7 +316,7 @@ impl PriceDatabase {
     /// call; it is "explicit" only because callers invoke it after
     /// pass 1 (which adds explicit `Price` directives) and before
     /// pass 2 (which adds transaction-derived implicit prices). See
-    /// [`from_directives`] for the protocol.
+    /// [`Self::from_directives`] for the protocol.
     pub(crate) fn snapshot_keys(
         &self,
     ) -> std::collections::HashSet<(

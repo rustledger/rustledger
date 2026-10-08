@@ -49,6 +49,20 @@ pub struct LoadOptions {
     /// the sandbox's 30 seconds). The host's setting, never the ledger's:
     /// see `ResolvedPlugin::run_with_max_time_secs`.
     pub plugin_max_time_secs: Option<u64>,
+    /// Run only native plugins, skipping WASM and Python ones (default: false).
+    /// A name that is neither native nor a WASM/Python reference (see
+    /// `rustledger_plugin::classify_external_plugin`) is still reported as
+    /// E8001 "Plugin not found".
+    ///
+    /// Which runtimes are compiled in is decided by Cargo feature
+    /// unification, so a host that must never run external plugins cannot
+    /// rely on being built without them: the LSP is built with the CLI by a
+    /// plain workspace `cargo build`, which turns `wasm-plugins` and
+    /// `python-plugins` on for it too (#2486). With this set, the outcome is
+    /// the same in every build: a skipped plugin is neither resolved nor run,
+    /// and reports no error, so the host is responsible for telling the user
+    /// (the LSP's E8006).
+    pub native_plugins_only: bool,
 }
 
 impl Default for LoadOptions {
@@ -62,6 +76,7 @@ impl Default for LoadOptions {
             path_security: false,
             collect_capital_gains: false,
             plugin_max_time_secs: None,
+            native_plugins_only: false,
         }
     }
 }
@@ -82,6 +97,7 @@ impl LoadOptions {
             path_security: false,
             collect_capital_gains: false,
             plugin_max_time_secs: None,
+            native_plugins_only: false,
         }
     }
 }
@@ -1175,6 +1191,36 @@ pub fn run_plugins(
         PluginPass::PostBooking => rustledger_plugin::PluginPass::Regular,
     };
     for invocation in &entries {
+        // A native-only host skips WASM and Python references BEFORE
+        // resolution, so the result cannot depend on which runtimes were
+        // compiled in: resolving would run such a plugin in one build and
+        // report a "requires the ... feature" error in another (#2486). A
+        // name that is neither native nor WASM/Python shaped -- typically a
+        // misspelled native plugin -- is still an error, reported as E8001
+        // without consulting system Python, so it is the same in every build.
+        if options.native_plugins_only
+            && rustledger_plugin::find_native_plugin(
+                &invocation.name,
+                invocation.force_python,
+                pass_kind,
+                registry,
+            )
+            .is_none()
+        {
+            if rustledger_plugin::classify_external_plugin(
+                &invocation.name,
+                invocation.force_python,
+            ) == rustledger_plugin::ExternalPluginKind::Unknown
+            {
+                errors.push(resolve_error_to_ledger(
+                    &rustledger_plugin::PluginResolveError::NotFound {
+                        name: invocation.name.clone(),
+                        suggested_file: None,
+                    },
+                ));
+            }
+            continue;
+        }
         // Resolution (classify + path-security + feature-gate + #1432 reject)
         // lives in `rustledger_plugin::resolve_plugin`; execution in
         // `ResolvedPlugin::run`. The loader keeps wrapper building, op

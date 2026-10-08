@@ -1,0 +1,32 @@
+; BALANCES row order (#2409) with renamed roots: account_sortkey classifies
+; against the `name_*` options, so Debts (liabilities) sorts before Capital
+; (equity), and Revenue (income) before Spending (expenses), although plain
+; name order puts Capital first. Assets keeps its name so the corpus query
+; `BALANCES FROM has_account('Assets')` matches.
+
+option "name_liabilities" "Debts"
+option "name_equity" "Capital"
+option "name_income" "Revenue"
+option "name_expenses" "Spending"
+
+2024-01-01 open Assets:Bank USD
+2024-01-01 open Debts:Card USD
+2024-01-01 open Capital:Opening USD
+2024-01-01 open Revenue:Job USD
+2024-01-01 open Spending:Food USD
+
+2024-01-02 * "Opening balance"
+  Assets:Bank      500.00 USD
+  Capital:Opening
+
+2024-01-15 * "Pay"
+  Assets:Bank     2000.00 USD
+  Revenue:Job
+
+2024-02-03 * "Groceries"
+  Spending:Food     40.00 USD
+  Assets:Bank
+
+2024-02-05 * "Card payment"
+  Debts:Card        25.00 USD
+  Assets:Bank

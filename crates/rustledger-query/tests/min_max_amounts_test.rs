@@ -390,3 +390,47 @@ fn min_max_over_amounts_in_order_by_having_and_pivot() {
         ],
     );
 }
+
+/// Operands built by other expressions: a `convert(...)` amount, and an
+/// inventory a subquery built with `sum(position)`, aggregated again in the
+/// outer query. Both failed with "cannot compare values" before #2447; both
+/// agree with bean-query (all values share a currency, or are inventories).
+#[test]
+fn min_max_over_converted_amounts_and_subquery_inventories() {
+    const PRICED: &str = r#"
+2024-01-01 open Assets:Stock
+2024-01-01 open Equity:Open
+2024-01-01 price X 12 USD
+2024-01-01 price Y 30 USD
+2024-02-01 * "x"
+  Assets:Stock  2 X
+  Equity:Open  -2 X
+2024-02-02 * "y"
+  Assets:Stock  1 Y
+  Equity:Open  -1 Y
+"#;
+    assert_eq!(
+        rows(
+            PRICED,
+            "SELECT min(convert(units(position), 'USD')), max(convert(units(position), 'USD')) \
+             WHERE account = 'Assets:Stock'"
+        ),
+        vec![vec!["24 USD", "30 USD"]],
+    );
+
+    // Per-account inventories from a subquery: MIN and MAX are ORDER BY's
+    // ends. bean-query gives the same pair: `Assets:Cash`'s `-70 USD` and
+    // `Assets:Stock`'s three lots.
+    let inner = "SELECT account, sum(position) AS s GROUP BY account";
+    let got = rows(LOTS, &format!("SELECT min(s), max(s) FROM ({inner})"));
+    let ordered = rows(LOTS, &format!("SELECT s FROM ({inner}) ORDER BY s"));
+    assert_eq!(
+        got,
+        vec![vec![
+            ordered.first().unwrap()[0].clone(),
+            ordered.last().unwrap()[0].clone(),
+        ]],
+    );
+    assert!(got[0][0].starts_with("-70 USD"), "{got:?}");
+    assert!(got[0][1].contains("1 Y"), "{got:?}");
+}

@@ -313,8 +313,12 @@ not depend on the order the statement or the ledger lists them in.
 
 Each existing transaction absorbs at most one new one, so two identical
 coffees on the same day are both kept when the ledger holds only one of them.
-Every skipped transaction is listed on stderr with the reason and the existing
-entry it matched.
+Skips are counted on stderr by kind, and up to 20 of each kind (ordinary, and
+the flagged date-and-amount-only ones) are listed with the reason and the
+existing entry they matched; the rest are summarized as `... and N more`. If
+the `--existing` ledger has errors, a warning says so: transactions in the
+parts that failed to load cannot be compared, so their duplicates may be
+imported again.
 
 ## Workflow
 

@@ -271,8 +271,9 @@ other account's statement is recognized. Which rows are kept does not depend
 on the order the statement or the ledger lists them in.
 
 Each existing transaction absorbs at most one new one: two identical coffees on
-one day both import when the ledger already holds only one. Every skipped
-transaction is listed on stderr:
+one day both import when the ledger already holds only one. Skips are counted
+on stderr, and up to 20 of each kind are listed (the rest are summarized as
+`... and N more`):
 
 ```text
 Filtered 1 duplicate transaction(s) already in the existing ledger (0 by id link, 1 by date, amount and text):

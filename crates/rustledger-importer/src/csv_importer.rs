@@ -623,6 +623,29 @@ mod tests {
         );
     }
 
+    /// A CSV saved on Windows (CRLF line ends, a stray trailing space) still
+    /// yields clean id links: no `\r` and no separator leaks into the link.
+    #[test]
+    fn test_csv_import_transaction_id_survives_crlf() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Monzo")
+            .currency("GBP")
+            .transaction_id_column("Id")
+            .build()
+            .unwrap();
+        let csv_content = "Id,Date,Description,Amount\r\ntx_1,2024-01-15,Coffee,-4.50\r\ntx_2 ,2024-01-15,Tea,-2.00\r\n";
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
+        let links: Vec<String> = result
+            .directives
+            .iter()
+            .filter_map(|d| match d {
+                Directive::Transaction(t) => t.links.first().map(|l| l.as_str().to_string()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(links, ["csv-tx_1", "csv-tx_2"]);
+    }
+
     #[test]
     fn test_csv_import_debit_credit_columns() {
         let config = ImporterConfig::csv()

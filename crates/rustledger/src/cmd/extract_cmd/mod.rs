@@ -71,6 +71,7 @@ use config::{
 // Used only by the WASM-importer-dir resolution path (gated below).
 #[cfg(feature = "python-plugin-wasm")]
 use config::expand_tilde;
+#[cfg(test)]
 use duplicate::load_existing_transactions;
 use rustledger_core::{Directive, FormatConfig};
 use rustledger_importer::config::CsvConfigBuilder;
@@ -269,8 +270,13 @@ pub struct Args {
 /// most one new row, so two identical coffees on one day survive a ledger that
 /// holds one), a shared `^ofx-…` / `^csv-…` id link is decisive, and only
 /// transactions posting to that account in the same commodity are compared
-/// (#2421). Every dropped row is written to `report` with its reason, so a
-/// transaction never disappears silently.
+/// (#2421). The counts of every skip, and a bounded sample of skipped rows
+/// with their reasons, are written to `report`, so a transaction never
+/// disappears silently.
+/// How many skipped rows of each kind (ordinary, flagged money-only) the
+/// `--existing` report lists before summarizing the rest.
+const MAX_LISTED_SKIPS: usize = 20;
+
 fn filter_existing_duplicates(
     directives: Vec<Directive>,
     existing: &[rustledger_core::Transaction],
@@ -333,9 +339,26 @@ fn filter_existing_duplicates(
             None => format!("{} \"{}\"{amount}", t.date, t.narration),
         }
     };
+    // A full re-import skips every row, so listing them all buries the
+    // terminal in tens of thousands of lines nobody reads. List a bounded
+    // sample of each kind instead: the flagged money-only matches are the ones
+    // worth checking, so they get their own allowance and never hide behind
+    // ordinary ones. The summary line above always has the full counts.
     let mut dropped = vec![false; new.len()];
+    let (mut listed, mut listed_flagged, mut unlisted) = (0usize, 0usize, 0usize);
     for m in &matches {
         dropped[m.new_index] = true;
+        let flagged = m.reason == DuplicateReason::AmountOnly;
+        let shown = if flagged {
+            &mut listed_flagged
+        } else {
+            &mut listed
+        };
+        if *shown == MAX_LISTED_SKIPS {
+            unlisted += 1;
+            continue;
+        }
+        *shown += 1;
         // A match with no text on either side rests on the money alone; two
         // different description-less rows on one day for one amount look the
         // same, so say so where the user will see it.
@@ -350,6 +373,13 @@ fn filter_existing_duplicates(
             describe(new[m.new_index]),
             m.reason,
             describe(&existing[m.existing_index]),
+        )?;
+    }
+    if unlisted > 0 {
+        writeln!(
+            report,
+            "  ... and {unlisted} more skipped transaction(s) not listed \
+             (at most {MAX_LISTED_SKIPS} of each kind are shown)"
         )?;
     }
 
@@ -1687,7 +1717,11 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
     // ML-based account suggestions for transactions the rules engine left
     // pointing at a fallback account.
     let directives = if let Some(ref existing_path) = args.existing {
-        let existing_txns = load_existing_transactions(existing_path)?;
+        let existing = duplicate::load_existing(existing_path)?;
+        if let Some(warning) = &existing.warning {
+            eprintln!("warning: {warning}");
+        }
+        let existing_txns = existing.transactions;
         let filtered = filter_existing_duplicates(
             result.directives,
             &existing_txns,
@@ -4013,6 +4047,79 @@ default_expense = "Expenses:Uncategorized"
             report.contains("-- check: nothing but the date and amount ties these together"),
             "{report}"
         );
+    }
+
+    /// A full re-import must not bury the terminal: at most
+    /// `MAX_LISTED_SKIPS` rows of each kind are listed, the rest are counted,
+    /// and flagged money-only skips keep their own allowance so ordinary ones
+    /// cannot hide them.
+    #[test]
+    fn existing_dedup_report_is_bounded_and_keeps_flagged_rows_visible() {
+        use rustledger_core::{Amount, Posting, Transaction};
+        let t = |n: &str, cents: i64| {
+            Transaction::new("2024-01-15".parse().unwrap(), n)
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Bank",
+                    Amount::new(rust_decimal::Decimal::new(cents, 2), "EUR"),
+                ))
+                .with_synthesized_posting(Posting::auto("Expenses:Food"))
+        };
+        let mut rows: Vec<Transaction> = (0..30).map(|i| t("Coffee", -100 - i)).collect();
+        rows.extend((0..5).map(|i| t("", -900 - i)));
+        let new: Vec<Directive> = rows.iter().cloned().map(Directive::Transaction).collect();
+        let mut report = Vec::new();
+        let kept = filter_existing_duplicates(new, &rows, "Assets:Bank", &mut report).unwrap();
+        assert!(kept.is_empty());
+        let report = String::from_utf8(report).unwrap();
+        assert!(
+            report.starts_with("Filtered 35 duplicate transaction(s)"),
+            "{report}"
+        );
+        let skipped = report
+            .lines()
+            .filter(|l| l.starts_with("  skipped"))
+            .count();
+        let flagged = report
+            .lines()
+            .filter(|l| l.ends_with("ties these together"))
+            .count();
+        assert_eq!((skipped, flagged), (MAX_LISTED_SKIPS + 5, 5), "{report}");
+        assert!(
+            report.contains("... and 10 more skipped transaction(s) not listed"),
+            "{report}"
+        );
+    }
+
+    /// An `--existing` ledger that partly fails to load still dedups what
+    /// loaded, and says the rest was not compared instead of staying silent.
+    #[test]
+    fn a_partly_broken_existing_ledger_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = dir.path().join("ledger.beancount");
+        std::fs::write(
+            &ledger,
+            "2024-01-15 * \"Coffee\"\n  Assets:Bank  -4.00 EUR\n  Expenses:X\n\n\
+             2024-01-16 * \"Tea\n  Assets:Bank  -2.00 EUR\n  Expenses:X\n",
+        )
+        .unwrap();
+        let existing = duplicate::load_existing(&ledger).unwrap();
+        assert!(
+            existing
+                .transactions
+                .iter()
+                .any(|t| t.narration.as_str() == "Coffee"),
+            "the part that parsed still dedups"
+        );
+        let warning = existing.warning.expect("a broken ledger must be reported");
+        assert!(warning.contains("has 1 error(s)"), "{warning}");
+        assert!(warning.contains("may be imported again"), "{warning}");
+
+        std::fs::write(
+            &ledger,
+            "2024-01-15 * \"Coffee\"\n  Assets:Bank  -4.00 EUR\n  Expenses:X\n",
+        )
+        .unwrap();
+        assert!(duplicate::load_existing(&ledger).unwrap().warning.is_none());
     }
 
     #[test]

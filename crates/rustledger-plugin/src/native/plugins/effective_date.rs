@@ -13,7 +13,7 @@
 //! ```
 
 use regex::Regex;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashSet};
 use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
@@ -34,24 +34,35 @@ use super::super::{NativePlugin, RegularPlugin};
 /// Plugin for handling effective dates on postings.
 pub struct EffectiveDatePlugin;
 
+/// The holding accounts config: `(prefix, (earlier, later))` in the order
+/// the config names them.
+///
+/// A list, not a hash map, because the order decides the answer when two
+/// prefixes match one account (`Expenses` and `Expenses:Car`): the plugin
+/// takes the LAST match in config order, as the upstream Python plugin does
+/// (`for acct in holding_accts: if ...startswith(acct): found_acct = acct`).
+/// Over a `HashMap` the winner, and so the holding account, changed from run
+/// to run.
+type HoldingAccounts = Vec<(String, (String, String))>;
+
 /// Default holding accounts configuration.
-fn default_holding_accounts() -> HashMap<String, (String, String)> {
-    let mut map = HashMap::new();
-    map.insert(
-        "Expenses".to_string(),
+fn default_holding_accounts() -> HoldingAccounts {
+    vec![
         (
-            "Liabilities:Hold:Expenses".to_string(),
-            "Assets:Hold:Expenses".to_string(),
+            "Expenses".to_string(),
+            (
+                "Liabilities:Hold:Expenses".to_string(),
+                "Assets:Hold:Expenses".to_string(),
+            ),
         ),
-    );
-    map.insert(
-        "Income".to_string(),
         (
-            "Assets:Hold:Income".to_string(),
-            "Liabilities:Hold:Income".to_string(),
+            "Income".to_string(),
+            (
+                "Assets:Hold:Income".to_string(),
+                "Liabilities:Hold:Income".to_string(),
+            ),
         ),
-    );
-    map
+    ]
 }
 
 impl NativePlugin for EffectiveDatePlugin {
@@ -70,7 +81,11 @@ impl NativePlugin for EffectiveDatePlugin {
             None => default_holding_accounts(),
         };
 
-        let mut new_accounts: HashSet<String> = HashSet::new();
+        // Sorted: the synthesized `open`s are emitted in this order, all on
+        // one date, and the upstream plugin emits them `sorted(new_accounts)`.
+        // A `HashSet` here made `PRINT` and `#entries` output differ between
+        // two runs over the same ledger.
+        let mut new_accounts: BTreeSet<String> = BTreeSet::new();
         let mut earliest_date: Option<String> = None;
         // Accounts already opened by the user; suppress duplicate Opens
         // for holding accounts the user has pre-declared (else Late
@@ -117,19 +132,14 @@ impl NativePlugin for EffectiveDatePlugin {
                 for posting in &txn.postings {
                     if let Some(effective_date) = get_effective_date(posting) {
                         // Find the holding account for this posting's account type
-                        let (hold_account, _is_later) = find_holding_account(
+                        if let Some((prefix, hold_acct)) = find_holding_account(
                             &posting.account,
                             &effective_date,
                             &entry_date,
                             &holding_accounts,
-                        );
-
-                        if let Some(hold_acct) = hold_account {
+                        ) {
                             // Create modified posting with holding account
-                            let new_account = posting.account.replace(
-                                &find_account_prefix(&posting.account, &holding_accounts),
-                                &hold_acct,
-                            );
+                            let new_account = posting.account.replace(prefix, hold_acct);
                             new_accounts.insert(new_account.clone());
 
                             let mut modified_posting = posting.clone();
@@ -243,34 +253,27 @@ fn get_effective_date(posting: &PostingData) -> Option<String> {
     None
 }
 
-/// Find the appropriate holding account for a posting.
-fn find_holding_account(
+/// The config prefix that matches `account` and the holding account to use
+/// for it: the earlier one when the effective date is not after the entry's,
+/// else the later one. The last matching prefix in config order wins (see
+/// [`HoldingAccounts`]). One lookup for both, so the prefix replaced is always
+/// the one the holding account was chosen for.
+fn find_holding_account<'h>(
     account: &str,
     effective_date: &str,
     entry_date: &str,
-    holding_accounts: &HashMap<String, (String, String)>,
-) -> (Option<String>, bool) {
-    for (prefix, (earlier, later)) in holding_accounts {
-        if account.starts_with(prefix) {
-            let is_later = effective_date > entry_date;
-            let hold_acct = if is_later { later } else { earlier };
-            return (Some(hold_acct.clone()), is_later);
-        }
-    }
-    (None, false)
-}
-
-/// Find the account prefix that matches the holding accounts config.
-fn find_account_prefix(
-    account: &str,
-    holding_accounts: &HashMap<String, (String, String)>,
-) -> String {
-    for prefix in holding_accounts.keys() {
-        if account.starts_with(prefix) {
-            return prefix.clone();
-        }
-    }
-    String::new()
+    holding_accounts: &'h HoldingAccounts,
+) -> Option<(&'h str, &'h str)> {
+    let (prefix, (earlier, later)) = holding_accounts
+        .iter()
+        .rev()
+        .find(|(prefix, _)| account.starts_with(prefix.as_str()))?;
+    let hold = if effective_date > entry_date {
+        later
+    } else {
+        earlier
+    };
+    Some((prefix.as_str(), hold.as_str()))
 }
 
 /// Create a posting with the opposite amount.
@@ -306,15 +309,21 @@ fn generate_link(date: &str) -> String {
 }
 
 /// Parse the configuration string.
-fn parse_config(config: &str) -> Result<HashMap<String, (String, String)>, String> {
-    let mut result = HashMap::new();
+fn parse_config(config: &str) -> Result<HoldingAccounts, String> {
+    let mut result: HoldingAccounts = Vec::new();
 
     // Parse format: {'Prefix': {'earlier': 'Account1', 'later': 'Account2'}, ...}
     for cap in HOLDING_ACCOUNT_RE.captures_iter(config) {
         let prefix = cap[1].to_string();
         let earlier = cap[2].to_string();
         let later = cap[3].to_string();
-        result.insert(prefix, (earlier, later));
+        // A repeated key keeps its first position and takes the new value,
+        // as a Python dict literal does.
+        if let Some(entry) = result.iter_mut().find(|(p, _)| *p == prefix) {
+            entry.1 = (earlier, later);
+        } else {
+            result.push((prefix, (earlier, later)));
+        }
     }
 
     if result.is_empty() {
@@ -505,5 +514,111 @@ mod tests {
             .filter(|d| matches!(d.data, DirectiveData::Transaction(_)))
             .count();
         assert_eq!(txn_count, 1);
+    }
+
+    /// A transaction whose postings are `(account, number, effective_date)`.
+    fn txn_with(date: &str, postings: &[(&str, &str, Option<&str>)]) -> DirectiveWrapper {
+        DirectiveWrapper {
+            directive_type: "transaction".to_string(),
+            date: date.to_string(),
+            filename: None,
+            lineno: None,
+            data: DirectiveData::Transaction(TransactionData {
+                flag: "*".to_string(),
+                payee: None,
+                narration: "t".to_string(),
+                tags: vec![],
+                links: vec![],
+                metadata: vec![],
+                postings: postings
+                    .iter()
+                    .map(|(account, number, effective)| PostingData {
+                        account: (*account).to_string(),
+                        units: Some(AmountData {
+                            number: (*number).to_string(),
+                            currency: "USD".to_string(),
+                        }),
+                        cost: None,
+                        price: None,
+                        flag: None,
+                        metadata: effective
+                            .map(|d| {
+                                vec![(
+                                    "effective_date".to_string(),
+                                    MetaValueData::Date(d.to_string()),
+                                )]
+                            })
+                            .unwrap_or_default(),
+                        span: None,
+                    })
+                    .collect(),
+            }),
+        }
+    }
+
+    fn input(directives: Vec<DirectiveWrapper>, config: Option<&str>) -> PluginInput {
+        PluginInput {
+            directives,
+            options: PluginOptions::default(),
+            config: config.map(ToString::to_string),
+        }
+    }
+
+    /// The synthesized `open`s come out sorted, as the upstream plugin emits
+    /// them (`sorted(new_accounts)`). They were in `HashSet` order, so two runs
+    /// over one ledger printed them in different orders.
+    #[test]
+    fn synthesized_opens_are_sorted() {
+        let directives = vec![txn_with(
+            "2024-01-15",
+            &[
+                ("Expenses:Rent", "10", Some("2024-02-01")),
+                ("Expenses:Car", "10", Some("2024-02-01")),
+                ("Expenses:Food", "10", Some("2024-02-01")),
+                ("Income:Salary", "-10", Some("2024-01-01")),
+                ("Expenses:Books", "10", Some("2024-01-01")),
+                ("Assets:Cash", "-30", None),
+            ],
+        )];
+        let output = EffectiveDatePlugin.process(input(directives.clone(), None));
+        let opened: Vec<String> = materialize_ops(&directives, &output)
+            .into_iter()
+            .filter_map(|d| match d.data {
+                DirectiveData::Open(open) => Some(open.account),
+                _ => None,
+            })
+            .collect();
+        let mut sorted = opened.clone();
+        sorted.sort();
+        assert_eq!(opened.len(), 5, "{opened:?}");
+        assert_eq!(opened, sorted);
+    }
+
+    /// Two prefixes that both match: the last one in config order wins, as
+    /// upstream. Over a `HashMap` the winner was random, and so was the
+    /// holding account a posting moved to; the run is repeated because one
+    /// draw of a random order can land right by chance.
+    #[test]
+    fn overlapping_prefixes_take_the_last_in_config_order() {
+        let config = "{'Expenses': {'earlier': 'Liabilities:Hold:Expenses', 'later': 'Assets:Hold:Expenses'}, \
+                      'Expenses:Car': {'earlier': 'Liabilities:Hold:Car', 'later': 'Assets:Hold:Car'}}";
+        let directives = vec![txn_with(
+            "2024-01-15",
+            &[
+                ("Expenses:Car:Gas", "10", Some("2024-02-01")),
+                ("Assets:Cash", "-10", None),
+            ],
+        )];
+        for _ in 0..32 {
+            let output = EffectiveDatePlugin.process(input(directives.clone(), Some(config)));
+            let accounts: Vec<String> = materialize_ops(&directives, &output)
+                .into_iter()
+                .filter_map(|d| match d.data {
+                    DirectiveData::Open(open) => Some(open.account),
+                    _ => None,
+                })
+                .collect();
+            assert_eq!(accounts, ["Assets:Hold:Car:Gas"]);
+        }
     }
 }

@@ -867,11 +867,10 @@ jobs:
       # checks out an orphan branch with no `scripts/` and no `target/`, so a
       # gate placed after it could not find this script.
       #
-      # #2118 (beancount pools lots we keep per-acquisition) is a divergence
-      # we decided to keep. It is tallied on its own line and does NOT fail
-      # the run; the exit code tracks unexplained divergences alone. A
-      # permanently red run is one nobody reads, which is how the next real
-      # regression gets missed.
+      # #2118 (beancount pools repeated lot identities within a date) used to
+      # be waived here as a known divergence. rustledger merges such lots too
+      # now, so a divergence of that shape is a regression: it is tallied on
+      # its own line as a tripwire and FAILS the run like any other.
       #
       # Seeding matches the budget fuzz and the synthetic corpus policy:
       # fresh nightly, fixed for PR/push so a red X does not move when an

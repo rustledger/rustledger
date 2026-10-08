@@ -78,6 +78,18 @@ struct Cli {
     )]
     plugin_max_time_secs: Option<u64>,
 
+    /// Memory cap, in MiB, for each WASM or Python plugin or WASM importer
+    /// call (default: 256, or `[plugins] max_memory_mb` from the config
+    /// file; at most 4096). A Python plugin needs about 1.2 KB per
+    /// transaction
+    #[arg(
+        long,
+        global = true,
+        value_name = "MB",
+        value_parser = clap::value_parser!(u64).range(1..=4096)
+    )]
+    plugin_max_memory_mb: Option<u64>,
+
     #[command(subcommand)]
     command: Commands,
 }
@@ -345,6 +357,9 @@ fn main() -> ExitCode {
     rustledger::plugin_budget::set_max_time_secs(
         cli.plugin_max_time_secs
             .or(config.plugins.max_time_secs.map(std::num::NonZeroU64::get)),
+    );
+    rustledger::plugin_budget::set_max_memory_mb(
+        cli.plugin_max_memory_mb.or(config.plugins.max_memory_mb),
     );
 
     // Get effective profile: CLI flag takes precedence, then env var

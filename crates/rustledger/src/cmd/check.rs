@@ -710,6 +710,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
             .collect(),
         validate: true,
         plugin_max_time_secs: crate::plugin_budget::max_time_secs(),
+        plugin_max_memory_mb: crate::plugin_budget::max_memory_mb(),
         ..Default::default()
     };
 
@@ -847,6 +848,9 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
         let mut runtime = rustledger_plugin::RuntimeConfig::default();
         if let Some(secs) = crate::plugin_budget::max_time_secs() {
             runtime.max_time_secs = secs;
+        }
+        if let Some(bytes) = crate::plugin_budget::max_memory_bytes() {
+            runtime.max_memory = bytes;
         }
         let mut wasm_mgr = PluginManager::with_config(runtime);
         for plugin_path in &args.plugins {

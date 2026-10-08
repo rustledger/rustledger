@@ -1301,6 +1301,9 @@ fn build_registry(args: &Args) -> Result<ImporterRegistry> {
         if let Some(secs) = crate::plugin_budget::max_time_secs() {
             runtime.max_time_secs = secs;
         }
+        if let Some(bytes) = crate::plugin_budget::max_memory_bytes() {
+            runtime.max_memory = bytes;
+        }
 
         // 1. CLI --wasm-importer paths (explicit precedence — registered
         //    first so they win identify()). Single-file failures abort

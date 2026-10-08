@@ -85,11 +85,13 @@ bs = "report balsheet"
 [plugins]
 # Time budget for each plugin or importer call (default: 30)
 max_time_secs = 120
+# Memory cap for each plugin or importer call, in MiB (default: 256)
+max_memory_mb = 1024
 ```
 
 ### Plugin Time Budget
 
-Each call into a WASM plugin, Python plugin, or WASM importer gets a time budget, 30 seconds by default, after which it is stopped with `all fuel consumed by WebAssembly`. The budget is counted in wasm work, not on a clock, and is sized so that a call never runs longer than its budget even on a slow machine. So on a typical machine a call runs out much sooner: most code gets one twentieth to one fifth of the stated seconds. A plugin doing real work over a large ledger can need more. Raise it with `[plugins] max_time_secs` in any config file, or for one run with the global `--plugin-max-time-secs <SECS>` flag, which overrides the config. The value must be at least 1:
+Each call into a WASM plugin, Python plugin, or WASM importer gets a time budget, 30 seconds by default, after which it is stopped with a message saying so and how to raise it. The budget is counted in wasm work, not on a clock, and is sized so that a call never runs longer than its budget even on a slow machine. So on a typical machine a call runs out much sooner: most code gets one twentieth to one fifth of the stated seconds. A plugin doing real work over a large ledger can need more. Raise it with `[plugins] max_time_secs` in any config file, or for one run with the global `--plugin-max-time-secs <SECS>` flag, which overrides the config. The value must be at least 1:
 
 ```bash
 rledger check --plugin-max-time-secs 120 ledger.beancount
@@ -97,7 +99,17 @@ rledger check --plugin-max-time-secs 120 ledger.beancount
 
 The budget is a setting of whoever runs rustledger, never of the ledger: nothing in a beancount file can raise it, so a service that loads ledgers it did not write keeps control of how much CPU their plugins get. A project `.rledger.toml` is found from the directory rledger runs in, not from where the ledger is. So running rledger inside someone else's repository applies their `max_time_secs`, as it applies their aliases and default file; run it from a directory you control to keep your own.
 
-Python plugins get the same budget, counted the same way. Starting the Python interpreter costs about 1.2 seconds of it on every call, so a Python plugin needs a budget of at least 2. On top of that, moving each transaction to Python and back costs about 0.5 milliseconds of budget: the default 30 seconds covers a plugin over roughly 50,000 transactions, and a plugin over a larger ledger, or one doing heavy work per entry, needs a higher `max_time_secs`. When a plugin runs out, the message says how many seconds moving its entries took, so you know how much to add.
+Python plugins get the same budget, counted the same way. Starting the Python interpreter costs about 1.2 seconds of it on every call, so a Python plugin needs a budget of at least 2. On top of that, moving each transaction to Python and back costs about 0.5 milliseconds of budget: the default 30 seconds covers a plugin over roughly 50,000 transactions, and a plugin over a larger ledger, or one doing heavy work per entry, needs a higher `max_time_secs`. When a plugin runs out, the message says how many seconds moving its entries took, so you know how much to add. A Python plugin is also held to the budget on the clock: time it spends sleeping or waiting counts, so it is stopped after that many seconds whatever it does.
+
+### Plugin Memory Cap
+
+Each call into a WASM plugin, Python plugin, or WASM importer can use up to 256 MiB of memory by default; one that needs more is stopped with a message saying it ran out. Raise the cap with `[plugins] max_memory_mb` in any config file, or for one run with the global `--plugin-max-memory-mb <MB>` flag, which overrides the config. The value must be between 1 and 4096 (all a WASM guest can address):
+
+```bash
+rledger check --plugin-max-memory-mb 1024 --plugin-max-time-secs 300 ledger.beancount
+```
+
+A Python plugin holds every entry as Python objects, about 1.2 KB per transaction, so the default fits roughly 150,000 transactions; a 300,000-transaction ledger runs with 1024 MiB (and a budget of a few minutes). Like the time budget, the cap is a setting of whoever runs rustledger, never of the ledger.
 
 ### Using Profiles
 

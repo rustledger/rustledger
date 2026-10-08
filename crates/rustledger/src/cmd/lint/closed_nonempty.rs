@@ -90,6 +90,7 @@ pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<Ex
         run_plugins: true,
         validate: true,
         plugin_max_time_secs: crate::plugin_budget::max_time_secs(),
+        plugin_max_memory_mb: crate::plugin_budget::max_memory_mb(),
         ..Default::default()
     };
     for path in &args.files {

@@ -49,6 +49,10 @@ pub struct LoadOptions {
     /// the sandbox's 30 seconds). The host's setting, never the ledger's:
     /// see `ResolvedPlugin::run_with_max_time_secs`.
     pub plugin_max_time_secs: Option<u64>,
+    /// Memory cap, in MiB, for each WASM or Python plugin call (default:
+    /// `None`, the sandbox's 256 MiB; wasm32 addresses at most 4096). The
+    /// host's setting, never the ledger's, like `plugin_max_time_secs`.
+    pub plugin_max_memory_mb: Option<u64>,
     /// Run only native plugins, skipping WASM and Python ones (default: false).
     /// A name that is neither native nor a WASM/Python reference (see
     /// `rustledger_plugin::classify_external_plugin`) is still reported as
@@ -76,6 +80,7 @@ impl Default for LoadOptions {
             path_security: false,
             collect_capital_gains: false,
             plugin_max_time_secs: None,
+            plugin_max_memory_mb: None,
             native_plugins_only: false,
         }
     }
@@ -97,6 +102,7 @@ impl LoadOptions {
             path_security: false,
             collect_capital_gains: false,
             plugin_max_time_secs: None,
+            plugin_max_memory_mb: None,
             native_plugins_only: false,
         }
     }
@@ -1246,12 +1252,17 @@ pub fn run_plugins(
         // plugin-set source location is preserved (the old WASM/Python runner
         // conversions dropped it; native always kept it).
         let wrappers = build_wrappers(directives, source_map);
-        match resolved.run_with_max_time_secs(
+        match resolved.run_with_limits(
             wrappers,
             &plugin_options,
             &invocation.config,
             base_dir,
-            options.plugin_max_time_secs,
+            rustledger_plugin::PluginLimits::new(
+                options.plugin_max_time_secs,
+                options
+                    .plugin_max_memory_mb
+                    .map(|mb| usize::try_from(mb.saturating_mul(1 << 20)).unwrap_or(usize::MAX)),
+            ),
         ) {
             Ok(output) => {
                 record_plugin_errors(errors, output.errors, source_map);
@@ -1362,7 +1373,6 @@ fn apply_plugin_ops(
     source_map: &SourceMap,
 ) -> Result<(), ProcessError> {
     use rustledger_plugin::PluginOp;
-    use rustledger_plugin::wrapper_to_directive;
 
     // Validate the op set forms a complete cover of the input — the contract is
     // single-sourced in `rustledger-plugin` so the loader and FFI surfaces stay
@@ -1380,8 +1390,9 @@ fn apply_plugin_ops(
                 new_directives.push(directives[i].clone());
             }
             PluginOp::Modify(i, wrapper) => {
-                let mut directive = wrapper_to_directive(&wrapper)
-                    .map_err(|e| ProcessError::PluginConversion(e.to_string()))?;
+                let Some(mut directive) = convert_plugin_entry(&wrapper, errors) else {
+                    return Ok(());
+                };
                 // Plugins are not trusted to return well-formed inner
                 // posting spans — a misbehaving plugin can synthesize a
                 // file_id pointing at a nonexistent source or a span
@@ -1427,8 +1438,9 @@ fn apply_plugin_ops(
                         rustledger_parser::SYNTHESIZED_FILE_ID,
                     ),
                 };
-                let mut directive = wrapper_to_directive(&wrapper)
-                    .map_err(|e| ProcessError::PluginConversion(e.to_string()))?;
+                let Some(mut directive) = convert_plugin_entry(&wrapper, errors) else {
+                    return Ok(());
+                };
                 sanitize_inner_posting_spans(&mut directive, source_map);
                 new_directives.push(Spanned::new(directive, span).with_file_id(file_id as usize));
             }
@@ -1438,6 +1450,35 @@ fn apply_plugin_ops(
 
     *directives = new_directives;
     Ok(())
+}
+
+/// `wrapper` as a directive, or `None` after reporting why it cannot be
+/// one. A plugin is not trusted to return well-formed entries: before
+/// #2500's second review one bad date from a WASM or Python plugin
+/// aborted the whole load (`processing pipeline failed`, exit 2, every
+/// other diagnostic lost). Now the plugin's changes are discarded, as
+/// for an op set that does not cover its input, and the load goes on.
+#[cfg(feature = "plugins")]
+fn convert_plugin_entry(
+    wrapper: &rustledger_plugin::DirectiveWrapper,
+    errors: &mut Vec<LedgerError>,
+) -> Option<Directive> {
+    match rustledger_plugin::wrapper_to_directive(wrapper) {
+        Ok(directive) => Some(directive),
+        Err(e) => {
+            errors.push(
+                LedgerError::error(
+                    "PLUGIN",
+                    format!(
+                        "plugin returned an entry that is not valid ({e}); \
+                         its changes were discarded"
+                    ),
+                )
+                .with_phase("plugin"),
+            );
+            None
+        }
+    }
 }
 
 /// Reset any inner `Spanned<Posting>` whose location does not refer to a

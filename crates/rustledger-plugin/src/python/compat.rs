@@ -807,7 +807,8 @@ def run_plugin(module, plugin_name, entries_path, options_json, config=None,
             errors.append(ValidationError(
                 None,
                 f'Error applying plugin "{plugin_name}" ({name}): it ran out of the '
-                f'sandbox memory limit (MemoryError)',
+                f'sandbox memory limit (MemoryError; rledger raises it with '
+                f'--plugin-max-memory-mb or [plugins] max_memory_mb)',
                 None))
             continue
         except Exception as e:

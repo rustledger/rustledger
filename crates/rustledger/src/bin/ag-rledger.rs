@@ -1265,6 +1265,7 @@ fn load_config() -> Config {
     rustledger::plugin_budget::set_max_time_secs(
         config.plugins.max_time_secs.map(std::num::NonZeroU64::get),
     );
+    rustledger::plugin_budget::set_max_memory_mb(config.plugins.max_memory_mb);
     config
 }
 

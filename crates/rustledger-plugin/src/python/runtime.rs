@@ -157,6 +157,19 @@ struct PythonStoreState {
     limiter: MemoryLimiter,
 }
 
+/// Most WASI resources (open files and directories, streams) a Python
+/// plugin may hold at once. Each open file is a host file descriptor, so
+/// without a cap (wasmtime's default is a million) a plugin could exhaust
+/// the host process's descriptor limit (it reached the 1024 `ulimit -n`
+/// in #2500's second review), failing whatever else the host was doing.
+/// `CPython` itself holds a handful while importing.
+const MAX_GUEST_RESOURCES: usize = 256;
+
+/// How often, in fuel, a running guest yields to the host, so the
+/// wall-clock deadline in [`PythonRuntime::run_python`] can stop it
+/// (about every few milliseconds of guest work).
+const FUEL_YIELD_INTERVAL: u64 = 10_000_000;
+
 /// The script `CPython` runs: load the compat layer, load the plugin file
 /// as a module of its own, run it, and write the result.
 ///
@@ -221,6 +234,7 @@ pub struct PythonRuntime {
     module: Module,
     stdlib_path: std::path::PathBuf,
     max_time_secs: u64,
+    max_memory: usize,
 }
 
 impl PythonRuntime {
@@ -258,6 +272,7 @@ impl PythonRuntime {
             module,
             stdlib_path,
             max_time_secs: crate::sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS,
+            max_memory: PYTHON_MAX_MEMORY,
         })
     }
 
@@ -272,6 +287,18 @@ impl PythonRuntime {
     #[must_use]
     pub const fn with_max_time_secs(mut self, secs: u64) -> Self {
         self.max_time_secs = secs;
+        self
+    }
+
+    /// Set the sandbox memory cap, in bytes, like a WASM plugin's
+    /// [`crate::RuntimeConfig::max_memory`]: the host's setting
+    /// (`[plugins] max_memory_mb`, `--plugin-max-memory-mb`,
+    /// `LoadOptions::plugin_max_memory_mb`), never the ledger's. The
+    /// default is [`crate::sandbox::DEFAULT_SANDBOX_MAX_MEMORY`]; wasm32
+    /// cannot address more than 4 GiB.
+    #[must_use]
+    pub const fn with_max_memory(mut self, bytes: usize) -> Self {
+        self.max_memory = bytes;
         self
     }
 
@@ -480,28 +507,42 @@ impl PythonRuntime {
         // Construct the sandboxed Store via the helper so production
         // and the `make_sandboxed_python_store_caps_memory_growth_via_wasmtime`
         // regression test exercise the same wiring (issue #1234).
-        let mut store =
-            make_sandboxed_python_store(&self.engine, wasi_ctx, python_fuel(self.max_time_secs))
-                .map_err(PythonError::Wasm)?;
+        let mut store = make_sandboxed_python_store(
+            &self.engine,
+            wasi_ctx,
+            python_fuel(self.max_time_secs),
+            self.max_memory,
+        )
+        .map_err(PythonError::Wasm)?;
 
-        // Create linker and add WASI. The closure reaches through the
-        // state wrapper to the inner `p1::WasiP1Ctx` that the WASI
-        // syscall implementations expect.
-        let mut linker: Linker<PythonStoreState> = Linker::new(&self.engine);
-        p1::add_to_linker_sync(&mut linker, |state| &mut state.wasi).map_err(PythonError::Wasm)?;
-
-        // Instantiate and run
-        let instance = linker
-            .instantiate(&mut store, &self.module)
-            .map_err(PythonError::Wasm)?;
-
-        // Get the _start function (WASI entry point)
-        let start = instance
-            .get_typed_func::<(), ()>(&mut store, "_start")
-            .map_err(PythonError::Wasm)?;
-
-        // Run Python
-        let outcome = start.call(&mut store, ());
+        // Run Python, on a thread of its own under a wall-clock deadline
+        // of the time budget. Fuel alone bounds only computation: a guest
+        // waiting in WASI (`time.sleep`, `select`) burns none, so before
+        // #2500's second review `time.sleep(10**9)` hung the host. The
+        // guest runs async (on a fiber, whose stack is sized for
+        // `WASM_STACK`), yields every `FUEL_YIELD_INTERVAL`, and is
+        // dropped at the deadline. The fiber also means a deep recursion
+        // traps in the guest instead of overflowing the host's stack,
+        // which aborted the whole process before.
+        let deadline = std::time::Duration::from_secs(self.max_time_secs.max(1));
+        let outcome = run_start(&self.engine, &self.module, &mut store, deadline)?;
+        let Some(outcome) = outcome else {
+            forward_guest_stderr(&stderr.contents());
+            return Err(PythonError::Execution(format!(
+                "the plugin {}; time spent waiting or sleeping counts",
+                crate::sandbox::time_budget_exceeded(self.max_time_secs).trim_start_matches("it ")
+            )));
+        };
+        // `exit(0)` is a normal end; the output says whether it is whole.
+        let outcome = match outcome {
+            Err(e)
+                if e.downcast_ref::<wasmtime_wasi::I32Exit>()
+                    .is_some_and(|x| x.0 == 0) =>
+            {
+                Ok(())
+            }
+            other => other,
+        };
         // The interpreter's own diagnostics (a traceback, the plugin's
         // prints) are the user's to see, whatever the outcome.
         forward_guest_stderr(&stderr.contents());
@@ -529,11 +570,15 @@ impl PythonRuntime {
                 )
             } else if limiter.growth_denied() {
                 format!(
-                    "the plugin ran out of the {} MiB sandbox memory limit, which is fixed \
-                     (Python holds every entry as objects, about 1 KB per transaction; \
-                     {entries} entries were passed in): ",
-                    limiter.max_memory() >> 20
+                    "the plugin {} (Python holds every entry as objects, about 1.2 KB per \
+                     transaction; {entries} entries were passed in): ",
+                    crate::sandbox::memory_cap_exceeded(limiter.max_memory())
+                        .trim_start_matches("it ")
                 )
+            } else if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::StackOverflow) {
+                "the plugin recursed past the sandbox's call stack: ".to_string()
+            } else if format!("{e:#}").contains("resource table has no free keys") {
+                format!("the plugin held more than {MAX_GUEST_RESOURCES} files open at once: ")
             } else if let Some(exit) = e.downcast_ref::<wasmtime_wasi::I32Exit>() {
                 // An uncaught exception at the top level (an import the
                 // compat layer does not provide, a syntax error): its
@@ -564,6 +609,45 @@ impl PythonRuntime {
     }
 }
 
+/// Instantiate `module` in `store` and run its `_start`, on a thread of
+/// its own with a current-thread tokio runtime, for at most `deadline`.
+/// `None` when the deadline passed first.
+fn run_start(
+    engine: &Engine,
+    module: &Module,
+    store: &mut Store<PythonStoreState>,
+    deadline: std::time::Duration,
+) -> Result<Option<wasmtime::Result<()>>, PythonError> {
+    std::thread::scope(|scope| {
+        std::thread::Builder::new()
+            .name("rledger-python-plugin".to_string())
+            .spawn_scoped(scope, move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(PythonError::Io)?;
+                rt.block_on(async move {
+                    // Create linker and add WASI. The closure reaches
+                    // through the state wrapper to the inner
+                    // `p1::WasiP1Ctx` that the WASI syscall
+                    // implementations expect.
+                    let mut linker: Linker<PythonStoreState> = Linker::new(engine);
+                    p1::add_to_linker_async(&mut linker, |state| &mut state.wasi)
+                        .map_err(PythonError::Wasm)?;
+                    let run = async {
+                        let instance = linker.instantiate_async(&mut *store, module).await?;
+                        let start = instance.get_typed_func::<(), ()>(&mut *store, "_start")?;
+                        start.call_async(&mut *store, ()).await
+                    };
+                    Ok(tokio::time::timeout(deadline, run).await.ok())
+                })
+            })
+            .map_err(PythonError::Io)?
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
 /// Build a `Store<PythonStoreState>` pre-wired with the runtime's
 /// resource caps:
 ///
@@ -592,16 +676,29 @@ fn make_sandboxed_python_store(
     engine: &Engine,
     wasi: p1::WasiP1Ctx,
     fuel: u64,
+    max_memory: usize,
 ) -> wasmtime::Result<Store<PythonStoreState>> {
     let mut store = Store::new(
         engine,
         PythonStoreState {
             wasi,
-            limiter: MemoryLimiter::new(PYTHON_MAX_MEMORY),
+            limiter: MemoryLimiter::new(max_memory),
         },
     );
     store.limiter(|state| &mut state.limiter);
+    {
+        use wasmtime_wasi::WasiView;
+        store
+            .data_mut()
+            .wasi
+            .ctx()
+            .table
+            .set_max_capacity(MAX_GUEST_RESOURCES);
+    }
     store.set_fuel(fuel)?;
+    // Yield to the host now and then, so the wall-clock deadline in
+    // `run_start` can stop a long computation too.
+    store.fuel_async_yield_interval(Some(FUEL_YIELD_INTERVAL))?;
     Ok(store)
 }
 
@@ -626,9 +723,9 @@ fn make_sandboxed_python_store(
 /// pick 2 MiB to match the stock default difference (default
 /// `async_stack_size` 2 MiB minus default `max_wasm_stack` 512 KiB gives
 /// ~1.5 MiB of host headroom; rounding up to 2 MiB is comfortable). The
-/// Python runtime here is sync-only (it uses [`wasmtime_wasi::p1`], no
-/// `.await`), so the async stack is never actually allocated at runtime;
-/// this value purely satisfies wasmtime's config validator.
+/// Python runtime runs async (see [`run_start`]), so the guest runs on a
+/// fiber stack of this size: a recursion past `WASM_STACK` traps in the
+/// guest rather than overflowing the host thread's stack.
 fn engine_config() -> Config {
     const WASM_STACK: usize = 16 * 1024 * 1024;
     const ASYNC_STACK_HEADROOM: usize = 2 * 1024 * 1024;
@@ -933,10 +1030,18 @@ fn parse_plugin_output(output: &[u8], input_len: usize) -> Result<PluginOutput, 
     })?;
     let result: serde_json::Value = serde_json::from_str(result)
         .map_err(|e| PythonError::Serialization(format!("failed to parse result: {e}")))?;
+    // The compat layer always ends with this line; output without it was
+    // cut short (a plugin that exited midway), and before #2500's second
+    // review its last entry was read as the result, so the entries were
+    // silently kept as they were.
     let ran = result
         .get("ran")
         .and_then(serde_json::Value::as_bool)
-        .unwrap_or(false);
+        .ok_or_else(|| {
+            PythonError::Execution(
+                "the plugin's output ends before its result; it may have exited midway".to_string(),
+            )
+        })?;
     let json_errors = match result.get("errors") {
         Some(serde_json::Value::Array(errors)) => errors.clone(),
         _ => Vec::new(),
@@ -1225,8 +1330,9 @@ mod tests {
         let engine =
             Engine::new(&engine_config()).expect("engine_config must build a valid Engine");
         let wasi = WasiCtxBuilder::new().build_p1();
-        let mut store = make_sandboxed_python_store(&engine, wasi, python_fuel(1))
-            .expect("store construction must succeed");
+        let mut store =
+            make_sandboxed_python_store(&engine, wasi, python_fuel(1), PYTHON_MAX_MEMORY)
+                .expect("store construction must succeed");
 
         // `PYTHON_MAX_MEMORY = 256 MiB = 4096 pages` (1 wasm page = 64 KiB).
         // Initial memory is 1 page; request grow by 5000 pages, which
@@ -1246,15 +1352,24 @@ mod tests {
                     memory.grow))
         "#;
         let module = Module::new(&engine, wat).expect("synthetic wat module must compile");
+        // The store is set up for async calls (see `run_start`).
         let linker = Linker::<PythonStoreState>::new(&engine);
-        let instance = linker
-            .instantiate(&mut store, &module)
-            .expect("instantiation must succeed under the cap");
-        let try_grow = instance
-            .get_typed_func::<(), i32>(&mut store, "try_grow_past_cap")
-            .expect("export must exist");
-
-        let result = try_grow.call(&mut store, ()).expect("call must not trap");
+        let result = tokio::runtime::Builder::new_current_thread()
+            .build()
+            .expect("tokio runtime")
+            .block_on(async {
+                let instance = linker
+                    .instantiate_async(&mut store, &module)
+                    .await
+                    .expect("instantiation must succeed under the cap");
+                let try_grow = instance
+                    .get_typed_func::<(), i32>(&mut store, "try_grow_past_cap")
+                    .expect("export must exist");
+                try_grow
+                    .call_async(&mut store, ())
+                    .await
+                    .expect("call must not trap")
+            });
         assert_eq!(
             result, -1,
             "memory.grow past PYTHON_MAX_MEMORY must return -1 (growth rejected). \

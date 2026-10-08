@@ -517,7 +517,8 @@ fn wasm_importer_time_budget() {
 // Limits: memory
 // ---------------------------------------------------------------------------
 
-const OUT_OF_MEMORY: &str = "ran out of the 256 MiB sandbox memory limit";
+const OUT_OF_MEMORY: &str = "ran out of the 256 MiB sandbox memory limit (rledger raises it with \
+     --plugin-max-memory-mb or [plugins] max_memory_mb)";
 
 #[test]
 fn wasm_plugin_memory_cap() {
@@ -547,7 +548,10 @@ fn python_plugin_memory_cap() {
     .unwrap();
     run(dir.path(), &["check", "ledger.beancount"])
         .failed_cleanly()
-        .has("ran out of the sandbox memory limit (MemoryError)");
+        .has(
+            "ran out of the sandbox memory limit (MemoryError; rledger raises it with \
+             --plugin-max-memory-mb or [plugins] max_memory_mb)",
+        );
 }
 
 #[test]
@@ -803,4 +807,224 @@ fn python_plugin_output_is_capped() {
     run(dir.path(), &["check", "ledger.beancount"])
         .failed_cleanly()
         .has("the plugin's output exceeded its");
+}
+
+// ---------------------------------------------------------------------------
+// Limits: a host-set memory cap (#2500 second review)
+// ---------------------------------------------------------------------------
+
+/// Run `f` with a 1024 MiB cap set by the flag, then by the config file.
+fn both_memory_sources(dir: &Path, f: impl Fn(&[&str]) -> Out) {
+    f(&["--plugin-max-memory-mb", "1024"]);
+    std::fs::write(dir.join("config.toml"), "[plugins]\nmax_memory_mb = 1024\n").unwrap();
+    f(&[]);
+    std::fs::remove_file(dir.join("config.toml")).unwrap();
+}
+
+/// A plugin that needs more than the default 256 MiB runs once the host
+/// raises the cap, by flag or config, for each sandboxed kind.
+#[test]
+fn wasm_plugin_memory_cap_is_host_configurable() {
+    let Some(guests) = guests() else { return };
+    let dir = ledger("plugin \"conformance.wasm\" \"alloc\"");
+    install_wasm_plugin(dir.path(), guests);
+    both_memory_sources(dir.path(), |flags| {
+        let mut args = flags.to_vec();
+        args.extend(["check", "ledger.beancount"]);
+        let out = run(dir.path(), &args);
+        out.has("conformance: WASM plugin ran over 5 directives")
+            .lacks("ran out");
+        out
+    });
+}
+
+#[test]
+fn python_plugin_memory_cap_is_host_configurable() {
+    if !python_ready() {
+        return;
+    }
+    let dir = ledger("plugin \"hog.py\"");
+    std::fs::write(
+        dir.path().join("hog.py"),
+        "__plugins__ = ['hog']\n\
+         def hog(entries, options_map):\n    \
+             held = bytearray(300 << 20)\n    \
+             return entries, [ValidationError(None, f'held {len(held) >> 20} MiB', None)]\n",
+    )
+    .unwrap();
+    both_memory_sources(dir.path(), |flags| {
+        let mut args = flags.to_vec();
+        args.extend(["check", "ledger.beancount"]);
+        let out = run(dir.path(), &args);
+        out.has("held 300 MiB").lacks("MemoryError");
+        out
+    });
+}
+
+#[test]
+fn wasm_importer_memory_cap_is_host_configurable() {
+    let Some(guests) = guests() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    both_memory_sources(dir.path(), |flags| {
+        let out = extract(dir.path(), guests, "alloc", flags);
+        out.has("2024-01-15 * \"conformance import\"")
+            .lacks("ran out");
+        out
+    });
+}
+
+/// Out-of-range caps are refused, from the flag and from the config file.
+#[test]
+fn memory_cap_range_is_checked() {
+    let dir = ledger("");
+    for mb in ["0", "4097"] {
+        let out = run(
+            dir.path(),
+            &["--plugin-max-memory-mb", mb, "check", "ledger.beancount"],
+        );
+        assert_eq!(out.code, Some(2), "{}", out.text);
+        std::fs::write(
+            dir.path().join("config.toml"),
+            format!("[plugins]\nmax_memory_mb = {mb}\n"),
+        )
+        .unwrap();
+        run(dir.path(), &["check", "ledger.beancount"])
+            .has("max_memory_mb must be between 1 and 4096");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Limits: a hostile Python plugin (#2500 second review)
+// ---------------------------------------------------------------------------
+
+/// A temp dir with `ledger.beancount` running `name.py` = `source`.
+fn python_plugin(name: &str, source: &str) -> tempfile::TempDir {
+    let dir = ledger(&format!("plugin \"{name}.py\""));
+    std::fs::write(dir.path().join(format!("{name}.py")), source).unwrap();
+    dir
+}
+
+/// Waiting burns no fuel, so before the wall-clock deadline a plugin that
+/// slept hung the host for as long as it liked.
+#[test]
+fn python_plugin_sleep_is_stopped_by_the_budget() {
+    if !python_ready() {
+        return;
+    }
+    let dir = python_plugin(
+        "nap",
+        "import time\n__plugins__ = ['nap']\ndef nap(entries, options_map):\n    \
+         time.sleep(90)\n    return entries, []\n",
+    );
+    let start = std::time::Instant::now();
+    run(
+        dir.path(),
+        &["--plugin-max-time-secs", "2", "check", "ledger.beancount"],
+    )
+    .failed_cleanly()
+    .has(&budget(2))
+    .has("time spent waiting or sleeping counts");
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(60),
+        "took {:?}",
+        start.elapsed()
+    );
+}
+
+/// A runaway recursion is contained: it ends in the guest (out of stack
+/// or memory, whichever comes first) and rledger reports it. Before, the
+/// guest ran on the host thread's stack, smaller than the guest's, and
+/// the host aborted with a stack overflow (SIGABRT, no diagnostics).
+#[test]
+fn python_plugin_deep_recursion_is_contained() {
+    if !python_ready() {
+        return;
+    }
+    let dir = python_plugin(
+        "deep",
+        "import sys\nsys.setrecursionlimit(10**8)\n__plugins__ = ['deep']\n\
+         def down(n):\n    return down(n + 1) + 1\n\
+         def deep(entries, options_map):\n    down(0)\n    return entries, []\n",
+    );
+    let out = run(dir.path(), &["check", "ledger.beancount"]);
+    out.failed_cleanly();
+    assert!(
+        out.text
+            .contains("the plugin recursed past the sandbox's call stack")
+            || out.text.contains(OUT_OF_MEMORY),
+        "{}",
+        out.text
+    );
+}
+
+/// Each open file is a host descriptor; a plugin that opens without
+/// closing is stopped before it exhausts the host's (it reached the
+/// 1024 `ulimit -n` before).
+#[test]
+fn python_plugin_open_files_are_capped() {
+    if !python_ready() {
+        return;
+    }
+    let dir = python_plugin(
+        "hoard",
+        "__plugins__ = ['hoard']\ndef hoard(entries, options_map):\n    \
+         held = []\n    while True:\n        held.append(open('/work/script.py', 'rb'))\n",
+    );
+    run(dir.path(), &["check", "ledger.beancount"])
+        .failed_cleanly()
+        .has("the plugin held more than 256 files open at once");
+}
+
+/// What a plugin writes to its result stream itself is checked, not
+/// trusted: output cut short, bytes that are not UTF-8, and an entry that
+/// is not valid are each reported, and the load goes on (an invalid
+/// entry used to abort it with `processing pipeline failed`, exit 2).
+#[test]
+fn python_plugin_crafted_output_is_rejected() {
+    if !python_ready() {
+        return;
+    }
+    let forge = |payload: &str| {
+        format!(
+            "import os\n__plugins__ = ['forge']\ndef forge(entries, options_map):\n    \
+             os.write(1, {payload})\n    os._exit(0)\n"
+        )
+    };
+    let entry =
+        r#"{"date": "2024-01-01", "type": "close", "account": "Assets:Bank", "metadata": []}"#;
+    let cut_short = format!("b'{{\"insert\": {entry}}}\\n'");
+    run(
+        python_plugin("forge", &forge(&cut_short)).path(),
+        &["check", "ledger.beancount"],
+    )
+    .failed_cleanly()
+    .has("the plugin's output ends before its result");
+    run(
+        python_plugin(
+            "forge",
+            &forge(r#"b'\xff\xfe\n{"ran": true, "errors": []}\n'"#),
+        )
+        .path(),
+        &["check", "ledger.beancount"],
+    )
+    .failed_cleanly()
+    .has("plugin output is not UTF-8");
+    let bad_date = format!(
+        "b'{{\"insert\": {}}}\\n{{\"ran\": true, \"errors\": []}}\\n'",
+        entry.replace("2024-01-01", "9999-99-99")
+    );
+    run(python_plugin("forge", &forge(&bad_date)).path(), &["check", "ledger.beancount"])
+        .failed_cleanly()
+        .has("plugin returned an entry that is not valid (invalid date format: 9999-99-99); its changes were discarded")
+        .lacks("processing pipeline failed");
+}
+
+/// Native `leafonly` counts an account as a parent when a child is only
+/// opened, as bean-check does (`Assets:Bank:Sub` is never posted to).
+#[test]
+fn native_leafonly_counts_opened_children() {
+    let dir = ledger("plugin \"leafonly\"");
+    run(dir.path(), &["check", "ledger.beancount"])
+        .has("Posting to non-leaf account 'Assets:Bank'")
+        .lacks("Python");
 }

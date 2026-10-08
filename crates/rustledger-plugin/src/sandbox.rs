@@ -256,10 +256,7 @@ pub fn explain_limit(
     if error.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
         Some(time_budget_exceeded(max_time_secs))
     } else if limiter.growth_denied() {
-        Some(format!(
-            "it ran out of the {} MiB sandbox memory limit",
-            limiter.max_memory() >> 20
-        ))
+        Some(memory_cap_exceeded(limiter.max_memory()))
     } else {
         None
     }
@@ -272,6 +269,16 @@ pub fn time_budget_exceeded(max_time_secs: u64) -> String {
         "it exceeded its {}-second time budget (rledger raises it with \
          --plugin-max-time-secs or [plugins] max_time_secs)",
         max_time_secs.max(1)
+    )
+}
+
+/// "It ran out of the N MiB sandbox memory limit", and how to raise it.
+#[must_use]
+pub fn memory_cap_exceeded(max_memory: usize) -> String {
+    format!(
+        "it ran out of the {} MiB sandbox memory limit (rledger raises it with \
+         --plugin-max-memory-mb or [plugins] max_memory_mb)",
+        max_memory >> 20
     )
 }
 

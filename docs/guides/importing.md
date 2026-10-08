@@ -215,7 +215,7 @@ Persistent setup goes in `importers.toml`:
 wasm_importer_dir = "/etc/rledger/importers.d"
 ```
 
-The sandbox is the same one used for directive plugins: no filesystem, no network, no WASI, with a 256 MiB memory cap and a time budget of at most 30 seconds per call. The budget is raised with `[plugins] max_time_secs` in the rledger config file or `--plugin-max-time-secs`; see [Plugin Time Budget](../getting-started/configuration.md#plugin-time-budget). To **author** a WASM importer, depend on `rustledger-plugin-types` with the `guest` feature and use the `wasm_importer_main!` macro — see [`examples/wasm-importer-csv-example`](https://github.com/rustledger/rustledger/tree/main/examples/wasm-importer-csv-example) for a reference implementation.
+The sandbox is the same one used for directive plugins: no filesystem, no network, no WASI, with a memory cap (256 MiB by default) and a time budget (at most 30 seconds per call by default). They are raised with `[plugins] max_memory_mb` and `max_time_secs` in the rledger config file, or `--plugin-max-memory-mb` and `--plugin-max-time-secs`; see [Plugin Time Budget](../getting-started/configuration.md#plugin-time-budget) and [Plugin Memory Cap](../getting-started/configuration.md#plugin-memory-cap). To **author** a WASM importer, depend on `rustledger-plugin-types` with the `guest` feature and use the `wasm_importer_main!` macro — see [`examples/wasm-importer-csv-example`](https://github.com/rustledger/rustledger/tree/main/examples/wasm-importer-csv-example) for a reference implementation.
 
 ## Multiple Accounts
 

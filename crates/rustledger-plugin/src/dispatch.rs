@@ -32,6 +32,29 @@ pub enum PluginPass {
     Regular,
 }
 
+/// Host-chosen limits for one sandboxed (WASM or Python) plugin call;
+/// `None` keeps the sandbox default (30 seconds, 256 MiB). See
+/// [`ResolvedPlugin::run_with_limits`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PluginLimits {
+    /// The time budget, in seconds.
+    pub max_time_secs: Option<u64>,
+    /// The linear-memory cap, in bytes (wasm32 addresses at most 4 GiB).
+    pub max_memory_bytes: Option<usize>,
+}
+
+impl PluginLimits {
+    /// Limits of `max_time_secs` seconds and `max_memory_bytes` bytes.
+    #[must_use]
+    pub const fn new(max_time_secs: Option<u64>, max_memory_bytes: Option<usize>) -> Self {
+        Self {
+            max_time_secs,
+            max_memory_bytes,
+        }
+    }
+}
+
 /// A plugin reference resolved to a concrete runtime, ready to [`run`].
 ///
 /// [`run`]: ResolvedPlugin::run
@@ -314,6 +337,43 @@ impl ResolvedPlugin<'_> {
         base_dir: &Path,
         max_time_secs: Option<u64>,
     ) -> Result<PluginOutput, PluginRunError> {
+        self.run_with_limits(
+            wrappers,
+            options,
+            config,
+            base_dir,
+            PluginLimits {
+                max_time_secs,
+                ..PluginLimits::default()
+            },
+        )
+    }
+
+    /// [`Self::run`] with host-chosen [`PluginLimits`] (time budget and
+    /// memory cap) for a WASM or Python plugin. Like the time budget, the
+    /// memory cap is the HOST's setting, never the ledger's: a ledger that
+    /// could raise it could make any service that loads it allocate up to
+    /// 4 GiB per plugin. Native plugins have neither limit.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run`].
+    #[cfg_attr(
+        not(all(feature = "python-plugins", feature = "wasm-runtime")),
+        allow(unused_variables)
+    )]
+    pub fn run_with_limits(
+        &self,
+        wrappers: Vec<DirectiveWrapper>,
+        options: &PluginOptions,
+        config: &Option<String>,
+        base_dir: &Path,
+        limits: PluginLimits,
+    ) -> Result<PluginOutput, PluginRunError> {
+        let PluginLimits {
+            max_time_secs,
+            max_memory_bytes,
+        } = limits;
         match self {
             ResolvedPlugin::Native(plugin) => Ok(plugin.process(PluginInput {
                 directives: wrappers,
@@ -325,6 +385,9 @@ impl ResolvedPlugin<'_> {
                 let mut runtime = crate::RuntimeConfig::default();
                 if let Some(secs) = max_time_secs {
                     runtime.max_time_secs = secs;
+                }
+                if let Some(bytes) = max_memory_bytes {
+                    runtime.max_memory = bytes;
                 }
                 let mut mgr = crate::PluginManager::with_config(runtime);
                 let idx = mgr.load(path).map_err(|e| PluginRunError::WasmFailed {
@@ -353,6 +416,9 @@ impl ResolvedPlugin<'_> {
                 })?;
                 if let Some(secs) = max_time_secs {
                     runtime = runtime.with_max_time_secs(secs);
+                }
+                if let Some(bytes) = max_memory_bytes {
+                    runtime = runtime.with_max_memory(bytes);
                 }
                 let input = PluginInput {
                     directives: wrappers,

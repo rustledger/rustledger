@@ -108,7 +108,7 @@ fn rows(ledger: &str, bql: &str) -> Vec<Vec<String>> {
 }
 
 #[test]
-fn min_max_over_amounts_across_currencies() {
+fn amounts_min_and_max_are_order_by_ends_across_currencies() {
     assert_eq!(
         rows(MIXED, "SELECT min(units(position)), max(units(position))"),
         vec![vec!["-5.00 EUR", "5 USD"]],
@@ -116,7 +116,7 @@ fn min_max_over_amounts_across_currencies() {
 }
 
 #[test]
-fn min_max_over_positions() {
+fn positions_min_matches_beanquery_and_max_is_order_by_last() {
     // MIN matches bean-query (`-5 USD`). MAX is the last position in ORDER
     // BY's order: USD ranks before EUR in beancount's `Position.sortkey`, so
     // that is `5.00 EUR`. bean-query's tuple fallback answers `5 USD`.
@@ -138,7 +138,7 @@ fn min_max_over_positions() {
 }
 
 #[test]
-fn min_max_over_inventories() {
+fn inventories_max_is_order_by_last() {
     // The running `balance` holds 5 USD, then nothing, then 5.00 EUR, then
     // nothing. bean-query also answers 5.00 EUR for the MAX.
     let got = rows(MIXED, "SELECT max(balance)");
@@ -231,7 +231,7 @@ fn min_max_are_order_by_first_and_last_for_lots_and_inventories() {
 
 /// The aggregate also works where HAVING evaluates it.
 #[test]
-fn max_over_amounts_in_having() {
+fn max_over_amounts_works_in_having() {
     assert_eq!(
         rows(
             LOTS,
@@ -250,7 +250,7 @@ fn max_over_amounts_in_having() {
 /// Strings, accounts, dates and booleans keep their order; only amounts,
 /// positions and inventories are new (#2447). Values are bean-query's.
 #[test]
-fn min_max_over_other_types_unchanged() {
+fn min_max_over_strings_dates_and_booleans_unchanged() {
     assert_eq!(
         rows(
             LOTS,

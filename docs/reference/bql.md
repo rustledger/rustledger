@@ -240,7 +240,7 @@ the pivot, and are sorted by the first column's values when there is none.
 | `first(x)` | First value |
 | `last(x)` | Last value |
 | `min(x)` | Minimum value: the first value `ORDER BY x` would give (NULLs skipped) |
-| `max(x)` | Maximum value: the last value `ORDER BY x` would give (NULLs skipped) |
+| `max(x)` | Maximum value: the first value `ORDER BY x DESC` would give (NULLs skipped) |
 | `avg(x)` | Average value |
 
 ### Examples

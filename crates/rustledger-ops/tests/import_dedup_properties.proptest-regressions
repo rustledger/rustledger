@@ -1,0 +1,10 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 546fa4d69c30d5e605cdae1e5e22b6ae9fae58eb5e77e2f2414d09c9215ddda1 # shrinks to rows = [(0, -100, "EUR", false, "", None)], cut = 1
+cc 9a619092a0ca1bc6a482bf8b91f3b416475b4cf0643aad9dbc8c4f15e6304ae3 # shrinks to new = [(0, -100, "EUR", false, "coffee", None), (0, -100, "EUR", false, "coffee", None), (0, -400, "EUR", true, "coffee", Some(1)), (0, -100, "EUR", false, "coffee", None), (0, -100, "EUR", false, "coffee", None), (0, -100, "EUR", false, "coffee", None), (0, -400, "EUR", true, "coffee shop", Some(1))], existing = [(0, -400, "EUR", true, "coffee", Some(1))], seed = 7731015564171660270
+cc 709ac6e3055b107bf42110376a01df8d21a7cbac233529ca0dc56f9cb2c84e15 # shrinks to rows = [(0, -100, "EUR", false, "coffee", None), (0, -250, "USD", true, "rent", Some(1)), (0, -100, "EUR", false, "coffee", None), (0, -100, "EUR", false, "coffee", None), (0, -100, "EUR", false, "coffee", None), (0, -250, "USD", true, "coffee", Some(1))], cut = 2
+cc a5fbcb3d6c36c191cdc5affd4b4d1460fce89515623af406f4c963f41a5c93dc # shrinks to new = [(0, -400, "EUR", true, "coffee", false), (0, -100, "EUR", false, "coffee", false), (0, -400, "EUR", true, "coffee", true), (0, -400, "EUR", true, "shop", false)], existing = [(0, -100, "EUR", false, "coffee", false), (0, -100, "EUR", false, "coffee", false), (0, -100, "EUR", false, "coffee", false), (0, -400, "EUR", true, "coffee", false), (0, -400, "EUR", true, "coffee shop", false)], seed = 1628291163514483242

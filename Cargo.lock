@@ -3523,6 +3523,7 @@ dependencies = [
  "proptest",
  "regex",
  "rust_decimal",
+ "rustc-hash 2.1.3",
  "rustledger-core",
  "rustledger-parser",
  "rustledger-plugin-types",

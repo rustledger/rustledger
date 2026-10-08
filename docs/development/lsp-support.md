@@ -53,6 +53,19 @@ regular-plugins → Late) on every `didOpen` / `didChange` / `didSave`,
 producing the same verdict `rledger check` does. The lens follows
 that verdict.
 
+The exception is plugins that are not native. The LSP runs only native
+plugins and skips WASM and Python plugins, reporting each skipped plugin
+as an E8006 information diagnostic, so its verdict can differ from
+`rledger check` on a ledger that uses them. A plugin name that is neither
+native nor a WASM or Python reference (a `.wasm` or `.py` file, a path, a
+dotted module name, or a `python:` prefix), such as a misspelled native
+plugin, is not skipped silently: it is reported as E8001 "Plugin not
+found". The skip is a load option
+(`LoadOptions::native_plugins_only`), not an absent feature: building the
+LSP together with the CLI compiles the WASM and Python runtimes into it
+through Cargo feature unification, and it skips those plugins all the
+same (#2486).
+
 Pre-#1264 the lens ran a separate `parse → sort → book` evaluator
 that silently dropped plugins. The classic symptom was a `⚠ ...
 (see diagnostic)` lens on a file `rledger check` accepted — the

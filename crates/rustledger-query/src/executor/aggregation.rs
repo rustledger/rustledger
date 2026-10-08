@@ -831,7 +831,7 @@ impl<'a> Executor<'a> {
 
     /// Evaluate an aggregate expression against a group of generic table rows.
     ///
-    /// This mirrors [`evaluate_aggregate_expr`] but operates on `&[&Row]` (table rows)
+    /// This mirrors [`Self::evaluate_aggregate_expr`] but operates on `&[&Row]` (table rows)
     /// rather than `&[&PostingContext]`. Column values are resolved by name via `column_map`.
     pub(super) fn evaluate_aggregate_table_expr(
         &self,
@@ -1180,8 +1180,8 @@ impl<'a> Executor<'a> {
 
     /// Evaluate a HAVING clause expression against a group of table rows.
     ///
-    /// Mirrors [`evaluate_having_expr`] but dispatches aggregate function calls to
-    /// [`evaluate_aggregate_table_expr`] instead of [`evaluate_aggregate_expr`].
+    /// Mirrors [`Self::evaluate_having_expr`] but dispatches aggregate function calls to
+    /// [`Self::evaluate_aggregate_table_expr`] instead of [`Self::evaluate_aggregate_expr`].
     pub(super) fn evaluate_having_table_expr(
         &self,
         expr: &Expr,

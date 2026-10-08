@@ -77,9 +77,13 @@ jobs:
           # Hyperfine — authenticated `gh api` (5000/hr vs 60/hr) and
           # `curl -f` so download errors don't cascade into "not in
           # gzip format" (see issue surfaced in PR #1015 CI).
-          HYPERFINE_VERSION=$(gh api repos/sharkdp/hyperfine/releases/latest --jq '.tag_name')
+          # Pinned: hyperfine v2.0.0 (2026-10-07) moved `mean`/`stddev` under
+          # `summary.time_wall_clock` in --export-json, which the parsers below
+          # read as `entry['mean']` (KeyError on v2). Bump deliberately, with the
+          # parsers, rather than tracking `latest`.
+          HYPERFINE_VERSION=v1.21.0
           if [ -z "${HYPERFINE_VERSION:-}" ] || [ "$HYPERFINE_VERSION" = "null" ]; then
-            echo "::error::Failed to fetch hyperfine latest release tag" >&2
+            echo "::error::HYPERFINE_VERSION is not set" >&2
             exit 1
           fi
           curl -sSfL "https://github.com/sharkdp/hyperfine/releases/download/${HYPERFINE_VERSION}/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C /tmp
@@ -581,9 +585,13 @@ jobs:
           sudo mv /tmp/hledger /usr/local/bin/
 
           # Hyperfine — authenticated lookup + hard-fail on download.
-          HYPERFINE_VERSION=$(gh api repos/sharkdp/hyperfine/releases/latest --jq '.tag_name')
+          # Pinned: hyperfine v2.0.0 (2026-10-07) moved `mean`/`stddev` under
+          # `summary.time_wall_clock` in --export-json, which the parsers below
+          # read as `entry['mean']` (KeyError on v2). Bump deliberately, with the
+          # parsers, rather than tracking `latest`.
+          HYPERFINE_VERSION=v1.21.0
           if [ -z "${HYPERFINE_VERSION:-}" ] || [ "$HYPERFINE_VERSION" = "null" ]; then
-            echo "::error::Failed to fetch hyperfine latest release tag" >&2
+            echo "::error::HYPERFINE_VERSION is not set" >&2
             exit 1
           fi
           curl -sSfL "https://github.com/sharkdp/hyperfine/releases/download/${HYPERFINE_VERSION}/hyperfine-${HYPERFINE_VERSION}-x86_64-unknown-linux-gnu.tar.gz" | tar xz -C /tmp

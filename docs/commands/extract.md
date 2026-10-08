@@ -217,8 +217,11 @@ counted):
 Rows on the same date are never reordered against each other except by that
 one reversal. Other directives an importer produces, such as the balance
 assertion from an OFX `LEDGERBAL`, are placed by date in the canonical order
-`rledger format` and booking use. The `--balance` assertion is always written
-last. Duplicate detection (`--existing`) runs after ordering, so its report of
+`rledger format` and booking use. Moving a balance assertion never changes
+whether it holds: beancount and `rledger check` evaluate a `balance` at the
+start of its date, before that day's transactions, whichever line it is on, so
+one dated on the statement's last day is written ahead of that day's rows. The
+`--balance` assertion is always written last. Duplicate detection (`--existing`) runs after ordering, so its report of
 skipped rows lists them in output order.
 
 The assumption behind the reversal: **a bank that lists days newest-first lists

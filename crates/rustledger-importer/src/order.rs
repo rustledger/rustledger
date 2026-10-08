@@ -36,6 +36,14 @@ use rustledger_core::{Directive, booking_sort_key};
 /// balance assertion an OFX `LEDGERBAL` becomes, is not a row and is placed
 /// by the sort alone.
 ///
+/// Moving a balance assertion cannot change whether it holds. Beancount and
+/// `rledger check` both evaluate a `balance` at the START of its date, before
+/// that day's transactions, whatever line it is written on: the loader sorts
+/// by (date, directive type) and a balance ranks ahead of a transaction. The
+/// sort here uses that same key, so an assertion dated on a statement's last
+/// day is written ahead of that day's rows, which is where it is checked. (A
+/// closing balance must be dated the day after; the OFX importer does that.)
+///
 /// A tie, including a statement whose rows all share one date, keeps file
 /// order: the direction cannot be told, and guessing would reorder a day.
 /// An oldest-first statement comes back exactly as it went in.
@@ -262,6 +270,39 @@ mod tests {
             ("2024-01-02", "b2"),
         ]);
         assert_eq!(narrations(&extract(&f)), ["a1", "a2", "b1", "b2"]);
+    }
+
+    /// A balance an importer emits on the statement's last date is written
+    /// ahead of that day's transactions: that is where beancount and
+    /// `rledger check` evaluate it whatever its line, so the output reads the
+    /// way it is checked and the check result cannot change.
+    #[test]
+    fn a_same_date_balance_is_written_before_that_days_transactions() {
+        use rustledger_core::{Amount, Balance};
+        let mut directives = CsvImporter
+            .extract_string(
+                "Date,Description,Amount\n2024-01-03,c,-1.00\n2024-01-02,b,-1.00\n",
+                &config(),
+            )
+            .unwrap()
+            .directives;
+        directives.push(Directive::Balance(Balance::new(
+            "2024-01-03".parse().unwrap(),
+            "Assets:Bank",
+            Amount::new(rust_decimal::Decimal::new(100, 0), "USD"),
+        )));
+        let shape: Vec<String> = chronological(directives)
+            .iter()
+            .map(|d| match d {
+                Directive::Transaction(t) => format!("{} {}", t.date, t.narration),
+                Directive::Balance(b) => format!("{} balance", b.date),
+                other => format!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            shape,
+            ["2024-01-02 b", "2024-01-03 balance", "2024-01-03 c"]
+        );
     }
 
     /// The OFX `LEDGERBAL` assertion is not a row: it does not vote on

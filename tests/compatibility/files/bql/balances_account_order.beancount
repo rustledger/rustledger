@@ -1,0 +1,47 @@
+; BALANCES row order (#2409): bean-query orders rows by account_sortkey,
+; account type first (Assets, Liabilities, Equity, Income, Expenses), then
+; name. Every account type is present, each in a transaction that touches
+; Assets (the corpus query is `BALANCES FROM has_account('Assets')`), so a
+; plain name order (Assets, Equity, Expenses, Income, Liabilities) differs.
+
+2024-01-01 open Assets:Bank:Checking USD
+2024-01-01 open Assets:Cash USD
+2024-01-01 open Liabilities:CreditCard USD
+2024-01-01 open Liabilities:Loan USD
+2024-01-01 open Equity:Opening-Balances USD
+2024-01-01 open Income:Salary USD
+2024-01-01 open Income:Interest USD
+2024-01-01 open Expenses:Food USD
+2024-01-01 open Expenses:Rent USD
+
+2024-01-02 * "Opening balance"
+  Assets:Bank:Checking   1000.00 USD
+  Equity:Opening-Balances
+
+2024-01-15 * "Payroll"
+  Assets:Bank:Checking   3000.00 USD
+  Income:Salary
+
+2024-01-20 * "Interest"
+  Assets:Bank:Checking      1.25 USD
+  Income:Interest
+
+2024-02-01 * "Rent"
+  Expenses:Rent          1500.00 USD
+  Assets:Bank:Checking
+
+2024-02-03 * "Groceries on the card"
+  Expenses:Food            85.40 USD
+  Liabilities:CreditCard
+
+2024-02-10 * "Pay the card"
+  Liabilities:CreditCard   85.40 USD
+  Assets:Bank:Checking
+
+2024-02-12 * "Borrow"
+  Assets:Cash             200.00 USD
+  Liabilities:Loan
+
+2024-02-14 * "Lunch"
+  Expenses:Food            12.00 USD
+  Assets:Cash

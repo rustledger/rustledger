@@ -239,8 +239,8 @@ the pivot, and are sorted by the first column's values when there is none.
 | `count(*)` | Count rows |
 | `first(x)` | First value |
 | `last(x)` | Last value |
-| `min(x)` | Minimum value |
-| `max(x)` | Maximum value |
+| `min(x)` | Minimum value: the first value `ORDER BY x` would give (NULLs skipped) |
+| `max(x)` | Maximum value: the last value `ORDER BY x` would give (NULLs skipped) |
 | `avg(x)` | Average value |
 
 ### Examples
@@ -250,6 +250,13 @@ SELECT account, sum(position) GROUP BY account
 SELECT count(*) WHERE account ~ "Expenses"
 SELECT min(date), max(date)
 ```
+
+`min` and `max` work on numbers, strings, dates, booleans (`false < true`),
+amounts, positions and inventories, in `ORDER BY`'s order. Amounts compare by
+currency, then number, so across currencies the result follows the currency
+order, not size: `max(units(position))` over `5 EUR` and `3 USD` is `3 USD`.
+bean-query answers `5 EUR` there; see section 15 of the
+[compatibility notes](compatibility.md).
 
 ## Scalar Functions
 

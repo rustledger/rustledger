@@ -342,3 +342,51 @@ fn min_max_over_accounts_is_string_order_not_account_type_order() {
         vec![vec!["Equity:Opening", "Liabilities:Card"]],
     );
 }
+
+/// Every other place a MIN/MAX over amounts is evaluated: an aggregate in
+/// ORDER BY that is not selected, HAVING on the table path (`#postings` and a
+/// subquery), and PIVOT over the aggregate. All failed with "cannot compare
+/// values" before #2447; all follow ORDER BY's order now. Where bean-query
+/// differs (`Assets:Cash`'s MAX is `10 EUR` there), it is the documented MAX
+/// divergence.
+#[test]
+fn min_max_over_amounts_in_order_by_having_and_pivot() {
+    let by_cash = vec![
+        vec!["Assets:Cash", "-30 USD"],
+        vec!["Equity:Open", "-6 USD"],
+    ];
+    for bql in [
+        "SELECT account, max(units(position)) FROM #postings GROUP BY account \
+         HAVING currency(max(units(position))) = 'USD' ORDER BY account",
+        "SELECT account, max(u) FROM (SELECT account, units(position) AS u) \
+         GROUP BY account HAVING currency(max(u)) = 'USD' ORDER BY account",
+    ] {
+        assert_eq!(rows(LOTS, bql), by_cash, "{bql}");
+    }
+    // ORDER BY an aggregate the query computes: groups sort by their MAX.
+    assert_eq!(
+        rows(
+            LOTS,
+            "SELECT account, max(units(position)) GROUP BY account \
+             ORDER BY max(units(position))"
+        ),
+        vec![
+            vec!["Assets:Cash", "-30 USD"],
+            vec!["Equity:Open", "-6 USD"],
+            vec!["Assets:Stock", "1 Y"],
+        ],
+    );
+    // PIVOT reshapes the per-group MAX; one year, so one value column.
+    assert_eq!(
+        rows(
+            LOTS,
+            "SELECT account, year, max(units(position)) GROUP BY account, year \
+             PIVOT BY account, year"
+        ),
+        vec![
+            vec!["Assets:Cash", "-30 USD"],
+            vec!["Assets:Stock", "1 Y"],
+            vec!["Equity:Open", "-6 USD"],
+        ],
+    );
+}

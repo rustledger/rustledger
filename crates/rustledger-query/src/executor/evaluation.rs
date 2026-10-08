@@ -600,8 +600,9 @@ impl Executor<'_> {
 /// an evaluation per posting, with the same answer; putting a posting column
 /// on it brings back #2414, where the first posting answered for all of them.
 /// `filename`, `lineno` and `meta` are absent: on a posting row they are the
-/// posting's.
-const FROM_ENTRY_COLUMNS: &[&str] = &[
+/// posting's. `from_filter_column_lists_match_the_executor` checks this list
+/// against the row evaluator's columns.
+pub(super) const FROM_ENTRY_COLUMNS: &[&str] = &[
     "date",
     "year",
     "month",
@@ -663,8 +664,9 @@ pub(super) fn from_filter_reads_postings(expr: &Expr) -> bool {
 
 /// Columns of a posting row that the entries `PRINT` prints do not have:
 /// beanquery's `postings` columns that its `entries` table lacks, plus
-/// rledger's own posting columns.
-const POSTING_ONLY_COLUMNS: &[&str] = &[
+/// rledger's own posting columns. Checked by the same test as
+/// [`FROM_ENTRY_COLUMNS`].
+pub(super) const POSTING_ONLY_COLUMNS: &[&str] = &[
     "account",
     "other_accounts",
     "position",

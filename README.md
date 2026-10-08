@@ -270,7 +270,7 @@ Automatically identifies inter-account transfers by matching opposite-sign amoun
 
 ### Duplicate Detection
 
-Fuzzy matching on date + amount + payee/narration prevents importing the same transaction twice. Structural fingerprinting (BLAKE3) provides stable hashes for comparison.
+Bank transaction ids (`^ofx-…`, `^csv-…` links) and matching on date + the account's amount + payee/narration prevent importing the same transaction twice; identical transactions you really made twice are kept. Structural fingerprinting (BLAKE3) provides stable hashes for comparison.
 
 ### Balance Reconciliation
 

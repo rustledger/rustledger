@@ -5,14 +5,19 @@
 //! - **Structural** — exact hash match using [`crate::fingerprint::structural_hash`].
 //!   Finds transactions that are byte-for-byte identical (excluding metadata).
 //!
-//! - **Fuzzy** — approximate match using date + amount + text similarity.
-//!   Finds transactions that are likely the same despite minor differences
-//!   (e.g., different payee formatting between bank and ledger).
+//! - **Import** — [`find_import_duplicates`] matches imported transactions
+//!   against an existing ledger: shared id links (`^ofx-…`, `^csv-…`) with
+//!   the same account, commodity and amount first, then the same date,
+//!   account, commodity and amount with identical or similar payee/narration
+//!   text. Existing transactions are a multiset, so each
+//!   absorbs at most one new transaction.
 //!
 //! - **Fingerprint** (future, Phase 1) — stable BLAKE3 fingerprint match for
 //!   import deduplication across runs.
 
 use std::collections::HashSet;
+
+use rustc_hash::FxHashMap as HashMap;
 
 use rust_decimal::Decimal;
 use rustledger_core::{Directive, Transaction};
@@ -69,8 +74,69 @@ pub fn find_structural_duplicates(directives: &[DirectiveWrapper]) -> Vec<Struct
 }
 
 // ============================================================================
-// Fuzzy dedup — for matching imported transactions against existing ledger
+// Import dedup — matching imported transactions against an existing ledger
 // ============================================================================
+
+/// Link prefix marking a bank-assigned OFX transaction id (`FITID`).
+pub const OFX_ID_LINK_PREFIX: &str = "ofx-";
+
+/// Link prefix marking a CSV transaction id (an importer's
+/// `transaction_id_column`).
+pub const CSV_ID_LINK_PREFIX: &str = "csv-";
+
+/// Every link prefix that marks a source-assigned transaction id.
+///
+/// Each prefix is its own namespace: ids are only compared within one, so an
+/// OFX id and a CSV id never contradict each other (a bank whose export moved
+/// from OFX to CSV still dedups by text).
+const ID_LINK_PREFIXES: &[&str] = &[OFX_ID_LINK_PREFIX, CSV_ID_LINK_PREFIX];
+
+/// Render a source transaction id as a beancount link under `prefix`, or
+/// `None` if nothing usable survives.
+///
+/// Links lex as `\^[a-zA-Z0-9-_/.]+`, and a bank's id is an opaque string that
+/// need not respect that. Anything outside the set becomes `-`, so the emitted
+/// ledger re-parses.
+///
+/// Two different ids collide after sanitizing when they differ only in
+/// characters that all map to `-` (`a b` and `a:b`). Dedup therefore treats an
+/// equal id link as identity only when the account, commodity and amount also
+/// agree, so a collision cannot drop a different transaction.
+///
+/// # Example
+///
+/// ```
+/// use rustledger_ops::dedup::{CSV_ID_LINK_PREFIX, id_link};
+///
+/// assert_eq!(id_link(CSV_ID_LINK_PREFIX, " tx_00A1 ").as_deref(), Some("csv-tx_00A1"));
+/// assert_eq!(id_link(CSV_ID_LINK_PREFIX, "a b:c").as_deref(), Some("csv-a-b-c"));
+/// assert_eq!(id_link(CSV_ID_LINK_PREFIX, "  "), None);
+/// ```
+#[must_use]
+pub fn id_link(prefix: &str, raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+
+    // An id that sanitizes to only separators carries no information, and the
+    // resulting link would be one every such transaction shares — worse than
+    // no link at all. `-` is not the only separator that survives: `.`, `_`
+    // and `/` are all in the link charset, so `...` and `__/__` pass a
+    // `trim_matches('-')` check while meaning exactly as little. Require a
+    // character that actually identifies something.
+    if !cleaned.chars().any(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(format!("{prefix}{cleaned}"))
+}
 
 /// Configuration for fuzzy duplicate detection.
 #[derive(Debug, Clone)]
@@ -88,6 +154,307 @@ impl Default for FuzzyDedupConfig {
     }
 }
 
+/// Why a new transaction was matched to an existing one.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum DuplicateReason {
+    /// Both carry this id link (`^ofx-…`, `^csv-…`) and the same account,
+    /// commodity and amount; the date and text may differ.
+    IdLink(String),
+    /// Same date, account, commodity and amount, and identical payee/narration.
+    ExactText,
+    /// Same date, account, commodity and amount, and similar payee/narration.
+    FuzzyText,
+    /// Same date, account, commodity and amount, and NEITHER side has a payee
+    /// or narration, so nothing but the money says they are the same. Kept
+    /// apart from [`Self::ExactText`] so a report can flag these: two distinct
+    /// description-less rows on one day for one amount are indistinguishable.
+    AmountOnly,
+}
+
+impl std::fmt::Display for DuplicateReason {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IdLink(link) => write!(f, "same id link ^{link}"),
+            Self::ExactText => f.write_str("same date, amount and text"),
+            Self::FuzzyText => f.write_str("same date and amount, similar text"),
+            Self::AmountOnly => {
+                f.write_str("same date and amount, and neither has a payee or narration to compare")
+            }
+        }
+    }
+}
+
+/// One new transaction matched to the existing transaction it duplicates.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportDuplicate {
+    /// Index of the new transaction in the `new` input.
+    pub new_index: usize,
+    /// Index of the existing transaction it was matched to. Every existing
+    /// transaction appears at most once across all matches.
+    pub existing_index: usize,
+    /// What the match rests on.
+    pub reason: DuplicateReason,
+}
+
+/// Match newly imported transactions against an existing ledger.
+///
+/// The existing transactions are a **multiset**: each one absorbs at most one
+/// new transaction, so two identical coffees on one day survive a ledger that
+/// already holds one of them (#2421).
+///
+/// `account` scopes the comparison to the posting each transaction makes to
+/// the importer's account: its commodity and amount are what is compared, and
+/// an existing transaction that never touches the account is not a candidate.
+/// When the account's leg is split over several postings, its net movement
+/// per commodity is compared too. A new transaction that itself never touches
+/// `account` (a WASM importer may post elsewhere) is compared unscoped, as
+/// below, rather than skipping dedup. With `None` (a caller with no importer
+/// account, such as the component's `session.dedup`), each transaction's first
+/// posting — its account, commodity and amount — is compared instead.
+///
+/// Matching runs in three passes, strongest evidence first, so a weak match
+/// can never claim an existing transaction a stronger one needed:
+///
+/// 1. **Id links.** A shared `^ofx-…` / `^csv-…` link is a duplicate whatever
+///    the date or text say, provided the account, commodity and amount agree
+///    (so two different ids that sanitize to the same link cannot drop a
+///    different transaction).
+/// 2. **Exact text.** Same date, commodity and amount, identical
+///    (case-insensitive) payee + narration. When both are empty the match
+///    rests on the money alone and is reported as
+///    [`DuplicateReason::AmountOnly`].
+/// 3. **Fuzzy text.** Same date, commodity and amount, similar payee +
+///    narration (see [`FuzzyDedupConfig`]).
+///
+/// Passes 2 and 3 never pair two transactions that both carry ids in the same
+/// namespace: equal ids were matched in pass 1, so different ids mean two
+/// distinct transactions however alike they look. When only one side has an
+/// id (a ledger imported before ids were emitted), the text passes decide.
+///
+/// Rows are visited, and candidates offered, in a canonical content order, so
+/// which transactions survive depends only on the contents of the statement
+/// and the ledger, never on the order either lists them in. Identical empty
+/// text counts as identical, so a statement with no description column still
+/// re-imports to nothing.
+///
+/// Existing keys are computed once and bucketed by date, account, commodity
+/// and amount, so the cost is near-linear in `new + existing` rather than
+/// their product (#2422).
+///
+/// The result is ordered by `new_index`.
+///
+/// # Example
+///
+/// ```
+/// use rust_decimal::Decimal;
+/// use rustledger_core::{Amount, Posting, Transaction};
+/// use rustledger_ops::dedup::{DuplicateReason, FuzzyDedupConfig, find_import_duplicates};
+///
+/// let coffee = || {
+///     Transaction::new("2024-01-15".parse().unwrap(), "Coffee")
+///         .with_synthesized_posting(Posting::new(
+///             "Assets:Bank",
+///             Amount::new(Decimal::new(-450, 2), "EUR"),
+///         ))
+///         .with_synthesized_posting(Posting::auto("Expenses:Food"))
+/// };
+/// // Two identical coffees on the statement, one already in the ledger.
+/// let (a, b, booked) = (coffee(), coffee(), coffee());
+/// let dups = find_import_duplicates(
+///     &[&a, &b],
+///     &[&booked],
+///     Some("Assets:Bank"),
+///     &FuzzyDedupConfig::default(),
+/// );
+/// // The booked one absorbs exactly one row; the other is new.
+/// assert_eq!(dups.len(), 1);
+/// assert_eq!(dups[0].new_index, 0);
+/// assert_eq!(dups[0].reason, DuplicateReason::ExactText);
+/// ```
+#[must_use]
+pub fn find_import_duplicates(
+    new: &[&Transaction],
+    existing: &[&Transaction],
+    account: Option<&str>,
+    config: &FuzzyDedupConfig,
+) -> Vec<ImportDuplicate> {
+    let threshold = config.text_similarity_threshold;
+
+    let scoped = Index::build(existing, account);
+    let new_keys = new_keys(new, account);
+    // Built only if some new row is out of scope (see `new_keys`).
+    let unscoped = new_keys
+        .iter()
+        .flatten()
+        .any(|(_, in_scope)| !in_scope)
+        .then(|| Index::build(existing, None));
+    let index_for = |in_scope: bool| -> &Index<'_> {
+        if in_scope {
+            &scoped
+        } else {
+            unscoped.as_ref().unwrap_or(&scoped)
+        }
+    };
+
+    let mut consumed = vec![false; existing.len()];
+    let mut matched: Vec<Option<(usize, DuplicateReason)>> = vec![None; new.len()];
+
+    // Visit new rows in a canonical content order (input order only among
+    // identical rows), and candidates likewise (see `Index::build`, ranked by `TxnKey::rank`), so the
+    // rows that survive are a function of the two statements' CONTENTS: the
+    // order rows appear in the file or the ledger cannot change which
+    // transactions are kept. Without this, the greedy fuzzy pass let an
+    // earlier row claim the entry a later, better row needed.
+    let ranks: Vec<_> = new_keys
+        .iter()
+        .map(|k| k.as_ref().map(|(k, _)| k.rank()))
+        .collect();
+    let mut order: Vec<usize> = (0..new.len()).collect();
+    order.sort_by(|&a, &b| ranks[a].cmp(&ranks[b]));
+
+    // Pass 1: shared id links. The id decides whatever the date or text say,
+    // but the money must agree: a sanitized link can collide (`a b` and `a:b`
+    // both become `…-a-b`), and a collision must not drop a different
+    // transaction. A bank's id for one transaction does not change amount.
+    for &new_i in &order {
+        let Some((key, in_scope)) = &new_keys[new_i] else {
+            continue;
+        };
+        let index = index_for(*in_scope);
+        'ids: for id in &key.ids {
+            for &ex in index.by_id.get(id).map_or(&[][..], Vec::as_slice) {
+                if consumed[ex] {
+                    continue;
+                }
+                let Some(ek) = &index.keys[ex] else { continue };
+                if !same_money(&key.amounts, &ek.amounts) {
+                    continue;
+                }
+                consumed[ex] = true;
+                matched[new_i] = Some((ex, DuplicateReason::IdLink((*id).to_string())));
+                break 'ids;
+            }
+        }
+    }
+
+    // Passes 2 and 3: same amount bucket, text decides.
+    for exact in [true, false] {
+        for &new_i in &order {
+            if matched[new_i].is_some() {
+                continue;
+            }
+            let Some((key, in_scope)) = &new_keys[new_i] else {
+                continue;
+            };
+            let index = index_for(*in_scope);
+            'amounts: for amount in &key.amounts {
+                for &ex in index.by_amount.get(amount).map_or(&[][..], Vec::as_slice) {
+                    if consumed[ex] {
+                        continue;
+                    }
+                    let Some(ek) = &index.keys[ex] else {
+                        continue;
+                    };
+                    if ids_conflict(&key.ids, &ek.ids) {
+                        continue;
+                    }
+                    let hit = if exact {
+                        // Equal text, empty included: a statement with no
+                        // description column still re-imports to nothing.
+                        key.text == ek.text
+                    } else {
+                        fuzzy_text_match(&key.text, &ek.text, threshold)
+                    };
+                    if hit {
+                        consumed[ex] = true;
+                        let reason = if exact && key.text.is_empty() {
+                            DuplicateReason::AmountOnly
+                        } else if exact {
+                            DuplicateReason::ExactText
+                        } else {
+                            DuplicateReason::FuzzyText
+                        };
+                        matched[new_i] = Some((ex, reason));
+                        break 'amounts;
+                    }
+                }
+            }
+        }
+    }
+
+    matched
+        .into_iter()
+        .enumerate()
+        .filter_map(|(new_index, m)| {
+            m.map(|(existing_index, reason)| ImportDuplicate {
+                new_index,
+                existing_index,
+                reason,
+            })
+        })
+        .collect()
+}
+
+/// Each new transaction's key, and whether it is in the importer's scope:
+/// one that never touches `account` (a WASM importer may post elsewhere) is
+/// keyed unscoped, by its first posting, instead of escaping dedup.
+fn new_keys<'a>(new: &[&'a Transaction], account: Option<&str>) -> Vec<Option<(TxnKey<'a>, bool)>> {
+    new.iter()
+        .map(|t| match TxnKey::of(t, account) {
+            Some(key) => Some((key, true)),
+            None if account.is_some() => TxnKey::of(t, None).map(|key| (key, false)),
+            None => None,
+        })
+        .collect()
+}
+
+/// Existing transactions keyed once for one scope.
+struct Index<'a> {
+    keys: Vec<Option<TxnKey<'a>>>,
+    by_amount: HashMap<AmountKey<'a>, Vec<usize>>,
+    by_id: HashMap<&'a str, Vec<usize>>,
+}
+
+impl<'a> Index<'a> {
+    fn build(existing: &[&'a Transaction], account: Option<&str>) -> Self {
+        let keys: Vec<Option<TxnKey<'a>>> =
+            existing.iter().map(|t| TxnKey::of(t, account)).collect();
+        let mut by_amount: HashMap<AmountKey<'a>, Vec<usize>> = HashMap::default();
+        let mut by_id: HashMap<&'a str, Vec<usize>> = HashMap::default();
+        for (i, key) in keys.iter().enumerate() {
+            let Some(key) = key else { continue };
+            for amount in &key.amounts {
+                by_amount.entry(amount.clone()).or_default().push(i);
+            }
+            for id in &key.ids {
+                by_id.entry(id).or_default().push(i);
+            }
+        }
+        // Candidates in canonical content order (index order among equals),
+        // so the ledger's directive order cannot decide which entry a row
+        // claims.
+        let ranks: Vec<_> = keys.iter().map(|k| k.as_ref().map(TxnKey::rank)).collect();
+        for bucket in by_amount.values_mut().chain(by_id.values_mut()) {
+            // Stable, so index order breaks ties between identical entries.
+            bucket.sort_by(|&a, &b| ranks[a].cmp(&ranks[b]));
+        }
+        Self {
+            keys,
+            by_amount,
+            by_id,
+        }
+    }
+}
+
+/// Whether two keys share an account, commodity and amount, on any date.
+fn same_money(a: &[AmountKey<'_>], b: &[AmountKey<'_>]) -> bool {
+    a.iter().any(|x| {
+        b.iter()
+            .any(|y| x.account == y.account && x.currency == y.currency && x.number == y.number)
+    })
+}
+
 /// Result of a fuzzy duplicate match.
 #[derive(Debug)]
 pub struct FuzzyDuplicateMatch {
@@ -97,100 +464,170 @@ pub struct FuzzyDuplicateMatch {
     pub existing_index: usize,
 }
 
-/// Find fuzzy duplicates between new and existing transactions.
+/// Find duplicates between new and existing directives, with no importer
+/// account to scope by.
 ///
-/// Matches on: same date, same first-posting amount, and fuzzy text match
-/// on payee/narration. Returns indices of new transactions that are
-/// probable duplicates of existing ones.
+/// [`find_import_duplicates`] with `account = None` over the transactions of
+/// each list: each transaction's first posting (account, commodity, amount)
+/// is compared, existing transactions are consumed one match each, and id
+/// links are decisive. Indices are into the directive slices; directives that
+/// are not transactions never match.
 #[must_use]
 pub fn find_fuzzy_duplicates(
     new_directives: &[Directive],
     existing_directives: &[Directive],
     config: &FuzzyDedupConfig,
 ) -> Vec<FuzzyDuplicateMatch> {
-    let threshold = config.text_similarity_threshold;
-    // Pre-compute each existing transaction's comparison key ONCE (its
-    // date/amount/text), so the per-new scan below doesn't re-derive — and
-    // re-allocate — them for every candidate.
-    let existing: Vec<(usize, TxnKey)> = existing_directives
-        .iter()
-        .enumerate()
-        .filter_map(|(i, d)| match d {
-            Directive::Transaction(txn) => Some((i, TxnKey::of(txn))),
-            _ => None,
-        })
-        .collect();
-
-    let mut matches = Vec::new();
-    for (new_i, directive) in new_directives.iter().enumerate() {
-        if let Directive::Transaction(new_txn) = directive {
-            // Compute the new transaction's key once per new transaction.
-            let key = TxnKey::of(new_txn);
-            if let Some((existing_i, _)) = existing
-                .iter()
-                .find(|(_, ek)| key.is_duplicate_of(ek, threshold))
-            {
-                matches.push(FuzzyDuplicateMatch {
-                    new_index: new_i,
-                    existing_index: *existing_i,
-                });
-            }
-        }
+    fn transactions(directives: &[Directive]) -> (Vec<usize>, Vec<&Transaction>) {
+        directives
+            .iter()
+            .enumerate()
+            .filter_map(|(i, d)| match d {
+                Directive::Transaction(t) => Some((i, t)),
+                _ => None,
+            })
+            .unzip()
     }
-    matches
+    let (new_pos, new_txns) = transactions(new_directives);
+    let (existing_pos, existing_txns) = transactions(existing_directives);
+    find_import_duplicates(&new_txns, &existing_txns, None, config)
+        .into_iter()
+        .map(|m| FuzzyDuplicateMatch {
+            new_index: new_pos[m.new_index],
+            existing_index: existing_pos[m.existing_index],
+        })
+        .collect()
 }
 
-/// Whether `new_txn` is a fuzzy duplicate of any transaction in `existing`.
-///
-/// Per-transaction convenience over the same matcher as [`find_fuzzy_duplicates`]
-/// — the single source for `rledger extract --existing` duplicate filtering,
-/// which previously had its own copy with a divergent `> 0.5` threshold (this
-/// uses `config.text_similarity_threshold`, default `>= 0.5`).
-#[must_use]
-pub fn is_duplicate(
-    new_txn: &Transaction,
-    existing: &[Transaction],
-    config: &FuzzyDedupConfig,
-) -> bool {
-    // Compute the new transaction's key once, not once per existing candidate.
-    let key = TxnKey::of(new_txn);
-    existing.iter().any(|existing_txn| {
-        key.is_duplicate_of(&TxnKey::of(existing_txn), config.text_similarity_threshold)
-    })
-}
-
-/// A transaction's fuzzy-dedup comparison key: date, first-posting amount, and
-/// the lowercased payee/narration text. Computing this once and reusing it
-/// across a scan avoids recomputing (and reallocating) `txn_text` per candidate.
-struct TxnKey {
+/// Bucket key: what two transactions must share before their text is compared.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+struct AmountKey<'a> {
     date: rustledger_core::NaiveDate,
-    amount: Option<Decimal>,
+    account: &'a str,
+    currency: &'a str,
+    /// Normalized, so `-2.5` and `-2.50` share a bucket.
+    number: Decimal,
+}
+
+/// A transaction's dedup comparison key, computed once per transaction.
+struct TxnKey<'a> {
+    /// One entry per distinct posting on the scoped account, plus the
+    /// account's net per commodity when it has several postings (or the first
+    /// posting when unscoped). Usually exactly one.
+    amounts: Vec<AmountKey<'a>>,
+    /// Links under an [`ID_LINK_PREFIXES`] namespace.
+    ids: Vec<&'a str>,
+    /// Lowercased payee + narration.
     text: String,
 }
 
-impl TxnKey {
-    fn of(txn: &Transaction) -> Self {
-        Self {
-            date: txn.date,
-            amount: first_posting_amount(txn),
-            text: txn_text(txn),
-        }
+impl<'a> TxnKey<'a> {
+    /// A content-only ordering key (borrowed, so ranking allocates nothing):
+    /// sorting by it makes the match independent of input order.
+    const fn rank(&self) -> (&str, &[&'a str], &[AmountKey<'a>]) {
+        (
+            self.text.as_str(),
+            self.ids.as_slice(),
+            self.amounts.as_slice(),
+        )
     }
 
-    /// Same date, same first-posting amount, and a fuzzy payee/narration match.
-    fn is_duplicate_of(&self, other: &Self, threshold: f64) -> bool {
-        self.date == other.date
-            && self.amount == other.amount
-            && fuzzy_text_match(&self.text, &other.text, threshold)
+    /// `None` when the transaction makes no posting to `account` (or, unscoped,
+    /// has no postings): it cannot be a duplicate of anything the importer
+    /// produced.
+    fn of(txn: &'a Transaction, account: Option<&str>) -> Option<Self> {
+        let amount_of = |p: &'a rustledger_core::Posting| {
+            let units = p.units.as_ref()?;
+            Some(AmountKey {
+                date: txn.date,
+                account: p.account.as_str(),
+                currency: units.currency()?,
+                number: units.number()?.normalize(),
+            })
+        };
+        let amounts: Vec<AmountKey<'a>> = match account {
+            Some(account) => {
+                let on_account: Vec<&'a rustledger_core::Posting> = txn
+                    .postings
+                    .iter()
+                    .map(|p| &**p)
+                    .filter(|p| p.account.as_str() == account)
+                    .collect();
+                if on_account.is_empty() {
+                    return None;
+                }
+                let mut amounts: Vec<AmountKey<'a>> =
+                    on_account.iter().filter_map(|p| amount_of(p)).collect();
+                // A ledger entry may split the account's leg across several
+                // postings (`-6.00` and `-4.00` for one `-10.00` statement
+                // row), so the account's net movement per commodity is a key
+                // too.
+                if amounts.len() > 1 {
+                    // `None` marks a commodity whose net overflows `Decimal`
+                    // (only a crafted ledger gets there): it has no net key
+                    // rather than panicking the import.
+                    let mut nets: Vec<(&'a str, Option<AmountKey<'a>>)> = Vec::new();
+                    for a in &amounts {
+                        match nets.iter_mut().find(|(c, _)| *c == a.currency) {
+                            Some((_, net)) => {
+                                *net = net.take().and_then(|mut n| {
+                                    n.number = n.number.checked_add(a.number)?;
+                                    Some(n)
+                                });
+                            }
+                            None => nets.push((a.currency, Some(a.clone()))),
+                        }
+                    }
+                    for mut n in nets.into_iter().filter_map(|(_, n)| n) {
+                        n.number = n.number.normalize();
+                        amounts.push(n);
+                    }
+                }
+                amounts
+            }
+            None => txn
+                .postings
+                .first()
+                .and_then(|p| amount_of(p))
+                .into_iter()
+                .collect(),
+        };
+        let mut unique: Vec<AmountKey<'a>> = Vec::with_capacity(amounts.len());
+        for a in amounts {
+            if !unique.contains(&a) {
+                unique.push(a);
+            }
+        }
+        let amounts = unique;
+        let ids = txn
+            .links
+            .iter()
+            .map(rustledger_core::Link::as_str)
+            .filter(|l| ID_LINK_PREFIXES.iter().any(|p| l.starts_with(p)))
+            .collect();
+        Some(Self {
+            amounts,
+            ids,
+            text: txn_text(txn),
+        })
     }
 }
 
-/// Get the decimal amount from the first posting of a transaction.
-fn first_posting_amount(txn: &Transaction) -> Option<Decimal> {
-    txn.postings.first().and_then(|p| {
-        p.units
-            .as_ref()
-            .and_then(rustledger_core::IncompleteAmount::number)
+/// Whether two id sets prove two transactions distinct: both carry ids in some
+/// shared namespace and no id is common to both.
+fn ids_conflict(a: &[&str], b: &[&str]) -> bool {
+    ID_LINK_PREFIXES.iter().any(|prefix| {
+        let a_ns: Vec<&str> = a
+            .iter()
+            .copied()
+            .filter(|l| l.starts_with(prefix))
+            .collect();
+        let b_ns: Vec<&str> = b
+            .iter()
+            .copied()
+            .filter(|l| l.starts_with(prefix))
+            .collect();
+        !a_ns.is_empty() && !b_ns.is_empty() && !a_ns.iter().any(|l| b_ns.contains(l))
     })
 }
 
@@ -600,19 +1037,301 @@ mod tests {
             1,
             "exactly 50% overlap must be a duplicate (>= 0.5)",
         );
+    }
 
-        // The per-transaction `is_duplicate` entry point (used by `extract
-        // --existing`) agrees with the batch API.
-        let Directive::Transaction(new_txn) = &new[0] else {
-            unreachable!()
+    // ===== Import dedup (multiset, scoped, id links) =====
+
+    /// A transaction posting `amount currency` to `account`, with links.
+    fn txn(
+        date: &str,
+        narration: &str,
+        account: &str,
+        amount: &str,
+        currency: &str,
+        links: &[&str],
+    ) -> Transaction {
+        use std::str::FromStr;
+        let mut t = Transaction::new(date.parse().unwrap(), narration)
+            .with_synthesized_posting(rustledger_core::Posting::new(
+                account,
+                rustledger_core::Amount::new(Decimal::from_str(amount).unwrap(), currency),
+            ))
+            .with_synthesized_posting(rustledger_core::Posting::auto("Expenses:Food"));
+        for l in links {
+            t = t.with_link(*l);
+        }
+        t
+    }
+
+    const BANK: &str = "Assets:Bank:Checking";
+
+    fn import(new: &[Transaction], existing: &[Transaction]) -> Vec<ImportDuplicate> {
+        let new: Vec<&Transaction> = new.iter().collect();
+        let existing: Vec<&Transaction> = existing.iter().collect();
+        find_import_duplicates(&new, &existing, Some(BANK), &FuzzyDedupConfig::default())
+    }
+
+    #[test]
+    fn existing_transactions_are_a_multiset() {
+        // Two identical croissants on one day, one already in the ledger:
+        // exactly one of the new pair is a duplicate (#2421).
+        let coffee = txn("2024-01-15", "Croissant", BANK, "-2.50", "EUR", &[]);
+        let dups = import(
+            &[coffee.clone(), coffee.clone()],
+            std::slice::from_ref(&coffee),
+        );
+        assert_eq!(dups.len(), 1, "{dups:?}");
+        assert_eq!(dups[0].new_index, 0);
+        assert_eq!(dups[0].reason, DuplicateReason::ExactText);
+
+        // Two existing absorb two new; a third new survives.
+        let dups = import(
+            &[coffee.clone(), coffee.clone(), coffee.clone()],
+            &[coffee.clone(), coffee],
+        );
+        assert_eq!(
+            dups.iter()
+                .map(|d| (d.new_index, d.existing_index))
+                .collect::<Vec<_>>(),
+            vec![(0, 0), (1, 1)],
+        );
+    }
+
+    #[test]
+    fn matching_is_scoped_to_the_importer_account_and_commodity() {
+        let existing = txn("2024-01-15", "Croissant", BANK, "-2.50", "EUR", &[]);
+        // Another account: not a candidate at all.
+        let other = txn(
+            "2024-01-15",
+            "Croissant",
+            "Assets:Other:Bank",
+            "-2.50",
+            "EUR",
+            &[],
+        );
+        assert!(import(&[other], std::slice::from_ref(&existing)).is_empty());
+        // Same account, another commodity.
+        let usd = txn("2024-01-15", "Croissant", BANK, "-2.50", "USD", &[]);
+        assert!(import(&[usd], std::slice::from_ref(&existing)).is_empty());
+        // The account posting decides, not the first posting: an existing
+        // entry written with the expense leg first still matches.
+        let mut reordered = existing;
+        reordered.postings.reverse();
+        let same = txn("2024-01-15", "Croissant", BANK, "-2.5", "EUR", &[]);
+        assert_eq!(import(&[same], &[reordered]).len(), 1);
+    }
+
+    #[test]
+    fn a_shared_id_link_is_decisive() {
+        // Same id and money: a duplicate even though date and text differ (a
+        // pending row re-posted on another day, a rewritten narration).
+        let existing = txn(
+            "2024-01-14",
+            "POS 4411 BAKERY",
+            BANK,
+            "-2.50",
+            "EUR",
+            &["ofx-77"],
+        );
+        let new = txn("2024-01-15", "Croissant", BANK, "-2.50", "EUR", &["ofx-77"]);
+        let dups = import(&[new], std::slice::from_ref(&existing));
+        assert_eq!(dups.len(), 1);
+        assert_eq!(dups[0].reason, DuplicateReason::IdLink("ofx-77".into()));
+
+        // Different ids in one namespace: two transactions, however alike.
+        let a = txn("2024-01-15", "Croissant", BANK, "-2.50", "EUR", &["csv-1"]);
+        let b = txn("2024-01-15", "Croissant", BANK, "-2.50", "EUR", &["csv-2"]);
+        assert!(import(&[b], std::slice::from_ref(&a)).is_empty());
+
+        // An id on one side only (a ledger imported before ids existed): text decides.
+        let plain = txn("2024-01-15", "Croissant", BANK, "-2.50", "EUR", &[]);
+        assert_eq!(
+            import(std::slice::from_ref(&a), std::slice::from_ref(&plain)).len(),
+            1
+        );
+        assert_eq!(import(&[plain], std::slice::from_ref(&a)).len(), 1);
+
+        // Ids in different namespaces do not contradict each other.
+        let ofx = txn("2024-01-15", "Croissant", BANK, "-2.50", "EUR", &["ofx-9"]);
+        assert_eq!(import(&[ofx], std::slice::from_ref(&a)).len(), 1);
+
+        // A link outside the id namespaces is not an id.
+        let tagged = txn(
+            "2024-01-15",
+            "Croissant",
+            BANK,
+            "-2.50",
+            "EUR",
+            &["invoice-1"],
+        );
+        let tagged2 = txn(
+            "2024-01-15",
+            "Croissant",
+            BANK,
+            "-2.50",
+            "EUR",
+            &["invoice-2"],
+        );
+        assert_eq!(import(&[tagged2], &[tagged]).len(), 1);
+    }
+
+    #[test]
+    fn stronger_evidence_claims_an_existing_transaction_first() {
+        // The new id-carrying row owns the existing one, even though an
+        // earlier new row matches it by text.
+        let existing = txn("2024-01-15", "Croissant", BANK, "-2.50", "EUR", &["csv-1"]);
+        let by_text = txn("2024-01-15", "Croissant", BANK, "-2.50", "EUR", &[]);
+        let by_id = txn("2024-01-15", "Croissant", BANK, "-2.50", "EUR", &["csv-1"]);
+        let dups = import(&[by_text, by_id], std::slice::from_ref(&existing));
+        assert_eq!(dups.len(), 1);
+        assert_eq!(dups[0].new_index, 1);
+
+        // An exact text match outranks an earlier fuzzy one.
+        let existing = txn("2024-01-15", "coffee shop", BANK, "-4.00", "EUR", &[]);
+        let fuzzy = txn("2024-01-15", "coffee", BANK, "-4.00", "EUR", &[]);
+        let exact = txn("2024-01-15", "Coffee Shop", BANK, "-4.00", "EUR", &[]);
+        let dups = import(&[fuzzy, exact], std::slice::from_ref(&existing));
+        assert_eq!(dups.len(), 1);
+        assert_eq!(dups[0].new_index, 1);
+        assert_eq!(dups[0].reason, DuplicateReason::ExactText);
+    }
+
+    #[test]
+    fn unscoped_matching_compares_the_first_posting_account_and_commodity() {
+        let usd = make_directive("2024-01-15", Some("Store"), "Groceries", "-50.00");
+        let mut eur = usd.clone();
+        if let Directive::Transaction(t) = &mut eur {
+            t.postings[0].units = Some(rustledger_core::IncompleteAmount::from(
+                rustledger_core::Amount::new(Decimal::new(-5000, 2), "EUR"),
+            ));
+        }
+        let config = FuzzyDedupConfig::default();
+        assert!(
+            find_fuzzy_duplicates(
+                std::slice::from_ref(&eur),
+                std::slice::from_ref(&usd),
+                &config
+            )
+            .is_empty()
+        );
+        // And the multiset rule holds here too.
+        let pair = [usd.clone(), usd.clone()];
+        assert_eq!(
+            find_fuzzy_duplicates(&pair, std::slice::from_ref(&usd), &config).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn id_link_sanitizes_and_rejects_empty_ids() {
+        assert_eq!(id_link("csv-", " tx_00A1 "), Some("csv-tx_00A1".into()));
+        assert_eq!(id_link("csv-", "a b:c"), Some("csv-a-b-c".into()));
+        assert_eq!(id_link("csv-", "  "), None);
+        assert_eq!(id_link("csv-", "./_"), None);
+    }
+
+    #[test]
+    fn an_id_collision_with_a_different_amount_is_not_a_duplicate() {
+        // `a b` and `a:b` both sanitize to `csv-a-b`. Equal links but different
+        // money: two transactions, kept — not a silent drop.
+        assert_eq!(id_link("csv-", "a b"), id_link("csv-", "a:b"));
+        let existing = txn("2024-01-15", "Coffee", BANK, "-4.00", "EUR", &["csv-a-b"]);
+        let new = txn("2024-01-15", "Rent", BANK, "-900.00", "EUR", &["csv-a-b"]);
+        assert!(import(&[new], std::slice::from_ref(&existing)).is_empty());
+    }
+
+    #[test]
+    fn a_split_account_leg_matches_its_net_movement() {
+        let mut existing = txn("2024-01-15", "Shop", BANK, "-6.00", "EUR", &[]);
+        existing.postings.insert(
+            1,
+            rustledger_core::Spanned::synthesized(rustledger_core::Posting::new(
+                BANK,
+                rustledger_core::Amount::new(Decimal::new(-400, 2), "EUR"),
+            )),
+        );
+        let new = txn("2024-01-15", "Shop", BANK, "-10.00", "EUR", &[]);
+        assert_eq!(import(&[new], &[existing]).len(), 1);
+    }
+
+    #[test]
+    fn a_transfer_already_booked_from_the_other_statement_is_a_duplicate() {
+        // Imported first from the savings statement; the checking statement's
+        // row for the same transfer would double-count the checking leg.
+        let existing = txn(
+            "2024-01-15",
+            "Transfer to savings",
+            "Assets:Savings",
+            "100.00",
+            "EUR",
+            &[],
+        );
+        let mut existing = existing;
+        existing.postings[1] =
+            rustledger_core::Spanned::synthesized(rustledger_core::Posting::new(
+                BANK,
+                rustledger_core::Amount::new(Decimal::new(-10000, 2), "EUR"),
+            ));
+        let new = txn(
+            "2024-01-15",
+            "Transfer to savings",
+            BANK,
+            "-100.00",
+            "EUR",
+            &[],
+        );
+        assert_eq!(import(&[new], &[existing]).len(), 1);
+    }
+
+    #[test]
+    fn a_new_transaction_outside_the_account_falls_back_to_unscoped() {
+        // A WASM importer that posts somewhere other than the configured
+        // account must still be deduplicated, by its first posting.
+        let other = txn("2024-01-15", "Coffee", "Assets:Wallet", "-4.00", "EUR", &[]);
+        assert_eq!(
+            import(std::slice::from_ref(&other), std::slice::from_ref(&other)).len(),
+            1
+        );
+    }
+
+    #[test]
+    fn row_order_does_not_decide_which_row_a_fuzzy_match_claims() {
+        // "coffee" and "shop" both fuzzily match the one "coffee shop" entry.
+        // Which survives must not depend on which the statement lists first.
+        let existing = txn("2024-01-15", "coffee shop", BANK, "-4.00", "EUR", &[]);
+        let a = txn("2024-01-15", "coffee", BANK, "-4.00", "EUR", &[]);
+        let b = txn("2024-01-15", "shop", BANK, "-4.00", "EUR", &[]);
+        let dropped = |new: &[Transaction]| {
+            let d = import(new, std::slice::from_ref(&existing));
+            assert_eq!(d.len(), 1);
+            new[d[0].new_index].narration.as_str().to_string()
         };
-        let Directive::Transaction(existing_txn) = &existing[0] else {
-            unreachable!()
-        };
-        assert!(is_duplicate(
-            new_txn,
-            std::slice::from_ref(existing_txn),
-            &FuzzyDedupConfig::default(),
-        ));
+        assert_eq!(dropped(&[a.clone(), b.clone()]), dropped(&[b, a]));
+    }
+
+    #[test]
+    fn a_match_with_no_text_on_either_side_is_reported_as_amount_only() {
+        let a = txn("2024-01-15", "", BANK, "-60.00", "EUR", &[]);
+        let dups = import(std::slice::from_ref(&a), std::slice::from_ref(&a));
+        assert_eq!(dups.len(), 1);
+        assert_eq!(dups[0].reason, DuplicateReason::AmountOnly);
+        // Text on one side only is not a match at all.
+        let b = txn("2024-01-15", "ATM", BANK, "-60.00", "EUR", &[]);
+        assert!(import(&[b], &[a]).is_empty());
+    }
+
+    #[test]
+    fn a_split_leg_whose_net_overflows_does_not_panic() {
+        let max = Decimal::MAX.to_string();
+        let mut existing = txn("2024-01-15", "Shop", BANK, &max, "EUR", &[]);
+        existing.postings.insert(
+            1,
+            rustledger_core::Spanned::synthesized(rustledger_core::Posting::new(
+                BANK,
+                rustledger_core::Amount::new(Decimal::MAX, "EUR"),
+            )),
+        );
+        let new = txn("2024-01-15", "Shop", BANK, "-10.00", "EUR", &[]);
+        assert!(import(&[new], &[existing]).is_empty());
     }
 }

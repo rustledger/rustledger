@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 1a31da67c98df383712aee36c79dc8212111631a2932ec561e8456f330bdba7b # shrinks to ledger = "2024-01-01 open Equity:Open\n2024-01-01 open Assets:G0\n2024-02-02 * \"t\"\n  Assets:G0  8 X {18 USD}\n  Equity:Open\n2024-01-01 open Assets:G1\n2024-02-03 * \"t\"\n  Assets:G1  8 X {18 USD}\n  Equity:Open\n"
+cc c36ffdb6b37a8db62eb65c53be1971be9b30c1d629591c27d74dff821eed4cce # shrinks to ledger = "2024-01-01 open Equity:Open\n2024-01-01 open Assets:G0\n2024-02-02 * \"t\"\n  Assets:G0  4 X {14 USD}\n  Equity:Open\n2024-01-01 open Assets:G1\n2024-02-03 * \"t\"\n  Assets:G1  -7 USD\n  Equity:Open\n2024-02-04 * \"t\"\n  Assets:G1  3 USD\n  Equity:Open\n2024-02-05 * \"t\"\n  Assets:G1  4 USD\n  Equity:Open\n2024-02-06 * \"t\"\n  Assets:G1  4 X {14 USD}\n  Equity:Open\n"

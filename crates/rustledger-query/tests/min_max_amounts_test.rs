@@ -324,3 +324,21 @@ fn min_max_over_amounts_on_tables_and_subqueries() {
         vec![vec!["Assets:A", "3 USD"], vec!["Assets:B", "-3 USD"]],
     );
 }
+
+/// MIN/MAX over account names are string order, not the account-type order
+/// `BALANCES` uses (#2409): `Liabilities:Card` sorts after `Equity:Opening`
+/// as text, though before it by account type. bean-query agrees.
+#[test]
+fn min_max_over_accounts_is_string_order_not_account_type_order() {
+    const TYPES: &str = r#"
+2024-01-01 open Equity:Opening
+2024-01-01 open Liabilities:Card
+2024-01-02 * "x"
+  Liabilities:Card  -5 USD
+  Equity:Opening     5 USD
+"#;
+    assert_eq!(
+        rows(TYPES, "SELECT min(account), max(account)"),
+        vec![vec!["Equity:Opening", "Liabilities:Card"]],
+    );
+}

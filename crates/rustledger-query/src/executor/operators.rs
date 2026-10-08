@@ -208,6 +208,22 @@ impl Executor<'_> {
             // so defining the order there would accept a query it rejects.
             // The order exists for the aggregates and stops there.
             (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
+            // Amounts, positions and inventories order as `ORDER BY` orders
+            // them (`compare_values_for_sort`'s arms), so `MIN` and `MAX` are
+            // the first and last of that order. This is a deliberate departure
+            // from bean-query, and unlike the boolean arm it is not one it
+            // shares: its `Max` updates on `value > cur`
+            // (`beanquery/query_env.py:880`), and beancount defines `__lt__`
+            // alone on `Amount`/`Position` -- the sortkey, currency first --
+            // so its `>` is plain tuple comparison, number first for
+            // `Amount(number, currency)`. Over `5 EUR` and `3 USD` its `MAX`
+            // therefore answers `5 EUR`, the same value as its `MIN` and the
+            // FIRST of its own ORDER BY: its MAX disagrees with its own sort.
+            // Ordering both ends by the sortkey here keeps them consistent
+            // with ORDER BY (#2447).
+            (Value::Amount(a), Value::Amount(b)) => Self::amount_order(a, b),
+            (Value::Position(a), Value::Position(b)) => Self::position_order(a, b),
+            (Value::Inventory(a), Value::Inventory(b)) => Self::inventory_order(a, b),
             _ => return Err(QueryError::Type("cannot compare values".to_string())),
         };
         Ok(ord.is_lt())

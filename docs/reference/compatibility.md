@@ -411,8 +411,18 @@ of 148, and the five that differ are exactly this.
 Inventories sort as beancount's `Inventory.__lt__` does, by their positions
 sorted, compared in turn, with this position order. A position of zero units,
 which rustledger keeps for a cost-less holding that nets to zero, holds nothing
-and is left out, as beancount has none. Pinned by
-`crates/rustledger-query/tests/order_by_amounts.rs` (issue #2445).
+and is left out, as beancount has none.
+
+`MIN` and `MAX` over amounts, positions and inventories are the ends of that
+same order; they used to fail with `cannot compare values`. bean-query uses a
+different order for each of its two aggregates (its `Min` compares the sortkey,
+its `Max` the tuple fallback), so over `5 EUR` and `3 USD` it answers `5 EUR`
+for both -- and that value is the first of its own `ORDER BY`, so its `MAX`
+disagrees with its own sort; here `min(units(position))` is `5 EUR` and
+`max(units(position))` is `3 USD`.
+
+Pinned by `crates/rustledger-query/tests/order_by_amounts.rs` (issue #2445) and
+`crates/rustledger-query/tests/minmax_amounts_test.rs` (issue #2447).
 
 ## BQL Query Compatibility
 

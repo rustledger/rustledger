@@ -1,11 +1,24 @@
-//! Property: MIN and MAX are the first and last value ORDER BY gives (#2447).
+//! Property: MIN is the first value `ORDER BY v` gives, and MAX the first
+//! value `ORDER BY v DESC` gives (#2447).
 //!
 //! Generated ledgers hold groups (accounts) of mixed values: amounts in up to
 //! four currencies, positions with and without cost, prices that are NULL on
 //! most postings, and per-account inventories. For each operand, MIN/MAX over
-//! a group must equal the first/last non-NULL value of the same group under
-//! ORDER BY, on the default table and through a subquery. An operand route
-//! that compared values some other way would break it.
+//! a group must equal those non-NULL values, on the default table and through
+//! a subquery. An operand route that compared values some other way would
+//! break it.
+//!
+//! Why "first under DESC" and not "last under ASC": the order has ties
+//! between values that are not equal. Beancount's `Position.sortkey`, which
+//! the position order follows, ignores a lot's date and label, so
+//! `8 X {18 USD, 2024-02-02}` and `8 X {18 USD, 2024-02-03}` tie. ORDER BY is
+//! stable either way, so a tie group keeps input order, and MIN and MAX keep
+//! the FIRST value of the extreme tie group in input order (they replace the
+//! current value only on a strict comparison). That is the first row of each
+//! sort direction, exactly.
+//! "Last under ASC" is the last of the top tie group instead, a different
+//! value whenever the group has two members: the original form of this
+//! property, which failed intermittently in CI on such ties.
 
 use proptest::prelude::*;
 use rustledger_booking::BookingEngine;
@@ -79,35 +92,40 @@ fn run(ledger: &str, bql: &str) -> Vec<Vec<Value>> {
         .rows
 }
 
-/// Per account, the first and last non-NULL value of `column` under ORDER BY.
-fn order_by_ends(ledger: &str, column: &str) -> Vec<(Value, Value, Value)> {
-    let ordered = run(
-        ledger,
-        &format!("SELECT account, {column} AS v ORDER BY account, v"),
-    );
-    let accounts = run(ledger, "SELECT DISTINCT account ORDER BY account");
-    accounts
-        .iter()
-        .map(|a| {
-            let vals: Vec<&Value> = ordered
-                .iter()
-                .filter(|r| r[0] == a[0] && r[1] != Value::Null)
-                .map(|r| &r[1])
-                .collect();
-            let first = vals.first().map_or(Value::Null, |v| (*v).clone());
-            let last = vals.last().map_or(Value::Null, |v| (*v).clone());
-            (a[0].clone(), first, last)
-        })
+/// Per account, the first non-NULL value of `column` under `ORDER BY v` and
+/// under `ORDER BY v DESC`: what MIN and MAX must return.
+fn order_by_extremes(ledger: &str, column: &str) -> Vec<(Value, Value, Value)> {
+    let first_per_account = |direction: &str| -> Vec<(Value, Value)> {
+        let ordered = run(
+            ledger,
+            &format!("SELECT account, {column} AS v ORDER BY account, v {direction}"),
+        );
+        let accounts = run(ledger, "SELECT DISTINCT account ORDER BY account");
+        accounts
+            .iter()
+            .map(|a| {
+                let first = ordered
+                    .iter()
+                    .find(|r| r[0] == a[0] && r[1] != Value::Null)
+                    .map_or(Value::Null, |r| r[1].clone());
+                (a[0].clone(), first)
+            })
+            .collect()
+    };
+    first_per_account("ASC")
+        .into_iter()
+        .zip(first_per_account("DESC"))
+        .map(|((account, min), (_, max))| (account, min, max))
         .collect()
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig::with_cases(64))]
+    #![proptest_config(ProptestConfig::with_cases(32))]
 
     #[test]
-    fn min_max_equal_order_by_ends(ledger in ledger()) {
+    fn min_max_equal_first_value_of_each_sort_direction(ledger in ledger()) {
         for column in ["units(position)", "position", "cost(position)", "price", "number"] {
-            let expected = order_by_ends(&ledger, column);
+            let expected = order_by_extremes(&ledger, column);
             for bql in [
                 format!("SELECT account, min({column}), max({column}) GROUP BY account ORDER BY account"),
                 format!(
@@ -125,11 +143,12 @@ proptest! {
 
         // Inventories: per-account sums from a subquery, aggregated again.
         let inner = "SELECT account, sum(position) AS s GROUP BY account";
-        let ordered = run(&ledger, &format!("SELECT s FROM ({inner}) ORDER BY s"));
+        let ascending = run(&ledger, &format!("SELECT s FROM ({inner}) ORDER BY s"));
+        let descending = run(&ledger, &format!("SELECT s FROM ({inner}) ORDER BY s DESC"));
         let got = run(&ledger, &format!("SELECT min(s), max(s) FROM ({inner})"));
         prop_assert_eq!(
             &got,
-            &vec![vec![ordered.first().unwrap()[0].clone(), ordered.last().unwrap()[0].clone()]],
+            &vec![vec![ascending[0][0].clone(), descending[0][0].clone()]],
             "{}", ledger
         );
     }

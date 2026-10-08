@@ -415,7 +415,12 @@ and is left out, as beancount has none. Pinned by
 `crates/rustledger-query/tests/order_by_amounts.rs` (issue #2445).
 
 `MIN` and `MAX` over amounts, positions and inventories use this same order:
-they return the first and last value `ORDER BY` would. `MIN` agrees with
+`MIN` returns the first value `ORDER BY` gives ascending, `MAX` the first it
+gives descending. The order has ties between values that are not equal (two
+lots that differ only in date or label, as in beancount's `Position.sortkey`);
+those keep input order, and `MIN` and `MAX` both return the first of them.
+bean-query's `MIN` does too; its `MAX` uses the tuple fallback described
+below, which compares the lot dates and picks the later lot. `MIN` agrees with
 bean-query, except over positions whose currencies the rank above orders
 differently: `min(position)` over `2 X {20 USD}` and `1 Y {5 USD}` is
 `2 X {20 USD}` here and `1 Y {5 USD}` in bean-query, as with `ORDER BY`. `MAX`

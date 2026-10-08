@@ -214,8 +214,10 @@ impl Executor<'_> {
             (Value::Boolean(a), Value::Boolean(b)) => a.cmp(b),
             // Amounts, positions and inventories: DELEGATED to
             // `compare_values_for_sort`, so `MIN` and `MAX` are always the
-            // first and last value `ORDER BY` gives (#2447) and cannot drift
-            // from it. They used to fail with "cannot compare values".
+            // first value `ORDER BY` gives ascending and descending (#2447)
+            // and cannot drift from it. Values the order ties (lots that
+            // differ only in date) keep input order, so with the strict
+            // comparisons in the aggregates both return the first of them. They used to fail with "cannot compare values".
             //
             // MIN agrees with bean-query, except that positions inherit the
             // position order's own divergence (unlisted currencies ranked

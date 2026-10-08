@@ -1377,6 +1377,49 @@ mod tests {
         );
     }
 
+    /// The editor books a currency-less units number the way `rledger check`
+    /// does (#2465): from the account's running balance, which this pass
+    /// builds itself by booking in `booking_sort_key` order. The issue's
+    /// ledger must therefore get no booking diagnostic here either, or the
+    /// editor would flag a file `check` accepts.
+    #[test]
+    fn currency_less_posting_books_from_the_balance_as_check_does() {
+        let source = r"2026-01-01 open Assets:Foo
+2026-01-01 open Assets:Bar
+2026-01-01 open Equity:Opening
+
+2026-10-01 !
+    Assets:Foo    42.50
+    Assets:Bar
+
+2026-01-02 *
+    Assets:Foo       100.00 USD
+    Equity:Opening
+";
+        let result = parse(source);
+        assert!(
+            result.errors.is_empty(),
+            "parse errors: {:?}",
+            result.errors
+        );
+
+        let diagnostics = all_diagnostics(
+            &result,
+            source,
+            None,
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
+        let errors: Vec<String> = diagnostics
+            .iter()
+            .filter(|d| matches!(d.severity, Some(DiagnosticSeverity::ERROR)))
+            .map(|d| format!("{}: {}", get_code(d), d.message))
+            .collect();
+        assert!(errors.is_empty(), "check accepts this ledger: {errors:?}");
+    }
+
     #[test]
     fn test_unbalanced_diagnostic_range_does_not_overshoot() {
         // The unbalanced transaction (lines 3-5) is followed by a blank line

@@ -217,7 +217,9 @@ refuses every `{*}` (`Cost merging is not supported yet`).
 ### BOOK: Cannot Infer Currency
 
 **Cause**: A posting writes a number but no currency (`Assets:Cash  42.50`),
-and nothing determines which currency it is in. rledger reads the currency the
+and nothing determines which currency it is in. Reported as
+`interpolation failed: cannot infer currency for posting to account Expenses:Food`
+(for the example below). rledger reads the currency the
 same way Python beancount does, in this order:
 
 1. If the posting has no cost and no price, is the only posting in the

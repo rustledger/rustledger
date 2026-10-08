@@ -271,7 +271,10 @@ account = "Assets:Bank:MyBank"
 # extract uses the currency of the account's `open` directive in the
 # --ledger ledger (or in --existing, if --ledger does not open the
 # account), when that `open` names exactly one, and otherwise stops with
-# an error rather than guess.
+# an error rather than guess. Precedence, highest first: a --ledger
+# profile, --currency, this key, the account's `open`. A value that is not
+# a commodity (`usd`, `€`, "") is an error naming where it came from, and
+# a value the account's `open` does not allow is a warning.
 currency = "EUR"
 
 # Column mapping (0-indexed)

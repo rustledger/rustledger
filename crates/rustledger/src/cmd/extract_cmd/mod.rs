@@ -767,8 +767,32 @@ fn overlay_cli_args(entry: &ImporterEntry, args: &Args) -> ImporterEntry {
     merged
 }
 
+/// A `--ledger` profile's currency outranks `--currency` (the `open` is the
+/// account's declaration). When the two disagree the flag is not used, which
+/// must be said rather than dropped silently.
+fn profile_overrides_currency_flag(
+    profile: &ledger_profile::LedgerProfile,
+    args: &Args,
+) -> Option<String> {
+    let declared = profile.currency.as_deref()?;
+    let flag = args.currency.as_deref()?;
+    (declared != flag).then(|| {
+        format!(
+            "--currency {flag} is not used: the --ledger profile for {} declares {declared}",
+            profile.account
+        )
+    })
+}
+
 /// Give a CSV entry that names no `currency` the one its account is opened
-/// with, or refuse.
+/// with, or refuse; and check a currency that IS configured (from the entry,
+/// `--currency` or the default) is a valid commodity, warning when the
+/// account's `open` does not allow it.
+///
+/// Precedence, highest first: a `--ledger` profile, `--currency`, the entry's
+/// `currency`, the account's single `open` currency, else an error. The
+/// configured value always wins over a disagreeing `open`; the warning makes
+/// the disagreement visible before `rledger check` does.
 ///
 /// Every other source of a CSV config states a currency: `--currency`, a
 /// `--ledger` profile, and the raw-argument and `--auto` paths (whose
@@ -788,10 +812,8 @@ fn resolve_entry_currency(
     config: ImporterConfig,
     entry_name: Option<&str>,
     args: &Args,
+    report: &mut impl Write,
 ) -> Result<ImporterConfig> {
-    if config.currency.is_some() {
-        return Ok(config);
-    }
     let mut ledgers: Vec<&Path> = Vec::new();
     for path in [args.ledger.as_deref(), args.existing.as_deref()]
         .into_iter()
@@ -801,17 +823,56 @@ fn resolve_entry_currency(
             ledgers.push(path);
         }
     }
+    if let Some(currency) = &config.currency {
+        // Where the value came from, for the messages below.
+        let source = match (args.currency.as_deref(), entry_name) {
+            (Some(flag), _) if flag == currency => "--currency".to_string(),
+            (_, Some(name)) => format!("`currency` in the '{name}' entry of importers.toml"),
+            _ => "the default currency".to_string(),
+        };
+        // A value the parser cannot read (`usd`, `€`, ``) used to surface as
+        // "canonical formatter failed to re-parse", or, for an empty string,
+        // as amounts with no commodity at all.
+        if !rustledger_parser::is_valid_currency(currency) {
+            anyhow::bail!(
+                "{source} is {currency:?}, which is not a valid commodity \
+                 (commodities are upper-case, like `USD` or `EUR`)"
+            );
+        }
+        // A configured currency the account's `open` does not allow is a
+        // misconfiguration `rledger check` would reject on every imported
+        // posting. The configured value still wins (it is what the user
+        // asked for), but say so now rather than after the import.
+        for path in &ledgers {
+            let lookup = ledger_profile::open_currencies(path, &config.account)?;
+            if let Some(allowed) = lookup.currencies {
+                if !allowed.is_empty() && !allowed.contains(currency) {
+                    writeln!(
+                        report,
+                        "warning: {source} books {currency}, but `open {}` in {} allows \
+                         only {}; `rledger check` will reject these postings",
+                        config.account,
+                        path.display(),
+                        allowed.join(", ")
+                    )?;
+                }
+                break;
+            }
+        }
+        return Ok(config);
+    }
     let mut why = Vec::new();
     for path in &ledgers {
         let lookup = ledger_profile::open_currencies(path, &config.account)?;
         match lookup.currencies {
             Some(currencies) => match currencies.as_slice() {
                 [one] => {
-                    eprintln!(
+                    writeln!(
+                        report,
                         "Using currency {one} from the `open {}` directive in {}",
                         config.account,
                         path.display()
-                    );
+                    )?;
                     return Ok(ImporterConfig {
                         currency: Some(one.clone()),
                         ..config
@@ -1649,14 +1710,26 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
         // declaration. Applied after the chain so every arm above is covered,
         // including `--auto` and raw CLI arguments.
         let config = match profile.as_ref() {
-            Some(p) => ImporterConfig {
-                account: p.account.clone(),
-                currency: p.currency.clone().or(config.currency),
-                ..config
-            },
+            Some(p) => {
+                // The profile's `open` outranks `--currency` too; a flag that
+                // loses must not be dropped silently.
+                if let Some(warning) = profile_overrides_currency_flag(p, args) {
+                    eprintln!("warning: {warning}");
+                }
+                ImporterConfig {
+                    account: p.account.clone(),
+                    currency: p.currency.clone().or(config.currency),
+                    ..config
+                }
+            }
             None => config,
         };
-        let config = resolve_entry_currency(config, used_entry.as_deref(), args)?;
+        let config = resolve_entry_currency(
+            config,
+            used_entry.as_deref(),
+            args,
+            &mut io::stderr().lock(),
+        )?;
 
         (config, fallbacks)
     };
@@ -4094,6 +4167,101 @@ default_expense = "Expenses:Uncategorized"
         );
         assert!(err.contains("which has 1 load error(s)"), "{err}");
         assert!(err.contains("may be in the part that failed"), "{err}");
+    }
+
+    /// Run `resolve_entry_currency` for an account `Assets:Bank:Euro` whose
+    /// config carries `currency`, with extra CLI flags; returns the result
+    /// and what it reported.
+    fn resolve_with(
+        currency: Option<&str>,
+        flags: &[&str],
+        ledger: Option<&str>,
+    ) -> (std::result::Result<Option<String>, String>, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let mut argv = vec!["extract".to_string(), "x.csv".to_string()];
+        argv.extend(flags.iter().map(ToString::to_string));
+        if let Some(text) = ledger {
+            let path = dir.path().join("l.beancount");
+            std::fs::write(&path, text).unwrap();
+            argv.push("--existing".to_string());
+            argv.push(path.to_str().unwrap().to_string());
+        }
+        let args = Args::parse_from(argv);
+        let mut builder = ImporterConfig::csv().account("Assets:Bank:Euro");
+        if let Some(c) = currency {
+            builder = builder.currency(c);
+        }
+        let mut report = Vec::new();
+        let out =
+            resolve_entry_currency(builder.build().unwrap(), Some("bank"), &args, &mut report)
+                .map(|c| c.currency)
+                .map_err(|e| format!("{e:#}"));
+        (out, String::from_utf8(report).unwrap())
+    }
+
+    /// A configured currency the parser cannot read fails where it is
+    /// configured, naming the key, instead of "canonical formatter failed to
+    /// re-parse" (or, for `""`, amounts with no commodity at all).
+    #[test]
+    fn an_invalid_configured_currency_is_named() {
+        for bad in ["usd", "€", ""] {
+            let (out, _) = resolve_with(Some(bad), &[], None);
+            let err = out.unwrap_err();
+            assert!(
+                err.contains(&format!("`currency` in the 'bank' entry of importers.toml is {bad:?}, which is not a valid commodity")),
+                "{err}"
+            );
+        }
+        let (out, _) = resolve_with(Some("usd"), &["--currency", "usd"], None);
+        assert!(out.unwrap_err().starts_with("--currency is \"usd\""));
+    }
+
+    /// The configured currency wins over a disagreeing `open`, with a warning
+    /// naming both; an agreeing or unconstrained `open` says nothing.
+    #[test]
+    fn a_configured_currency_the_open_disallows_is_warned() {
+        let ledger = Some("2024-01-01 open Assets:Bank:Euro CHF\n");
+        let (out, report) = resolve_with(Some("EUR"), &[], ledger);
+        assert_eq!(out.unwrap().as_deref(), Some("EUR"));
+        assert!(
+            report.contains("warning: `currency` in the 'bank' entry of importers.toml books EUR, but `open Assets:Bank:Euro` in"),
+            "{report}"
+        );
+        assert!(report.contains("allows only CHF"), "{report}");
+
+        let (_, report) = resolve_with(Some("GBP"), &["--currency", "GBP"], ledger);
+        assert!(
+            report.starts_with("warning: --currency books GBP"),
+            "{report}"
+        );
+
+        for quiet in [
+            "2024-01-01 open Assets:Bank:Euro EUR,CHF\n",
+            "2024-01-01 open Assets:Bank:Euro\n",
+        ] {
+            let (_, report) = resolve_with(Some("EUR"), &[], Some(quiet));
+            assert!(report.is_empty(), "{quiet}: {report}");
+        }
+    }
+
+    /// A `--ledger` profile's currency outranks `--currency`; a flag that
+    /// loses is reported, one that agrees is not.
+    #[test]
+    fn a_profile_overriding_currency_flag_is_reported() {
+        let profile = ledger_profile::LedgerProfile {
+            account: "Liabilities:Card".to_string(),
+            importer: "ofx".to_string(),
+            currency: Some("USD".to_string()),
+        };
+        let args = Args::parse_from(["extract", "x.qfx", "--currency", "EUR"]);
+        assert_eq!(
+            profile_overrides_currency_flag(&profile, &args).as_deref(),
+            Some(
+                "--currency EUR is not used: the --ledger profile for Liabilities:Card declares USD"
+            )
+        );
+        let args = Args::parse_from(["extract", "x.qfx", "--currency", "USD"]);
+        assert!(profile_overrides_currency_flag(&profile, &args).is_none());
     }
 
     /// #2464: an `open` with no currency constraint cannot answer either.

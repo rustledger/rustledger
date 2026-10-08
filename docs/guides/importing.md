@@ -69,7 +69,10 @@ directive when you pass the ledger with `--ledger` or `--existing` and that
 directive names exactly one currency (`2024-01-01 open Assets:Bank:Chase USD`).
 `--ledger` decides when it opens the account; `--existing` is read only when it
 does not. Included files are followed. Otherwise extract stops with an error
-naming the importer. It never guesses a
+naming the importer. A configured `currency` (or `--currency`) always wins
+over the `open`, but if the `open` does not allow it, extract warns, since
+`rledger check` would reject every imported posting. A value that is not a
+commodity at all (`usd`, `€`, an empty string) is an error naming its source. It never guesses a
 currency, since amounts booked in the wrong one corrupt the ledger silently.
 
 The `importers.toml` file is searched for automatically in these locations (first found wins):

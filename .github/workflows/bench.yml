@@ -78,9 +78,10 @@ jobs:
           # `curl -f` so download errors don't cascade into "not in
           # gzip format" (see issue surfaced in PR #1015 CI).
           # Pinned: hyperfine v2.0.0 (2026-10-07) moved `mean`/`stddev` under
-          # `summary.time_wall_clock` in --export-json, which the parsers below
-          # read as `entry['mean']` (KeyError on v2). Bump deliberately, with the
-          # parsers, rather than tracking `latest`.
+          # `summary.time_wall_clock` and `memory_usage_byte` to
+          # `summary.memory_peak_resident` in --export-json, which the parsers
+          # below read as `entry['mean']` (KeyError on v2). Bump deliberately,
+          # with the parsers, rather than tracking `latest`.
           HYPERFINE_VERSION=v1.21.0
           if [ -z "${HYPERFINE_VERSION:-}" ] || [ "$HYPERFINE_VERSION" = "null" ]; then
             echo "::error::HYPERFINE_VERSION is not set" >&2
@@ -586,9 +587,10 @@ jobs:
 
           # Hyperfine — authenticated lookup + hard-fail on download.
           # Pinned: hyperfine v2.0.0 (2026-10-07) moved `mean`/`stddev` under
-          # `summary.time_wall_clock` in --export-json, which the parsers below
-          # read as `entry['mean']` (KeyError on v2). Bump deliberately, with the
-          # parsers, rather than tracking `latest`.
+          # `summary.time_wall_clock` and `memory_usage_byte` to
+          # `summary.memory_peak_resident` in --export-json, which the parsers
+          # below read as `entry['mean']` (KeyError on v2). Bump deliberately,
+          # with the parsers, rather than tracking `latest`.
           HYPERFINE_VERSION=v1.21.0
           if [ -z "${HYPERFINE_VERSION:-}" ] || [ "$HYPERFINE_VERSION" = "null" ]; then
             echo "::error::HYPERFINE_VERSION is not set" >&2

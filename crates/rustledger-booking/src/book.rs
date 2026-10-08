@@ -14,10 +14,7 @@ use rustledger_core::{
 };
 use thiserror::Error;
 
-use crate::{
-    InterpolationError, InterpolationResult, interpolate_with_tolerance_map,
-    interpolate_with_tolerances,
-};
+use crate::{InterpolationError, InterpolationResult, interpolate_with_tolerance_map};
 
 // Note: We no longer quantize calculated values during booking.
 // Python beancount preserves full precision during booking and only
@@ -1694,6 +1691,66 @@ impl BookingEngine {
         Ok(())
     }
 
+    /// What both booking entry points need before they book `txn`, computed
+    /// in one place so they cannot drift: its tolerances, and `txn` with any
+    /// currency-less units number given its currency (`None` when there is
+    /// none, which is almost always).
+    ///
+    /// The order is the point. Tolerances come from the transaction AS
+    /// WRITTEN, matching beancount's `booking_full.book`, which infers them
+    /// from `entry.postings` before resolving any `{}` and before such a
+    /// posting gets its currency. Deriving them after booking would feed the
+    /// lot's 26-digit per-unit cost into the tolerance and silently disable
+    /// quantization (see `interpolate_with_tolerance_map`); deriving them
+    /// after resolving let the posting's own precision loosen its currency,
+    /// so an auto-posting beside `42.5` booked `-32.400 USD` where beancount
+    /// books `-32.377 USD` (#2465).
+    fn prepare(
+        &self,
+        txn: &Transaction,
+    ) -> Result<
+        (
+            FxHashMap<rustledger_core::Currency, Decimal>,
+            Option<Transaction>,
+        ),
+        InterpolationError,
+    > {
+        let tolerances = crate::transaction_tolerances(txn, &self.tolerance.options());
+        Ok((tolerances, self.resolve_elided_units_currencies(txn)?))
+    }
+
+    /// `txn` with every units number written without a currency
+    /// (`Assets:Foo  42.50`) given one, or `None` when it has no such posting.
+    ///
+    /// The rule is beancount's — see
+    /// [`crate::interpolate::resolve_elided_units_currencies`] — and this is
+    /// the only caller that can apply all of it, because its second step reads
+    /// the account's running balance (#2465). It runs before booking, because
+    /// booking a reduction needs the commodity to find the lot.
+    fn resolve_elided_units_currencies(
+        &self,
+        txn: &Transaction,
+    ) -> Result<Option<Transaction>, InterpolationError> {
+        if !txn
+            .postings
+            .iter()
+            .any(|p| matches!(p.units, Some(IncompleteAmount::NumberOnly(_))))
+        {
+            return Ok(None);
+        }
+        let resolved = crate::interpolate::resolve_elided_units_currencies(txn, |account| {
+            self.inventories.get(account).map(AsRef::as_ref)
+        })?;
+        let mut txn = txn.clone();
+        for (idx, currency) in resolved {
+            let posting = &mut txn.postings[idx];
+            if let Some(IncompleteAmount::NumberOnly(number)) = posting.units {
+                posting.units = Some(IncompleteAmount::Complete(Amount::new(number, currency)));
+            }
+        }
+        Ok(Some(txn))
+    }
+
     /// Book and interpolate a transaction.
     ///
     /// This fills in empty cost specs, then interpolates any missing amounts. Thin
@@ -1729,11 +1786,29 @@ impl BookingEngine {
         &mut self,
         txn: &mut Transaction,
     ) -> Result<Vec<CapitalGain>, BookingError> {
+        // A units number written without its currency is rare, and resolving
+        // it rewrites the posting, so that path works on a copy and commits it
+        // only once everything has succeeded (#2465).
+        let (tolerances, resolved) = self.prepare(txn)?;
+        if let Some(mut resolved) = resolved {
+            let gains = self.book_interpolate_apply_with(&mut resolved, &tolerances)?;
+            *txn = resolved;
+            return Ok(gains);
+        }
+        self.book_interpolate_apply_with(txn, &tolerances)
+    }
+
+    /// [`Self::book_interpolate_apply`] with the tolerances already computed
+    /// from the transaction as written.
+    fn book_interpolate_apply_with(
+        &mut self,
+        txn: &mut Transaction,
+        tolerances: &FxHashMap<rustledger_core::Currency, Decimal>,
+    ) -> Result<Vec<CapitalGain>, BookingError> {
         // Fast path, as in `book_and_interpolate_with_gains`: with no cost
         // specs `book` is an identity, so interpolate the transaction itself.
         if !txn.postings.iter().any(|p| p.cost.is_some()) {
-            let tolerances = crate::transaction_tolerances(txn, &self.tolerance.options());
-            let undo = crate::interpolate::interpolate_in_place_undoable(txn, &tolerances)?;
+            let undo = crate::interpolate::interpolate_in_place_undoable(txn, tolerances)?;
             if let Err(e) = self.apply(txn) {
                 undo.restore(txn);
                 return Err(e);
@@ -1743,10 +1818,9 @@ impl BookingEngine {
         // Slow path: `book` already produces an owned transaction, so work on
         // that and commit only once apply has succeeded. Nothing needs undoing
         // — `txn` is not touched until the end.
-        let tolerances = crate::transaction_tolerances(txn, &self.tolerance.options());
         let booked = self.book(txn)?;
         let mut candidate = booked.transaction;
-        let _ = crate::interpolate::interpolate_in_place_undoable(&mut candidate, &tolerances)?;
+        let _ = crate::interpolate::interpolate_in_place_undoable(&mut candidate, tolerances)?;
         self.apply(&candidate)?;
         *txn = candidate;
         Ok(booked.gains)
@@ -1768,6 +1842,8 @@ impl BookingEngine {
         &self,
         txn: &Transaction,
     ) -> Result<(InterpolationResult, Vec<CapitalGain>), BookingError> {
+        let (tolerances, resolved) = self.prepare(txn)?;
+        let txn = resolved.as_ref().unwrap_or(txn);
         // Fast path: with no cost specs, `book` is an identity that only clones
         // `txn` verbatim (profiling flagged that clone as ~6 MB / 10k txns — the
         // common case), and it realizes no gains. In the fast path `book(txn)`'s
@@ -1777,17 +1853,10 @@ impl BookingEngine {
         // allocate).
         if !txn.postings.iter().any(|p| p.cost.is_some()) {
             return Ok((
-                interpolate_with_tolerances(txn, &self.tolerance.options())?,
+                interpolate_with_tolerance_map(txn, &tolerances)?,
                 Vec::new(),
             ));
         }
-        // Tolerances come from the PRE-booking transaction, matching
-        // beancount's `booking_full.book`, which infers them from
-        // `entry.postings` before resolving any `{}`. Deriving them after
-        // booking would feed the lot's 26-digit per-unit cost into the
-        // tolerance and silently disable quantization — see
-        // `interpolate_with_tolerance_map`.
-        let tolerances = crate::transaction_tolerances(txn, &self.tolerance.options());
         // First book (fill in costs + compute gains), then interpolate amounts.
         let booked = self.book(txn)?;
         let result = interpolate_with_tolerance_map(&booked.transaction, &tolerances)?;

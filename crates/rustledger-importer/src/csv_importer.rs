@@ -561,6 +561,10 @@ impl CsvImporter {
         if rustledger_parser::is_valid_currency(cell) {
             return Ok(cell.to_string());
         }
+        // Validated AFTER the case change, so only a value that is a
+        // commodity once upper-cased gets through: `to_ascii_uppercase`
+        // leaves non-ASCII alone, so full-width `ｕｓｄ` stays invalid. The
+        // caller has already trimmed surrounding whitespace.
         let upper = cell.to_ascii_uppercase();
         if rustledger_parser::is_valid_currency(&upper) {
             return Ok(upper);
@@ -569,10 +573,11 @@ impl CsvImporter {
             ColumnSpec::Name(name) => format!("{name:?}"),
             ColumnSpec::Index(i) => format!("{i}"),
         };
+        // Worded like the configured-currency check in the CLI (#2498):
+        // "<source> is <value>, which is not a valid commodity (...)".
         anyhow::bail!(
-            "currency_column {column} holds {cell:?}, which is not a valid commodity \
-             (a commodity is an upper-case letter followed by upper-case letters, \
-             digits or `'._-`, like `USD` or `EUR`)"
+            "currency_column {column} is {cell:?}, which is not a valid commodity \
+             (commodities are upper-case, like `USD` or `EUR`)"
         )
     }
 
@@ -1218,13 +1223,16 @@ More info
 2024-01-02,Coffee,-5.00,EUR\n\
 2024-01-03,Euro sign,-1.00,€\n\
 2024-01-04,Dollar sign,-2.00,US$\n\
-2024-01-05,Digit first,-3.00,1USD\n";
+2024-01-05,Digit first,-3.00,1USD\n\
+2024-01-06,Full width,-4.00,\u{ff55}\u{ff53}\u{ff44}\n\
+2024-01-07,Inner space,-5.00,U SD\n";
         let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert_eq!(result.directives.len(), 1, "{:?}", result.warnings);
-        assert_eq!(result.warnings.len(), 3, "{:?}", result.warnings);
+        assert_eq!(result.warnings.len(), 5, "{:?}", result.warnings);
         assert!(
             result.warnings[0].starts_with(
-                "Row 2: currency_column \"Currency\" holds \"€\", which is not a valid commodity"
+                "Row 2: currency_column \"Currency\" is \"€\", which is not a valid commodity \
+                 (commodities are upper-case, like `USD` or `EUR`)"
             ),
             "{:?}",
             result.warnings
@@ -1262,7 +1270,7 @@ More info
             )
             .unwrap();
         assert!(
-            result.warnings[0].starts_with("Row 1: currency_column 3 holds \"€\""),
+            result.warnings[0].starts_with("Row 1: currency_column 3 is \"€\""),
             "{:?}",
             result.warnings
         );
@@ -1282,7 +1290,8 @@ More info
             .unwrap();
         let csv_content = "Date,Description,Amount,Currency\n\
 2024-01-02,Coffee,-5.00,usd\n\
-2024-01-03,Tea,-1.00, Eur \n";
+2024-01-03,Tea,-1.00, Eur \n\
+2024-01-04,Juice,-2.00,usd \n";
         let result = CsvImporter.extract_string(csv_content, &config).unwrap();
         assert!(result.warnings.is_empty(), "{:?}", result.warnings);
         let ccy: Vec<String> = result
@@ -1295,7 +1304,7 @@ More info
                 _ => panic!("expected transaction"),
             })
             .collect();
-        assert_eq!(ccy, ["USD", "EUR"]);
+        assert_eq!(ccy, ["USD", "EUR", "USD"]);
     }
 
     #[test]

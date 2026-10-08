@@ -110,13 +110,24 @@ ledger and is queryable in BQL via `meta("value_date")`.
 
 If the bank's CSV has a unique id per transaction (Monzo's `Transaction ID`,
 for example), name the column and every imported transaction carries it as a
-`^csv-<id>` link, the CSV counterpart of OFX's `^ofx-<FITID>`:
+`^csv-<id>` link, the CSV counterpart of OFX's `^ofx-<FITID>`. For a
+Monzo-style export (`Transaction ID,Date,Time,Type,Name,…,Amount,Currency,…,Description,…`,
+dates like `15/01/2024`):
 
 ```toml
 [[importers]]
 name = "monzo"
+account = "Assets:Monzo"
+currency = "GBP"
+date_column = "Date"
+date_format = "%d/%m/%Y"
+payee_column = "Name"
+narration_column = "Description"
+amount_column = "Amount"
 transaction_id_column = "Transaction ID"
 ```
+
+`rledger extract --importer monzo monzo.csv` then writes:
 
 ```beancount
 2024-01-15 * "Bakery" "Croissant" ^csv-tx_0000A1b2C3

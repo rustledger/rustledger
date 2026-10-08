@@ -305,9 +305,10 @@ payee_column = 1
 narration_column = 2
 amount_column = 3
 
-# Or use column names (if CSV has header)
-date_column = "Date"
-amount_column = "Amount"
+# Or use column names (if CSV has header) instead of the indices above;
+# each key may appear only once
+# date_column = "Date"
+# amount_column = "Amount"
 
 # Date parsing
 date_format = "%Y-%m-%d"  # or "%m/%d/%Y", "%d.%m.%Y"

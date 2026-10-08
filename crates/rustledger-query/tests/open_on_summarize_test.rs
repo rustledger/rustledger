@@ -835,3 +835,53 @@ fn a_filter_expression_before_the_modifiers() {
         ),
     );
 }
+
+/// A summarization posting is synthesized, and `OPEN ON` can synthesize a
+/// transaction whose two postings share one account (the opening-balances
+/// account summarized into itself). `other_accounts` excludes only the current
+/// posting there too, so it still lists that account, and `accounts` lists it
+/// once (#2483). Expected values are bean-query's.
+#[test]
+fn other_accounts_on_a_synthesized_self_transfer() {
+    const SELF: &str = r#"
+2024-01-01 open Assets:Bank USD
+2024-01-01 open Assets:Savings USD
+2024-01-01 open Expenses:Food USD
+2024-01-01 open Equity:Opening-Balances USD
+
+2024-01-02 * "opening"
+  Assets:Savings  100 USD
+  Equity:Opening-Balances  -100 USD
+
+2024-01-05 * "x"
+  Expenses:Food  5 USD
+  Expenses:Food  5 USD
+  Assets:Bank   -10 USD
+
+2024-03-01 * "y"
+  Expenses:Food  1 USD
+  Assets:Bank   -1 USD
+"#;
+    let got = rows(
+        SELF,
+        "SELECT account, accounts, other_accounts FROM OPEN ON 2024-02-01 \
+         WHERE 'Assets:Bank' NOT IN accounts AND 'Assets:Savings' NOT IN accounts \
+         AND 'Equity:Earnings:Previous' NOT IN accounts",
+    );
+    let one = r#"StringSet(["Equity:Opening-Balances"])"#;
+    assert_eq!(
+        got,
+        vec![
+            vec![
+                "Equity:Opening-Balances".to_string(),
+                one.to_string(),
+                one.to_string()
+            ],
+            vec![
+                "Equity:Opening-Balances".to_string(),
+                one.to_string(),
+                one.to_string()
+            ],
+        ],
+    );
+}

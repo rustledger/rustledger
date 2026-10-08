@@ -2895,3 +2895,42 @@ fn inventory_sort_paths_agree() {
     let direct: Vec<&str> = direct.iter().map(|(name, _)| *name).collect();
     assert_eq!(direct, want, "compare_values_for_sort");
 }
+
+/// `TxnAccounts::others` (built once per transaction) equals the definition
+/// it stands in for: the sorted, deduped accounts of every posting except the
+/// one at this index (#2483).
+#[test]
+fn txn_accounts_others_matches_excluding_by_index() {
+    use super::system_tables::TxnAccounts;
+    let shapes: [&[&str]; 4] = [
+        &["Expenses:Food", "Expenses:Food", "Assets:Bank"],
+        &["A", "B", "C"],
+        &["A", "A", "A"],
+        &["B", "A", "B", "C", "A"],
+    ];
+    for accounts in shapes {
+        let mut txn = Transaction::new(rustledger_core::naive_date(2024, 1, 1).unwrap(), "t");
+        for a in accounts {
+            txn = txn.with_synthesized_posting(Posting::new(*a, Amount::new(dec!(1), "USD")));
+        }
+        let set = TxnAccounts::of(&txn);
+        let owned = TxnAccounts::of(&txn).into_owned();
+        let mut all: Vec<String> = accounts.iter().map(|a| (*a).to_string()).collect();
+        all.sort();
+        all.dedup();
+        assert_eq!(set.accounts(), all, "{accounts:?}");
+        assert_eq!(owned.accounts(), all, "{accounts:?}");
+        for (i, a) in accounts.iter().enumerate() {
+            let mut expected: Vec<String> = accounts
+                .iter()
+                .enumerate()
+                .filter(|(j, _)| *j != i)
+                .map(|(_, a)| (*a).to_string())
+                .collect();
+            expected.sort();
+            expected.dedup();
+            assert_eq!(set.others(a), expected, "{accounts:?} posting {i}");
+            assert_eq!(owned.others(a), expected, "{accounts:?} posting {i}");
+        }
+    }
+}

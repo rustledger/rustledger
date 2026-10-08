@@ -1,8 +1,8 @@
 # Rustledger Compatibility Results
-# Generated: 2026-10-07T03:50:57Z
+# Generated: 2026-10-08T03:39:31Z
 
 summary:
-  total_files: 1263
+  total_files: 1267
   excluded_files: 9
   check_exit_match_pct: 100
   full_match_pct: 100
@@ -11,32 +11,32 @@ summary:
   regressions: 0
 
 check_compatibility:
-  total_files: 1263
+  total_files: 1267
   excluded_files: 9
-  exit_code_match: 1263
+  exit_code_match: 1267
   exit_code_match_pct: 100
   rust_only_pass: 0
   python_only_pass: 0
 
 ast_compatibility:
-  accounts_match: 1263
+  accounts_match: 1267
   accounts_match_pct: 100
-  posting_count_match: 1263
+  posting_count_match: 1267
   posting_count_match_pct: 100
-  error_presence_match: 1263
+  error_presence_match: 1267
   error_presence_match_pct: 100
-  full_match: 1263
+  full_match: 1267
   full_match_pct: 100
 
 bql_compatibility:
-  queries_tested: 12787
-  queries_matching: 12085
+  queries_tested: 12844
+  queries_matching: 12139
   match_pct: 100
   # Raw = nothing masked. Reported next to match_pct so the size of
   # KNOWN_*_DIVERGENCES is visible rather than inferable; the gap
   # between the two moves whenever pins are added (#1902).
   raw_match_pct: 94
-  known_divergences: 702
+  known_divergences: 705
 
 regressions:
   count: 0

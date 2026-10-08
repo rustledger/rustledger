@@ -125,8 +125,7 @@ fetch_repo "fava-investor" "redstreet/fava_investor"
 # 13. Fava Dashboards
 fetch_repo "fava-dashboards" "andreasgerstmayr/fava-dashboards"
 
-# 14. Beancern (tariochbctools)
-fetch_repo "beancern" "tarioch/beancern"
+# 14. Beancern (tariochbctools): removed, see the note above "Forks with Test Data".
 
 # 15. double-entry-generator - Chinese accounting tool
 fetch_repo "double-entry-generator" "deb-sig/double-entry-generator"
@@ -251,12 +250,16 @@ fetch_repo "zed-beancount" "zed-extensions/beancount"
 fetch_repo "beancount-exporter" "LaunchPlatform/beancount-exporter"
 fetch_repo "beanhub-forms" "LaunchPlatform/beanhub-forms"
 fetch_repo "beanhub-web-react" "LaunchPlatform/beanhub-web-react"
-fetch_repo "beancount-extract" "LaunchPlatform/beancount-extract"
 fetch_repo "beancount-exchangerates" "xuhcc/beancount-exchangerates"
 fetch_repo "beancount-cryptoassets" "xuhcc/beancount-cryptoassets"
 
+# Removed 2026-10: tarioch/beancern, LaunchPlatform/beancount-extract and
+# iocoop/beancount no longer exist (GitHub 404), and contributed no corpus
+# files. Left in, they failed to clone on every run, so `.fetch-failures` was
+# never 0 and corpus-baseline-drift.py suppressed EVERY "file is gone" entry
+# as possibly a failed clone -- a real upstream deletion could never be
+# reported (#2473).
 # === Forks with Test Data ===
-fetch_repo "iocoop-beancount" "iocoop/beancount"
 fetch_repo "beancount-valuation" "Evernight/beancount-valuation"
 
 # === More Converters ===

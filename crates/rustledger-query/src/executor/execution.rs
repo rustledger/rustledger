@@ -1619,10 +1619,24 @@ impl Executor<'_> {
             if blank {
                 text.push('\n');
             }
-            text.push_str(&rustledger_core::format::format_directives(
+            // `rledger format`'s canonical form, through the one function
+            // that turns a typed directive into it (`rledger add`, `extract`
+            // and the FFI `format.entry` use it too). Calling
+            // `rustledger_core::format` directly printed that emitter's
+            // intermediate text, which `rledger format` then rewrote:
+            // `price X  110 USD` for `price X 110 USD`.
+            let formatted = rustledger_parser::format::canonicalize_directives(
                 std::iter::once(directive),
                 &config,
-            ));
+            )
+            .map_err(|e| {
+                QueryError::Evaluation(format!(
+                    "cannot print the {} of {}: {e}",
+                    directive.type_name(),
+                    directive.date()
+                ))
+            })?;
+            text.push_str(&formatted);
             result.add_row(vec![Value::String(text)]);
         }
 

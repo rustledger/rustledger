@@ -437,6 +437,31 @@ Across currencies neither rule measures size: rustledger's `MAX` of `-30 USD`
 and `10 EUR` is `-30 USD`, the last value in currency order. Pinned by
 `crates/rustledger-query/tests/min_max_amounts_test.rs` (issue #2447).
 
+### 16. PRINT Output Layout
+
+`PRINT` writes each entry the way `rledger format` writes it, so the
+spacing comes from rustledger's formatter, not beancount's printer. This
+section covers layout only. Transactions are laid out the same way in both,
+and the other directives differ in spacing:
+
+| | rustledger | bean-query |
+|---|---|---|
+| `open` | `2024-01-01 open Assets:Cash USD` | account padded to a fixed column, then `USD` |
+| `price` | `2024-01-03 price X 110 USD` | number right-aligned at a fixed column |
+| `balance` | `2024-01-04 balance Assets:Cash -300 USD` | number right-aligned at a fixed column |
+| postings | aligned within each entry | aligned within each entry |
+| `render_commas` | no separators | separators |
+
+The fixed columns are beancount's printer layout. rustledger keeps one
+canonical form for every directive it writes as text (`rledger format`,
+`rledger add`, `rledger extract`, the component's `format.entry`), so
+anything `PRINT` prints is already formatted. One layout difference
+remains: `rledger format` aligns postings across a whole file, and `PRINT`,
+like bean-query, aligns each entry on its own. Thousands separators would
+need the ledger's display context in the query engine, which `PRINT` does
+not have yet. Pinned by
+`crates/rustledger-query/tests/print_entry_stream.rs` (issue #2426).
+
 ## BQL Query Compatibility
 
 BQL (Beancount Query Language) compatibility was tested with 11 standard queries on 50 files:

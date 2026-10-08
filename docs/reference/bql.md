@@ -472,7 +472,8 @@ WHERE "trip-2024" IN links
 
 ## PRINT
 
-`PRINT` writes entries back as ledger text, as `rledger format` writes them:
+`PRINT` writes entries back as ledger text, each in `rledger format`'s
+canonical form, with postings aligned within the entry:
 
 ```sql
 PRINT FROM has_account('Assets:Bank') OPEN ON 2024-01-01

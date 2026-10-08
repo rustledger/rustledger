@@ -65,10 +65,10 @@ const FULL: &str = r#"2024-01-01 open Assets:B USD,X "FIFO"
     pmeta: 1
   Assets:C  -300 USD
 
-2024-01-03 price X  110 USD
-2024-01-03 price X  111 USD
+2024-01-03 price X 110 USD
+2024-01-03 price X 111 USD
 
-2024-01-04 balance Assets:C  -300 USD
+2024-01-04 balance Assets:C -300 USD
 
 2024-01-05 note Assets:C "a note"
 
@@ -78,20 +78,20 @@ const FULL: &str = r#"2024-01-01 open Assets:B USD,X "FIFO"
   Expenses:Food   12.50 USD
   Assets:C       -12.50 USD
 
-2024-01-08 balance Expenses:Food  12.50 USD
+2024-01-08 balance Expenses:Food 12.50 USD
 
 2024-02-01 * "sell"
   Assets:B   -1 X {100 USD, 2024-01-02, "lot-a"} @ 120 USD
   Assets:C  120 USD
   Income:G  -20 USD
 
-2024-02-03 price X  125 USD
+2024-02-03 price X 125 USD
 
 2024-02-05 * "lunch2"
   Expenses:Food   7.25 USD
   Assets:C       -7.25 USD
 
-2024-02-10 balance Expenses:Food  19.75 USD
+2024-02-10 balance Expenses:Food 19.75 USD
 "#;
 
 /// `PRINT FROM OPEN ON 2024-02-01`.
@@ -100,7 +100,7 @@ const OPENED: &str = r#"2024-01-01 open Assets:B USD,X "FIFO"
 2024-01-01 open Income:G USD
 2024-01-01 open Expenses:Food USD
 
-2024-01-03 price X  111 USD
+2024-01-03 price X 111 USD
 
 2024-01-31 S "Opening balance for 'Assets:B' (Summarization)"
   Assets:B                    3 X {100 USD, 2024-01-02, "lot-a"}
@@ -119,7 +119,7 @@ const OPENED: &str = r#"2024-01-01 open Assets:B USD,X "FIFO"
   Assets:C  120 USD
   Income:G  -20 USD
 
-2024-02-03 price X  125 USD
+2024-02-03 price X 125 USD
 
 2024-02-05 * "lunch2"
   Expenses:Food   7.25 USD
@@ -142,10 +142,10 @@ const CLOSED_CLEARED: &str = r#"2024-01-01 open Assets:B USD,X "FIFO"
     pmeta: 1
   Assets:C  -300 USD
 
-2024-01-03 price X  110 USD
-2024-01-03 price X  111 USD
+2024-01-03 price X 110 USD
+2024-01-03 price X 111 USD
 
-2024-01-04 balance Assets:C  -300 USD
+2024-01-04 balance Assets:C -300 USD
 
 2024-01-05 note Assets:C "a note"
 
@@ -155,7 +155,7 @@ const CLOSED_CLEARED: &str = r#"2024-01-01 open Assets:B USD,X "FIFO"
   Expenses:Food   12.50 USD
   Assets:C       -12.50 USD
 
-2024-01-08 balance Expenses:Food  12.50 USD
+2024-01-08 balance Expenses:Food 12.50 USD
 
 2024-02-01 * "sell"
   Assets:B   -1 X {100 USD, 2024-01-02, "lot-a"} @ 120 USD
@@ -180,7 +180,7 @@ const HAS_ACCOUNT: &str = r#"2024-01-01 open Assets:C USD
     pmeta: 1
   Assets:C  -300 USD
 
-2024-01-04 balance Assets:C  -300 USD
+2024-01-04 balance Assets:C -300 USD
 
 2024-01-05 note Assets:C "a note"
 
@@ -266,7 +266,7 @@ fn print_filters_every_entry_type() {
     assert_eq!(lunches.matches(" * ").count(), 2, "{lunches}");
     assert_eq!(
         print("PRINT FROM type = 'price' AND date < 2024-02-01"),
-        "2024-01-03 price X  110 USD\n2024-01-03 price X  111 USD\n"
+        "2024-01-03 price X 110 USD\n2024-01-03 price X 111 USD\n"
     );
     // A filter and OPEN ON together: the filter runs on the summarized stream.
     assert!(
@@ -312,4 +312,42 @@ fn has_account_reads_the_accounts_of_an_entries_row() {
             "transaction"
         ]
     );
+}
+
+/// Each printed entry is already in `rledger format`'s canonical form: PRINT
+/// renders through `canonicalize_directives`, the one function that turns a
+/// typed directive into that form. Rendering with `rustledger_core::format`
+/// directly printed its intermediate text instead (`price X  110 USD`, which
+/// `rledger format` rewrites to `price X 110 USD`).
+///
+/// Entry by entry, because `rledger format` aligns the postings of a whole
+/// file and PRINT, like bean-query, aligns each entry on its own.
+#[test]
+fn every_printed_entry_is_in_rledger_formats_canonical_form() {
+    let ledger = load(LEDGER);
+    let mut executor = Executor::new_with_sources(&ledger.directives, &ledger.source_map);
+    executor.set_account_types(ledger.options.to_account_types());
+    executor.set_booking_method(ledger.booking_method);
+    executor.set_summary_accounts(SummaryAccounts::from_options(&ledger.options));
+    for query in [
+        "PRINT",
+        "PRINT FROM OPEN ON 2024-02-01",
+        "PRINT FROM CLOSE ON 2024-02-02 CLEAR",
+    ] {
+        let result = executor
+            .execute(&parse(query).expect("parses"))
+            .expect("runs");
+        assert!(result.rows.len() > 5, "{query}: {} rows", result.rows.len());
+        for row in &result.rows {
+            let [Value::String(text)] = row.as_slice() else {
+                panic!("{query}: {row:?}");
+            };
+            let entry = text.trim_start_matches('\n');
+            assert_eq!(
+                rustledger_parser::format::format_source(entry),
+                entry,
+                "{query}: not in canonical form",
+            );
+        }
+    }
 }

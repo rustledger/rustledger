@@ -2619,9 +2619,9 @@ impl<'a> Executor<'a> {
     ///   beancount compatibility) or falls back to the executor's
     ///   `target_currency` setting.
     /// * `at_date` - Optional valuation date. When `Some`, prices are looked up
-    ///   with "on or before" semantics via [`price::PriceDatabase::convert`];
+    ///   with "on or before" semantics via [`crate::price::PriceDatabase::convert`];
     ///   when `None`, the latest available price is used via
-    ///   [`price::PriceDatabase::convert_latest`] (matches Python's
+    ///   [`crate::price::PriceDatabase::convert_latest`] (matches Python's
     ///   `value(position)` with `date=None`, which may use a future-dated price).
     ///
     /// # Returns

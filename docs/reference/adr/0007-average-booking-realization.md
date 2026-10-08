@@ -51,10 +51,13 @@ hledger: the pool is rewritten, the journal is not).
 - `Inventory::merge_average` collapses all cost-bearing lots of a currency into
   one weighted-average lot (`Σ(units·cost) / Σ units`); cost-less (cash)
   positions and net-zero currencies are handled cleanly.
+  (Since #2394 it pools each side, long and short, separately; see the
+  amendments below.)
 - The query **realizes** an AVERAGE account as a single pool: the query
   `AccountInfo` carries the account's booking method, and `sum(position)` over a
   group whose postings all belong to one AVERAGE account calls `merge_average`.
-  FIFO / LIFO / STRICT / HIFO / NONE accounts are unaffected.
+  FIFO / LIFO / STRICT / HIFO / NONE accounts are unaffected. (Since #2394 the
+  group is first replayed through booking; see the amendments below.)
 
 ## Consequences
 

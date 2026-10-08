@@ -258,7 +258,8 @@ order, not size: `max(units(position))` over `5 EUR` and `3 USD` is `3 USD`.
 bean-query answers `5 EUR` there; see section 15 of the
 [compatibility notes](compatibility.md).
 
-`sum(position)` over the postings of one `AVERAGE` account (with `GROUP BY
+`sum(position)` over the postings of one `AVERAGE` account (booking `AVERAGE`
+through its `open` or the ledger's `booking_method` option; with `GROUP BY
 account`, or a `WHERE` that keeps one account) shows the account's holding the
 way booking realizes it: the selected postings are replayed through the
 booking engine, as `BALANCES` does, and each side is then shown as one lot at

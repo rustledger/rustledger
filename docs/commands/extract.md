@@ -305,8 +305,9 @@ account = "Assets:Bank:MyBank"
 # account), when that `open` names exactly one, and otherwise stops with
 # an error rather than guess. Precedence, highest first: a --ledger
 # profile, --currency, this key, the account's `open`. A value that is not
-# a commodity (`usd`, `€`, "") is an error naming where it came from, and
-# a value the account's `open` does not allow is a warning.
+# a commodity (`usd`, `€`, "") is an error naming where it came from, for
+# CSV, OFX and WASM importers alike, and a value the account's `open` does
+# not allow is a warning.
 currency = "EUR"
 
 # Column mapping (0-indexed)
@@ -322,6 +323,13 @@ amount_column = 3
 
 # Date parsing
 date_format = "%Y-%m-%d"  # or "%m/%d/%Y", "%d.%m.%Y"
+
+# A per-row currency, for multi-currency exports. A blank cell uses
+# `currency`. A lower- or mixed-case code (`usd`, `Eur`) is upper-cased,
+# since the bank's file cannot be fixed and the code means the same either
+# way; a cell that is still not a commodity (`€`, `US$`) is a row error
+# naming the row, this column and the value.
+# currency_column = "Currency"
 
 # A unique per-transaction id from the bank, added as a `^csv-<id>` link
 # that `--existing` uses as identity when deduplicating

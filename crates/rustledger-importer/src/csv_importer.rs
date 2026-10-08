@@ -366,7 +366,7 @@ impl CsvImporter {
                 if cell.is_empty() {
                     default_currency()?
                 } else {
-                    cell.to_string()
+                    Self::cell_currency(cell, col)?
                 }
             }
             None => default_currency()?,
@@ -539,6 +539,41 @@ impl CsvImporter {
             engine.load_merchant_dict();
         }
         engine
+    }
+
+    /// The commodity a `currency_column` cell names (#2516).
+    ///
+    /// A cell the parser cannot read as a commodity used to be written into
+    /// the posting as is, and failed much later as "canonical formatter
+    /// failed to re-parse", naming neither the row, the column nor the value.
+    /// It is now a row error naming the column and the value (the caller adds
+    /// the row number).
+    ///
+    /// A lower- or mixed-case code (`usd`, `Eur`) is upper-cased: commodities
+    /// are upper-case in the ledger, the cell comes from the bank's file
+    /// where the user cannot fix it, and an ISO 4217 code means the same in
+    /// either case, so `usd` can only mean `USD`. Only the case changes; a
+    /// value that is still not a commodity after it (`€`, `US$`) is refused.
+    /// This differs on purpose from a configured `currency = "usd"`, which
+    /// the CLI refuses: that value is the user's own and fixed once at its
+    /// source.
+    fn cell_currency(cell: &str, col: &ColumnSpec) -> Result<String> {
+        if rustledger_parser::is_valid_currency(cell) {
+            return Ok(cell.to_string());
+        }
+        let upper = cell.to_ascii_uppercase();
+        if rustledger_parser::is_valid_currency(&upper) {
+            return Ok(upper);
+        }
+        let column = match col {
+            ColumnSpec::Name(name) => format!("{name:?}"),
+            ColumnSpec::Index(i) => format!("{i}"),
+        };
+        anyhow::bail!(
+            "currency_column {column} holds {cell:?}, which is not a valid commodity \
+             (a commodity is an upper-case letter followed by upper-case letters, \
+             digits or `'._-`, like `USD` or `EUR`)"
+        )
     }
 
     fn get_column<'a>(
@@ -1163,6 +1198,104 @@ More info
         assert_eq!(ccy(0), "EUR");
         assert_eq!(ccy(1), "USD");
         assert_eq!(ccy(2), "USD", "blank currency cell falls back to default");
+    }
+
+    /// #2516: a `currency_column` cell that is not a commodity is a row
+    /// error naming the row, the column and the value, not a posting that
+    /// fails to re-parse later. The other rows still import.
+    #[test]
+    fn a_currency_cell_that_is_not_a_commodity_is_a_row_error() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .currency_column("Currency")
+            .build()
+            .unwrap();
+        let csv_content = "Date,Description,Amount,Currency\n\
+2024-01-02,Coffee,-5.00,EUR\n\
+2024-01-03,Euro sign,-1.00,€\n\
+2024-01-04,Dollar sign,-2.00,US$\n\
+2024-01-05,Digit first,-3.00,1USD\n";
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
+        assert_eq!(result.directives.len(), 1, "{:?}", result.warnings);
+        assert_eq!(result.warnings.len(), 3, "{:?}", result.warnings);
+        assert!(
+            result.warnings[0].starts_with(
+                "Row 2: currency_column \"Currency\" holds \"€\", which is not a valid commodity"
+            ),
+            "{:?}",
+            result.warnings
+        );
+        assert!(
+            result.warnings[1].starts_with("Row 3: "),
+            "{:?}",
+            result.warnings
+        );
+        assert!(
+            result.warnings[1].contains("\"US$\""),
+            "{:?}",
+            result.warnings
+        );
+        assert!(
+            result.warnings[2].contains("\"1USD\""),
+            "{:?}",
+            result.warnings
+        );
+
+        // By index, the column is named by its number.
+        let by_index = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .currency_column_index(3)
+            .build()
+            .unwrap();
+        let result = CsvImporter
+            .extract_string(
+                "Date,Description,Amount,Currency\n2024-01-03,X,-1.00,€\n",
+                &by_index,
+            )
+            .unwrap();
+        assert!(
+            result.warnings[0].starts_with("Row 1: currency_column 3 holds \"€\""),
+            "{:?}",
+            result.warnings
+        );
+    }
+
+    /// #2516: a lower- or mixed-case code is the same ISO code, so it is
+    /// upper-cased rather than refused (the bank's file cannot be fixed).
+    #[test]
+    fn a_lowercase_currency_cell_is_uppercased() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .currency_column("Currency")
+            .build()
+            .unwrap();
+        let csv_content = "Date,Description,Amount,Currency\n\
+2024-01-02,Coffee,-5.00,usd\n\
+2024-01-03,Tea,-1.00, Eur \n";
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        let ccy: Vec<String> = result
+            .directives
+            .iter()
+            .map(|d| match d {
+                Directive::Transaction(txn) => {
+                    txn.postings[0].amount().unwrap().currency.to_string()
+                }
+                _ => panic!("expected transaction"),
+            })
+            .collect();
+        assert_eq!(ccy, ["USD", "EUR"]);
     }
 
     #[test]

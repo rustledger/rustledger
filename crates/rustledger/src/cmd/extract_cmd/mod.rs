@@ -919,6 +919,23 @@ fn profile_overrides_currency_flag(
     })
 }
 
+/// Refuse a configured currency the parser cannot read as a commodity,
+/// naming where it came from (`source`).
+///
+/// A value like `usd` or `€` used to surface as "canonical formatter failed
+/// to re-parse", and an empty string as amounts with no commodity at all. Shared by the CSV path ([`resolve_entry_currency`]) and
+/// the OFX/WASM path, so every importer type refuses the same values with
+/// the same message (#2517).
+fn check_currency(currency: &str, source: &str) -> Result<()> {
+    if !rustledger_parser::is_valid_currency(currency) {
+        anyhow::bail!(
+            "{source} is {currency:?}, which is not a valid commodity \
+             (commodities are upper-case, like `USD` or `EUR`)"
+        );
+    }
+    Ok(())
+}
+
 /// Give a CSV entry that names no `currency` the one its account is opened
 /// with, or refuse; and check a currency that IS configured (from the entry,
 /// `--currency` or the default) is a valid commodity, warning when the
@@ -965,15 +982,7 @@ fn resolve_entry_currency(
             (_, Some(name)) => format!("`currency` in the '{name}' entry of importers.toml"),
             _ => "the default currency".to_string(),
         };
-        // A value the parser cannot read (`usd`, `€`, ``) used to surface as
-        // "canonical formatter failed to re-parse", or, for an empty string,
-        // as amounts with no commodity at all.
-        if !rustledger_parser::is_valid_currency(currency) {
-            anyhow::bail!(
-                "{source} is {currency:?}, which is not a valid commodity \
-                 (commodities are upper-case, like `USD` or `EUR`)"
-            );
-        }
+        check_currency(currency, &source)?;
         // A configured currency the account's `open` does not allow is a
         // misconfiguration `rledger check` would reject on every imported
         // posting. The configured value still wins (it is what the user
@@ -1070,12 +1079,45 @@ fn resolve_entry_currency(
     )
 }
 
+/// The currency for a non-CSV importer (OFX, WASM), checked as the CSV path
+/// checks it (#2517).
+///
+/// Precedence, highest first: a `--ledger` profile, `--currency`, the entry's
+/// `currency`, the default. A profile's currency comes from a parsed `open`
+/// directive, the default is a constant, and `--currency` is checked when the
+/// run starts, so only the entry's value is checked here. Either used to
+/// reach the output or fail later with an unrelated message.
+fn minimal_currency(
+    profile: Option<&ledger_profile::LedgerProfile>,
+    args: &Args,
+    entry: Option<&MinimalEntry>,
+) -> Result<String> {
+    if let Some(currency) = profile.and_then(|p| p.currency.clone()) {
+        return Ok(currency);
+    }
+    if let Some(currency) = &args.currency {
+        // Checked once, at the start of the run, for every importer type.
+        return Ok(currency.clone());
+    }
+    if let Some(entry) = entry
+        && let Some(currency) = &entry.currency
+    {
+        check_currency(
+            currency,
+            &format!("`currency` in the '{}' entry of importers.toml", entry.name),
+        )?;
+        return Ok(currency.clone());
+    }
+    Ok(DEFAULT_CURRENCY.to_string())
+}
+
 /// The fields a non-CSV dispatcher can take from an `importers.toml` entry.
 ///
 /// Deliberately not the whole `ImporterEntry`: the column-mapping fields
 /// describe delimited text and mean nothing to a self-describing format, so
 /// carrying them here would invite using them.
 struct MinimalEntry {
+    name: String,
     format: Option<String>,
     account: Option<String>,
     currency: Option<String>,
@@ -1109,6 +1151,7 @@ fn load_minimal_entry(
     // Surface an unrecognized `type` here rather than treating it as CSV.
     entry.entry_format()?;
     Ok(Some(MinimalEntry {
+        name: entry.name.clone(),
         format: entry.format.clone(),
         account: entry.account.clone(),
         currency: entry.currency.clone(),
@@ -1438,6 +1481,14 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
     // cannot safely write never reports having extracted anything (#2251).
     validate_output_target(args)?;
 
+    // `--currency` is refused here, once, whichever importer reads the file
+    // (#2517): the CSV path checked it, but the OFX and WASM paths let `usd`
+    // or `€` through to the output. Checked even when a `--ledger` profile
+    // will outrank it, since an invalid flag is a typo either way.
+    if let Some(currency) = &args.currency {
+        check_currency(currency, "--currency")?;
+    }
+
     // External preprocessing (PDF etc.): if the resolved config entry
     // declares `preprocess`, run it FIRST and hand the rest of the
     // pipeline a temp .csv holding its stdout — so `--auto` inference,
@@ -1588,14 +1639,7 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
             account: named_account
                 .clone()
                 .unwrap_or_else(|| args.account_or_default()),
-            currency: Some(
-                profile
-                    .as_ref()
-                    .and_then(|p| p.currency.clone())
-                    .or_else(|| args.currency.clone())
-                    .or_else(|| entry.as_ref().and_then(|e| e.currency.clone()))
-                    .unwrap_or_else(|| DEFAULT_CURRENCY.to_string()),
-            ),
+            currency: Some(minimal_currency(profile.as_ref(), args, entry.as_ref())?),
             importer_type: rustledger_importer::config::ImporterType::Csv(
                 rustledger_importer::config::CsvConfig::default(),
             ),
@@ -3151,6 +3195,88 @@ default_expense = "Expenses:Uncategorized"
             // is that we don't error out before reaching the WASM
             // importer.
         }
+    }
+
+    /// #2517: an invalid `--currency` is refused, naming the flag, on the
+    /// OFX and WASM paths as on the CSV one; before, it went into the output
+    /// or failed later with an unrelated message. An OFX entry's own
+    /// invalid `currency` is refused the same way, naming the entry.
+    #[test]
+    fn an_invalid_currency_is_refused_for_every_importer_type() {
+        use rustledger_importer::test_fixtures::identifying_wat;
+        let tmp = tempfile::tempdir().unwrap();
+        let ofx = tmp.path().join("statement.ofx");
+        std::fs::write(
+            &ofx,
+            "<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>USD<BANKTRANLIST>\
+             <STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20240115<TRNAMT>-50.00<FITID>1<NAME>Shop</STMTTRN>\
+             </BANKTRANLIST></STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>",
+        )
+        .unwrap();
+        let wasm = tmp.path().join("my.wasm");
+        std::fs::write(&wasm, wat::parse_str(identifying_wat("mt9")).unwrap()).unwrap();
+        let mt940 = tmp.path().join("statement.mt940");
+        std::fs::write(&mt940, b"any bytes").unwrap();
+
+        let run_err = |argv: &[&str], file: &Path| {
+            let args = Args::parse_from(argv);
+            let mut out = Vec::new();
+            run_with_writer(&args, file, &mut out)
+                .map(|()| String::from_utf8(out).unwrap())
+                .unwrap_err()
+                .to_string()
+        };
+        for bad in ["usd", "€", ""] {
+            let want = format!("--currency is {bad:?}, which is not a valid commodity");
+            let err = run_err(
+                &[
+                    "extract",
+                    ofx.to_str().unwrap(),
+                    "-a",
+                    "Assets:Bank",
+                    "--currency",
+                    bad,
+                ],
+                &ofx,
+            );
+            assert!(err.starts_with(&want), "ofx {bad:?}: {err}");
+            let err = run_err(
+                &[
+                    "extract",
+                    mt940.to_str().unwrap(),
+                    "--wasm-importer",
+                    wasm.to_str().unwrap(),
+                    "--currency",
+                    bad,
+                ],
+                &mt940,
+            );
+            assert!(err.starts_with(&want), "wasm {bad:?}: {err}");
+        }
+
+        let config = tmp.path().join("importers.toml");
+        std::fs::write(
+            &config,
+            "[[importers]]\nname = \"card\"\ntype = \"ofx\"\naccount = \"Assets:Bank\"\ncurrency = \"usd\"\n",
+        )
+        .unwrap();
+        let err = run_err(
+            &[
+                "extract",
+                ofx.to_str().unwrap(),
+                "--config",
+                config.to_str().unwrap(),
+                "--importer",
+                "card",
+            ],
+            &ofx,
+        );
+        assert!(
+            err.starts_with(
+                "`currency` in the 'card' entry of importers.toml is \"usd\", which is not a valid commodity"
+            ),
+            "{err}"
+        );
     }
 
     #[test]

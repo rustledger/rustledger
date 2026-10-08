@@ -105,6 +105,76 @@ pub enum PluginRunError {
     },
 }
 
+/// The native plugin `name` resolves to in `pass`, if any.
+///
+/// This is the first step of [`resolve_plugin`] and the one definition of
+/// "native" a host should use (#2486). A `python:`-forced name is never
+/// native. Prefixed names resolve via their short last segment inside the
+/// registry.
+#[must_use]
+pub fn find_native_plugin<'a>(
+    name: &str,
+    force_python: bool,
+    pass: PluginPass,
+    registry: &'a NativePluginRegistry,
+) -> Option<&'a dyn NativePlugin> {
+    if force_python {
+        return None;
+    }
+    match pass {
+        PluginPass::Synth => registry.find_synth(name).map(|p| p as &dyn NativePlugin),
+        PluginPass::Regular => registry.find_regular(name).map(|p| p as &dyn NativePlugin),
+    }
+}
+
+/// What a plugin reference that is NOT native names.
+///
+/// Judged from its text alone: no filesystem access, no registry, no
+/// runtime. This is the classification [`resolve_plugin`] applies after
+/// [`find_native_plugin`] finds nothing, so a host that wants to skip
+/// external plugins without resolving them (the LSP, #2486) can tell a WASM
+/// or Python reference from an unknown name exactly the way resolution would.
+///
+/// Deliberately not `#[non_exhaustive]`: a caller decides per kind whether
+/// to skip or report (the LSP skips `Wasm`/`Python`, reports `Unknown`), so a
+/// new kind must fail its build rather than fall into a wildcard arm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExternalPluginKind {
+    /// A `.wasm` reference (checked first, so `python:x.wasm` is WASM).
+    Wasm,
+    /// A `python:`-forced name, a `.py` file, or a path- or module-shaped
+    /// name (contains a path separator or a `.`).
+    Python,
+    /// Anything else: a bare name the native registry does not hold, such
+    /// as a misspelled native plugin.
+    Unknown,
+}
+
+/// Classify a non-native plugin reference; see [`ExternalPluginKind`].
+///
+/// The extension test ignores case (`X.WASM` is WASM). "Contains a path
+/// separator" means the HOST's separator (`/` on Unix, `\` on Windows),
+/// exactly as `resolve_plugin` has always tested it.
+#[must_use]
+pub fn classify_external_plugin(name: &str, force_python: bool) -> ExternalPluginKind {
+    let ext = Path::new(name)
+        .extension()
+        .and_then(|e| e.to_str())
+        .unwrap_or("")
+        .to_lowercase();
+    if ext == "wasm" {
+        ExternalPluginKind::Wasm
+    } else if force_python
+        || ext == "py"
+        || name.contains(std::path::MAIN_SEPARATOR)
+        || name.contains('.')
+    {
+        ExternalPluginKind::Python
+    } else {
+        ExternalPluginKind::Unknown
+    }
+}
+
 /// Classify a plugin invocation into a runnable [`ResolvedPlugin`].
 ///
 /// Native plugins resolve through the typed registry keyed on `pass`; everything
@@ -128,28 +198,14 @@ pub fn resolve_plugin<'a>(
     base_dir: &Path,
     path_security: bool,
 ) -> Result<ResolvedPlugin<'a>, PluginResolveError> {
-    // Native plugins resolve through the typed registry keyed on the pass.
-    // Prefixed names resolve via the short last segment inside the registry.
-    let native: Option<&dyn NativePlugin> = if force_python {
-        None
-    } else {
-        match pass {
-            PluginPass::Synth => registry.find_synth(name).map(|p| p as &dyn NativePlugin),
-            PluginPass::Regular => registry.find_regular(name).map(|p| p as &dyn NativePlugin),
-        }
-    };
-    if let Some(plugin) = native {
+    if let Some(plugin) = find_native_plugin(name, force_python, pass, registry) {
         return Ok(ResolvedPlugin::Native(plugin));
     }
 
     // Not native — classify by extension / shape.
-    let ext = Path::new(name)
-        .extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("")
-        .to_lowercase();
+    let kind = classify_external_plugin(name, force_python);
 
-    if ext == "wasm" {
+    if kind == ExternalPluginKind::Wasm {
         #[cfg(feature = "wasm-runtime")]
         {
             return Ok(ResolvedPlugin::Wasm(resolve_path(
@@ -164,8 +220,7 @@ pub fn resolve_plugin<'a>(
         });
     }
 
-    if force_python || ext == "py" || name.contains(std::path::MAIN_SEPARATOR) || name.contains('.')
-    {
+    if kind == ExternalPluginKind::Python {
         // Python module or file-based plugin (or `python:`-prefixed force_python).
         #[cfg(feature = "python-plugins")]
         {
@@ -470,6 +525,41 @@ mod module_name_tests {
         std::fs::write(&file, "").unwrap();
         // A real file named like a module is still a file reference.
         assert!(!is_python_module_name(&file, "pkg.mod"));
+    }
+}
+
+/// `classify_external_plugin` is the classification `resolve_plugin` used
+/// inline before it was factored out (#2486); pin every shape, including the
+/// order (`.wasm` before `python:`) and case-insensitive extensions.
+#[cfg(test)]
+mod classify_tests {
+    use super::{ExternalPluginKind as K, classify_external_plugin as classify};
+
+    #[test]
+    fn every_reference_shape() {
+        let sep = std::path::MAIN_SEPARATOR;
+        let cases: Vec<(String, bool, K)> = vec![
+            ("x.wasm".into(), false, K::Wasm),
+            ("X.WASM".into(), false, K::Wasm),
+            ("/a/b/x.wasm".into(), false, K::Wasm),
+            ("x.wasm".into(), true, K::Wasm),
+            ("x.py".into(), false, K::Python),
+            ("X.PY".into(), false, K::Python),
+            ("pkg.module".into(), false, K::Python),
+            ("./plugins/p".into(), false, K::Python),
+            (format!("plugins{sep}p"), false, K::Python),
+            ("auto_accounts".into(), true, K::Python),
+            ("some_mod".into(), true, K::Python),
+            ("autoaccounts".into(), false, K::Unknown),
+            ("plugdir".into(), false, K::Unknown),
+        ];
+        for (name, force_python, want) in cases {
+            assert_eq!(
+                classify(&name, force_python),
+                want,
+                "{name} (python: {force_python})"
+            );
+        }
     }
 }
 

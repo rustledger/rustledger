@@ -16,7 +16,6 @@ use crate::config::CsvConfigBuilder;
 use anyhow::{Result, anyhow};
 use format_num_pattern::Locale;
 use serde::Deserialize;
-use std::collections::HashMap;
 use std::str::FromStr;
 
 /// Which built-in parser an entry configures.
@@ -105,9 +104,12 @@ pub struct ImporterEntry {
     pub default_expense: Option<String>,
     /// Default income account for unmatched positive-amount (money in) transactions.
     pub default_income: Option<String>,
-    /// Account mappings: pattern → account.
+    /// Account mappings: pattern → account, in the order the file lists them.
+    ///
+    /// Order matters: longer patterns are tried first, and among patterns of
+    /// equal length the one written first wins (#2423).
     #[serde(default)]
-    pub mappings: HashMap<String, String>,
+    pub mappings: Mappings,
     /// Categorize via the built-in merchant dictionary (off by default).
     pub use_merchant_dict: Option<bool>,
     /// External preprocessing command (argv array). When set, the command
@@ -148,6 +150,80 @@ pub struct ImporterEntry {
     /// output as content instead).
     #[serde(default)]
     pub preprocess: Option<Vec<String>>,
+}
+
+/// An `[importers.mappings]` table, kept in file order.
+///
+/// A `HashMap` here made equal-length overlapping patterns (`"foo"` and
+/// `"bar"` both matching `foobar`) pick an account at random per run, since
+/// only length ordered the rules (#2423). This keeps the order the file wrote
+/// them in, which is the tie-break: among patterns of equal length, the first
+/// one listed wins. (A plain map cannot: `toml` without `preserve_order`
+/// yields keys sorted, and turning that feature on would reorder every other
+/// table the workspace serializes.)
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Mappings(Vec<(String, String)>);
+
+impl Mappings {
+    /// The account mapped to `pattern`, if any.
+    #[must_use]
+    pub fn get(&self, pattern: &str) -> Option<&String> {
+        self.0.iter().find(|(p, _)| p == pattern).map(|(_, a)| a)
+    }
+
+    /// Number of mappings.
+    #[must_use]
+    pub const fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    /// Whether there are no mappings.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The `(pattern, account)` pairs in file order.
+    pub fn iter(&self) -> impl Iterator<Item = &(String, String)> {
+        self.0.iter()
+    }
+}
+
+impl FromIterator<(String, String)> for Mappings {
+    fn from_iter<I: IntoIterator<Item = (String, String)>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl<'de> Deserialize<'de> for Mappings {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+        impl<'de> serde::de::Visitor<'de> for Visitor {
+            type Value = Mappings;
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str("a table of pattern = \"Account\" strings")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Mappings, A::Error> {
+                // The `toml` deserializer hands table keys over sorted, not
+                // in file order, so read each key's span and restore the
+                // order the file wrote them in from that.
+                let mut pairs = Vec::with_capacity(map.size_hint().unwrap_or(0));
+                while let Some((key, account)) =
+                    map.next_entry::<toml::Spanned<String>, String>()?
+                {
+                    pairs.push((key.span().start, key.into_inner(), account));
+                }
+                pairs.sort_by_key(|(start, _, _)| *start);
+                Ok(Mappings(
+                    pairs.into_iter().map(|(_, k, a)| (k, a)).collect(),
+                ))
+            }
+        }
+        deserializer.deserialize_map(Visitor)
+    }
 }
 
 impl ImporterEntry {
@@ -353,11 +429,10 @@ pub fn build_config_from_entry(entry: &ImporterEntry) -> Result<ImporterConfig> 
         builder = builder.default_income(account);
     }
     if !entry.mappings.is_empty() {
-        let mut mappings: Vec<(String, String)> = entry
-            .mappings
-            .iter()
-            .map(|(k, v)| (k.clone(), v.clone()))
-            .collect();
+        // Longest pattern first, so a specific pattern outranks a shorter one
+        // it contains. The sort is stable, so patterns of equal length keep
+        // file order: the first one written wins, on every run (#2423).
+        let mut mappings: Vec<(String, String)> = entry.mappings.iter().cloned().collect();
         mappings.sort_by_key(|a| std::cmp::Reverse(a.0.len()));
         builder = builder.mappings(mappings);
     }
@@ -466,6 +541,80 @@ mod tests {
     /// Regression for #1133: `amount_locale` / `amount_format` set in
     /// `importers.toml` were silently ignored — only the matching CLI flags
     /// (`--amount-locale` / `--amount-format`) applied them.
+    /// The bare-table form the component's `importer.extract` parses keeps
+    /// mappings in file order too, and the built config breaks length ties
+    /// by it (#2423).
+    #[test]
+    fn mappings_keep_file_order_through_build() {
+        let entry = ImporterEntry::from_toml_str(
+            "name = \"t\"\n[mappings]\n\"zz\" = \"A:Z\"\n\"long one\" = \"A:L\"\n\"aa\" = \"A:A\"\n",
+        )
+        .unwrap();
+        let keys: Vec<&str> = entry.mappings.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(keys, ["zz", "long one", "aa"]);
+        let crate::config::ImporterType::Csv(csv) =
+            build_config_from_entry(&entry).unwrap().importer_type;
+        let patterns: Vec<&str> = csv.mappings.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(patterns, ["long one", "zz", "aa"]);
+    }
+
+    /// File order must survive every TOML spelling of the table, in an
+    /// `[[importers]]` array with several entries as the CLI loads it.
+    #[test]
+    fn mappings_keep_file_order_in_every_toml_spelling() {
+        #[derive(Deserialize)]
+        struct File {
+            importers: Vec<ImporterEntry>,
+        }
+        let keys = |e: &ImporterEntry| -> Vec<String> {
+            e.mappings.iter().map(|(k, _)| k.clone()).collect()
+        };
+        let text = r#"
+[[importers]]
+name = "subtable"
+[importers.mappings]
+"zz" = "A:Z"
+'mm literal' = "A:M"
+aa = "A:A"
+
+[[importers]]
+name = "inline"
+mappings = { "zz" = "A:Z", "mm" = "A:M", "aa" = "A:A" }
+
+[[importers]]
+name = "dotted"
+mappings."zz" = "A:Z"
+mappings.mm = "A:M"
+mappings."a a" = "A:A"
+
+[[importers]]
+name = "unicode"
+[importers.mappings]
+"ü" = "A:U"
+"é" = "A:E"
+"a" = "A:A"
+"#;
+        let file: File = toml::from_str(text).unwrap();
+        assert_eq!(keys(&file.importers[0]), ["zz", "mm literal", "aa"]);
+        assert_eq!(keys(&file.importers[1]), ["zz", "mm", "aa"]);
+        assert_eq!(keys(&file.importers[2]), ["zz", "mm", "a a"]);
+        assert_eq!(keys(&file.importers[3]), ["ü", "é", "a"]);
+
+        // An empty table, and an entry without one, are both empty.
+        let file: File = toml::from_str(
+            "[[importers]]\nname = \"a\"\nmappings = {}\n[[importers]]\nname = \"b\"\n",
+        )
+        .unwrap();
+        assert!(file.importers[0].mappings.is_empty());
+        assert!(file.importers[1].mappings.is_empty());
+
+        // A non-string account is still an error, not a silent skip.
+        assert!(
+            toml::from_str::<File>("[[importers]]\nname = \"a\"\n[importers.mappings]\nx = 1\n")
+                .is_err()
+        );
+    }
+
     #[test]
     fn entry_format_defaults_to_csv_and_reads_ofx() {
         let csv: ImporterEntry = toml::from_str("name = \"a\"").unwrap();

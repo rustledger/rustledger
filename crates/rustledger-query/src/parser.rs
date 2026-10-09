@@ -98,14 +98,93 @@ fn nesting_exceeds_limit(source: &str) -> Option<usize> {
     None
 }
 
-/// Parse a BQL query string.
+/// `source` with every `/* ... */` comment outside a string literal replaced
+/// by spaces, newlines kept, so every byte offset (and so every error
+/// position) is unchanged. Borrowed when there is no comment.
+///
+/// These are beanquery's comments (`@@comments` in its `bql.ebnf`): a
+/// comment ends at the first `*/` and does not nest, may span lines, and
+/// separates tokens as whitespace does. Inside a string it is part of the
+/// string. String lexing here MUST agree with `string_literal`, as
+/// `nesting_exceeds_limit`'s does: backslash is an ordinary byte, and `''`
+/// continues a single-quoted string.
+///
+/// beanquery 0.2 has no `--` comment: it reads `3--2` as `3 - -2`, which is
+/// 5, so treating `--` as a comment would change what such a query means.
+/// Its other comment rule, `@@eol_comments :: /\;[^\n]*?$/`, is anchored
+/// to the end of the input (no multiline flag), so it only lets anything
+/// follow a final `;` on the last line: `SELECT 1;2` runs `SELECT 1` and
+/// drops the `2` without a word. rledger rejects text after the `;` instead
+/// of silently dropping it (#2403).
 ///
 /// # Errors
 ///
-/// Returns a `ParseError` if the query string is malformed, or if
-/// parenthesis nesting exceeds the internal nesting limit (rejected up
-/// front to bound parse time and stack depth).
+/// A `/*` with no closing `*/`, at the `/*`'s offset, as beanquery rejects
+/// it.
+pub fn strip_comments(source: &str) -> Result<std::borrow::Cow<'_, str>, ParseError> {
+    let bytes = source.as_bytes();
+    let mut out: Option<Vec<u8>> = None;
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            quote @ (b'"' | b'\'') => {
+                // Skip the string body; an unterminated string is the
+                // grammar's to reject.
+                i += 1;
+                while i < bytes.len() {
+                    if bytes[i] == quote {
+                        if quote == b'\'' && bytes.get(i + 1) == Some(&b'\'') {
+                            i += 2;
+                            continue;
+                        }
+                        break;
+                    }
+                    i += 1;
+                }
+                i += 1;
+            }
+            b'/' if bytes.get(i + 1) == Some(&b'*') => {
+                let start = i;
+                let Some(len) = source[start + 2..].find("*/") else {
+                    return Err(ParseError::new(
+                        ParseErrorKind::SyntaxError("unterminated comment: no closing */".into()),
+                        start,
+                    ));
+                };
+                let end = start + 2 + len + 2;
+                let buf = out.get_or_insert_with(|| bytes.to_vec());
+                for b in &mut buf[start..end] {
+                    if *b != b'\n' {
+                        *b = b' ';
+                    }
+                }
+                i = end;
+            }
+            _ => i += 1,
+        }
+    }
+    Ok(match out {
+        // Only whole comments were replaced, each byte by an ASCII space, so
+        // the rest is the input's own UTF-8 and every char boundary stays put.
+        Some(buf) => std::borrow::Cow::Owned(
+            String::from_utf8(buf).expect("blanking whole comments keeps UTF-8 valid"),
+        ),
+        None => std::borrow::Cow::Borrowed(source),
+    })
+}
+
+/// Parse a BQL query string.
+///
+/// `/* ... */` comments are skipped as whitespace (see [`strip_comments`]).
+///
+/// # Errors
+///
+/// Returns a `ParseError` if the query string is malformed, if a comment is
+/// not closed, or if parenthesis nesting exceeds the internal nesting limit
+/// (rejected up front to bound parse time and stack depth).
 pub fn parse(source: &str) -> Result<Query, ParseError> {
+    let stripped = strip_comments(source)?;
+    let source = stripped.as_ref();
     if let Some(offset) = nesting_exceeds_limit(source) {
         return Err(ParseError::new(
             ParseErrorKind::SyntaxError(format!(
@@ -1739,6 +1818,122 @@ mod tests {
     fn test_semicolon_optional() {
         assert!(parse("SELECT *").is_ok());
         assert!(parse("SELECT *;").is_ok());
+    }
+
+    /// `/* ... */` comments, as beanquery 0.2 reads them (#2403). Each
+    /// accepted query parses to what it does with the comment removed; each
+    /// rejected one is rejected by bean-query's parser too (checked against
+    /// beanquery 0.2.0's `beanquery.parser.parse`).
+    #[test]
+    fn block_comments_are_whitespace() {
+        let same = |commented: &str, plain: &str| {
+            assert_eq!(
+                parse(commented).unwrap_or_else(|e| panic!("{commented:?}: {e}")),
+                parse(plain).unwrap(),
+                "{commented:?}",
+            );
+        };
+        same("/* leading */ SELECT account", "SELECT account");
+        same(
+            "/* line one\n   line two */\nSELECT account",
+            "SELECT account",
+        );
+        same("SELECT /* a\nb */ account", "SELECT account");
+        // A trailing comment with no newline after it.
+        same("SELECT account /* trailing */", "SELECT account");
+        same("SELECT account\n/* trailing */", "SELECT account");
+        same(
+            "SELECT account; /* after the terminator */",
+            "SELECT account",
+        );
+        same("SELECT account /**/", "SELECT account");
+        same("SELECT account /* a ** b */", "SELECT account");
+        // No nesting: the inner `/*` is comment text.
+        same("SELECT account /* a /* b */", "SELECT account");
+        // A quote inside a comment opens no string.
+        same("/* it's \"quoted */ SELECT account", "SELECT account");
+        same("/* café ☕ */ SELECT account", "SELECT account");
+        // A comment separates tokens as whitespace does.
+        same("SELECT 3/**/-2", "SELECT 3 - 2");
+        same(
+            "SELECT account/* c */WHERE/* c */account ~ 'Bank'",
+            "SELECT account WHERE account ~ 'Bank'",
+        );
+        // Parens in a comment do not count toward the nesting limit.
+        same(
+            &format!(
+                "SELECT account /* {} */",
+                "(".repeat(MAX_NESTING_DEPTH + 10)
+            ),
+            "SELECT account",
+        );
+    }
+
+    #[test]
+    fn block_comment_text_inside_a_string_is_the_string() {
+        for (query, value) in [
+            (
+                "SELECT account WHERE narration = 'a /* b */ c'",
+                "a /* b */ c",
+            ),
+            ("SELECT account WHERE narration = \"x /* y\"", "x /* y"),
+            (
+                "SELECT account WHERE narration = 'it''s /* not */'",
+                "it''s /* not */",
+            ),
+        ] {
+            let Query::Select(sel) = parse(query).unwrap() else {
+                panic!("a SELECT");
+            };
+            let Some(Expr::BinaryOp(op)) = &sel.where_clause else {
+                panic!("{query}: {:?}", sel.where_clause);
+            };
+            let Expr::Literal(Literal::String(s)) = &op.right else {
+                panic!("{query}: {:?}", op.right);
+            };
+            assert_eq!(s.value(), value, "{query}");
+        }
+    }
+
+    #[test]
+    fn block_comments_rejected_where_beanquery_rejects_them() {
+        // Unterminated: an error at the `/*`.
+        let err = parse("SELECT account /* no end").unwrap_err();
+        assert_eq!(err.position, 15, "{err}");
+        assert!(err.to_string().contains("unterminated comment"), "{err}");
+        // Not nested: the first `*/` closes it, and `c */` is left over.
+        assert!(parse("SELECT account /* a /* b */ c */").is_err());
+        // Not inside a token.
+        assert!(parse("SELE/**/CT account").is_err());
+        assert!(parse("SELECT acc/**/ount").is_err());
+        // An error after a comment keeps its offset in the original text.
+        let plain = parse("SELECT account WHERE").unwrap_err();
+        let commented = parse("SELECT account /* c */ WHERE").unwrap_err();
+        assert_eq!(commented.position, plain.position + "/* c */ ".len());
+    }
+
+    /// beanquery 0.2 has no `--` comment: `3--2` is `3 - -2`. Reading `--`
+    /// as a comment would quietly turn that into `SELECT 3` (#2403).
+    #[test]
+    fn double_dash_is_not_a_comment() {
+        let Query::Select(sel) = parse("SELECT 3--2").unwrap() else {
+            panic!("a SELECT");
+        };
+        assert!(
+            matches!(sel.targets[0].expr, Expr::BinaryOp(_)),
+            "{:?}",
+            sel.targets[0].expr
+        );
+        assert!(parse("-- a comment\nSELECT account").is_err());
+    }
+
+    /// beanquery's `;` comment rule is anchored to the end of the input, so
+    /// it drops anything after a final `;` without a word: `SELECT 1;2` runs
+    /// `SELECT 1`. rledger refuses the leftover instead (#2403).
+    #[test]
+    fn text_after_the_terminator_is_an_error() {
+        assert!(parse("SELECT 1;2").is_err());
+        assert!(parse("SELECT account; trailing").is_err());
     }
 
     #[test]

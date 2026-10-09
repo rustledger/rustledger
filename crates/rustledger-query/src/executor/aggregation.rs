@@ -3,7 +3,7 @@
 use rustc_hash::FxHashMap as HashMap;
 
 use rust_decimal::Decimal;
-use rustledger_core::{Amount, Inventory, Position};
+use rustledger_core::{Amount, BookingMethod, Inventory, Position, Transaction};
 
 use crate::ast::{Expr, Literal, Target, UnaryOperator};
 use crate::error::QueryError;
@@ -251,11 +251,11 @@ impl<'a> Executor<'a> {
         Ok(row)
     }
 
-    /// True when every posting in `group` belongs to a single account that is
-    /// AVERAGE-booked. Such a group's summed inventory should be realized as one
-    /// weighted-average pool (`Inventory::merge_average`). Returns false for
-    /// empty/mixed-account groups, so non-aggregated-by-account sums are
-    /// unaffected.
+    /// True when every posting in `group` belongs to a single account that
+    /// books with AVERAGE, its own method or else the ledger's. Such a group's
+    /// sum is realized through booking and presented as weighted-average pools
+    /// ([`Self::realize_average_group`]). Returns false for empty/mixed-account
+    /// groups, so non-aggregated-by-account sums are unaffected.
     fn group_is_single_average_account(&self, group: &[&PostingContext]) -> bool {
         let mut account: Option<&str> = None;
         for ctx in group {
@@ -269,14 +269,81 @@ impl<'a> Executor<'a> {
         account.is_some_and(|a| self.account_is_average(a))
     }
 
-    /// Is `account` opened with the AVERAGE booking method? A sum of its
-    /// positions is then merged into one weighted-average pool, here and in
-    /// a row-filtered BALANCES (`scan_postings`).
+    /// Is `account` booked AVERAGE? `SUM(position)` then realizes its
+    /// positions through booking, and a row-filtered `BALANCES`
+    /// (`scan_postings`) presents a partly selected one the same way.
+    ///
+    /// The same resolution as `BookingEngine::register_account_methods` and
+    /// `method_for`: the `open`'s method when it parses, else the ledger's.
+    /// Only the open's was read here, so under a global
+    /// `option "booking_method" "AVERAGE"` a sale's lot was left dangling
+    /// beside the lots it sold from.
     pub(super) fn account_is_average(&self, account: &str) -> bool {
         self.account_info
             .get(account)
             .and_then(|info| info.booking.as_deref())
-            .is_some_and(|b| b.eq_ignore_ascii_case("AVERAGE"))
+            .and_then(|b| b.parse::<BookingMethod>().ok())
+            .unwrap_or(self.booking_method)
+            == BookingMethod::Average
+    }
+
+    /// `group`'s postings, all of one AVERAGE account, realized the way
+    /// `BALANCES` realizes an account and then presented as one pool per
+    /// side ([`Inventory::merge_average`]).
+    ///
+    /// This used to sum the postings and pool every cost-bearing lot of a
+    /// commodity. A sum holds each sale as a negative lot, and so does a
+    /// short, so on an account holding both a long and a short the pool netted
+    /// one into the other and printed a lot nobody held: `-2 X {101 USD}` and
+    /// `3 X {102 USD}` came out as `1 X {104 USD}` (#2394). Nothing that looks
+    /// only at the sum can tell the two apart; booking can. So the group is
+    /// replayed through `BookingEngine::replay_transaction`, the canonical
+    /// walk `BALANCES` and `account_balance` use, which takes each sale from
+    /// its pool and leaves a short as a short.
+    ///
+    /// A group is a filtered subset of the account's postings, and replaying
+    /// one is what `replay_transaction` is for (#1985): each transaction
+    /// contributes only its postings in the group, in their order, and the
+    /// pool is the one those postings alone would build.
+    ///
+    /// `None` when booking cannot realize the subset, such as a sale of more
+    /// units than the group holds; the caller then keeps the plain sum.
+    ///
+    /// # Errors
+    ///
+    /// A pool outside `Decimal`'s range.
+    fn realize_average_group(group: &[&PostingContext]) -> Result<Option<Inventory>, QueryError> {
+        let mut engine = rustledger_booking::BookingEngine::with_method(BookingMethod::Average);
+        let mut rest = group;
+        while let Some(first) = rest.first() {
+            let txn: &Transaction = &first.transaction;
+            // A transaction's postings are consecutive in the group: the scan
+            // emits them together, in posting order.
+            let run = rest
+                .iter()
+                .take_while(|ctx| {
+                    std::ptr::eq(std::ptr::from_ref::<Transaction>(&ctx.transaction), txn)
+                })
+                .count();
+            let mut subset = Transaction::new(txn.date, txn.narration.clone());
+            subset.postings = rest[..run]
+                .iter()
+                .map(|ctx| txn.postings[ctx.posting_index].clone())
+                .collect();
+            if engine.replay_transaction(&subset).is_err() {
+                return Ok(None);
+            }
+            rest = &rest[run..];
+        }
+        let mut realized = engine
+            .into_inventories()
+            .into_values()
+            .next()
+            .unwrap_or_default();
+        realized
+            .merge_average()
+            .map_err(|e| QueryError::Evaluation(e.to_string()))?;
+        Ok(Some(realized))
     }
 
     pub(super) fn evaluate_aggregate_expr(
@@ -417,14 +484,23 @@ impl<'a> Executor<'a> {
                                     )))
                                     .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                             }
-                            // Realize an AVERAGE-booked account as a single
-                            // weighted-average pool: the journal keeps the real
-                            // per-lot costs, but the account's balance merges
-                            // them (matching its booking method).
-                            if self.group_is_single_average_account(group) {
-                                total_inventory
-                                    .merge_average()
-                                    .map_err(|e| QueryError::Evaluation(e.to_string()))?;
+                            // Realize an AVERAGE-booked account through
+                            // booking, as one weighted-average pool per side:
+                            // the journal keeps the real per-lot costs, but
+                            // the account's balance pools them (matching its
+                            // booking method). Only the bare column, whose
+                            // values are the postings' own positions.
+                            //
+                            // When booking cannot realize the subset (a WHERE
+                            // that keeps a sale but not enough of what it
+                            // sold from), the plain sum stands, unmerged:
+                            // exactly what the postings add up to, rather
+                            // than a pool that netted a sale into a short.
+                            if from_postings
+                                && self.group_is_single_average_account(group)
+                                && let Some(realized) = Self::realize_average_group(group)?
+                            {
+                                total_inventory = realized;
                             }
                             Ok(Value::Inventory(std::sync::Arc::new(total_inventory)))
                         } else if has_numbers {

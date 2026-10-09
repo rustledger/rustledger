@@ -560,7 +560,7 @@ pub struct AccountInfo {
     pub open_meta: Metadata,
     /// Booking method string from the Open directive (e.g. `"AVERAGE"`), if any.
     /// Stored raw to avoid coupling the query crate to the booking-method enum;
-    /// used to realize AVERAGE accounts as a single weighted-average pool.
+    /// used to realize AVERAGE accounts as one weighted-average pool per side.
     pub booking: Option<String>,
 }
 

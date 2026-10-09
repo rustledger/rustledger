@@ -107,7 +107,11 @@ impl Parser {
             match self.peek() {
                 Some(' ' | '\t' | '\x0c') => self.pos += 1,
                 Some('\n' | '\r') if depth > 0 => self.pos += 1,
-                Some('\\') if matches!(self.peek_at(1), Some('\n')) && self.has_token_after(2) => {
+                // A continuation needs something after it, even only a line
+                // break or a comment: Python rejects one at the very end.
+                Some('\\')
+                    if matches!(self.peek_at(1), Some('\n')) && self.pos + 2 < self.chars.len() =>
+                {
                     self.pos += 2;
                 }
                 Some('#') => {
@@ -118,21 +122,6 @@ impl Parser {
                 _ => return,
             }
         }
-    }
-
-    /// Whether a token (anything but whitespace or a comment) follows
-    /// `offset` characters on.
-    fn has_token_after(&self, offset: usize) -> bool {
-        let mut in_comment = false;
-        for &c in self.chars.iter().skip(self.pos + offset) {
-            match c {
-                '\n' => in_comment = false,
-                '#' => in_comment = true,
-                c if in_comment || c.is_whitespace() => {}
-                _ => return true,
-            }
-        }
-        false
     }
 
     fn value(&mut self, depth: usize) -> Result<PyValue, String> {
@@ -599,6 +588,11 @@ mod tests {
             ("none", "ERR"),
             ("-True", "ERR"),
             ("-'a'", "ERR"),
+            ("{}\\\n\n", "dict0"),
+            ("{}\\\n# c", "dict0"),
+            ("{}\\\n ", "dict0"),
+            ("{}\\\n\\\n", "ERR"),
+            ("[1,\\\n", "ERR"),
         ];
         let mut wrong = Vec::new();
         for (source, want) in cases {
@@ -693,6 +687,38 @@ mod tests {
                 got
             };
             assert_eq!(got, want, "{name}");
+        }
+    }
+
+    /// Number forms at the edges of Python's rules, each checked against
+    /// Python 3.13: the 4300-digit limit counts digits only (signs and
+    /// underscores excluded), applies to decimal integers only, and a
+    /// leading zero still makes a non-zero integer invalid.
+    #[test]
+    fn number_edges_match_python() {
+        let cases: Vec<(String, &str)> = vec![
+            (format!("+{}", "1".repeat(4301)), "ERR"),
+            (format!("-{}", "1".repeat(4300)), "num:nz"),
+            (format!("{}1", "1_".repeat(4300)), "ERR"),
+            (format!("{}1", "1_".repeat(4299)), "num:nz"),
+            ("0_0".to_string(), "num:0"),
+            (format!("0x{}", "_f".repeat(3000)), "num:nz"),
+            ("0x__f".to_string(), "ERR"),
+            ("0b_".to_string(), "ERR"),
+            ("0o_7".to_string(), "num:nz"),
+            ("-0x0".to_string(), "num:0"),
+            ("+0b0".to_string(), "num:0"),
+            (format!("{}.", "1".repeat(4300)), "num:nz"),
+            (format!("{}1", "0".repeat(4301)), "ERR"),
+        ];
+        for (source, want) in cases {
+            assert_eq!(
+                class(&source),
+                want,
+                "{:.24}... ({} chars)",
+                source,
+                source.len()
+            );
         }
     }
 

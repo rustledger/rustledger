@@ -1379,21 +1379,21 @@ fn importers_config_not_found_message() -> anyhow::Error {
     anyhow!("No importers.toml found. Create one in the current directory or at {user_path}")
 }
 
+/// [`resolve_scan_dirs_to`], warning on stderr. For tests.
+#[cfg(all(test, feature = "python-plugin-wasm"))]
+fn resolve_scan_dirs(args: &Args) -> Result<Vec<PathBuf>> {
+    resolve_scan_dirs_to(args, &mut io::stderr())
+}
+
 /// Resolve the list of directories to scan for WASM importers.
 ///
 /// Top-level dispatcher; the two real branches are
 /// [`resolve_scan_dirs_explicit`] (user named a config file with
 /// `--config`, errors propagate) and [`resolve_scan_dirs_implicit`]
 /// (no flag, soft-discover from default locations, errors warn-and-
-/// degrade). CLI `--wasm-importer-dir` flags override both and
-/// short-circuit the toml lookup entirely.
+/// degrade, the warning going to `err_out`). CLI `--wasm-importer-dir`
+/// flags override both and short-circuit the toml lookup entirely.
 #[cfg(feature = "python-plugin-wasm")]
-/// [`resolve_scan_dirs_to`], warning on stderr. For tests.
-#[cfg(test)]
-fn resolve_scan_dirs(args: &Args) -> Result<Vec<PathBuf>> {
-    resolve_scan_dirs_to(args, &mut io::stderr())
-}
-
 fn resolve_scan_dirs_to(args: &Args, err_out: &mut dyn Write) -> Result<Vec<PathBuf>> {
     if !args.wasm_importer_dir.is_empty() {
         return Ok(args.wasm_importer_dir.clone());
@@ -1452,6 +1452,12 @@ fn resolve_scan_dirs_implicit(err_out: &mut dyn Write) -> Vec<PathBuf> {
     }
 }
 
+/// [`build_registry_to`], with its notes on stderr. For tests.
+#[cfg(test)]
+fn build_registry(args: &Args) -> Result<ImporterRegistry> {
+    build_registry_to(args, &mut io::stderr())
+}
+
 /// Build an [`ImporterRegistry`] with WASM importers registered ahead
 /// of the built-in CSV/OFX importers, so user-discovered modules win
 /// the `identify()` race. Priority (highest first):
@@ -1464,19 +1470,15 @@ fn resolve_scan_dirs_implicit(err_out: &mut dyn Write) -> Vec<PathBuf> {
 /// 3. Built-in CSV + OFX importers (always present, registered last)
 ///
 /// Per-dir scan failures (a single malformed `.wasm` among many) are
-/// logged to stderr but don't abort startup — see [`register_wasm_dir`]'s
+/// written to `err_out`, with each importer loaded and each directory
+/// scanned, but don't abort startup — see [`register_wasm_dir`]'s
 /// skip-and-collect semantics.
-#[cfg_attr(not(feature = "python-plugin-wasm"), allow(unused_variables))]
-/// [`build_registry_to`], with its notes on stderr. For tests.
-#[cfg(test)]
-fn build_registry(args: &Args) -> Result<ImporterRegistry> {
-    build_registry_to(args, &mut io::stderr())
-}
-
-/// The importer registry for this invocation. Its notes (each WASM importer
-/// loaded, each directory scanned) go to `err_out`.
-// `err_out` is unused without the WASM importers, which write every note.
-#[cfg_attr(not(feature = "python-plugin-wasm"), allow(unused_variables))]
+// Without the WASM importers, `args` and `err_out` are unused: those
+// importers read every flag and write every note.
+#[cfg_attr(
+    not(feature = "python-plugin-wasm"),
+    allow(unused_variables, clippy::needless_pass_by_ref_mut)
+)]
 fn build_registry_to(args: &Args, err_out: &mut dyn Write) -> Result<ImporterRegistry> {
     let mut registry = ImporterRegistry::new();
 

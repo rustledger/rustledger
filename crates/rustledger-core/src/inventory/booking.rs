@@ -1108,6 +1108,18 @@ impl Inventory {
         );
 
         let mut currency = None;
+        // The per-lot changes, summed. Kept rather than replaced by `units`:
+        // the two are equal in VALUE, but a drained lot's change is `0 - prev`
+        // at the lot's own scale (`rust_decimal`'s zero shortcut), so this
+        // never widens the cached total to the scale written on the sale --
+        // and that scale is rendered (`got 1 X` in an E2001, not `1.00 X`).
+        // Checked, where it used to be a bare `+=` (#2554); see below for why
+        // it cannot actually fail.
+        let delta = fold_noting_rounding(updates.iter().map(|&(idx, new_units)| {
+            new_units
+                .checked_sub(self.positions[idx].units.number)
+                .unwrap_or(units.number)
+        }));
 
         for &(idx, new_units) in updates {
             if currency.is_none() {
@@ -1138,15 +1150,19 @@ impl Inventory {
 
         // One adjustment for the whole plan: see the assertion at the top.
         //
-        // By `units`, as `commit_from_lot` does: the lots moved by exactly
-        // that much. This used to re-add the per-lot changes with a bare `+=`,
-        // which PANICKED past `Decimal::MAX` and rounded short of it (#2554);
-        // the plan has already proved `total + units` in range (`net_after`),
-        // so this addition cannot panic.
+        // The lots moved by exactly `units` -- the plan's takes sum to it
+        // exactly -- so `delta` equals `units.number` in value, and the plan
+        // has proved `total + units` in range (`net_after`): this addition
+        // cannot panic. The per-lot sum is used when it is provably exact,
+        // for its scale; `units.number` otherwise, for its value (#2554).
+        let delta = match delta {
+            Some((sum, true)) => sum,
+            _ => units.number,
+        };
         if let Some(currency) = currency
             && let Some(stats) = self.units_cache.get_mut(&currency)
         {
-            stats.total = crate::decimal::add_python_scale(stats.total, units.number);
+            stats.total = crate::decimal::add_python_scale(stats.total, delta);
         }
     }
 
@@ -1581,9 +1597,11 @@ impl Inventory {
             // available, then carry the remainder as a negative (short)
             // simple position.
             let sign = units.number.signum();
-            // Exact, and settled BEFORE anything is consumed: `MAX - 0.48`
+            // Exact, and computed before anything is consumed: `MAX - 0.48`
             // rounds to `MAX`, which would short `0.48` more than the posting
-            // sold (#2554).
+            // sold (#2554). (The `add` of the short below can still fail after
+            // the drain has committed -- a pre-existing gap `apply`'s undo log
+            // covers, not something this check closes.)
             let short =
                 crate::decimal::checked_sub_exact(requested, available).ok_or_else(|| {
                     BookingError::Overflow(OverflowError {
@@ -3462,6 +3480,15 @@ mod reduction_tests {
                 assert!(is_overflow(&r), "{method:?}: got {r:?}");
                 assert_eq!(holdings(&inv), [d(10)], "{method:?}");
             }
+            // The same at magnitudes a token ledger reaches: 1e11 units, an
+            // 18-decimal sale. beancount accepts it and rounds the lot.
+            let mut inv = mk([corp(Decimal::new(100_000_000_000, 0), dec!(0.00001), 1)]);
+            let r = inv.reduce(
+                &sell(Decimal::new(1, 18)),
+                Some(&CostSpec::default()),
+                BookingMethod::Fifo,
+            );
+            assert!(is_overflow(&r), "got {r:?}");
             // One digit fewer fits, and books exactly.
             let mut inv = mk([corp(d(1), d(1), 1)]);
             inv.reduce(
@@ -3471,6 +3498,25 @@ mod reduction_tests {
             )
             .expect("0.9999999999999999999999999999 is a Decimal");
             assert_eq!(holdings(&inv), [Decimal::ONE - Decimal::new(1, 28)]);
+        }
+
+        /// Review of #2554: the fix first adjusted the units cache by the
+        /// sale's own `-10.00`, which widened an ordinary total to `1.00`
+        /// where beancount and `main` say `1`. Values were equal; the scale,
+        /// which a balance error renders, was not.
+        #[test]
+        fn a_multi_lot_sale_keeps_the_totals_scale() {
+            for method in [
+                BookingMethod::Fifo,
+                BookingMethod::Lifo,
+                BookingMethod::Hifo,
+            ] {
+                let mut inv = mk([corp(d(2), d(3), 1), corp(d(8), dec!(1.50), 2)]);
+                inv.reduce(&sell(dec!(10.00)), Some(&CostSpec::default()), method)
+                    .expect("sells both lots");
+                inv.add(corp(d(1), d(2), 3)).expect("fits");
+                assert_eq!(inv.units("CORP").to_string(), "1", "{method:?}");
+            }
         }
 
         /// STRICT's total-match exception summed the matching lots with

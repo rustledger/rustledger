@@ -336,8 +336,9 @@ impl fmt::Display for OverflowError {
         write!(
             f,
             "{} amount exceeds the representable range (±7.9e28, at most \
-             28-29 significant digits); split the transaction, or denominate \
-             it in larger units (thousands, millions) so the number is smaller",
+             28-29 significant digits); split the transaction, denominate it \
+             in larger units (thousands, millions) so the number is smaller, \
+             or write fewer decimal places",
             self.currency
         )
     }

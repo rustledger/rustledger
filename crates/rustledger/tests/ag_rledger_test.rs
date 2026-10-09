@@ -460,3 +460,335 @@ fn extract_adapter_keeps_entry_values_and_lets_flags_override() {
         "--skip-rows 0 did not override the entry's 1: {flags}"
     );
 }
+
+/// Run `ag-rledger <args...>` with `dir` as the cwd and the only config
+/// source, and return `(exit_code, envelope, stderr)`.
+fn run_in(dir: &std::path::Path, args: &[&str]) -> (i32, Value, String) {
+    let output = Command::new(ag_rledger())
+        .args(args)
+        // `dir` is the user config dir and the cwd, so no stray project
+        // config is found above it; PROGRAMDATA covers the Windows system
+        // config path.
+        .current_dir(dir)
+        .env("RLEDGER_CONFIG_DIR", dir)
+        .env("PROGRAMDATA", dir)
+        .env_remove("RLEDGER_PROFILE")
+        .env_remove("AG_RLEDGER_PROFILE")
+        .output()
+        .expect("spawn ag-rledger");
+    let code = output.status.code().expect("exit code");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let envelope: Value = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("envelope is not JSON ({e}): {stdout}"));
+    (
+        code,
+        envelope,
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// #2522: a config file that fails to load was dropped for defaults
+/// (`unwrap_or_default()`), so a typo anywhere in it silently reset every
+/// setting. It is now an error in the envelope, for every command that reads
+/// the config, as `rledger` makes it fatal (#1306).
+#[test]
+fn a_broken_config_is_an_error_not_silent_defaults() {
+    for broken in [
+        // Zero is refused at parse time: the sandbox would read it as 1s.
+        "[plugins]\nmax_time_secs = 0\n",
+        // A typo'd key under `[plugins]` (the table denies unknown fields).
+        "[plugins]\nmax_time_sec = 5\n",
+        // Not TOML at all.
+        "[plugins\n",
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = write_fixture(tmp.path(), "good.beancount", GOOD_LEDGER);
+        let file = file.to_str().unwrap();
+        std::fs::write(tmp.path().join("config.toml"), broken).unwrap();
+
+        for args in [
+            vec!["check", file],
+            vec!["query", file, "SELECT account"],
+            vec!["report", file, "balances"],
+            vec!["format", file, "--check"],
+            vec!["doctor", "stats", file],
+            vec!["lint", "transfers", file],
+            vec!["extract", "bank.csv"],
+            vec![
+                "add",
+                file,
+                "--quick",
+                "p",
+                "n",
+                "Assets:Cash",
+                "1 USD",
+                "--dry-run",
+            ],
+            vec!["compat", "uninstall", "--prefix", "nowhere"],
+            vec!["price", "--list-sources"],
+        ] {
+            let (code, env, _) = run_in(tmp.path(), &args);
+            assert_eq!(
+                env["ok"],
+                Value::Bool(false),
+                "{args:?} with {broken:?}: {env}"
+            );
+            assert_eq!(env["error"]["code"], "CONFIG_ERROR", "{args:?}: {env}");
+            assert_eq!(code, 2, "{args:?}: {env}");
+            let message = env["error"]["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains("Failed to parse config file"),
+                "{args:?}: the message must name the config failure: {env}"
+            );
+        }
+
+        // `config` is exempt, as in `rledger`: it is how a broken file is
+        // found and fixed.
+        let (code, env, _) = run_in(tmp.path(), &["config", "path"]);
+        assert_eq!(code, 0, "config path must still run: {env}");
+    }
+}
+
+/// The plugin-budget flags are refused when out of range, with the bounds
+/// `rledger` applies (one shared definition).
+#[test]
+fn plugin_budget_flags_are_validated() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "good.beancount", GOOD_LEDGER);
+    let file = file.to_str().unwrap();
+    for (flag, value) in [
+        ("--plugin-max-time-secs", "0"),
+        ("--plugin-max-memory-mb", "0"),
+        ("--plugin-max-memory-mb", "4097"),
+    ] {
+        let (code, env, _) = run_in(tmp.path(), &["check", file, flag, value]);
+        assert_eq!(code, 2, "{flag} {value}: {env}");
+        assert_eq!(
+            env["error"]["code"], "INVALID_FLAG",
+            "{flag} {value}: {env}"
+        );
+        assert!(
+            env["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains(flag)),
+            "{flag} {value}: {env}"
+        );
+    }
+    // In range, accepted on every command, before or after it.
+    let (code, env, _) = run_in(
+        tmp.path(),
+        &[
+            "--plugin-max-time-secs",
+            "5",
+            "report",
+            file,
+            "balances",
+            "--plugin-max-memory-mb",
+            "512",
+        ],
+    );
+    assert_eq!(code, 0, "{env}");
+}
+
+/// #2522/#2552: `allow_unknown_flags()` let any flag through unread. A flag
+/// the command does not read is now refused, whether it is a typo or a real
+/// `rledger` flag the agent surface does not support.
+#[test]
+fn a_flag_the_command_does_not_read_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "good.beancount", GOOD_LEDGER);
+    let file = file.to_str().unwrap();
+    for args in [
+        vec!["check", file, "--frobnicate"],
+        vec!["report", file, "balances", "--no-pager"],
+        vec!["format", file, "--check", "--no-cache"],
+        vec!["check", file, "--plugin-max-mem-mb", "512"],
+    ] {
+        let (code, env, _) = run_in(tmp.path(), &args);
+        assert_eq!(env["error"]["code"], "UNKNOWN_FLAG", "{args:?}: {env}");
+        assert_eq!(code, 2, "{args:?}: {env}");
+    }
+    // agcli's framework flags still pass on every command.
+    let (code, env, _) = run_in(
+        tmp.path(),
+        &["check", file, "--json", "--compact", "--no-color"],
+    );
+    assert_eq!(code, 0, "{env}");
+}
+
+/// `ag-rledger --plugin-max-time-secs 5 <alias>` took `5` for the command
+/// and never expanded the alias.
+#[test]
+fn an_alias_after_a_plugin_budget_flag_still_expands() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "good.beancount", GOOD_LEDGER);
+    std::fs::write(
+        tmp.path().join("config.toml"),
+        "[aliases]\nbal = \"report balances\"\n",
+    )
+    .unwrap();
+    let (code, env, _) = run_in(
+        tmp.path(),
+        &[
+            "--plugin-max-memory-mb",
+            "512",
+            "bal",
+            "--file",
+            file.to_str().unwrap(),
+            "--format",
+            "json",
+        ],
+    );
+    assert_eq!(code, 0, "{env}");
+    assert_eq!(env["result"]["command"], "report", "{env}");
+}
+
+/// The plugin budget reaches a plugin run by `ag-rledger`, from the flag
+/// and from the config file, with the flag winning (#2522, #2552). Before,
+/// `ag-rledger` had no flag, and a config-only budget was applied before the
+/// flags could be.
+#[cfg(feature = "python-plugin-wasm")]
+mod plugin_budget {
+    use super::*;
+    use rustledger_plugin::sandbox::FUEL_PER_SECOND;
+    use std::path::Path;
+
+    /// What the plugin's empty output fails with once `process` returns:
+    /// proof it ran to completion, not merely that it did not trap.
+    const RAN_TO_COMPLETION: &str = "reading marker";
+    const FUEL_TRAP: &str = "all fuel consumed";
+
+    /// Write `plugin.wasm` (from `process_body`, a WAT function body ending in
+    /// an `i64`) and a ledger that loads it; return the ledger path.
+    fn setup(dir: &Path, process_body: &str) -> String {
+        let wat = format!(
+            r#"(module
+                (memory (export "memory") 1)
+                (func (export "alloc") (param i32) (result i32) i32.const 0)
+                (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+                (func (export "process") (param i32 i32) (result i64) (local $n i32)
+                    {process_body}))"#
+        );
+        let wasm = dir.join("plugin.wasm");
+        std::fs::write(&wasm, wat::parse_str(wat).expect("WAT parses")).unwrap();
+        let ledger = dir.join("ledger.beancount");
+        std::fs::write(
+            &ledger,
+            format!(
+                "plugin \"{}\"\n\n2024-01-01 open Assets:Bank USD\n",
+                wasm.display()
+            ),
+        )
+        .unwrap();
+        ledger.to_str().unwrap().to_string()
+    }
+
+    /// About three seconds of fuel: fits the default 30 s, traps on 1 s.
+    fn burn(dir: &Path) -> String {
+        let iterations = 3 * FUEL_PER_SECOND / 6;
+        setup(
+            dir,
+            &format!(
+                "(local.set $n (i32.const {iterations}))
+                 (loop
+                     (local.set $n (i32.sub (local.get $n) (i32.const 1)))
+                     (br_if 0 (local.get $n)))
+                 i64.const 0"
+            ),
+        )
+    }
+
+    /// Grows memory to about 300 MiB: refused under the default 256 MiB
+    /// cap (the plugin then traps), granted under 1024.
+    fn hog(dir: &Path) -> String {
+        setup(
+            dir,
+            "(if (i32.eq (memory.grow (i32.const 4800)) (i32.const -1)) (then unreachable))
+             i64.const 0",
+        )
+    }
+
+    fn result_text(env: &Value) -> String {
+        env.to_string()
+    }
+
+    #[test]
+    fn time_budget_flag_and_config_take_effect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = burn(tmp.path());
+
+        let (_, env, _) = run_in(tmp.path(), &["check", &ledger]);
+        let out = result_text(&env);
+        assert!(out.contains(RAN_TO_COMPLETION), "default budget: {out}");
+        assert!(!out.contains(FUEL_TRAP), "default budget: {out}");
+
+        for args in [
+            vec!["check", &ledger, "--plugin-max-time-secs", "1"],
+            vec!["--plugin-max-time-secs", "1", "check", &ledger],
+            // `report` too: the budget is the process's, not `check`'s.
+            vec!["report", &ledger, "balances", "--plugin-max-time-secs", "1"],
+        ] {
+            let (_, env, _) = run_in(tmp.path(), &args);
+            assert!(result_text(&env).contains(FUEL_TRAP), "{args:?}: {env}");
+        }
+
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            "[plugins]\nmax_time_secs = 1\n",
+        )
+        .unwrap();
+        let (_, env, _) = run_in(tmp.path(), &["check", &ledger]);
+        assert!(result_text(&env).contains(FUEL_TRAP), "config: {env}");
+
+        // The flag beats the config file.
+        let (_, env, _) = run_in(
+            tmp.path(),
+            &["check", &ledger, "--plugin-max-time-secs", "60"],
+        );
+        let out = result_text(&env);
+        assert!(out.contains(RAN_TO_COMPLETION), "flag over config: {out}");
+        assert!(!out.contains(FUEL_TRAP), "flag over config: {out}");
+    }
+
+    #[test]
+    fn memory_cap_flag_and_config_take_effect() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ledger = hog(tmp.path());
+
+        let (_, env, _) = run_in(tmp.path(), &["check", &ledger]);
+        assert!(
+            !result_text(&env).contains(RAN_TO_COMPLETION),
+            "the default 256 MiB cap must refuse the plugin: {env}"
+        );
+
+        let (_, env, _) = run_in(
+            tmp.path(),
+            &["check", &ledger, "--plugin-max-memory-mb", "1024"],
+        );
+        assert!(
+            result_text(&env).contains(RAN_TO_COMPLETION),
+            "--plugin-max-memory-mb 1024 must let it run: {env}"
+        );
+
+        std::fs::write(
+            tmp.path().join("config.toml"),
+            "[plugins]\nmax_memory_mb = 1024\n",
+        )
+        .unwrap();
+        let (_, env, _) = run_in(tmp.path(), &["check", &ledger]);
+        assert!(
+            result_text(&env).contains(RAN_TO_COMPLETION),
+            "config: {env}"
+        );
+
+        // The flag beats the config file.
+        let (_, env, _) = run_in(
+            tmp.path(),
+            &["check", &ledger, "--plugin-max-memory-mb", "256"],
+        );
+        assert!(
+            !result_text(&env).contains(RAN_TO_COMPLETION),
+            "flag over config: {env}"
+        );
+    }
+}

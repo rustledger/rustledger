@@ -49,7 +49,10 @@ use rustledger_core::{
     Amount, CostNumber, CostSpec, Directive, Inventory, NaiveDate, Position, Posting, Transaction,
 };
 
+use rustc_hash::{FxHashMap, FxHashSet};
+
 use super::Executor;
+use super::types::EntryRef;
 use crate::error::QueryError;
 
 /// The equity accounts `FROM ... OPEN ON` summarizes into: beancount's
@@ -346,6 +349,87 @@ impl Executor<'_> {
     }
 }
 
+impl<'a> Executor<'a> {
+    /// What `FROM ... OPEN ON open` keeps from before the date, in entry
+    /// order: the `open` directives still active at it, the last `price` of
+    /// each currency pair before it, and the [`Self::open_summaries`]
+    /// (beancount's `summarize.summarize`). Also the income-statement
+    /// accounts the summary cleared: their `balance` directives on or after
+    /// the date are dropped, as beancount's `transfer_balances` drops them.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::open_summaries`].
+    pub(super) fn open_head(
+        &self,
+        open: NaiveDate,
+    ) -> Result<(Vec<(Option<usize>, EntryRef<'a>)>, FxHashSet<String>), QueryError> {
+        // `get_open_entries`: the earliest `open` of each account, unless a
+        // `close` before the date closed it.
+        let mut opens: FxHashMap<&str, (usize, &'a Directive)> = FxHashMap::default();
+        // `get_last_price_entries`: the last price of each (base, quote).
+        let mut prices: FxHashMap<(&str, &str), (usize, &'a Directive)> = FxHashMap::default();
+        let mut cleared = FxHashSet::default();
+        for (index, directive) in self.resolved_directives().enumerate() {
+            if directive.date() >= open {
+                continue;
+            }
+            match directive {
+                Directive::Open(o) => {
+                    let earlier = opens
+                        .get(o.account.as_str())
+                        .is_some_and(|(_, d)| d.date() <= o.date);
+                    if !earlier {
+                        opens.insert(o.account.as_str(), (index, directive));
+                    }
+                }
+                Directive::Close(c) => {
+                    opens.remove(c.account.as_str());
+                }
+                Directive::Price(p) => {
+                    prices.insert(
+                        (p.currency.as_str(), p.amount.currency.as_str()),
+                        (index, directive),
+                    );
+                }
+                Directive::Transaction(txn) => {
+                    for posting in &txn.postings {
+                        if self.account_types.is_income_statement(&posting.account) {
+                            cleared.insert(posting.account.to_string());
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        // beancount's `entry_sortkey`: date, then the type order (`open`
+        // first), then the line, where a summary's line is 0.
+        let mut head: Vec<((NaiveDate, i8, usize), (Option<usize>, EntryRef<'a>))> = opens
+            .into_values()
+            .chain(prices.into_values())
+            .map(|(index, directive)| {
+                let order = if matches!(directive, Directive::Open(_)) {
+                    -2
+                } else {
+                    0
+                };
+                (
+                    (directive.date(), order, index + 1),
+                    (Some(index), EntryRef::Ledger(directive)),
+                )
+            })
+            .collect();
+        head.extend(
+            self.open_summaries(open)?
+                .into_iter()
+                .map(|txn| ((txn.date, 0, 0), (None, EntryRef::Synthesized(txn)))),
+        );
+        // Stable, so the summaries keep their account order.
+        head.sort_by_key(|(key, _)| *key);
+        Ok((head.into_iter().map(|(_, entry)| entry).collect(), cleared))
+    }
+}
+
 impl Executor<'_> {
     /// `CLOSE`'s conversions entry: dated `date`, the period's balance at
     /// cost negated into `account_current_conversions`, each posting priced
@@ -358,11 +442,11 @@ impl Executor<'_> {
     /// A balance or cost that leaves the `Decimal` range.
     pub(super) fn close_conversions(
         &self,
-        stream: &[(Option<usize>, super::TransactionRef<'_>)],
+        stream: &[(Option<usize>, EntryRef<'_>)],
         date: NaiveDate,
     ) -> Result<Option<Arc<Transaction>>, QueryError> {
         let mut balance = OrderedBalance::default();
-        for (_, txn) in stream {
+        for txn in stream.iter().filter_map(|(_, entry)| entry.transaction()) {
             for posting in &txn.postings {
                 if let Some(units) = posting.amount() {
                     balance.add(&Position::from_posting(
@@ -407,16 +491,16 @@ impl Executor<'_> {
     /// A transaction the engine cannot realize, or a cost out of range.
     pub(super) fn clear_transfers(
         &self,
-        stream: &[(Option<usize>, super::TransactionRef<'_>)],
+        stream: &[(Option<usize>, EntryRef<'_>)],
         date: NaiveDate,
     ) -> Result<Vec<Arc<Transaction>>, QueryError> {
         let mut engine = rustledger_booking::BookingEngine::for_ledger(
             self.booking_method,
             self.resolved_directives(),
         );
-        for (_, txn) in stream {
+        for txn in stream.iter().filter_map(|(_, entry)| entry.transaction()) {
             engine
-                .replay_transaction(txn)
+                .replay_transaction(&txn)
                 .map_err(|e| QueryError::Evaluation(e.to_string()))?;
         }
         let balances: BTreeMap<String, Inventory> = engine

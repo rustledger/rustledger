@@ -829,4 +829,15 @@ fn test_query_print_outputs_directives() {
         stdout.contains("open Assets:Cash"),
         "PRINT should emit directives, got:\n{stdout}"
     );
+    // Raw ledger text, as bean-query prints it: no table header, no padding,
+    // no row-count footer, and the interpolated amount (#2426).
+    assert_eq!(
+        stdout,
+        "2020-01-01 open Assets:Cash USD\n\
+         2020-01-01 open Equity:O USD\n\
+         \n\
+         2020-02-01 * \"p\"\n  \
+           Assets:Cash   10.00 USD\n  \
+           Equity:O     -10.00 USD\n"
+    );
 }

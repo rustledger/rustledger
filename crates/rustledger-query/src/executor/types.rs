@@ -457,6 +457,33 @@ impl QueryResult {
     }
 }
 
+/// An entry of the stream a `FROM` clause gives: a directive in the ledger,
+/// or a transaction the query synthesized (an `OPEN ON` summary, a `CLOSE`
+/// conversions entry, a `CLEAR` transfer).
+///
+/// `PRINT` prints this stream; the posting sources iterate its transactions
+/// (#2411).
+#[derive(Debug, Clone)]
+pub(super) enum EntryRef<'a> {
+    /// A directive in the ledger.
+    Ledger(&'a rustledger_core::Directive),
+    /// A transaction the query synthesized, with no source in the ledger.
+    Synthesized(std::sync::Arc<Transaction>),
+}
+
+impl<'a> EntryRef<'a> {
+    /// The entry's transaction, if it is one.
+    pub(super) fn transaction(&self) -> Option<TransactionRef<'a>> {
+        match self {
+            Self::Ledger(rustledger_core::Directive::Transaction(txn)) => {
+                Some(TransactionRef::Ledger(txn))
+            }
+            Self::Ledger(_) => None,
+            Self::Synthesized(txn) => Some(TransactionRef::Synthesized(std::sync::Arc::clone(txn))),
+        }
+    }
+}
+
 /// The transaction a posting row belongs to: one in the ledger, or one the
 /// query synthesized.
 ///

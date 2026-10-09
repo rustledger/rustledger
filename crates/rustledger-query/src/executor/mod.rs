@@ -8,6 +8,7 @@ mod types;
 
 pub use summarize::SummaryAccounts;
 use types::AccountInfo;
+use types::EntryRef;
 pub use types::{
     Interval, IntervalUnit, PostingContext, QueryResult, Row, SourceLocation, Table,
     TransactionRef, Value, WindowContext,
@@ -860,6 +861,38 @@ impl<'a> Executor<'a> {
         I: IntoIterator<Item = (usize, &'a Directive)>,
         I::IntoIter: 'a,
     {
+        Ok(Box::new(self.window_entries(from, directives)?.filter_map(
+            |(index, entry)| entry.transaction().map(|txn| (index, txn)),
+        )))
+    }
+
+    /// The entries a `FROM` clause's `OPEN ON` / `CLOSE` / `CLEAR` leave, in
+    /// order: beanquery's `prepare`, which is beancount's `summarize.open_opt`,
+    /// `close_opt` and `clear_opt`. [`Self::window_transactions`] is its
+    /// transactions; `PRINT` prints all of it (#2411).
+    ///
+    /// - `OPEN ON`: the entries before the date are replaced by the `open`
+    ///   directives still active at it, the last `price` of each currency
+    ///   pair before it, and the opening-balance summaries, in beancount's
+    ///   entry order (`summarize.summarize`). Every entry on or after the
+    ///   date follows, except a `balance` on an income or expense account
+    ///   the summary cleared: beancount's `transfer_balances` drops those,
+    ///   since they would no longer hold.
+    /// - `CLOSE ON` truncates at the date, then `CLOSE` appends the
+    ///   conversions entry; `CLEAR` appends the transfers, last.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::window_transactions`].
+    fn window_entries<I>(
+        &self,
+        from: Option<&FromClause>,
+        directives: I,
+    ) -> Result<Box<dyn Iterator<Item = (Option<usize>, EntryRef<'a>)> + 'a>, QueryError>
+    where
+        I: IntoIterator<Item = (usize, &'a Directive)>,
+        I::IntoIter: 'a,
+    {
         let open_on = from.and_then(|f| f.open_on);
         let close_on = from.and_then(|f| f.close_on);
         let close = from.is_some_and(|f| f.close || f.close_on.is_some());
@@ -874,28 +907,25 @@ impl<'a> Executor<'a> {
         let in_window = move |date: NaiveDate| {
             open_on.is_none_or(|open| date >= open) && close_on.is_none_or(|close| date < close)
         };
-        let summaries = match open_on {
-            Some(open) => self.open_summaries(open)?,
-            None => Vec::new(),
+        let (head, cleared) = match open_on {
+            Some(open) => self.open_head(open)?,
+            None => (Vec::new(), rustc_hash::FxHashSet::default()),
         };
-        let head = summaries
-            .into_iter()
-            .map(|txn| (None, TransactionRef::Synthesized(txn)));
-        let transactions = move |(index, directive): (usize, &'a Directive)| match directive {
-            Directive::Transaction(txn) if in_window(txn.date) => {
-                Some((Some(index), TransactionRef::Ledger(txn)))
-            }
-            _ => None,
+        let entries = move |(index, directive): (usize, &'a Directive)| {
+            let kept = in_window(directive.date())
+                && !matches!(directive, Directive::Balance(b) if cleared.contains(b.account.as_str()));
+            kept.then_some((Some(index), EntryRef::Ledger(directive)))
         };
         if !close && !clear {
             return Ok(Box::new(
-                head.chain(directives.into_iter().filter_map(transactions)),
+                head.into_iter()
+                    .chain(directives.into_iter().filter_map(entries)),
             ));
         }
 
         // CLOSE and CLEAR append entries computed from the whole window, so it
         // is materialized; every other query stays lazy.
-        let mut stream: Vec<(Option<usize>, TransactionRef<'a>)> = head.collect();
+        let mut stream: Vec<(Option<usize>, EntryRef<'a>)> = head;
         // beancount dates a bare CLOSE's conversions entry, and CLEAR's
         // transfers, at `entries[-1].date`: the last entry of ANY type left
         // after OPEN and CLOSE, which can be a price or a balance dated after
@@ -914,7 +944,7 @@ impl<'a> Executor<'a> {
             if in_window(date) {
                 last_date = last_date.max(Some(date));
             }
-            if let Some(entry) = transactions((index, directive)) {
+            if let Some(entry) = entries((index, directive)) {
                 stream.push(entry);
             }
         }
@@ -931,7 +961,7 @@ impl<'a> Executor<'a> {
                 && let Some(conversions) = self.close_conversions(&stream, date)?
             {
                 last_date = last_date.max(Some(date));
-                stream.push((None, TransactionRef::Synthesized(conversions)));
+                stream.push((None, EntryRef::Synthesized(conversions)));
             }
         }
         if clear && let Some(date) = last_date {
@@ -939,7 +969,7 @@ impl<'a> Executor<'a> {
             stream.extend(
                 transfers
                     .into_iter()
-                    .map(|txn| (None, TransactionRef::Synthesized(txn))),
+                    .map(|txn| (None, EntryRef::Synthesized(txn))),
             );
         }
         Ok(Box::new(stream.into_iter()))

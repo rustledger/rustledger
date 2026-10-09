@@ -282,7 +282,7 @@ fn filter_existing_duplicates(
     directives: Vec<Directive>,
     existing: &[rustledger_core::Transaction],
     account: &str,
-    report: &mut impl Write,
+    report: &mut (impl Write + ?Sized),
 ) -> Result<Vec<Directive>> {
     use rustledger_ops::dedup::DuplicateReason;
 
@@ -407,14 +407,19 @@ fn filter_existing_duplicates(
 /// trait implementation that consumes a config.
 pub fn list_importers(args: &Args) -> Result<()> {
     let mut stdout = io::stdout().lock();
-    list_importers_with_writer(args, &mut stdout)
+    list_importers_with_writer(args, &mut stdout, &mut io::stderr())
 }
 
-/// List available importers, writing the listing to `out`.
+/// List available importers, writing the listing to `out` and the WASM
+/// registry's notes to `err_out`.
 ///
 /// Writer-injectable variant of [`list_importers`] used by `ag-rledger`.
 /// Behavior is otherwise identical.
-pub fn list_importers_with_writer<W: Write>(args: &Args, out: &mut W) -> Result<()> {
+pub fn list_importers_with_writer<W: Write>(
+    args: &Args,
+    out: &mut W,
+    err_out: &mut dyn Write,
+) -> Result<()> {
     // ===== TOML profiles =====
     //
     // Optional: if no config file is present we still want to list
@@ -458,7 +463,7 @@ pub fn list_importers_with_writer<W: Write>(args: &Args, out: &mut W) -> Result<
     // Always shown — at minimum CSV + OFX, plus any WASM-discovered
     // modules. Build a fresh registry from args so users see exactly
     // what this invocation would dispatch through.
-    let registry = build_registry(args)?;
+    let registry = build_registry_to(args, err_out)?;
     writeln!(out, "Registered importer engines:")?;
     for (name, description) in registry.list_importers() {
         writeln!(out, "  {name} - {description}")?;
@@ -729,7 +734,11 @@ fn reject_shell_splice(program: &str, argv: &[String]) -> Result<()> {
 /// Split out of [`maybe_preprocess`] so that config discovery — the fallible
 /// part — can be made TOLERANT for a config the user never pointed at, while
 /// failures from actually running the command always propagate.
-fn resolve_preprocess_argv(args: &Args, file: &Path) -> Result<Option<Vec<String>>> {
+fn resolve_preprocess_argv(
+    args: &Args,
+    file: &Path,
+    err_out: &mut dyn Write,
+) -> Result<Option<Vec<String>>> {
     let Some((config_path, source)) = find_importers_config_with_source(args.config.as_deref())?
     else {
         return Ok(None);
@@ -769,7 +778,8 @@ fn resolve_preprocess_argv(args: &Args, file: &Path) -> Result<Option<Vec<String
     };
 
     if source == ConfigSource::CurrentDirectory {
-        eprintln!(
+        let _ = writeln!(
+            err_out,
             "warning: ignoring `preprocess` in {} — a config found in the \
              current directory is not run. Pass it with --config if it is \
              yours.",
@@ -808,7 +818,11 @@ fn resolve_preprocess_argv(args: &Args, file: &Path) -> Result<Option<Vec<String
 /// ambiguous file lying around must not fail them — before this split, the mere
 /// presence of one did. Paths that DO use a config re-load it below and report
 /// the same error from there.
-fn maybe_preprocess(args: &Args, file: &Path) -> Result<Option<tempfile::NamedTempFile>> {
+fn maybe_preprocess(
+    args: &Args,
+    file: &Path,
+    err_out: &mut dyn Write,
+) -> Result<Option<tempfile::NamedTempFile>> {
     // A config problem discovered HERE is never reported here.
     //
     // Not swallowing it: every path that actually uses a config loads and
@@ -823,7 +837,7 @@ fn maybe_preprocess(args: &Args, file: &Path) -> Result<Option<tempfile::NamedTe
     // guard made unconditional, `--config broken.toml` still errors, from the
     // branch below. A condition whose removal no test can detect is complexity
     // pretending to be caution.
-    let argv = match resolve_preprocess_argv(args, file) {
+    let argv = match resolve_preprocess_argv(args, file, err_out) {
         Ok(Some(argv)) => argv,
         Ok(None) | Err(_) => return Ok(None),
     };
@@ -838,7 +852,11 @@ fn maybe_preprocess(args: &Args, file: &Path) -> Result<Option<tempfile::NamedTe
         .iter()
         .map(|a| a.replace(INPUT_PLACEHOLDER, &input))
         .collect();
-    eprintln!("Preprocessing with: {program} {}", cmd_args.join(" "));
+    let _ = writeln!(
+        err_out,
+        "Preprocessing with: {program} {}",
+        cmd_args.join(" ")
+    );
     let tmp = tempfile::Builder::new()
         .prefix("rledger-preprocess-")
         .suffix(".csv")
@@ -1073,7 +1091,7 @@ fn resolve_entry_currency(
     entry_name: Option<&str>,
     args: &Args,
     loaded: &mut ledgers::Ledgers,
-    report: &mut impl Write,
+    report: &mut (impl Write + ?Sized),
 ) -> Result<ImporterConfig> {
     let mut ledgers: Vec<&Path> = Vec::new();
     for path in [args.ledger.as_deref(), args.existing.as_deref()]
@@ -1294,6 +1312,7 @@ fn entry_for_minimal_config(
     file: &Path,
     importer_name: Option<&str>,
     warn_on_failure: bool,
+    err_out: &mut dyn Write,
 ) -> Option<MinimalEntry> {
     match load_minimal_entry(args, file, importer_name) {
         Ok(entry) => entry,
@@ -1301,7 +1320,8 @@ fn entry_for_minimal_config(
             // Silent when a `--ledger` profile already supplied the account:
             // saying we fell back to `--account` would simply be untrue.
             if warn_on_failure {
-                eprintln!(
+                let _ = writeln!(
+                    err_out,
                     "warning: could not apply importers.toml ({e}); \
                      using --account/--currency instead"
                 );
@@ -1368,13 +1388,19 @@ fn importers_config_not_found_message() -> anyhow::Error {
 /// degrade). CLI `--wasm-importer-dir` flags override both and
 /// short-circuit the toml lookup entirely.
 #[cfg(feature = "python-plugin-wasm")]
+/// [`resolve_scan_dirs_to`], warning on stderr. For tests.
+#[cfg(test)]
 fn resolve_scan_dirs(args: &Args) -> Result<Vec<PathBuf>> {
+    resolve_scan_dirs_to(args, &mut io::stderr())
+}
+
+fn resolve_scan_dirs_to(args: &Args, err_out: &mut dyn Write) -> Result<Vec<PathBuf>> {
     if !args.wasm_importer_dir.is_empty() {
         return Ok(args.wasm_importer_dir.clone());
     }
     match args.config.as_deref() {
         Some(path) => resolve_scan_dirs_explicit(path),
-        None => Ok(resolve_scan_dirs_implicit()),
+        None => Ok(resolve_scan_dirs_implicit(err_out)),
     }
 }
 
@@ -1400,7 +1426,7 @@ fn resolve_scan_dirs_explicit(path: &Path) -> Result<Vec<PathBuf>> {
 /// fatal (the user didn't explicitly point at it). Print a warning
 /// for the malformed case so the user can find their mistake.
 #[cfg(feature = "python-plugin-wasm")]
-fn resolve_scan_dirs_implicit() -> Vec<PathBuf> {
+fn resolve_scan_dirs_implicit(err_out: &mut dyn Write) -> Vec<PathBuf> {
     let cfg_path = match find_importers_config(None) {
         Ok(Some(p)) => p,
         Ok(None) | Err(_) => return Vec::new(),
@@ -1416,7 +1442,8 @@ fn resolve_scan_dirs_implicit() -> Vec<PathBuf> {
             // Visible warning instead of silent loss — the user's
             // wasm_importer_dir setting would otherwise vanish with
             // no signal that the file even exists.
-            eprintln!(
+            let _ = writeln!(
+                err_out,
                 "warning: implicit importers.toml at {} failed to parse: {e:#}; ignoring wasm_importer_dir",
                 cfg_path.display()
             );
@@ -1440,7 +1467,17 @@ fn resolve_scan_dirs_implicit() -> Vec<PathBuf> {
 /// logged to stderr but don't abort startup — see [`register_wasm_dir`]'s
 /// skip-and-collect semantics.
 #[cfg_attr(not(feature = "python-plugin-wasm"), allow(unused_variables))]
+/// [`build_registry_to`], with its notes on stderr. For tests.
+#[cfg(test)]
 fn build_registry(args: &Args) -> Result<ImporterRegistry> {
+    build_registry_to(args, &mut io::stderr())
+}
+
+/// The importer registry for this invocation. Its notes (each WASM importer
+/// loaded, each directory scanned) go to `err_out`.
+// `err_out` is unused without the WASM importers, which write every note.
+#[cfg_attr(not(feature = "python-plugin-wasm"), allow(unused_variables))]
+fn build_registry_to(args: &Args, err_out: &mut dyn Write) -> Result<ImporterRegistry> {
     let mut registry = ImporterRegistry::new();
 
     // 1 + 2. WASM importer loading (sandboxed `.wasm` importers). Gated behind
@@ -1467,13 +1504,17 @@ fn build_registry(args: &Args) -> Result<ImporterRegistry> {
             let name = registry
                 .register_wasm_from_path_with_config(path, runtime)
                 .with_context(|| format!("failed to load WASM importer {}", path.display()))?;
-            eprintln!("loaded WASM importer `{name}` from {}", path.display());
+            let _ = writeln!(
+                err_out,
+                "loaded WASM importer `{name}` from {}",
+                path.display()
+            );
         }
 
         // 2. Directory scan(s): CLI flags override toml entirely.
         //    Multiple dirs are scanned in order. `~` is expanded for
         //    toml-supplied paths (CLI paths get shell expansion).
-        let scan_dirs: Vec<PathBuf> = resolve_scan_dirs(args)?;
+        let scan_dirs: Vec<PathBuf> = resolve_scan_dirs_to(args, err_out)?;
         for dir in &scan_dirs {
             let report = registry
                 .register_wasm_dir_with_config(dir, runtime)
@@ -1481,7 +1522,8 @@ fn build_registry(args: &Args) -> Result<ImporterRegistry> {
                     format!("failed to scan WASM importer directory {}", dir.display())
                 })?;
             if !report.loaded.is_empty() || !report.failures.is_empty() {
-                eprintln!(
+                let _ = writeln!(
+                    err_out,
                     "WASM importer scan {}: loaded {}, failed {}",
                     dir.display(),
                     report.loaded.len(),
@@ -1489,7 +1531,11 @@ fn build_registry(args: &Args) -> Result<ImporterRegistry> {
                 );
             }
             for (failed_path, err) in &report.failures {
-                eprintln!("  warning: failed to load {}: {err}", failed_path.display());
+                let _ = writeln!(
+                    err_out,
+                    "  warning: failed to load {}: {err}",
+                    failed_path.display()
+                );
             }
         }
     }
@@ -1580,18 +1626,24 @@ fn validate_output_target(args: &Args) -> Result<()> {
 /// binary; `ag-rledger` calls `run_with_writer` with a buffer.
 pub fn run(args: &Args, file: &Path) -> Result<()> {
     let mut stdout = io::stdout().lock();
-    run_with_writer(args, file, &mut stdout)
+    run_with_writer(args, file, &mut stdout, &mut io::stderr())
 }
 
 /// Run the extract command, writing extracted directives to `out`.
 ///
-/// Behavior matches the original `run()`: a `--output <file>` flag still
-/// writes to disk (and the "Wrote output to ..." note still goes to
-/// stderr), and progress/warning lines still go to stderr. Only the
-/// default stdout sink for the formatted directives is redirected to the
-/// injected writer.
-pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Result<()> {
-    run_with_ledgers(args, file, out, &mut ledgers::Ledgers::default())
+/// A `--output <file>` flag still writes to disk. Progress and warning
+/// lines (and the "Wrote output to ..." note) go to `err_out`, which
+/// `rledger` points at stderr. `ag-rledger` passes a buffer for its
+/// envelope: on the process's stderr, warnings such as "--importer was
+/// given, so the --ledger profile is not applied" never reached an agent
+/// (#2546).
+pub fn run_with_writer<W: Write>(
+    args: &Args,
+    file: &Path,
+    out: &mut W,
+    err_out: &mut dyn Write,
+) -> Result<()> {
+    run_with_ledgers(args, file, out, err_out, &mut ledgers::Ledgers::default())
 }
 
 /// [`run_with_writer`], reading `--ledger` and `--existing` through `ledgers`.
@@ -1603,6 +1655,7 @@ fn run_with_ledgers<W: Write>(
     args: &Args,
     file: &Path,
     out: &mut W,
+    err_out: &mut dyn Write,
     ledgers: &mut ledgers::Ledgers,
 ) -> Result<()> {
     // Validate the output target BEFORE any extraction work, so a run that
@@ -1622,7 +1675,7 @@ fn run_with_ledgers<W: Write>(
     // pipeline a temp .csv holding its stdout — so `--auto` inference,
     // dispatch, and column mapping all operate on the preprocessed
     // content unchanged. The binding keeps the temp file alive to EOF.
-    let preprocessed = maybe_preprocess(args, file)?;
+    let preprocessed = maybe_preprocess(args, file, err_out)?;
     // `source_file` keeps the name the user typed; `file` becomes the
     // preprocessed CONTENT. Rebinding both to the temp path meant
     // auto-identification matched `filename_pattern` against
@@ -1635,7 +1688,7 @@ fn run_with_ledgers<W: Write>(
         .as_ref()
         .map_or(file, tempfile::NamedTempFile::path);
 
-    let registry = build_registry(args)?;
+    let registry = build_registry_to(args, err_out)?;
 
     // Pick the dispatcher BEFORE building config: only `CsvImporter`
     // needs the elaborate `--importer`/`--config`/`--auto` config
@@ -1669,7 +1722,8 @@ fn run_with_ledgers<W: Write>(
             // silently ignored `--ledger` is the failure this feature keeps
             // reproducing.
             if matched.is_some() && args.importer.is_some() {
-                eprintln!(
+                let _ = writeln!(
+                    err_out,
                     "warning: --importer was given, so the --ledger profile for \
                      {} is not applied",
                     matched.as_ref().map_or("", |p| p.account.as_str())
@@ -1749,6 +1803,7 @@ fn run_with_ledgers<W: Write>(
             source_file,
             effective_entry_name.as_deref(),
             profile.is_none(),
+            err_out,
         );
         // Every source that can name an account, in precedence order. Kept
         // as one binding so the refusal below cannot disagree with the value
@@ -1838,7 +1893,8 @@ fn run_with_ledgers<W: Write>(
                     )
                 })?;
 
-            eprintln!(
+            let _ = writeln!(
+                err_out,
                 "Using importer '{}' from {}",
                 importer_name,
                 config_path.display()
@@ -1867,7 +1923,8 @@ fn run_with_ledgers<W: Write>(
                     anyhow!("No importer matches file '{filename}'. Use --importer to select one.")
                 })?;
 
-            eprintln!(
+            let _ = writeln!(
+                err_out,
                 "Using importer '{}' from {}",
                 entry.name,
                 config_path.display()
@@ -1885,13 +1942,14 @@ fn run_with_ledgers<W: Write>(
                     file.display()
                 ))?;
 
-            eprintln!(
+            let _ = writeln!(
+                err_out,
                 "Auto-detected format (confidence: {:.0}%):",
                 inferred.confidence * 100.0
             );
-            eprintln!("  delimiter: {:?}", inferred.delimiter);
-            eprintln!("  date_format: {}", inferred.date_format);
-            eprintln!("  has_header: {}", inferred.has_header);
+            let _ = writeln!(err_out, "  delimiter: {:?}", inferred.delimiter);
+            let _ = writeln!(err_out, "  date_format: {}", inferred.date_format);
+            let _ = writeln!(err_out, "  has_header: {}", inferred.has_header);
 
             let mut csv_config = inferred.to_csv_config();
             if args.include_zero_amounts {
@@ -1907,9 +1965,12 @@ fn run_with_ledgers<W: Write>(
             if let Some(locale) = &args.amount_locale {
                 let locale = parse_amount_locale(locale)?;
                 csv_config.amount_locale = Some(locale);
-                eprintln!("  amount_locale: {locale:?} (from --amount-locale)");
+                let _ = writeln!(
+                    err_out,
+                    "  amount_locale: {locale:?} (from --amount-locale)"
+                );
             } else if let Some(locale) = inferred.amount_locale {
-                eprintln!("  amount_locale: {locale:?} (inferred)");
+                let _ = writeln!(err_out, "  amount_locale: {locale:?} (inferred)");
             }
             if let Some(format) = &args.amount_format {
                 csv_config.amount_format = Some(format.clone());
@@ -2021,7 +2082,7 @@ fn run_with_ledgers<W: Write>(
                 // The profile's `open` outranks `--currency` too; a flag that
                 // loses must not be dropped silently.
                 if let Some(warning) = profile_overrides_currency_flag(p, args) {
-                    eprintln!("warning: {warning}");
+                    let _ = writeln!(err_out, "warning: {warning}");
                 }
                 ImporterConfig {
                     account: p.account.clone(),
@@ -2031,13 +2092,7 @@ fn run_with_ledgers<W: Write>(
             }
             None => config,
         };
-        let config = resolve_entry_currency(
-            config,
-            used_entry.as_deref(),
-            args,
-            ledgers,
-            &mut io::stderr().lock(),
-        )?;
+        let config = resolve_entry_currency(config, used_entry.as_deref(), args, ledgers, err_out)?;
 
         (config, fallbacks)
     };
@@ -2055,7 +2110,7 @@ fn run_with_ledgers<W: Write>(
 
     // Print warnings
     for warning in &result.warnings {
-        eprintln!("warning: {warning}");
+        let _ = writeln!(err_out, "warning: {warning}");
     }
 
     // Fail loudly when the importer produced no transactions — before
@@ -2086,14 +2141,14 @@ fn run_with_ledgers<W: Write>(
     let directives = if let Some(ref existing_path) = args.existing {
         let existing = duplicate::load_existing(ledgers, existing_path)?;
         if let Some(warning) = &existing.warning {
-            eprintln!("warning: {warning}");
+            let _ = writeln!(err_out, "warning: {warning}");
         }
         let existing_txns = existing.transactions;
         let filtered = filter_existing_duplicates(
             result.directives,
             &existing_txns,
             &config.account,
-            &mut io::stderr().lock(),
+            err_out,
         )?;
         let mut filtered = filtered;
         if args.suggest_categories {
@@ -2101,6 +2156,7 @@ fn run_with_ledgers<W: Write>(
                 &mut filtered,
                 &existing_txns,
                 &fallback_accounts,
+                err_out,
             )?;
         }
         filtered
@@ -2152,7 +2208,8 @@ fn run_with_ledgers<W: Write>(
     // while reporting a successful no-op — the #2251 all-duplicates case.
     // Leaving it untouched is the correct outcome, and is not an error.
     if directives.is_empty() {
-        eprintln!(
+        let _ = writeln!(
+            err_out,
             "Nothing to write from {} (every extracted transaction was already present)",
             file.display()
         );
@@ -2161,7 +2218,7 @@ fn run_with_ledgers<W: Write>(
         if let Some(ref output_path) = args.output
             && output_path.exists()
         {
-            eprintln!("{} left unchanged", output_path.display());
+            let _ = writeln!(err_out, "{} left unchanged", output_path.display());
         }
         return Ok(());
     }
@@ -2181,7 +2238,7 @@ fn run_with_ledgers<W: Write>(
         let mut out_file = fs::File::create(output_path)
             .with_context(|| format!("Failed to create output file: {}", output_path.display()))?;
         out_file.write_all(formatted.as_bytes())?;
-        eprintln!("Wrote output to {}", output_path.display());
+        let _ = writeln!(err_out, "Wrote output to {}", output_path.display());
     } else {
         out.write_all(formatted.as_bytes())?;
     }
@@ -2190,7 +2247,8 @@ fn run_with_ledgers<W: Write>(
         .iter()
         .filter(|d| matches!(d, Directive::Transaction(_)))
         .count();
-    eprintln!(
+    let _ = writeln!(
+        err_out,
         "Extracted {written_txns} transactions from {}",
         file.display()
     );
@@ -2436,7 +2494,8 @@ preprocess = ["cat", "{input}"]
             pdf.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        run_with_writer(&args, &pdf, &mut out).expect("auto-identifies the pdf profile");
+        run_with_writer(&args, &pdf, &mut out, &mut std::io::sink())
+            .expect("auto-identifies the pdf profile");
         let text = String::from_utf8(out).unwrap();
         assert!(
             text.contains("Assets:Bank"),
@@ -2483,7 +2542,9 @@ preprocess = ["touch", "{}"]
         // No --config: discovery has to find it in the current directory.
         let args = Args::parse_from(["extract", csv.to_str().unwrap()]);
         let mut out = Vec::new();
-        let _ = with_cwd(dir.path(), || run_with_writer(&args, &csv, &mut out));
+        let _ = with_cwd(dir.path(), || {
+            run_with_writer(&args, &csv, &mut out, &mut std::io::sink())
+        });
 
         assert!(
             !marker.exists(),
@@ -2529,7 +2590,7 @@ preprocess = ["cat", "{input}"]
             pdf.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        run_with_writer(&args, &pdf, &mut out).unwrap();
+        run_with_writer(&args, &pdf, &mut out, &mut std::io::sink()).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("Coffee"), "row not imported: {text}");
         assert!(text.contains("Assets:Bank"), "account missing: {text}");
@@ -2579,7 +2640,9 @@ preprocess = ["cat", "{input}"]
             hostile.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        let result = with_cwd(dir.path(), || run_with_writer(&args, &hostile, &mut out));
+        let result = with_cwd(dir.path(), || {
+            run_with_writer(&args, &hostile, &mut out, &mut std::io::sink())
+        });
 
         let err = result.unwrap_err();
         assert!(
@@ -2623,7 +2686,9 @@ preprocess = ["cat", "{input}"]
             hostile.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        let result = with_cwd(dir.path(), || run_with_writer(&args, &hostile, &mut out));
+        let result = with_cwd(dir.path(), || {
+            run_with_writer(&args, &hostile, &mut out, &mut std::io::sink())
+        });
 
         result.expect("the positional form is allowed");
         let text = String::from_utf8(out).unwrap();
@@ -2668,7 +2733,9 @@ preprocess = ["cat", "{input}"]
 
         let args = Args::parse_from(["extract", "--auto", csv.to_str().unwrap()]);
         let mut out = Vec::new();
-        let result = with_cwd(dir.path(), || run_with_writer(&args, &csv, &mut out));
+        let result = with_cwd(dir.path(), || {
+            run_with_writer(&args, &csv, &mut out, &mut std::io::sink())
+        });
 
         result.expect("--auto must not read the ambiguous config at all");
         assert!(String::from_utf8(out).unwrap().contains("Coffee"));
@@ -2692,7 +2759,9 @@ preprocess = ["cat", "{input}"]
 
         let args = Args::parse_from(["extract", "--auto", csv.to_str().unwrap()]);
         let mut out = Vec::new();
-        let result = with_cwd(dir.path(), || run_with_writer(&args, &csv, &mut out));
+        let result = with_cwd(dir.path(), || {
+            run_with_writer(&args, &csv, &mut out, &mut std::io::sink())
+        });
 
         result.expect("--auto must not be failed by an unparsable config");
         assert!(String::from_utf8(out).unwrap().contains("Tea"));
@@ -2722,7 +2791,7 @@ preprocess = ["cat", "{input}"]
             csv.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        let err = run_with_writer(&args, &csv, &mut out).unwrap_err();
+        let err = run_with_writer(&args, &csv, &mut out, &mut std::io::sink()).unwrap_err();
         assert!(
             err.to_string().contains("parse importers config"),
             "a named config must report its own parse error, got: {err}"
@@ -2753,7 +2822,7 @@ preprocess = ["cat", "{input}"]
             pdf.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        let err = run_with_writer(&args, &pdf, &mut out).unwrap_err();
+        let err = run_with_writer(&args, &pdf, &mut out, &mut std::io::sink()).unwrap_err();
         assert!(err.to_string().contains("preprocess command"), "{err}");
     }
 
@@ -2780,7 +2849,7 @@ preprocess = ["cat", "{input}"]
             path.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        run_with_writer(&args, &path, &mut out).unwrap();
+        run_with_writer(&args, &path, &mut out, &mut std::io::sink()).unwrap();
         let text = String::from_utf8(out).unwrap();
 
         assert!(text.contains("Coffee"), "first row not imported: {text}");
@@ -3357,7 +3426,7 @@ default_expense = "Expenses:Uncategorized"
         let run_err = |argv: &[&str], file: &Path| {
             let args = Args::parse_from(argv);
             let mut out = Vec::new();
-            run_with_writer(&args, file, &mut out)
+            run_with_writer(&args, file, &mut out, &mut std::io::sink())
                 .map(|()| String::from_utf8(out).unwrap())
                 .unwrap_err()
                 .to_string()
@@ -3715,8 +3784,10 @@ default_expense = "Expenses:Uncategorized"
             ledger.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        with_cwd(dir.path(), || run_with_writer(&args, &qfx, &mut out))
-            .expect("the ofx entry must be parsed as OFX, not CSV");
+        with_cwd(dir.path(), || {
+            run_with_writer(&args, &qfx, &mut out, &mut std::io::sink())
+        })
+        .expect("the ofx entry must be parsed as OFX, not CSV");
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("COFFEE"), "OFX did not parse; got:\n{text}");
         assert!(
@@ -3764,7 +3835,7 @@ default_expense = "Expenses:Uncategorized"
             csv.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        run_with_writer(&args, &csv, &mut out).expect("extract runs");
+        run_with_writer(&args, &csv, &mut out, &mut std::io::sink()).expect("extract runs");
         let text = String::from_utf8(out).unwrap();
 
         assert!(
@@ -3822,7 +3893,7 @@ default_expense = "Expenses:Uncategorized"
             csv.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        run_with_writer(&args, &csv, &mut out).expect("extract runs");
+        run_with_writer(&args, &csv, &mut out, &mut std::io::sink()).expect("extract runs");
         let text = String::from_utf8(out).unwrap();
 
         assert!(
@@ -3961,7 +4032,7 @@ default_expense = "Expenses:Uncategorized"
             argv.push(qfx.to_str().unwrap());
             let args = Args::parse_from(argv);
             let mut out = Vec::new();
-            run_with_writer(&args, &qfx, &mut out).expect("ofx extract runs");
+            run_with_writer(&args, &qfx, &mut out, &mut std::io::sink()).expect("ofx extract runs");
             String::from_utf8(out).unwrap()
         };
 
@@ -4014,7 +4085,7 @@ default_expense = "Expenses:Uncategorized"
             argv.push(csv.to_str().unwrap());
             let args = Args::parse_from(argv);
             let mut out = Vec::new();
-            run_with_writer(&args, &csv, &mut out).expect("extract runs");
+            run_with_writer(&args, &csv, &mut out, &mut std::io::sink()).expect("extract runs");
             String::from_utf8(out).unwrap()
         };
 
@@ -4071,7 +4142,7 @@ default_expense = "Expenses:Uncategorized"
             csv.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        run_with_writer(&args, &csv, &mut out).expect("extract runs");
+        run_with_writer(&args, &csv, &mut out, &mut std::io::sink()).expect("extract runs");
         let text = String::from_utf8(out).unwrap();
 
         assert!(
@@ -4119,7 +4190,7 @@ default_expense = "Expenses:Uncategorized"
             argv.push(qfx.to_str().unwrap());
             let args = Args::parse_from(argv);
             let mut out = Vec::new();
-            run_with_writer(&args, &qfx, &mut out).expect("ofx extract runs");
+            run_with_writer(&args, &qfx, &mut out, &mut std::io::sink()).expect("ofx extract runs");
             String::from_utf8(out).unwrap()
         };
 
@@ -4171,7 +4242,7 @@ default_expense = "Expenses:Uncategorized"
             csv.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        run_with_writer(&args, &csv, &mut out).expect("extract runs");
+        run_with_writer(&args, &csv, &mut out, &mut std::io::sink()).expect("extract runs");
         let text = String::from_utf8(out).unwrap();
 
         assert!(
@@ -4202,8 +4273,10 @@ default_expense = "Expenses:Uncategorized"
         let qfx = cc_qfx(dir.path());
         let args = Args::parse_from(["extract", qfx.to_str().unwrap()]);
         let mut out = Vec::new();
-        let err = with_cwd(dir.path(), || run_with_writer(&args, &qfx, &mut out))
-            .expect_err("an unnamed account must not silently become the default");
+        let err = with_cwd(dir.path(), || {
+            run_with_writer(&args, &qfx, &mut out, &mut std::io::sink())
+        })
+        .expect_err("an unnamed account must not silently become the default");
         let msg = err.to_string();
         assert!(msg.contains("liability"), "got: {msg}");
         assert!(
@@ -4222,8 +4295,10 @@ default_expense = "Expenses:Uncategorized"
         for account in ["Liabilities:CreditCard", DEFAULT_ACCOUNT] {
             let args = Args::parse_from(["extract", qfx.to_str().unwrap(), "--account", account]);
             let mut out = Vec::new();
-            with_cwd(dir.path(), || run_with_writer(&args, &qfx, &mut out))
-                .unwrap_or_else(|e| panic!("--account {account} must be honored, got: {e}"));
+            with_cwd(dir.path(), || {
+                run_with_writer(&args, &qfx, &mut out, &mut std::io::sink())
+            })
+            .unwrap_or_else(|e| panic!("--account {account} must be honored, got: {e}"));
             assert!(String::from_utf8(out).unwrap().contains(account));
         }
     }
@@ -4249,8 +4324,10 @@ default_expense = "Expenses:Uncategorized"
 
         let args = Args::parse_from(["extract", qfx.to_str().unwrap()]);
         let mut out = Vec::new();
-        with_cwd(dir.path(), || run_with_writer(&args, &qfx, &mut out))
-            .expect("an account named by config is named, even if it is the default");
+        with_cwd(dir.path(), || {
+            run_with_writer(&args, &qfx, &mut out, &mut std::io::sink())
+        })
+        .expect("an account named by config is named, even if it is the default");
         assert!(String::from_utf8(out).unwrap().contains(DEFAULT_ACCOUNT));
     }
 
@@ -4271,7 +4348,10 @@ default_expense = "Expenses:Uncategorized"
         .unwrap();
         let args = Args::parse_from(["extract", qfx.to_str().unwrap()]);
         let mut out = Vec::new();
-        with_cwd(dir.path(), || run_with_writer(&args, &qfx, &mut out)).unwrap();
+        with_cwd(dir.path(), || {
+            run_with_writer(&args, &qfx, &mut out, &mut std::io::sink())
+        })
+        .unwrap();
         assert!(String::from_utf8(out).unwrap().contains(DEFAULT_ACCOUNT));
     }
 
@@ -4323,7 +4403,10 @@ default_expense = "Expenses:Uncategorized"
             "flagentry",
         ]);
         let mut out = Vec::new();
-        with_cwd(dir.path(), || run_with_writer(&args, &csv, &mut out)).unwrap();
+        with_cwd(dir.path(), || {
+            run_with_writer(&args, &csv, &mut out, &mut std::io::sink())
+        })
+        .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(
             text.contains("Assets:FromFlag"),
@@ -4367,7 +4450,10 @@ default_expense = "Expenses:Uncategorized"
             ledger.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        with_cwd(dir.path(), || run_with_writer(&args, &csv, &mut out)).unwrap();
+        with_cwd(dir.path(), || {
+            run_with_writer(&args, &csv, &mut out, &mut std::io::sink())
+        })
+        .unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(
             text.contains("Assets:FromLedger"),
@@ -4837,7 +4923,14 @@ default_expense = "Expenses:Uncategorized"
             ]);
             let mut loaded = ledgers::Ledgers::default();
             let mut out = Vec::new();
-            run_with_ledgers(&args, &csv_path, &mut out, &mut loaded).unwrap();
+            run_with_ledgers(
+                &args,
+                &csv_path,
+                &mut out,
+                &mut std::io::sink(),
+                &mut loaded,
+            )
+            .unwrap();
             (loaded.loads, String::from_utf8(out).unwrap())
         };
 
@@ -5611,7 +5704,7 @@ filename_pattern = "statement*"
                 config_path.to_str().unwrap(),
             ]);
             let mut out = Vec::new();
-            run_with_writer(&args, &file, &mut out).unwrap();
+            run_with_writer(&args, &file, &mut out, &mut std::io::sink()).unwrap();
             let out = String::from_utf8(out).unwrap();
             assert!(out.contains(want), "{want}: {out}");
         }

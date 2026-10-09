@@ -355,6 +355,7 @@ pub const WILDCARD_COLUMNS: &[&str] =
 /// One column of the default posting row source (a `SELECT` with no `FROM`
 /// table): its name, its value type, and a one-line description.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ColumnInfo {
     /// The column's name, as a query writes it.
     pub name: &'static str,

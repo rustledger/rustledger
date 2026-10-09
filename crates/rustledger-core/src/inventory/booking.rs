@@ -351,7 +351,11 @@ impl Inventory {
     /// ([`Self::exact_total_in_range_near_ceiling`]).
     fn net_after(&self, units: &Amount) -> Option<Decimal> {
         crate::decimal::checked_add_python_scale(self.units(&units.currency), units.number).filter(
-            |&after| self.exact_total_in_range_near_ceiling(&units.currency, after, units.number),
+            |&after| {
+                self.exact_total_in_range_near_ceiling(&units.currency, after, || {
+                    crate::to_bigdecimal(units.number)
+                })
+            },
         )
     }
 
@@ -1663,6 +1667,17 @@ impl Inventory {
                 .filter(|p| p.units.currency == units.currency)
                 .map(|p| crate::to_bigdecimal(p.units.number))
                 .sum();
+            if exact.sign() != crate::to_bigdecimal(total_units).sign() {
+                // The cache had drifted across zero: by the exact total the
+                // account holds nothing on the side this sells from, so the
+                // posting is an augmentation, as the branch above books it.
+                self.add(Position::simple(units.clone()))?;
+                return Ok(BookingResult {
+                    matched: SmallVec::new(),
+                    cost_basis: None,
+                    matched_basis: SmallVec::new(),
+                });
+            }
             let exact_available = exact.abs();
             if exact_available >= crate::to_bigdecimal(requested)
                 && exact.sign() == crate::to_bigdecimal(total_units).sign()
@@ -3748,6 +3763,60 @@ mod reduction_tests {
             let matched: Vec<Decimal> = r.matched.iter().map(|p| p.units.number).collect();
             assert_eq!(matched, [d(10)]);
             assert_eq!(holdings(&inv), [Decimal::new(1, 28)]);
+        }
+
+        /// Review of #2554, round 5: the near-ceiling check summed the lots
+        /// plus the ADDED units, but a merge stores `lot + units` rounded:
+        /// `...0001 + 0.5` is stored as `...0002`, an exact total of
+        /// `MAX + 0.5`. The check uses the merged lot as stored.
+        #[test]
+        fn add_checks_the_merged_lot_as_stored() {
+            let simple = |n: Decimal| Position::simple(Amount::new(n, "CORP"));
+            let mut inv = Inventory::new();
+            inv.add(simple(
+                Decimal::from_str_exact("10000000000000000000000000001").unwrap(),
+            ))
+            .expect("fits");
+            inv.add(corp(
+                Decimal::from_str_exact("69228162514264337593543950333").unwrap(),
+                Decimal::new(1, 28),
+                1,
+            ))
+            .expect("fits");
+            inv.add(corp(dec!(0.5), d(1), 2))
+                .expect("MAX - 0.5 exactly");
+            let before = holdings(&inv);
+            let r = inv.add(simple(dec!(0.5)));
+            assert!(r.is_err(), "got {r:?}");
+            assert_eq!(holdings(&inv), before);
+        }
+
+        /// Review of #2554, round 5: NONE's recount refused a buy when the
+        /// cached total had drifted across zero (`-1e-18` cached, `0`
+        /// exact). By the exact total nothing is held on the other side, so
+        /// the posting is an augmentation.
+        #[test]
+        fn a_none_buy_against_a_cache_drifted_across_zero_augments() {
+            let mut inv = mk([corp(Decimal::new(10_000_000_000, 0), d(1), 1)]);
+            for day in 2..12 {
+                inv.add(corp(Decimal::new(1, 19), d(1), day)).expect("fits");
+            }
+            // Opposite pairs at distinct costs, so nothing compacts the
+            // cache back into agreement.
+            for i in 0..30_i64 {
+                let cost = Decimal::new(100 + i, 0);
+                inv.add(corp(d(5), cost, 1)).expect("fits");
+                inv.add(corp(d(-5), cost + d(1000), 1)).expect("fits");
+            }
+            let sale = Decimal::from_str_exact("10000000000.000000000000000001").unwrap();
+            inv.reduce(&sell(sale), None, BookingMethod::None)
+                .expect("drains");
+            let r = inv.reduce(
+                &Amount::new(Decimal::new(1, 18), "CORP"),
+                None,
+                BookingMethod::None,
+            );
+            assert!(r.is_ok(), "got {r:?}");
         }
 
         /// Review of #2554: the fix first adjusted the units cache by the

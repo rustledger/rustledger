@@ -9699,6 +9699,27 @@ fn test_option_assignment_wrong_direction_ignored() {
     assert_eq!(errors.len(), 0, "{errors:?}");
 }
 
+/// T31: an adjusted contract (numeric root suffix after a reverse split,
+/// 10-share deliverable) is not checked. Its root `XYZ1` names no stock
+/// commodity, so the `XYZ` leg is not read as an assignment, and the
+/// 100-share rule is never applied to it.
+#[test]
+fn test_option_assignment_adjusted_contract_skipped() {
+    let adjusted = "XYZ1261016P00005000";
+    let errors = assignment_errors(vec![
+        sto("2026-09-03", "1", adjusted, "50.00"),
+        txn_of(
+            "2026-10-16",
+            vec![
+                per_unit(leg(OPT_ACCT, "1", adjusted), "50.00"),
+                per_unit(leg(STOCK_ACCT, "10", "XYZ"), "45.00"),
+                cash("-500.00"),
+            ],
+        ),
+    ]);
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
 /// The plugin is reachable by name through the registry.
 #[test]
 fn test_option_assignment_registered() {

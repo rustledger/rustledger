@@ -1576,7 +1576,13 @@ jobs:
   # 2. run the python-gated suites — keep the list in sync with
   #    `grep -rl 'Command::new("bean-' crates/*/tests` (currently:
   #    rustledger integration_test + bean_price_compat,
-  #    rustledger-core synthetic_generation);
+  #    rustledger-core synthetic_generation), plus rustledger
+  #    python_plugin_wasi, which runs Python plugins through the
+  #    CPython-on-WASI runtime and skips where the runtime cannot be
+  #    downloaded (#2500); RLEDGER_REQUIRE_PYTHON_WASI=1 makes that
+  #    skip a failure here; and rustledger plugin_conformance, the plugin
+  #    kind x entry point x limits matrix, which also builds wasm32
+  #    guests (RLEDGER_REQUIRE_WASM32=1 makes a failed build a failure);
   # 3. grep the captured output for every suite's skip marker, so a new
   #    availability probe (different binary, a container check) can't
   #    quietly reintroduce the green-skip.
@@ -1589,6 +1595,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # stable
         with:
           toolchain: 1.98.1 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
+          # plugin_conformance builds its WASM plugin and importer guests.
+          targets: wasm32-unknown-unknown
       # rust-cache intentionally omitted — see the note on the
       # compatibility-test job (LGPL-3.0 license-check interaction).
       - name: Set up Python
@@ -1609,19 +1617,21 @@ jobs:
       - name: Run python-gated test suites
         env:
           CARGO_TERM_COLOR: always
+          RLEDGER_REQUIRE_PYTHON_WASI: '1'
+          RLEDGER_REQUIRE_WASM32: '1'
         run: |
           # tee the output so the skip-marker check below inspects THIS
           # run (a rerun inside an `if` would mask test failures and
           # cover only one suite — review catch).
           set -o pipefail
-          cargo test -p rustledger --test integration_test --test bean_price_compat -- --nocapture 2>&1 | tee /tmp/gated-tests.log
+          cargo test -p rustledger --test integration_test --test bean_price_compat --test python_plugin_wasi --test plugin_conformance -- --nocapture 2>&1 | tee /tmp/gated-tests.log
           cargo test -p rustledger-core --test synthetic_generation -- --nocapture 2>&1 | tee -a /tmp/gated-tests.log
       - name: Fail on silent skips
         run: |
           # Every gated suite prints a recognizable marker when it skips;
           # any of them appearing means an availability probe drifted
           # despite the assert step above.
-          if grep -Eq "Skipping: Python beancount not available|bean-check not found, skipping|skipping bean-price compat" /tmp/gated-tests.log; then
+          if grep -Eq "Skipping: Python beancount not available|bean-check not found, skipping|skipping bean-price compat|Skipping: CPython WASI runtime unavailable|Skipping: conformance WASM guests unavailable" /tmp/gated-tests.log; then
             echo "::error::python-gated tests skipped despite the tools being installed — availability probe drifted"
             exit 1
           fi

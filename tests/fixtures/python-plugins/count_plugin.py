@@ -1,4 +1,6 @@
 # Plugin that counts entries by type
+__plugins__ = ['plugin']
+
 def plugin(entries, options_map, config=None):
     """Count entries by type and print summary."""
     counts = {}

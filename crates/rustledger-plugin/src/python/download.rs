@@ -73,8 +73,12 @@ fn download_and_extract() -> Result<(), PythonError> {
     let cache = cache_dir()?;
     fs::create_dir_all(&cache)?;
 
-    // Download the zip file to a temp file to avoid memory exhaustion
-    let zip_path = cache.join("download.zip.tmp");
+    // Download the zip file to a temp file to avoid memory exhaustion.
+    // Per-process names: two first runs at once (parallel tests, two
+    // rledger processes) used to share one temp file and one extraction
+    // target, so one could read the other's half-written zip, or see
+    // `python.wasm` while it was still being written (#2500 review).
+    let zip_path = cache.join(format!("download.zip.tmp.{}", std::process::id()));
     let mut response = ureq::get(DOWNLOAD_URL)
         .call()
         .map_err(|e| PythonError::Download(format!("HTTP request failed: {e}")))?;
@@ -123,13 +127,17 @@ fn download_and_extract() -> Result<(), PythonError> {
     let mut archive = zip::ZipArchive::new(zip_file)
         .map_err(|e| PythonError::Download(format!("failed to open zip: {e}")))?;
 
+    let staging = cache.join(format!("extract.tmp.{}", std::process::id()));
+    let _ = fs::remove_dir_all(&staging);
+    fs::create_dir_all(&staging)?;
+
     for i in 0..archive.len() {
         let mut file = archive
             .by_index(i)
             .map_err(|e| PythonError::Download(format!("failed to read zip entry: {e}")))?;
 
         let outpath = match file.enclosed_name() {
-            Some(path) => cache.join(path),
+            Some(path) => staging.join(path),
             None => continue,
         };
 
@@ -144,11 +152,42 @@ fn download_and_extract() -> Result<(), PythonError> {
         }
     }
 
-    eprintln!("  ✓ Extracted to {}", cache.display());
-
     // Clean up temp file
     let _ = fs::remove_file(&zip_path);
 
+    let installed = install_staged(&staging, &cache);
+    let _ = fs::remove_dir_all(&staging);
+    installed?;
+
+    eprintln!("  ✓ Extracted to {}", cache.display());
+    Ok(())
+}
+
+/// Move a complete extraction from `staging` into `cache`.
+///
+/// `python.wasm` is what [`ensure_runtime`] checks for, so it goes in
+/// last, by an atomic rename: whoever sees it sees a complete `lib` too.
+/// When it is already there, another process finished first and this
+/// extraction is dropped. A `lib` with no `python.wasm` beside it is left
+/// over from an interrupted install, and is replaced.
+fn install_staged(staging: &std::path::Path, cache: &std::path::Path) -> Result<(), PythonError> {
+    let wasm = cache.join("python.wasm");
+    if wasm.exists() {
+        return Ok(());
+    }
+    let lib = cache.join("lib");
+    if lib.exists() {
+        let stale = cache.join(format!("lib.stale.{}", std::process::id()));
+        fs::rename(&lib, &stale)?;
+        let _ = fs::remove_dir_all(&stale);
+    }
+    match fs::rename(staging.join("lib"), &lib) {
+        Ok(()) => {}
+        // Another process installed its `lib` in the meantime.
+        Err(_) if lib.exists() => {}
+        Err(e) => return Err(e.into()),
+    }
+    fs::rename(staging.join("python.wasm"), &wasm)?;
     Ok(())
 }
 
@@ -185,6 +224,47 @@ mod tests {
     fn test_python_stdlib_path() {
         let path = python_stdlib_path().unwrap();
         assert!(path.to_string_lossy().ends_with("lib"));
+    }
+
+    /// The runtime appears all at once: `python.wasm` (the "installed"
+    /// marker) only after `lib`, a leftover partial `lib` is replaced, and
+    /// a finished install is never overwritten (#2500 review).
+    #[test]
+    fn install_staged_is_all_or_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("cache");
+        let staging = dir.path().join("staging");
+        let stage = |tag: &str| {
+            fs::create_dir_all(staging.join("lib")).unwrap();
+            fs::write(staging.join("lib/os.py"), tag).unwrap();
+            fs::write(staging.join("python.wasm"), tag).unwrap();
+        };
+        fs::create_dir_all(cache.join("lib")).unwrap();
+        fs::write(cache.join("lib/partial.py"), "half").unwrap();
+
+        stage("first");
+        install_staged(&staging, &cache).unwrap();
+        assert_eq!(
+            fs::read_to_string(cache.join("python.wasm")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            fs::read_to_string(cache.join("lib/os.py")).unwrap(),
+            "first"
+        );
+        assert!(!cache.join("lib/partial.py").exists(), "stale lib replaced");
+
+        fs::remove_dir_all(&staging).unwrap();
+        stage("second");
+        install_staged(&staging, &cache).unwrap();
+        assert_eq!(
+            fs::read_to_string(cache.join("python.wasm")).unwrap(),
+            "first"
+        );
+        assert_eq!(
+            fs::read_to_string(cache.join("lib/os.py")).unwrap(),
+            "first"
+        );
     }
 
     #[test]

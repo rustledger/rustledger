@@ -45,10 +45,14 @@ pub struct LoadOptions {
     /// that never read them (`check`, BQL, holdings, the FFI component) don't carry
     /// the vector — only the capgains report opts in.
     pub collect_capital_gains: bool,
-    /// Time budget, in seconds, for each WASM plugin call (default: `None`,
+    /// Time budget, in seconds, for each WASM or Python plugin call (default: `None`,
     /// the sandbox's 30 seconds). The host's setting, never the ledger's:
     /// see `ResolvedPlugin::run_with_max_time_secs`.
     pub plugin_max_time_secs: Option<u64>,
+    /// Memory cap, in MiB, for each WASM or Python plugin call (default:
+    /// `None`, the sandbox's 256 MiB; wasm32 addresses at most 4096). The
+    /// host's setting, never the ledger's, like `plugin_max_time_secs`.
+    pub plugin_max_memory_mb: Option<u64>,
     /// Run only native plugins, skipping WASM and Python ones (default: false).
     /// A name that is neither native nor a WASM/Python reference (see
     /// `rustledger_plugin::classify_external_plugin`) is still reported as
@@ -76,6 +80,7 @@ impl Default for LoadOptions {
             path_security: false,
             collect_capital_gains: false,
             plugin_max_time_secs: None,
+            plugin_max_memory_mb: None,
             native_plugins_only: false,
         }
     }
@@ -97,6 +102,7 @@ impl LoadOptions {
             path_security: false,
             collect_capital_gains: false,
             plugin_max_time_secs: None,
+            plugin_max_memory_mb: None,
             native_plugins_only: false,
         }
     }
@@ -1246,12 +1252,17 @@ pub fn run_plugins(
         // plugin-set source location is preserved (the old WASM/Python runner
         // conversions dropped it; native always kept it).
         let wrappers = build_wrappers(directives, source_map);
-        match resolved.run_with_max_time_secs(
+        match resolved.run_with_limits(
             wrappers,
             &plugin_options,
             &invocation.config,
             base_dir,
-            options.plugin_max_time_secs,
+            rustledger_plugin::PluginLimits::new(
+                options.plugin_max_time_secs,
+                options
+                    .plugin_max_memory_mb
+                    .map(|mb| usize::try_from(mb.saturating_mul(1 << 20)).unwrap_or(usize::MAX)),
+            ),
         ) {
             Ok(output) => {
                 record_plugin_errors(errors, output.errors, source_map);
@@ -1313,12 +1324,15 @@ fn record_plugin_errors(
     source_map: &SourceMap,
 ) {
     for err in plugin_errors {
+        // A plugin's text is shown to the user: escape its control
+        // characters (see `rustledger_plugin::untrusted`).
+        let message = rustledger_plugin::escape_untrusted_text(&err.message).into_owned();
         let mut ledger_err = match err.severity {
             rustledger_plugin::PluginErrorSeverity::Error => {
-                LedgerError::error("PLUGIN", err.message).with_phase("plugin")
+                LedgerError::error("PLUGIN", message).with_phase("plugin")
             }
             rustledger_plugin::PluginErrorSeverity::Warning => {
-                LedgerError::warning("PLUGIN", err.message).with_phase("plugin")
+                LedgerError::warning("PLUGIN", message).with_phase("plugin")
             }
         };
         // Propagate plugin-set source location into `ErrorLocation`.
@@ -1327,7 +1341,14 @@ fn record_plugin_errors(
         if let (Some(file), Some(line)) = (&err.source_file, err.line_number) {
             let resolved_path = source_map
                 .get_by_path(std::path::Path::new(file))
-                .map_or_else(|| std::path::PathBuf::from(file), |f| f.path.clone());
+                .map_or_else(
+                    || {
+                        std::path::PathBuf::from(
+                            rustledger_plugin::escape_untrusted_line(file).into_owned(),
+                        )
+                    },
+                    |f| f.path.clone(),
+                );
             ledger_err = ledger_err.with_location(ErrorLocation {
                 file: resolved_path,
                 line: line as usize,
@@ -1362,7 +1383,6 @@ fn apply_plugin_ops(
     source_map: &SourceMap,
 ) -> Result<(), ProcessError> {
     use rustledger_plugin::PluginOp;
-    use rustledger_plugin::wrapper_to_directive;
 
     // Validate the op set forms a complete cover of the input — the contract is
     // single-sourced in `rustledger-plugin` so the loader and FFI surfaces stay
@@ -1380,8 +1400,9 @@ fn apply_plugin_ops(
                 new_directives.push(directives[i].clone());
             }
             PluginOp::Modify(i, wrapper) => {
-                let mut directive = wrapper_to_directive(&wrapper)
-                    .map_err(|e| ProcessError::PluginConversion(e.to_string()))?;
+                let Some(mut directive) = convert_plugin_entry(&wrapper, errors) else {
+                    return Ok(());
+                };
                 // Plugins are not trusted to return well-formed inner
                 // posting spans — a misbehaving plugin can synthesize a
                 // file_id pointing at a nonexistent source or a span
@@ -1427,8 +1448,9 @@ fn apply_plugin_ops(
                         rustledger_parser::SYNTHESIZED_FILE_ID,
                     ),
                 };
-                let mut directive = wrapper_to_directive(&wrapper)
-                    .map_err(|e| ProcessError::PluginConversion(e.to_string()))?;
+                let Some(mut directive) = convert_plugin_entry(&wrapper, errors) else {
+                    return Ok(());
+                };
                 sanitize_inner_posting_spans(&mut directive, source_map);
                 new_directives.push(Spanned::new(directive, span).with_file_id(file_id as usize));
             }
@@ -1438,6 +1460,37 @@ fn apply_plugin_ops(
 
     *directives = new_directives;
     Ok(())
+}
+
+/// `wrapper` as a directive, or `None` after reporting why it cannot be
+/// one. A plugin is not trusted to return well-formed entries: before
+/// #2500's second review one bad date from a WASM or Python plugin
+/// aborted the whole load (`processing pipeline failed`, exit 2, every
+/// other diagnostic lost). Now the plugin's changes are discarded, as
+/// for an op set that does not cover its input, and the load goes on.
+#[cfg(feature = "plugins")]
+fn convert_plugin_entry(
+    wrapper: &rustledger_plugin::DirectiveWrapper,
+    errors: &mut Vec<LedgerError>,
+) -> Option<Directive> {
+    match rustledger_plugin::wrapper_to_directive(wrapper) {
+        Ok(directive) => Some(directive),
+        Err(e) => {
+            errors.push(
+                LedgerError::error(
+                    "PLUGIN",
+                    // The reason quotes the plugin's value (a date, say).
+                    format!(
+                        "plugin returned an entry that is not valid ({}); \
+                         its changes were discarded",
+                        rustledger_plugin::escape_untrusted_text(&e.to_string())
+                    ),
+                )
+                .with_phase("plugin"),
+            );
+            None
+        }
+    }
 }
 
 /// Reset any inner `Spanned<Posting>` whose location does not refer to a
@@ -1823,15 +1876,23 @@ fn resolve_error_to_ledger(e: &rustledger_plugin::PluginResolveError) -> LedgerE
 #[cfg(feature = "plugins")]
 fn run_error_to_ledger(e: &rustledger_plugin::PluginRunError) -> LedgerError {
     use rustledger_plugin::PluginRunError as Rn;
+    // The message can carry guest-chosen text (a Python exception's
+    // message, a WASM module's function names in a backtrace).
     match e {
         Rn::WasmFailed { path, message } => LedgerError::error(
             "PLUGIN",
-            format!("WASM plugin {} failed: {message}", path.display()),
+            format!(
+                "WASM plugin {} failed: {}",
+                path.display(),
+                rustledger_plugin::escape_untrusted_text(message)
+            ),
         )
         .with_phase("plugin"),
-        Rn::PythonFailed { message } => {
-            LedgerError::error("E8002", message.clone()).with_phase("plugin")
-        }
+        Rn::PythonFailed { message } => LedgerError::error(
+            "E8002",
+            rustledger_plugin::escape_untrusted_text(message).into_owned(),
+        )
+        .with_phase("plugin"),
     }
 }
 

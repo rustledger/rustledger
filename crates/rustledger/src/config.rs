@@ -80,12 +80,36 @@ pub struct Config {
 #[serde(default, deny_unknown_fields)]
 #[non_exhaustive]
 pub struct PluginsConfig {
-    /// Time budget, in seconds, for each call into a WASM plugin or WASM
-    /// importer (default: 30). `--plugin-max-time-secs` overrides it.
+    /// Time budget, in seconds, for each call into a WASM or Python plugin
+    /// or a WASM importer (default: 30). `--plugin-max-time-secs` overrides
+    /// it.
     ///
     /// Zero is refused when the file is parsed: the sandbox would treat it
     /// as one second, and many tools read zero as "no limit".
     pub max_time_secs: Option<std::num::NonZeroU64>,
+    /// Memory cap, in MiB, for each call into a WASM or Python plugin or a
+    /// WASM importer (default: 256; at most 4096, all a wasm32 guest can
+    /// address). `--plugin-max-memory-mb` overrides it. A Python plugin
+    /// holds every entry as objects, about 1.2 KB per transaction, so a
+    /// ledger past about 150,000 transactions needs more than the default.
+    #[serde(deserialize_with = "deserialize_memory_mb")]
+    pub max_memory_mb: Option<u64>,
+}
+
+/// The largest memory cap, in MiB: all a wasm32 guest can address.
+pub const MAX_PLUGIN_MEMORY_MB: u64 = 4096;
+
+fn deserialize_memory_mb<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<u64>, D::Error> {
+    let mb = <u64 as serde::Deserialize>::deserialize(deserializer)?;
+    if (1..=MAX_PLUGIN_MEMORY_MB).contains(&mb) {
+        Ok(Some(mb))
+    } else {
+        Err(serde::de::Error::custom(format!(
+            "max_memory_mb must be between 1 and {MAX_PLUGIN_MEMORY_MB}, got {mb}"
+        )))
+    }
 }
 
 impl PluginsConfig {
@@ -94,6 +118,9 @@ impl PluginsConfig {
     const fn merge(mut self, other: Self) -> Self {
         if other.max_time_secs.is_some() {
             self.max_time_secs = other.max_time_secs;
+        }
+        if other.max_memory_mb.is_some() {
+            self.max_memory_mb = other.max_memory_mb;
         }
         self
     }
@@ -618,9 +645,12 @@ impl Config {
 # bs = "report balance-sheet"
 
 # [plugins]
-# Time budget for each WASM plugin or importer call (default 30). A call is
+# Time budget for each WASM or Python plugin or importer call (default 30). A call is
 # stopped within at most this many seconds, usually far sooner.
 # max_time_secs = 120
+# Memory cap for each WASM or Python plugin or importer call, in MiB (default 256,
+# at most 4096). A Python plugin needs about 1.2 KB per transaction.
+# max_memory_mb = 1024
 "#
         .to_string()
     }

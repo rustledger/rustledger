@@ -1191,7 +1191,9 @@ fn command_result(command: &str, stdout: &str, exit_code: i32) -> Value {
 }
 
 fn command_failed(error: &anyhow::Error) -> CommandError {
-    let message = format!("{error:#}");
+    // The chain can quote a WASM module's own text; escaped as in
+    // rledger's `render_error`.
+    let message = rustledger_plugin::escape_untrusted_text(&format!("{error:#}")).into_owned();
     let (code, exit_code, fix) = if message.contains("FILE is required") {
         (
             "MISSING_FILE",
@@ -1265,6 +1267,7 @@ fn load_config() -> Config {
     rustledger::plugin_budget::set_max_time_secs(
         config.plugins.max_time_secs.map(std::num::NonZeroU64::get),
     );
+    rustledger::plugin_budget::set_max_memory_mb(config.plugins.max_memory_mb);
     config
 }
 

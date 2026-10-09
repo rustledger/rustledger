@@ -491,6 +491,7 @@ fn load(
         // report pays to retain the vector.
         collect_capital_gains: matches!(report, Report::Capgains { .. }),
         plugin_max_time_secs: crate::plugin_budget::max_time_secs(),
+        plugin_max_memory_mb: crate::plugin_budget::max_memory_mb(),
         ..Default::default()
     };
 

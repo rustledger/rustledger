@@ -117,12 +117,14 @@ impl NativePlugin for EffectiveDatePlugin {
         // entries stay paired with their input indices in input-order.
         let mut inserted_txns: Vec<DirectiveWrapper> = Vec::new();
 
-        // Links number the entries this run moves, in input order: the same
-        // ledger gets the same links every time, in any process. They came
-        // from a process-wide counter taken modulo 4096, so an LSP or FFI
-        // host reloading a ledger saw its links change, and the 4097th entry
-        // reused the first one's link.
-        let mut moved = 0usize;
+        // Links number the entries this run moves on each date, in input
+        // order: the same ledger gets the same links every time, in any
+        // process, and an edit shifts only the links of later moved entries
+        // on the same date. They came from a process-wide counter taken
+        // modulo 4096, so an LSP or FFI host reloading a ledger saw its
+        // links change, and the 4097th entry reused the first one's link.
+        let mut moved_on: std::collections::BTreeMap<String, usize> =
+            std::collections::BTreeMap::new();
 
         for (i, mut directive) in input.directives.into_iter().enumerate() {
             let DirectiveData::Transaction(txn) = &directive.data else {
@@ -201,8 +203,9 @@ impl NativePlugin for EffectiveDatePlugin {
                 continue;
             }
 
-            let link = edate_link(&entry_date, moved);
-            moved += 1;
+            let n = moved_on.entry(entry_date.clone()).or_insert(0);
+            let link = edate_link(&entry_date, *n);
+            *n += 1;
 
             if let DirectiveData::Transaction(ref mut txn) = directive.data {
                 if !txn.links.contains(&link) {
@@ -376,9 +379,9 @@ fn create_opposite_posting(posting: &PostingData) -> PostingData {
 }
 
 /// The link joining an entry the plugin moves to its new entries:
-/// `edate-<yymmdd>-<n>`, `n` counting the entries moved in this run, in
-/// input order, in hex, with no wraparound. Upstream draws three random
-/// letters (`edate-200301-flb`).
+/// `edate-<yymmdd>-<n>`, `n` counting, in hex and with no wraparound, the
+/// entries of that date moved before it in this run. Upstream draws three
+/// random letters (`edate-200301-flb`).
 fn edate_link(date: &str, n: usize) -> String {
     let date_short = date.replace('-', "");
     let date_short = date_short.get(2..).unwrap_or(&date_short);
@@ -759,6 +762,100 @@ mod tests {
         )];
         let output = EffectiveDatePlugin.process(input(directives.clone(), Some(config)));
         assert!(output.errors.is_empty(), "{:?}", output.errors);
+        assert_eq!(opened(&directives, &output), ["Assets:Hold:E:Food"]);
+    }
+
+    /// A link depends only on the moved entries of its own date before it:
+    /// adding an unrelated transaction, or a moved one on another date,
+    /// leaves every link as it was. A moved entry added earlier on the same
+    /// date renumbers the later ones of that date; that is the cost of links
+    /// that need no randomness.
+    #[test]
+    fn links_shift_only_with_moved_entries_of_the_same_date() {
+        let moved = |date: &str| {
+            txn_with(
+                date,
+                &[
+                    ("Expenses:Rent", "10", Some("2024-03-01")),
+                    ("Assets:Cash", "-10", None),
+                ],
+            )
+        };
+        let unrelated = txn_with(
+            "2024-01-10",
+            &[("Expenses:Food", "1", None), ("Assets:Cash", "-1", None)],
+        );
+        let links = |directives: Vec<DirectiveWrapper>| -> Vec<String> {
+            let out = materialize_ops(
+                &directives,
+                &EffectiveDatePlugin.process(input(directives.clone(), None)),
+            );
+            out.iter()
+                .filter_map(|d| match &d.data {
+                    DirectiveData::Transaction(t)
+                        if !t.metadata.iter().any(|(k, _)| k == "original_date") =>
+                    {
+                        t.links.iter().find(|l| l.starts_with("edate-")).cloned()
+                    }
+                    _ => None,
+                })
+                .collect()
+        };
+        let base = links(vec![moved("2024-01-15"), moved("2024-02-15")]);
+        assert_eq!(base, ["edate-240115-000", "edate-240215-000"]);
+        assert_eq!(
+            links(vec![unrelated, moved("2024-01-15"), moved("2024-02-15")]),
+            base
+        );
+        assert_eq!(
+            links(vec![
+                moved("2024-01-12"),
+                moved("2024-01-15"),
+                moved("2024-02-15")
+            ])[1..],
+            base[..]
+        );
+        assert_eq!(
+            links(vec![
+                moved("2024-01-15"),
+                moved("2024-01-15"),
+                moved("2024-02-15")
+            ]),
+            ["edate-240115-000", "edate-240115-001", "edate-240215-000"]
+        );
+    }
+
+    /// An entry left as written leaves nothing behind: no holding-account
+    /// `open` for the postings it would have moved, while another entry in
+    /// the same run is moved as usual. The prefix `Expenses:` does not match
+    /// the root `Expenses` itself, as upstream's `startswith` does not.
+    #[test]
+    fn a_kept_entry_leaves_no_opens_behind() {
+        let config = "{'Expenses:': {'earlier': 'Liabilities:Hold:E:', 'later': 'Assets:Hold:E:'}}";
+        let directives = vec![
+            txn_with(
+                "2024-01-15",
+                &[
+                    ("Expenses:Rent", "10", Some("2024-02-01")),
+                    ("Expenses", "10", Some("2024-02-01")),
+                    ("Assets:Cash", "-20", None),
+                ],
+            ),
+            txn_with(
+                "2024-01-16",
+                &[
+                    ("Expenses:Food", "10", Some("2024-02-01")),
+                    ("Assets:Cash", "-10", None),
+                ],
+            ),
+        ];
+        let output = EffectiveDatePlugin.process(input(directives.clone(), Some(config)));
+        assert_eq!(output.errors.len(), 1, "{:?}", output.errors);
+        assert!(
+            output.errors[0].message.contains("cannot move Expenses ("),
+            "{}",
+            output.errors[0].message
+        );
         assert_eq!(opened(&directives, &output), ["Assets:Hold:E:Food"]);
     }
 

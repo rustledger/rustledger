@@ -86,6 +86,10 @@ struct Parser {
     pos: usize,
 }
 
+/// How deep brackets may nest. Python's parser stops at 200 ("too many nested
+/// parentheses"), and a limit keeps hostile input from exhausting the stack.
+const MAX_DEPTH: usize = 200;
+
 impl Parser {
     fn peek(&self) -> Option<char> {
         self.chars.get(self.pos).copied()
@@ -139,10 +143,19 @@ impl Parser {
             Some('[') => self.seq(']', depth),
             Some('(') => self.seq(')', depth),
             Some('-' | '+') => {
+                // One sign, on a number literal: `literal_eval` takes `-1`
+                // and `- 1`, not `--1` or `-True`.
                 let sign = self.peek().unwrap_or('+');
                 self.pos += 1;
                 self.skip_trivia(depth);
-                match self.value(depth)? {
+                let starts_number = self.peek().is_some_and(|c| {
+                    c.is_ascii_digit()
+                        || (c == '.' && self.peek_at(1).is_some_and(|d| d.is_ascii_digit()))
+                });
+                if !starts_number {
+                    return Err(format!("`{sign}` applies only to a number"));
+                }
+                match self.number()? {
                     PyValue::Number { text, zero } => Ok(PyValue::Number {
                         text: format!("{sign}{text}"),
                         zero,
@@ -166,6 +179,9 @@ impl Parser {
     fn dict_or_set(&mut self, depth: usize) -> Result<PyValue, String> {
         self.pos += 1; // `{`
         let depth = depth + 1;
+        if depth > MAX_DEPTH {
+            return Err("too many nested brackets".to_string());
+        }
         let mut entries = Vec::new();
         let mut items = Vec::new();
         loop {
@@ -207,6 +223,9 @@ impl Parser {
     fn seq(&mut self, close: char, depth: usize) -> Result<PyValue, String> {
         self.pos += 1; // `[` or `(`
         let depth = depth + 1;
+        if depth > MAX_DEPTH {
+            return Err("too many nested brackets".to_string());
+        }
         let mut items = Vec::new();
         let mut saw_comma = false;
         loop {
@@ -249,7 +268,31 @@ impl Parser {
             }
         }
         let text: String = self.chars[start..self.pos].iter().collect();
+        // An underscore must sit between two digits (or right after a base
+        // prefix, `0x_ff`): Python rejects `1__0`, `1_` and `1_.5`.
+        let chars: Vec<char> = text.chars().collect();
+        for (i, c) in chars.iter().enumerate() {
+            if *c != '_' {
+                continue;
+            }
+            let before = i.checked_sub(1).and_then(|j| chars.get(j)).copied();
+            let after = chars.get(i + 1).copied();
+            let after_prefix =
+                i == 2 && chars[0] == '0' && matches!(chars[1], 'x' | 'X' | 'o' | 'O' | 'b' | 'B');
+            if !(before.is_some_and(|b| b.is_ascii_hexdigit()) || after_prefix)
+                || !after.is_some_and(|a| a.is_ascii_hexdigit())
+            {
+                return Err(format!("invalid number `{text}`"));
+            }
+        }
         let digits = text.replace('_', "");
+        // An imaginary literal (`1j`) is a number too; only its truthiness
+        // matters here.
+        let digits = digits
+            .strip_suffix(['j', 'J'])
+            .filter(|d| !d.to_ascii_lowercase().starts_with("0x"))
+            .unwrap_or(&digits)
+            .to_string();
         let lower = digits.to_ascii_lowercase();
         let zero = if let Some(hex) = lower.strip_prefix("0x") {
             u128::from_str_radix(hex, 16).map_err(|_| format!("invalid number `{text}`"))? == 0
@@ -326,7 +369,7 @@ impl Parser {
             if any && is_bytes != bytes.is_some() {
                 return Err("cannot mix bytes and str literals".to_string());
             }
-            let part = self.string_body(raw)?;
+            let part = self.string_body(raw, is_bytes)?;
             if is_bytes {
                 let b = bytes.get_or_insert_with(Vec::new);
                 for c in part.chars() {
@@ -348,7 +391,9 @@ impl Parser {
     }
 
     /// The quoted part of one string literal, escapes resolved unless `raw`.
-    fn string_body(&mut self, raw: bool) -> Result<String, String> {
+    /// In a bytes literal (`is_bytes`) `\u`, `\U` and `\N` are not escapes
+    /// and keep their backslash, as in Python.
+    fn string_body(&mut self, raw: bool, is_bytes: bool) -> Result<String, String> {
         let quote = self.peek().unwrap_or('\'');
         let triple = self.peek_at(1) == Some(quote) && self.peek_at(2) == Some(quote);
         self.pos += if triple { 3 } else { 1 };
@@ -368,6 +413,9 @@ impl Parser {
             }
             self.pos += 1;
             if c != '\\' {
+                if is_bytes && !c.is_ascii() {
+                    return Err("bytes can only contain ASCII literal characters".to_string());
+                }
                 out.push(c);
                 continue;
             }
@@ -406,6 +454,10 @@ impl Parser {
                     out.push(char::from_u32(code).ok_or("invalid octal escape")?);
                 }
                 'x' => out.push(self.hex_escape(2)?),
+                'u' | 'U' | 'N' if is_bytes => {
+                    out.push('\\');
+                    out.push(next);
+                }
                 'u' => out.push(self.hex_escape(4)?),
                 'U' => out.push(self.hex_escape(8)?),
                 'N' => return Err("`\\N{...}` escapes are not supported".to_string()),
@@ -430,5 +482,130 @@ impl Parser {
         self.pos += len;
         let code = u32::from_str_radix(&digits, 16).map_err(|e| e.to_string())?;
         char::from_u32(code).ok_or_else(|| "invalid escape".to_string())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The value class `parse` gives, in the form the Python oracle printed:
+    /// `str:<text>`, `bytes:<hex>`, `num:0` / `num:nz`, `seq<n>`, `dict<n>`,
+    /// `True` / `False` / `None`, or `ERR`.
+    fn class(source: &str) -> String {
+        match parse(source) {
+            Err(_) => "ERR".to_string(),
+            Ok(PyValue::None) => "None".to_string(),
+            Ok(PyValue::Bool(b)) => if b { "True" } else { "False" }.to_string(),
+            Ok(PyValue::Number { zero, .. }) => if zero { "num:0" } else { "num:nz" }.to_string(),
+            Ok(PyValue::Str(s)) => format!("str:{s}"),
+            Ok(PyValue::Bytes(b)) => {
+                use std::fmt::Write;
+                b.iter().fold("bytes:".to_string(), |mut out, x| {
+                    let _ = write!(out, "{x:02x}");
+                    out
+                })
+            }
+            Ok(PyValue::Seq(items)) => format!("seq{}", items.len()),
+            Ok(PyValue::Dict(entries)) => format!("dict{}", entries.len()),
+        }
+    }
+
+    /// Every expectation is Python 3.13's `ast.literal_eval` on the same
+    /// text, except `\N{...}`, a documented gap rejected here.
+    #[test]
+    fn parses_as_literal_eval_parses() {
+        let cases: Vec<(&str, &str)> = vec![
+            ("r'\\x41'", "str:\\x41"),
+            ("r'\\''", "str:\\'"),
+            ("r'\\'", "ERR"),
+            ("'\\x4'", "ERR"),
+            ("'\\x41'", "str:A"),
+            ("'\\u00e9'", "str:\u{e9}"),
+            ("'\\U0001F600'", "str:\u{1f600}"),
+            ("'\\U00110000'", "ERR"),
+            ("'\\101'", "str:A"),
+            ("'\\400'", "str:\u{100}"),
+            ("'\\0'", "str:\u{0}"),
+            ("'\\8'", "str:\\8"),
+            ("'\\q'", "str:\\q"),
+            ("'\\N{BULLET}'", "ERR"),
+            ("b'\\u00e9'", "bytes:5c7530306539"),
+            ("b'\u{e9}'", "ERR"),
+            ("b'\\x41'", "bytes:41"),
+            ("rb'\\x'", "bytes:5c78"),
+            ("f'x'", "ERR"),
+            ("'a' b'b'", "ERR"),
+            ("'a' 'b'", "str:ab"),
+            ("'''a'b'''", "str:a'b"),
+            ("'a\\\nb'", "str:ab"),
+            ("'a\nb'", "ERR"),
+            ("\"\"\"x\"\"\"", "str:x"),
+            ("1e5", "num:nz"),
+            ("1E+5", "num:nz"),
+            ("0b101", "num:nz"),
+            ("0o17", "num:nz"),
+            ("0xFF", "num:nz"),
+            ("1_000", "num:nz"),
+            ("1__0", "ERR"),
+            ("0__0", "ERR"),
+            ("1_", "ERR"),
+            ("0x_ff", "num:nz"),
+            ("_1", "ERR"),
+            (".5", "num:nz"),
+            ("5.", "num:nz"),
+            ("1j", "num:nz"),
+            ("-0.0", "num:0"),
+            ("00", "num:0"),
+            ("07", "ERR"),
+            ("0_0", "num:0"),
+            ("1e", "ERR"),
+            ("0x", "ERR"),
+            ("+1", "num:nz"),
+            ("- 1", "num:nz"),
+            ("--1", "ERR"),
+            ("{ # c\n 'a': 1}", "dict1"),
+            ("{'a': 1} # c", "dict1"),
+            ("{'#': 1}", "dict1"),
+            ("\\\n{}", "dict0"),
+            ("{}\\\n", "ERR"),
+            ("{'a':\\\n 1}", "dict1"),
+            ("\u{c}{}", "dict0"),
+            ("{}\u{0}", "ERR"),
+            ("'\\\n'", "str:"),
+            ("(1)", "num:nz"),
+            ("(1,)", "seq1"),
+            ("()", "seq0"),
+            ("[1,]", "seq1"),
+            ("{1,}", "seq1"),
+            ("{,}", "ERR"),
+            ("[,]", "ERR"),
+            ("{'a':1,,}", "ERR"),
+            ("{'a'}", "seq1"),
+            ("{**{}}", "ERR"),
+            ("True", "True"),
+            ("None", "None"),
+            ("none", "ERR"),
+            ("-True", "ERR"),
+            ("-'a'", "ERR"),
+        ];
+        let mut wrong = Vec::new();
+        for (source, want) in cases {
+            let got = class(source);
+            if got != want {
+                wrong.push(format!("{source:?}: want {want:?}, got {got:?}"));
+            }
+        }
+        assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    }
+
+    /// Hostile nesting is an error, not a stack overflow: Python stops at 200
+    /// levels ("too many nested parentheses").
+    #[test]
+    fn deep_nesting_is_rejected() {
+        assert!(parse(&"[".repeat(100_000)).is_err());
+        assert!(parse(&format!("{}{}", "{'a': ".repeat(100_000), "1")).is_err());
+        let ok = format!("{}1{}", "[".repeat(150), "]".repeat(150));
+        assert_eq!(class(&ok), "seq1");
     }
 }

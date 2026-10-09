@@ -484,7 +484,7 @@ deliberately differs in five places:
 | two matching prefixes | the most specific wins, whatever the config order | the last one in config order, so a general prefix listed after a specific one shadows it |
 | holding-account name | only the leading prefix is replaced: `Income:Interest:Income` becomes `Assets:Hold:Income:Interest:Income` | `str.replace` replaces every occurrence: `Assets:Hold:Income:Interest:Assets:Hold:Income` |
 | a marked posting it cannot move | an error naming the posting, and the whole transaction left as written | no prefix matches: the plugin fails (`KeyError: ''`) and changes nothing; a non-date value: the posting is skipped silently; no amount: the plugin fails (`-None`) |
-| the link | `edate-<yymmdd>-<n>`, `n` counting the entries moved, so the same ledger always gets the same links | `edate-<yymmdd>-<three random letters>` |
+| the link | `edate-<yymmdd>-<n>`, `n` counting the entries of that date moved before it, so the same ledger always gets the same links; a moved entry added earlier on the same date renumbers the later ones of that date | `edate-<yymmdd>-<three random letters>` |
 
 The rule behind the fourth row: a posting marked `effective_date` is either
 moved or reported, never left in place beside siblings that moved. An

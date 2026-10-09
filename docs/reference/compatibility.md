@@ -445,8 +445,9 @@ and `10 EUR` is `-30 USD`, the last value in currency order. Pinned by
 ### 16. PRINT Output Layout
 
 `PRINT` writes each entry the way `rledger format` writes it, so the layout
-comes from rustledger's formatter, not beancount's printer. The entries are
-the same; how they are written differs:
+comes from rustledger's formatter, not beancount's printer. This table lists
+layout differences only. The loader differences elsewhere on this page show
+up in `PRINT` as well:
 
 | | rustledger | bean-query |
 |---|---|---|

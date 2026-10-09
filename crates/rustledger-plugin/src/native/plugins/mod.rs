@@ -24,6 +24,7 @@ mod no_duplicates;
 mod no_unused;
 mod one_commodity;
 mod pedantic;
+mod py_literal;
 mod rename_accounts;
 mod rx_txn;
 mod sell_gains;

@@ -1115,11 +1115,11 @@ impl Inventory {
         // and that scale is rendered (`got 1 X` in an E2001, not `1.00 X`).
         // Checked, where it used to be a bare `+=` (#2554); see below for why
         // it cannot actually fail.
-        let delta = fold_noting_rounding(updates.iter().map(|&(idx, new_units)| {
-            new_units
-                .checked_sub(self.positions[idx].units.number)
-                .unwrap_or(units.number)
-        }));
+        let delta = updates
+            .iter()
+            .map(|&(idx, new_units)| new_units.checked_sub(self.positions[idx].units.number))
+            .collect::<Option<SmallVec<[Decimal; 2]>>>()
+            .and_then(fold_noting_rounding);
 
         for &(idx, new_units) in updates {
             if currency.is_none() {
@@ -1287,7 +1287,24 @@ impl Inventory {
         // covering a short (negative pool) yields a negative matched lot.
         let matched: MatchedLots = smallvec![at_avg_cost(reduction * total_units.signum())];
 
-        let new_units = total_units + units.number;
+        // Checked before anything is removed (#2554). Exact when the pool
+        // total is: a lot sold down below its resolution (`10 - 1e-28`) kept
+        // the units it sold. A pool total that already rounded is booked as
+        // #2363 decided, so only the range is checked then. And the running
+        // total must stay in range, or `rebuild_index` below meets a total
+        // `add` would have refused.
+        let overflow = || {
+            BookingError::Overflow(OverflowError {
+                currency: units.currency.clone(),
+            })
+        };
+        let new_units = if total_units_exact {
+            crate::decimal::checked_add_exact(total_units, units.number)
+        } else {
+            total_units.checked_add(units.number)
+        }
+        .ok_or_else(overflow)?;
+        self.net_after(units).ok_or_else(overflow)?;
 
         // Remove the reduced side, and any emptied lot of this currency;
         // leave the other side as it was.
@@ -1503,6 +1520,13 @@ impl Inventory {
         };
         let reduction = units.number.abs();
         let (avg_cost, cost_currency) = (pool.number, pool.currency);
+        // As in `reduce_average`: the running total must stay in range, or the
+        // rebuild below meets a total `add` would have refused (#2554).
+        self.net_after(units).ok_or_else(|| {
+            BookingError::Overflow(OverflowError {
+                currency: units.currency.clone(),
+            })
+        })?;
 
         // The whole pool: what its lots cost, not the rounded average times
         // the units (#2417).
@@ -1584,8 +1608,30 @@ impl Inventory {
             });
         }
 
-        let available = total_units.abs();
+        let mut available = total_units.abs();
         let requested = units.number.abs();
+
+        if requested > available {
+            // About to short what is left over, so `available` must be exact,
+            // and the cached total is allowed to round (#2363): lots summing
+            // to `...169.6` cached as `...170` shorted against the wrong
+            // number, or reported a shortfall NONE never has (#2554 review).
+            // Recounted only here, where a short is about to be booked.
+            let exact: bigdecimal::BigDecimal = self
+                .positions
+                .iter()
+                .filter(|p| p.units.currency == units.currency)
+                .map(|p| crate::to_bigdecimal(p.units.number))
+                .sum();
+            available = crate::decimal::decimal_from_big_exact(&exact)
+                .filter(|net| net.signum() == total_units.signum())
+                .ok_or_else(|| {
+                    BookingError::Overflow(OverflowError {
+                        currency: units.currency.clone(),
+                    })
+                })?
+                .abs();
+        }
 
         if requested > available {
             // NONE performs no booking, so shorts are always allowed —
@@ -3470,7 +3516,11 @@ mod reduction_tests {
         /// mantissa holds, so it rounded back to `10` and the sale vanished.
         #[test]
         fn a_sale_below_the_lot_resolution_is_an_overflow() {
-            for method in [BookingMethod::Fifo, BookingMethod::Strict] {
+            for method in [
+                BookingMethod::Fifo,
+                BookingMethod::Strict,
+                BookingMethod::Average,
+            ] {
                 let mut inv = mk([corp(d(10), d(1), 1)]);
                 let r = inv.reduce(
                     &sell(Decimal::new(1, 28)),
@@ -3498,6 +3548,51 @@ mod reduction_tests {
             )
             .expect("0.9999999999999999999999999999 is a Decimal");
             assert_eq!(holdings(&inv), [Decimal::ONE - Decimal::new(1, 28)]);
+        }
+
+        /// Review of #2554, round 2: AVERAGE had no range check on the running
+        /// total. A long at the ceiling, a short at the floor and a cost-less
+        /// short of `K` net to `-K`; selling `K` more from the long moves the
+        /// net to `-2K`, past `-MAX`. Release booked it with a wrong cached
+        /// total; debug hit `rebuild_index`'s assertion.
+        #[test]
+        fn an_average_sale_past_the_range_is_an_overflow() {
+            let k = Decimal::from_str_exact("39614081257132168796771975168").unwrap();
+            let mut inv = mk([corp(Decimal::MAX, d(1), 1), corp(-Decimal::MAX, d(2), 2)]);
+            inv.add(Position::simple(Amount::new(-k, "CORP")))
+                .expect("nets to -K");
+            let merge = CostSpec {
+                merge: true,
+                ..CostSpec::default()
+            };
+            // AVERAGE, and the `{*}` merge, which shares the hazard.
+            for (spec, method) in [
+                (None, BookingMethod::Average),
+                (Some(&merge), BookingMethod::Strict),
+            ] {
+                let mut inv = inv.clone();
+                let r = inv.reduce(&sell(k), spec, method);
+                assert!(is_overflow(&r), "{method:?}: got {r:?}");
+                assert_eq!(inv.units("CORP"), -k, "{method:?}");
+            }
+        }
+
+        /// Review of #2554, round 2: NONE shorted against the CACHED total,
+        /// which may round (`...169.6` cached as `...170`). The true short,
+        /// `...164.4`, needs 30 digits, so the sale is an overflow -- not a
+        /// shortfall, which NONE never reports.
+        #[test]
+        fn a_none_short_against_a_rounded_total_is_an_overflow() {
+            let half = Decimal::from_str_exact("39614081257132168796771975168").unwrap();
+            let mut inv = mk([
+                corp(half, dec!(1.50), 1),
+                corp(dec!(0.1), d(2), 2),
+                corp(dec!(1.5), d(1), 3),
+            ]);
+            let before = holdings(&inv);
+            let r = inv.reduce(&sell(Decimal::MAX - d(1)), None, BookingMethod::None);
+            assert!(is_overflow(&r), "got {r:?}");
+            assert_eq!(holdings(&inv), before);
         }
 
         /// Review of #2554: the fix first adjusted the units cache by the

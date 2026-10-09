@@ -1,0 +1,14 @@
+# Guests for `tests/plugin_conformance.rs`: a WASM directive plugin and a
+# WASM importer, built for wasm32-unknown-unknown by the test itself.
+#
+# Standalone (not part of the rustledger workspace), so a workspace
+# build never compiles them for the host target.
+[workspace]
+members = ["wasm-plugin", "wasm-importer"]
+resolver = "3"
+
+[profile.release]
+opt-level = "z"
+lto = true
+strip = true
+codegen-units = 1

@@ -66,7 +66,8 @@ struct Cli {
     #[arg(long, short = 'P', global = true)]
     profile: Option<String>,
 
-    /// Time budget for each WASM plugin or importer call: it is stopped
+    /// Time budget for each WASM or Python plugin call and WASM importer
+    /// call: it is stopped
     /// within at most this many seconds, usually far sooner (default: 30, or
     /// `[plugins] max_time_secs` from the config file)
     #[arg(
@@ -76,6 +77,18 @@ struct Cli {
         value_parser = clap::value_parser!(u64).range(1..)
     )]
     plugin_max_time_secs: Option<u64>,
+
+    /// Memory cap, in MiB, for each WASM or Python plugin or WASM importer
+    /// call (default: 256, or `[plugins] max_memory_mb` from the config
+    /// file; at most 4096). A Python plugin needs about 1.2 KB per
+    /// transaction
+    #[arg(
+        long,
+        global = true,
+        value_name = "MB",
+        value_parser = clap::value_parser!(u64).range(1..=4096)
+    )]
+    plugin_max_memory_mb: Option<u64>,
 
     #[command(subcommand)]
     command: Commands,
@@ -292,6 +305,15 @@ fn parse_alias_expansion(expansion: &str) -> Vec<String> {
     parts
 }
 
+/// An error's whole chain, for the terminal. A chain can quote a WASM
+/// module's own text (a trap's backtrace names its functions; a decode
+/// error quotes what it returned), and not every layer escapes it, so the
+/// whole chain is escaped here (see `rustledger_plugin::untrusted`;
+/// escaping twice changes nothing).
+fn render_error(e: &anyhow::Error) -> String {
+    rustledger_plugin::escape_untrusted_text(&format!("{e:#}")).into_owned()
+}
+
 fn main() -> ExitCode {
     // Load config early (before parsing) for alias expansion.
     //
@@ -335,7 +357,7 @@ fn main() -> ExitCode {
     if let Err(e) = &config_result
         && !matches!(cli.command, Commands::Config { .. })
     {
-        eprintln!("error: {e:#}");
+        eprintln!("error: {}", render_error(e));
         return ExitCode::from(2);
     }
 
@@ -344,6 +366,9 @@ fn main() -> ExitCode {
     rustledger::plugin_budget::set_max_time_secs(
         cli.plugin_max_time_secs
             .or(config.plugins.max_time_secs.map(std::num::NonZeroU64::get)),
+    );
+    rustledger::plugin_budget::set_max_memory_mb(
+        cli.plugin_max_memory_mb.or(config.plugins.max_memory_mb),
     );
 
     // Get effective profile: CLI flag takes precedence, then env var
@@ -364,7 +389,7 @@ fn main() -> ExitCode {
                 // error — exit cleanly, matching the Query/Format arms.
                 Err(e) if rustledger::pager::is_broken_pipe(&e) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("error: {e:#}");
+                    eprintln!("error: {}", render_error(&e));
                     ExitCode::from(2)
                 }
             }
@@ -386,7 +411,7 @@ fn main() -> ExitCode {
                 // error — exit cleanly, matching the Report arm and git.
                 Err(e) if rustledger::pager::is_broken_pipe(&e) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("error: {e:#}");
+                    eprintln!("error: {}", render_error(&e));
                     ExitCode::from(1)
                 }
             }
@@ -405,7 +430,7 @@ fn main() -> ExitCode {
                 // error — exit cleanly, matching the Report arm and git.
                 Err(e) if rustledger::pager::is_broken_pipe(&e) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("error: {e:#}");
+                    eprintln!("error: {}", render_error(&e));
                     ExitCode::from(2)
                 }
             }
@@ -438,7 +463,7 @@ fn main() -> ExitCode {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) if rustledger::pager::is_broken_pipe(&e) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("error: {e:#}");
+                    eprintln!("error: {}", render_error(&e));
                     ExitCode::from(1)
                 }
             }
@@ -451,7 +476,7 @@ fn main() -> ExitCode {
             match rustledger::cmd::doctor::run(command) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("error: {e:#}");
+                    eprintln!("error: {}", render_error(&e));
                     ExitCode::from(1)
                 }
             }
@@ -462,7 +487,7 @@ fn main() -> ExitCode {
                 match rustledger::cmd::extract_cmd::list_importers(&args) {
                     Ok(()) => return ExitCode::SUCCESS,
                     Err(e) => {
-                        eprintln!("error: {e:#}");
+                        eprintln!("error: {}", render_error(&e));
                         return ExitCode::from(1);
                     }
                 }
@@ -474,7 +499,7 @@ fn main() -> ExitCode {
             match rustledger::cmd::extract_cmd::run(&args, &file) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("error: {e:#}");
+                    eprintln!("error: {}", render_error(&e));
                     ExitCode::from(1)
                 }
             }
@@ -483,7 +508,7 @@ fn main() -> ExitCode {
             match rustledger::cmd::price_cmd::run(&args.price_args, &config.price) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("error: {e:#}");
+                    eprintln!("error: {}", render_error(&e));
                     ExitCode::from(1)
                 }
             }
@@ -491,7 +516,7 @@ fn main() -> ExitCode {
         Commands::Config { args } => match rustledger::cmd::config_cmd::run(&args) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
-                eprintln!("error: {e:#}");
+                eprintln!("error: {}", render_error(&e));
                 ExitCode::from(1)
             }
         },
@@ -503,7 +528,7 @@ fn main() -> ExitCode {
             match rustledger::cmd::add_cmd::run(&args, &file) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("error: {e:#}");
+                    eprintln!("error: {}", render_error(&e));
                     ExitCode::from(1)
                 }
             }
@@ -511,14 +536,14 @@ fn main() -> ExitCode {
         Commands::Explain { args } => match rustledger::cmd::explain::run(&args) {
             Ok(code) => code,
             Err(e) => {
-                eprintln!("error: {e:#}");
+                eprintln!("error: {}", render_error(&e));
                 ExitCode::from(1)
             }
         },
         Commands::Lint { args } => match rustledger::cmd::lint::run(&args) {
             Ok(code) => code,
             Err(e) => {
-                eprintln!("error: {e:#}");
+                eprintln!("error: {}", render_error(&e));
                 ExitCode::from(1)
             }
         },
@@ -527,7 +552,7 @@ fn main() -> ExitCode {
                 match rustledger::cmd::compat::install(prefix.as_deref()) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(e) => {
-                        eprintln!("error: {e:#}");
+                        eprintln!("error: {}", render_error(&e));
                         ExitCode::from(1)
                     }
                 }
@@ -536,7 +561,7 @@ fn main() -> ExitCode {
                 match rustledger::cmd::compat::uninstall(prefix.as_deref()) {
                     Ok(()) => ExitCode::SUCCESS,
                     Err(e) => {
-                        eprintln!("error: {e:#}");
+                        eprintln!("error: {}", render_error(&e));
                         ExitCode::from(1)
                     }
                 }

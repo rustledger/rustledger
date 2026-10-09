@@ -19,32 +19,48 @@ impl NativePlugin for LeafOnlyPlugin {
     fn process(&self, input: PluginInput) -> PluginOutput {
         use std::collections::HashSet;
 
-        // Collect all accounts used
-        let mut all_accounts: HashSet<String> = HashSet::new();
-        for wrapper in &input.directives {
-            if let DirectiveData::Transaction(txn) = &wrapper.data {
-                for posting in &txn.postings {
-                    all_accounts.insert(posting.account.clone());
+        // Every account the ledger names, as beancount's realization does:
+        // posted to, or named by an open, close, balance, pad, note or
+        // document. An account whose child is only opened is a parent all
+        // the same (#2500 review: counting only posted accounts missed it,
+        // where bean-check reports it).
+        fn add_ancestors<'a>(parents: &mut HashSet<&'a str>, account: &'a str) {
+            let mut end = account.len();
+            while let Some(colon) = account[..end].rfind(':') {
+                if !parents.insert(&account[..colon]) {
+                    break; // its ancestors are in already
                 }
+                end = colon;
             }
         }
-
-        // Find parent accounts (accounts that are prefixes of others)
-        let parent_accounts: HashSet<&String> = all_accounts
-            .iter()
-            .filter(|acc| {
-                all_accounts
-                    .iter()
-                    .any(|other| other != *acc && other.starts_with(&format!("{acc}:")))
-            })
-            .collect();
+        let mut parent_accounts: HashSet<&str> = HashSet::new();
+        for wrapper in &input.directives {
+            let accounts: &[&String] = match &wrapper.data {
+                DirectiveData::Transaction(txn) => {
+                    for posting in &txn.postings {
+                        add_ancestors(&mut parent_accounts, &posting.account);
+                    }
+                    &[]
+                }
+                DirectiveData::Open(d) => &[&d.account],
+                DirectiveData::Close(d) => &[&d.account],
+                DirectiveData::Balance(d) => &[&d.account],
+                DirectiveData::Note(d) => &[&d.account],
+                DirectiveData::Document(d) => &[&d.account],
+                DirectiveData::Pad(d) => &[&d.account, &d.source_account],
+                _ => &[],
+            };
+            for account in accounts {
+                add_ancestors(&mut parent_accounts, account);
+            }
+        }
 
         // Check for postings to parent accounts
         let mut errors = Vec::new();
         for wrapper in &input.directives {
             if let DirectiveData::Transaction(txn) = &wrapper.data {
                 for posting in &txn.postings {
-                    if parent_accounts.contains(&posting.account) {
+                    if parent_accounts.contains(posting.account.as_str()) {
                         errors.push(PluginError::error(format!(
                             "Posting to non-leaf account '{}' - has child accounts",
                             posting.account

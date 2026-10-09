@@ -73,6 +73,8 @@ anyhow = "1"
 
 # Regex
 regex = "1"
+# NFC folding for import dedup text comparison (#2507).
+unicode-normalization = "0.1"
 
 # Parsing
 format_num_pattern = { version = "0.9.5", features = ["rust_decimal"] }

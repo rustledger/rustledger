@@ -36,6 +36,9 @@ toml-config = ["dep:serde", "dep:toml"]
 [dependencies]
 rustledger-core.workspace = true
 rustledger-ops.workspace = true
+# `is_valid_currency`: the lexer's own commodity rule, for `currency_column`
+# cells (#2516).
+rustledger-parser.workspace = true
 rustledger-plugin = { workspace = true, features = ["wasm-runtime"], optional = true }
 rustledger-plugin-types.workspace = true
 jiff.workspace = true

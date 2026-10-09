@@ -1,4 +1,6 @@
 # Plugin that adds tags to transactions based on account patterns
+__plugins__ = ['plugin']
+
 def plugin(entries, options_map, config=None):
     """Add #food tag to transactions with Expenses:Food postings."""
     new_entries = []

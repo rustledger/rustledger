@@ -86,22 +86,21 @@ pub const DEFAULT_SANDBOX_MAX_MEMORY: usize = 256 * 1024 * 1024;
 /// rather than hanging.
 ///
 /// Shared by the WASM plugin runtime
-/// ([`crate::runtime::RuntimeConfig::default`]) and the WASM
-/// importer host
-/// (`rustledger_importer::wasm::WasmRuntimeConfig::default`).
+/// ([`crate::runtime::RuntimeConfig::default`]), the WASM importer
+/// host (`rustledger_importer::wasm::WasmRuntimeConfig::default`), and
+/// the Python plugin runtime (`crate::python::PythonRuntime`), all
+/// converted by [`fuel_for_secs`].
 ///
-/// # Python opts out
+/// # Python uses it too
 ///
-/// The Python plugin runtime does NOT use this constant. `CPython`
-/// compiled to WASI runs as an interpreter that emits many wasm
-/// instructions per Python-source operation, so a Python workload
-/// at "the same wall-clock budget" needs ~10-100x more wasmtime
-/// fuel than equivalent native wasm. The Python path therefore
-/// sets fuel directly via its own `PYTHON_FUEL` constant
-/// (`crate::python::runtime::PYTHON_FUEL`), independent of this
-/// seconds-based default. The opt-out is principled — interpreter
-/// overhead is a structural property of CPython-on-wasm, not an
-/// oversight.
+/// Until #2500 the Python runtime had its own fixed 600M-fuel budget,
+/// on the theory that `CPython` "needs ~10-100x more fuel" than wasm.
+/// Fuel counts wasm operators, and `CPython` compiled to WASI is wasm:
+/// measured, it runs 3-6 billion fuel per CPU-second, the same range
+/// as other wasm. So the same seconds budget converts at the same
+/// rate. What Python does need is a fixed ~1.2G (~1.2 budget-seconds)
+/// for the interpreter to start on every call, which 600M could not
+/// cover, so no Python plugin ran at all.
 pub const DEFAULT_SANDBOX_MAX_TIME_SECS: u64 = 30;
 
 /// wasmtime fuel granted per second of a sandbox time budget.
@@ -161,6 +160,7 @@ pub fn shared_engine() -> Arc<Engine> {
 /// defeats the "self-contained module" guarantee.
 pub struct MemoryLimiter {
     max_memory: usize,
+    denied: bool,
 }
 
 impl MemoryLimiter {
@@ -168,7 +168,24 @@ impl MemoryLimiter {
     /// `max_memory` bytes.
     #[must_use]
     pub const fn new(max_memory: usize) -> Self {
-        Self { max_memory }
+        Self {
+            max_memory,
+            denied: false,
+        }
+    }
+
+    /// Whether a memory growth past the cap was refused, so a host can
+    /// say that a guest which failed ran out of memory (#2500 review:
+    /// `CPython` reports it only as a `MemoryError` traceback).
+    #[must_use]
+    pub const fn growth_denied(&self) -> bool {
+        self.denied
+    }
+
+    /// The cap, in bytes.
+    #[must_use]
+    pub const fn max_memory(&self) -> usize {
+        self.max_memory
     }
 }
 
@@ -179,7 +196,9 @@ impl ResourceLimiter for MemoryLimiter {
         desired: usize,
         _maximum: Option<usize>,
     ) -> wasmtime::Result<bool> {
-        Ok(desired <= self.max_memory)
+        let allowed = desired <= self.max_memory;
+        self.denied |= !allowed;
+        Ok(allowed)
     }
 
     fn table_growing(
@@ -213,15 +232,90 @@ impl StoreState {
             limiter: MemoryLimiter::new(max_memory),
         }
     }
+
+    /// The store's memory limiter.
+    #[must_use]
+    pub const fn limiter(&self) -> &MemoryLimiter {
+        &self.limiter
+    }
+}
+
+/// What ran out, in words a user can act on, when a sandboxed call
+/// failed for hitting one of its limits: the time budget (naming it and
+/// how to raise it) or the memory cap. `None` for any other failure.
+///
+/// One wording for WASM plugins, WASM importers and Python plugins
+/// (#2500 review: only the Python path said how to raise the budget, and
+/// none said that memory had run out).
+#[must_use]
+pub fn explain_limit(
+    error: &anyhow::Error,
+    limiter: &MemoryLimiter,
+    max_time_secs: u64,
+) -> Option<String> {
+    if error.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::OutOfFuel) {
+        Some(time_budget_exceeded(max_time_secs))
+    } else if limiter.growth_denied() {
+        Some(memory_cap_exceeded(limiter.max_memory()))
+    } else {
+        None
+    }
+}
+
+/// "It exceeded its N-second time budget", and how to raise it.
+#[must_use]
+pub fn time_budget_exceeded(max_time_secs: u64) -> String {
+    format!(
+        "it exceeded its {}-second time budget (rledger raises it with \
+         --plugin-max-time-secs or [plugins] max_time_secs)",
+        max_time_secs.max(1)
+    )
+}
+
+/// "It ran out of the N MiB sandbox memory limit", and how to raise it.
+#[must_use]
+pub fn memory_cap_exceeded(max_memory: usize) -> String {
+    format!(
+        "it ran out of the {} MiB sandbox memory limit (rledger raises it with \
+         --plugin-max-memory-mb or [plugins] max_memory_mb)",
+        max_memory >> 20
+    )
+}
+
+/// `error` with [`explain_limit`]'s explanation as context, when there is
+/// one.
+#[must_use]
+pub fn with_limit_context(
+    error: impl Into<anyhow::Error>,
+    limiter: &MemoryLimiter,
+    max_time_secs: u64,
+) -> anyhow::Error {
+    let error = error.into();
+    match explain_limit(&error, limiter, max_time_secs) {
+        Some(why) => error.context(why),
+        None => error,
+    }
+}
+
+/// The fuel a time budget of `max_time_secs` grants: [`FUEL_PER_SECOND`]
+/// per second, clamped to at least one second (zero would trap on the
+/// first instruction) and saturating instead of overflowing.
+///
+/// The one conversion for every sandboxed runtime: WASM plugins and
+/// importers through [`make_sandboxed_store`], and Python plugins.
+#[must_use]
+pub const fn fuel_for_secs(max_time_secs: u64) -> u64 {
+    let secs = if max_time_secs == 0 { 1 } else { max_time_secs };
+    secs.saturating_mul(FUEL_PER_SECOND)
 }
 
 /// Create a [`Store`] with rustledger's sandbox enforcement wired in:
 ///
 /// - [`MemoryLimiter`] enforcing `max_memory` on both initial
 ///   allocation and `memory.grow`
-/// - Fuel budget computed from `max_time_secs` (clamped `≥1` to
-///   avoid zero-fuel starvation; `saturating_mul` to avoid overflow
-///   on absurd configurations)
+/// - Fuel budget computed from `max_time_secs` by [`fuel_for_secs`]
+///   (clamped `≥1` to avoid zero-fuel starvation; `saturating_mul` to
+///   avoid overflow on absurd configurations)
 ///
 /// Used by both the WASM importer host and the directive-plugin
 /// runtime so the per-call enforcement is identical across the
@@ -241,8 +335,7 @@ pub fn make_sandboxed_store(
 ) -> wasmtime::Result<Store<StoreState>> {
     let mut store = Store::new(engine, StoreState::new(max_memory));
     store.limiter(|s| &mut s.limiter);
-    let fuel = max_time_secs.max(1).saturating_mul(FUEL_PER_SECOND);
-    store.set_fuel(fuel)?;
+    store.set_fuel(fuel_for_secs(max_time_secs))?;
     Ok(store)
 }
 

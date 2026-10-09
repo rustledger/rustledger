@@ -23,6 +23,8 @@ rustc-hash.workspace = true
 jiff.workspace = true
 blake3.workspace = true
 regex.workspace = true
+# NFC folding of transaction text before dedup compares it (#2507).
+unicode-normalization.workspace = true
 
 # Note: the ML categorizer (`ml` module) implements its own Multinomial
 # Naive Bayes in pure Rust (std only) — no external ML/array crates. It

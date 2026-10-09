@@ -6,7 +6,8 @@
 //!   Finds transactions that are byte-for-byte identical (excluding metadata).
 //!
 //! - **Import** — [`find_import_duplicates`] matches imported transactions
-//!   against an existing ledger: shared id links (`^ofx-…`, `^csv-…`) with
+//!   against an existing ledger: shared id links (`^ofx-…`, `^csv-…`,
+//!   `^wasm-<importer>/…`) with
 //!   the same account, commodity and amount first, then the same date,
 //!   account, commodity and amount with identical or similar payee/narration
 //!   text. Existing transactions are a multiset, so each
@@ -84,24 +85,43 @@ pub const OFX_ID_LINK_PREFIX: &str = "ofx-";
 /// `transaction_id_column`).
 pub const CSV_ID_LINK_PREFIX: &str = "csv-";
 
-/// Every link prefix that marks a source-assigned transaction id.
+/// Link prefix marking a WASM importer's transaction id; the full link is
+/// `wasm-<importer>/<id>`, built by [`wasm_id_link`] (#2519).
+pub use rustledger_plugin_types::WASM_ID_LINK_PREFIX;
+
+/// The WASM importer's id link, `wasm-<importer>/<id>` (#2519).
+pub use rustledger_plugin_types::wasm_id_link;
+
+/// The fixed link prefixes that mark a source-assigned transaction id. Each
+/// is one namespace.
+const FIXED_ID_LINK_PREFIXES: &[&str] = &[OFX_ID_LINK_PREFIX, CSV_ID_LINK_PREFIX];
+
+/// The id namespace a link belongs to, or `None` when it is not an id link.
 ///
-/// Each prefix is its own namespace: ids are only compared within one, so an
-/// OFX id and a CSV id never contradict each other (a bank whose export moved
-/// from OFX to CSV still dedups by text).
-const ID_LINK_PREFIXES: &[&str] = &[OFX_ID_LINK_PREFIX, CSV_ID_LINK_PREFIX];
+/// Ids are only compared within one namespace, so an OFX id and a CSV id
+/// never contradict each other (a bank whose export moved from OFX to CSV
+/// still dedups by text). The namespaces are `ofx-`, `csv-`, and one per
+/// WASM importer, `wasm-<importer>/` (up to the first `/`), so two WASM
+/// importers' ids never contradict each other either. A `wasm-` link with no
+/// `/`, or nothing on either side of it, is not an id link.
+fn id_namespace(link: &str) -> Option<&str> {
+    if let Some(prefix) = FIXED_ID_LINK_PREFIXES
+        .iter()
+        .find(|p| link.starts_with(**p))
+    {
+        return Some(prefix);
+    }
+    let rest = link.strip_prefix(WASM_ID_LINK_PREFIX)?;
+    let slash = rest.find('/')?;
+    (slash > 0 && slash + 1 < rest.len()).then(|| &link[..=WASM_ID_LINK_PREFIX.len() + slash])
+}
 
 /// Render a source transaction id as a beancount link under `prefix`, or
 /// `None` if nothing usable survives.
 ///
-/// Links lex as `\^[a-zA-Z0-9-_/.]+`, and a bank's id is an opaque string that
-/// need not respect that. Anything outside the set becomes `-`, so the emitted
-/// ledger re-parses.
-///
-/// Two different ids collide after sanitizing when they differ only in
-/// characters that all map to `-` (`a b` and `a:b`). Dedup therefore treats an
-/// equal id link as identity only when the account, commodity and amount also
-/// agree, so a collision cannot drop a different transaction.
+/// The canonical sanitizer lives in `rustledger-plugin-types`
+/// ([`rustledger_plugin_types::id_link`]) so a WASM importer, which cannot
+/// depend on this crate, builds its links with the same rule.
 ///
 /// # Example
 ///
@@ -114,28 +134,7 @@ const ID_LINK_PREFIXES: &[&str] = &[OFX_ID_LINK_PREFIX, CSV_ID_LINK_PREFIX];
 /// ```
 #[must_use]
 pub fn id_link(prefix: &str, raw: &str) -> Option<String> {
-    let cleaned: String = raw
-        .trim()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.') {
-                c
-            } else {
-                '-'
-            }
-        })
-        .collect();
-
-    // An id that sanitizes to only separators carries no information, and the
-    // resulting link would be one every such transaction shares — worse than
-    // no link at all. `-` is not the only separator that survives: `.`, `_`
-    // and `/` are all in the link charset, so `...` and `__/__` pass a
-    // `trim_matches('-')` check while meaning exactly as little. Require a
-    // character that actually identifies something.
-    if !cleaned.chars().any(|c| c.is_ascii_alphanumeric()) {
-        return None;
-    }
-    Some(format!("{prefix}{cleaned}"))
+    rustledger_plugin_types::id_link(prefix, raw)
 }
 
 /// Configuration for fuzzy duplicate detection.
@@ -158,7 +157,8 @@ impl Default for FuzzyDedupConfig {
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
 pub enum DuplicateReason {
-    /// Both carry this id link (`^ofx-…`, `^csv-…`) and the same account,
+    /// Both carry this id link (`^ofx-…`, `^csv-…`, `^wasm-<importer>/…`) and
+    /// the same account,
     /// commodity and amount; the date and text may differ.
     IdLink(String),
     /// Same date, account, commodity and amount, and identical payee/narration.
@@ -216,7 +216,8 @@ pub struct ImportDuplicate {
 /// Matching runs in three passes, strongest evidence first, so a weak match
 /// can never claim an existing transaction a stronger one needed:
 ///
-/// 1. **Id links.** A shared `^ofx-…` / `^csv-…` link is a duplicate whatever
+/// 1. **Id links.** A shared `^ofx-…` / `^csv-…` / `^wasm-<importer>/…` link
+///    is a duplicate whatever
 ///    the date or text say, provided the account, commodity and amount agree
 ///    (so two different ids that sanitize to the same link cannot drop a
 ///    different transaction).
@@ -515,7 +516,7 @@ struct TxnKey<'a> {
     /// account's net per commodity when it has several postings (or the first
     /// posting when unscoped). Usually exactly one.
     amounts: Vec<AmountKey<'a>>,
-    /// Links under an [`ID_LINK_PREFIXES`] namespace.
+    /// Links in an id namespace (see [`id_namespace`]).
     ids: Vec<&'a str>,
     /// Lowercased payee + narration.
     text: String,
@@ -603,7 +604,7 @@ impl<'a> TxnKey<'a> {
             .links
             .iter()
             .map(rustledger_core::Link::as_str)
-            .filter(|l| ID_LINK_PREFIXES.iter().any(|p| l.starts_with(p)))
+            .filter(|l| id_namespace(l).is_some())
             .collect();
         Some(Self {
             amounts,
@@ -616,30 +617,44 @@ impl<'a> TxnKey<'a> {
 /// Whether two id sets prove two transactions distinct: both carry ids in some
 /// shared namespace and no id is common to both.
 fn ids_conflict(a: &[&str], b: &[&str]) -> bool {
-    ID_LINK_PREFIXES.iter().any(|prefix| {
-        let a_ns: Vec<&str> = a
-            .iter()
-            .copied()
-            .filter(|l| l.starts_with(prefix))
-            .collect();
-        let b_ns: Vec<&str> = b
-            .iter()
-            .copied()
-            .filter(|l| l.starts_with(prefix))
-            .collect();
-        !a_ns.is_empty() && !b_ns.is_empty() && !a_ns.iter().any(|l| b_ns.contains(l))
+    a.iter().filter_map(|l| id_namespace(l)).any(|ns| {
+        let in_ns = |l: &&str| id_namespace(l) == Some(ns);
+        let b_ns: Vec<&str> = b.iter().copied().filter(in_ns).collect();
+        !b_ns.is_empty() && !a.iter().copied().filter(in_ns).any(|l| b_ns.contains(&l))
     })
 }
 
 /// Build a lowercase string combining payee and narration for fuzzy matching.
+///
+/// Folded so that two spellings of the same text compare equal (#2507):
+/// `é` stored as one code point (NFC) and as `e` plus a combining accent
+/// (NFD) are the same text, but bank exports and editors differ in which
+/// they write, so the row was re-imported as a visible duplicate. The text is
+/// decomposed, lowercased, then recomposed: Unicode's canonical caseless
+/// match (D145) with `to_lowercase` in place of full case folding, so the
+/// result is the same whichever form either side was stored in.
+///
+/// Canonical (NFC), deliberately not compatibility (NFKC), equivalence.
+/// Canonical forms are the same characters by definition; compatibility
+/// forms are not always the same text (`²` and `2`, `½` and `1⁄2`, `ﬁ` and
+/// `fi`, full-width and ASCII letters). A false text match here drops a row
+/// the user never sees, while a missed one leaves a duplicate they can
+/// delete, so only the folding that can never merge different text is done.
+/// Whitespace variants need no folding: matching splits on
+/// `char::is_whitespace`, which already covers a no-break space.
 fn txn_text(txn: &Transaction) -> String {
+    use unicode_normalization::UnicodeNormalization;
     let mut text = String::new();
     if let Some(ref payee) = txn.payee {
         text.push_str(payee.as_str());
         text.push(' ');
     }
     text.push_str(txn.narration.as_str());
-    text.to_lowercase()
+    text.nfd()
+        .collect::<String>()
+        .to_lowercase()
+        .nfc()
+        .collect()
 }
 
 /// Fuzzy text match: returns true if either string contains the other,
@@ -1121,6 +1136,100 @@ mod tests {
         assert_eq!(import(&[same], &[reordered]).len(), 1);
     }
 
+    /// #2519: a WASM importer's `wasm-<importer>/<id>` link is an id like
+    /// `^ofx-` and `^csv-`: decisive when shared (with equal money), proof of
+    /// two transactions when it differs within one importer, and silent
+    /// across importers, which are separate namespaces.
+    #[test]
+    fn a_wasm_importer_id_link_is_an_id() {
+        let id = |importer: &str, raw: &str| wasm_id_link(importer, raw).unwrap();
+        let mt1 = id("MT940", "1");
+        let existing = txn(
+            "2024-01-14",
+            "POS 4411 BAKERY",
+            BANK,
+            "-2.50",
+            "EUR",
+            &[&mt1],
+        );
+        let renamed = txn("2024-01-15", "Croissant", BANK, "-2.50", "EUR", &[&mt1]);
+        let dups = import(&[renamed], std::slice::from_ref(&existing));
+        assert_eq!(dups.len(), 1);
+        assert_eq!(dups[0].reason, DuplicateReason::IdLink(mt1.clone()));
+
+        // Same importer, different id: two transactions, however alike.
+        let a = txn("2024-01-15", "Croissant", BANK, "-2.50", "EUR", &[&mt1]);
+        let b = txn(
+            "2024-01-15",
+            "Croissant",
+            BANK,
+            "-2.50",
+            "EUR",
+            &[&id("MT940", "2")],
+        );
+        assert!(import(&[b], std::slice::from_ref(&a)).is_empty());
+
+        // Another importer's id (or an OFX one) does not contradict it: text
+        // decides, as when a bank's export moves from one format to another.
+        let camt = txn(
+            "2024-01-15",
+            "Croissant",
+            BANK,
+            "-2.50",
+            "EUR",
+            &[&id("camt", "2")],
+        );
+        assert_eq!(import(&[camt], std::slice::from_ref(&a)).len(), 1);
+        let ofx = txn("2024-01-15", "Croissant", BANK, "-2.50", "EUR", &["ofx-2"]);
+        assert_eq!(import(&[ofx], std::slice::from_ref(&a)).len(), 1);
+
+        // Importers whose names differ only in characters a lossy sanitizer
+        // would merge are separate namespaces: one's id never matches the
+        // other's, so a different transaction with the same id and amount
+        // is not dropped.
+        let mut namespaces: Vec<String> = ["My Bank", "My-Bank", "My_Bank", "My/Bank", "my-bank"]
+            .iter()
+            .map(|name| id(name, "7"))
+            .collect();
+        namespaces.sort();
+        namespaces.dedup();
+        assert_eq!(namespaces.len(), 5, "{namespaces:?}");
+        let mine = txn(
+            "2024-01-15",
+            "Rent",
+            BANK,
+            "-9.00",
+            "EUR",
+            &[&id("My Bank", "7")],
+        );
+        let theirs = txn(
+            "2024-01-15",
+            "Gym",
+            BANK,
+            "-9.00",
+            "EUR",
+            &[&id("My-Bank", "7")],
+        );
+        assert!(import(&[theirs], std::slice::from_ref(&mine)).is_empty());
+
+        // `wasm-` without an importer namespace is not an id: two such links
+        // that differ do not make the rows distinct.
+        let bare1 = txn("2024-01-15", "Croissant", BANK, "-2.50", "EUR", &["wasm-1"]);
+        let bare2 = txn("2024-01-15", "Croissant", BANK, "-2.50", "EUR", &["wasm-2"]);
+        assert_eq!(import(&[bare2], std::slice::from_ref(&bare1)).len(), 1);
+    }
+
+    #[test]
+    fn id_namespaces() {
+        assert_eq!(id_namespace("ofx-77"), Some("ofx-"));
+        assert_eq!(id_namespace("csv-tx_1"), Some("csv-"));
+        assert_eq!(id_namespace("wasm-mt940/2024/1"), Some("wasm-mt940/"));
+        assert_eq!(id_namespace("wasm-mt940/"), None);
+        assert_eq!(id_namespace("wasm-/1"), None);
+        assert_eq!(id_namespace("wasm-1"), None);
+        assert_eq!(id_namespace("invoice-1"), None);
+    }
+
     #[test]
     fn a_shared_id_link_is_decisive() {
         // Same id and money: a duplicate even though date and text differ (a
@@ -1318,6 +1427,37 @@ mod tests {
         // Text on one side only is not a match at all.
         let b = txn("2024-01-15", "ATM", BANK, "-60.00", "EUR", &[]);
         assert!(import(&[b], &[a]).is_empty());
+    }
+
+    /// #2507: the same text in NFC and NFD (and in either case) is the same
+    /// transaction, so the statement row is recognized, not re-imported.
+    #[test]
+    fn nfc_and_nfd_spellings_of_the_same_text_match() {
+        let nfc = "Ren\u{e9}e Lumi\u{e8}re";
+        let nfd = "Rene\u{301}e Lumie\u{300}re";
+        let upper_nfd = "RENE\u{301}E LUMIE\u{300}RE";
+        for (new_text, existing_text) in [(nfd, nfc), (nfc, nfd), (upper_nfd, nfc)] {
+            let new = txn("2024-01-15", new_text, BANK, "-4.50", "EUR", &[]);
+            let existing = txn("2024-01-15", existing_text, BANK, "-4.50", "EUR", &[]);
+            let dups = import(&[new], &[existing]);
+            assert_eq!(dups.len(), 1, "{new_text:?} vs {existing_text:?}");
+            assert_ne!(dups[0].reason, DuplicateReason::AmountOnly);
+        }
+    }
+
+    /// #2507: compatibility forms are NOT folded (NFC, not NFKC). `ﬁ` and
+    /// `fi`, or `²` and `2`, are not the same text, and a false match drops
+    /// a row silently, so they stay distinct.
+    #[test]
+    fn compatibility_forms_are_not_folded() {
+        for (new_text, existing_text) in [("\u{fb01}sh", "fish"), ("Unit\u{b2}", "Unit2")] {
+            let new = txn("2024-01-15", new_text, BANK, "-4.50", "EUR", &[]);
+            let existing = txn("2024-01-15", existing_text, BANK, "-4.50", "EUR", &[]);
+            assert!(
+                import(&[new], &[existing]).is_empty(),
+                "{new_text:?} vs {existing_text:?}"
+            );
+        }
     }
 
     #[test]

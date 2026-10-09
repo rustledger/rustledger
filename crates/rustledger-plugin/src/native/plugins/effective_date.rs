@@ -19,14 +19,22 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 /// Regex for parsing holding account configuration entries.
 /// Format: `'Prefix': {'earlier': 'Account1', 'later': 'Account2'}`
+/// One `'Prefix': {...}` entry of the config dict, either quote style.
 static HOLDING_ACCOUNT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"'([^']+)'\s*:\s*\{\s*'earlier'\s*:\s*'([^']+)'\s*,\s*'later'\s*:\s*'([^']+)'\s*\}")
+    Regex::new(r#"(?:'([^']+)'|"([^"]+)")\s*:\s*\{([^{}]*)\}"#)
         .expect("HOLDING_ACCOUNT_RE: invalid regex pattern")
 });
 
+/// One `'earlier': 'Account'` / `'later': 'Account'` field of an entry, in
+/// either order and either quote style, as the Python dict literal allows.
+static HOLDING_FIELD_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?:'(earlier|later)'|"(earlier|later)")\s*:\s*(?:'([^']+)'|"([^"]+)")"#)
+        .expect("HOLDING_FIELD_RE: invalid regex pattern")
+});
+
 use crate::types::{
-    AmountData, DirectiveData, DirectiveWrapper, MetaValueData, OpenData, PluginInput, PluginOp,
-    PluginOutput, PostingData, TransactionData,
+    AmountData, DirectiveData, DirectiveWrapper, MetaValueData, OpenData, PluginError,
+    PluginErrorSeverity, PluginInput, PluginOp, PluginOutput, PostingData, TransactionData,
 };
 
 use super::super::{NativePlugin, RegularPlugin};
@@ -75,11 +83,28 @@ impl NativePlugin for EffectiveDatePlugin {
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
-        // Parse configuration or use defaults
-        let holding_accounts = match &input.config {
-            Some(config) => parse_config(config).unwrap_or_else(|_| default_holding_accounts()),
+        // Parse configuration or use defaults. A config that does not parse
+        // is an error and the plugin changes nothing, as upstream, where
+        // `literal_eval` raises and beancount reports the plugin's failure.
+        // This used to fall back to the default config silently, so a typo
+        // in a custom config moved postings to holding accounts the user had
+        // not asked for.
+        let holding_accounts = match input.config.as_deref().map(parse_config) {
             None => default_holding_accounts(),
+            Some(Ok(config)) => config,
+            Some(Err(e)) => {
+                return PluginOutput {
+                    ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
+                    errors: vec![PluginError {
+                        message: format!("effective_date: cannot read the config: {e}"),
+                        source_file: None,
+                        line_number: None,
+                        severity: PluginErrorSeverity::Error,
+                    }],
+                };
+            }
         };
+        let mut errors: Vec<PluginError> = Vec::new();
 
         // Sorted: the synthesized `open`s are emitted in this order, all on
         // one date, and the upstream plugin emits them `sorted(new_accounts)`.
@@ -113,6 +138,25 @@ impl NativePlugin for EffectiveDatePlugin {
         for (i, mut directive) in input.directives.into_iter().enumerate() {
             let is_interesting = matches!(&directive.data, DirectiveData::Transaction(t) if has_effective_date_posting(t));
             if !is_interesting {
+                ops.push(PluginOp::Keep(i));
+                continue;
+            }
+            // An effective date equal to the entry's own date means nothing:
+            // upstream reports it and leaves the entry as written. This used
+            // to route the posting through a holding account and back on the
+            // same day, with no word to the user.
+            if let DirectiveData::Transaction(txn) = &directive.data
+                && txn
+                    .postings
+                    .iter()
+                    .any(|p| get_effective_date(p).as_deref() == Some(directive.date.as_str()))
+            {
+                errors.push(PluginError {
+                    message: "Effective and actual dates are identical".to_string(),
+                    source_file: directive.filename.clone(),
+                    line_number: directive.lineno,
+                    severity: PluginErrorSeverity::Error,
+                });
                 ops.push(PluginOp::Keep(i));
                 continue;
             }
@@ -181,7 +225,11 @@ impl NativePlugin for EffectiveDatePlugin {
                                 data: DirectiveData::Transaction(new_txn),
                             });
                         } else {
-                            // No matching holding account, keep original
+                            // No configured prefix matches: the posting is
+                            // kept as written, on purpose
+                            // (`test_effective_date_unconfigured_prefix_unchanged`).
+                            // Upstream fails outright here (`KeyError: ''`)
+                            // and applies nothing to the whole ledger.
                             modified_postings.push(posting.clone());
                         }
                     } else {
@@ -223,10 +271,7 @@ impl NativePlugin for EffectiveDatePlugin {
             }
         }
 
-        PluginOutput {
-            ops,
-            errors: Vec::new(),
-        }
+        PluginOutput { ops, errors }
     }
 }
 
@@ -308,28 +353,66 @@ fn generate_link(date: &str) -> String {
     format!("edate-{}-{:03x}", date_short, counter % 4096)
 }
 
-/// Parse the configuration string.
+/// Parse the configuration string: a Python dict literal mapping each
+/// account prefix to its `earlier` and `later` holding accounts.
+///
+/// An empty dict means the default config, as upstream (`if not
+/// holding_accts`). Anything else must read as such a dict, in either quote
+/// style and with the two fields in either order; text that does not is an
+/// error rather than being skipped.
 fn parse_config(config: &str) -> Result<HoldingAccounts, String> {
     let mut result: HoldingAccounts = Vec::new();
 
-    // Parse format: {'Prefix': {'earlier': 'Account1', 'later': 'Account2'}, ...}
     for cap in HOLDING_ACCOUNT_RE.captures_iter(config) {
-        let prefix = cap[1].to_string();
-        let earlier = cap[2].to_string();
-        let later = cap[3].to_string();
+        let prefix = cap.get(1).or_else(|| cap.get(2)).map_or("", |m| m.as_str());
+        let (mut earlier, mut later) = (None, None);
+        for field in HOLDING_FIELD_RE.captures_iter(&cap[3]) {
+            let key = field
+                .get(1)
+                .or_else(|| field.get(2))
+                .map_or("", |m| m.as_str());
+            let value = field
+                .get(3)
+                .or_else(|| field.get(4))
+                .map(|m| m.as_str().to_string());
+            if key == "earlier" {
+                earlier = value;
+            } else {
+                later = value;
+            }
+        }
+        let (Some(earlier), Some(later)) = (earlier, later) else {
+            return Err(format!(
+                "the entry for '{prefix}' needs both 'earlier' and 'later'"
+            ));
+        };
         // A repeated key keeps its first position and takes the new value,
         // as a Python dict literal does.
-        if let Some(entry) = result.iter_mut().find(|(p, _)| *p == prefix) {
+        if let Some(entry) = result.iter_mut().find(|(p, _)| p == prefix) {
             entry.1 = (earlier, later);
         } else {
-            result.push((prefix, (earlier, later)));
+            result.push((prefix.to_string(), (earlier, later)));
         }
     }
 
-    if result.is_empty() {
-        return Err("No holding accounts found in config".to_string());
+    // Whatever the entries did not account for may only be the dict's own
+    // braces, commas and whitespace.
+    let rest = HOLDING_ACCOUNT_RE.replace_all(config, "");
+    if let Some(stray) = rest
+        .chars()
+        .find(|c| !(c.is_whitespace() || matches!(c, '{' | '}' | ',')))
+    {
+        return Err(format!(
+            "unexpected `{stray}`; expected a dict of holding accounts"
+        ));
+    }
+    if rest.matches('{').count() != rest.matches('}').count() {
+        return Err("unbalanced braces".to_string());
     }
 
+    if result.is_empty() {
+        return Ok(default_holding_accounts());
+    }
     Ok(result)
 }
 
@@ -620,5 +703,83 @@ mod tests {
                 .collect();
             assert_eq!(accounts, ["Assets:Hold:Car:Gas"]);
         }
+    }
+
+    fn opened(directives: &[DirectiveWrapper], output: &PluginOutput) -> Vec<String> {
+        materialize_ops(directives, output)
+            .into_iter()
+            .filter_map(|d| match d.data {
+                DirectiveData::Open(open) => Some(open.account),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// A config that does not parse is an error, and nothing changes, as
+    /// upstream (`literal_eval` raises). It used to fall back to the default
+    /// config without a word.
+    #[test]
+    fn an_unreadable_config_is_an_error_and_changes_nothing() {
+        let directives = vec![create_test_transaction_with_effective_date(
+            "2024-01-15",
+            "2024-02-01",
+        )];
+        for config in [
+            "{'Expenses': {'earlier': 'Liabilities:Hold:X'",
+            "{'Expenses': {'earlier': 'Liabilities:Hold:X'}}",
+            "not a dict",
+        ] {
+            let output = EffectiveDatePlugin.process(input(directives.clone(), Some(config)));
+            assert_eq!(output.errors.len(), 1, "{config}: {:?}", output.errors);
+            assert!(output.errors[0].message.contains("cannot read the config"));
+            assert_eq!(
+                materialize_ops(&directives, &output),
+                directives,
+                "{config}"
+            );
+        }
+    }
+
+    /// The same dict in the other spellings Python accepts: double quotes, and
+    /// `later` before `earlier`. An empty dict is the default config.
+    #[test]
+    fn the_config_reads_either_quote_style_and_field_order() {
+        let directives = vec![create_test_transaction_with_effective_date(
+            "2024-01-15",
+            "2024-02-01",
+        )];
+        for config in [
+            "{'Expenses': {'earlier': 'Liabilities:Hold:E', 'later': 'Assets:Hold:E'}}",
+            r#"{"Expenses": {"later": "Assets:Hold:E", "earlier": "Liabilities:Hold:E"}}"#,
+        ] {
+            let output = EffectiveDatePlugin.process(input(directives.clone(), Some(config)));
+            assert!(output.errors.is_empty(), "{config}: {:?}", output.errors);
+            assert_eq!(
+                opened(&directives, &output),
+                ["Assets:Hold:E:Food"],
+                "{config}"
+            );
+        }
+        let output = EffectiveDatePlugin.process(input(directives.clone(), Some("{}")));
+        assert!(output.errors.is_empty());
+        assert_eq!(opened(&directives, &output), ["Assets:Hold:Expenses:Food"]);
+    }
+
+    /// An effective date equal to the entry's date: upstream's error, and the
+    /// entry stays as written. It used to go through a holding account and
+    /// back on the same day.
+    #[test]
+    fn an_effective_date_equal_to_the_entry_date_is_an_error() {
+        let directives = vec![create_test_transaction_with_effective_date(
+            "2024-01-15",
+            "2024-01-15",
+        )];
+        let output = EffectiveDatePlugin.process(input(directives.clone(), None));
+        assert_eq!(output.errors.len(), 1, "{:?}", output.errors);
+        assert_eq!(
+            output.errors[0].message,
+            "Effective and actual dates are identical"
+        );
+        assert_eq!(materialize_ops(&directives, &output), directives);
     }
 }

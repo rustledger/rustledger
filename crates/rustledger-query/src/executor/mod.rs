@@ -760,6 +760,7 @@ impl<'a> Executor<'a> {
                     where_reads_balance: false,
                     where_reads_account_balance: false,
                     output_reads_account_balance: true,
+                    txn_accounts: false,
                 },
                 false,
             )?
@@ -822,6 +823,8 @@ impl<'a> Executor<'a> {
                     where_reads_balance,
                     where_reads_account_balance,
                     output_reads_account_balance,
+                    txn_accounts: query_references_column(query, "accounts")
+                        || query_references_column(query, "other_accounts"),
                 },
                 true,
             )?
@@ -1003,6 +1006,7 @@ impl<'a> Executor<'a> {
             where_reads_balance,
             where_reads_account_balance,
             output_reads_account_balance,
+            txn_accounts: needs_txn_accounts,
         } = needs;
         let mut postings = Vec::new();
         // Per-account running balance — accumulates every posting the FROM clause
@@ -1103,6 +1107,9 @@ impl<'a> Executor<'a> {
                         .map_err(|e| QueryError::Evaluation(e.to_string()))
                 })
             };
+            // One account set per transaction, shared by its rows (#2504).
+            let txn_accounts = (needs_txn_accounts && collect_contexts)
+                .then(|| std::sync::Arc::new(system_tables::TxnAccounts::of(&txn).into_owned()));
             for (i, posting) in txn.postings.iter().enumerate() {
                 // Update the account-level running balance regardless of
                 // whether this posting passes WHERE — `account_balance`
@@ -1219,6 +1226,7 @@ impl<'a> Executor<'a> {
                         None
                     },
                     directive_index,
+                    txn_accounts: txn_accounts.clone(),
                 };
 
                 // Check WHERE clause (posting-level filter)
@@ -3068,6 +3076,10 @@ struct ScanNeeds {
     /// Something other than the WHERE reads `account_balance`, so the snapshot
     /// has to outlive the filter.
     output_reads_account_balance: bool,
+    /// `accounts` or `other_accounts` is read anywhere, the WHERE included,
+    /// so each transaction's account set is built once and shared by its
+    /// rows (#2504).
+    txn_accounts: bool,
 }
 
 /// Return `true` if any part of a `SelectQuery` OTHER than its `WHERE` clause

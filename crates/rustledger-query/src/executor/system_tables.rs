@@ -919,6 +919,10 @@ impl Executor<'_> {
                         where_reads_balance: false,
                         where_reads_account_balance: false,
                         output_reads_account_balance: account_balance,
+                        // Every row has both columns: the scan builds each
+                        // transaction's set once (#2504), shared with the
+                        // default table's.
+                        txn_accounts: true,
                     }
                 },
                 true,
@@ -970,10 +974,6 @@ impl Executor<'_> {
         // rebuilding (strings, tags/links vectors, full meta conversion) for
         // every posting (#1800 review).
         let mut last_entry: Option<(usize, Value)> = None;
-        // One account set per transaction, keyed like `last_entry` by the
-        // directive index (unique per transaction here: this scan has no
-        // FROM, so nothing is synthesized).
-        let mut last_accounts: Option<(usize, TxnAccounts<String>)> = None;
 
         for ctx in contexts {
             let txn: &rustledger_core::Transaction = &ctx.transaction;
@@ -1002,15 +1002,16 @@ impl Executor<'_> {
             let tags: Vec<String> = txn.tags.iter().map(ToString::to_string).collect();
             let links: Vec<String> = txn.links.iter().map(ToString::to_string).collect();
 
-            // Built once per transaction, not per posting: rebuilding the set
-            // for every row made a transaction of n postings cost O(n^2).
-            if last_accounts
-                .as_ref()
-                .is_none_or(|(idx, _)| *idx != dir_idx)
-            {
-                last_accounts = Some((dir_idx, TxnAccounts::of(txn).into_owned()));
-            }
-            let txn_accounts = &last_accounts.as_ref().expect("set just above").1;
+            // Built once per transaction by the scan, not per posting:
+            // rebuilding the set for every row made a transaction of n
+            // postings cost O(n^2).
+            let built;
+            let txn_accounts = if let Some(set) = ctx.txn_accounts.as_deref() {
+                set
+            } else {
+                built = TxnAccounts::of(txn).into_owned();
+                &built
+            };
             let all_accounts = txn_accounts.accounts();
 
             let description = Self::transaction_description(txn);
@@ -1205,6 +1206,7 @@ impl Executor<'_> {
 /// from the transaction (one set per row, no copies until output), and
 /// [`TxnAccounts::into_owned`] keeps a set across rows (`#postings` builds
 /// one per transaction).
+#[derive(Debug)]
 pub(super) struct TxnAccounts<S> {
     /// Every posting's account, sorted and deduped.
     all: Vec<S>,

@@ -66,29 +66,10 @@ struct Cli {
     #[arg(long, short = 'P', global = true)]
     profile: Option<String>,
 
-    /// Time budget for each WASM or Python plugin call and WASM importer
-    /// call: it is stopped
-    /// within at most this many seconds, usually far sooner (default: 30, or
-    /// `[plugins] max_time_secs` from the config file)
-    #[arg(
-        long,
-        global = true,
-        value_name = "SECS",
-        value_parser = clap::value_parser!(u64).range(1..)
-    )]
-    plugin_max_time_secs: Option<u64>,
-
-    /// Memory cap, in MiB, for each WASM or Python plugin or WASM importer
-    /// call (default: 256, or `[plugins] max_memory_mb` from the config
-    /// file; at most 4096). A Python plugin needs about 1.2 KB per
-    /// transaction
-    #[arg(
-        long,
-        global = true,
-        value_name = "MB",
-        value_parser = clap::value_parser!(u64).range(1..=4096)
-    )]
-    plugin_max_memory_mb: Option<u64>,
+    /// The global plugin-budget flags, shared with `ag-rledger` so the two
+    /// cannot drift (#2522, #2552).
+    #[command(flatten)]
+    plugin_budget: rustledger::plugin_budget::PluginBudgetArgs,
 
     #[command(subcommand)]
     command: Commands,
@@ -226,10 +207,26 @@ fn require_file(
 /// Returns the expanded arguments.
 /// Global flags written before the command that take their value as a
 /// separate argument (`-P work`). Alias expansion must skip that value, or
-/// it reads it as the command. A new value-taking global flag goes here.
-const GLOBAL_VALUE_FLAGS: &[&str] = &["-P", "--profile", "--plugin-max-time-secs"];
+/// it reads it as the command.
+///
+/// Read from clap's own definition of `Cli`, not kept as a list: the list
+/// this replaced was missing `--plugin-max-memory-mb`, so
+/// `rledger --plugin-max-memory-mb 512 <alias>` took `512` for the command
+/// and never expanded the alias.
+fn global_value_flags() -> Vec<String> {
+    let cli = Cli::command();
+    cli.get_arguments()
+        .filter(|arg| arg.is_global_set() && arg.get_action().takes_values())
+        .flat_map(|arg| {
+            let long = arg.get_long().map(|l| format!("--{l}"));
+            let short = arg.get_short().map(|s| format!("-{s}"));
+            long.into_iter().chain(short)
+        })
+        .collect()
+}
 
 fn expand_aliases(args: Vec<String>, config: &Config) -> Vec<String> {
+    let value_flags = global_value_flags();
     // Find the first non-flag argument (the potential command/alias)
     let mut cmd_index = None;
     for (i, arg) in args.iter().enumerate().skip(1) {
@@ -237,7 +234,7 @@ fn expand_aliases(args: Vec<String>, config: &Config) -> Vec<String> {
         if i > 1
             && args
                 .get(i - 1)
-                .is_some_and(|prev| GLOBAL_VALUE_FLAGS.contains(&prev.as_str()))
+                .is_some_and(|prev| value_flags.iter().any(|f| f == prev))
         {
             continue;
         }
@@ -361,15 +358,9 @@ fn main() -> ExitCode {
         return ExitCode::from(2);
     }
 
-    // The WASM plugin and importer time budget: the flag, else the config
-    // file. Set once, before any command runs a plugin.
-    rustledger::plugin_budget::set_max_time_secs(
-        cli.plugin_max_time_secs
-            .or(config.plugins.max_time_secs.map(std::num::NonZeroU64::get)),
-    );
-    rustledger::plugin_budget::set_max_memory_mb(
-        cli.plugin_max_memory_mb.or(config.plugins.max_memory_mb),
-    );
+    // The WASM plugin and importer time budget and memory cap: each flag,
+    // else the config file. Set once, before any command runs a plugin.
+    cli.plugin_budget.apply(&config.plugins);
 
     // Get effective profile: CLI flag takes precedence, then env var
     let profile = cli
@@ -745,7 +736,9 @@ mod tests {
     #[test]
     fn test_expand_aliases_skips_plugin_budget_value() {
         // `--plugin-max-time-secs 120 bal`: `120` is the flag's value, not
-        // the command, so `bal` must still expand.
+        // the command, so `bal` must still expand. The same for
+        // `--plugin-max-memory-mb`, which the hand-kept list this test once
+        // guarded had left out.
         let config = Config {
             aliases: {
                 let mut aliases = std::collections::HashMap::new();
@@ -758,6 +751,8 @@ mod tests {
             "rledger",
             "--plugin-max-time-secs",
             "120",
+            "--plugin-max-memory-mb",
+            "512",
             "-P",
             "work",
             "bal",
@@ -771,6 +766,8 @@ mod tests {
                 "rledger",
                 "--plugin-max-time-secs",
                 "120",
+                "--plugin-max-memory-mb",
+                "512",
                 "-P",
                 "work",
                 "report",

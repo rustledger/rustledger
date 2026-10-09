@@ -21,7 +21,8 @@ repos:
       # Typos - spell checker
       - id: typos
         name: typos
-        entry: typos --locale en-us
+        # --force-exclude: honor .typos.toml excludes for the files prek passes.
+        entry: typos --locale en-us --force-exclude
         language: system
         types: [text]
       # Gitleaks - secrets detection

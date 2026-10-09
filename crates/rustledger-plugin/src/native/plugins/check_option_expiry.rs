@@ -15,31 +15,13 @@
 
 use std::collections::BTreeMap;
 use std::str::FromStr;
-use std::sync::LazyLock;
 
-use regex::Regex;
 use rust_decimal::Decimal;
 
 use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutput};
 
 use super::super::{NativePlugin, RegularPlugin};
-
-/// OCC option symbol with spaces removed: root, `YYMMDD`, `C`/`P`, 8-digit strike.
-static OCC_SYMBOL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^[A-Z][A-Z0-9.]{0,5}(\d{2})(\d{2})(\d{2})[CP]\d{8}$")
-        .expect("OCC symbol regex is valid")
-});
-
-/// Return the expiry date (`YYYY-MM-DD`) if `symbol` is a valid OCC option symbol.
-fn occ_expiry(symbol: &str) -> Option<String> {
-    let caps = OCC_SYMBOL_RE.captures(symbol)?;
-    let year: i16 = 2000 + caps[1].parse::<i16>().ok()?;
-    let month: i8 = caps[2].parse().ok()?;
-    let day: i8 = caps[3].parse().ok()?;
-    // Rejects impossible dates such as month 13 or 2026-02-30.
-    let date = jiff::civil::Date::new(year, month, day).ok()?;
-    Some(date.to_string())
-}
+use super::option_symbol::parse_occ;
 
 /// Net position of one contract in one account.
 struct Position {
@@ -76,7 +58,7 @@ impl NativePlugin for CheckOptionExpiryPlugin {
                 let Some(units) = &posting.units else {
                     continue;
                 };
-                let Some(expiry) = occ_expiry(&units.currency) else {
+                let Some(occ) = parse_occ(&units.currency) else {
                     continue;
                 };
                 let Ok(number) = Decimal::from_str(&units.number) else {
@@ -85,7 +67,7 @@ impl NativePlugin for CheckOptionExpiryPlugin {
                 let pos = positions
                     .entry((posting.account.clone(), units.currency.clone()))
                     .or_insert(Position {
-                        expiry,
+                        expiry: occ.expiry,
                         net: Decimal::ZERO,
                         opened_at: i,
                     });

@@ -127,31 +127,23 @@ fn the_booker_and_resolve_agree_on_compound_per_unit() {
 /// A pool holding BOTH directions of the same commodity, through the exact
 /// escalation (#2353).
 ///
-/// The property test draws pools whose lots share a sign, so this regime, a
-/// positive lot and a negative one averaged together, had no coverage, and it
-/// is where a weighted average is least intuitive: the numerator is a
-/// difference of products, not a sum of like terms. 18-decimal costs make
-/// every product need 36 places, so this goes through `BigDecimal` rather than
-/// the fast path.
+/// A positive lot and a negative one are never averaged together, by any
+/// path, so 18-decimal costs that would need 36 places to average come back
+/// exactly as they went in.
 ///
-/// Reached through `merge_average`, the realization of a SUM of an AVERAGE
-/// account's postings, where a sale is a negative lot at the pool's cost and
-/// is netted in. It used to be reached through an AVERAGE reduction over a
-/// long and a short, but that pooling was the bug (#2393): a reduction takes
-/// only the side opposite its sign, so the same inventory now sells from the
-/// long lot at its own cost, which this also pins.
+/// This regime used to be reached twice. An AVERAGE reduction over a long and
+/// a short pooled both sides, which was #2393: a reduction takes only the
+/// side opposite its sign, so the same inventory now sells from the long lot
+/// at its own cost, which this also pins. Then `merge_average`, the view of an
+/// AVERAGE account's `sum(position)`, pooled both sides, because it was handed
+/// a sum of postings in which a sale is a negative lot at the pool's cost.
+/// That fabricated a lot on an account holding a long and a short (#2394); the
+/// query realizes the account through booking first now, so the negative lot
+/// is a short, and `merge_average` pools each side apart.
 #[test]
-fn a_mixed_sign_pool_is_correctly_rounded_through_the_escalation() {
-    use bigdecimal::BigDecimal;
-    use rustledger_core::{Inventory, to_bigdecimal};
-
+fn a_mixed_sign_pool_keeps_each_side_at_its_own_cost() {
     let (u1, c1) = (dec("1.234567890123456789"), dec("0.000000000000000002"));
     let (u2, c2) = (dec("-0.234567890123456789"), dec("0.000000000000000003"));
-    assert!(
-        u1.checked_mul(c1)
-            .is_some_and(|p| p.scale() != u1.scale() + c1.scale()),
-        "premise: the product cannot be exact, so the escalation runs"
-    );
 
     let lots = || {
         let mut inv = Inventory::new();
@@ -171,17 +163,17 @@ fn a_mixed_sign_pool_is_correctly_rounded_through_the_escalation() {
 
     let mut merged = lots();
     merged.merge_average().expect("merges");
-    let got = merged
+    let mut sides: Vec<(Decimal, Decimal)> = merged
         .positions()
-        .find(|p| p.units.currency == "TKN")
-        .and_then(|p| p.cost.as_ref())
-        .expect("one averaged lot")
-        .number;
-    let exact: BigDecimal = (to_bigdecimal(u1) * to_bigdecimal(c1)
-        + to_bigdecimal(u2) * to_bigdecimal(c2))
-        / to_bigdecimal(total);
-    let want = Decimal::from_str(&exact.to_plain_string()).expect("representable");
-    assert_eq!(got, want, "exact average of a positive and a negative lot");
+        .filter(|p| p.units.currency == "TKN")
+        .map(|p| (p.units.number, p.cost.as_ref().expect("costed").number))
+        .collect();
+    sides.sort();
+    assert_eq!(
+        sides,
+        vec![(u2, c2), (u1, c1)],
+        "each side is its own pool, at its own cost (#2394)"
+    );
 
     // The reduction, by contrast, takes from the long side alone.
     let mut sold = lots();

@@ -12,7 +12,7 @@
 //! `toml`/`serde`.
 
 use crate::ImporterConfig;
-use crate::config::CsvConfigBuilder;
+use crate::config::{ColumnSpec, CsvConfigBuilder, ImporterType};
 use anyhow::{Result, anyhow};
 use format_num_pattern::Locale;
 use serde::Deserialize;
@@ -293,6 +293,79 @@ pub fn parse_amount_locale(name: &str) -> Result<Locale> {
 }
 
 impl ImporterEntry {
+    /// The columns this entry configures BY NAME, as `(key, name)` pairs in
+    /// key order: each column key the entry sets whose value is a header name
+    /// rather than a 0-based index. Columns the entry leaves to the built-in
+    /// defaults are not listed, and neither are index columns.
+    ///
+    /// These are what a file's header can confirm or rule out, which is how
+    /// `rledger extract` chooses between several entries that all match a
+    /// file by name (#2295). Read off the config [`build_config_from_entry`]
+    /// builds, so a name and an index are told apart exactly as extraction
+    /// tells them apart (`"3"` is an index there too).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the entry does not build into a config.
+    pub fn named_columns(&self) -> Result<Vec<(&'static str, String)>> {
+        let config = build_config_from_entry(self)?;
+        let ImporterType::Csv(csv) = &config.importer_type;
+        let configured = [
+            (
+                "date_column",
+                self.date_column.is_some(),
+                Some(&csv.date_column),
+            ),
+            (
+                "narration_column",
+                self.narration_column.is_some(),
+                csv.narration_column.as_ref(),
+            ),
+            (
+                "payee_column",
+                self.payee_column.is_some(),
+                csv.payee_column.as_ref(),
+            ),
+            (
+                "amount_column",
+                self.amount_column.is_some(),
+                csv.amount_column.as_ref(),
+            ),
+            (
+                "currency_column",
+                self.currency_column.is_some(),
+                csv.currency_column.as_ref(),
+            ),
+            (
+                "transaction_id_column",
+                self.transaction_id_column.is_some(),
+                csv.transaction_id_column.as_ref(),
+            ),
+            (
+                "debit_column",
+                self.debit_column.is_some(),
+                csv.debit_column.as_ref(),
+            ),
+            (
+                "credit_column",
+                self.credit_column.is_some(),
+                csv.credit_column.as_ref(),
+            ),
+            (
+                "secondary_date_column",
+                self.secondary_date_column.is_some(),
+                csv.secondary_date.as_ref().map(|s| &s.column),
+            ),
+        ];
+        Ok(configured
+            .into_iter()
+            .filter_map(|(key, set, spec)| match (set, spec) {
+                (true, Some(ColumnSpec::Name(name))) => Some((key, name.clone())),
+                _ => None,
+            })
+            .collect())
+    }
+
     /// The declared format, defaulting to CSV.
     ///
     /// # Errors
@@ -651,6 +724,28 @@ name = "unicode"
         let entry: ImporterEntry = toml::from_str("name = \"a\"\ntype = \"nonsense\"").unwrap();
         let err = build_config_from_entry(&entry).unwrap_err().to_string();
         assert!(err.contains("unknown type 'nonsense'"), "got: {err}");
+    }
+
+    /// `named_columns` lists what the entry names by header, in key order,
+    /// and leaves out index columns (including a numeric string, which
+    /// extraction reads as an index too) and columns left to the defaults.
+    #[test]
+    fn named_columns_lists_only_columns_named_by_header() {
+        let entry: ImporterEntry = toml::from_str(
+            "name = \"a\"\namount_column = \"Amount (GBP)\"\ndate_column = 0\n\
+             payee_column = \"3\"\ndebit_column = \"Out\"\nsecondary_date_column = \"Value Date\"",
+        )
+        .unwrap();
+        assert_eq!(
+            entry.named_columns().unwrap(),
+            [
+                ("amount_column", "Amount (GBP)".to_string()),
+                ("debit_column", "Out".to_string()),
+                ("secondary_date_column", "Value Date".to_string()),
+            ]
+        );
+        let bare: ImporterEntry = toml::from_str("name = \"b\"").unwrap();
+        assert!(bare.named_columns().unwrap().is_empty());
     }
 
     /// An `ofx` entry is not rejected there: account/currency still apply.

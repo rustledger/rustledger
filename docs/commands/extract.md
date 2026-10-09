@@ -195,6 +195,41 @@ error: refusing to overwrite ledger.beancount (163 bytes)
 being overwritten, so naming the same file for both `--existing` and `--output`
 is refused outright.
 
+### Output Order
+
+`extract` writes a statement oldest-first, whichever way the bank exported it,
+and keeps the export's own sequence within each day. This applies to every
+importer: CSV, OFX and WASM.
+
+For each input file it looks at the dates of consecutive rows, counting how
+often the date goes up and how often it goes down (rows sharing a date are not
+counted):
+
+- **More steps down than up** means a newest-first export. The rows are
+  reversed first, then sorted by date, so each day's rows come out in the
+  reverse of the order the bank listed them.
+- **Otherwise** the rows are sorted by date as they are. An oldest-first export
+  comes out exactly as it went in, and an unsorted or grouped one (by payee,
+  say) is sorted with each day's rows in file order.
+- **A tie**, including a file whose rows all share one date, keeps file order:
+  the direction cannot be told, so it is not guessed.
+
+Rows on the same date are never reordered against each other except by that
+one reversal. Other directives an importer produces, such as the balance
+assertion from an OFX `LEDGERBAL`, are placed by date in the canonical order
+`rledger format` and booking use. Moving a balance assertion never changes
+whether it holds: beancount and `rledger check` evaluate a `balance` at the
+start of its date, before that day's transactions, whichever line it is on, so
+one dated on the statement's last day is written ahead of that day's rows. The
+`--balance` assertion is always written last. Duplicate detection (`--existing`) runs after ordering, so its report of
+skipped rows lists them in output order.
+
+The assumption behind the reversal: **a bank that lists days newest-first lists
+the rows within a day newest-first too.** Neither CSV nor OFX carries a time of
+day that `extract` could check this against, and no time of day survives
+import. A bank that sorts days descending but lists each day's rows
+oldest-first would come out with those days' rows reversed.
+
 ### Importer Profiles in the Ledger
 
 An account's `open` directive already declares the account and its currency,

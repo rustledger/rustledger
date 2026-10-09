@@ -306,6 +306,12 @@ wasm_importer_main! {
 }
 ```
 
+If the source format gives each transaction a stable, unique id, add
+`wasm_id_link("my-bank", &id)` to the transaction's `links`
+(`^wasm-my-bank/<id>` in the ledger). `rledger extract --existing` then
+recognizes a re-imported transaction by that id, as it does OFX `FITID`s.
+Keep the importer name stable: it is the id's namespace.
+
 The macro emits the required exports (`memory`, `alloc`, `metadata`,
 `identify`, `extract`, `extract_enriched`) gated on
 `#[cfg_attr(target_arch = "wasm32", ...)]` so the host-target build of

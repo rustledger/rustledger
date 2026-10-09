@@ -295,8 +295,9 @@ rledger extract statement.csv -a Assets:Bank --existing ledger.beancount
 
 Only transactions in `ledger.beancount` that post to the importer's account,
 in the same commodity, are candidates. A new transaction is a duplicate when it
-shares an id link with one (`^ofx-…`, or `^csv-…` from
-`transaction_id_column`) and moves the same amount on any date, or when it has
+shares an id link with one (`^ofx-…`, `^csv-…` from
+`transaction_id_column`, or `^wasm-<importer>/…` from a WASM importer; see
+[Importing Data](../guides/importing.md)) and moves the same amount on any date, or when it has
 the same date and amount and the same or a similar payee/narration. Ids of the
 same kind that differ mean two different transactions, however alike they
 look; when only one side has an id (a ledger imported before ids existed), the

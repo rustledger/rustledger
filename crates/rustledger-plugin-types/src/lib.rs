@@ -1230,6 +1230,130 @@ impl ImporterOutput {
     }
 }
 
+// ----------------------------------------------------------------------------
+// Transaction ids for dedup (#2519)
+// ----------------------------------------------------------------------------
+
+/// Link prefix marking a transaction id assigned by a WASM importer's source
+/// format. The full link is `wasm-<importer>/<id>`; build it with
+/// [`wasm_id_link`] rather than by hand.
+///
+/// `rledger extract --existing` treats a shared id link as identity (with
+/// equal money), exactly as it does the built-in importers' `^ofx-<FITID>`
+/// and `^csv-<id>` links. Each importer gets its own namespace,
+/// `wasm-<importer>/`: ids are only compared within one, so switching a
+/// bank's statements from one importer (or format) to another falls back to
+/// comparing text instead of calling every transaction new.
+///
+/// A convention rather than a field on [`ImporterOutput`] on purpose: the
+/// output types have public fields and are built with struct literals in
+/// importer code (`EnrichedImporterOutput` has no constructor), so a new
+/// field would break every importer's source. A link is already a field
+/// every transaction carries.
+pub const WASM_ID_LINK_PREFIX: &str = "wasm-";
+
+/// Render a source transaction id as a beancount link under `prefix`, or
+/// `None` if nothing usable survives.
+///
+/// Links lex as `\^[a-zA-Z0-9-_/.]+`, and a source's id is an opaque string
+/// that need not respect that. Anything outside the set becomes `-`, so the
+/// emitted ledger re-parses. Leading and trailing whitespace is dropped, and
+/// an id with no letter or digit left (`...`, `__/__`) is `None`: a link
+/// every such transaction shares would be worse than none.
+///
+/// Two different ids collide after sanitizing when they differ only in
+/// characters that all map to `-` (`a b` and `a:b`). Dedup therefore treats
+/// an equal id link as identity only when the account, commodity and amount
+/// also agree, so a collision cannot drop a different transaction.
+///
+/// This is the one sanitizer for every importer's id links: the built-in OFX
+/// and CSV importers reach it through `rustledger_ops::dedup::id_link`, and
+/// a WASM importer through [`wasm_id_link`].
+///
+/// # Example
+///
+/// ```
+/// use rustledger_plugin_types::id_link;
+///
+/// assert_eq!(id_link("csv-", " tx_00A1 ").as_deref(), Some("csv-tx_00A1"));
+/// assert_eq!(id_link("csv-", "a b:c").as_deref(), Some("csv-a-b-c"));
+/// assert_eq!(id_link("csv-", "  "), None);
+/// ```
+#[must_use]
+pub fn id_link(prefix: &str, raw: &str) -> Option<String> {
+    let cleaned: String = raw
+        .trim()
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.') {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect();
+    // `-` is not the only separator that survives: `.`, `_` and `/` are all
+    // in the link charset, so require a character that identifies something.
+    if !cleaned.chars().any(|c| c.is_ascii_alphanumeric()) {
+        return None;
+    }
+    Some(format!("{prefix}{cleaned}"))
+}
+
+/// The link a WASM importer adds to a transaction to give it the source's
+/// transaction id, so `rledger extract --existing` recognizes it on a
+/// re-import (#2519): `wasm-<importer>/<id>`.
+///
+/// `importer` names the namespace and should be the importer's `name` (the
+/// one given to `wasm_importer_main!`). It is encoded **injectively**, so two
+/// different names can never share a namespace: ASCII letters (case kept),
+/// digits, `-` and `.` are kept, and every other byte, `_` and `/` included,
+/// becomes `_` and two hex digits (`My Bank` is `My_20Bank`, `a/b` is
+/// `a_2Fb`, `a_b` is `a_5Fb`). A sanitizing map that turned all of those into
+/// `-` would put `My Bank` and `my-bank` in one namespace, where one
+/// importer's id could match the other's and drop a different transaction.
+/// `raw` is sanitized as [`id_link`] does (ids that differ only in
+/// characters it maps to `-` can collide; dedup then still requires the same
+/// account, commodity and amount). `None` when the name is empty or the id
+/// has no letter or digit, in which case add no link: the transaction then
+/// dedups by date, amount and text.
+///
+/// Push the result onto the transaction's `links` (without a `^`):
+///
+/// ```
+/// use rustledger_plugin_types::wasm_id_link;
+///
+/// assert_eq!(
+///     wasm_id_link("MT940", " 2024/0001 ").as_deref(),
+///     Some("wasm-MT940/2024/0001")
+/// );
+/// assert_eq!(wasm_id_link("My Bank", "a:b").as_deref(), Some("wasm-My_20Bank/a-b"));
+/// assert_ne!(wasm_id_link("My Bank", "1"), wasm_id_link("My-Bank", "1"));
+/// assert_eq!(wasm_id_link("MT940", "--"), None);
+/// assert_eq!(wasm_id_link("", "123"), None);
+/// ```
+///
+/// The id must be unique per transaction in the source, and stable across
+/// downloads: dedup trusts an equal id with equal money as the same
+/// transaction on any date.
+#[must_use]
+pub fn wasm_id_link(importer: &str, raw: &str) -> Option<String> {
+    use std::fmt::Write as _;
+    if importer.is_empty() {
+        return None;
+    }
+    let mut name = String::with_capacity(importer.len());
+    for byte in importer.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.') {
+            name.push(char::from(byte));
+        } else {
+            // Infallible: writing to a String.
+            let _ = write!(name, "_{byte:02X}");
+        }
+    }
+    id_link(&format!("{WASM_ID_LINK_PREFIX}{name}/"), raw)
+}
+
 /// Wire-format output returned from a WASM importer's
 /// `extract_enriched`. Each directive is paired with per-directive
 /// categorization metadata.

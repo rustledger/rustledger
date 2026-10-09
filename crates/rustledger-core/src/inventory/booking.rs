@@ -1183,33 +1183,48 @@ impl Inventory {
         })
     }
 
-    /// Collapse every cost-bearing lot of each currency into a single
-    /// weighted-average-cost lot. Cost-less (cash) positions are left untouched.
+    /// Collapse the cost-bearing lots on each SIDE of each currency, long and
+    /// short, into a single weighted-average-cost lot. Cost-less (cash)
+    /// positions are left untouched.
     ///
-    /// This realizes the balance of an AVERAGE-booked account, where all lots of
-    /// a commodity share one running cost. The journal keeps the real per-lot
-    /// costs; only this realized view merges them (matching hledger's pool
-    /// model). A currency whose lots net to zero is removed; a currency whose
-    /// lots have mismatched cost currencies is left untouched.
+    /// This presents the realized balance of an AVERAGE-booked account, where
+    /// the lots on one side of a commodity share one running cost. The journal
+    /// keeps the real per-lot costs; only this view merges them (matching
+    /// hledger's pool model). A side whose lots have mismatched cost
+    /// currencies is left untouched.
+    ///
+    /// The input must be REALIZED, its sales already taken by booking: the
+    /// query executor replays an account's postings through the booking
+    /// engine first (#2394). A negative lot is then a short and nothing else,
+    /// and pooling it with the long lots is the netting AVERAGE booking does
+    /// not do (#2393). This used to pool both sides, which a sum of postings
+    /// needed, because there a sale is a negative lot at the pool's cost. On
+    /// an account holding a long and a short that fabricated one lot nobody
+    /// held: `-2 X {101}` and `3 X {102}` came out as `1 X {104}`.
     ///
     /// # Errors
     ///
-    /// [`OverflowError`] when a currency's lots sum outside `rust_decimal`'s
+    /// [`OverflowError`] when a side's lots sum outside `rust_decimal`'s
     /// range. The merged view is a realized balance, so a clamped total would
     /// be rendered as an exact position (#1863).
     pub fn merge_average(&mut self) -> Result<(), OverflowError> {
-        let currencies: std::collections::BTreeSet<Currency> = self
+        // Keyed on the sign of the lot's units: `true` for the short side. A
+        // zero lot holds nothing (#2385) and, alone on its side, sums to zero
+        // and is removed; beside non-zero lots it adds nothing to the average.
+        let side = |p: &Position| (p.units.currency.clone(), p.units.number.is_sign_negative());
+        let sides: std::collections::BTreeSet<(Currency, bool)> = self
             .positions
             .iter()
             .filter(|p| p.cost.is_some())
-            .map(|p| p.units.currency.clone())
+            .map(side)
             .collect();
 
-        for currency in currencies {
+        for key in sides {
+            let on_side = |p: &Position| p.cost.is_some() && side(p) == key;
             let slots: Vec<usize> = self
                 .positions
                 .iter_slots()
-                .filter(|(_, p)| p.units.currency == currency && p.cost.is_some())
+                .filter(|(_, p)| on_side(p))
                 .map(|(i, _)| i)
                 .collect();
             // Carried onto the merged lot, so it keeps exact totals (#2425).
@@ -1218,7 +1233,7 @@ impl Inventory {
                 let matching: Vec<&Position> = slots.iter().map(|&i| &self.positions[i]).collect();
                 let (total_units, total_units_exact) = pool_units(matching.iter().copied())
                     .ok_or_else(|| OverflowError {
-                        currency: currency.clone(),
+                        currency: key.0.clone(),
                     })?;
                 let avg = if total_units.is_zero() {
                     None
@@ -1236,11 +1251,10 @@ impl Inventory {
                 continue;
             }
 
-            self.positions
-                .retain(|p| !(p.units.currency == currency && p.cost.is_some()));
+            self.positions.retain(|p| !on_side(p));
             if let Some((avg_cost, cost_currency)) = avg {
                 let slot = self.positions.push_slot(Position::with_cost(
-                    Amount::new(total_units, currency.clone()),
+                    Amount::new(total_units, key.0.clone()),
                     Cost::new(avg_cost, cost_currency),
                 ));
                 self.set_lot_total(slot, pool_cost);
@@ -3028,39 +3042,47 @@ mod reduction_tests {
     #[test]
     fn merge_average_collapses_lots_to_single_weighted_lot() {
         // The realized balance of an AVERAGE account is one pool at the
-        // weighted-average cost: (10*150 + 10*170 - 5*160) / 15 = 160.
+        // weighted-average cost: (10*150 + 10*170) / 20 = 160.
         let mut i = Inventory::new();
         i.add(lot(10, 150, 1)).expect("fixture fits in Decimal");
         i.add(lot(10, 170, 2)).expect("fixture fits in Decimal");
-        i.add(Position::with_cost(
-            Amount::new(dec!(-5), "STK"),
-            Cost::new(dec!(160), "USD"),
-        ))
-        .expect("fixture fits in Decimal");
         i.merge_average().expect("fixture fits in Decimal");
         let stk: Vec<&Position> = i
             .positions()
             .filter(|p| p.units.currency == "STK")
             .collect();
         assert_eq!(stk.len(), 1);
-        assert_eq!(stk[0].units.number, dec!(15));
+        assert_eq!(stk[0].units.number, dec!(20));
         assert_eq!(stk[0].cost.as_ref().unwrap().number, dec!(160));
     }
 
+    /// A long and a short are two pools, merged apart (#2394).
+    ///
+    /// The input is realized, so the negative lots are shorts, not sales.
+    /// Pooling both sides netted them into one lot nobody held: these four
+    /// lots came out as `14 STK {184.43…}`, an average of the long and the
+    /// short costs over the difference of their units.
     #[test]
-    fn merge_average_net_zero_removes_lots() {
+    fn merge_average_pools_each_side_apart() {
+        let short = |units: i64, cost: i64| {
+            Position::with_cost(
+                Amount::new(Decimal::from(units), "STK"),
+                Cost::new(Decimal::from(cost), "USD"),
+            )
+        };
         let mut i = Inventory::new();
-        i.add(lot(10, 150, 1)).expect("fixture fits in Decimal");
-        i.add(Position::with_cost(
-            Amount::new(dec!(-10), "STK"),
-            Cost::new(dec!(160), "USD"),
-        ))
-        .expect("fixture fits in Decimal");
-        i.merge_average().expect("fixture fits in Decimal");
-        assert_eq!(
-            i.positions().filter(|p| p.units.currency == "STK").count(),
-            0
-        );
+        i.add(lot(10, 150, 1)).expect("fits");
+        i.add(short(-2, 101)).expect("fits");
+        i.add(lot(10, 170, 2)).expect("fits");
+        i.add(short(-4, 104)).expect("fits");
+        i.merge_average().expect("fits");
+        let mut stk: Vec<(Decimal, Decimal)> = i
+            .positions()
+            .filter(|p| p.units.currency == "STK")
+            .map(|p| (p.units.number, p.cost.as_ref().unwrap().number))
+            .collect();
+        stk.sort();
+        assert_eq!(stk, vec![(dec!(-6), dec!(103)), (dec!(20), dec!(160))]);
     }
 
     #[test]

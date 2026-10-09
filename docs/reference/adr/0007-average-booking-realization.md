@@ -51,10 +51,13 @@ hledger: the pool is rewritten, the journal is not).
 - `Inventory::merge_average` collapses all cost-bearing lots of a currency into
   one weighted-average lot (`Σ(units·cost) / Σ units`); cost-less (cash)
   positions and net-zero currencies are handled cleanly.
+  (Since #2394 it pools each side, long and short, separately; see the
+  amendments below.)
 - The query **realizes** an AVERAGE account as a single pool: the query
   `AccountInfo` carries the account's booking method, and `sum(position)` over a
   group whose postings all belong to one AVERAGE account calls `merge_average`.
-  FIFO / LIFO / STRICT / HIFO / NONE accounts are unaffected.
+  FIFO / LIFO / STRICT / HIFO / NONE accounts are unaffected. (Since #2394 the
+  group is first replayed through booking; see the amendments below.)
 
 ## Consequences
 
@@ -85,10 +88,41 @@ So an AVERAGE reduction pools the SIDE it takes from, the lots whose sign is
 opposite the reduction's, and leaves the other side unchanged. A single-sided
 account, the case this ADR was written for, is unaffected.
 
-`merge_average` (the `sum(position)` realization above) is not changed. It
-merges a sum of postings, where every sale is already a negative lot at the
+`merge_average` (the `sum(position)` realization above) was not changed here. It
+merged a sum of postings, where every sale is already a negative lot at the
 pool's cost, so sign cannot separate sales from shorts; on a mixed account
-that view is still wrong, tracked in #2394.
+that view was wrong, and is fixed by the next amendment (#2394).
+
+## Amendment: `sum(position)` realizes through booking (#2394)
+
+The previous amendment left `merge_average` pooling both sides, because it
+was handed a sum of postings in which a sale is a negative lot at the pool's
+cost. On an account holding a long and a short that netted one into the
+other: `-2 X {101}` beside `3 X {102}` came out as `1 X {104}`.
+
+`sum(position)` over one AVERAGE account now replays the group's postings
+through `BookingEngine::replay_transaction`, the walk `BALANCES` and
+`account_balance` use, so every sale is taken from its pool before anything
+is merged. In that realized inventory a negative lot is a short, so
+`merge_average` now pools each side apart, as a reduction does. The account
+counts as AVERAGE whether its `open` says so or the ledger's
+`option "booking_method"` does.
+
+Two seams remain, both deliberate:
+
+- A subset booking cannot realize (a `WHERE` keeping a sale but not what it
+  sold from) keeps the plain sum of its postings. `BALANCES` over the same
+  `FROM` subset errors; erroring here would fail queries that answered
+  before, and the plain sum is exactly what the selected postings add up to.
+- Booking keeps an AVERAGE account's purchases as separate lots until a sale
+  merges them, so before the first sale `BALANCES` and `report balances`
+  list them while `sum(position)` shows the pool. The Decision above says
+  the realized balance is the pool, so it is those surfaces that lag; making
+  them present the pool is a separate change.
+
+A property test (`sum_position_balances_agreement`) holds `sum(position)` to
+`BALANCES` presented one pool per side, over generated ledgers and `FROM` and
+`WHERE` subsets.
 
 ## Prior art
 

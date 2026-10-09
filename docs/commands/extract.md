@@ -295,8 +295,9 @@ rledger extract statement.csv -a Assets:Bank --existing ledger.beancount
 
 Only transactions in `ledger.beancount` that post to the importer's account,
 in the same commodity, are candidates. A new transaction is a duplicate when it
-shares an id link with one (`^ofx-…`, or `^csv-…` from
-`transaction_id_column`) and moves the same amount on any date, or when it has
+shares an id link with one (`^ofx-…`, `^csv-…` from
+`transaction_id_column`, or `^wasm-<importer>/…` from a WASM importer; see
+[Importing Data](../guides/importing.md)) and moves the same amount on any date, or when it has
 the same date and amount and the same or a similar payee/narration. Ids of the
 same kind that differ mean two different transactions, however alike they
 look; when only one side has an id (a ledger imported before ids existed), the
@@ -304,6 +305,13 @@ text decides. An entry that splits the account's leg over several postings is
 also compared by its net movement, so a transfer already imported from the
 other account's statement is recognized. Which rows are kept does not depend
 on the order the statement or the ledger lists them in.
+
+Text is compared ignoring case and Unicode normalization form: an `é` written
+as one character and one written as `e` plus a combining accent are the same
+text, whichever form the bank's export and the ledger each use. Compatibility
+forms are deliberately not folded (`ﬁ` is not `fi`, `²` is not `2`): they are
+not always the same text, and a false match would silently drop a row, where a
+missed one only leaves a duplicate you can see.
 
 Each existing transaction absorbs at most one new one: two identical coffees on
 one day both import when the ledger already holds only one. Skips are counted
@@ -340,8 +348,9 @@ account = "Assets:Bank:MyBank"
 # account), when that `open` names exactly one, and otherwise stops with
 # an error rather than guess. Precedence, highest first: a --ledger
 # profile, --currency, this key, the account's `open`. A value that is not
-# a commodity (`usd`, `€`, "") is an error naming where it came from, and
-# a value the account's `open` does not allow is a warning.
+# a commodity (`usd`, `€`, "") is an error naming where it came from, for
+# CSV, OFX and WASM importers alike, and a value the account's `open` does
+# not allow is a warning.
 currency = "EUR"
 
 # Column mapping (0-indexed)
@@ -357,6 +366,13 @@ amount_column = 3
 
 # Date parsing
 date_format = "%Y-%m-%d"  # or "%m/%d/%Y", "%d.%m.%Y"
+
+# A per-row currency, for multi-currency exports. A blank cell uses
+# `currency`. A lower- or mixed-case code (`usd`, `Eur`) is upper-cased,
+# since the bank's file cannot be fixed and the code means the same either
+# way; a cell that is still not a commodity (`€`, `US$`) is a row error
+# naming the row, this column and the value.
+# currency_column = "Currency"
 
 # A unique per-transaction id from the bank, added as a `^csv-<id>` link
 # that `--existing` uses as identity when deduplicating

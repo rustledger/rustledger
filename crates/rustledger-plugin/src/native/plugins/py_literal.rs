@@ -288,29 +288,40 @@ impl Parser {
         let digits = text.replace('_', "");
         // An imaginary literal (`1j`) is a number too; only its truthiness
         // matters here.
-        let digits = digits
+        let stripped = digits
             .strip_suffix(['j', 'J'])
-            .filter(|d| !d.to_ascii_lowercase().starts_with("0x"))
-            .unwrap_or(&digits)
-            .to_string();
+            .filter(|d| !d.to_ascii_lowercase().starts_with("0x"));
+        let imaginary = stripped.is_some();
+        let digits = stripped.unwrap_or(&digits).to_string();
         let lower = digits.to_ascii_lowercase();
+        // A based integer of any length (Python's are unbounded): valid
+        // digits, and zero when every digit is.
+        let based = |digits: &str, radix: u32| -> Result<bool, String> {
+            if digits.is_empty() || !digits.chars().all(|c| c.is_digit(radix)) {
+                return Err(format!("invalid number `{text}`"));
+            }
+            Ok(digits.chars().all(|c| c == '0'))
+        };
         let zero = if let Some(hex) = lower.strip_prefix("0x") {
-            u128::from_str_radix(hex, 16).map_err(|_| format!("invalid number `{text}`"))? == 0
+            based(hex, 16)?
         } else if let Some(oct) = lower.strip_prefix("0o") {
-            u128::from_str_radix(oct, 8).map_err(|_| format!("invalid number `{text}`"))? == 0
+            based(oct, 8)?
         } else if let Some(bin) = lower.strip_prefix("0b") {
-            u128::from_str_radix(bin, 2).map_err(|_| format!("invalid number `{text}`"))? == 0
+            based(bin, 2)?
         } else {
             let value: f64 = lower
                 .parse()
                 .map_err(|_| format!("invalid number `{text}`"))?;
+            let integer = !lower.contains(['.', 'e']) && !imaginary;
             // Python rejects a leading zero on a non-zero integer (`07`).
-            if !lower.contains(['.', 'e'])
-                && lower.len() > 1
-                && lower.starts_with('0')
-                && value != 0.0
-            {
+            if integer && lower.len() > 1 && lower.starts_with('0') && value != 0.0 {
                 return Err(format!("invalid number `{text}`"));
+            }
+            // And a decimal integer of more than 4300 digits ("Exceeds the
+            // limit (4300 digits) for integer string conversion"), unless it
+            // is all zeros.
+            if integer && lower.len() > 4300 && value != 0.0 {
+                return Err(format!("`{text:.20}...` has more than 4300 digits"));
             }
             value == 0.0
         };
@@ -607,5 +618,98 @@ mod tests {
         assert!(parse(&format!("{}{}", "{'a': ".repeat(100_000), "1")).is_err());
         let ok = format!("{}1{}", "[".repeat(150), "]".repeat(150));
         assert_eq!(class(&ok), "seq1");
+    }
+
+    /// Long and pathological inputs parse in time linear in their length:
+    /// each of these is a couple of megabytes or a million repetitions, and
+    /// none may take more than a few seconds even in a debug build. Also the
+    /// number forms Python accepts at any length: based integers are
+    /// unbounded, a decimal integer stops at 4300 digits unless it is zero.
+    #[test]
+    fn long_inputs_parse_in_linear_time() {
+        use std::time::{Duration, Instant};
+        let cases: Vec<(&str, String, &str)> = vec![
+            (
+                "continuations",
+                format!("{{{}}}", "\\\n".repeat(200_000)),
+                "dict0",
+            ),
+            ("long string", format!("'{}'", "a".repeat(2_000_000)), "str"),
+            (
+                "long comment",
+                format!("{{ #{}\n}}", "c".repeat(2_000_000)),
+                "dict0",
+            ),
+            (
+                "many items",
+                format!("[{}]", "1,".repeat(500_000)),
+                "seq500000",
+            ),
+            ("concatenation", "'a' ".repeat(200_000), "str"),
+            (
+                "whitespace",
+                format!("{{{}}}", " ".repeat(2_000_000)),
+                "dict0",
+            ),
+            (
+                "line breaks",
+                format!("[{}]", "\n".repeat(2_000_000)),
+                "seq0",
+            ),
+            (
+                "unterminated",
+                format!("'{}", "\\\\".repeat(1_000_000)),
+                "ERR",
+            ),
+            (
+                "hex digits",
+                format!("0x{}", "f".repeat(1_000_000)),
+                "num:nz",
+            ),
+            ("hex zeros", format!("0x{}", "0".repeat(1_000_000)), "num:0"),
+            ("4300 digits", "1".repeat(4300), "num:nz"),
+            ("4301 digits", "1".repeat(4301), "ERR"),
+            ("zeros", "0".repeat(1_000_000), "num:0"),
+            (
+                "long float",
+                format!("{}.0", "1".repeat(1_000_000)),
+                "num:nz",
+            ),
+            ("long imaginary", format!("{}j", "1".repeat(5000)), "num:nz"),
+            (
+                "199 mixed levels",
+                format!("{}1{}", "{'a': [(".repeat(66), ",)]}".repeat(66)),
+                "dict1",
+            ),
+        ];
+        for (name, source, want) in cases {
+            let start = Instant::now();
+            let got = class(&source);
+            let elapsed = start.elapsed();
+            assert!(elapsed < Duration::from_secs(5), "{name}: {elapsed:?}");
+            let got = if want == "str" {
+                got.chars().take(3).collect()
+            } else {
+                got
+            };
+            assert_eq!(got, want, "{name}");
+        }
+    }
+
+    proptest::proptest! {
+        #![proptest_config(proptest::prelude::ProptestConfig::with_cases(4096))]
+        /// Any text: an answer, never a panic. Drawn from the characters the
+        /// grammar cares about, so brackets, quotes, escapes, prefixes,
+        /// comments and number forms all collide.
+        #[test]
+        fn never_panics(source in "[{}\\[\\]()'\"\\\\#:,\n \trbufjxoeEN0-9a-f_.+\\-]{0,300}") {
+            let _ = parse(&source);
+        }
+
+        /// Any Unicode at all, too.
+        #[test]
+        fn never_panics_on_any_text(source in "\\PC{0,200}") {
+            let _ = parse(&source);
+        }
     }
 }

@@ -409,8 +409,19 @@ fn parse_config(config: &str) -> Result<HoldingAccounts, String> {
     let PyValue::Dict(entries) = value else {
         return Err("expected a dict of holding accounts".to_string());
     };
-    let mut result: HoldingAccounts = Vec::new();
+    // Python builds the dict first: a repeated key keeps its first position
+    // and takes its last value, so an earlier, malformed value under that key
+    // is gone before anything reads it.
+    let mut merged: Vec<(PyValue, PyValue)> = Vec::with_capacity(entries.len());
     for (key, holding) in entries {
+        if let Some(entry) = merged.iter_mut().find(|(k, _)| *k == key) {
+            entry.1 = holding;
+        } else {
+            merged.push((key, holding));
+        }
+    }
+    let mut result: HoldingAccounts = Vec::with_capacity(merged.len());
+    for (key, holding) in merged {
         let PyValue::Str(prefix) = key else {
             return Err(format!("a prefix must be a string, found {key:?}"));
         };
@@ -430,13 +441,7 @@ fn parse_config(config: &str) -> Result<HoldingAccounts, String> {
             }
         };
         let accounts = (field("earlier")?, field("later")?);
-        // A repeated key keeps its first position and takes the new value,
-        // as a Python dict literal does.
-        if let Some(entry) = result.iter_mut().find(|(p, _)| *p == prefix) {
-            entry.1 = accounts;
-        } else {
-            result.push((prefix, accounts));
-        }
+        result.push((prefix, accounts));
     }
     Ok(result)
 }
@@ -1307,6 +1312,10 @@ enses""": {'earlier': 'L:H', 'later': 'A:H'}}"#,
             ), // error
             (r"07", Expect::Err),        // error
             (r"{'a': 1,}", Expect::Err), // unusable
+            (
+                "{'Expenses': {'earlier': 1}, 'Expenses': {'earlier': 'L:H', 'later': 'A:H'}}",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
         ];
         for (config, expect) in cases {
             let got = parse_config(config);
@@ -1322,5 +1331,46 @@ enses""": {'earlier': 'L:H', 'later': 'A:H'}}"#,
                 Expect::Err => assert!(got.is_err(), "{config:?} should be rejected: {got:?}"),
             }
         }
+    }
+
+    /// `parse_config` against Python on 500 generated configs (every quote
+    /// style and prefix, escapes, implicit concatenation, comments, line
+    /// continuations, trailing commas, repeated and extra keys, non-string
+    /// values, and random mutations), each classified by running
+    /// `ast.literal_eval`. See `tests/fixtures/effective_date/generate_configs.py`
+    /// to regenerate or draw more; 20,000 drawn cases agree.
+    #[test]
+    fn the_config_reads_as_literal_eval_reads_it_on_generated_configs() {
+        let cases: Vec<(String, String)> = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/effective_date/configs.json"
+        ))
+        .expect("the fixture parses");
+        assert!(cases.len() >= 500, "{} cases", cases.len());
+        let mut wrong = Vec::new();
+        for (config, want) in &cases {
+            let got = match parse_config(config) {
+                Err(_) => "error".to_string(),
+                Ok(h) if want == "default" && h == default_holding_accounts() => {
+                    "default".to_string()
+                }
+                Ok(h) => {
+                    let rows: Vec<[&str; 3]> = h
+                        .iter()
+                        .map(|(p, (e, l))| [p.as_str(), e.as_str(), l.as_str()])
+                        .collect();
+                    format!("ok:{}", serde_json::to_string(&rows).expect("json"))
+                }
+            };
+            if got.replace(", ", ",") != want.replace(", ", ",") {
+                wrong.push(format!("{config:?}\n  want {want}\n  got  {got}"));
+            }
+        }
+        assert!(
+            wrong.is_empty(),
+            "{} of {}:\n{}",
+            wrong.len(),
+            cases.len(),
+            wrong.join("\n")
+        );
     }
 }

@@ -28,7 +28,7 @@ WHERE account ~ '^(Assets|Liabilities):'
 
 A comment may span lines and end the query without a newline after it. It does not nest (the first `*/` closes it), text inside a string is never a comment, and an unclosed `/*` is an error.
 
-`--` is **not** a comment, in bean-query or here: `SELECT 3--2` is `3 - -2`. Anything after the `;` that ends a query is an error; bean-query drops it without a word. (The `-- ...` lines in the examples on this page are annotations, not part of the query.)
+`--` is **not** a comment, in bean-query or here: `SELECT 3--2` is `3 - -2`. Text other than whitespace and comments after the `;` that ends a query is an error; bean-query drops it without a word. (The `-- ...` lines in the examples on this page are annotations, not part of the query.)
 
 ## SELECT Clause
 

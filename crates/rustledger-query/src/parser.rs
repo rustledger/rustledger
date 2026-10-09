@@ -1912,6 +1912,33 @@ mod tests {
         assert_eq!(commented.position, plain.position + "/* c */ ".len());
     }
 
+    proptest::proptest! {
+        /// Over inputs made of comment, string and multi-byte characters,
+        /// `strip_comments` keeps every byte offset, keeps newlines and
+        /// everything outside a comment, and leaves no comment behind (a
+        /// second pass finds none), and `parse` does not panic.
+        #[test]
+        fn strip_comments_keeps_offsets(src in "[/*'\" a\né(]{0,40}") {
+            let Ok(stripped) = strip_comments(&src) else {
+                // Only an unclosed comment is refused.
+                proptest::prop_assert!(src.contains("/*"));
+                return Ok(());
+            };
+            proptest::prop_assert_eq!(stripped.len(), src.len());
+            for (i, (a, b)) in src.bytes().zip(stripped.bytes()).enumerate() {
+                proptest::prop_assert!(
+                    a == b || (b == b' ' && a != b'\n'),
+                    "byte {} changed from {:?} to {:?}", i, a as char, b as char
+                );
+            }
+            proptest::prop_assert!(matches!(
+                strip_comments(&stripped),
+                Ok(std::borrow::Cow::Borrowed(_))
+            ));
+            let _ = parse(&src);
+        }
+    }
+
     /// beanquery 0.2 has no `--` comment: `3--2` is `3 - -2`. Reading `--`
     /// as a comment would quietly turn that into `SELECT 3` (#2403).
     #[test]

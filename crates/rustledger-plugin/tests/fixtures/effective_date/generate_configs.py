@@ -77,9 +77,8 @@ def classify(c):
     if c == "": return "default"
     try: v = ast.literal_eval(c)
     except Exception: return "error"
-    try:
-        if not v: return "default"
-    except Exception: return "error"
+    # literal_eval yields only builtin literals, whose truth test never raises.
+    if not v: return "default"
     if not isinstance(v, dict): return "error"
     out = []
     for k, d in v.items():

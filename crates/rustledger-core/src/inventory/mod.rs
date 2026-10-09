@@ -1164,9 +1164,12 @@ pub struct Inventory {
     ///
     /// Only lots WITH a cost appear. A spec that names no per-unit cost still
     /// scans, because it can match anything.
+    ///
+    /// Persistent on the `Shared` store, so cloning a snapshot stays O(1)
+    /// (#2388) — see [`CostIndex`].
     /// Not serialized - rebuilt on demand, like the caches above.
     #[serde(skip)]
-    cost_index: FxHashMap<CostKey, smallvec::SmallVec<[usize; 2]>>,
+    cost_index: CostIndex,
 
     /// EVERY lot per units-currency, in the order FIFO consumes them: lot date
     /// ascending, ties broken by slot ascending.
@@ -1265,6 +1268,116 @@ pub(super) struct OrderedIndex {
 /// What [`Inventory::cost_index`] groups lots by: the units they are held in,
 /// and the per-unit cost a spec would name to select them.
 type CostKey = (crate::Currency, Decimal, crate::Currency);
+
+/// The slots of one [`CostKey`] bucket, in slot order.
+type CostSlots = SmallVec<[usize; 2]>;
+
+/// [`Inventory::cost_index`], in the representation its position store
+/// wants: a plain hash map for the `Owned` store that books, a persistent one
+/// for the `Shared` store that BQL clones once per output row.
+///
+/// Both are COMPLETE maps of every cost-bearing lot, and every reader treats
+/// them the same. Only the cost of a clone differs. The shared store exists
+/// so that cloning the running `balance` is O(1) (#1086); an `FxHashMap`
+/// beside it copied every entry on every clone, which put O(rows x lots)
+/// straight back: 2,000 lots took 0.5 GB and 8,000 took 7.6 GB, growing 4x
+/// per doubling (#2388). `imbl`'s map clones in O(1) and an insert copies only
+/// the path to the changed entry, so successive snapshots share the rest.
+///
+/// An incomplete index is not an option for the shared store: `add` finds its
+/// merge target through this map, so leaving lots out of it stops them
+/// merging, and the reductions that trust it miss them.
+#[derive(Debug, Clone)]
+enum CostIndex {
+    /// For the `Owned` store.
+    Owned(FxHashMap<CostKey, CostSlots>),
+    /// For the `Shared` store.
+    Shared(
+        imbl::GenericHashMap<
+            CostKey,
+            CostSlots,
+            rustc_hash::FxBuildHasher,
+            imbl::shared_ptr::DefaultSharedPtr,
+        >,
+    ),
+}
+
+impl Default for CostIndex {
+    fn default() -> Self {
+        Self::Owned(FxHashMap::default())
+    }
+}
+
+impl CostIndex {
+    /// An empty index in the representation `store` wants.
+    fn for_store(store: &PositionStore) -> Self {
+        if store.is_owned() {
+            Self::default()
+        } else {
+            Self::Shared(imbl::GenericHashMap::default())
+        }
+    }
+
+    fn get(&self, key: &CostKey) -> Option<&CostSlots> {
+        match self {
+            Self::Owned(m) => m.get(key),
+            Self::Shared(m) => m.get(key),
+        }
+    }
+
+    /// Record `slot` under `key`, after the slots already there.
+    fn push(&mut self, key: CostKey, slot: usize) {
+        match self {
+            Self::Owned(m) => m.entry(key).or_default().push(slot),
+            Self::Shared(m) => m.entry(key).or_default().push(slot),
+        }
+    }
+
+    /// Drop `slot` from `key`'s bucket, and the bucket once it is empty.
+    fn remove_slot(&mut self, key: &CostKey, slot: usize) {
+        let emptied = match self {
+            Self::Owned(m) => m.get_mut(key).map(|slots| {
+                slots.retain(|s| *s != slot);
+                slots.is_empty()
+            }),
+            Self::Shared(m) => m.get_mut(key).map(|slots| {
+                slots.retain(|s| *s != slot);
+                slots.is_empty()
+            }),
+        };
+        if emptied == Some(true) {
+            match self {
+                Self::Owned(m) => {
+                    m.remove(key);
+                }
+                Self::Shared(m) => {
+                    m.remove(key);
+                }
+            }
+        }
+    }
+
+    fn len(&self) -> usize {
+        match self {
+            Self::Owned(m) => m.len(),
+            Self::Shared(m) => m.len(),
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    /// The same entries as a plain hash map, for a store that has just become
+    /// `Owned`. O(entries), which the store's own conversion already pays.
+    fn make_owned(&mut self) {
+        if let Self::Shared(m) = self {
+            let owned: FxHashMap<CostKey, CostSlots> =
+                m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+            *self = Self::Owned(owned);
+        }
+    }
+}
 
 /// The key for `position`, if it carries a cost.
 fn cost_key(position: &Position) -> Option<CostKey> {
@@ -1424,7 +1537,7 @@ impl TryFrom<InventoryWire> for Inventory {
         let mut inv = Self {
             positions: PositionStore::Owned(Slots::from_live(wire.positions.into_iter().collect())),
             units_cache: FxHashMap::default(),
-            cost_index: FxHashMap::default(),
+            cost_index: CostIndex::default(),
             ordered_index: None,
             indexless: false,
             undo_open: false,
@@ -1664,8 +1777,10 @@ impl Inventory {
     /// to it anyway.
     #[must_use]
     pub fn new_shared() -> Self {
+        let positions = PositionStore::Shared(Vector::new());
         Self {
-            positions: PositionStore::Shared(Vector::new()),
+            cost_index: CostIndex::for_store(&positions),
+            positions,
             ..Self::default()
         }
     }
@@ -2288,7 +2403,7 @@ impl Inventory {
         if let Some(key) = key
             && !self.indexless
         {
-            self.cost_index.entry(key).or_default().push(slot);
+            self.cost_index.push(key, slot);
         }
         self.ordered_index_insert(&ordering, slot);
         Ok(())
@@ -2332,13 +2447,8 @@ impl Inventory {
             .ordered_index
             .is_some()
             .then(|| position.units.currency.clone());
-        if let Some(key) = cost_key(position)
-            && let Some(slots) = self.cost_index.get_mut(&key)
-        {
-            slots.retain(|slot| *slot != idx);
-            if slots.is_empty() {
-                self.cost_index.remove(&key);
-            }
+        if let Some(key) = cost_key(position) {
+            self.cost_index.remove_slot(&key, idx);
         }
         // The list is ordered, so find the entry rather than scanning for it:
         // a FIFO account drains its oldest lot over and over, and `retain`
@@ -2468,11 +2578,11 @@ impl Inventory {
     ///
     /// Returned ascending so callers see the same order a scan would.
     fn cost_candidates(&self, units: &Amount, spec: &CostSpec) -> Option<Vec<usize>> {
-        // An empty index means it was never built for this inventory — a
-        // shared snapshot, or one that has not been rebuilt since. Scanning is
-        // always correct, and answering from an index that is missing entries
-        // is NOT: the lot would never reach the predicate. Falling back keeps
-        // the only failure mode the harmless one.
+        // An `indexless` inventory has no index to answer from. An empty
+        // index is complete (it holds no cost-bearing lot), so scanning finds
+        // the same nothing; it scans anyway, as the harmless direction.
+        // Answering from an index that is missing entries is NOT harmless:
+        // the lot would never reach the predicate.
         if self.indexless || self.cost_index.is_empty() {
             return None;
         }
@@ -2575,6 +2685,9 @@ impl Inventory {
         // Vector with correct `Arc` refcounting, so in-place mutation below has
         // no shared chunk to corrupt.
         self.positions.make_owned();
+        // In step with the store: the slots are unchanged, so the entries are
+        // still right, and booking's lookups want the plain map.
+        self.cost_index.make_owned();
 
         // Compaction does NOT run here. It renumbers slots, which would
         // invalidate an open undo log — and `apply` keeps one across the whole
@@ -2668,7 +2781,10 @@ impl Inventory {
 
     fn try_rebuild_index_from(&mut self, source: CacheSource) -> Result<(), OverflowError> {
         self.units_cache.clear();
-        self.cost_index.clear();
+        // A fresh map in the representation the store wants (#2388), rather
+        // than clearing the old one: `modify_positions` and the deserializer
+        // swap the store underneath it.
+        self.cost_index = CostIndex::for_store(&self.positions);
         // Preserve whether the ordered index has been BUILT, rather than
         // building it here. A rebuild happens on compaction and on rollback,
         // neither of which means ordered selection is in use — repopulating
@@ -2678,39 +2794,40 @@ impl Inventory {
         let ordered_was_built = self.ordered_index.as_ref().map(|i| i.order);
         self.ordered_index = None;
 
-        // The cost index is for BOOKING, and only the owned backing books.
+        // The cost index is COMPLETE on both stores, because `add` finds its
+        // merge target through it whichever store it is on. This used to skip
+        // the shared store, to keep its per-row clone O(1); but `add` went on
+        // indexing every lot added after the rebuild, so the map was partial
+        // (lots from before it stopped merging) and still O(lots) to clone,
+        // which is #2388. The shared store's map is persistent instead, so it
+        // clones in O(1) and can be complete (see `CostIndex`).
         //
-        // Not a micro-optimization: `Inventory` derives `Clone` and BQL clones
-        // a shared snapshot ONCE PER OUTPUT ROW (`running_balance.clone()` in
-        // the executor). This map holds roughly an entry per distinct cost, so
-        // building it for shared inventories would put O(lots) back into every
-        // per-row clone — the O(rows x lots) blow-up that #1086 is about and
-        // that the shared backing exists to avoid. Snapshots keep an empty map
-        // and clone it for free.
-        let index_costs = matches!(self.positions, PositionStore::Owned(_)) && !self.indexless;
+        // Only an `indexless` inventory has none, and it scans.
+        let index_costs = !self.indexless;
+        // The ordered index is for booking's ordered selection, which only the
+        // owned store does: `reduce` converts a shared store first.
+        let index_order = index_costs && self.positions.is_owned();
 
         // Currencies whose slot-order total overflowed; totaled exactly below.
         // Empty on every ledger with ordinary magnitudes.
         let mut overflowed: SmallVec<[crate::Currency; 1]> = SmallVec::new();
 
         for (idx, pos) in self.positions.iter_slots() {
-            if index_costs {
-                if let Some(key) = cost_key(pos) {
-                    self.cost_index.entry(key).or_default().push(idx);
-                }
-                if let Some(order) = ordered_was_built {
-                    self.ordered_index
-                        .get_or_insert_with(|| {
-                            Box::new(OrderedIndex {
-                                order,
-                                by_currency: FxHashMap::default(),
-                            })
+            if index_costs && let Some(key) = cost_key(pos) {
+                self.cost_index.push(key, idx);
+            }
+            if index_order && let Some(order) = ordered_was_built {
+                self.ordered_index
+                    .get_or_insert_with(|| {
+                        Box::new(OrderedIndex {
+                            order,
+                            by_currency: FxHashMap::default(),
                         })
-                        .by_currency
-                        .entry(pos.units.currency.clone())
-                        .or_default()
-                        .push(idx);
-                }
+                    })
+                    .by_currency
+                    .entry(pos.units.currency.clone())
+                    .or_default()
+                    .push(idx);
             }
             // Update units cache for all positions. Checked, not `+=`:
             // `Decimal`'s `+` panics on overflow, and this runs over payloads.
@@ -6487,18 +6604,6 @@ mod tests {
         assert_eq!(inv.units("AAPL"), dec!(0));
     }
 
-    /// A shared snapshot must not carry the cost index.
-    ///
-    /// `Inventory` derives `Clone`, and BQL clones a shared running balance
-    /// ONCE PER OUTPUT ROW — the executor says so directly above the call.
-    /// The shared backing makes the positions O(1) to clone, which is what
-    /// #1086 needed; a per-inventory map holding roughly an entry per distinct
-    /// cost would put O(lots) straight back into every one of those clones and
-    /// undo it.
-    ///
-    /// Nothing else in the suite would notice: the index is invisible in
-    /// results, and no instruction profile here runs BQL. So it is asserted
-    /// directly, on the representation.
     /// A detached snapshot carries no lot index and never grows a partial
     /// one (#2383).
     ///
@@ -6560,44 +6665,79 @@ mod tests {
         assert_eq!(clone.units("AAPL"), dec!(16));
     }
 
+    /// A shared snapshot's cost index clones in O(1), and is complete.
+    ///
+    /// `Inventory` derives `Clone`, and BQL clones a shared running balance
+    /// ONCE PER OUTPUT ROW — the executor says so directly above the call.
+    /// The shared backing makes the positions O(1) to clone, which is what
+    /// #1086 needed; a plain map holding an entry per distinct cost put O(lots)
+    /// straight back into every one of those clones: 8,000 lots took 7.6 GB
+    /// (#2388).
+    ///
+    /// This used to be `a_shared_snapshot_carries_no_cost_index`, which called
+    /// `rebuild_index` before asserting the index was empty. The rebuild was
+    /// the one path that skipped the shared store; `add`, the path BQL takes,
+    /// indexed every lot, so the test passed while every row copied the map.
+    /// Each step below is asserted after `add` alone, and again after a
+    /// rebuild.
+    ///
+    /// Nothing else in the suite would notice: the index is invisible in
+    /// results, and no instruction profile here runs BQL. So the clone is
+    /// asserted directly, on the representation.
     #[test]
-    fn a_shared_snapshot_carries_no_cost_index() {
+    fn a_shared_snapshot_clones_its_cost_index_in_constant_time() {
+        let lot = |units: Decimal| {
+            Position::with_cost(
+                Amount::new(units, "AAPL"),
+                Cost::new(units * dec!(10), "USD"),
+            )
+        };
+        let shares_its_index = |a: &Inventory, b: &Inventory| match (&a.cost_index, &b.cost_index) {
+            (CostIndex::Shared(x), CostIndex::Shared(y)) => x.ptr_eq(y),
+            _ => false,
+        };
+
         let mut shared = Inventory::new_shared();
         for units in [dec!(10), dec!(20), dec!(30)] {
-            shared
-                .add(Position::with_cost(
-                    Amount::new(units, "AAPL"),
-                    Cost::new(units * dec!(10), "USD"),
-                ))
-                .expect("fits");
+            shared.add(lot(units)).expect("fits");
         }
-        shared.rebuild_index();
+        // After `add` alone: the path BQL's running balance takes.
+        assert_eq!(shared.cost_index.len(), 3, "every lot is indexed");
+        let row = shared.clone();
         assert!(
-            shared.cost_index.is_empty(),
-            "a shared snapshot built an index of {} entries; every per-row \
-             clone now pays for it",
-            shared.cost_index.len(),
+            shares_its_index(&shared, &row),
+            "cloning a shared snapshot copied its cost index; every per-row \
+             clone pays O(lots) for it (#2388): {:?}",
+            shared.cost_index,
         );
 
-        // The owned backing — the one that books — still gets it.
+        // A rebuild keeps it persistent AND complete. It used to leave the
+        // map empty, after which `add` indexed only the lots that came later:
+        // the lots from before stopped merging.
+        shared.rebuild_index();
+        assert_eq!(shared.cost_index.len(), 3, "the rebuild indexes every lot");
+        assert!(shares_its_index(&shared, &shared.clone()));
+        shared.add(lot(dec!(10))).expect("fits");
+        assert_eq!(
+            shared.len(),
+            3,
+            "a lot added after a rebuild must merge into the one it matches",
+        );
+        assert_eq!(shared.units("AAPL"), dec!(70));
+        // The row taken before is untouched by the later add.
+        assert_eq!(row.units("AAPL"), dec!(60));
+        assert_eq!(row.len(), 3);
+
+        // The owned backing — the one that books — keeps the plain map.
         let mut owned = Inventory::new();
         for units in [dec!(10), dec!(20), dec!(30)] {
-            owned
-                .add(Position::with_cost(
-                    Amount::new(units, "AAPL"),
-                    Cost::new(units * dec!(10), "USD"),
-                ))
-                .expect("fits");
+            owned.add(lot(units)).expect("fits");
         }
-        assert_eq!(
-            owned.cost_index.len(),
-            3,
-            "the owned backing must still index its lots, or the fast path is \
-             dead everywhere",
-        );
+        assert!(matches!(owned.cost_index, CostIndex::Owned(_)));
+        assert_eq!(owned.cost_index.len(), 3);
 
-        // And a snapshot still books CORRECTLY, by scanning: an inventory with
-        // no index must never answer "no matching lot" for a lot it holds.
+        // And a snapshot still books CORRECTLY: a reduction converts it to
+        // the owned store, the index with it, and finds the lot by its cost.
         let result = shared
             .reduce(
                 &Amount::new(dec!(-20), "AAPL"),
@@ -6608,8 +6748,10 @@ mod tests {
                 ),
                 BookingMethod::Strict,
             )
-            .expect("a snapshot with no cost index must fall back to scanning");
+            .expect("a shared snapshot finds the lot it holds");
         assert_eq!(result.matched.len(), 1);
+        assert!(matches!(shared.cost_index, CostIndex::Owned(_)));
+        assert_eq!(row.units("AAPL"), dec!(60), "the earlier row is untouched");
     }
 
     /// Tombstones must not reach the wire, and a round trip must come back

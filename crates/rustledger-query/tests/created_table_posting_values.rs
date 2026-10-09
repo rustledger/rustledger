@@ -394,3 +394,38 @@ fn select_star_position_is_the_position_column() {
         assert_eq!(rows(&directives, statements), direct, "{statements:?}");
     }
 }
+
+/// A table made with explicit columns keeps the posting values of the rows
+/// `INSERT ... SELECT` adds, as one made by `CREATE TABLE ... AS SELECT`
+/// does, and rows inserted before them still take the value path.
+#[test]
+fn a_table_with_explicit_columns_keeps_them_too() {
+    let directives = booked(LEDGER);
+    let direct = rows(
+        &directives,
+        &["SELECT account, weight(position), cost(position) ORDER BY account, date"],
+    );
+    let got = rows(
+        &directives,
+        &[
+            "CREATE TABLE t (account, position, date)",
+            "INSERT INTO t SELECT account, position, date",
+            "SELECT account, weight(position), cost(position) FROM t ORDER BY account, date",
+        ],
+    );
+    assert_eq!(got, direct);
+
+    let got = rows(
+        &directives,
+        &[
+            "CREATE TABLE t (account, position)",
+            "INSERT INTO t VALUES ('Assets:A', NULL)",
+            "INSERT INTO t SELECT account, position WHERE account = 'Assets:E'",
+            "SELECT account, weight(position) FROM t ORDER BY account",
+        ],
+    );
+    let weights: Vec<Value> = got.iter().map(|r| r[1].clone()).collect();
+    assert_eq!(weights[0], Value::Null, "{got:?}");
+    assert_eq!(amount(&weights[1]), "11.00 USD");
+    assert_eq!(amount(&weights[2]), "12.00 USD");
+}

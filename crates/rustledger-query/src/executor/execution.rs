@@ -1793,8 +1793,6 @@ impl Executor<'_> {
                 None => format!("table has {} columns but {found}", visible.len()),
             })
         };
-        let keeps_posting_values = visible.len() < table.columns.len();
-
         // Each inserted row's values, and for a SELECT the result's columns,
         // whose hidden ones carry the posting-derived values of the posting
         // columns it passes through.
@@ -1818,12 +1816,10 @@ impl Executor<'_> {
                 (rows, None)
             }
             InsertSource::Select(select) => {
-                // A table that keeps posting-derived values gets them for the
-                // rows inserted too, or they would answer from the value
-                // (#2441).
-                let stored = keeps_posting_values
-                    .then(|| self.with_stored_posting_columns(select))
-                    .flatten();
+                // The rows inserted keep their posting-derived values, as a
+                // table created from the same SELECT would, or they would
+                // answer from the value (#2441).
+                let stored = self.with_stored_posting_columns(select);
                 let result = self.execute_select(stored.as_ref().unwrap_or(select))?;
                 let shown = result
                     .columns
@@ -1837,22 +1833,24 @@ impl Executor<'_> {
             }
         };
 
-        // A row's hidden cells start as "no posting": NULL, with each failure
+        // A hidden cell with no posting behind it: NULL, with each failure
         // flag TRUE, so `weight`, `cost` and `sum` take the value path, which
         // is all a row without a posting has.
-        let template: Vec<Value> = table
-            .columns
-            .iter()
-            .map(|c| {
-                if c.starts_with('\u{0}') && c.ends_with(") error") {
-                    Value::Boolean(true)
-                } else {
-                    Value::Null
-                }
-            })
-            .collect();
+        let no_posting = |column: &str| {
+            if column.starts_with('\u{0}') && column.ends_with(") error") {
+                Value::Boolean(true)
+            } else {
+                Value::Null
+            }
+        };
+        // The table's columns after this insert: a hidden value the source
+        // carries for a column the table keeps none for adds that hidden
+        // column (a table made by `CREATE TABLE t (account, position)` has
+        // none until a posting arrives), with the rows already there marked
+        // as having no posting.
+        let mut columns_after = table.columns.clone();
         // For each inserted value, the (table, source) cells of its hidden
-        // values that both sides have.
+        // values.
         let index = |columns: &[String], name: &str| columns.iter().position(|c| c == name);
         let mut copies: Vec<(usize, usize)> = Vec::new();
         let mut value_at: Vec<usize> = Vec::with_capacity(targets.len());
@@ -1865,7 +1863,7 @@ impl Executor<'_> {
                     .enumerate()
                 {
                     value_at.push(i);
-                    let table_column = &table.columns[targets[k]];
+                    let table_column = table.columns[targets[k]].clone();
                     for (kind, suffix) in [
                         ("weight", ""),
                         ("weight", " error"),
@@ -1873,15 +1871,16 @@ impl Executor<'_> {
                         ("cost", " error"),
                         ("lot total", ""),
                     ] {
-                        if let (Some(to), Some(from)) = (
-                            index(
-                                &table.columns,
-                                &super::hidden_name(kind, table_column, suffix),
-                            ),
-                            index(columns, &super::hidden_name(kind, name, suffix)),
-                        ) {
-                            copies.push((to, from));
-                        }
+                        let Some(from) = index(columns, &super::hidden_name(kind, name, suffix))
+                        else {
+                            continue;
+                        };
+                        let hidden = super::hidden_name(kind, &table_column, suffix);
+                        let to = index(&columns_after, &hidden).unwrap_or_else(|| {
+                            columns_after.push(hidden);
+                            columns_after.len() - 1
+                        });
+                        copies.push((to, from));
                     }
                 }
             }
@@ -1893,6 +1892,14 @@ impl Executor<'_> {
             .tables
             .get_mut(&table_name)
             .expect("table existence verified above");
+        let added = table.columns.len()..columns_after.len();
+        if !added.is_empty() {
+            for row in &mut table.rows {
+                row.extend(columns_after[added.clone()].iter().map(|c| no_posting(c)));
+            }
+            table.columns = columns_after;
+        }
+        let template: Vec<Value> = table.columns.iter().map(|c| no_posting(c)).collect();
         for mut source_row in rows_to_insert {
             let mut row = template.clone();
             for (&to, &from) in targets.iter().zip(&value_at) {

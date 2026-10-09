@@ -2107,3 +2107,82 @@ fn apply_edits(source: &str, edits: &[lsp_types::TextEdit]) -> String {
     }
     out
 }
+
+/// The native `effective_date` plugin runs in the LSP, so a config it cannot
+/// read must reach the editor as a diagnostic, and the server must keep
+/// answering. A deeply nested config used to overflow the stack in the
+/// config parser and take the whole process down; it now stops at Python's
+/// own nesting limit and reports that.
+#[test]
+fn an_unreadable_effective_date_config_is_a_diagnostic_not_a_crash() {
+    let mut client = LspTestClient::spawn();
+    client.initialize();
+
+    for (name, config) in [
+        ("hostile", "[".repeat(100_000)),
+        ("unclosed", "{'Expenses': {'earlier': 'L:H'".to_string()),
+    ] {
+        let uri = test_uri(&format!("effective_date_{name}.beancount"));
+        let source = format!(
+            "plugin \"beancount_reds_plugins.effective_date.effective_date\" \"{config}\"\n\
+             2020-01-01 open Assets:Bank\n\
+             2020-01-01 open Expenses:Rent\n\
+             2020-03-01 * \"rent\"\n  \
+               Expenses:Rent  200 USD\n    \
+                 effective_date: 2020-04-01\n  \
+               Assets:Bank\n"
+        );
+        client.open_document(&uri, &source);
+
+        // A request after the open: the server must answer it, which it
+        // cannot do if loading the document killed it.
+        let id = client.next_request_id();
+        let req = lsp_server::Request {
+            id: id.clone(),
+            method: <CodeLensRequest as lsp_types::request::Request>::METHOD.to_string(),
+            params: serde_json::to_value(CodeLensParams {
+                text_document: TextDocumentIdentifier {
+                    uri: uri.parse().unwrap(),
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            })
+            .unwrap(),
+        };
+        client.raw_send_request(req).expect("send codeLens request");
+
+        // Diagnostics may be published before or after the response; keep
+        // reading until both have arrived.
+        let mut messages: Vec<String> = Vec::new();
+        let mut answered = false;
+        let deadline = Instant::now() + Duration::from_secs(15);
+        while !(answered
+            && messages
+                .iter()
+                .any(|m| m.contains("cannot read the config")))
+        {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let Some(msg) = client.recv_with_timeout(remaining) else {
+                assert!(answered, "{name}: the server stopped answering");
+                break;
+            };
+            match msg {
+                lsp_server::Message::Response(r) if r.id == id => answered = true,
+                lsp_server::Message::Notification(n)
+                    if n.method == "textDocument/publishDiagnostics" =>
+                {
+                    let p: lsp_types::PublishDiagnosticsParams =
+                        serde_json::from_value(n.params).unwrap();
+                    messages.extend(p.diagnostics.into_iter().map(|d| d.message));
+                }
+                _ => {}
+            }
+        }
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("cannot read the config")),
+            "{name}: the config error must be a diagnostic: {messages:?}"
+        );
+    }
+}

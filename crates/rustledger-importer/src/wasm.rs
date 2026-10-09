@@ -115,7 +115,13 @@ pub enum WasmImporterError {
         source: std::io::Error,
     },
     /// The WASM module is malformed or uses unsupported features.
-    #[error("failed to compile WASM module {path}: {source}")]
+    // The module's own text (names in its name section, its import
+    // names, strings in what it returns) shows up in these messages; it is
+    // escaped like any importer text (see `rustledger_plugin::untrusted`).
+    #[error(
+        "failed to compile WASM module {path}: {}",
+        rustledger_plugin::escape_untrusted_text(&format!("{source:#}"))
+    )]
     Compile {
         /// Path of the module that failed to compile.
         path: PathBuf,
@@ -125,7 +131,9 @@ pub enum WasmImporterError {
     /// The WASM module has imports — they're forbidden in the importer
     /// sandbox. Importers must be self-contained.
     #[error(
-        "WASM importer has forbidden import {module}::{name} — importers must be self-contained"
+        "WASM importer has forbidden import {}::{} — importers must be self-contained",
+        rustledger_plugin::escape_untrusted_line(module),
+        rustledger_plugin::escape_untrusted_line(name)
     )]
     ForbiddenImport {
         /// Import module namespace (e.g. `env`, `wasi_snapshot_preview1`).
@@ -140,10 +148,16 @@ pub enum WasmImporterError {
     /// memory limit, etc.).
     // `{0:#}` prints the anyhow chain: a fuel trap's cause, `all fuel consumed
     // by WebAssembly`, is its innermost layer, below the wasm backtrace.
-    #[error("WASM importer runtime error: {0:#}")]
+    #[error(
+        "WASM importer runtime error: {}",
+        rustledger_plugin::escape_untrusted_text(&format!("{:#}", .0))
+    )]
     Runtime(#[source] anyhow::Error),
     /// `MessagePack` decode error on the WASM-returned bytes.
-    #[error("WASM importer returned malformed MessagePack: {0}")]
+    #[error(
+        "WASM importer returned malformed MessagePack: {}",
+        rustledger_plugin::escape_untrusted_text(&.0.to_string())
+    )]
     Decode(#[source] rmp_serde::decode::Error),
     /// `MessagePack` encode error on the input being sent to the WASM
     /// importer. Practically only happens if `ImporterConfig` carries

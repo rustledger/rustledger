@@ -1178,3 +1178,53 @@ fn python_plugin_work_dir_is_private() {
     let _ = child.wait();
     assert_eq!(mode & 0o077, 0, "work directory mode {mode:o}");
 }
+
+/// A module's own text in a load error (here its import names) is escaped
+/// on every path that reports one: `check --plugin`, a `plugin`
+/// directive, `extract --wasm-importer` and an importer directory scan.
+#[test]
+fn wasm_module_text_in_load_errors_is_escaped() {
+    let wat = r#"(module
+        (import "m\1b[2J\1b]0;pwned\07" "f" (func))
+        (memory (export "memory") 1)
+        (func (export "alloc") (param i32) (result i32) i32.const 0)
+        (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+        (func (export "process") (param i32 i32) (result i64) i64.const 0)
+        (func (export "identify") (param i32 i32) (result i64) i64.const 0)
+        (func (export "extract") (param i32 i32) (result i64) i64.const 0)
+        (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 0)
+        (func (export "metadata") (result i64) i64.const 0))"#;
+    let dir = ledger("plugin \"evil.wasm\"");
+    let bytes = wat::parse_str(wat).expect("WAT parses");
+    std::fs::write(dir.path().join("evil.wasm"), &bytes).unwrap();
+    std::fs::create_dir(dir.path().join("importers")).unwrap();
+    std::fs::write(dir.path().join("importers/evil.wasm"), &bytes).unwrap();
+    std::fs::write(dir.path().join("plain.beancount"), BODY).unwrap();
+    std::fs::write(dir.path().join("statement.conformance"), "x").unwrap();
+    let cases: [&[&str]; 4] = [
+        &["check", "--plugin", "evil.wasm", "plain.beancount"],
+        &["check", "ledger.beancount"],
+        &[
+            "extract",
+            "--wasm-importer",
+            "evil.wasm",
+            "--account",
+            "Assets:Bank",
+            "statement.conformance",
+        ],
+        &[
+            "extract",
+            "--wasm-importer-dir",
+            "importers",
+            "--account",
+            "Assets:Bank",
+            "statement.conformance",
+        ],
+    ];
+    for args in cases {
+        let out = run(dir.path(), args);
+        out.has("forbidden import")
+            .has("m\\u{1b}[2J\\u{1b}]0;pwned\\u{7}");
+        no_raw_controls(&out);
+    }
+}

@@ -7,8 +7,14 @@
 //! on the reader: `ESC [ 2 J` clears the screen, an OSC sequence retitles
 //! the terminal or writes the clipboard, a carriage return overwrites a
 //! line already shown (#2500's second review). These functions escape
-//! every control character as `\u{..}`, so the text reads the same and
-//! can do nothing.
+//! every control character (C0, DEL and C1, so a lone `\r` too) as
+//! `\u{..}`, so the text reads the same and can do nothing. They also
+//! escape the bidirectional embedding, override and isolate characters
+//! (U+202A–U+202E, U+2066–U+2069), which reorder how the rest of a line is
+//! shown ("Trojan Source"), and the Unicode line and paragraph separators
+//! (U+2028, U+2029), which some renderers break lines on. Other text,
+//! including right-to-left scripts and zero-width characters, is left as
+//! it is: it can mislead only as any text can.
 //!
 //! Strings from the ledger itself (narrations, payees) are a separate
 //! question: the ledger is the user's own.
@@ -16,13 +22,19 @@
 use std::borrow::Cow;
 use std::fmt::Write;
 
+/// Whether `c` can change how text around it is shown.
+fn is_unsafe(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{2028}' | '\u{2029}')
+}
+
 fn escape(text: &str, keep: impl Fn(char) -> bool) -> Cow<'_, str> {
-    if !text.chars().any(|c| c.is_control() && !keep(c)) {
+    if !text.chars().any(|c| is_unsafe(c) && !keep(c)) {
         return Cow::Borrowed(text);
     }
     let mut out = String::with_capacity(text.len() + 8);
     for c in text.chars() {
-        if c.is_control() && !keep(c) {
+        if is_unsafe(c) && !keep(c) {
             let _ = write!(out, "\\u{{{:x}}}", u32::from(c));
         } else {
             out.push(c);
@@ -60,5 +72,19 @@ mod tests {
             escape_untrusted_text("plain ünïcode"),
             Cow::Borrowed(_)
         ));
+        // Bidi overrides and isolates, and line separators, escaped;
+        // right-to-left text and zero-width characters kept.
+        assert_eq!(
+            escape_untrusted_text("a\u{202e}b\u{2066}c\u{2028}d"),
+            "a\\u{202e}b\\u{2066}c\\u{2028}d"
+        );
+        assert!(matches!(
+            escape_untrusted_text("שלום \u{200b}x"),
+            Cow::Borrowed(_)
+        ));
+        // Escaping is idempotent: its output has nothing left to escape,
+        // so a second pass cannot double-escape.
+        let once = escape_untrusted_text("\u{1b}[2J\u{9b}").into_owned();
+        assert_eq!(escape_untrusted_text(&once), once);
     }
 }

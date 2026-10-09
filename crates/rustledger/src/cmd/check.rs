@@ -855,7 +855,13 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
         let mut wasm_mgr = PluginManager::with_config(runtime);
         for plugin_path in &args.plugins {
             if let Err(e) = wasm_mgr.load(plugin_path) {
-                let msg = format!("failed to load WASM plugin {}: {e}", plugin_path.display());
+                // `{e:#}` names the cause (a forbidden import, say), which
+                // carries the module's own text, so it is escaped.
+                let msg = format!(
+                    "failed to load WASM plugin {}: {}",
+                    plugin_path.display(),
+                    rustledger_plugin::escape_untrusted_text(&format!("{e:#}"))
+                );
                 // Tally and filter like every other diagnostic, so
                 // --show-summary counts this and --exclude-rules can hide it.
                 // The count below is deliberately outside: hiding a

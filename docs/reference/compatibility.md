@@ -469,6 +469,37 @@ The only remaining differences are display-only:
 
 These do not affect the underlying values.
 
+## Plugin Differences
+
+### The `effective_date` Plugin
+
+rustledger runs `beancount_reds_plugins.effective_date.effective_date` natively
+(any module name whose last segment is `effective_date`). It moves the same
+postings to the same holding accounts as upstream on an ordinary config, and
+deliberately differs in five places:
+
+| | rustledger | upstream |
+|---|---|---|
+| prefix matching | whole account components: `Expenses:Car` matches `Expenses:Car:Gas`, not `Expenses:Cards:Fee` | raw `startswith`, so `Expenses:Car` matches `Expenses:Cards:Fee` |
+| two matching prefixes | the most specific wins, whatever the config order | the last one in config order, so a general prefix listed after a specific one shadows it |
+| holding-account name | only the leading prefix is replaced: `Income:Interest:Income` becomes `Assets:Hold:Income:Interest:Income` | `str.replace` replaces every occurrence: `Assets:Hold:Income:Interest:Assets:Hold:Income` |
+| a marked posting it cannot move | an error naming the posting, and the whole transaction left as written | no prefix matches: the plugin fails (`KeyError: ''`) and changes nothing; a non-date value: the posting is skipped silently; no amount: the plugin fails (`-None`) |
+| the link | `edate-<yymmdd>-<n>`, `n` counting the entries moved, so the same ledger always gets the same links | `edate-<yymmdd>-<three random letters>` |
+
+The rule behind the fourth row: a posting marked `effective_date` is either
+moved or reported, never left in place beside siblings that moved. An
+`effective_date` equal to the transaction's own date is an error in both, and
+the transaction is left as written. A config `literal_eval` rejects is an
+error in both and changes nothing; a falsy one (`{}`, `None`) means the
+default config in both. A dict entry missing `earlier` or `later` is an error
+here as soon as the config is read; upstream fails only when a posting
+reaches it.
+
+As upstream does, the new entry at the effective date keeps the transaction's
+payee, tags, links and metadata, adding `original_date` and the link, and the
+moved posting keeps its metadata, `effective_date` included. Pinned by the
+tests in `crates/rustledger-plugin/src/native/plugins/effective_date.rs`.
+
 ## Running Compatibility Tests
 
 ```bash

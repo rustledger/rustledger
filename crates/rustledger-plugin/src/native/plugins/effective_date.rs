@@ -13,7 +13,6 @@
 //! ```
 
 use std::collections::{BTreeSet, HashSet};
-use std::sync::atomic::{AtomicUsize, Ordering};
 
 use crate::types::{
     AmountData, DirectiveData, DirectiveWrapper, MetaValueData, OpenData, PluginError,
@@ -118,109 +117,149 @@ impl NativePlugin for EffectiveDatePlugin {
         // entries stay paired with their input indices in input-order.
         let mut inserted_txns: Vec<DirectiveWrapper> = Vec::new();
 
+        // Links number the entries this run moves, in input order: the same
+        // ledger gets the same links every time, in any process. They came
+        // from a process-wide counter taken modulo 4096, so an LSP or FFI
+        // host reloading a ledger saw its links change, and the 4097th entry
+        // reused the first one's link.
+        let mut moved = 0usize;
+
         for (i, mut directive) in input.directives.into_iter().enumerate() {
-            let is_interesting = matches!(&directive.data, DirectiveData::Transaction(t) if has_effective_date_posting(t));
-            if !is_interesting {
+            let DirectiveData::Transaction(txn) = &directive.data else {
                 ops.push(PluginOp::Keep(i));
                 continue;
-            }
-            // An effective date equal to the entry's own date means nothing:
-            // upstream reports it and leaves the entry as written. This used
-            // to route the posting through a holding account and back on the
-            // same day, with no word to the user.
-            if let DirectiveData::Transaction(txn) = &directive.data
-                && txn
-                    .postings
-                    .iter()
-                    .any(|p| get_effective_date(p).as_deref() == Some(directive.date.as_str()))
+            };
+            if !txn
+                .postings
+                .iter()
+                .any(|p| effective_date_meta(p).is_some())
             {
-                errors.push(PluginError {
-                    message: "Effective and actual dates are identical".to_string(),
-                    source_file: directive.filename.clone(),
-                    line_number: directive.lineno,
-                    severity: PluginErrorSeverity::Error,
-                });
                 ops.push(PluginOp::Keep(i));
                 continue;
             }
 
-            // Generate a random link for this set of entries
-            let link = generate_link(&directive.date);
-
-            if let DirectiveData::Transaction(ref mut txn) = directive.data {
-                // Add link to original transaction
-                if !txn.links.contains(&link) {
-                    txn.links.push(link.clone());
-                }
-
-                let entry_date = directive.date.clone();
-                let mut modified_postings = Vec::new();
-
-                for posting in &txn.postings {
-                    if let Some(effective_date) = get_effective_date(posting) {
-                        // Find the holding account for this posting's account type
-                        if let Some((prefix, hold_acct)) = find_holding_account(
+            // Every marked posting must be one the plugin can move, or the
+            // whole entry stays as written and each one that cannot is
+            // reported: a posting marked `effective_date` is moved or
+            // reported, never kept in place beside siblings that moved.
+            let entry_date = directive.date.clone();
+            let mut plans: Vec<Option<(String, String)>> = Vec::with_capacity(txn.postings.len());
+            let mut problems: Vec<String> = Vec::new();
+            for posting in &txn.postings {
+                let Some(value) = effective_date_meta(posting) else {
+                    plans.push(None);
+                    continue;
+                };
+                let plan = match value {
+                    // Upstream skips a non-date value silently, leaving the
+                    // posting where it is.
+                    MetaValueData::Date(date) if *date == entry_date => {
+                        Err("Effective and actual dates are identical".to_string())
+                    }
+                    MetaValueData::Date(date) => {
+                        match find_holding_account(
                             &posting.account,
-                            &effective_date,
+                            date,
                             &entry_date,
                             &holding_accounts,
                         ) {
-                            // Create modified posting with holding account
-                            let new_account = posting.account.replace(prefix, hold_acct);
-                            new_accounts.insert(new_account.clone());
-
-                            let mut modified_posting = posting.clone();
-                            modified_posting.account.clone_from(&new_account);
-                            // Remove effective_date from metadata
-                            modified_posting
-                                .metadata
-                                .retain(|(k, _)| k != "effective_date");
-
-                            // Create hold posting (opposite of modified) before moving
-                            let hold_posting = create_opposite_posting(&modified_posting);
-
-                            modified_postings.push(modified_posting);
-
-                            // Create new entry at effective date
-                            let mut cleaned_original = posting.clone();
-                            cleaned_original
-                                .metadata
-                                .retain(|(k, _)| k != "effective_date");
-
-                            let new_txn = TransactionData {
-                                flag: txn.flag.clone(),
-                                payee: txn.payee.clone(),
-                                narration: txn.narration.clone(),
-                                tags: txn.tags.clone(),
-                                links: vec![link.clone()],
-                                metadata: vec![(
-                                    "original_date".to_string(),
-                                    MetaValueData::Date(entry_date.clone()),
-                                )],
-                                postings: vec![hold_posting, cleaned_original],
-                            };
-
-                            inserted_txns.push(DirectiveWrapper {
-                                directive_type: "transaction".to_string(),
-                                date: effective_date,
-                                filename: directive.filename.clone(),
-                                lineno: directive.lineno,
-                                data: DirectiveData::Transaction(new_txn),
-                            });
-                        } else {
-                            // No configured prefix matches: the posting is
-                            // kept as written, on purpose
-                            // (`test_effective_date_unconfigured_prefix_unchanged`).
-                            // Upstream fails outright here (`KeyError: ''`)
-                            // and applies nothing to the whole ledger.
-                            modified_postings.push(posting.clone());
+                            // Upstream crashes on an elided amount (`-None`).
+                            Some(_) if posting.units.is_none() => {
+                                Err("the posting has no amount to move".to_string())
+                            }
+                            Some(new_account) => Ok((date.clone(), new_account)),
+                            // Upstream fails the whole plugin (`KeyError: ''`).
+                            None => Err("no holding account is configured for it".to_string()),
                         }
-                    } else {
-                        // No effective_date, keep original
-                        modified_postings.push(posting.clone());
+                    }
+                    other => Err(format!(
+                        "its `effective_date` is not a date: {}",
+                        describe_meta(other)
+                    )),
+                };
+                match plan {
+                    Ok(plan) => plans.push(Some(plan)),
+                    Err(reason) => {
+                        problems.push(format!("{} ({reason})", posting.account));
+                        plans.push(None);
                     }
                 }
+            }
+            if !problems.is_empty() {
+                for problem in problems {
+                    errors.push(PluginError {
+                        message: format!(
+                            "effective_date: cannot move {problem}; the transaction is left as written"
+                        ),
+                        source_file: directive.filename.clone(),
+                        line_number: directive.lineno,
+                        severity: PluginErrorSeverity::Error,
+                    });
+                }
+                ops.push(PluginOp::Keep(i));
+                continue;
+            }
 
+            let link = edate_link(&entry_date, moved);
+            moved += 1;
+
+            if let DirectiveData::Transaction(ref mut txn) = directive.data {
+                if !txn.links.contains(&link) {
+                    txn.links.push(link.clone());
+                }
+                let mut modified_postings = Vec::with_capacity(txn.postings.len());
+                for (posting, plan) in txn.postings.iter().zip(plans) {
+                    let Some((effective_date, new_account)) = plan else {
+                        modified_postings.push(posting.clone());
+                        continue;
+                    };
+                    new_accounts.insert(new_account.clone());
+
+                    // The posting moves to the holding account, its metadata
+                    // as written, `effective_date` included, as upstream.
+                    let mut modified_posting = posting.clone();
+                    modified_posting.account.clone_from(&new_account);
+
+                    // The new entry: the holding account reversed and the
+                    // original posting, both without `effective_date`.
+                    let mut cleaned_original = posting.clone();
+                    cleaned_original
+                        .metadata
+                        .retain(|(k, _)| k != "effective_date");
+                    let mut hold_posting = create_opposite_posting(&modified_posting);
+                    hold_posting.metadata.retain(|(k, _)| k != "effective_date");
+                    modified_postings.push(modified_posting);
+
+                    // It keeps the transaction's metadata, tags and links (the
+                    // edate link among them), plus `original_date`, as
+                    // upstream's `entry._replace(meta={**entry.meta, ...})`.
+                    let mut metadata: Vec<(String, MetaValueData)> = txn
+                        .metadata
+                        .iter()
+                        .filter(|(k, _)| k != "original_date")
+                        .cloned()
+                        .collect();
+                    metadata.push((
+                        "original_date".to_string(),
+                        MetaValueData::Date(entry_date.clone()),
+                    ));
+                    let new_txn = TransactionData {
+                        flag: txn.flag.clone(),
+                        payee: txn.payee.clone(),
+                        narration: txn.narration.clone(),
+                        tags: txn.tags.clone(),
+                        links: txn.links.clone(),
+                        metadata,
+                        postings: vec![hold_posting, cleaned_original],
+                    };
+                    inserted_txns.push(DirectiveWrapper {
+                        directive_type: "transaction".to_string(),
+                        date: effective_date,
+                        filename: directive.filename.clone(),
+                        lineno: directive.lineno,
+                        data: DirectiveData::Transaction(new_txn),
+                    });
+                }
                 txn.postings = modified_postings;
             }
 
@@ -260,48 +299,62 @@ impl NativePlugin for EffectiveDatePlugin {
 
 impl RegularPlugin for EffectiveDatePlugin {}
 
-/// Check if a transaction has any posting with `effective_date` metadata.
-fn has_effective_date_posting(txn: &TransactionData) -> bool {
-    txn.postings.iter().any(|p| {
-        p.metadata
-            .iter()
-            .any(|(k, v)| k == "effective_date" && matches!(v, MetaValueData::Date(_)))
-    })
+/// A posting's `effective_date` metadata value, whatever its type.
+fn effective_date_meta(posting: &PostingData) -> Option<&MetaValueData> {
+    posting
+        .metadata
+        .iter()
+        .find(|(key, _)| key == "effective_date")
+        .map(|(_, value)| value)
 }
 
-/// Get the `effective_date` from a posting's metadata.
-fn get_effective_date(posting: &PostingData) -> Option<String> {
-    for (key, value) in &posting.metadata {
-        if key == "effective_date"
-            && let MetaValueData::Date(d) = value
-        {
-            return Some(d.clone());
-        }
+/// A metadata value as the ledger wrote it, for an error message.
+fn describe_meta(value: &MetaValueData) -> String {
+    match value {
+        MetaValueData::String(s) => format!("the string \"{s}\""),
+        MetaValueData::Number(n) => format!("the number {n}"),
+        MetaValueData::Account(a) => format!("the account {a}"),
+        MetaValueData::Currency(c) => format!("the currency {c}"),
+        other => format!("{other:?}"),
     }
-    None
 }
 
-/// The config prefix that matches `account` and the holding account to use
-/// for it: the earlier one when the effective date is not after the entry's,
-/// else the later one. The last matching prefix in config order wins (see
-/// [`HoldingAccounts`]). One lookup for both, so the prefix replaced is always
-/// the one the holding account was chosen for.
-fn find_holding_account<'h>(
+/// The holding account `account` moves to: the most specific configured
+/// prefix that `account` equals or sits under (on a `:` boundary), with that
+/// prefix replaced by its earlier holding account when the effective date is
+/// not after the entry's, else its later one.
+///
+/// Deliberately not upstream's rule. Upstream tests `startswith` on the raw
+/// string, takes the last match in config order, and renames with
+/// `str.replace`, which replaces every occurrence. So `Expenses:Car` matched
+/// `Expenses:Cards:Fee`; a general prefix listed after a specific one
+/// shadowed it; and prefix `Income` turned `Income:Interest:Income` into
+/// `Assets:Hold:Income:Interest:Assets:Hold:Income`. Here only whole account
+/// components match, the most specific prefix wins whatever the order, and
+/// only the leading prefix is replaced.
+fn find_holding_account(
     account: &str,
     effective_date: &str,
     entry_date: &str,
-    holding_accounts: &'h HoldingAccounts,
-) -> Option<(&'h str, &'h str)> {
+    holding_accounts: &HoldingAccounts,
+) -> Option<String> {
     let (prefix, (earlier, later)) = holding_accounts
         .iter()
-        .rev()
-        .find(|(prefix, _)| account.starts_with(prefix.as_str()))?;
+        .filter(|(prefix, _)| {
+            // A prefix written with its trailing `:` (`'Expenses:'`) is
+            // already on a boundary.
+            account == prefix
+                || account
+                    .strip_prefix(prefix.as_str())
+                    .is_some_and(|rest| prefix.ends_with(':') || rest.starts_with(':'))
+        })
+        .max_by_key(|(prefix, _)| prefix.len())?;
     let hold = if effective_date > entry_date {
         later
     } else {
         earlier
     };
-    Some((prefix.as_str(), hold.as_str()))
+    Some(format!("{hold}{}", &account[prefix.len()..]))
 }
 
 /// Create a posting with the opposite amount.
@@ -321,19 +374,14 @@ fn create_opposite_posting(posting: &PostingData) -> PostingData {
     opposite
 }
 
-/// Counter for generating unique links.
-static LINK_COUNTER: AtomicUsize = AtomicUsize::new(0);
-
-/// Generate a unique link for effective date entries.
-fn generate_link(date: &str) -> String {
+/// The link joining an entry the plugin moves to its new entries:
+/// `edate-<yymmdd>-<n>`, `n` counting the entries moved in this run, in
+/// input order, in hex, with no wraparound. Upstream draws three random
+/// letters (`edate-200301-flb`).
+fn edate_link(date: &str, n: usize) -> String {
     let date_short = date.replace('-', "");
-    let date_short = if date_short.len() > 6 {
-        &date_short[2..]
-    } else {
-        &date_short
-    };
-    let counter = LINK_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("edate-{}-{:03x}", date_short, counter % 4096)
+    let date_short = date_short.get(2..).unwrap_or(&date_short);
+    format!("edate-{date_short}-{n:03x}")
 }
 
 /// Parse the configuration string the way upstream does: `if config:
@@ -650,14 +698,16 @@ mod tests {
         assert_eq!(opened, sorted);
     }
 
-    /// Two prefixes that both match: the last one in config order wins, as
-    /// upstream. Over a `HashMap` the winner was random, and so was the
-    /// holding account a posting moved to; the run is repeated because one
-    /// draw of a random order can land right by chance.
+    const CAR_CONFIG: &str = "{'Expenses:Car': {'earlier': 'Liabilities:Hold:Car', 'later': 'Assets:Hold:Car'}, \
+                              'Expenses': {'earlier': 'Liabilities:Hold:Expenses', 'later': 'Assets:Hold:Expenses'}}";
+
+    /// The most specific matching prefix wins whatever the config order:
+    /// `Expenses:Car` listed BEFORE `Expenses` still takes `Expenses:Car:Gas`.
+    /// Upstream takes the last match in config order, so there the general
+    /// prefix listed after shadows the specific one. Over the old `HashMap`
+    /// the winner was random, so the run is repeated.
     #[test]
-    fn overlapping_prefixes_take_the_last_in_config_order() {
-        let config = "{'Expenses': {'earlier': 'Liabilities:Hold:Expenses', 'later': 'Assets:Hold:Expenses'}, \
-                      'Expenses:Car': {'earlier': 'Liabilities:Hold:Car', 'later': 'Assets:Hold:Car'}}";
+    fn the_most_specific_prefix_wins_in_any_order() {
         let directives = vec![txn_with(
             "2024-01-15",
             &[
@@ -666,16 +716,220 @@ mod tests {
             ],
         )];
         for _ in 0..32 {
-            let output = EffectiveDatePlugin.process(input(directives.clone(), Some(config)));
-            let accounts: Vec<String> = materialize_ops(&directives, &output)
-                .into_iter()
-                .filter_map(|d| match d.data {
-                    DirectiveData::Open(open) => Some(open.account),
-                    _ => None,
-                })
-                .collect();
-            assert_eq!(accounts, ["Assets:Hold:Car:Gas"]);
+            let output = EffectiveDatePlugin.process(input(directives.clone(), Some(CAR_CONFIG)));
+            assert!(output.errors.is_empty(), "{:?}", output.errors);
+            assert_eq!(opened(&directives, &output), ["Assets:Hold:Car:Gas"]);
         }
+    }
+
+    /// Prefixes match whole account components: `Expenses:Car` does not take
+    /// `Expenses:Cards:Fee`, which falls to `Expenses`. Upstream's raw
+    /// `startswith` matched it, and moved it to `Assets:Hold:Cards:Fee`.
+    #[test]
+    fn a_prefix_matches_whole_components_only() {
+        let directives = vec![txn_with(
+            "2024-01-15",
+            &[
+                ("Expenses:Cards:Fee", "10", Some("2024-02-01")),
+                ("Expenses:Car", "10", Some("2024-02-01")),
+                ("Assets:Cash", "-20", None),
+            ],
+        )];
+        let output = EffectiveDatePlugin.process(input(directives.clone(), Some(CAR_CONFIG)));
+        assert!(output.errors.is_empty(), "{:?}", output.errors);
+        assert_eq!(
+            opened(&directives, &output),
+            ["Assets:Hold:Car", "Assets:Hold:Expenses:Cards:Fee"]
+        );
+    }
+
+    /// A prefix written with a trailing `:` still matches the accounts under
+    /// it, and the holding account written the same way joins cleanly, as
+    /// upstream's `startswith` / `replace` handle it.
+    #[test]
+    fn a_prefix_with_a_trailing_colon_matches() {
+        let config = "{'Expenses:': {'earlier': 'Liabilities:Hold:E:', 'later': 'Assets:Hold:E:'}}";
+        let directives = vec![txn_with(
+            "2024-01-15",
+            &[
+                ("Expenses:Food", "10", Some("2024-02-01")),
+                ("Assets:Cash", "-10", None),
+            ],
+        )];
+        let output = EffectiveDatePlugin.process(input(directives.clone(), Some(config)));
+        assert!(output.errors.is_empty(), "{:?}", output.errors);
+        assert_eq!(opened(&directives, &output), ["Assets:Hold:E:Food"]);
+    }
+
+    /// Only the leading prefix is replaced. Upstream's `str.replace` replaced
+    /// every occurrence: `Income:Interest:Income` became
+    /// `Assets:Hold:Income:Interest:Assets:Hold:Income`.
+    #[test]
+    fn only_the_leading_prefix_is_renamed() {
+        let directives = vec![txn_with(
+            "2024-01-15",
+            &[
+                ("Income:Interest:Income", "-10", Some("2024-01-01")),
+                ("Assets:Cash", "10", None),
+            ],
+        )];
+        let output = EffectiveDatePlugin.process(input(directives.clone(), None));
+        assert!(output.errors.is_empty(), "{:?}", output.errors);
+        assert_eq!(
+            opened(&directives, &output),
+            ["Assets:Hold:Income:Interest:Income"]
+        );
+    }
+
+    /// An `effective_date` that is not a date (here a quoted string) cannot be
+    /// applied: reported, and the whole entry stays as written. Upstream
+    /// skips it silently.
+    #[test]
+    fn a_non_date_effective_date_is_reported_and_the_entry_kept() {
+        let mut directives = vec![txn_with(
+            "2024-01-15",
+            &[
+                ("Expenses:Rent", "10", Some("2024-02-01")),
+                ("Expenses:Food", "10", None),
+                ("Assets:Cash", "-20", None),
+            ],
+        )];
+        if let DirectiveData::Transaction(txn) = &mut directives[0].data {
+            txn.postings[1].metadata.push((
+                "effective_date".to_string(),
+                MetaValueData::String("2024-03-01".to_string()),
+            ));
+        }
+        let output = EffectiveDatePlugin.process(input(directives.clone(), None));
+        assert_eq!(output.errors.len(), 1, "{:?}", output.errors);
+        assert!(output.errors[0].message.contains("Expenses:Food"));
+        assert!(output.errors[0].message.contains("not a date"));
+        assert_eq!(materialize_ops(&directives, &output), directives);
+    }
+
+    /// A marked posting with no amount cannot be reversed: reported, entry
+    /// kept. Upstream crashes on `-None`.
+    #[test]
+    fn a_posting_without_an_amount_is_reported_and_the_entry_kept() {
+        let mut directives = vec![txn_with(
+            "2024-01-15",
+            &[
+                ("Expenses:Rent", "10", Some("2024-02-01")),
+                ("Assets:Cash", "-10", None),
+            ],
+        )];
+        if let DirectiveData::Transaction(txn) = &mut directives[0].data {
+            txn.postings[0].units = None;
+        }
+        let output = EffectiveDatePlugin.process(input(directives.clone(), None));
+        assert_eq!(output.errors.len(), 1, "{:?}", output.errors);
+        assert!(output.errors[0].message.contains("no amount"));
+        assert_eq!(materialize_ops(&directives, &output), directives);
+    }
+
+    /// The links number the moved entries within the run: running the plugin
+    /// twice in one process gives identical output (the process-wide counter
+    /// made the second run's links differ), and 5,000 moved entries get 5,000
+    /// distinct links (the counter wrapped at 4,096).
+    #[test]
+    fn links_are_deterministic_and_unique() {
+        let directives: Vec<DirectiveWrapper> = (0..5000)
+            .map(|_| {
+                txn_with(
+                    "2024-01-15",
+                    &[
+                        ("Expenses:Rent", "10", Some("2024-02-01")),
+                        ("Assets:Cash", "-10", None),
+                    ],
+                )
+            })
+            .collect();
+        let first = materialize_ops(
+            &directives,
+            &EffectiveDatePlugin.process(input(directives.clone(), None)),
+        );
+        let second = materialize_ops(
+            &directives,
+            &EffectiveDatePlugin.process(input(directives.clone(), None)),
+        );
+        assert_eq!(first, second, "the same ledger, the same output");
+        let links: BTreeSet<String> = first
+            .iter()
+            .filter(|d| d.date == "2024-01-15")
+            .filter_map(|d| match &d.data {
+                DirectiveData::Transaction(t) => t.links.first().cloned(),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(links.len(), 5000);
+    }
+
+    /// The new entry keeps the transaction's payee, tags, links and metadata,
+    /// adding `original_date` and the edate link, as upstream does (checked
+    /// against beancount 3.2.3). The moved posting keeps its metadata,
+    /// `effective_date` included, as upstream; the new entry's postings drop
+    /// `effective_date`.
+    #[test]
+    fn the_new_entry_keeps_the_transactions_metadata_and_links() {
+        let mut directives = vec![txn_with(
+            "2024-01-15",
+            &[
+                ("Expenses:Rent", "10", Some("2024-02-01")),
+                ("Assets:Cash", "-10", None),
+            ],
+        )];
+        if let DirectiveData::Transaction(txn) = &mut directives[0].data {
+            txn.payee = Some("Landlord".to_string());
+            txn.tags = vec!["housing".to_string()];
+            txn.links = vec!["lease".to_string()];
+            txn.metadata = vec![(
+                "txnkey".to_string(),
+                MetaValueData::String("tv".to_string()),
+            )];
+            txn.postings[0]
+                .metadata
+                .push(("pkey".to_string(), MetaValueData::String("pv".to_string())));
+        }
+        let out = materialize_ops(
+            &directives,
+            &EffectiveDatePlugin.process(input(directives.clone(), None)),
+        );
+        let txns: Vec<&TransactionData> = out
+            .iter()
+            .filter_map(|d| match &d.data {
+                DirectiveData::Transaction(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        let original = txns
+            .iter()
+            .find(|t| !t.metadata.iter().any(|(k, _)| k == "original_date"))
+            .expect("original");
+        let new = txns
+            .iter()
+            .find(|t| t.metadata.iter().any(|(k, _)| k == "original_date"))
+            .expect("new entry");
+        assert_eq!(new.payee.as_deref(), Some("Landlord"));
+        assert_eq!(new.tags, ["housing"]);
+        assert_eq!(new.links, original.links);
+        assert!(
+            new.links.contains(&"lease".to_string())
+                && new.links.iter().any(|l| l.starts_with("edate-"))
+        );
+        assert!(new.metadata.iter().any(|(k, _)| k == "txnkey"));
+        let moved = &original.postings[0];
+        assert_eq!(moved.account, "Assets:Hold:Expenses:Rent");
+        assert!(moved.metadata.iter().any(|(k, _)| k == "effective_date"));
+        assert!(
+            new.postings
+                .iter()
+                .all(|p| p.metadata.iter().all(|(k, _)| k != "effective_date"))
+        );
+        assert!(
+            new.postings
+                .iter()
+                .all(|p| p.metadata.iter().any(|(k, _)| k == "pkey"))
+        );
     }
 
     fn opened(directives: &[DirectiveWrapper], output: &PluginOutput) -> Vec<String> {
@@ -749,9 +1003,13 @@ mod tests {
         )];
         let output = EffectiveDatePlugin.process(input(directives.clone(), None));
         assert_eq!(output.errors.len(), 1, "{:?}", output.errors);
-        assert_eq!(
-            output.errors[0].message,
-            "Effective and actual dates are identical"
+        assert!(
+            output.errors[0]
+                .message
+                .contains("Effective and actual dates are identical")
+                && output.errors[0].message.contains("Expenses:Food"),
+            "{:?}",
+            output.errors[0].message
         );
         assert_eq!(materialize_ops(&directives, &output), directives);
     }

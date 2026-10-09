@@ -32,6 +32,29 @@ pub enum PluginPass {
     Regular,
 }
 
+/// Host-chosen limits for one sandboxed (WASM or Python) plugin call;
+/// `None` keeps the sandbox default (30 seconds, 256 MiB). See
+/// [`ResolvedPlugin::run_with_limits`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct PluginLimits {
+    /// The time budget, in seconds.
+    pub max_time_secs: Option<u64>,
+    /// The linear-memory cap, in bytes (wasm32 addresses at most 4 GiB).
+    pub max_memory_bytes: Option<usize>,
+}
+
+impl PluginLimits {
+    /// Limits of `max_time_secs` seconds and `max_memory_bytes` bytes.
+    #[must_use]
+    pub const fn new(max_time_secs: Option<u64>, max_memory_bytes: Option<usize>) -> Self {
+        Self {
+            max_time_secs,
+            max_memory_bytes,
+        }
+    }
+}
+
 /// A plugin reference resolved to a concrete runtime, ready to [`run`].
 ///
 /// [`run`]: ResolvedPlugin::run
@@ -228,7 +251,12 @@ pub fn resolve_plugin<'a>(
             // A bare module name (`plugin "pkg.mod"`) is unsupported by design —
             // reject it up front with an actionable message rather than spinning
             // up the runtime just to fail and relabel the error (#1432).
-            if is_python_module_name(&resolved, name) {
+            // `python:<name>` for a plugin with a built-in Python
+            // implementation runs that, not the native plugin (#2500
+            // review: nothing reached `execute_builtin` before).
+            if is_python_module_name(&resolved, name)
+                && !(force_python && crate::python::builtin_python_plugin(name).is_some())
+            {
                 return Err(PluginResolveError::PythonModuleName {
                     name: name.to_string(),
                     suggested_file: crate::python::suggest_module_path(name),
@@ -280,20 +308,23 @@ impl ResolvedPlugin<'_> {
         self.run_with_max_time_secs(wrappers, options, config, base_dir, None)
     }
 
-    /// [`Self::run`] with a host-chosen time budget for a WASM plugin.
+    /// [`Self::run`] with a host-chosen time budget for a WASM or Python
+    /// plugin.
     ///
-    /// `max_time_secs` replaces a WASM plugin's default budget (30 seconds,
-    /// `sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS`); `None` keeps the default. It is the HOST's setting (the CLI's config
-    /// file or flag, an embedder's choice), never the ledger's: a ledger
-    /// that could raise its own plugins' budget would let its author spend
-    /// unbounded CPU on any service that loads it. Native plugins have no
-    /// budget, and Python plugins keep their own fixed budget.
+    /// `max_time_secs` replaces the default budget (30 seconds,
+    /// `sandbox::DEFAULT_SANDBOX_MAX_TIME_SECS`); `None` keeps the default.
+    /// It is the HOST's setting (the CLI's config file or flag, an
+    /// embedder's choice), never the ledger's: a ledger that could raise
+    /// its own plugins' budget would let its author spend unbounded CPU on
+    /// any service that loads it. Native plugins have no budget. Both
+    /// runtimes convert seconds to fuel by `sandbox::fuel_for_secs`; a
+    /// Python plugin also spends ~1.2 of them starting `CPython` (#2500).
     ///
     /// # Errors
     ///
     /// As [`Self::run`].
     // `base_dir` is read only by the Python arm, `max_time_secs` only by
-    // the WASM arm.
+    // the WASM and Python arms.
     #[cfg_attr(
         not(all(feature = "python-plugins", feature = "wasm-runtime")),
         allow(unused_variables)
@@ -306,6 +337,43 @@ impl ResolvedPlugin<'_> {
         base_dir: &Path,
         max_time_secs: Option<u64>,
     ) -> Result<PluginOutput, PluginRunError> {
+        self.run_with_limits(
+            wrappers,
+            options,
+            config,
+            base_dir,
+            PluginLimits {
+                max_time_secs,
+                ..PluginLimits::default()
+            },
+        )
+    }
+
+    /// [`Self::run`] with host-chosen [`PluginLimits`] (time budget and
+    /// memory cap) for a WASM or Python plugin. Like the time budget, the
+    /// memory cap is the HOST's setting, never the ledger's: a ledger that
+    /// could raise it could make any service that loads it allocate up to
+    /// 4 GiB per plugin. Native plugins have neither limit.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run`].
+    #[cfg_attr(
+        not(all(feature = "python-plugins", feature = "wasm-runtime")),
+        allow(unused_variables)
+    )]
+    pub fn run_with_limits(
+        &self,
+        wrappers: Vec<DirectiveWrapper>,
+        options: &PluginOptions,
+        config: &Option<String>,
+        base_dir: &Path,
+        limits: PluginLimits,
+    ) -> Result<PluginOutput, PluginRunError> {
+        let PluginLimits {
+            max_time_secs,
+            max_memory_bytes,
+        } = limits;
         match self {
             ResolvedPlugin::Native(plugin) => Ok(plugin.process(PluginInput {
                 directives: wrappers,
@@ -318,10 +386,13 @@ impl ResolvedPlugin<'_> {
                 if let Some(secs) = max_time_secs {
                     runtime.max_time_secs = secs;
                 }
+                if let Some(bytes) = max_memory_bytes {
+                    runtime.max_memory = bytes;
+                }
                 let mut mgr = crate::PluginManager::with_config(runtime);
                 let idx = mgr.load(path).map_err(|e| PluginRunError::WasmFailed {
                     path: path.clone(),
-                    message: format!("failed to load: {e}"),
+                    message: format!("failed to load: {e:#}"),
                 })?;
                 mgr.execute(
                     idx,
@@ -338,18 +409,34 @@ impl ResolvedPlugin<'_> {
             }
             #[cfg(feature = "python-plugins")]
             ResolvedPlugin::Python { raw, resolved } => {
-                let runtime = crate::python::PythonRuntime::new().map_err(|e| {
+                let mut runtime = crate::python::PythonRuntime::new().map_err(|e| {
                     PluginRunError::PythonFailed {
                         message: format!("Python runtime unavailable: {e}"),
                     }
                 })?;
+                if let Some(secs) = max_time_secs {
+                    runtime = runtime.with_max_time_secs(secs);
+                }
+                if let Some(bytes) = max_memory_bytes {
+                    runtime = runtime.with_max_memory(bytes);
+                }
                 let input = PluginInput {
                     directives: wrappers,
                     options: options.clone(),
                     config: config.clone(),
                 };
                 // File-vs-module classifier matches the up-front #1432 rejection.
-                if is_python_plugin_file(resolved, raw) {
+                if !is_python_plugin_file(resolved, raw)
+                    && crate::python::builtin_python_plugin(raw).is_some()
+                {
+                    // Only a `python:`-forced built-in name gets here; see
+                    // `resolve_plugin`.
+                    runtime
+                        .execute_builtin(raw, &input)
+                        .map_err(|e| PluginRunError::PythonFailed {
+                            message: format!("Python plugin '{raw}' execution failed: {e}"),
+                        })
+                } else if is_python_plugin_file(resolved, raw) {
                     runtime
                         .execute_module(raw, &input, Some(base_dir))
                         .map_err(|e| PluginRunError::PythonFailed {

@@ -23,6 +23,7 @@ python-plugins = [
   "sha2",
   "dirs",
   "tempfile",
+  "tokio",
 ]
 
 [dependencies]
@@ -32,6 +33,9 @@ rustledger-ops.workspace = true
 rustledger-plugin-types.workspace = true
 wasmtime = { workspace = true, optional = true }
 wasmtime-wasi = { workspace = true, optional = true }
+# Runs the Python guest async, under a wall-clock deadline (already in the
+# tree through wasmtime-wasi).
+tokio = { version = "1", optional = true, default-features = false, features = ["rt", "time"] }
 serde.workspace = true
 serde_json.workspace = true
 rmp-serde.workspace = true

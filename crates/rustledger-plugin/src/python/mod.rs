@@ -36,7 +36,8 @@ mod runtime;
 
 pub use compat::BEANCOUNT_COMPAT_PY;
 pub use runtime::{
-    PythonRuntime, is_python_available, is_python_plugin_file_ref, suggest_module_path,
+    PythonRuntime, builtin_python_plugin, is_python_available, is_python_plugin_file_ref,
+    suggest_module_path,
 };
 
 /// Python plugin error types.

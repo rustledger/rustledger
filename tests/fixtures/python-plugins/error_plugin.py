@@ -1,4 +1,6 @@
 # Plugin that generates validation errors for testing
+__plugins__ = ['plugin']
+
 def plugin(entries, options_map, config=None):
     """Generate errors for transactions without payees."""
     errors = []

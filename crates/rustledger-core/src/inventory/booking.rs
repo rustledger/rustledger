@@ -272,6 +272,8 @@ struct MergePlan {
     matching_indices: std::collections::HashSet<usize>,
     /// Units held across those slots.
     total_units: Decimal,
+    /// Whether `total_units` is exact (see [`pool_units`]).
+    total_units_exact: bool,
     /// The pool's per-unit cost, or `None` when the lots carry no cost.
     pool: Option<Amount>,
     /// What the pool's lots cost in total, for a sale that takes all of it
@@ -345,6 +347,26 @@ impl Inventory {
     /// refuse reductions from inventories `add` accepted.
     fn net_after(&self, units: &Amount) -> Option<Decimal> {
         crate::decimal::checked_add_python_scale(self.units(&units.currency), units.number)
+    }
+
+    /// Whether the EXACT total of `units.currency`, once `units` is booked,
+    /// is within `Decimal`'s range.
+    ///
+    /// For AVERAGE and the `{*}` merge, which rebuild the caches from the
+    /// lots afterwards: the rebuild totals the lots exactly, so the cached
+    /// (possibly rounded, #2363) total that [`Self::net_after`] reads can pass
+    /// a reduction whose exact total the rebuild then cannot hold -- a
+    /// `rebuild_index` assertion in debug, a wrong cached total in release
+    /// (#2554 review). Both paths are O(lots) already.
+    fn exact_total_after_in_range(&self, units: &Amount) -> bool {
+        let exact: bigdecimal::BigDecimal = self
+            .positions
+            .iter()
+            .filter(|p| p.units.currency == units.currency)
+            .map(|p| crate::to_bigdecimal(p.units.number))
+            .sum::<bigdecimal::BigDecimal>()
+            + crate::to_bigdecimal(units.number);
+        exact.abs() <= crate::to_bigdecimal(Decimal::MAX)
     }
 
     /// Carry an exact-total lot's remaining total across a partial take:
@@ -1304,7 +1326,9 @@ impl Inventory {
             total_units.checked_add(units.number)
         }
         .ok_or_else(overflow)?;
-        self.net_after(units).ok_or_else(overflow)?;
+        if !self.exact_total_after_in_range(units) {
+            return Err(overflow());
+        }
 
         // Remove the reduced side, and any emptied lot of this currency;
         // leave the other side as it was.
@@ -1481,6 +1505,7 @@ impl Inventory {
         Ok(MergePlan {
             matching_indices: matching.iter().map(|(i, _)| *i).collect(),
             total_units,
+            total_units_exact,
             pool,
             total_cost: self.pool_total(matching.iter().map(|(i, _)| *i)),
         })
@@ -1510,6 +1535,7 @@ impl Inventory {
         let MergePlan {
             matching_indices,
             total_units,
+            total_units_exact,
             pool: Some(pool),
             total_cost,
         } = plan
@@ -1520,13 +1546,22 @@ impl Inventory {
         };
         let reduction = units.number.abs();
         let (avg_cost, cost_currency) = (pool.number, pool.currency);
-        // As in `reduce_average`: the running total must stay in range, or the
-        // rebuild below meets a total `add` would have refused (#2554).
-        self.net_after(units).ok_or_else(|| {
+        // As in `reduce_average`: the remainder exact when the pool total is,
+        // and the account's exact total in range (#2554).
+        let overflow = || {
             BookingError::Overflow(OverflowError {
                 currency: units.currency.clone(),
             })
-        })?;
+        };
+        let remaining = if total_units_exact {
+            crate::decimal::checked_add_exact(total_units, units.number)
+        } else {
+            total_units.checked_add(units.number)
+        }
+        .ok_or_else(overflow)?;
+        if !self.exact_total_after_in_range(units) {
+            return Err(overflow());
+        }
 
         // The whole pool: what its lots cost, not the rounded average times
         // the units (#2417).
@@ -1568,7 +1603,6 @@ impl Inventory {
             .retain_slots(|slot, _| !matching_indices.contains(&slot));
 
         // Add back a single merged lot with the remainder
-        let remaining = total_units + units.number; // units.number is negative for reductions
         if !remaining.is_zero() {
             let slot = self.positions.push_slot(Position::with_cost(
                 Amount::new(remaining, units.currency.clone()),
@@ -1611,8 +1645,9 @@ impl Inventory {
         let mut available = total_units.abs();
         let requested = units.number.abs();
 
-        if requested > available {
-            // About to short what is left over, so `available` must be exact,
+        if requested >= available {
+            // About to short what is left over (or to drain it all), so
+            // `available` must be exact,
             // and the cached total is allowed to round (#2363): lots summing
             // to `...169.6` cached as `...170` shorted against the wrong
             // number, or reported a shortfall NONE never has (#2554 review).
@@ -1623,14 +1658,18 @@ impl Inventory {
                 .filter(|p| p.units.currency == units.currency)
                 .map(|p| crate::to_bigdecimal(p.units.number))
                 .sum();
-            available = crate::decimal::decimal_from_big_exact(&exact)
-                .filter(|net| net.signum() == total_units.signum())
-                .ok_or_else(|| {
-                    BookingError::Overflow(OverflowError {
-                        currency: units.currency.clone(),
-                    })
-                })?
-                .abs();
+            // The cached total when it is right: it carries the widest scale
+            // seen, which is what the short has always been booked at.
+            if exact != crate::to_bigdecimal(total_units) {
+                available = crate::decimal::decimal_from_big_exact(&exact)
+                    .filter(|net| net.signum() == total_units.signum())
+                    .ok_or_else(|| {
+                        BookingError::Overflow(OverflowError {
+                            currency: units.currency.clone(),
+                        })
+                    })?
+                    .abs();
+            }
         }
 
         if requested > available {
@@ -3593,6 +3632,76 @@ mod reduction_tests {
             let r = inv.reduce(&sell(Decimal::MAX - d(1)), None, BookingMethod::None);
             assert!(is_overflow(&r), "got {r:?}");
             assert_eq!(holdings(&inv), before);
+        }
+
+        /// Review of #2554, round 3: AVERAGE and `{*}` checked the CACHED
+        /// total, which may have rounded down (`...334` for an exact
+        /// `...334.6`), so a reduction whose exact total passed `MAX` got
+        /// through and the rebuild could not hold it.
+        #[test]
+        fn a_pooled_sale_past_the_range_of_the_exact_total_is_an_overflow() {
+            let build = || {
+                let mut inv = mk([corp(d(1), d(1), 1), corp(dec!(-1.5), dec!(2.0), 2)]);
+                inv.add(Position::simple(Amount::new(Decimal::MAX, "CORP")))
+                    .expect("fits");
+                inv.add(corp(dec!(0.1), d(3), 3))
+                    .expect("the cache rounds and accepts");
+                inv
+            };
+            let merge = CostSpec {
+                merge: true,
+                ..CostSpec::default()
+            };
+            for (spec, method) in [
+                (None, BookingMethod::Average),
+                (Some(&merge), BookingMethod::Strict),
+            ] {
+                let mut inv = build();
+                let before = holdings(&inv);
+                let r = inv.reduce(&Amount::new(d(1), "CORP"), spec, method);
+                assert!(is_overflow(&r), "{method:?}: got {r:?}");
+                assert_eq!(holdings(&inv), before, "{method:?}");
+            }
+        }
+
+        /// Review of #2554, round 3: `{*}` kept the units it sold below a
+        /// lot's resolution (`15 - 1e-28` rounds to `15`), as AVERAGE did.
+        #[test]
+        fn a_merge_sale_below_the_pool_resolution_is_an_overflow() {
+            let merge = CostSpec {
+                merge: true,
+                ..CostSpec::default()
+            };
+            let mut inv = mk([corp(d(10), d(1), 1), corp(d(5), d(2), 2)]);
+            let r = inv.reduce(
+                &sell(Decimal::new(1, 28)),
+                Some(&merge),
+                BookingMethod::Strict,
+            );
+            assert!(is_overflow(&r), "got {r:?}");
+            assert_eq!(holdings(&inv), [d(10), d(5)]);
+        }
+
+        /// Review of #2554, round 3: NONE's exact recount took the surviving
+        /// lots' scale (`2`), where the short has always been booked at the
+        /// cached total's (`2.000`, the widest seen). Recount only when the
+        /// cache is wrong.
+        #[test]
+        fn a_none_short_keeps_the_cached_scale() {
+            let mut inv = mk([corp(dec!(1.000), d(1), 1), corp(d(2), d(1), 2)]);
+            inv.reduce(&sell(dec!(1.000)), None, BookingMethod::None)
+                .expect("drains the first lot");
+            let r = inv
+                .reduce(&sell(d(5)), None, BookingMethod::None)
+                .expect("NONE shorts");
+            let matched: Vec<String> = r
+                .matched
+                .iter()
+                .map(|p| p.units.number.to_string())
+                .collect();
+            assert_eq!(matched, ["2.000"]);
+            let lots: Vec<String> = holdings(&inv).iter().map(ToString::to_string).collect();
+            assert_eq!(lots, ["-3.000"]);
         }
 
         /// Review of #2554: the fix first adjusted the units cache by the

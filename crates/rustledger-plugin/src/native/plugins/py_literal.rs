@@ -61,8 +61,14 @@ impl PyValue {
 /// A message naming what was found where a literal, or the end of the text,
 /// was expected.
 pub fn parse(source: &str) -> Result<PyValue, String> {
+    // Python reads `\r\n` and a lone `\r` as `\n`, inside strings too, so a
+    // config written in a CRLF ledger parses the same as in an LF one.
     let mut parser = Parser {
-        chars: source.chars().collect(),
+        chars: source
+            .replace("\r\n", "\n")
+            .replace('\r', "\n")
+            .chars()
+            .collect(),
         pos: 0,
     };
     // Blank lines, comments and indentation before the literal are ignored,
@@ -593,6 +599,14 @@ mod tests {
             ("{}\\\n ", "dict0"),
             ("{}\\\n\\\n", "ERR"),
             ("[1,\\\n", "ERR"),
+            ("{\\\r\n}", "dict0"),
+            ("{}\\\r\n\r\n", "dict0"),
+            ("{\r\n'a': 1\r\n}", "dict1"),
+            ("'a\\\r\nb'", "str:ab"),
+            ("\r\n{}", "dict0"),
+            ("{}\r", "dict0"),
+            ("{\r}", "dict0"),
+            ("'a\rb'", "ERR"),
         ];
         let mut wrong = Vec::new();
         for (source, want) in cases {

@@ -10,7 +10,8 @@ N 500, classified by Python 3.13; the Rust test
 `the_config_reads_as_literal_eval_reads_it_on_generated_configs` checks
 `parse_config` against it. Configs come from a small grammar (every quote
 style and prefix, escapes, implicit concatenation, comments, line
-continuations, trailing commas, repeated keys, extra keys, non-string values)
+continuations, CR and CRLF line breaks, trailing commas, repeated keys, extra
+keys, non-string values)
 plus random character mutations."""
 import ast, json, random, sys, warnings
 warnings.simplefilter("ignore")
@@ -37,7 +38,7 @@ def qstr(s):
         i = rng.randrange(1, len(body)); return q + body[:i] + q + " " + q + body[i:] + q
     return q + body + q
 def ws():
-    return rng.choice(["", " ", "  ", "\n", " # c\n", "\t", "\\\n"])
+    return rng.choice(["", " ", "  ", "\n", " # c\n", "\t", "\\\n", "\r\n", "\\\r\n", "\r"])
 def value():
     r = rng.random()
     if r < 0.97: return qstr(rng.choice(ACC))
@@ -62,7 +63,7 @@ def config():
     if rng.random() < 0.05: body = "(" + body + ")"
     if rng.random() < 0.1: body = ws() + body + ws()
     return body
-ALPHA = "{}[]()'\":,#\\\n rbuxj0_.-+é"
+ALPHA = "{}[]()'\":,#\\\n\r rbuxj0_.-+é"
 def mutate(s):
     for _ in range(rng.choice([1, 1, 2, 3])):
         if not s: s = rng.choice(ALPHA); continue

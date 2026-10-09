@@ -359,23 +359,32 @@ impl Inventory {
         )
     }
 
-    /// Whether the EXACT total of `units.currency`, once `units` is booked,
-    /// is within `Decimal`'s range.
+    /// Whether the EXACT total of `currency` is within `Decimal`'s range once
+    /// the pool (the slots `in_pool` names) is replaced by one lot of
+    /// `remainder` units.
     ///
     /// For AVERAGE and the `{*}` merge, which rebuild the caches from the
     /// lots afterwards: the rebuild totals the lots exactly, so the cached
     /// (possibly rounded, #2363) total that [`Self::net_after`] reads can pass
     /// a reduction whose exact total the rebuild then cannot hold -- a
     /// `rebuild_index` assertion in debug, a wrong cached total in release
-    /// (#2554 review). Both paths are O(lots) already.
-    fn exact_total_after_in_range(&self, units: &Amount) -> bool {
+    /// (#2554 review). The remainder is taken as it will be STORED: the pool
+    /// total it comes from may itself have rounded (`...333.5` up to
+    /// `...334`), so "the lots plus the sale" is not what the rebuild sees.
+    /// Both paths are O(lots) already.
+    fn exact_total_after_in_range(
+        &self,
+        currency: &crate::Currency,
+        in_pool: impl Fn(usize) -> bool,
+        remainder: Decimal,
+    ) -> bool {
         let exact: bigdecimal::BigDecimal = self
             .positions
-            .iter()
-            .filter(|p| p.units.currency == units.currency)
-            .map(|p| crate::to_bigdecimal(p.units.number))
+            .iter_slots()
+            .filter(|(i, p)| p.units.currency == *currency && !in_pool(*i))
+            .map(|(_, p)| crate::to_bigdecimal(p.units.number))
             .sum::<bigdecimal::BigDecimal>()
-            + crate::to_bigdecimal(units.number);
+            + crate::to_bigdecimal(remainder);
         exact.abs() <= crate::to_bigdecimal(Decimal::MAX)
     }
 
@@ -1336,7 +1345,11 @@ impl Inventory {
             total_units.checked_add(units.number)
         }
         .ok_or_else(overflow)?;
-        if !self.exact_total_after_in_range(units) {
+        if !self.exact_total_after_in_range(
+            &units.currency,
+            |i| matching_slots.contains(&i),
+            new_units,
+        ) {
             return Err(overflow());
         }
 
@@ -1569,7 +1582,11 @@ impl Inventory {
             total_units.checked_add(units.number)
         }
         .ok_or_else(overflow)?;
-        if !self.exact_total_after_in_range(units) {
+        if !self.exact_total_after_in_range(
+            &units.currency,
+            |i| matching_indices.contains(&i),
+            remaining,
+        ) {
             return Err(overflow());
         }
 
@@ -3817,6 +3834,40 @@ mod reduction_tests {
                 BookingMethod::None,
             );
             assert!(r.is_ok(), "got {r:?}");
+        }
+
+        /// Review of #2554, round 6: the pooled range check added the sale to
+        /// the lots, but the stored remainder comes from a pool total that
+        /// may round (`...333 + 0.5` is stored as `...334`), so the exact
+        /// total became `MAX + 0.5`: a rebuild assertion in debug, `units()`
+        /// reading `1.5` in release.
+        #[test]
+        fn a_pooled_remainder_is_checked_as_stored() {
+            let build = || {
+                let mut inv = mk([corp(
+                    Decimal::from_str_exact("79228162514264337593543950333").unwrap(),
+                    d(1),
+                    1,
+                )]);
+                inv.add(Position::simple(Amount::new(dec!(1.5), "CORP")))
+                    .expect("fits");
+                inv.add(corp(dec!(0.5), d(2), 2)).expect("exactly MAX");
+                inv
+            };
+            let merge = CostSpec {
+                merge: true,
+                ..CostSpec::default()
+            };
+            for (spec, method) in [
+                (None, BookingMethod::Average),
+                (Some(&merge), BookingMethod::Strict),
+            ] {
+                let mut inv = build();
+                let before = holdings(&inv);
+                let r = inv.reduce(&sell(Decimal::new(1, 28)), spec, method);
+                assert!(is_overflow(&r), "{method:?}: got {r:?}");
+                assert_eq!(holdings(&inv), before, "{method:?}");
+            }
         }
 
         /// Review of #2554: the fix first adjusted the units cache by the

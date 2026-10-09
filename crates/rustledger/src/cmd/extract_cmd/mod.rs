@@ -58,6 +58,7 @@
 mod config;
 mod duplicate;
 mod ledger_profile;
+mod ledgers;
 mod suggest;
 
 use crate::cmd::completions::ShellType;
@@ -481,16 +482,29 @@ pub fn list_importers_with_writer<W: Write>(args: &Args, out: &mut W) -> Result<
 fn resolve_config_entry<'a>(
     args: &Args,
     importers_file: &'a ImportersFile,
+    file: &Path,
     filename: &str,
 ) -> Result<Option<&'a rustledger_importer::toml_entry::ImporterEntry>> {
-    resolve_config_entry_named(args.importer.as_deref(), importers_file, filename)
+    resolve_config_entry_named(
+        args,
+        args.importer.as_deref(),
+        importers_file,
+        file,
+        filename,
+    )
 }
 
 /// As [`resolve_config_entry`], but with the entry name supplied explicitly so
 /// a `--ledger` profile can name one (#2257) without forging an `Args`.
+///
+/// `file` is the statement as the user gave it (before any `preprocess`):
+/// when several entries match `filename`, its header settles which one
+/// applies (see [`entries_the_header_allows`]).
 fn resolve_config_entry_named<'a>(
+    args: &Args,
     importer_name: Option<&str>,
     importers_file: &'a ImportersFile,
+    file: &Path,
     filename: &str,
 ) -> Result<Option<&'a rustledger_importer::toml_entry::ImporterEntry>> {
     if let Some(name) = importer_name {
@@ -516,14 +530,108 @@ fn resolve_config_entry_named<'a>(
             ))
         }
         _ => {
+            let (allowed, why) = entries_the_header_allows(args, &matches, file);
+            if let [only] = allowed.as_slice() {
+                return Ok(Some(only));
+            }
             let names: Vec<&str> = matches.iter().map(|e| e.name.as_str()).collect();
             Err(anyhow!(
-                "Multiple importers match file '{}': {}. Use --importer to select one.",
+                "Multiple importers match file '{}': {}. Use --importer to select one.\n  \
+                 the file's header did not settle it:\n    {}",
                 filename,
-                names.join(", ")
+                names.join(", "),
+                why.join("\n    ")
             ))
         }
     }
+}
+
+/// Of several entries whose `filename_pattern` matches a file, the ones its
+/// header allows, plus one line per entry saying why (#2295).
+///
+/// An entry is ruled out only when a column it configures BY NAME is missing
+/// from the file's header, read with that entry's own delimiter and header
+/// setting, exactly as extraction would read it. Starling's GBP and EUR
+/// statements share a filename shape and differ only in `Amount (GBP)` versus
+/// `Amount (EUR)`, so two entries naming those columns are told apart by the
+/// header alone.
+///
+/// Everything the header cannot speak to is kept, never guessed away: an
+/// entry for another format (`type = "ofx"`), one that runs `preprocess` (its
+/// columns describe the command's output, not this file), a headerless one,
+/// one that names no columns (indices or the defaults only), one whose config
+/// does not build, and every entry when the file cannot be read as text. So a
+/// single survivor is the only entry that could read the file, and anything
+/// else stays the existing "multiple importers match" refusal.
+///
+/// CLI column flags are applied first, as they will be to the entry used, so
+/// `--amount-column` counts as configuring that column.
+fn entries_the_header_allows<'a>(
+    args: &Args,
+    candidates: &[&'a rustledger_importer::toml_entry::ImporterEntry],
+    file: &Path,
+) -> (
+    Vec<&'a rustledger_importer::toml_entry::ImporterEntry>,
+    Vec<String>,
+) {
+    let content = fs::read_to_string(file);
+    let mut allowed = Vec::new();
+    let mut why = Vec::new();
+    for &entry in candidates {
+        let name = &entry.name;
+        let merged = overlay_cli_args(entry, args);
+        let verdict: std::result::Result<Vec<(&str, String)>, String> = (|| {
+            match merged.entry_format() {
+                Ok(EntryFormat::Csv) => {}
+                Ok(_) => return Err("is not a CSV entry, so its columns cannot be checked".into()),
+                Err(e) => return Err(format!("cannot be checked: {e}")),
+            }
+            if merged.preprocess.is_some() {
+                return Err("runs `preprocess`, so it reads the command's output, \
+                            not this file's header"
+                    .into());
+            }
+            let named = merged
+                .named_columns()
+                .map_err(|e| format!("cannot be checked: {e}"))?;
+            if named.is_empty() {
+                return Err("names no columns by name, so the header cannot rule it out".into());
+            }
+            let config =
+                build_config_from_entry(&merged).map_err(|e| format!("cannot be checked: {e}"))?;
+            let rustledger_importer::config::ImporterType::Csv(csv) = &config.importer_type;
+            let content = content
+                .as_ref()
+                .map_err(|e| format!("cannot be checked: the file could not be read ({e})"))?;
+            let header = CsvImporter::header(content, csv)
+                .map_err(|e| format!("cannot be checked: the header could not be read ({e})"))?
+                .ok_or_else(|| {
+                    "reads files with no header row, so its columns cannot be checked".to_string()
+                })?;
+            Ok(named
+                .into_iter()
+                .filter(|(_, column)| !header.contains(column))
+                .collect())
+        })();
+        match verdict {
+            Ok(missing) if missing.is_empty() => {
+                allowed.push(entry);
+                why.push(format!("'{name}': has every column it names"));
+            }
+            Ok(missing) => {
+                let missing: Vec<String> = missing
+                    .iter()
+                    .map(|(key, column)| format!("{key} {column:?}"))
+                    .collect();
+                why.push(format!("'{name}': header has no {}", missing.join(", ")));
+            }
+            Err(reason) => {
+                allowed.push(entry);
+                why.push(format!("'{name}': {reason}"));
+            }
+        }
+    }
+    (allowed, why)
 }
 
 /// Run the resolved config entry's external `preprocess` command, if any.
@@ -655,7 +763,7 @@ fn resolve_preprocess_argv(args: &Args, file: &Path) -> Result<Option<Vec<String
     // it separately here meant this path had no single-importer fallback and
     // ran the command on the FIRST of several matches, before the other branch
     // reported the ambiguity — a side effect ahead of an error.
-    let entry = resolve_config_entry(args, &importers_file, &filename)?;
+    let entry = resolve_config_entry(args, &importers_file, file, &filename)?;
     let Some(argv) = entry.and_then(|e| e.preprocess.as_ref()) else {
         return Ok(None);
     };
@@ -947,6 +1055,7 @@ fn resolve_entry_currency(
     config: ImporterConfig,
     entry_name: Option<&str>,
     args: &Args,
+    loaded: &mut ledgers::Ledgers,
     report: &mut impl Write,
 ) -> Result<ImporterConfig> {
     let mut ledgers: Vec<&Path> = Vec::new();
@@ -979,7 +1088,7 @@ fn resolve_entry_currency(
         // posting. The configured value still wins (it is what the user
         // asked for), but say so now rather than after the import.
         for path in &ledgers {
-            let lookup = ledger_profile::open_currencies(path, &config.account)?;
+            let lookup = ledger_profile::open_currencies(loaded, path, &config.account)?;
             if let Some(allowed) = lookup.currencies {
                 if !allowed.is_empty() && !allowed.contains(currency) {
                     writeln!(
@@ -998,7 +1107,7 @@ fn resolve_entry_currency(
     }
     let mut why = Vec::new();
     for path in &ledgers {
-        let lookup = ledger_profile::open_currencies(path, &config.account)?;
+        let lookup = ledger_profile::open_currencies(loaded, path, &config.account)?;
         match lookup.currencies {
             Some(currencies) => match currencies.as_slice() {
                 [one] => {
@@ -1099,8 +1208,10 @@ fn load_minimal_entry(
         .and_then(std::ffi::OsStr::to_str)
         .unwrap_or_default();
     let Some(entry) = resolve_config_entry_named(
+        args,
         importer_name.or(args.importer.as_deref()),
         &importers_file,
+        file,
         filename,
     )?
     else {
@@ -1434,6 +1545,20 @@ pub fn run(args: &Args, file: &Path) -> Result<()> {
 /// default stdout sink for the formatted directives is redirected to the
 /// injected writer.
 pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Result<()> {
+    run_with_ledgers(args, file, out, &mut ledgers::Ledgers::default())
+}
+
+/// [`run_with_writer`], reading `--ledger` and `--existing` through `ledgers`.
+///
+/// Every reader of those files (the profile lookup, the currency lookup and
+/// dedup) goes through the one `Ledgers`, so each path is loaded once per run
+/// however many of them need it (#2503).
+fn run_with_ledgers<W: Write>(
+    args: &Args,
+    file: &Path,
+    out: &mut W,
+    ledgers: &mut ledgers::Ledgers,
+) -> Result<()> {
     // Validate the output target BEFORE any extraction work, so a run that
     // cannot safely write never reports having extracted anything (#2251).
     validate_output_target(args)?;
@@ -1475,7 +1600,7 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
         Some(ledger_path) => {
             // Loaded even when it will not be applied, so a broken ledger is
             // still reported: `--ledger` is an explicit request to read it.
-            let profiles = ledger_profile::load_profiles(ledger_path)?;
+            let profiles = ledger_profile::load_profiles(ledgers, ledger_path)?;
             let filename = source_file
                 .file_name()
                 .and_then(std::ffi::OsStr::to_str)
@@ -1690,8 +1815,8 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
                 .file_name()
                 .map(|s| s.to_string_lossy())
                 .unwrap_or_default();
-            let entry =
-                resolve_config_entry(args, &importers_file, &filename)?.ok_or_else(|| {
+            let entry = resolve_config_entry(args, &importers_file, source_file, &filename)?
+                .ok_or_else(|| {
                     anyhow!("No importer matches file '{filename}'. Use --importer to select one.")
                 })?;
 
@@ -1863,6 +1988,7 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
             config,
             used_entry.as_deref(),
             args,
+            ledgers,
             &mut io::stderr().lock(),
         )?;
 
@@ -1871,7 +1997,14 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
 
     // `importer` was selected earlier so we could route config-
     // building correctly; here it's used for the actual dispatch.
-    let result = importer.extract(file, &config)?;
+    let mut result = importer.extract(file, &config)?;
+
+    // Oldest first, keeping the export's sequence within a day, for every
+    // importer type (#2319). Once, here: after the importer, so a CSV, OFX
+    // and WASM statement are ordered by the same rule, and before dedup, so
+    // the skip report lists rows in the order they are written. The
+    // `--balance` assertion is appended after both and so stays last.
+    result.directives = rustledger_importer::order::chronological(result.directives);
 
     // Print warnings
     for warning in &result.warnings {
@@ -1904,7 +2037,7 @@ pub fn run_with_writer<W: Write>(args: &Args, file: &Path, out: &mut W) -> Resul
     // ML-based account suggestions for transactions the rules engine left
     // pointing at a fallback account.
     let directives = if let Some(ref existing_path) = args.existing {
-        let existing = duplicate::load_existing(existing_path)?;
+        let existing = duplicate::load_existing(ledgers, existing_path)?;
         if let Some(warning) = &existing.warning {
             eprintln!("warning: {warning}");
         }
@@ -4348,7 +4481,7 @@ default_expense = "Expenses:Uncategorized"
              2024-01-16 * \"Tea\n  Assets:Bank  -2.00 EUR\n  Expenses:X\n",
         )
         .unwrap();
-        let existing = duplicate::load_existing(&ledger).unwrap();
+        let existing = duplicate::load_existing(&mut ledgers::Ledgers::default(), &ledger).unwrap();
         assert!(
             existing
                 .transactions
@@ -4365,7 +4498,12 @@ default_expense = "Expenses:Uncategorized"
             "2024-01-15 * \"Coffee\"\n  Assets:Bank  -4.00 EUR\n  Expenses:X\n",
         )
         .unwrap();
-        assert!(duplicate::load_existing(&ledger).unwrap().warning.is_none());
+        assert!(
+            duplicate::load_existing(&mut ledgers::Ledgers::default(), &ledger)
+                .unwrap()
+                .warning
+                .is_none()
+        );
     }
 
     #[test]
@@ -4524,6 +4662,72 @@ default_expense = "Expenses:Uncategorized"
         );
     }
 
+    /// #2503: one ledger given as both `--ledger` and `--existing` is read by
+    /// the profile lookup, the currency lookup and dedup, and loaded once;
+    /// two different ledgers are loaded once each. The output is what three
+    /// separate loads produced: the currency comes from the `open`, and the
+    /// row already in the ledger is skipped while the new one is kept.
+    #[test]
+    fn each_ledger_is_loaded_once_per_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("importers.toml");
+        std::fs::write(
+            &config_path,
+            "[[importers]]\nname = \"bank\"\naccount = \"Assets:Bank:Euro\"\n\
+             date_column = \"Date\"\nnarration_column = \"Description\"\namount_column = \"Amount\"\n",
+        )
+        .unwrap();
+        let csv_path = dir.path().join("statement.csv");
+        std::fs::write(
+            &csv_path,
+            "Date,Description,Amount\n2024-01-15,Coffee,-5.00\n2024-01-16,Tea,-3.00\n",
+        )
+        .unwrap();
+        let main = dir.path().join("main.beancount");
+        std::fs::write(
+            &main,
+            "2024-01-01 open Assets:Bank:Euro EUR\n2024-01-01 open Expenses:X\n\
+             2024-01-15 * \"Coffee\"\n  Assets:Bank:Euro  -5.00 EUR\n  Expenses:X\n",
+        )
+        .unwrap();
+        let other = dir.path().join("other.beancount");
+        std::fs::write(&other, "2024-01-01 open Assets:Other EUR\n").unwrap();
+
+        let run_counting = |ledger: &Path, existing: &Path| {
+            let args = Args::parse_from([
+                "extract",
+                csv_path.to_str().unwrap(),
+                "--importer",
+                "bank",
+                "--config",
+                config_path.to_str().unwrap(),
+                "--ledger",
+                ledger.to_str().unwrap(),
+                "--existing",
+                existing.to_str().unwrap(),
+            ]);
+            let mut loaded = ledgers::Ledgers::default();
+            let mut out = Vec::new();
+            run_with_ledgers(&args, &csv_path, &mut out, &mut loaded).unwrap();
+            (loaded.loads, String::from_utf8(out).unwrap())
+        };
+
+        let (loads, out) = run_counting(&main, &main);
+        assert_eq!(loads, 1, "one path, three readers: {out}");
+        assert!(!out.contains("Coffee"), "the duplicate is skipped: {out}");
+        assert!(
+            out.contains("-3.00 EUR"),
+            "the new row is kept in EUR: {out}"
+        );
+
+        // `--ledger` never opens the account, so the currency lookup reads
+        // both; dedup reuses the `--existing` load.
+        let (loads, out) = run_counting(&other, &main);
+        assert_eq!(loads, 2, "two paths: {out}");
+        assert!(!out.contains("Coffee"), "{out}");
+        assert!(out.contains("-3.00 EUR"), "{out}");
+    }
+
     /// #2464: when the `open` is in an include that failed to load, the error
     /// says the ledger did not load, not that the account was never opened.
     #[test]
@@ -4561,10 +4765,15 @@ default_expense = "Expenses:Uncategorized"
             builder = builder.currency(c);
         }
         let mut report = Vec::new();
-        let out =
-            resolve_entry_currency(builder.build().unwrap(), Some("bank"), &args, &mut report)
-                .map(|c| c.currency)
-                .map_err(|e| format!("{e:#}"));
+        let out = resolve_entry_currency(
+            builder.build().unwrap(),
+            Some("bank"),
+            &args,
+            &mut ledgers::Ledgers::default(),
+            &mut report,
+        )
+        .map(|c| c.currency)
+        .map_err(|e| format!("{e:#}"));
         (out, String::from_utf8(report).unwrap())
     }
 
@@ -5195,6 +5404,170 @@ filename_pattern = "statement*"
         assert!(msg.contains("Multiple importers"));
         assert!(msg.contains("checking"));
         assert!(msg.contains("credit"));
+    }
+
+    /// Petemounce's two Starling statements (#2295): one filename shape,
+    /// told apart only by the currency in the amount and balance headers.
+    const STARLING_EUR: &str = "Date,Counter Party,Reference,Type,Amount (EUR),Balance (EUR),Spending Category,Notes\n\
+        06/01/2026,Lidl,REF2,CARD,-9.99,100.00,GROCERIES,\n";
+    const STARLING_GBP: &str = "Date,Counter Party,Reference,Type,Amount (GBP),Balance (GBP),Spending Category,Notes\n\
+        05/01/2026,Tesco,REF1,CARD,-12.34,200.00,GROCERIES,\n";
+
+    fn starling_entry(name: &str, currency: &str, extra: &str) -> String {
+        format!(
+            "[[importers]]\nname = \"{name}\"\nfilename_pattern = \"StarlingStatement_*.csv\"\n\
+             account = \"Assets:Starling\"\ncurrency = \"{currency}\"\ndate_column = \"Date\"\n\
+             date_format = \"%d/%m/%Y\"\npayee_column = \"Counter Party\"\n\
+             narration_column = \"Reference\"\n{extra}\n"
+        )
+    }
+
+    /// Resolve the entry for a statement named like Starling's, holding
+    /// `csv`, under `config`. Returns the entry's name or the error text.
+    fn resolve_starling(config: &str, csv: &str) -> std::result::Result<Option<String>, String> {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("importers.toml");
+        std::fs::write(&config_path, config).unwrap();
+        let file = dir
+            .path()
+            .join("StarlingStatement_2022-05-14_2023-05-13.csv");
+        std::fs::write(&file, csv).unwrap();
+        let args = Args::parse_from(["extract", file.to_str().unwrap()]);
+        let importers = load_importers_config(&config_path).unwrap();
+        resolve_config_entry(
+            &args,
+            &importers,
+            &file,
+            "StarlingStatement_2022-05-14_2023-05-13.csv",
+        )
+        .map(|e| e.map(|e| e.name.clone()))
+        .map_err(|e| format!("{e:#}"))
+    }
+
+    fn starling_config() -> String {
+        starling_entry("starling-gbp", "GBP", "amount_column = \"Amount (GBP)\"")
+            + &starling_entry("starling-eur", "EUR", "amount_column = \"Amount (EUR)\"")
+    }
+
+    /// #2295: two entries match by filename; the header's `Amount (...)`
+    /// column picks the one whose columns are all there, for either file.
+    #[test]
+    fn the_header_picks_between_entries_matching_one_filename() {
+        let config = starling_config();
+        assert_eq!(
+            resolve_starling(&config, STARLING_GBP).unwrap().as_deref(),
+            Some("starling-gbp")
+        );
+        assert_eq!(
+            resolve_starling(&config, STARLING_EUR).unwrap().as_deref(),
+            Some("starling-eur")
+        );
+    }
+
+    /// #2295 end to end: the selected entry's currency is what the rows carry.
+    #[test]
+    fn a_header_selected_entry_imports_in_its_currency() {
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("importers.toml");
+        std::fs::write(&config_path, starling_config()).unwrap();
+        for (csv, want) in [(STARLING_EUR, "-9.99 EUR"), (STARLING_GBP, "-12.34 GBP")] {
+            let file = dir
+                .path()
+                .join("StarlingStatement_2022-05-14_2023-05-13.csv");
+            std::fs::write(&file, csv).unwrap();
+            let args = Args::parse_from([
+                "extract",
+                file.to_str().unwrap(),
+                "--config",
+                config_path.to_str().unwrap(),
+            ]);
+            let mut out = Vec::new();
+            run_with_writer(&args, &file, &mut out).unwrap();
+            let out = String::from_utf8(out).unwrap();
+            assert!(out.contains(want), "{want}: {out}");
+        }
+    }
+
+    /// #2295: when the header rules out every candidate, the refusal stays,
+    /// and says per entry which configured columns the header lacks.
+    #[test]
+    fn no_entry_fitting_the_header_lists_missing_columns_per_entry() {
+        let usd = STARLING_GBP.replace("(GBP)", "(USD)");
+        let err = resolve_starling(&starling_config(), &usd).unwrap_err();
+        assert!(
+            err.contains("Multiple importers match file 'StarlingStatement_2022-05-14_2023-05-13.csv': starling-gbp, starling-eur"),
+            "{err}"
+        );
+        assert!(
+            err.contains("'starling-gbp': header has no amount_column \"Amount (GBP)\""),
+            "{err}"
+        );
+        assert!(
+            err.contains("'starling-eur': header has no amount_column \"Amount (EUR)\""),
+            "{err}"
+        );
+    }
+
+    /// #2295: entries that both fit the header are still ambiguous.
+    #[test]
+    fn several_entries_fitting_the_header_are_still_refused() {
+        let config = starling_entry("a", "GBP", "amount_column = \"Amount (GBP)\"")
+            + &starling_entry("b", "EUR", "amount_column = \"Amount (GBP)\"");
+        let err = resolve_starling(&config, STARLING_GBP).unwrap_err();
+        assert!(err.contains("Multiple importers match"), "{err}");
+        assert!(err.contains("'a': has every column it names"), "{err}");
+        assert!(err.contains("'b': has every column it names"), "{err}");
+    }
+
+    /// #2295: what the header cannot judge is never ruled out: an index-only
+    /// entry, a headerless one, an OFX one and a `preprocess` one all stay
+    /// candidates beside the entry the header fits, so the refusal stands
+    /// and says why for each.
+    #[test]
+    fn entries_the_header_cannot_judge_are_kept() {
+        let fits = starling_entry("fits", "GBP", "amount_column = \"Amount (GBP)\"");
+        let cases = [
+            (
+                "[[importers]]\nname = \"other\"\nfilename_pattern = \"StarlingStatement_*.csv\"\n\
+                 account = \"Assets:X\"\ncurrency = \"GBP\"\ndate_column = 0\namount_column = 4\n",
+                "names no columns by name",
+            ),
+            (
+                "[[importers]]\nname = \"other\"\nfilename_pattern = \"StarlingStatement_*.csv\"\n\
+                 account = \"Assets:X\"\ncurrency = \"GBP\"\nskip_header = true\ndate_column = 0\n\
+                 amount_column = \"Nope\"\n",
+                "no header row",
+            ),
+            (
+                "[[importers]]\nname = \"other\"\ntype = \"ofx\"\n\
+                 filename_pattern = \"StarlingStatement_*.csv\"\naccount = \"Assets:X\"\n",
+                "is not a CSV entry",
+            ),
+            (
+                "[[importers]]\nname = \"other\"\nfilename_pattern = \"StarlingStatement_*.csv\"\n\
+                 account = \"Assets:X\"\ncurrency = \"GBP\"\namount_column = \"Nope\"\n\
+                 preprocess = [\"cat\", \"{input}\"]\n",
+                "runs `preprocess`",
+            ),
+        ];
+        for (other, reason) in cases {
+            let err = resolve_starling(&format!("{fits}{other}"), STARLING_GBP).unwrap_err();
+            assert!(err.contains("Multiple importers match"), "{reason}: {err}");
+            assert!(err.contains("'other': "), "{reason}: {err}");
+            assert!(err.contains(reason), "{reason}: {err}");
+        }
+    }
+
+    /// #2295: a single filename match is used as before, even when its
+    /// columns are not in the header (extraction then reports that).
+    #[test]
+    fn a_single_filename_match_is_not_checked_against_the_header() {
+        let config = starling_entry("only", "EUR", "amount_column = \"Amount (EUR)\"")
+            + "[[importers]]\nname = \"elsewhere\"\nfilename_pattern = \"*.ofx\"\naccount = \"Assets:Y\"\n";
+        assert_eq!(
+            resolve_starling(&config, STARLING_GBP).unwrap().as_deref(),
+            Some("only")
+        );
     }
 
     #[test]

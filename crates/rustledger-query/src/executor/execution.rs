@@ -450,6 +450,69 @@ impl Executor<'_> {
         })
     }
 
+    /// `select` with hidden targets carrying `weight`, `cost` and the lot
+    /// total of each of its columns that can pass a posting's `position`
+    /// through, for a table that stores its rows (`CREATE TABLE ... AS
+    /// SELECT`, `INSERT ... SELECT`), or `None` when there is none (#2441).
+    ///
+    /// A subquery computes these for the columns its outer query reads
+    /// ([`Self::with_hidden_posting_columns`]). A stored table has no outer
+    /// query yet, so it keeps them for every column that can need them: a
+    /// bare `position`, renamed or not; a column of a stored table that
+    /// keeps them itself; and any bare column of a subquery, which computes
+    /// them only for the columns that pass a posting through. Without them a
+    /// table answered `weight(position)` from the `Position` value, which
+    /// has no price, and `cost` / `sum` from the per-unit cost a `{{T}}` lot
+    /// rounds to: `10 EUR` for `10 EUR @ 1.10 USD`, and
+    /// `500.00000000000000000000000001 USD` for `3 X {{500 USD}}`.
+    ///
+    /// The values are stored in the same NUL-named columns `#postings` and
+    /// subqueries use (see `hidden_weight_column`), which the row evaluator
+    /// reads for any table and `SELECT *` never shows.
+    pub(super) fn with_stored_posting_columns(&self, select: &SelectQuery) -> Option<SelectQuery> {
+        let from = select.from.as_ref();
+        let from_subquery = from.is_some_and(|f| f.subquery.is_some());
+        let from_table = from
+            .and_then(|f| f.table_name.as_ref())
+            .and_then(|name| self.tables.get(&name.to_uppercase()));
+        let mut reads: Vec<Target> = Vec::new();
+        let mut read = |column: String| {
+            for function in ["WEIGHT", "COST", "SUM"] {
+                reads.push(Target {
+                    expr: Expr::Function(FunctionCall {
+                        name: function.to_string(),
+                        args: vec![Expr::Column(column.clone())],
+                    }),
+                    alias: None,
+                });
+            }
+        };
+        for target in &select.targets {
+            match &target.expr {
+                Expr::Wildcard => read("position".to_string()),
+                Expr::Column(source) => {
+                    let carries = source.eq_ignore_ascii_case("position")
+                        || from_subquery
+                        || from_table.is_some_and(|t| {
+                            let hidden = super::hidden_weight_column(source);
+                            t.columns.contains(&hidden)
+                        });
+                    if carries {
+                        read(target.alias.as_ref().map_or_else(
+                            || self.expr_to_name(&target.expr),
+                            |alias| alias.to_lowercase(),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if reads.is_empty() {
+            return None;
+        }
+        self.with_hidden_posting_columns(&SelectQuery::new(reads), select)
+    }
+
     /// Execute a SELECT query that sources from a subquery.
     pub(super) fn execute_select_from_subquery(
         &self,
@@ -1659,12 +1722,15 @@ impl Executor<'_> {
         }
 
         let table = if let Some(select) = &create.as_select {
-            // CREATE TABLE ... AS SELECT ...
-            let result = self.execute_select(select)?;
+            // CREATE TABLE ... AS SELECT ..., keeping the posting-derived
+            // values of its posting columns beside them (#2441).
+            let stored = self.with_stored_posting_columns(select);
+            let result = self.execute_select(stored.as_ref().unwrap_or(select))?;
             Table {
                 columns: result.columns,
                 rows: result.rows,
-                // A CREATE TABLE ... AS SELECT result hides nothing.
+                // Nothing beyond the NUL-named columns, which every table
+                // hides (`wildcard_hidden`).
                 hidden: Vec::new(),
             }
         } else {
@@ -1690,134 +1756,152 @@ impl Executor<'_> {
         insert: &InsertStmt,
     ) -> Result<QueryResult, QueryError> {
         let table_name = insert.table_name.to_uppercase();
-
-        // Check if table exists
-        if !self.tables.contains_key(&table_name) {
+        let Some(table) = self.tables.get(&table_name) else {
             return Err(QueryError::Evaluation(format!(
                 "table '{}' does not exist",
                 insert.table_name
             )));
-        }
+        };
 
-        // Get the table's column count for validation
-        let table_column_count = self
-            .tables
-            .get(&table_name)
-            .expect("table existence verified above")
-            .columns
-            .len();
+        // The columns an INSERT writes: all but the NUL-named ones holding
+        // each row's posting-derived values (#2441), which no query names.
+        let visible: Vec<usize> = (0..table.columns.len())
+            .filter(|&i| !table.columns[i].starts_with('\u{0}'))
+            .collect();
+        // The table column each inserted value goes to.
+        let targets: Vec<usize> = match &insert.columns {
+            Some(cols) => cols
+                .iter()
+                .map(|c| {
+                    visible
+                        .iter()
+                        .copied()
+                        .find(|&i| table.columns[i].eq_ignore_ascii_case(c))
+                        .ok_or_else(|| {
+                            QueryError::Evaluation(format!(
+                                "column '{}' does not exist in table '{}'",
+                                c, insert.table_name
+                            ))
+                        })
+                })
+                .collect::<Result<_, _>>()?,
+            None => visible.clone(),
+        };
+        let width_mismatch = |found: String| {
+            QueryError::Evaluation(match &insert.columns {
+                Some(cols) => format!("INSERT has {} columns but {found}", cols.len()),
+                None => format!("table has {} columns but {found}", visible.len()),
+            })
+        };
+        let keeps_posting_values = visible.len() < table.columns.len();
 
-        let rows_to_insert: Vec<Vec<Value>> = match &insert.source {
+        // Each inserted row's values, and for a SELECT the result's columns,
+        // whose hidden ones carry the posting-derived values of the posting
+        // columns it passes through.
+        let (rows_to_insert, source): (Vec<Vec<Value>>, Option<Vec<String>>) = match &insert.source
+        {
             InsertSource::Values(value_rows) => {
-                // Evaluate each row of expressions
                 let mut rows = Vec::with_capacity(value_rows.len());
                 for value_row in value_rows {
-                    // Validate column count
-                    if let Some(ref cols) = insert.columns {
-                        if value_row.len() != cols.len() {
-                            return Err(QueryError::Evaluation(format!(
-                                "INSERT has {} columns but VALUES has {} values",
-                                cols.len(),
-                                value_row.len()
-                            )));
-                        }
-                    } else if value_row.len() != table_column_count {
-                        return Err(QueryError::Evaluation(format!(
-                            "table has {} columns but VALUES has {} values",
-                            table_column_count,
+                    if value_row.len() != targets.len() {
+                        return Err(width_mismatch(format!(
+                            "VALUES has {} values",
                             value_row.len()
                         )));
                     }
-
-                    // Evaluate each expression in the row
-                    let mut row = Vec::with_capacity(value_row.len());
-                    for expr in value_row {
-                        let value = self.evaluate_literal_expr(expr)?;
-                        row.push(value);
-                    }
+                    let row = value_row
+                        .iter()
+                        .map(|expr| self.evaluate_literal_expr(expr))
+                        .collect::<Result<Vec<_>, _>>()?;
                     rows.push(row);
                 }
-                rows
+                (rows, None)
             }
             InsertSource::Select(select) => {
-                // Execute the SELECT and use its results
-                let result = self.execute_select(select)?;
-
-                // Validate column count
-                if let Some(ref cols) = insert.columns {
-                    if result.columns.len() != cols.len() {
-                        return Err(QueryError::Evaluation(format!(
-                            "INSERT has {} columns but SELECT returns {} columns",
-                            cols.len(),
-                            result.columns.len()
-                        )));
-                    }
-                } else if result.columns.len() != table_column_count {
-                    return Err(QueryError::Evaluation(format!(
-                        "table has {} columns but SELECT returns {} columns",
-                        table_column_count,
-                        result.columns.len()
-                    )));
+                // A table that keeps posting-derived values gets them for the
+                // rows inserted too, or they would answer from the value
+                // (#2441).
+                let stored = keeps_posting_values
+                    .then(|| self.with_stored_posting_columns(select))
+                    .flatten();
+                let result = self.execute_select(stored.as_ref().unwrap_or(select))?;
+                let shown = result
+                    .columns
+                    .iter()
+                    .filter(|c| !c.starts_with('\u{0}'))
+                    .count();
+                if shown != targets.len() {
+                    return Err(width_mismatch(format!("SELECT returns {shown} columns")));
                 }
-
-                result.rows
+                (result.rows, Some(result.columns))
             }
         };
 
-        let rows_inserted = rows_to_insert.len();
-
-        // Insert rows into the table
-        if let Some(ref cols) = insert.columns {
-            // Insert with specific columns - need to map to table column positions
-            let table = self
-                .tables
-                .get(&table_name)
-                .expect("table existence verified above");
-            let col_indices: Vec<Option<usize>> = cols
-                .iter()
-                .map(|c| {
-                    table
-                        .columns
-                        .iter()
-                        .position(|tc| tc.eq_ignore_ascii_case(c))
-                })
-                .collect();
-
-            // Validate all column names exist
-            for (i, idx) in col_indices.iter().enumerate() {
-                if idx.is_none() {
-                    return Err(QueryError::Evaluation(format!(
-                        "column '{}' does not exist in table '{}'",
-                        cols[i], insert.table_name
-                    )));
+        // A row's hidden cells start as "no posting": NULL, with each failure
+        // flag TRUE, so `weight`, `cost` and `sum` take the value path, which
+        // is all a row without a posting has.
+        let template: Vec<Value> = table
+            .columns
+            .iter()
+            .map(|c| {
+                if c.starts_with('\u{0}') && c.ends_with(") error") {
+                    Value::Boolean(true)
+                } else {
+                    Value::Null
                 }
-            }
-
-            // Build full rows with NULLs for missing columns
-            let table = self
-                .tables
-                .get_mut(&table_name)
-                .expect("table existence verified above");
-            for value_row in rows_to_insert {
-                let mut full_row = vec![Value::Null; table_column_count];
-                for (i, value) in value_row.into_iter().enumerate() {
-                    // Use .get() for defensive bounds checking even though validation
-                    // should guarantee lengths match
-                    if let Some(idx) = col_indices.get(i).copied().flatten() {
-                        full_row[idx] = value;
+            })
+            .collect();
+        // For each inserted value, the (table, source) cells of its hidden
+        // values that both sides have.
+        let index = |columns: &[String], name: &str| columns.iter().position(|c| c == name);
+        let mut copies: Vec<(usize, usize)> = Vec::new();
+        let mut value_at: Vec<usize> = Vec::with_capacity(targets.len());
+        match &source {
+            Some(columns) => {
+                for (k, (i, name)) in columns
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| !c.starts_with('\u{0}'))
+                    .enumerate()
+                {
+                    value_at.push(i);
+                    let table_column = &table.columns[targets[k]];
+                    for (kind, suffix) in [
+                        ("weight", ""),
+                        ("weight", " error"),
+                        ("cost", ""),
+                        ("cost", " error"),
+                        ("lot total", ""),
+                    ] {
+                        if let (Some(to), Some(from)) = (
+                            index(
+                                &table.columns,
+                                &super::hidden_name(kind, table_column, suffix),
+                            ),
+                            index(columns, &super::hidden_name(kind, name, suffix)),
+                        ) {
+                            copies.push((to, from));
+                        }
                     }
                 }
-                table.add_row(full_row);
             }
-        } else {
-            // Insert all columns in order
-            let table = self
-                .tables
-                .get_mut(&table_name)
-                .expect("table existence verified above");
-            for row in rows_to_insert {
-                table.add_row(row);
+            None => value_at.extend(0..targets.len()),
+        }
+
+        let rows_inserted = rows_to_insert.len();
+        let table = self
+            .tables
+            .get_mut(&table_name)
+            .expect("table existence verified above");
+        for mut source_row in rows_to_insert {
+            let mut row = template.clone();
+            for (&to, &from) in targets.iter().zip(&value_at) {
+                row[to] = std::mem::replace(&mut source_row[from], Value::Null);
             }
+            for &(to, from) in &copies {
+                row[to] = std::mem::replace(&mut source_row[from], Value::Null);
+            }
+            table.add_row(row);
         }
 
         // Return result with row count

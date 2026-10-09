@@ -15,8 +15,8 @@
 //! silently. Once the paths are unified these stay green by construction — and
 //! re-divergence becomes a test failure here.
 
-use super::Executor;
 use super::types::{PostingContext, Value};
+use super::{Executor, PostingRow};
 use crate::ast::{Expr, FunctionCall, Literal, QuotedString};
 use crate::error::QueryError;
 use rust_decimal_macros::dec;
@@ -67,13 +67,13 @@ fn run_both(
         .collect::<Option<Vec<Expr>>>()
         .map(|lit_args| {
             let txn = scratch_txn();
-            let ctx = PostingContext {
+            let ctx = PostingRow::from(PostingContext {
                 transaction: (&txn).into(),
                 posting_index: 0,
                 balance: None,
                 account_balance: None,
                 directive_index: None,
-            };
+            });
             let call = FunctionCall {
                 name: name.to_string(),
                 args: lit_args,

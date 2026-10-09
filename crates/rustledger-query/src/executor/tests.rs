@@ -2902,7 +2902,10 @@ fn inventory_sort_paths_agree() {
 #[test]
 fn txn_accounts_others_matches_excluding_by_index() {
     use super::system_tables::TxnAccounts;
-    let shapes: [&[&str]; 4] = [
+    let executor = Executor::new(&[]);
+    let shapes: [&[&str]; 6] = [
+        &[],
+        &["A"],
         &["Expenses:Food", "Expenses:Food", "Assets:Bank"],
         &["A", "B", "C"],
         &["A", "A", "A"],
@@ -2914,7 +2917,7 @@ fn txn_accounts_others_matches_excluding_by_index() {
             txn = txn.with_synthesized_posting(Posting::new(*a, Amount::new(dec!(1), "USD")));
         }
         let set = TxnAccounts::of(&txn);
-        let owned = TxnAccounts::of(&txn).into_owned();
+        let owned = Arc::new(TxnAccounts::of(&txn).into_owned());
         let mut all: Vec<String> = accounts.iter().map(|a| (*a).to_string()).collect();
         all.sort();
         all.dedup();
@@ -2931,7 +2934,198 @@ fn txn_accounts_others_matches_excluding_by_index() {
             expected.dedup();
             assert_eq!(set.others(a), expected, "{accounts:?} posting {i}");
             assert_eq!(owned.others(a), expected, "{accounts:?} posting {i}");
+            for txn_accounts in [None, Some(owned.clone())] {
+                let row = PostingRow {
+                    context: PostingContext {
+                        transaction: (&txn).into(),
+                        posting_index: i,
+                        balance: None,
+                        account_balance: None,
+                        directive_index: None,
+                    },
+                    txn_accounts,
+                };
+                assert_eq!(
+                    executor.evaluate_column("accounts", &row).unwrap(),
+                    Value::StringSet(all.clone()),
+                    "{accounts:?} posting {i}"
+                );
+                assert_eq!(
+                    executor.evaluate_column("other_accounts", &row).unwrap(),
+                    Value::StringSet(expected.clone()),
+                    "{accounts:?} posting {i}"
+                );
+            }
         }
+    }
+}
+
+#[test]
+fn test_transaction_account_sets_are_shared_and_gated_by_query_clauses() {
+    let directives = sample_directives();
+    let executor = Executor::new(&directives);
+    for sql in [
+        "SELECT accounts, accounts, other_accounts",
+        "SELECT account WHERE accounts IS NOT NULL",
+        "SELECT account FROM other_accounts IS NOT NULL",
+        "SELECT count(*) GROUP BY accounts",
+        "SELECT other_accounts, count(*) HAVING other_accounts IS NOT NULL",
+        "SELECT account ORDER BY other_accounts",
+        "SELECT account ORDER BY accounts",
+        "SELECT count(*) AS accounts HAVING count(accounts) > 0",
+        "SELECT row_number() OVER (PARTITION BY accounts ORDER BY other_accounts)",
+    ] {
+        let Query::Select(query) = parse(sql).unwrap() else {
+            panic!("expected SELECT: {sql}");
+        };
+        let rows = executor.collect_postings(&query).unwrap();
+        assert_eq!(rows.len(), 4, "{sql}");
+        let sets: Vec<_> = rows
+            .iter()
+            .map(|row| row.txn_accounts.as_ref().unwrap())
+            .collect();
+        assert!(Arc::ptr_eq(sets[0], sets[1]), "{sql}");
+        assert!(Arc::ptr_eq(sets[2], sets[3]), "{sql}");
+        assert!(!Arc::ptr_eq(sets[0], sets[2]), "{sql}");
+    }
+    for sql in [
+        "SELECT account",
+        "SELECT *",
+        "SELECT account AS accounts ORDER BY accounts",
+        "SELECT account AS other_accounts ORDER BY other_accounts",
+        "SELECT account AS accounts, count(*) GROUP BY accounts ORDER BY accounts",
+        "SELECT account AS other_accounts, count(*) GROUP BY other_accounts",
+        "SELECT count(*) AS accounts HAVING accounts > 0",
+        "SELECT count(*) AS other_accounts HAVING (other_accounts > 0)",
+        "SELECT account AS accounts, currency AS other_accounts, count(*) \
+         GROUP BY accounts, other_accounts PIVOT BY accounts, other_accounts",
+    ] {
+        let Query::Select(query) = parse(sql).unwrap() else {
+            panic!("expected SELECT: {sql}");
+        };
+        let rows = executor.collect_postings(&query).unwrap();
+        assert_eq!(rows.len(), 4);
+        assert!(rows.iter().all(|row| row.txn_accounts.is_none()), "{sql}");
+        Executor::new(&directives)
+            .execute(&Query::Select(query))
+            .unwrap();
+    }
+
+    let pattern_directives = vec![Directive::Transaction(
+        Transaction::new(date(2024, 1, 1), "Account patterns")
+            .with_synthesized_posting(Posting::new(
+                "Assets:accounts",
+                Amount::new(dec!(-1), "USD"),
+            ))
+            .with_synthesized_posting(Posting::new(
+                "Expenses:other_accounts",
+                Amount::new(dec!(1), "USD"),
+            )),
+    )];
+    let mut pattern_executor = Executor::new(&pattern_directives);
+    for sql in [
+        "SELECT account FROM HAS_ACCOUNT(accounts)",
+        "SELECT account FROM HAS_ACCOUNT(other_accounts)",
+    ] {
+        let Query::Select(query) = parse(sql).unwrap() else {
+            panic!("expected SELECT: {sql}");
+        };
+        let rows = pattern_executor.collect_postings(&query).unwrap();
+        assert_eq!(rows.len(), 2, "{sql}");
+        assert!(rows.iter().all(|row| row.txn_accounts.is_none()), "{sql}");
+        let result = pattern_executor.execute(&Query::Select(query)).unwrap();
+        assert_eq!(
+            result.rows,
+            vec![
+                vec![Value::String("Assets:accounts".into())],
+                vec![Value::String("Expenses:other_accounts".into())],
+            ],
+            "{sql}",
+        );
+    }
+}
+
+#[test]
+fn test_synthesized_rows_keep_their_own_transaction_account_sets() {
+    let mut directives = sample_directives();
+    directives.push(Directive::Transaction(
+        Transaction::new(date(2024, 1, 17), "Exchange")
+            .with_synthesized_posting(
+                Posting::new("Assets:EUR", Amount::new(dec!(10), "EUR")).with_price(
+                    rustledger_core::PriceAnnotation::unit(Amount::new(dec!(1.10), "USD")),
+                ),
+            )
+            .with_synthesized_posting(Posting::new("Assets:USD", Amount::new(dec!(-11), "USD"))),
+    ));
+    let mut executor = Executor::new(&directives);
+    let ledger_query = parse("SELECT accounts, other_accounts").unwrap();
+    let original = executor.execute(&ledger_query).unwrap();
+    for window in [
+        "OPEN ON 2024-01-16",
+        "OPEN ON 2024-02-01",
+        "CLOSE",
+        "CLOSE ON 2024-01-18",
+        "CLEAR",
+        "CLOSE CLEAR",
+        "OPEN ON 2024-01-16 CLOSE ON 2024-01-18 CLEAR",
+        "CLOSE",
+    ] {
+        let Query::Select(query) = parse(&format!(
+            "SELECT accounts, other_accounts \
+             FROM other_accounts IS NOT NULL {window}"
+        ))
+        .unwrap() else {
+            panic!("expected SELECT");
+        };
+        let rows = executor.collect_postings(&query).unwrap();
+        assert!(
+            rows.iter()
+                .any(|row| matches!(row.transaction, TransactionRef::Synthesized(_)))
+        );
+        for row in &rows {
+            for other in &rows {
+                if let (TransactionRef::Synthesized(txn), TransactionRef::Synthesized(other_txn)) =
+                    (&row.transaction, &other.transaction)
+                {
+                    assert_eq!(
+                        Arc::ptr_eq(
+                            row.txn_accounts.as_ref().unwrap(),
+                            other.txn_accounts.as_ref().unwrap()
+                        ),
+                        Arc::ptr_eq(txn, other_txn),
+                        "{window}",
+                    );
+                }
+            }
+        }
+        for row in rows {
+            for (column, excluded) in [
+                ("accounts", None),
+                ("other_accounts", Some(row.posting_index)),
+            ] {
+                let mut expected: Vec<String> = row
+                    .transaction
+                    .postings
+                    .iter()
+                    .enumerate()
+                    .filter(|(i, _)| Some(*i) != excluded)
+                    .map(|(_, posting)| posting.account.to_string())
+                    .collect();
+                expected.sort();
+                expected.dedup();
+                assert_eq!(
+                    executor.evaluate_column(column, &row).unwrap(),
+                    Value::StringSet(expected)
+                );
+            }
+        }
+        let unchanged = executor.execute(&ledger_query).unwrap();
+        assert_eq!(unchanged.columns, original.columns, "{window}");
+        assert_eq!(unchanged.rows, original.rows, "{window}");
+        assert_eq!(
+            unchanged.row_group_keys, original.row_group_keys,
+            "{window}"
+        );
     }
 }
 

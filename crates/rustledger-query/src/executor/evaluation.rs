@@ -7,9 +7,9 @@ use rustledger_core::{Amount, CostNumber, Position, Transaction};
 use crate::ast::{Expr, Literal, Target};
 use crate::error::QueryError;
 
-use super::Executor;
 use super::system_tables::TxnAccounts;
 use super::types::{PostingContext, Row, Value, WindowContext};
+use super::{Executor, PostingRow};
 
 impl Executor<'_> {
     /// Evaluate a FROM filter on one posting of a transaction.
@@ -28,12 +28,26 @@ impl Executor<'_> {
         posting_index: usize,
         directive_index: Option<usize>,
     ) -> Result<bool, QueryError> {
-        let ctx = || PostingContext {
-            transaction: txn.into(),
-            posting_index,
-            balance: None,
-            account_balance: None,
-            directive_index,
+        self.evaluate_from_filter_with_accounts(filter, txn, posting_index, directive_index, None)
+    }
+
+    pub(super) fn evaluate_from_filter_with_accounts(
+        &self,
+        filter: &Expr,
+        txn: &Transaction,
+        posting_index: usize,
+        directive_index: Option<usize>,
+        txn_accounts: Option<&std::sync::Arc<TxnAccounts<String>>>,
+    ) -> Result<bool, QueryError> {
+        let ctx = || PostingRow {
+            context: PostingContext {
+                transaction: txn.into(),
+                posting_index,
+                balance: None,
+                account_balance: None,
+                directive_index,
+            },
+            txn_accounts: txn_accounts.cloned(),
         };
         // Handle special FROM predicates
         match filter {
@@ -139,18 +153,14 @@ impl Executor<'_> {
     pub(super) fn evaluate_predicate(
         &self,
         expr: &Expr,
-        ctx: &PostingContext,
+        ctx: &PostingRow,
     ) -> Result<bool, QueryError> {
         let value = self.evaluate_expr(expr, ctx)?;
         self.to_bool(&value)
     }
 
     /// Evaluate an expression in the context of a posting.
-    pub(super) fn evaluate_expr(
-        &self,
-        expr: &Expr,
-        ctx: &PostingContext,
-    ) -> Result<Value, QueryError> {
+    pub(super) fn evaluate_expr(&self, expr: &Expr, ctx: &PostingRow) -> Result<Value, QueryError> {
         match expr {
             Expr::Wildcard => Ok(Value::Null), // Wildcard isn't really an expression
             Expr::Column(name) => self.evaluate_column(name, ctx),
@@ -300,7 +310,7 @@ impl Executor<'_> {
     pub(super) fn evaluate_column(
         &self,
         name: &str,
-        ctx: &PostingContext,
+        ctx: &PostingRow,
     ) -> Result<Value, QueryError> {
         let placeholder;
         let posting = if let Some(posting) = ctx.transaction.postings.get(ctx.posting_index) {
@@ -475,21 +485,18 @@ impl Executor<'_> {
             }
             // All accounts in the transaction, as a sorted set
             // (bean-query: `{p.account for p in entry.postings}`).
-            "accounts" => Ok(Value::StringSet(
-                TxnAccounts::of(&ctx.transaction).accounts(),
-            )),
+            "accounts" => Ok(Value::StringSet(ctx.txn_accounts.as_deref().map_or_else(
+                || TxnAccounts::of(&ctx.transaction).accounts(),
+                TxnAccounts::accounts,
+            ))),
             // The accounts of every OTHER posting, as a sorted set. Only this
             // posting is excluded: another posting to the same account still
             // counts (bean-query: `sorted({p.account for p in entry.postings
             // if p is not context.posting})`, #2483).
-            //
-            // Built per row, so one transaction of n postings costs O(n^2)
-            // on this table, where `#postings` builds it once per
-            // transaction. Sharing one set across a transaction's rows here
-            // means carrying it on `PostingContext`, which is public API.
-            "other_accounts" => Ok(Value::StringSet(
-                TxnAccounts::of(&ctx.transaction).others(posting.account.as_ref()),
-            )),
+            "other_accounts" => Ok(Value::StringSet(ctx.txn_accounts.as_deref().map_or_else(
+                || TxnAccounts::of(&ctx.transaction).others(posting.account.as_ref()),
+                |accounts| accounts.others(posting.account.as_ref()),
+            ))),
             // Posting metadata as dictionary
             "meta" => Ok(Value::Metadata(Box::new(Self::augmented_meta(
                 &posting.meta,
@@ -546,7 +553,7 @@ impl Executor<'_> {
     pub(super) fn evaluate_row(
         &self,
         targets: &[Target],
-        ctx: &PostingContext,
+        ctx: &PostingRow,
     ) -> Result<Row, QueryError> {
         self.evaluate_row_with_window(targets, ctx, None)
     }
@@ -555,7 +562,7 @@ impl Executor<'_> {
     pub(super) fn evaluate_row_with_window(
         &self,
         targets: &[Target],
-        ctx: &PostingContext,
+        ctx: &PostingRow,
         window_ctx: Option<&WindowContext>,
     ) -> Result<Row, QueryError> {
         let mut row = Vec::new();

@@ -358,8 +358,9 @@ pub const WILDCARD_COLUMNS: &[&str] =
 pub struct ColumnInfo {
     /// The column's name, as a query writes it.
     pub name: &'static str,
-    /// The column's value type, in bean-query's vocabulary (`str`, `set`,
-    /// `amount`, ...). A trailing `?` is not used: most columns can be NULL.
+    /// The column's value type, as bean-query's `.describe postings` names
+    /// it (`str`, `set`, `amount`, ...), except `id`, which is an `int` here
+    /// where bean-query's is a `str` hash. Most columns can be NULL.
     pub type_name: &'static str,
     /// What the column holds.
     pub description: &'static str,
@@ -540,14 +541,14 @@ pub const POSTING_COLUMNS: &[ColumnInfo] = &[
         description: "Posting metadata",
     },
     ColumnInfo {
-        name: "accounts",
-        type_name: "set",
-        description: "Accounts of all the transaction's postings",
+        name: "entry",
+        type_name: "transaction",
+        description: "Parent transaction",
     },
     ColumnInfo {
-        name: "entry",
-        type_name: "object",
-        description: "Parent transaction",
+        name: "accounts",
+        type_name: "set[str]",
+        description: "Accounts of all the transaction's postings",
     },
 ];
 

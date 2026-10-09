@@ -2978,6 +2978,52 @@ fn posting_columns_match_the_evaluator() {
          listed but not evaluated {extra:?}",
     );
 
+    // bean-query 0.2.0's `.describe postings`, verbatim and in its order:
+    // every one of its columns is listed, with its type (except `id`, an
+    // integer here and a hash string there), and in its order.
+    let bean_query = [
+        ("type", "str"),
+        ("id", "int"),
+        ("date", "date"),
+        ("year", "int"),
+        ("month", "int"),
+        ("day", "int"),
+        ("filename", "str"),
+        ("lineno", "int"),
+        ("location", "str"),
+        ("flag", "str"),
+        ("payee", "str"),
+        ("narration", "str"),
+        ("description", "str"),
+        ("tags", "set"),
+        ("links", "set"),
+        ("posting_flag", "str"),
+        ("account", "str"),
+        ("other_accounts", "set"),
+        ("number", "decimal"),
+        ("currency", "str"),
+        ("cost_number", "decimal"),
+        ("cost_currency", "str"),
+        ("cost_date", "date"),
+        ("cost_label", "str"),
+        ("position", "position"),
+        ("price", "amount"),
+        ("weight", "amount"),
+        ("balance", "inventory"),
+        ("meta", "dict"),
+        ("entry", "transaction"),
+        ("accounts", "set[str]"),
+    ];
+    let shared: Vec<(&str, &str)> = POSTING_COLUMNS
+        .iter()
+        .filter(|c| bean_query.iter().any(|(n, _)| *n == c.name))
+        .map(|c| (c.name, c.type_name))
+        .collect();
+    assert_eq!(
+        shared, bean_query,
+        "`.describe postings` differs from bean-query's"
+    );
+
     // Every listed column runs, and `#postings` has no visible column the
     // default table lacks (its hidden ones are `_`- or NUL-prefixed).
     let directives = sample_directives();

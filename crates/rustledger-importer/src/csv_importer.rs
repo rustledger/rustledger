@@ -107,22 +107,15 @@ impl CsvImporter {
             );
         }
 
-        let mut reader = csv::ReaderBuilder::new()
-            .has_headers(csv_config.has_header)
-            .delimiter(csv_config.delimiter as u8)
-            .from_reader(content.as_bytes());
+        let mut reader = Self::reader(content, csv_config);
 
         // Build column name to index map from headers
-        let header_map: HashMap<String, usize> = if csv_config.has_header {
-            reader
-                .headers()?
-                .iter()
-                .enumerate()
-                .map(|(i, h)| (h.to_string(), i))
-                .collect()
-        } else {
-            HashMap::default()
-        };
+        let header_map: HashMap<String, usize> = Self::read_header(&mut reader, csv_config)?
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(i, h)| (h, i))
+            .collect();
 
         if let Some(id_col) = &csv_config.transaction_id_column {
             Self::check_transaction_id_column(id_col, csv_config, &header_map)?;
@@ -366,7 +359,7 @@ impl CsvImporter {
                 if cell.is_empty() {
                     default_currency()?
                 } else {
-                    cell.to_string()
+                    Self::cell_currency(cell, col)?
                 }
             }
             None => default_currency()?,
@@ -442,6 +435,45 @@ impl CsvImporter {
         }
 
         Ok(Some(txn))
+    }
+
+    /// The CSV reader every pass over a file uses, so the header that
+    /// [`Self::header`] reports is the header extraction reads.
+    fn reader<'a>(content: &'a str, csv_config: &CsvConfig) -> csv::Reader<&'a [u8]> {
+        csv::ReaderBuilder::new()
+            .has_headers(csv_config.has_header)
+            .delimiter(csv_config.delimiter as u8)
+            .from_reader(content.as_bytes())
+    }
+
+    /// The header row's column names, in order, or `None` for a headerless
+    /// config.
+    fn read_header(
+        reader: &mut csv::Reader<&[u8]>,
+        csv_config: &CsvConfig,
+    ) -> Result<Option<Vec<String>>> {
+        if !csv_config.has_header {
+            return Ok(None);
+        }
+        Ok(Some(
+            reader.headers()?.iter().map(ToString::to_string).collect(),
+        ))
+    }
+
+    /// The column names of `content`'s header row as extraction would read
+    /// them under `csv_config` (its delimiter and `has_header`; `skip_rows`
+    /// skips data rows after the header, so it does not move the header), or
+    /// `None` when the config says the file has no header.
+    ///
+    /// For choosing between importer entries by the columns a file has
+    /// (#2295): it shares the reader with extraction, so a column this
+    /// reports is one a column name in the config will find.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the header row is not valid CSV.
+    pub fn header(content: &str, csv_config: &CsvConfig) -> Result<Option<Vec<String>>> {
+        Self::read_header(&mut Self::reader(content, csv_config), csv_config)
     }
 
     /// Misconfigurations of `transaction_id_column` caught once, up front,
@@ -541,6 +573,46 @@ impl CsvImporter {
         engine
     }
 
+    /// The commodity a `currency_column` cell names (#2516).
+    ///
+    /// A cell the parser cannot read as a commodity used to be written into
+    /// the posting as is, and failed much later as "canonical formatter
+    /// failed to re-parse", naming neither the row, the column nor the value.
+    /// It is now a row error naming the column and the value (the caller adds
+    /// the row number).
+    ///
+    /// A lower- or mixed-case code (`usd`, `Eur`) is upper-cased: commodities
+    /// are upper-case in the ledger, the cell comes from the bank's file
+    /// where the user cannot fix it, and an ISO 4217 code means the same in
+    /// either case, so `usd` can only mean `USD`. Only the case changes; a
+    /// value that is still not a commodity after it (`€`, `US$`) is refused.
+    /// This differs on purpose from a configured `currency = "usd"`, which
+    /// the CLI refuses: that value is the user's own and fixed once at its
+    /// source.
+    fn cell_currency(cell: &str, col: &ColumnSpec) -> Result<String> {
+        if rustledger_parser::is_valid_currency(cell) {
+            return Ok(cell.to_string());
+        }
+        // Validated AFTER the case change, so only a value that is a
+        // commodity once upper-cased gets through: `to_ascii_uppercase`
+        // leaves non-ASCII alone, so full-width `ｕｓｄ` stays invalid. The
+        // caller has already trimmed surrounding whitespace.
+        let upper = cell.to_ascii_uppercase();
+        if rustledger_parser::is_valid_currency(&upper) {
+            return Ok(upper);
+        }
+        let column = match col {
+            ColumnSpec::Name(name) => format!("{name:?}"),
+            ColumnSpec::Index(i) => format!("{i}"),
+        };
+        // Worded like the configured-currency check in the CLI (#2498):
+        // "<source> is <value>, which is not a valid commodity (...)".
+        anyhow::bail!(
+            "currency_column {column} is {cell:?}, which is not a valid commodity \
+             (commodities are upper-case, like `USD` or `EUR`)"
+        )
+    }
+
     fn get_column<'a>(
         &self,
         record: &'a csv::StringRecord,
@@ -629,6 +701,28 @@ mod tests {
     use super::*;
     use crate::config::{AmountFormat, ImporterType};
     use std::str::FromStr;
+
+    /// `header` reads the header row with the config's delimiter, and is
+    /// `None` for a headerless config.
+    #[test]
+    fn header_reads_the_row_extraction_reads() {
+        let semicolons = CsvConfig {
+            delimiter: ';',
+            ..CsvConfig::default()
+        };
+        assert_eq!(
+            CsvImporter::header("Date;Amount (EUR)\n2024-01-01;1\n", &semicolons).unwrap(),
+            Some(vec!["Date".to_string(), "Amount (EUR)".to_string()])
+        );
+        let headerless = CsvConfig {
+            has_header: false,
+            ..CsvConfig::default()
+        };
+        assert_eq!(
+            CsvImporter::header("2024-01-01,1\n", &headerless).unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn test_parse_money_string() {
@@ -1163,6 +1257,108 @@ More info
         assert_eq!(ccy(0), "EUR");
         assert_eq!(ccy(1), "USD");
         assert_eq!(ccy(2), "USD", "blank currency cell falls back to default");
+    }
+
+    /// #2516: a `currency_column` cell that is not a commodity is a row
+    /// error naming the row, the column and the value, not a posting that
+    /// fails to re-parse later. The other rows still import.
+    #[test]
+    fn a_currency_cell_that_is_not_a_commodity_is_a_row_error() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .currency_column("Currency")
+            .build()
+            .unwrap();
+        let csv_content = "Date,Description,Amount,Currency\n\
+2024-01-02,Coffee,-5.00,EUR\n\
+2024-01-03,Euro sign,-1.00,€\n\
+2024-01-04,Dollar sign,-2.00,US$\n\
+2024-01-05,Digit first,-3.00,1USD\n\
+2024-01-06,Full width,-4.00,\u{ff55}\u{ff53}\u{ff44}\n\
+2024-01-07,Inner space,-5.00,U SD\n";
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
+        assert_eq!(result.directives.len(), 1, "{:?}", result.warnings);
+        assert_eq!(result.warnings.len(), 5, "{:?}", result.warnings);
+        assert!(
+            result.warnings[0].starts_with(
+                "Row 2: currency_column \"Currency\" is \"€\", which is not a valid commodity \
+                 (commodities are upper-case, like `USD` or `EUR`)"
+            ),
+            "{:?}",
+            result.warnings
+        );
+        assert!(
+            result.warnings[1].starts_with("Row 3: "),
+            "{:?}",
+            result.warnings
+        );
+        assert!(
+            result.warnings[1].contains("\"US$\""),
+            "{:?}",
+            result.warnings
+        );
+        assert!(
+            result.warnings[2].contains("\"1USD\""),
+            "{:?}",
+            result.warnings
+        );
+
+        // By index, the column is named by its number.
+        let by_index = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .currency("USD")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .currency_column_index(3)
+            .build()
+            .unwrap();
+        let result = CsvImporter
+            .extract_string(
+                "Date,Description,Amount,Currency\n2024-01-03,X,-1.00,€\n",
+                &by_index,
+            )
+            .unwrap();
+        assert!(
+            result.warnings[0].starts_with("Row 1: currency_column 3 is \"€\""),
+            "{:?}",
+            result.warnings
+        );
+    }
+
+    /// #2516: a lower- or mixed-case code is the same ISO code, so it is
+    /// upper-cased rather than refused (the bank's file cannot be fixed).
+    #[test]
+    fn a_lowercase_currency_cell_is_uppercased() {
+        let config = ImporterConfig::csv()
+            .account("Assets:Bank")
+            .date_column("Date")
+            .narration_column("Description")
+            .amount_column("Amount")
+            .currency_column("Currency")
+            .build()
+            .unwrap();
+        let csv_content = "Date,Description,Amount,Currency\n\
+2024-01-02,Coffee,-5.00,usd\n\
+2024-01-03,Tea,-1.00, Eur \n\
+2024-01-04,Juice,-2.00,usd \n";
+        let result = CsvImporter.extract_string(csv_content, &config).unwrap();
+        assert!(result.warnings.is_empty(), "{:?}", result.warnings);
+        let ccy: Vec<String> = result
+            .directives
+            .iter()
+            .map(|d| match d {
+                Directive::Transaction(txn) => {
+                    txn.postings[0].amount().unwrap().currency.to_string()
+                }
+                _ => panic!("expected transaction"),
+            })
+            .collect();
+        assert_eq!(ccy, ["USD", "EUR", "USD"]);
     }
 
     #[test]

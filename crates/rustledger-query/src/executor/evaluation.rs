@@ -573,13 +573,12 @@ impl Executor<'_> {
                         .map_or(Value::Null, |p| Value::String(p.to_string())),
                 );
                 row.push(Value::String(ctx.transaction.narration.to_string()));
-                let posting = &ctx.transaction.postings[ctx.posting_index];
-                row.push(Value::String(posting.account.to_string()));
-                row.push(
-                    posting
-                        .amount()
-                        .map_or(Value::Null, |u| Value::Amount(u.clone())),
-                );
+                row.push(self.evaluate_column("account", ctx)?);
+                // The `position` column itself, cost included, as bean-query's
+                // `SELECT *` gives it. This pushed the units alone, so a held
+                // lot lost its cost, and a table or subquery built from
+                // `SELECT *` summed units where `SELECT position` sums lots.
+                row.push(self.evaluate_column("position", ctx)?);
             } else if let Expr::Window(wf) = &target.expr {
                 // Handle window function
                 row.push(self.evaluate_window_function(wf, window_ctx)?);

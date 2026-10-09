@@ -358,3 +358,39 @@ fn an_overflowing_cost_fails_only_the_query_that_reads_it() {
         run(&directives, &[create, "SELECT cost(position) FROM t"]).expect_err("the lot overflows");
     assert!(err.contains("exceeds the representable range"), "{err}");
 }
+
+/// `SELECT *`'s `position` is the position column, cost included, as in
+/// bean-query: it gave the units alone, so a table or subquery built from
+/// `SELECT *` summed `4 Z` where the posting column sums `4 Z {12.50 USD}`.
+#[test]
+fn select_star_position_is_the_position_column() {
+    let directives = booked(LEDGER);
+    let star: Vec<Value> = rows(&directives, &["SELECT * ORDER BY date, account"])
+        .into_iter()
+        .map(|r| r[5].clone())
+        .collect();
+    let position: Vec<Value> = rows(&directives, &["SELECT position ORDER BY date, account"])
+        .into_iter()
+        .map(|r| r[0].clone())
+        .collect();
+    assert_eq!(star, position);
+
+    let tail = "GROUP BY account ORDER BY account";
+    let direct = rows(
+        &directives,
+        &[&format!(
+            "SELECT account, sum(position), cost(sum(position)) {tail}"
+        )],
+    );
+    for statements in [
+        &[
+            "CREATE TABLE t AS SELECT *",
+            &format!("SELECT account, sum(position), cost(sum(position)) FROM t {tail}"),
+        ][..],
+        &[&format!(
+            "SELECT account, sum(position), cost(sum(position)) FROM (SELECT *) {tail}"
+        )],
+    ] {
+        assert_eq!(rows(&directives, statements), direct, "{statements:?}");
+    }
+}

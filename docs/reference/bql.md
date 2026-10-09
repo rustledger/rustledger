@@ -258,6 +258,22 @@ order, not size: `max(units(position))` over `5 EUR` and `3 USD` is `3 USD`.
 bean-query answers `5 EUR` there; see section 15 of the
 [compatibility notes](compatibility.md).
 
+`sum(position)` over the postings of one `AVERAGE` account (booking `AVERAGE`
+through its `open` or the ledger's `booking_method` option; with `GROUP BY
+account`, or a `WHERE` that keeps one account) shows the account's holding the
+way booking realizes it: the selected postings are replayed through the
+booking engine, as `BALANCES` does, and each side is then shown as one lot at
+its weighted-average cost. A long and a short stay apart, so `3 X {102 USD}`
+beside `-2 X {101 USD}` is shown as both, never netted into one lot. Every
+other sum adds positions, as bean-query does.
+
+When the selected postings cannot be realized on their own, because a `WHERE`
+keeps a sale but not enough of the purchases it sold from, the result is the
+plain sum of those postings: the sale appears as a negative lot at the cost
+it was booked at, beside the purchases that were kept. `BALANCES` over the
+same `FROM` subset reports an error instead. Python beancount has no `AVERAGE`
+booking, so there is no bean-query answer to compare with.
+
 ## Scalar Functions
 
 ### Date Functions

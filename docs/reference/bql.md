@@ -346,6 +346,12 @@ and NULL when there are several.
 true on every row of a transaction that touches a matching account. It also
 works as an entry filter: `BALANCES FROM has_account('Assets')`.
 
+A posting column in a `FROM` filter (`account`, `number`, `position`, ...) is
+a row filter instead, as in beanquery: `FROM account ~ 'Bank'` keeps the bank
+postings only, the same as `WHERE account ~ 'Bank'`, applied after `OPEN ON`,
+`CLOSE` and `CLEAR`. `PRINT` prints whole entries, so it rejects a posting
+column in its `FROM`; use `PRINT FROM has_account('Bank')`.
+
 ### Metadata Functions
 
 Beancount metadata can live on a **transaction** (the line under the header,

@@ -2934,3 +2934,146 @@ fn txn_accounts_others_matches_excluding_by_index() {
         }
     }
 }
+
+/// Drift guard for the two hand-kept column lists that decide how a `FROM`
+/// filter is evaluated (#2414): `FROM_ENTRY_COLUMNS` (read once per
+/// transaction) and `POSTING_ONLY_COLUMNS` (rejected in `PRINT`).
+///
+/// Neither list can be computed from the row evaluator, which is one big
+/// `match`, so this checks them against what the executor actually returns.
+/// Every arm of that `match`, every column of the executor's own `#postings`
+/// and `#entries` schemas, and every name on either list is evaluated on both postings of a transaction whose
+/// postings differ in everything a posting can carry. Then:
+///
+/// - a column is on the entry list exactly when its two values are equal. A
+///   posting column on the list is #2414 again (the first posting answers for
+///   the rest), so this direction has no exceptions. The other direction has
+///   one: `filename` is the posting's own, which always equals its
+///   transaction's, and evaluating it per posting is only slower.
+/// - a column is posting-only exactly when a posting row has it and the
+///   `#entries` schema does not, which is how the list is defined.
+#[test]
+fn from_filter_column_lists_match_the_executor() {
+    use super::evaluation::{FROM_ENTRY_COLUMNS, POSTING_ONLY_COLUMNS, from_filter_reads_postings};
+    use rustledger_loader::{LoadOptions, Loader, VirtualFileSystem, process};
+    use std::collections::BTreeSet;
+
+    const SRC: &str = r#"
+2024-01-01 open Assets:A
+2024-01-01 open Assets:B
+2024-01-02 * "payee" "narration" #tag ^link
+  em: 1
+  Assets:A   2 X {10 USD, 2024-01-01, "lbl"} @ 11 USD
+    pm: 1
+  ! Assets:B  -20 USD
+"#;
+    let mut vfs = VirtualFileSystem::new();
+    vfs.add_file("main.beancount", SRC);
+    let raw = Loader::new()
+        .with_filesystem(Box::new(vfs))
+        .load(std::path::Path::new("main.beancount"))
+        .expect("loads");
+    let ledger = process(raw, &LoadOptions::default()).expect("processes");
+    assert!(ledger.errors.is_empty(), "{:?}", ledger.errors);
+    let run = |sql: &str| {
+        let mut executor = Executor::new_with_sources(&ledger.directives, &ledger.source_map);
+        executor.execute(&parse(sql).expect("parses"))
+    };
+
+    let entries_schema: BTreeSet<String> = run("SELECT * FROM #entries")
+        .expect("#entries")
+        .columns
+        .into_iter()
+        .collect();
+    let postings_schema = run("SELECT * FROM #postings").expect("#postings").columns;
+    assert!(
+        postings_schema.len() > 20,
+        "the schema came back: {postings_schema:?}"
+    );
+
+    // The row evaluator's own arms, read from its source: the one list that
+    // has every posting-row column, including rledger's `units`, `cost` and
+    // `has_cost`, which no schema lists. A new arm is checked the day it lands.
+    let source = include_str!("evaluation.rs");
+    let body = source
+        .split_once("fn evaluate_column(")
+        .and_then(|(_, rest)| rest.split_once("_ => Err(QueryError::UnknownColumn"))
+        .expect("evaluate_column's match is where this test expects it")
+        .0;
+    let arm = regex::Regex::new(r#"(?m)^\s*"([a-z_]+)" =>"#).expect("regex");
+    let evaluator_columns: Vec<String> =
+        arm.captures_iter(body).map(|c| c[1].to_string()).collect();
+    assert!(
+        evaluator_columns.len() > 30 && evaluator_columns.iter().any(|c| c == "has_cost"),
+        "the arms came back: {evaluator_columns:?}",
+    );
+
+    // Not vacuous if the `match` is reshaped (`"a" | "b" =>`, a helper, a
+    // table): every schema column and every listed name must be among the
+    // arms found, so an arm the pattern stops seeing fails here instead of
+    // quietly leaving its column unchecked.
+    for name in postings_schema
+        .iter()
+        .map(String::as_str)
+        .chain(FROM_ENTRY_COLUMNS.iter().copied())
+        .chain(POSTING_ONLY_COLUMNS.iter().copied())
+    {
+        assert!(
+            evaluator_columns.iter().any(|c| c == name),
+            "`{name}` was not found among evaluate_column's arms; update how this test reads them",
+        );
+    }
+
+    let names: BTreeSet<String> = postings_schema
+        .into_iter()
+        .chain(evaluator_columns)
+        .chain(entries_schema.iter().cloned())
+        .chain(FROM_ENTRY_COLUMNS.iter().map(ToString::to_string))
+        .chain(POSTING_ONLY_COLUMNS.iter().map(ToString::to_string))
+        .collect();
+
+    let mut checked = 0;
+    for name in &names {
+        let column = Expr::Column(name.clone());
+        let Ok(result) = run(&format!("SELECT {name}")) else {
+            // Not a posting-row column: an `#entries`-only name. It can be on
+            // neither list.
+            assert!(
+                !FROM_ENTRY_COLUMNS.contains(&name.as_str())
+                    && !POSTING_ONLY_COLUMNS.contains(&name.as_str()),
+                "`{name}` is listed but a posting row does not have it",
+            );
+            continue;
+        };
+        assert_eq!(result.rows.len(), 2, "`{name}`: one row per posting");
+        let differs = format!("{:?}", result.rows[0][0]) != format!("{:?}", result.rows[1][0]);
+        let per_posting = from_filter_reads_postings(&column);
+        if differs {
+            assert!(
+                per_posting,
+                "`{name}` differs between the postings of one transaction, so a FROM \
+                 filter on it must be evaluated per posting (#2414); take it off \
+                 FROM_ENTRY_COLUMNS",
+            );
+        } else if name != "filename" {
+            assert!(
+                !per_posting,
+                "`{name}` is the same on every posting of a transaction; add it to \
+                 FROM_ENTRY_COLUMNS",
+            );
+        }
+        assert_eq!(
+            POSTING_ONLY_COLUMNS.contains(&name.as_str()),
+            !entries_schema.contains(name),
+            "`{name}`: POSTING_ONLY_COLUMNS holds exactly the posting-row columns \
+             that #entries lacks",
+        );
+        checked += 1;
+    }
+    // Self-check: the fixture really does tell the two kinds apart.
+    assert!(checked > 25, "only {checked} columns were evaluated");
+    assert!(from_filter_reads_postings(&Expr::Column("account".into())));
+    assert!(!from_filter_reads_postings(&Expr::Column(
+        "narration".into()
+    )));
+}

@@ -266,19 +266,25 @@ impl<'a> Executor<'a> {
                 _ => {}
             }
         }
-        // The same resolution as `BookingEngine::register_account_methods`
-        // and `method_for`: the `open`'s method when it parses, else the
-        // ledger's. Only the open's was read here, so under a global
-        // `option "booking_method" "AVERAGE"` a sale's lot was left dangling
-        // beside the lots it sold from.
-        account.is_some_and(|a| {
-            self.account_info
-                .get(a)
-                .and_then(|info| info.booking.as_deref())
-                .and_then(|b| b.parse::<BookingMethod>().ok())
-                .unwrap_or(self.booking_method)
-                == BookingMethod::Average
-        })
+        account.is_some_and(|a| self.account_is_average(a))
+    }
+
+    /// Is `account` booked AVERAGE? `SUM(position)` then realizes its
+    /// positions through booking, and a row-filtered `BALANCES`
+    /// (`scan_postings`) presents a partly selected one the same way.
+    ///
+    /// The same resolution as `BookingEngine::register_account_methods` and
+    /// `method_for`: the `open`'s method when it parses, else the ledger's.
+    /// Only the open's was read here, so under a global
+    /// `option "booking_method" "AVERAGE"` a sale's lot was left dangling
+    /// beside the lots it sold from.
+    pub(super) fn account_is_average(&self, account: &str) -> bool {
+        self.account_info
+            .get(account)
+            .and_then(|info| info.booking.as_deref())
+            .and_then(|b| b.parse::<BookingMethod>().ok())
+            .unwrap_or(self.booking_method)
+            == BookingMethod::Average
     }
 
     /// `group`'s postings, all of one AVERAGE account, realized the way

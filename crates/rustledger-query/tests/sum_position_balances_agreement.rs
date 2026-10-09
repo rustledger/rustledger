@@ -37,12 +37,18 @@ const DEFAULTS: [BookingMethod; 3] = [
     BookingMethod::Strict,
     BookingMethod::Fifo,
 ];
-const FILTERS: [&str; 5] = [
+/// Entry-level filters keep or drop whole transactions. The posting-level
+/// ones (#2414) keep some postings of an account and not others, the case
+/// where `BALANCES` sums the selected postings rather than reading booking's
+/// inventory.
+const FILTERS: [&str; 7] = [
     "",
     " FROM date >= 2020-01-15",
     " FROM date < 2020-01-15",
     " FROM narration = 'even'",
     " FROM narration = 'odd'",
+    " FROM number > 0",
+    " FROM number < 0",
 ];
 
 #[derive(Debug, Clone)]

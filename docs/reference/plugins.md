@@ -470,6 +470,40 @@ plugin "beancount.plugins.check_drained"
 
 Options: None
 
+### check_option_assignment
+
+Checks the stock leg when a short option is assigned. For a short put, the stock's basis must be strike × shares − premium. For a short call, the sale proceeds must be strike × shares + premium. Options are recognized by OCC symbol, as for `check_option_expiry`.
+
+An assignment is a transaction that reduces a short option position and also moves the option's root commodity (stock rises for a put, falls for a call). Ordinary closes, long options, cash-settled index options, and assignments split across two transactions are not checked. Each assignment gets at most one error, from the first rule that fails:
+
+1. Stock units = 100 × contracts.
+2. The option leg is closed at cost (no gain realized on it).
+3. Basis (put) or proceeds (call) match within half a cent per share, compared as totals across all lots.
+
+```beancount
+plugin "check_option_assignment"
+
+2026-01-01 open Assets:Broker:Cash USD
+2026-01-01 open Assets:Broker:Stock AAPL
+2026-01-01 open Assets:Broker:Options
+2026-01-01 open Income:Trading:Gains
+
+2026-09-03 * "Sell to open 1 AAPL 2026-10-16 225 put @ 3.00"
+  Assets:Broker:Options  -1 AAPL261016P00225000 {300.00 USD}
+  Assets:Broker:Cash     300.00 USD
+
+2026-10-16 * "Assigned: buy 100 AAPL at 225, premium booked as income"
+  Assets:Broker:Options   1 AAPL261016P00225000 {}
+  Assets:Broker:Stock   100 AAPL {225.00 USD}
+  Assets:Broker:Cash  -22500.00 USD
+  Income:Trading:Gains   -300.00 USD
+; Error: AAPL261016P00225000 assignment: AAPL basis 22500.00 USD, expected 22200.00 USD (strike 225 × 100 − premium 300.00)
+```
+
+The correct entry drops the income line and writes the stock lot as `{222.00 USD}`. Like `check_option_expiry`, this plugin has no Python beancount equivalent; enable it with `--native-plugin check_option_assignment` to keep the file portable.
+
+Options: None
+
 ### check_option_expiry
 
 Reports an error for each option contract whose net position in an account is non-zero after its expiry date. Contracts are recognized by their OCC symbol with spaces removed: a root of 1–6 characters, the expiry as `YYMMDD`, `C` or `P`, and the strike × 1000 as 8 digits (`AAPL261016P00230000` is the AAPL 2026-10-16 230 put). Other commodities are ignored.

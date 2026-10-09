@@ -33,7 +33,7 @@ ______________________________________________________________________
 | **AI-ready** | MCP server for AI assistants, plus `ag-rledger` — an agent-native CLI with JSON envelopes |
 | **Runs anywhere** | WebAssembly support for browser and Node.js |
 | **Better errors** | Detailed error messages with source locations |
-| **32 built-in plugins** | Plus Python plugin compatibility via WASI sandbox |
+| **33 built-in plugins** | Plus Python plugin compatibility via WASI sandbox |
 | **Bank import** | CSV/OFX import with auto-detection, dedup, and categorization |
 | **Investment returns** | Money-weighted (XIRR) and time-weighted returns, robust over imperfect ledgers: a built-in beangrow replacement |
 | **Budgeting** | Budgeted vs actual spending from Fava-compatible `custom "budget"` directives, calendar-accurate pro-rating |
@@ -302,7 +302,7 @@ WASM importers implement the same `Importer` trait as the built-ins via the [`wa
 | [`rustledger-validate`](https://crates.io/crates/rustledger-validate) | Validation error codes |
 | [`rustledger-query`](https://crates.io/crates/rustledger-query) | BQL query engine |
 | [`rustledger-completion`](https://crates.io/crates/rustledger-completion) | Editor-agnostic completion logic (shared by LSP + WASM) |
-| [`rustledger-plugin`](https://crates.io/crates/rustledger-plugin) | 32 built-in plugins + Python plugin support |
+| [`rustledger-plugin`](https://crates.io/crates/rustledger-plugin) | 33 built-in plugins + Python plugin support |
 | [`rustledger-plugin-types`](https://crates.io/crates/rustledger-plugin-types) | Shared plugin type definitions |
 | [`rustledger-importer`](https://crates.io/crates/rustledger-importer) | Import framework: built-in CSV/OFX, plus a `WasmImporter` host loader for third-party `.wasm` importers |
 | [`rustledger-ops`](https://crates.io/crates/rustledger-ops) | Pure operations — ML categorization, LLM prompts, dedup, transfer detection, balance reconciliation, merchant dictionary |
@@ -327,7 +327,7 @@ WASM importers implement the same `Importer` trait as the built-ins via the [`wa
 </details>
 
 <details>
-<summary><strong>Built-in plugins (32)</strong></summary>
+<summary><strong>Built-in plugins (33)</strong></summary>
 
 | Plugin | Description |
 |--------|-------------|
@@ -340,6 +340,7 @@ WASM importers implement the same `Importer` trait as the built-ins via the [`wa
 | `check_closing` | Zero balance assertion on account close |
 | `check_commodity` | Validate commodity declarations |
 | `check_drained` | Ensure accounts are drained before close |
+| `check_option_assignment` | Check premium is folded into the stock leg on assignment |
 | `check_option_expiry` | Error on option contracts open past expiry |
 | `close_tree` | Close descendant accounts |
 | `coherent_cost` | Enforce cost OR price (not both) |

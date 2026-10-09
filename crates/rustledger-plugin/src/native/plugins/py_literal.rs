@@ -71,25 +71,95 @@ pub fn parse(source: &str) -> Result<PyValue, String> {
             .collect(),
         pos: 0,
     };
-    // Blank lines, comments and indentation before the literal are ignored,
-    // as `literal_eval` (eval mode) ignores them.
-    parser.skip_trivia(1);
+    // `literal_eval` strips leading spaces and tabs, then parses in eval
+    // mode, where every other line is indentation-checked: blank and
+    // comment-only lines are skipped, and the line holding a token must not
+    // be indented.
+    while matches!(parser.peek(), Some(' ' | '\t')) {
+        parser.pos += 1;
+    }
+    loop {
+        match parser.line_start()? {
+            Line::Token | Line::End => break,
+            Line::Blank => {
+                parser.skip_trivia(0);
+                if parser.peek() == Some('\n') {
+                    parser.pos += 1;
+                }
+            }
+        }
+    }
     let value = parser.value(0)?;
-    // After it: spaces, comments and line breaks only. A backslash
-    // continuation with nothing after it is a syntax error in Python.
+    // After it, only blank and comment lines. A backslash continuation with
+    // nothing after it is a syntax error in Python.
     loop {
         parser.skip_trivia(0);
         match parser.peek() {
             None => return Ok(value),
-            Some('\n' | '\r') => parser.pos += 1,
+            Some('\n') => {
+                parser.pos += 1;
+                match parser.line_start()? {
+                    Line::End => return Ok(value),
+                    Line::Blank => {}
+                    Line::Token => {
+                        let c = parser.peek().unwrap_or(' ');
+                        return Err(format!("unexpected `{c}` after the literal"));
+                    }
+                }
+            }
             Some(c) => return Err(format!("unexpected `{c}` after the literal")),
         }
     }
 }
 
+/// What a top-level physical line holds, after its indentation.
+enum Line {
+    /// A token: the literal, or text after it.
+    Token,
+    /// Nothing but a comment or the line break.
+    Blank,
+    /// The end of the text.
+    End,
+}
+
 struct Parser {
     chars: Vec<char>,
     pos: usize,
+}
+
+impl Parser {
+    /// Read a top-level line's indentation, as Python's tokenizer does:
+    /// spaces and tabs count, a form feed resets the count, and a backslash
+    /// continuation keeps counting on the next line. A token on an indented
+    /// line is an error ("unexpected indent"), and so is an indented last
+    /// line with nothing on it and no line break; blank and comment-only
+    /// lines may be indented.
+    fn line_start(&mut self) -> Result<Line, String> {
+        let mut indent = 0usize;
+        loop {
+            match self.peek() {
+                Some(' ' | '\t') => {
+                    indent += 1;
+                    self.pos += 1;
+                }
+                Some('\x0c') => {
+                    indent = 0;
+                    self.pos += 1;
+                }
+                Some('\\') if self.peek_at(1) == Some('\n') && self.pos + 2 < self.chars.len() => {
+                    self.pos += 2;
+                }
+                _ => break,
+            }
+        }
+        match self.peek() {
+            None if indent > 0 => Err("unexpected indent at the end of the text".to_string()),
+            None => Ok(Line::End),
+            Some('\n' | '#') => Ok(Line::Blank),
+            Some(_) if indent > 0 => Err("unexpected indent".to_string()),
+            Some(_) => Ok(Line::Token),
+        }
+    }
 }
 
 /// How deep brackets may nest. Python's parser stops at 200 ("too many nested
@@ -607,6 +677,50 @@ mod tests {
             ("{}\r", "dict0"),
             ("{\r}", "dict0"),
             ("'a\rb'", "ERR"),
+            // Indentation, as Python checks it in eval mode.
+            (" # c\n {}", "ERR"),
+            ("\n {}", "ERR"),
+            ("\n\t{}", "ERR"),
+            ("\n  # c\n{}", "dict0"),
+            ("  \n{}", "dict0"),
+            (" \n {}", "ERR"),
+            ("\\\n {}", "ERR"),
+            ("# c\n{}", "dict0"),
+            (" {}", "dict0"),
+            ("\n\n {}", "ERR"),
+            ("\r\n {}", "ERR"),
+            ("\u{c}\n {}", "ERR"),
+            ("\n\u{c}{}", "dict0"),
+            ("\n \u{c}{}", "dict0"),
+            ("# c\n\t# d\n{}", "dict0"),
+            (" {}\n # c", "dict0"),
+            ("{}\n  # c", "dict0"),
+            ("{}\n  ", "ERR"),
+            ("{}\n  \n", "dict0"),
+            ("{}\n\t", "ERR"),
+            ("{}  ", "dict0"),
+            ("{} \n ", "ERR"),
+            ("{}\n\n  ", "ERR"),
+            ("{}\n \u{c}", "dict0"),
+            ("{}\n\u{c}", "dict0"),
+            ("{}\n \n ", "ERR"),
+            ("{}\n # c\n ", "ERR"),
+            ("{}\\\n ", "dict0"),
+            ("{}\r\n ", "ERR"),
+            ("\u{c} {}", "ERR"),
+            ("\u{c}{}", "dict0"),
+            ("\\\n{}", "dict0"),
+            ("\\\n\t{}", "ERR"),
+            ("\\\n\u{c}{}", "dict0"),
+            ("{}\n\\\n", "ERR"),
+            ("{}\n\\\n\n", "dict0"),
+            ("\n \\\n{}", "ERR"),
+            ("{}\n \\\n", "ERR"),
+            ("{}\n\t# c", "dict0"),
+            ("# c\n  \n\t\n{}", "dict0"),
+            (" \t {}", "dict0"),
+            ("{}\n\u{c} ", "ERR"),
+            ("\n\u{c} {}", "ERR"),
         ];
         let mut wrong = Vec::new();
         for (source, want) in cases {

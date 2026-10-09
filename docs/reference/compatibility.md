@@ -491,9 +491,12 @@ moved or reported, never left in place beside siblings that moved. An
 `effective_date` equal to the transaction's own date is an error in both, and
 the transaction is left as written. A config `literal_eval` rejects is an
 error in both and changes nothing; a falsy one (`{}`, `None`) means the
-default config in both. A dict entry missing `earlier` or `later` is an error
-here as soon as the config is read; upstream fails only when a posting
-reaches it.
+default config in both. A dict entry missing `earlier` or `later`, a
+non-string account, or a truthy value that is not a dict is an error here as
+soon as the config is read; upstream fails only when a posting reaches it.
+The config reader follows Python's literal grammar, checked against
+`ast.literal_eval` on hundreds of thousands of generated configs, with one
+gap: a `\N{NAME}` escape is rejected here.
 
 As upstream does, the new entry at the effective date keeps the transaction's
 payee, tags, links and metadata, adding `original_date` and the link, and the

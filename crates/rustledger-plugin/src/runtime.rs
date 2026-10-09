@@ -285,7 +285,11 @@ impl Plugin {
             .context("plugin export `alloc` has wrong signature")?;
 
         // Allocate space for input
-        let input_ptr = alloc.call(&mut store, input_bytes.len() as u32)?;
+        let input_ptr = alloc
+            .call(&mut store, input_bytes.len() as u32)
+            .map_err(|e| {
+                sandbox::with_limit_context(e, store.data().limiter(), config.max_time_secs)
+            })?;
 
         // Write input to WASM memory
         memory.write(&mut store, input_ptr as usize, &input_bytes)?;
@@ -296,7 +300,11 @@ impl Plugin {
             .map_err(anyhow::Error::from)
             .context("plugin export `process` has wrong signature")?;
 
-        let result = process.call(&mut store, (input_ptr, input_bytes.len() as u32))?;
+        let result = process
+            .call(&mut store, (input_ptr, input_bytes.len() as u32))
+            .map_err(|e| {
+                sandbox::with_limit_context(e, store.data().limiter(), config.max_time_secs)
+            })?;
 
         // Parse result (packed as ptr << 32 | len)
         let output_ptr = (result >> 32) as u32;
@@ -534,6 +542,17 @@ pub struct WatchingPluginManager {
     on_reload: Option<Box<dyn Fn(&str) + Send + Sync>>,
 }
 
+/// The warning for a plugin that failed to reload. `e` can quote the
+/// module's own text (its import names), so it is escaped (see
+/// `crate::untrusted`).
+fn reload_failure_warning(path: &Path, e: &anyhow::Error) -> String {
+    format!(
+        "warning: failed to reload plugin {}: {}",
+        path.display(),
+        crate::escape_untrusted_text(&format!("{e:#}"))
+    )
+}
+
 impl WatchingPluginManager {
     /// Create a new watching plugin manager.
     pub fn new() -> Self {
@@ -620,11 +639,7 @@ impl WatchingPluginManager {
                     }
                     Err(e) => {
                         // Log error but don't fail - keep using old plugin
-                        eprintln!(
-                            "warning: failed to reload plugin {}: {}",
-                            tracked.path.display(),
-                            e
-                        );
+                        eprintln!("{}", reload_failure_warning(&tracked.path, &e));
                     }
                 }
             }
@@ -732,6 +747,21 @@ impl Default for WatchingPluginManager {
 
 #[cfg(test)]
 mod tests {
+
+    /// A reload failure's module text (here an import name) is escaped
+    /// in the warning (#2500 review).
+    #[test]
+    fn reload_failure_warning_escapes_module_text() {
+        let e =
+            anyhow::anyhow!("plugin has forbidden import: m\u{1b}[2J::f").context("invalid plugin");
+        let w = reload_failure_warning(Path::new("p.wasm"), &e);
+        assert_eq!(
+            w,
+            "warning: failed to reload plugin p.wasm: invalid plugin: \
+             plugin has forbidden import: m\\u{1b}[2J::f"
+        );
+    }
+
     use super::*;
     use crate::types::PluginOptions;
 

@@ -100,6 +100,48 @@ fn a_long_and_a_short_stay_two_pools() {
     assert_eq!(sum, lots(&ledger, BookingMethod::Strict, BALANCES));
 }
 
+/// A posting-level `FROM` (#2414) that keeps some of an AVERAGE account's
+/// postings and not others (the `Y` buy is left out): `BALANCES` is then the
+/// selected postings' sum as `sum(position)` computes it, on an account
+/// holding two longs, a short, and a sale from the long pool.
+#[test]
+fn a_partly_selected_account_is_realized_like_the_sum() {
+    let ledger = booked(
+        r#"
+2020-01-01 open Assets:Stock "AVERAGE"
+2020-01-01 open Assets:Cash
+2020-01-01 open Income:PnL
+
+2020-01-01 * "two longs and a short"
+  Assets:Stock  10 X {100 USD}
+  Assets:Stock  10 X {110 USD}
+  Assets:Stock  -2 X {101 USD}
+  Assets:Cash
+
+2020-01-05 * "sell 2 from the long pool"
+  Assets:Stock  -2 X {} @ 120 USD
+  Assets:Cash   240 USD
+  Income:PnL
+
+2020-02-01 * "a buy of another commodity, which the filter leaves out"
+  Assets:Stock   1 Y {200 USD}
+  Assets:Cash  -200 USD
+"#,
+        BookingMethod::Strict,
+    );
+    let from = "FROM currency = 'X' AND account = 'Assets:Stock'";
+    let balances = lots(&ledger, BookingMethod::Strict, &format!("BALANCES {from}"));
+    assert_eq!(balances, vec![(d("-2"), d("101")), (d("18"), d("105"))]);
+    assert_eq!(
+        balances,
+        lots(
+            &ledger,
+            BookingMethod::Strict,
+            &format!("SELECT account, sum(position) {from} GROUP BY account")
+        )
+    );
+}
+
 const TWO_BUYS_ONE_SALE: &str = r#"
 2020-01-01 open Assets:Stock X "AVERAGE"
 2020-01-01 open Assets:Cash

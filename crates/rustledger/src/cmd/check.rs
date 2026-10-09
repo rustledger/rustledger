@@ -710,6 +710,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
             .collect(),
         validate: true,
         plugin_max_time_secs: crate::plugin_budget::max_time_secs(),
+        plugin_max_memory_mb: crate::plugin_budget::max_memory_mb(),
         ..Default::default()
     };
 
@@ -848,10 +849,19 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
         if let Some(secs) = crate::plugin_budget::max_time_secs() {
             runtime.max_time_secs = secs;
         }
+        if let Some(bytes) = crate::plugin_budget::max_memory_bytes() {
+            runtime.max_memory = bytes;
+        }
         let mut wasm_mgr = PluginManager::with_config(runtime);
         for plugin_path in &args.plugins {
             if let Err(e) = wasm_mgr.load(plugin_path) {
-                let msg = format!("failed to load WASM plugin {}: {e}", plugin_path.display());
+                // `{e:#}` names the cause (a forbidden import, say), which
+                // carries the module's own text, so it is escaped.
+                let msg = format!(
+                    "failed to load WASM plugin {}: {}",
+                    plugin_path.display(),
+                    rustledger_plugin::escape_untrusted_text(&format!("{e:#}"))
+                );
                 // Tally and filter like every other diagnostic, so
                 // --show-summary counts this and --exclude-rules can hide it.
                 // The count below is deliberately outside: hiding a
@@ -900,12 +910,17 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                                 severity: sev.to_string(),
                                 phase: "plugin".to_string(),
                                 code: "PLUGIN".to_string(),
-                                message: err.message.clone(),
+                                message: rustledger_plugin::escape_untrusted_text(&err.message)
+                                    .into_owned(),
                                 hint: None,
                                 context: None,
                             });
                         } else if !args.quiet && shown {
-                            writeln!(stdout, "{sev}: {}", err.message)?;
+                            writeln!(
+                                stdout,
+                                "{sev}: {}",
+                                rustledger_plugin::escape_untrusted_text(&err.message)
+                            )?;
                         }
                         match err.severity {
                             rustledger_plugin::PluginErrorSeverity::Error => {
@@ -918,7 +933,10 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
                     }
                 }
                 Err(e) => {
-                    let msg = format!("WASM plugin execution failed: {e:#}");
+                    let msg = format!(
+                        "WASM plugin execution failed: {}",
+                        rustledger_plugin::escape_untrusted_text(&format!("{e:#}"))
+                    );
                     // Tally and filter like every other diagnostic, so
                     // --show-summary counts this and --exclude-rules can hide it.
                     // The count below is deliberately outside: hiding a

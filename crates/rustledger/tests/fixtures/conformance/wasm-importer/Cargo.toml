@@ -1,0 +1,11 @@
+[package]
+name = "conformance-wasm-importer"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+rustledger-plugin-types = { path = "../../../../../rustledger-plugin-types", features = ["guest"] }

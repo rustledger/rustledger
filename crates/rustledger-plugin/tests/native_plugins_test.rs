@@ -369,6 +369,30 @@ fn test_leafonly_error_on_parent_account() {
     );
 }
 
+/// A parent whose only child is opened (or named by another directive)
+/// and never posted to is still a parent, as in beancount's realization
+/// (#2500 review: native leafonly missed it; bean-check reports it).
+#[test]
+fn test_leafonly_error_on_parent_whose_child_is_only_opened() {
+    let plugin = LeafOnlyPlugin;
+    let input = make_input(vec![
+        make_open("2024-01-01", "Assets:Bank"),
+        make_open("2024-01-01", "Assets:Bank:Sub:Deeper"),
+        make_open("2024-01-01", "Expenses:Food"),
+        make_transaction(
+            "2024-01-15",
+            "Lunch",
+            vec![
+                ("Expenses:Food", "25.00", "USD"),
+                ("Assets:Bank", "-25.00", "USD"),
+            ],
+        ),
+    ]);
+    let output = process_and_materialize(&plugin, input);
+    assert_eq!(output.errors.len(), 1, "{:?}", output.errors);
+    assert!(output.errors[0].message.contains("'Assets:Bank'"));
+}
+
 /// Test all postings to leaf accounts - no errors.
 /// Converted from: `test_leaf_only3` behavior
 #[test]
@@ -4634,10 +4658,18 @@ fn test_pedantic_runs_multiple_validators() {
         ),
     ]);
     let output = process_and_materialize(&plugin, input);
+    let messages: Vec<&str> = output.errors.iter().map(|e| e.message.as_str()).collect();
+    // The leaf-only violation (`Expenses:Food:Restaurant` is only
+    // opened, but makes `Expenses:Food` a parent, as in bean-check), and
+    // the undeclared commodity. Before #2500's review this test expected
+    // one error, and the one it got was the commodity's: leafonly missed
+    // the violation the test is named for.
     assert_eq!(
-        output.errors.len(),
-        1,
-        "exactly one error for the single leaf-only violation"
+        messages,
+        [
+            "Posting to non-leaf account 'Expenses:Food' - has child accounts",
+            "commodity 'USD' used but not declared"
+        ]
     );
 }
 

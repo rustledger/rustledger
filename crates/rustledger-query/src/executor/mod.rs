@@ -356,6 +356,16 @@ pub const WILDCARD_COLUMNS: &[&str] =
 /// when the scan was asked for it (`needs_account_balance`); it honors the same
 /// `FROM` window (`open_on`/`close_on`) as the rest of the scan, so consumers
 /// like `BALANCES` get the windowed per-account totals for free.
+/// One account's rows under a posting-level `FROM` filter, in a scan
+/// (#2414): whether any of its postings was selected, whether any was not,
+/// and the plain sum of the selected ones.
+#[derive(Default)]
+struct RowSelection {
+    selected: bool,
+    rejected: bool,
+    sum: Inventory,
+}
+
 pub(crate) struct PostingScan<'a> {
     pub(crate) postings: Vec<PostingContext<'a>>,
     pub(crate) account_balances: FxHashMap<rustledger_core::Account, Inventory>,
@@ -1017,11 +1027,34 @@ impl<'a> Executor<'a> {
                 .map(|units| Position::from_posting(units, posting.cost.as_deref(), txn_date))
         };
 
+        // The FROM filter expression; the date window is the stream's
+        // (`window_transactions`). An entry-level filter keeps or drops a
+        // transaction whole. A posting-level one is a ROW filter, joined to
+        // WHERE with AND, as beanquery compiles it (#2414): a transaction is replayed
+        // whole when any of its postings passes, so `account_balance` stays
+        // the account's own running balance, but only the passing postings
+        // become rows.
+        let from_filter = from.and_then(|f| f.filter.as_ref());
+        let row_filter = from_filter.filter(|f| evaluation::from_filter_reads_postings(f));
+        // BALANCES' per-account totals under a row filter, where the engine's
+        // whole-transaction replay above is not the answer for every account.
+        let mut selection: FxHashMap<rustledger_core::Account, RowSelection> = FxHashMap::default();
+        let mut passes: Vec<bool> = Vec::new();
+
         for (directive_index, txn) in self.window_transactions(from, directive_iter)? {
-            // Apply the FROM filter expression; the date window is the
-            // stream's (`window_transactions`).
-            if let Some(filter) = from.and_then(|f| f.filter.as_ref())
-                && !self.evaluate_from_filter(filter, &txn)?
+            passes.clear();
+            if let Some(filter) = row_filter {
+                for i in 0..txn.postings.len() {
+                    passes.push(self.evaluate_from_filter(filter, &txn, i, directive_index)?);
+                }
+                if !passes.contains(&true) {
+                    continue;
+                }
+            } else if let Some(filter) = from_filter
+                // A transaction without postings has no row for the filter
+                // to keep, and no posting for a column to read.
+                && (txn.postings.is_empty()
+                    || !self.evaluate_from_filter(filter, &txn, 0, directive_index)?)
             {
                 continue;
             }
@@ -1061,6 +1094,38 @@ impl<'a> Executor<'a> {
                     replay
                         .advance()
                         .map_err(|e| QueryError::Evaluation(e.to_string()))?;
+                }
+
+                // The row half of a posting-level FROM filter: the posting
+                // was replayed above, since the account's running balance is
+                // the ledger's, but it is no row.
+                // The per-account record is BALANCES' (`collect_contexts`
+                // false), the only reader of `account_balances`.
+                if row_filter.is_some() {
+                    if !collect_contexts {
+                        let chosen = selection.entry(posting.account.clone()).or_default();
+                        if passes[i] {
+                            chosen.selected = true;
+                            if let Some(units) = posting.amount() {
+                                chosen
+                                    .sum
+                                    .add_with_total(
+                                        Position::from_posting(
+                                            units,
+                                            posting.cost.as_deref(),
+                                            txn.date,
+                                        ),
+                                        rustledger_booking::posting_lot_total(posting, units),
+                                    )
+                                    .map_err(|e| QueryError::Evaluation(e.to_string()))?;
+                            }
+                        } else {
+                            chosen.rejected = true;
+                        }
+                    }
+                    if !passes[i] {
+                        continue;
+                    }
                 }
 
                 // Callers that only want the per-account totals (BALANCES, via
@@ -1188,9 +1253,34 @@ impl<'a> Executor<'a> {
             }
         }
 
+        let mut account_balances = engine.into_inventories();
+        if row_filter.is_some() {
+            // Under a row filter an account's total is the sum of its
+            // selected postings (beanquery's BALANCES is `SUM(position)`
+            // over the rows). Where every posting of the account that the
+            // replay saw was selected, the engine's booked inventory is that
+            // sum, realized as booking realizes it (#1985); where some were
+            // not, it is the plain sum of the selected ones, as
+            // `SUM(position)` computes it, AVERAGE pools merged; an account
+            // with none is no row.
+            account_balances
+                .retain(|account, _| selection.get(account).is_some_and(|s| s.selected));
+            for (account, mut chosen) in selection {
+                if chosen.selected && chosen.rejected {
+                    // As `SUM(position)` realizes an AVERAGE account.
+                    if self.account_is_average(&account) {
+                        chosen
+                            .sum
+                            .merge_average()
+                            .map_err(|e| QueryError::Evaluation(e.to_string()))?;
+                    }
+                    account_balances.insert(account, chosen.sum);
+                }
+            }
+        }
         Ok(PostingScan {
             postings,
-            account_balances: engine.into_inventories(),
+            account_balances,
         })
     }
     /// Is this call `WEIGHT(position)` over the posting COLUMN?

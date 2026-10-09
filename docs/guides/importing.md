@@ -217,6 +217,27 @@ wasm_importer_dir = "/etc/rledger/importers.d"
 
 The sandbox is the same one used for directive plugins: no filesystem, no network, no WASI, with a 256 MiB memory cap and a time budget of at most 30 seconds per call. The budget is raised with `[plugins] max_time_secs` in the rledger config file or `--plugin-max-time-secs`; see [Plugin Time Budget](../getting-started/configuration.md#plugin-time-budget). To **author** a WASM importer, depend on `rustledger-plugin-types` with the `guest` feature and use the `wasm_importer_main!` macro — see [`examples/wasm-importer-csv-example`](https://github.com/rustledger/rustledger/tree/main/examples/wasm-importer-csv-example) for a reference implementation.
 
+### Transaction ids from a WASM importer
+
+A WASM importer can give each transaction the source format's own id, so
+`--existing` recognizes it the way it recognizes `^ofx-<FITID>` and
+`^csv-<id>`. The importer adds a link built by
+`rustledger_plugin_types::wasm_id_link(name, id)`, which comes out as
+`^wasm-<importer>/<id>`:
+
+```beancount
+2024-01-15 * "Bakery" "Croissant" ^wasm-MT940/2024-0001
+  Assets:Bank  -2.50 EUR
+  Expenses:Unknown
+```
+
+The importer name is encoded so that two different names never share a
+namespace (`My Bank` becomes `My_20Bank`), and the id is sanitized as for CSV
+ids. Each importer is its own namespace: ids are only compared with ids from the same
+importer, so moving a bank's statements to a different importer or format
+falls back to comparing text. An importer that adds no such link dedups by
+date, amount and text.
+
 ## Multiple Accounts
 
 Configure multiple importers for different accounts:

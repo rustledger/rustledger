@@ -1,5 +1,6 @@
 //! Duplicate transaction detection for extract command.
 
+use super::ledgers::Ledgers;
 use anyhow::{Context, Result};
 use rustledger_core::{Directive, Transaction};
 use std::path::Path;
@@ -7,7 +8,7 @@ use std::path::Path;
 /// The transactions of [`load_existing`], for tests.
 #[cfg(test)]
 pub(super) fn load_existing_transactions(path: &Path) -> Result<Vec<Transaction>> {
-    Ok(load_existing(path)?.transactions)
+    Ok(load_existing(&mut Ledgers::default(), path)?.transactions)
 }
 
 /// The `--existing` ledger as dedup sees it.
@@ -39,13 +40,13 @@ pub(super) struct ExistingLedger {
 /// A parse or include error does not stop the import, as before, but it is no
 /// longer silent: entries in the part that failed to load cannot be compared,
 /// so `extract` would re-import their duplicates without a word.
-pub(super) fn load_existing(path: &Path) -> Result<ExistingLedger> {
-    let options = rustledger_loader::LoadOptions {
-        run_plugins: false,
-        validate: false,
-        ..Default::default()
-    };
-    let ledger = rustledger_loader::load(path, &options)
+///
+/// Dedup is the last reader of the run's ledgers, so it takes this one out of
+/// `ledgers` rather than cloning its transactions; the currency lookup may
+/// already have loaded it (#2503).
+pub(super) fn load_existing(ledgers: &mut Ledgers, path: &Path) -> Result<ExistingLedger> {
+    let ledger = ledgers
+        .take(path)
         .with_context(|| format!("Failed to load existing ledger: {}", path.display()))?;
     let errors: Vec<&rustledger_loader::LedgerError> = ledger
         .errors

@@ -821,7 +821,7 @@ Most Python beancount plugins have native equivalents:
 - **Compilation**: First execution compiles WASM (~30 seconds)
 - **Time budget**: each call has the same time budget as a WASM plugin (30 seconds by default), of which starting the interpreter takes about 1.2; a plugin over a very large ledger can need more. See [Plugin Time Budget](../getting-started/configuration.md#plugin-time-budget)
 - **Memory**: the interpreter, and every entry as Python objects (about 1.2 KB per transaction), must fit in the sandbox memory cap, 256 MiB by default, which holds roughly 150,000 transactions. Raise it with `[plugins] max_memory_mb` or `--plugin-max-memory-mb`. See [Plugin Memory Cap](../getting-started/configuration.md#plugin-memory-cap)
-- **Other resources**: a plugin may hold at most 256 files open at once; it is stopped when it runs past its time budget on the clock, including time spent sleeping
+- **Other resources**: a plugin may hold at most 256 open files and pending polls (`select`) at once; it is stopped when it runs past its time budget on the clock, including time spent sleeping
 - **Not all plugins work**: C extensions and some stdlib modules unavailable
 - **File-path references only**: custom Python plugins must be referenced by file path and be self-contained — see [Referencing a Python Plugin](#referencing-a-python-plugin)
 - **Debugging**: Error messages may be less helpful

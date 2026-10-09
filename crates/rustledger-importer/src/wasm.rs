@@ -848,8 +848,10 @@ fn bridge_enriched_output(output: EnrichedImporterOutput) -> anyhow::Result<Enri
         entries.push((dir, enrichment));
     }
     let mut enriched = EnrichedImportResult::new(entries);
+    // These quote the importer's own strings (a method name, a
+    // fingerprint), so they are escaped like its warnings.
     for w in bridge_warnings {
-        enriched = enriched.with_warning(w);
+        enriched = enriched.with_warning(rustledger_plugin::escape_untrusted_text(&w).into_owned());
     }
     for w in output.warnings {
         enriched = enriched.with_warning(rustledger_plugin::escape_untrusted_text(&w).into_owned());
@@ -1557,6 +1559,34 @@ mod tests {
             bridged.warnings[0].contains("merchant_dict"),
             "warning should name the unknown method: {}",
             bridged.warnings[0]
+        );
+    }
+
+    /// The importer's own strings quoted in bridge warnings (an unknown
+    /// method, a malformed fingerprint) have their control characters
+    /// escaped (#2500 review).
+    #[test]
+    fn bridge_warnings_escape_importer_text() {
+        let out = EnrichedImporterOutput {
+            entries: vec![(
+                open_wrapper("Assets:Bank"),
+                enrichment_wrapper("x\u{1b}[2J", Some("zz\u{1b}]0;pwned\u{7}".to_string())),
+            )],
+            warnings: vec![],
+            errors: vec![],
+        };
+        let bridged = bridge_enriched_output(out).expect("bridge succeeds");
+        assert_eq!(bridged.warnings.len(), 2, "{:?}", bridged.warnings);
+        for w in &bridged.warnings {
+            assert!(
+                !w.contains('\u{1b}') && !w.contains('\u{7}'),
+                "raw control: {w:?}"
+            );
+        }
+        assert!(
+            bridged.warnings[0].contains("x\\u{1b}[2J"),
+            "{:?}",
+            bridged.warnings
         );
     }
 

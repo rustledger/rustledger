@@ -980,7 +980,7 @@ fn python_plugin_open_files_are_capped() {
     );
     run(dir.path(), &["check", "ledger.beancount"])
         .failed_cleanly()
-        .has("the plugin held more than 256 files open at once");
+        .has("the plugin held more than 256 open files and pending polls at once");
 }
 
 /// What a plugin writes to its result stream itself is checked, not
@@ -1227,4 +1227,80 @@ fn wasm_module_text_in_load_errors_is_escaped() {
             .has("m\\u{1b}[2J\\u{1b}]0;pwned\\u{7}");
         no_raw_controls(&out);
     }
+}
+
+/// The two importer errors that quote a module's own text after load: a
+/// runtime trap (its backtrace names the function, from the module's
+/// `name` section) and a decode error (serde quotes an unknown variant
+/// with `Display`). Both are escaped.
+#[test]
+fn wasm_importer_trap_and_decode_text_is_escaped() {
+    // `metadata` traps; its name in the `name` section carries controls.
+    let trap = r#"(module
+        (memory (export "memory") 1)
+        (func (export "alloc") (param i32) (result i32) i32.const 1024)
+        (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+        (func (export "identify") (param i32 i32) (result i64) i64.const 0)
+        (func (export "extract") (param i32 i32) (result i64) i64.const 0)
+        (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 0)
+        (func $"\1b[2J\1b]0;pwned\07" (export "metadata") (result i64) unreachable))"#;
+    // `extract` returns a directive whose `type` is an unknown variant
+    // carrying controls (hand-built MessagePack).
+    let decode = r#"(module
+  (memory (export "memory") 1)
+  (data (i32.const 16) "\82\a4\6e\61\6d\65\a4\65\76\69\6c\ab\64\65\73\63\72\69\70\74\69\6f\6e\a1\64")
+  (data (i32.const 256) "\81\a7\6d\61\74\63\68\65\73\c3")
+  (data (i32.const 512) "\83\aa\64\69\72\65\63\74\69\76\65\73\91\82\a4\64\61\74\65\aa\32\30\32\34\2d\30\31\2d\30\31\a4\74\79\70\65\ae\1b\5b\32\4a\1b\5d\30\3b\70\77\6e\65\64\07\a8\77\61\72\6e\69\6e\67\73\90\a6\65\72\72\6f\72\73\90")
+  (func (export "alloc") (param i32) (result i32) i32.const 4096)
+  (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+  (func (export "identify") (param i32 i32) (result i64) i64.const 1099511627786)
+  (func (export "extract") (param i32 i32) (result i64) i64.const 2199023255620)
+  (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 2199023255620)
+  (func (export "metadata") (result i64) i64.const 68719476761))"#;
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("statement.conformance"), "x").unwrap();
+    for (name, wat, says) in [
+        ("trap.wasm", trap, "WASM importer runtime error"),
+        ("decode.wasm", decode, "unknown variant"),
+    ] {
+        std::fs::write(
+            dir.path().join(name),
+            wat::parse_str(wat).expect("WAT parses"),
+        )
+        .unwrap();
+        let out = run(
+            dir.path(),
+            &[
+                "extract",
+                "--wasm-importer",
+                name,
+                "--account",
+                "Assets:Bank",
+                "statement.conformance",
+            ],
+        );
+        out.has(says).has("\\u{1b}[2J\\u{1b}]0;pwned\\u{7}");
+        no_raw_controls(&out);
+    }
+}
+
+/// An invalid entry's value quoted in the "not valid" error (here a date
+/// carrying controls) is escaped.
+#[test]
+fn invalid_plugin_entry_value_is_escaped() {
+    if !python_ready() {
+        return;
+    }
+    let dir = python_plugin(
+        "forge",
+        "import os\n__plugins__ = ['forge']\ndef forge(entries, options_map):\n    \
+         os.write(1, b'{\"insert\": {\"date\": \"\\\\u001b[2J\", \"type\": \"close\", \
+         \"account\": \"Assets:Bank\", \"metadata\": []}}\\n{\"ran\": true, \"errors\": []}\\n')\n    \
+         os._exit(0)\n",
+    );
+    let out = run(dir.path(), &["check", "ledger.beancount"]);
+    out.failed_cleanly()
+        .has("plugin returned an entry that is not valid")
+        .has("\\u{1b}[2J");
+    no_raw_controls(&out);
 }

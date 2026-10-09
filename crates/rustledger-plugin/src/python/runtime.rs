@@ -593,7 +593,7 @@ impl PythonRuntime {
             } else if e.downcast_ref::<wasmtime::Trap>() == Some(&wasmtime::Trap::StackOverflow) {
                 "the plugin recursed past the sandbox's call stack: ".to_string()
             } else if format!("{e:#}").contains("resource table has no free keys") {
-                format!("the plugin held more than {MAX_GUEST_RESOURCES} files open at once: ")
+                format!("the plugin held more than {MAX_GUEST_RESOURCES} open files and pending polls at once: ")
             } else if let Some(exit) = e.downcast_ref::<wasmtime_wasi::I32Exit>() {
                 // An uncaught exception at the top level (an import the
                 // compat layer does not provide, a syntax error): its

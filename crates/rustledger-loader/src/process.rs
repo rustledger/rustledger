@@ -1479,9 +1479,11 @@ fn convert_plugin_entry(
             errors.push(
                 LedgerError::error(
                     "PLUGIN",
+                    // The reason quotes the plugin's value (a date, say).
                     format!(
-                        "plugin returned an entry that is not valid ({e}); \
-                         its changes were discarded"
+                        "plugin returned an entry that is not valid ({}); \
+                         its changes were discarded",
+                        rustledger_plugin::escape_untrusted_text(&e.to_string())
                     ),
                 )
                 .with_phase("plugin"),

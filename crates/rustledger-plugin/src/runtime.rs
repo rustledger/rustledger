@@ -628,10 +628,11 @@ impl WatchingPluginManager {
                     }
                     Err(e) => {
                         // Log error but don't fail - keep using old plugin
+                        // `e` can quote the module's own text (its imports).
                         eprintln!(
                             "warning: failed to reload plugin {}: {}",
                             tracked.path.display(),
-                            e
+                            crate::escape_untrusted_text(&format!("{e:#}"))
                         );
                     }
                 }

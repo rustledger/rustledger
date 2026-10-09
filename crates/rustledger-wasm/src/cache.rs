@@ -194,7 +194,12 @@ use crate::types::{Error, LedgerOptions};
 /// and one whose currency was read off the residual now fails. `ParsedLedger`
 /// and `Ledger` archive booked directives and their errors, so a v32 blob
 /// would keep serving the old answer.
-pub const CACHE_VERSION: u32 = 33;
+/// v34: an entry with no source location (one a plugin inserted) sorts first
+/// among same-date, same-type entries instead of last (#2553). Loader v37,
+/// unchanged -- the loader archives parsed directives, which have no such
+/// entries. `Ledger` archives the processed, sorted directives, so a v33 blob
+/// would keep serving the old order.
+pub const CACHE_VERSION: u32 = 34;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

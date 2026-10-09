@@ -585,20 +585,51 @@ fn resolve_effective_booking_method(
 // without changing their semantics — only the type-level sequencing
 // is new. See `phase.rs` for the phase markers and overall rationale.
 
-/// Canonical display-order sort key: `(date, priority, file_id, span.start)`.
-/// What BQL / JSON / format output expects and what Python beancount
-/// produces. Used by `sort` (initial ordering) and `finalize` (re-sort
-/// after merging failed bookings back in).
+/// Canonical display-order sort key:
+/// `(date, priority, has_source_location, file_id, span.start)`.
+/// What BQL / JSON / format output expects. Used by `sort` (initial
+/// ordering) and `finalize` (re-sort after merging failed bookings and
+/// plugin-inserted entries back in).
+///
+/// An entry with no source location (`SYNTHESIZED_FILE_ID`, e.g. an `open`
+/// a plugin inserted without a filename) sorts FIRST among entries of the
+/// same `(date, priority)`. Beancount sorts by `(date, type, lineno)` and a
+/// synthesized entry has `lineno` 0, so it lands first there too. Before
+/// #2553 the sentinel id `u16::MAX` itself was the key, which put such
+/// entries LAST: an artifact of the sentinel's value, not a decision. The
+/// sentinel is unchanged; only its rank here is.
+///
+/// Entries with a real file keep rledger's file order `(file_id,
+/// span.start)`. Beancount's own key ignores the file and interleaves
+/// files by line number; that is deliberately NOT adopted, since file order
+/// is what booking walks.
+///
+/// Booking order cannot change with this rank for a loaded ledger. The key
+/// runs at `sort`, on the loader's parser output (every entry has a real
+/// file), and at `finalize`, after booking. In between, only the
+/// pre-booking synth plugins (`auto_accounts`, `document_discovery`) can
+/// insert entries, and they insert `open`s and `document`s, which do not
+/// book. Only a caller that hands [`process`] a hand-built `LoadResult`
+/// holding a synthesized cost-bearing transaction could see it book ahead of
+/// a same-date source transaction, which is where beancount books it too.
 type CanonicalSortKey = (
     rustledger_core::NaiveDate,
     rustledger_core::DirectivePriority,
+    bool,
     u16,
     usize,
 );
 
 #[inline]
 const fn canonical_sort_key(d: &Spanned<Directive>) -> CanonicalSortKey {
-    (d.value.date(), d.value.priority(), d.file_id, d.span.start)
+    (
+        d.value.date(),
+        d.value.priority(),
+        // `false` sorts before `true`: no location first.
+        d.file_id != rustledger_parser::SYNTHESIZED_FILE_ID,
+        d.file_id,
+        d.span.start,
+    )
 }
 
 impl crate::Directives<crate::Raw> {
@@ -906,7 +937,7 @@ impl crate::Directives<crate::LateValidated> {
 /// directives partitioned into `(booked, failed)`.
 ///
 /// The caller has already sorted `directives` into canonical display
-/// order `(date, priority, file_id, span.start)`. Booking needs the
+/// order (see [`canonical_sort_key`]). Booking needs the
 /// same ordering. Rather than assume that, we walk the vec via a
 /// transient `Vec<usize>` of indices sorted by booking order, which
 /// keeps `booking_sort_key` the one place a booking-order tiebreak
@@ -936,7 +967,7 @@ fn run_booking(
     engine.register_account_methods(directives.iter().map(|s| &s.value));
 
     // Build an index ordered for booking. `directives` is already in
-    // display order — `(date, priority, file_id, span.start)` — and the
+    // display order — see `canonical_sort_key` — and the
     // booking key is its `(date, priority)` prefix, so a stable sort
     // returns the identity permutation. It is kept rather than elided so
     // that booking order has exactly one definition to change.
@@ -2123,5 +2154,51 @@ mod module_ref_message_tests {
         let msg = module_ref_message("pkg.mod", None);
         assert!(msg.contains("reference the file directly"));
         assert!(msg.contains("self-contained"));
+    }
+}
+
+#[cfg(test)]
+mod canonical_sort_key_tests {
+    use super::canonical_sort_key;
+    use rustledger_core::{Directive, Open, SYNTHESIZED_FILE_ID, Span, Spanned};
+
+    fn open_at(account: &str, file_id: u16, start: usize) -> Spanned<Directive> {
+        let date = rustledger_core::naive_date(2024, 1, 1).unwrap();
+        Spanned::new(
+            Directive::Open(Open::new(date, account)),
+            Span::new(start, start),
+        )
+        .with_file_id(file_id as usize)
+    }
+
+    /// #2553: an entry with no source location sorts FIRST among same
+    /// `(date, priority)` entries, as beancount's lineno-0 synthesized
+    /// entries do, while entries with a real location keep file order
+    /// `(file_id, span.start)`: file 0 before file 1 whatever the offsets.
+    #[test]
+    fn synthesized_first_then_file_order() {
+        let mut v = [
+            open_at("Assets:F1Early", 1, 0),
+            open_at("Assets:F0Late", 0, 50),
+            open_at("Assets:Synth", SYNTHESIZED_FILE_ID, 0),
+            open_at("Assets:F0Early", 0, 10),
+        ];
+        v.sort_by_key(canonical_sort_key);
+        let order: Vec<String> = v
+            .iter()
+            .map(|d| match &d.value {
+                Directive::Open(o) => o.account.to_string(),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(
+            order,
+            [
+                "Assets:Synth",
+                "Assets:F0Early",
+                "Assets:F0Late",
+                "Assets:F1Early"
+            ]
+        );
     }
 }

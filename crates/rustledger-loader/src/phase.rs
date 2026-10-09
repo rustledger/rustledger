@@ -20,7 +20,7 @@
 //! | Phase | Invariant after this phase |
 //! |---|---|
 //! | [`Raw`] | Straight from the parser. No ordering / synth / booking guarantees. |
-//! | [`Sorted`] | Sorted into canonical display order `(date, priority, file_id, span.start)`. |
+//! | [`Sorted`] | Sorted into canonical display order `(date, priority, has_source_location, file_id, span.start)`. |
 //! | [`Synthed`] | Synth-only plugins (`auto_accounts`, `document_discovery`) applied. |
 //! | [`EarlyValidated`] | Early-phase validators ran. Account presence / lifecycle / structural errors collected. |
 //! | [`Booked`] | Cost-spec interpolation done. Failed transactions partitioned out. |
@@ -96,7 +96,7 @@ define_phase!(
 );
 define_phase!(
     Sorted,
-    "Sorted by `(date, priority, file_id, span.start)` — canonical display order."
+    "Sorted by `(date, priority, has_source_location, file_id, span.start)` — canonical display order."
 );
 define_phase!(
     Synthed,

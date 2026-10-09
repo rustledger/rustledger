@@ -470,8 +470,9 @@ anything `PRINT` prints is already formatted. Metadata is sorted because
 rustledger stores it unordered, so source order is not available. One
 difference from `rledger format` remains: `rledger format` aligns postings
 across a whole file, and `PRINT`, like bean-query, aligns each entry on its
-own. Thousands separators would need the ledger's display context in the
-query engine, which `PRINT` does not have yet.
+own. `PRINT` writes no thousands separators, as plain `rledger format` writes
+none; `rledger format --ledger` adds the ones a ledger's `render_commas`
+declares.
 
 Over the 742 files of the downloaded compatibility corpus, 342 of the 615
 that both tools print (bean-query fails on 45 more, and rustledger declines

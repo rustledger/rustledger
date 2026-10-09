@@ -6,7 +6,8 @@ use crate::ast::{Expr, SortDirection, Target, WindowFunction};
 use crate::error::QueryError;
 
 use super::Executor;
-use super::types::{PostingContext, Value, WindowContext};
+use super::PostingRow;
+use super::types::{Value, WindowContext};
 
 impl Executor<'_> {
     pub(super) fn has_window_functions(targets: &[Target]) -> bool {
@@ -33,7 +34,7 @@ impl Executor<'_> {
     }
     pub(super) fn compute_window_contexts(
         &self,
-        postings: &[PostingContext],
+        postings: &[PostingRow],
         wf: &WindowFunction,
     ) -> Result<Vec<WindowContext>, QueryError> {
         let spec = &wf.over;

@@ -367,8 +367,38 @@ struct RowSelection {
 }
 
 pub(crate) struct PostingScan<'a> {
-    pub(crate) postings: Vec<PostingContext<'a>>,
+    pub(crate) postings: Vec<PostingRow<'a>>,
     pub(crate) account_balances: FxHashMap<rustledger_core::Account, Inventory>,
+}
+
+/// Internal evaluation state shared by the rows of one transaction.
+#[derive(Debug)]
+pub(crate) struct PostingRow<'a> {
+    context: PostingContext<'a>,
+    txn_accounts: Option<Arc<system_tables::TxnAccounts<String>>>,
+}
+
+impl<'a> From<PostingContext<'a>> for PostingRow<'a> {
+    fn from(context: PostingContext<'a>) -> Self {
+        Self {
+            context,
+            txn_accounts: None,
+        }
+    }
+}
+
+impl<'a> std::ops::Deref for PostingRow<'a> {
+    type Target = PostingContext<'a>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.context
+    }
+}
+
+impl std::ops::DerefMut for PostingRow<'_> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.context
+    }
 }
 
 impl<'a> Executor<'a> {
@@ -754,6 +784,7 @@ impl<'a> Executor<'a> {
                 from,
                 None,
                 ScanNeeds {
+                    txn_accounts: false,
                     balance: false,
                     account_balance: true,
                     where_reads_balance: false,
@@ -766,7 +797,7 @@ impl<'a> Executor<'a> {
     }
 
     /// Collect postings matching the FROM and WHERE clauses.
-    fn collect_postings(&self, query: &SelectQuery) -> Result<Vec<PostingContext<'a>>, QueryError> {
+    fn collect_postings(&self, query: &SelectQuery) -> Result<Vec<PostingRow<'a>>, QueryError> {
         let from = query.from.as_ref();
         let where_clause = query.where_clause.as_ref();
 
@@ -816,6 +847,7 @@ impl<'a> Executor<'a> {
                 from,
                 where_clause,
                 ScanNeeds {
+                    txn_accounts: self.query_reads_transaction_accounts(query)?,
                     balance: needs_balance,
                     account_balance: needs_account_balance,
                     where_reads_balance,
@@ -825,6 +857,48 @@ impl<'a> Executor<'a> {
                 true,
             )?
             .postings)
+    }
+
+    /// Account-set reads after output aliases have been resolved.
+    fn query_reads_transaction_accounts(&self, query: &SelectQuery) -> Result<bool, QueryError> {
+        if !query_references_column(query, "accounts")
+            && !query_references_column(query, "other_accounts")
+        {
+            return Ok(false);
+        }
+        if query
+            .targets
+            .iter()
+            .any(|t| expr_reads_transaction_accounts(&t.expr))
+            || query
+                .where_clause
+                .as_ref()
+                .is_some_and(expr_reads_transaction_accounts)
+            || query
+                .from
+                .as_ref()
+                .and_then(|f| f.filter.as_ref())
+                .is_some_and(from_filter_reads_transaction_accounts)
+        {
+            return Ok(true);
+        }
+        if let Some(group) = &query.group_by
+            && Self::resolve_group_by_aliases(group, &query.targets)?
+                .iter()
+                .any(expr_reads_transaction_accounts)
+        {
+            return Ok(true);
+        }
+        // ORDER BY and PIVOT read projected values. Only hidden ordering
+        // targets evaluate an additional expression against a posting.
+        Ok(self
+            .find_hidden_order_by_targets(query)
+            .iter()
+            .any(|t| expr_reads_transaction_accounts(&t.expr))
+            || query
+                .having
+                .as_ref()
+                .is_some_and(having_reads_transaction_accounts))
     }
 
     /// The single posting-source scan, shared by the default `SELECT` path
@@ -968,6 +1042,7 @@ impl<'a> Executor<'a> {
         collect_contexts: bool,
     ) -> Result<PostingScan<'a>, QueryError> {
         let ScanNeeds {
+            txn_accounts: needs_txn_accounts,
             balance: needs_balance,
             account_balance: needs_account_balance,
             where_reads_balance,
@@ -1036,16 +1111,28 @@ impl<'a> Executor<'a> {
         // become rows.
         let from_filter = from.and_then(|f| f.filter.as_ref());
         let row_filter = from_filter.filter(|f| evaluation::from_filter_reads_postings(f));
+        let needs_txn_accounts =
+            needs_txn_accounts || from_filter.is_some_and(from_filter_reads_transaction_accounts);
         // BALANCES' per-account totals under a row filter, where the engine's
         // whole-transaction replay above is not the answer for every account.
         let mut selection: FxHashMap<rustledger_core::Account, RowSelection> = FxHashMap::default();
         let mut passes: Vec<bool> = Vec::new();
 
         for (directive_index, txn) in self.window_transactions(from, directive_iter)? {
+            // Build before FROM and WHERE can read either set. Owned names
+            // also keep synthesised opening/closing transactions independent.
+            let txn_accounts = needs_txn_accounts
+                .then(|| Arc::new(system_tables::TxnAccounts::of(&txn).into_owned()));
             passes.clear();
             if let Some(filter) = row_filter {
                 for i in 0..txn.postings.len() {
-                    passes.push(self.evaluate_from_filter(filter, &txn, i, directive_index)?);
+                    passes.push(self.evaluate_from_filter_with_accounts(
+                        filter,
+                        &txn,
+                        i,
+                        directive_index,
+                        txn_accounts.as_ref(),
+                    )?);
                 }
                 if !passes.contains(&true) {
                     continue;
@@ -1054,7 +1141,13 @@ impl<'a> Executor<'a> {
                 // A transaction without postings has no row for the filter
                 // to keep, and no posting for a column to read.
                 && (txn.postings.is_empty()
-                    || !self.evaluate_from_filter(filter, &txn, 0, directive_index)?)
+                    || !self.evaluate_from_filter_with_accounts(
+                        filter,
+                        &txn,
+                        0,
+                        directive_index,
+                        txn_accounts.as_ref(),
+                    )?)
             {
                 continue;
             }
@@ -1163,32 +1256,35 @@ impl<'a> Executor<'a> {
                 //   the value here is already the post-update running
                 //   total. We populate it eagerly when `needs_account_balance`
                 //   so SELECT / ORDER BY / HAVING / etc. can read it.
-                let mut ctx = PostingContext {
-                    transaction: txn.clone(),
-                    posting_index: i,
-                    balance: if where_reads_balance {
-                        Some(cumulative_balance.clone())
-                    } else {
-                        None
+                let mut ctx = PostingRow {
+                    context: PostingContext {
+                        transaction: txn.clone(),
+                        posting_index: i,
+                        balance: if where_reads_balance {
+                            Some(cumulative_balance.clone())
+                        } else {
+                            None
+                        },
+                        // Snapshotting the account's inventory used to copy
+                        // every lot, for EVERY posting the FROM clause kept,
+                        // including the ones WHERE was about to reject. That is
+                        // O(rows x lots) — 0.11s / 0.39s / 3.31s for 1k / 2k /
+                        // 6k transactions, quadratic (#2086).
+                        //
+                        // Same treatment `balance` got in #1085: the pre-WHERE
+                        // copy is only observable when the WHERE clause itself
+                        // reads the column. Otherwise it is filled in below,
+                        // for surviving rows only. Nothing mutates the engine
+                        // between here and there, so the deferred value is the
+                        // same one.
+                        account_balance: if needs_account_balance && where_reads_account_balance {
+                            snapshot(&replay, &posting.account)?
+                        } else {
+                            None
+                        },
+                        directive_index,
                     },
-                    // Snapshotting the account's inventory used to copy
-                    // every lot, for EVERY posting the FROM clause kept,
-                    // including the ones WHERE was about to reject. That is
-                    // O(rows x lots) — 0.11s / 0.39s / 3.31s for 1k / 2k /
-                    // 6k transactions, quadratic (#2086).
-                    //
-                    // Same treatment `balance` got in #1085: the pre-WHERE
-                    // copy is only observable when the WHERE clause itself
-                    // reads the column. Otherwise it is filled in below,
-                    // for surviving rows only. Nothing mutates the engine
-                    // between here and there, so the deferred value is the
-                    // same one.
-                    account_balance: if needs_account_balance && where_reads_account_balance {
-                        snapshot(&replay, &posting.account)?
-                    } else {
-                        None
-                    },
-                    directive_index,
+                    txn_accounts: txn_accounts.clone(),
                 };
 
                 // Check WHERE clause (posting-level filter)
@@ -1322,7 +1418,7 @@ impl<'a> Executor<'a> {
     fn evaluate_function(
         &self,
         func: &FunctionCall,
-        ctx: &PostingContext,
+        ctx: &PostingRow,
     ) -> Result<Value, QueryError> {
         self.evaluate_function_named(&func.name.to_uppercase(), func, ctx)
     }
@@ -1333,7 +1429,7 @@ impl<'a> Executor<'a> {
         &self,
         name: &str,
         func: &FunctionCall,
-        ctx: &PostingContext,
+        ctx: &PostingRow,
     ) -> Result<Value, QueryError> {
         match name {
             // The values a subquery carries in hidden columns for its outer
@@ -1442,7 +1538,7 @@ impl<'a> Executor<'a> {
         &self,
         name: &str,
         func: &FunctionCall,
-        ctx: &PostingContext,
+        ctx: &PostingRow,
     ) -> Result<Value, QueryError> {
         let args = func
             .args
@@ -3018,15 +3114,48 @@ fn expr_references_column(expr: &Expr, name: &str) -> bool {
     }
 }
 
+fn expr_reads_transaction_accounts(expr: &Expr) -> bool {
+    expr_references_column(expr, "accounts") || expr_references_column(expr, "other_accounts")
+}
+
+/// Root `FROM HAS_ACCOUNT` arguments are patterns; nested calls use expression evaluation.
+fn from_filter_reads_transaction_accounts(expr: &Expr) -> bool {
+    !matches!(expr, Expr::Function(func) if func.name.eq_ignore_ascii_case("HAS_ACCOUNT"))
+        && expr_reads_transaction_accounts(expr)
+}
+
+/// HAVING columns read the projected row; function expressions are evaluated
+/// again against the posting group by `evaluate_having_expr`.
+fn having_reads_transaction_accounts(expr: &Expr) -> bool {
+    match expr {
+        Expr::Function(_) => expr_reads_transaction_accounts(expr),
+        Expr::Attribute { operand, .. }
+        | Expr::Subscript { operand, .. }
+        | Expr::Paren(operand) => having_reads_transaction_accounts(operand),
+        Expr::UnaryOp(op) => having_reads_transaction_accounts(&op.operand),
+        Expr::BinaryOp(op) => {
+            having_reads_transaction_accounts(&op.left)
+                || having_reads_transaction_accounts(&op.right)
+        }
+        Expr::Between { value, low, high } => {
+            having_reads_transaction_accounts(value)
+                || having_reads_transaction_accounts(low)
+                || having_reads_transaction_accounts(high)
+        }
+        Expr::Set(items) => items.iter().any(having_reads_transaction_accounts),
+        Expr::Column(_) | Expr::Literal(_) | Expr::Wildcard | Expr::Window(_) => false,
+    }
+}
+
 /// Which of the expensive per-posting values a scan has to produce.
 ///
-/// Each one is a copy the scan can skip when nothing reads it, and *when* it
-/// is read decides how long it must be kept: a value the filter reads can be
-/// released once the filter has run, while one the output reads has to survive
-/// until the row is rendered. Passed as a struct because six booleans in a row
-/// at a call site say nothing about which is which.
+/// Flags that let the scan skip values a query does not read. The running-balance
+/// flags also distinguish filter-time and output-time reads so large snapshots
+/// can be released after the filter. Group them to keep call sites readable.
 #[derive(Debug, Clone, Copy)]
 struct ScanNeeds {
+    /// Either transaction account-set column is read by the row evaluator.
+    txn_accounts: bool,
     /// The cumulative `balance` column is read somewhere.
     balance: bool,
     /// The `account_balance` column is read somewhere.

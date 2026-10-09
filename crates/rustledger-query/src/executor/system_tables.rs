@@ -904,6 +904,8 @@ impl Executor<'_> {
                     let account_balance =
                         wildcard || super::query_references_column(query, "account_balance");
                     super::ScanNeeds {
+                        // The table builder already reuses its own account set.
+                        txn_accounts: false,
                         balance: wildcard || super::query_references_column(query, "balance"),
                         account_balance,
                         where_reads_balance: false,
@@ -966,6 +968,7 @@ impl Executor<'_> {
         let mut last_accounts: Option<(usize, TxnAccounts<String>)> = None;
 
         for ctx in contexts {
+            let ctx = ctx.context;
             let txn: &rustledger_core::Transaction = &ctx.transaction;
             let posting = &txn.postings[ctx.posting_index];
             // `scan_postings` always sets a real directive index on every context.
@@ -1192,9 +1195,9 @@ impl Executor<'_> {
 /// different posting that shares its account (#2483).
 ///
 /// Generic over how the names are held: [`TxnAccounts::of`] borrows them
-/// from the transaction (one set per row, no copies until output), and
-/// [`TxnAccounts::into_owned`] keeps a set across rows (`#postings` builds
-/// one per transaction).
+/// from the transaction, and [`TxnAccounts::into_owned`] keeps a set across
+/// posting rows.
+#[derive(Debug)]
 pub(super) struct TxnAccounts<S> {
     /// Every posting's account, sorted and deduped.
     all: Vec<S>,

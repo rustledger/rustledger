@@ -9,7 +9,8 @@ use crate::ast::{Expr, Literal, Target, UnaryOperator};
 use crate::error::QueryError;
 
 use super::Executor;
-use super::types::{PostingContext, Row, Value};
+use super::PostingRow;
+use super::types::{Row, Value};
 
 impl<'a> Executor<'a> {
     /// Whether `query` aggregates: a target holds an aggregate, or it has a
@@ -203,13 +204,13 @@ impl<'a> Executor<'a> {
     }
     pub(super) fn group_postings<'b>(
         &self,
-        postings: &'b [PostingContext<'a>],
+        postings: &'b [PostingRow<'a>],
         group_by: Option<&Vec<Expr>>,
-    ) -> Result<Vec<(Vec<Value>, Vec<&'b PostingContext<'a>>)>, QueryError> {
+    ) -> Result<Vec<(Vec<Value>, Vec<&'b PostingRow<'a>>)>, QueryError> {
         if let Some(group_exprs) = group_by {
             // Use HashMap for O(1) grouping, with a Vec to preserve insertion order
             // so results without ORDER BY are deterministic across runs.
-            let mut group_map: HashMap<String, (Vec<Value>, Vec<&PostingContext<'a>>)> =
+            let mut group_map: HashMap<String, (Vec<Value>, Vec<&PostingRow<'a>>)> =
                 HashMap::default();
             let mut key_order: Vec<String> = Vec::new();
 
@@ -242,7 +243,7 @@ impl<'a> Executor<'a> {
     pub(super) fn evaluate_aggregate_row(
         &self,
         targets: &[Target],
-        group: &[&PostingContext],
+        group: &[&PostingRow],
     ) -> Result<Row, QueryError> {
         let mut row = Vec::new();
         for target in targets {
@@ -256,7 +257,7 @@ impl<'a> Executor<'a> {
     /// sum is realized through booking and presented as weighted-average pools
     /// ([`Self::realize_average_group`]). Returns false for empty/mixed-account
     /// groups, so non-aggregated-by-account sums are unaffected.
-    fn group_is_single_average_account(&self, group: &[&PostingContext]) -> bool {
+    fn group_is_single_average_account(&self, group: &[&PostingRow]) -> bool {
         let mut account: Option<&str> = None;
         for ctx in group {
             let a = ctx.transaction.postings[ctx.posting_index].account.as_str();
@@ -312,7 +313,7 @@ impl<'a> Executor<'a> {
     /// # Errors
     ///
     /// A pool outside `Decimal`'s range.
-    fn realize_average_group(group: &[&PostingContext]) -> Result<Option<Inventory>, QueryError> {
+    fn realize_average_group(group: &[&PostingRow]) -> Result<Option<Inventory>, QueryError> {
         let mut engine = rustledger_booking::BookingEngine::with_method(BookingMethod::Average);
         let mut rest = group;
         while let Some(first) = rest.first() {
@@ -349,7 +350,7 @@ impl<'a> Executor<'a> {
     pub(super) fn evaluate_aggregate_expr(
         &self,
         expr: &Expr,
-        group: &[&PostingContext],
+        group: &[&PostingRow],
     ) -> Result<Value, QueryError> {
         match expr {
             Expr::Attribute { operand, name } => {
@@ -790,7 +791,7 @@ impl<'a> Executor<'a> {
         row: &[Value],
         column_names: &[String],
         targets: &[Target],
-        group: &[&PostingContext],
+        group: &[&PostingRow],
     ) -> Result<bool, QueryError> {
         // Build a map of column name -> index for quick lookup
         let col_map: HashMap<String, usize> = column_names
@@ -822,7 +823,7 @@ impl<'a> Executor<'a> {
         row: &[Value],
         col_map: &HashMap<String, usize>,
         alias_map: &HashMap<String, usize>,
-        group: &[&PostingContext],
+        group: &[&PostingRow],
     ) -> Result<Value, QueryError> {
         match expr {
             Expr::Attribute { operand, name } => Self::eval_attribute(
@@ -913,7 +914,7 @@ impl<'a> Executor<'a> {
     /// Evaluate an aggregate expression against a group of generic table rows.
     ///
     /// This mirrors [`Self::evaluate_aggregate_expr`] but operates on `&[&Row]` (table rows)
-    /// rather than `&[&PostingContext]`. Column values are resolved by name via `column_map`.
+    /// rather than `&[&PostingRow]`. Column values are resolved by name via `column_map`.
     pub(super) fn evaluate_aggregate_table_expr(
         &self,
         expr: &Expr,

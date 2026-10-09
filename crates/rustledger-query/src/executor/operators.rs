@@ -7,7 +7,8 @@ use crate::error::QueryError;
 use rustledger_core::{Amount, NaiveDate, Position};
 
 use super::Executor;
-use super::types::{DayCount, Interval, PostingContext, Value};
+use super::PostingRow;
+use super::types::{DayCount, Interval, Value};
 
 /// Whether `op` is an equality or ordering comparison — the operators for which
 /// a NULL operand yields SQL "UNKNOWN" (treated as not-matched).
@@ -85,7 +86,7 @@ impl Executor<'_> {
     pub(super) fn evaluate_binary_op(
         &self,
         op: &BinaryOp,
-        ctx: &PostingContext,
+        ctx: &PostingRow,
     ) -> Result<Value, QueryError> {
         let left = self.evaluate_expr(&op.left, ctx)?;
         let right = self.evaluate_expr(&op.right, ctx)?;
@@ -99,7 +100,7 @@ impl Executor<'_> {
     pub(super) fn evaluate_unary_op(
         &self,
         op: &UnaryOp,
-        ctx: &PostingContext,
+        ctx: &PostingRow,
     ) -> Result<Value, QueryError> {
         let val = self.evaluate_expr(&op.operand, ctx)?;
         self.unary_op_on_value(op.op, &val)

@@ -9,7 +9,8 @@ use crate::ast::FunctionCall;
 use crate::error::QueryError;
 
 use super::super::Executor;
-use super::super::types::{PostingContext, SourceLocation, Value};
+use super::super::PostingRow;
+use super::super::types::{SourceLocation, Value};
 
 impl Executor<'_> {
     /// Evaluate metadata functions: `META`, `ENTRY_META`, `ANY_META`.
@@ -21,7 +22,7 @@ impl Executor<'_> {
         &self,
         name: &str,
         func: &FunctionCall,
-        ctx: &PostingContext,
+        ctx: &PostingRow,
     ) -> Result<Value, QueryError> {
         Self::require_args(name, func, 1)?;
 
@@ -254,7 +255,7 @@ impl Executor<'_> {
     pub(crate) fn eval_coalesce(
         &self,
         func: &FunctionCall,
-        ctx: &PostingContext,
+        ctx: &PostingRow,
     ) -> Result<Value, QueryError> {
         for arg in &func.args {
             let val = self.evaluate_expr(arg, ctx)?;

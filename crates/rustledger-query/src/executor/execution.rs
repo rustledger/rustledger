@@ -268,7 +268,7 @@ impl Executor<'_> {
     /// For aggregate queries with explicit GROUP BY, only expressions in GROUP BY or
     /// aggregate expressions are allowed. Returns targets with aliases set to the full
     /// expression string for column-name matching in `sort_results`.
-    fn find_hidden_order_by_targets(&self, query: &SelectQuery) -> Vec<Target> {
+    pub(super) fn find_hidden_order_by_targets(&self, query: &SelectQuery) -> Vec<Target> {
         let Some(order_by) = &query.order_by else {
             return Vec::new();
         };

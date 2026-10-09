@@ -148,12 +148,53 @@ fn bench_query_scaling(c: &mut Criterion) {
     group.finish();
 }
 
+fn bench_transaction_accounts(c: &mut Criterion) {
+    let mut group = c.benchmark_group("query_transaction_accounts");
+    for size in [1000, 2000, 5000, 10000] {
+        let mut txn = Transaction::new(
+            rustledger_core::naive_date(2024, 1, 1).unwrap(),
+            "Repeated accounts",
+        );
+        // Keep emitted sets at two names so output size does not itself
+        // grow quadratically with the number of postings.
+        for _ in 0..size / 2 {
+            txn = txn
+                .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1), "USD")))
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Food",
+                    Amount::new(dec!(1), "USD"),
+                ));
+        }
+        let directives = vec![Directive::Transaction(txn)];
+        group.throughput(Throughput::Elements(size as u64));
+        for (name, sql) in [
+            ("default", "SELECT accounts, other_accounts"),
+            ("postings", "SELECT accounts, other_accounts FROM #postings"),
+            ("control", "SELECT account"),
+        ] {
+            let query = parse_query(sql).unwrap();
+            group.bench_with_input(
+                BenchmarkId::new(name, size),
+                &directives,
+                |b, directives| {
+                    b.iter(|| {
+                        let mut executor = Executor::new(std::hint::black_box(directives));
+                        executor.execute(std::hint::black_box(&query))
+                    });
+                },
+            );
+        }
+    }
+    group.finish();
+}
+
 criterion_group!(
     benches,
     bench_simple_select,
     bench_where_clause,
     bench_group_by,
     bench_balances,
-    bench_query_scaling
+    bench_query_scaling,
+    bench_transaction_accounts
 );
 criterion_main!(benches);

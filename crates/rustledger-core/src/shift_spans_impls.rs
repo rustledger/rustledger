@@ -78,6 +78,11 @@ crate::impl_shift_spans_noop!(
     Currency,
     Tag,
     Link,
+    // Sets of span-free identifiers. Not a blanket `SortedSet<T>` impl: a
+    // span-bearing element could reorder under a shift and break the set's
+    // invariant, so only the span-free instantiations are covered.
+    crate::TagSet,
+    crate::LinkSet,
 );
 
 // --- Amount / IncompleteAmount -------------------------------------
@@ -486,8 +491,8 @@ mod tests {
             flag: '*',
             payee: None,
             narration: "Test".into(),
-            tags: Vec::new(),
-            links: Vec::new(),
+            tags: Default::default(),
+            links: Default::default(),
             meta: crate::Metadata::default(),
             postings: vec![posting],
             trailing_comments: Vec::new(),

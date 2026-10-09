@@ -90,6 +90,23 @@ fn intern_typed_vec<T>(
     }
 }
 
+/// [`intern_typed_vec`] for a tag or link set. Goes through
+/// [`rustledger_core::SortedSet::for_each_mut`], the set's only mutable
+/// access, which keeps it sorted (re-pointing an `Arc` at an equal string
+/// cannot reorder it anyway).
+fn intern_typed_set<T: Ord>(
+    set: &mut rustledger_core::SortedSet<T>,
+    interner: &mut StringInterner,
+    dedup_count: &mut usize,
+    get_inner: fn(&mut T) -> &mut InternedStr,
+) {
+    set.for_each_mut(|s| {
+        if do_intern(get_inner(s), interner) {
+            *dedup_count += 1;
+        }
+    });
+}
+
 /// Re-intern the typed identifier payloads in a [`Metadata`] map.
 ///
 /// `MetaValue::{Account, Currency, Tag, Link}` payloads went unwalked
@@ -157,13 +174,13 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
             if do_intern(&mut txn.narration, interner) {
                 dedup_count += 1;
             }
-            intern_typed_vec(
+            intern_typed_set(
                 &mut txn.tags,
                 interner,
                 &mut dedup_count,
                 rustledger_core::Tag::as_interned_mut,
             );
-            intern_typed_vec(
+            intern_typed_set(
                 &mut txn.links,
                 interner,
                 &mut dedup_count,
@@ -265,6 +282,18 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
             if do_intern(note.account.as_interned_mut(), interner) {
                 dedup_count += 1;
             }
+            intern_typed_set(
+                &mut note.tags,
+                interner,
+                &mut dedup_count,
+                rustledger_core::Tag::as_interned_mut,
+            );
+            intern_typed_set(
+                &mut note.links,
+                interner,
+                &mut dedup_count,
+                rustledger_core::Link::as_interned_mut,
+            );
             intern_meta(&mut note.meta, interner, &mut dedup_count);
         }
         Directive::Document(doc) => {
@@ -272,13 +301,13 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
                 dedup_count += 1;
             }
             // Pre-Copilot this skipped tags/links. They're now covered.
-            intern_typed_vec(
+            intern_typed_set(
                 &mut doc.tags,
                 interner,
                 &mut dedup_count,
                 rustledger_core::Tag::as_interned_mut,
             );
-            intern_typed_vec(
+            intern_typed_set(
                 &mut doc.links,
                 interner,
                 &mut dedup_count,

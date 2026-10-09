@@ -509,12 +509,18 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     (#2408). A v36 entry archives the old full-name defaults, which the new
 ///     code would read as leaves and resolve to `Equity:Equity:Opening-Balances`.
 ///
+/// v38: tags and links are a sorted, deduplicated set (`SortedSet`, #2545),
+///     and `pushtag` also tags `document` and `note` entries (#2544). The
+///     archived bytes keep their layout (the set archives its backing `Vec`),
+///     but a v37 blob holds tags in written order, duplicates included, and
+///     untagged documents and notes, which the new code would serve as is.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 37;
+pub const CACHE_VERSION: u32 = 38;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1270,7 +1276,7 @@ mod tests {
         // the byte arrays below still hold.
         // v35 (#2193) is the same shape for balance tolerances: new errors,
         // same archived `CostNumber` encoding.
-        const FIXTURE_VERSION: u32 = 37;
+        const FIXTURE_VERSION: u32 = 38;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1386,7 +1392,7 @@ mod tests {
         // is unchanged.
         // v35 (#2193) likewise adds errors on a balance tolerance and touches
         // no `MetaValue`; the hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 37;
+        const FIXTURE_VERSION: u32 = 38;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

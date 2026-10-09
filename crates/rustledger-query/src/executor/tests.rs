@@ -786,8 +786,8 @@ fn test_meta_functions() {
         flag: '*',
         payee: Some("Coffee Shop".into()),
         narration: "Coffee".into(),
-        tags: vec![],
-        links: vec![],
+        tags: Default::default(),
+        links: Default::default(),
         meta: txn_meta,
         postings: vec![
             rustledger_core::Spanned::synthesized(Posting {
@@ -855,8 +855,8 @@ fn test_getitem_meta_eager_path_postings() {
         flag: '*',
         payee: None,
         narration: "Coffee".into(),
-        tags: vec![],
-        links: vec![],
+        tags: Default::default(),
+        links: Default::default(),
         meta: Metadata::default(),
         postings: vec![
             rustledger_core::Spanned::synthesized(Posting {
@@ -1307,8 +1307,8 @@ fn test_source_location_columns_return_null_without_sources() {
         flag: '*',
         payee: Some("Test".into()),
         narration: "Test transaction".into(),
-        tags: vec![],
-        links: vec![],
+        tags: Default::default(),
+        links: Default::default(),
         meta: Metadata::default(),
         postings: vec![
             rustledger_core::Spanned::synthesized(Posting::new(
@@ -1358,8 +1358,8 @@ fn test_source_location_columns_with_sources() {
         flag: '*',
         payee: Some("Test".into()),
         narration: "Test transaction".into(),
-        tags: vec![],
-        links: vec![],
+        tags: Default::default(),
+        links: Default::default(),
         meta: Metadata::default(),
         postings: vec![
             rustledger_core::Spanned::synthesized(Posting::new(
@@ -1426,8 +1426,8 @@ fn test_journal_via_source_mapped_executor_returns_rows() {
         flag: '*',
         payee: None,
         narration: "Lunch".into(),
-        tags: vec![],
-        links: vec![],
+        tags: Default::default(),
+        links: Default::default(),
         meta: Metadata::default(),
         postings: vec![
             rustledger_core::Spanned::synthesized(Posting::new(
@@ -1527,8 +1527,8 @@ fn test_per_posting_source_location() {
         flag: '*',
         payee: Some("Test".into()),
         narration: "Test".into(),
-        tags: vec![],
-        links: vec![],
+        tags: Default::default(),
+        links: Default::default(),
         meta: Metadata::default(),
         postings: vec![
             Spanned {
@@ -1590,8 +1590,8 @@ fn test_meta_includes_source_location() {
         flag: '*',
         payee: Some("Test".into()),
         narration: "Test".into(),
-        tags: vec![],
-        links: vec![],
+        tags: Default::default(),
+        links: Default::default(),
         meta: Metadata::default(),
         postings: vec![
             Spanned {
@@ -1672,8 +1672,8 @@ fn test_postings_balance_excludes_filtered_commodities() {
             flag: '*',
             payee: None,
             narration: "t".into(),
-            tags: vec![],
-            links: vec![],
+            tags: Default::default(),
+            links: Default::default(),
             meta: Metadata::default(),
             postings,
             trailing_comments: Vec::new(),

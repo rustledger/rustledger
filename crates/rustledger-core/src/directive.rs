@@ -736,9 +736,9 @@ pub struct Transaction {
     #[cfg_attr(feature = "rkyv", rkyv(with = AsInternedStr))]
     pub narration: InternedStr,
     /// Tags attached to this transaction
-    pub tags: Vec<crate::Tag>,
+    pub tags: crate::TagSet,
     /// Links attached to this transaction
-    pub links: Vec<crate::Link>,
+    pub links: crate::LinkSet,
     /// Transaction metadata
     pub meta: Metadata,
     /// Postings (account entries), each wrapped with its source span and
@@ -762,8 +762,8 @@ impl Transaction {
             flag: '*',
             payee: None,
             narration: narration.into(),
-            tags: Vec::new(),
-            links: Vec::new(),
+            tags: crate::TagSet::new(),
+            links: crate::LinkSet::new(),
             meta: Metadata::default(),
             postings: Vec::new(),
             trailing_comments: Vec::new(),
@@ -787,14 +787,14 @@ impl Transaction {
     /// Add a tag.
     #[must_use]
     pub fn with_tag(mut self, tag: impl Into<crate::Tag>) -> Self {
-        self.tags.push(tag.into());
+        self.tags.insert(tag.into());
         self
     }
 
     /// Add a link.
     #[must_use]
     pub fn with_link(mut self, link: impl Into<crate::Link>) -> Self {
-        self.links.push(link.into());
+        self.links.insert(link.into());
         self
     }
 
@@ -1324,9 +1324,9 @@ pub struct Note {
     /// beancount v3 accepts these on a `note`, and so did our parser -- it
     /// just had nowhere to put them, so they were dropped after parsing
     /// (#2160). `Document` has carried them all along; this mirrors it.
-    pub tags: Vec<crate::Tag>,
+    pub tags: crate::TagSet,
     /// Links, from `^link` on the note header. See `tags`.
-    pub links: Vec<crate::Link>,
+    pub links: crate::LinkSet,
     /// Metadata
     pub meta: Metadata,
 }
@@ -1343,23 +1343,23 @@ impl Note {
             date,
             account: account.into(),
             comment: comment.into(),
-            tags: Vec::new(),
-            links: Vec::new(),
+            tags: crate::TagSet::new(),
+            links: crate::LinkSet::new(),
             meta: Metadata::default(),
         }
     }
 
-    /// Set tags.
+    /// Set tags (sorted and deduplicated, see [`crate::SortedSet`]).
     #[must_use]
-    pub fn with_tags(mut self, tags: Vec<crate::Tag>) -> Self {
-        self.tags = tags;
+    pub fn with_tags(mut self, tags: impl IntoIterator<Item = crate::Tag>) -> Self {
+        self.tags = tags.into_iter().collect();
         self
     }
 
-    /// Set links.
+    /// Set links (sorted and deduplicated, see [`crate::SortedSet`]).
     #[must_use]
-    pub fn with_links(mut self, links: Vec<crate::Link>) -> Self {
-        self.links = links;
+    pub fn with_links(mut self, links: impl IntoIterator<Item = crate::Link>) -> Self {
+        self.links = links.into_iter().collect();
         self
     }
 
@@ -1400,9 +1400,9 @@ pub struct Document {
     /// File path to the document
     pub path: String,
     /// Tags
-    pub tags: Vec<crate::Tag>,
+    pub tags: crate::TagSet,
     /// Links
-    pub links: Vec<crate::Link>,
+    pub links: crate::LinkSet,
     /// Metadata
     pub meta: Metadata,
 }
@@ -1419,8 +1419,8 @@ impl Document {
             date,
             account: account.into(),
             path: path.into(),
-            tags: Vec::new(),
-            links: Vec::new(),
+            tags: crate::TagSet::new(),
+            links: crate::LinkSet::new(),
             meta: Metadata::default(),
         }
     }
@@ -1428,14 +1428,14 @@ impl Document {
     /// Add a tag.
     #[must_use]
     pub fn with_tag(mut self, tag: impl Into<crate::Tag>) -> Self {
-        self.tags.push(tag.into());
+        self.tags.insert(tag.into());
         self
     }
 
     /// Add a link.
     #[must_use]
     pub fn with_link(mut self, link: impl Into<crate::Link>) -> Self {
-        self.links.push(link.into());
+        self.links.insert(link.into());
         self
     }
 
@@ -1993,8 +1993,8 @@ mod tests {
             flag: '*',
             payee: None,
             narration: "Example".into(),
-            tags: vec![],
-            links: vec![],
+            tags: Default::default(),
+            links: Default::default(),
             meta,
             postings: vec![
                 crate::Spanned::synthesized(Posting::new(

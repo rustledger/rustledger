@@ -274,6 +274,9 @@ pub fn compute_directive_hash(directive: &Directive) -> String {
             field(&mut hasher, t.flag.to_string().as_bytes());
             opt(&mut hasher, t.payee.as_deref().map(str::as_bytes));
             field(&mut hasher, t.narration.as_bytes());
+            // Tags and links are a `SortedSet` (#2545), so the order they were
+            // written in, and a tag written twice, never reach the digest:
+            // `#a #b` and `#b #a #a` are one entry, as in beancount.
             count(&mut hasher, t.tags.len());
             for tag in &t.tags {
                 field(&mut hasher, tag.as_bytes());

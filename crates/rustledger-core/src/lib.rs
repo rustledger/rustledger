@@ -56,6 +56,7 @@ pub mod inventory;
 pub mod meta_json;
 pub mod position;
 pub mod shift_spans_impls;
+pub mod sorted_set;
 pub mod span;
 pub mod synthetic;
 pub mod visit;
@@ -99,6 +100,7 @@ pub use inventory::{
 };
 pub use meta_json::{json_to_meta_value, meta_value_to_json, meta_value_type_tag};
 pub use position::Position;
+pub use sorted_set::{LinkSet, SortedSet, TagSet};
 pub use span::{SYNTHESIZED_FILE_ID, ShiftSpans, Span, Spanned};
 pub use visit::{visit_accounts, visit_currencies};
 

@@ -460,7 +460,6 @@ up in `PRINT` as well:
 | comments inside a transaction | kept | dropped |
 | empty payee or narration | `""` kept | omitted |
 | metadata | keys sorted | source order |
-| tags and links | source order | sorted |
 | newline in a string | `\n` escape | raw newline |
 
 The fixed columns are beancount's printer layout. rustledger keeps one

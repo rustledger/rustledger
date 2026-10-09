@@ -392,8 +392,8 @@ pub(super) fn data_to_note(data: &NoteData, date: NaiveDate) -> Note {
         // arriving from a plugin has none to restore. Empty, not dropped:
         // the engine's `Note` gained the fields in #2160, and widening the
         // plugin contract to match is a separate, versioned decision.
-        tags: Vec::new(),
-        links: Vec::new(),
+        tags: Default::default(),
+        links: Default::default(),
         meta: data
             .metadata
             .iter()

@@ -532,8 +532,8 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 // gained the fields in #2160; widening this input shape to
                 // match is a separate, versioned decision, so a note built
                 // from the wire has none.
-                tags: Vec::new(),
-                links: Vec::new(),
+                tags: Default::default(),
+                links: Default::default(),
                 meta: json_map_to_metadata(meta),
             }))
         }
@@ -838,9 +838,10 @@ mod tests {
         let Directive::Document(doc) = directive else {
             panic!("expected Document directive");
         };
+        // Sorted, not in the order sent: tags are a set (#2545).
         assert_eq!(doc.tags.len(), 2);
-        assert_eq!(doc.tags[0].to_string(), "statement");
-        assert_eq!(doc.tags[1].to_string(), "bank");
+        assert_eq!(doc.tags[0].to_string(), "bank");
+        assert_eq!(doc.tags[1].to_string(), "statement");
         assert_eq!(doc.links.len(), 1);
         assert_eq!(doc.links[0].to_string(), "inv-2024-01");
     }

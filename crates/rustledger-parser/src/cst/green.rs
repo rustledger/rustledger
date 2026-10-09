@@ -97,8 +97,8 @@ pub(super) fn convert_transaction_header(
     let mut seen_flag = false;
     let mut seen_str_tag_link = false;
     let mut strings: Vec<String> = Vec::new();
-    let mut tags: Vec<Tag> = Vec::new();
-    let mut links: Vec<Link> = Vec::new();
+    let mut tags = rustledger_core::TagSet::new();
+    let mut links = rustledger_core::LinkSet::new();
     let mut past_header = false;
 
     for child in node.children() {
@@ -113,16 +113,10 @@ pub(super) fn convert_transaction_header(
             // deduped against what the header already contributed.
             match kind {
                 K::TAG => {
-                    let tg = Tag::new(text.trim_start_matches('#'));
-                    if !tags.contains(&tg) {
-                        tags.push(tg);
-                    }
+                    tags.insert(Tag::new(text.trim_start_matches('#')));
                 }
                 K::LINK => {
-                    let lk = Link::new(text.trim_start_matches('^'));
-                    if !links.contains(&lk) {
-                        links.push(lk);
-                    }
+                    links.insert(Link::new(text.trim_start_matches('^')));
                 }
                 _ => {}
             }
@@ -144,11 +138,11 @@ pub(super) fn convert_transaction_header(
                 }
                 K::TAG => {
                     seen_str_tag_link = true;
-                    tags.push(Tag::new(text.trim_start_matches('#')));
+                    tags.insert(Tag::new(text.trim_start_matches('#')));
                 }
                 K::LINK => {
                     seen_str_tag_link = true;
-                    links.push(Link::new(text.trim_start_matches('^')));
+                    links.insert(Link::new(text.trim_start_matches('^')));
                 }
                 // Flag region: the first flag-kind token before any STRING/TAG/LINK.
                 k if !seen_flag && !seen_str_tag_link => {

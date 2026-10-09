@@ -271,8 +271,8 @@ mod tests {
             flag: '*',
             payee: Some("Grocery Store".into()),
             narration: "Weekly groceries".into(),
-            tags: vec!["food".into()],
-            links: vec!["grocery-2024".into()],
+            tags: vec!["food".into()].into(),
+            links: vec!["grocery-2024".into()].into(),
             meta: Metadata::default(),
             postings: vec![
                 rustledger_core::Spanned::synthesized(Posting {
@@ -402,8 +402,8 @@ mod tests {
             date,
             account: "Assets:Bank".into(),
             path: "statements/2024-01.pdf".to_string(),
-            tags: vec!["statement".into(), "bank".into()],
-            links: vec!["inv-2024-01".into()],
+            tags: vec!["statement".into(), "bank".into()].into(),
+            links: vec!["inv-2024-01".into()].into(),
             meta: Metadata::default(),
         };
 
@@ -466,16 +466,16 @@ mod tests {
                 date,
                 account: "Assets:Test".into(),
                 comment: "Test note".to_string(),
-                tags: Vec::new(),
-                links: Vec::new(),
+                tags: Default::default(),
+                links: Default::default(),
                 meta: Metadata::default(),
             }),
             Directive::Document(Document {
                 date,
                 account: "Assets:Test".into(),
                 path: "/path/to/doc.pdf".to_string(),
-                tags: vec![],
-                links: vec![],
+                tags: Default::default(),
+                links: Default::default(),
                 meta: Metadata::default(),
             }),
             Directive::Query(Query {

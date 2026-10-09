@@ -580,9 +580,9 @@ fn every_directive_field_reaches_the_digest() {
 
     let doc_plain = Document::new(d, "Assets:A", "/x.pdf");
     let mut doc_tagged = Document::new(d, "Assets:A", "/x.pdf");
-    doc_tagged.tags = vec![Tag::new("t")];
+    doc_tagged.tags = vec![Tag::new("t")].into();
     let mut doc_linked = Document::new(d, "Assets:A", "/x.pdf");
-    doc_linked.links = vec![Link::new("t")];
+    doc_linked.links = vec![Link::new("t")].into();
 
     let mut custom_a = Custom::new(d, "budget");
     custom_a.values = vec![V::String("a".into())];

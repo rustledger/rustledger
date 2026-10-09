@@ -89,8 +89,8 @@ proptest! {
                 flag: '*',
                 payee: None,
                 narration: "Initial deposit".into(),
-                tags: vec![],
-                links: vec![],
+                tags: Default::default(),
+                links: Default::default(),
                 postings: vec![
                     Spanned::synthesized(Posting {
                         account: account.clone().into(),
@@ -170,8 +170,8 @@ proptest! {
                 flag: '*',
                 payee: None,
                 narration: "Initial deposit".into(),
-                tags: vec![],
-                links: vec![],
+                tags: Default::default(),
+                links: Default::default(),
                 postings: vec![
                     Spanned::synthesized(Posting {
                         account: account.clone().into(),
@@ -247,8 +247,8 @@ proptest! {
                 flag: '*',
                 payee: None,
                 narration: format!("Deposit {}", i + 1).into(),
-                tags: vec![],
-                links: vec![],
+                tags: Default::default(),
+                links: Default::default(),
                 postings: vec![
                     Spanned::synthesized(Posting {
                         account: account.clone().into(),
@@ -319,8 +319,8 @@ proptest! {
                 flag: '*',
                 payee: None,
                 narration: "Test transaction".into(),
-                tags: vec![],
-                links: vec![],
+                tags: Default::default(),
+                links: Default::default(),
                 postings: vec![
                     Spanned::synthesized(Posting {
                         account: account.clone().into(),
@@ -429,8 +429,8 @@ proptest! {
                 flag: '*',
                 payee: None,
                 narration: "Initial deposit".into(),
-                tags: vec![],
-                links: vec![],
+                tags: Default::default(),
+                links: Default::default(),
                 postings: vec![
                     Spanned::synthesized(Posting {
                         account: account.into(),
@@ -509,8 +509,8 @@ proptest! {
                 flag: '*',
                 payee: None,
                 narration: "Initial deposit".into(),
-                tags: vec![],
-                links: vec![],
+                tags: Default::default(),
+                links: Default::default(),
                 postings: vec![
                     Spanned::synthesized(Posting {
                         account: account.clone().into(),
@@ -568,8 +568,8 @@ proptest! {
                 flag: '*',
                 payee: None,
                 narration: "Initial deposit".into(),
-                tags: vec![],
-                links: vec![],
+                tags: Default::default(),
+                links: Default::default(),
                 postings: vec![
                     Spanned::synthesized(Posting {
                         account: account.clone().into(),
@@ -651,8 +651,8 @@ proptest! {
                 flag: '*',
                 payee: None,
                 narration: "Initial deposits".into(),
-                tags: vec![],
-                links: vec![],
+                tags: Default::default(),
+                links: Default::default(),
                 postings: vec![
                     Spanned::synthesized(Posting {
                         account: account1.clone().into(),

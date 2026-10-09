@@ -412,10 +412,15 @@ impl Diagnostics for CollectedDiagnostics {
 /// tidy `0.0%`-used row for a budget on a misspelled account with nothing
 /// saying so. That is the silent misreport the diagnostics exist to catch,
 /// reintroduced on the one surface that cannot see past it.
+///
+/// `no_cache` is `rledger report --no-cache`: load without the parse cache.
+/// It was hardwired to `false` here, so `ag-rledger report --no-cache` was
+/// accepted and ignored (#2522).
 pub fn run_with_writer<W: io::Write>(
     file: &PathBuf,
     report: &Report,
     verbose: bool,
+    no_cache: bool,
     format: &OutputFormat,
     out: &mut W,
     warnings: &mut dyn Diagnostics,
@@ -423,7 +428,7 @@ pub fn run_with_writer<W: io::Write>(
     // Existence-check → load → render(buffer): the same two-phase split the
     // production `run()` uses, minus the pager. Producing identical report
     // bytes is guaranteed because both paths funnel through `load` + `render`.
-    let loaded = load(file, report, verbose, false, warnings)?;
+    let loaded = load(file, report, verbose, no_cache, warnings)?;
     render(&loaded, report, file, format, out, warnings)
 }
 

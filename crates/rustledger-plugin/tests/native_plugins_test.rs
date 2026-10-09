@@ -5755,24 +5755,44 @@ fn test_effective_date_past_uses_earlier_holding_account() {
     );
 }
 
-/// Account prefix not in the default config (e.g. `Liabilities:`)
-/// → posting passes through unchanged. Pins the `find_holding_account
-/// → None → keep original` branch.
+/// Account prefix not in the default config (e.g. `Liabilities:`): the
+/// posting cannot be moved, so it is reported, naming the account, and the
+/// whole transaction stays as written. It used to be kept silently, while
+/// any sibling posting the config did cover was moved.
 #[test]
-fn test_effective_date_unconfigured_prefix_unchanged() {
+fn test_effective_date_unconfigured_prefix_is_reported_and_entry_kept() {
     let plugin = EffectiveDatePlugin;
-    // `Liabilities:` is not a default-mapped prefix. The plugin will
-    // see effective_date metadata, recognize it, but find no holding
-    // account → leaves the posting alone.
+    let mut txn =
+        make_txn_with_effective_date("2024-01-15", "2024-02-15", "Liabilities:CreditCard");
+    // A sibling the default config does cover: it must not move either.
+    if let DirectiveData::Transaction(ref mut data) = txn.data {
+        let mut food = data.postings[1].clone();
+        food.account = "Expenses:Food".to_string();
+        food.metadata.push((
+            "effective_date".to_string(),
+            MetaValueData::Date("2024-02-15".to_string()),
+        ));
+        data.postings.push(food);
+    }
     let input = make_input(vec![
         make_open("2024-01-01", "Assets:Cash"),
         make_open("2024-01-01", "Liabilities:CreditCard"),
-        make_txn_with_effective_date("2024-01-15", "2024-02-15", "Liabilities:CreditCard"),
+        make_open("2024-01-01", "Expenses:Food"),
+        txn.clone(),
     ]);
     let output = process_and_materialize(&plugin, input);
-    assert!(output.errors.is_empty());
+    assert_eq!(output.errors.len(), 1, "{:?}", output.errors);
+    assert!(
+        output.errors[0].message.contains("Liabilities:CreditCard"),
+        "{}",
+        output.errors[0].message
+    );
 
-    // No new opens should be created, no transaction at effective date.
+    // The transaction is exactly as written; nothing new was made.
+    assert!(
+        output.directives.contains(&txn),
+        "the entry must be left as written"
+    );
     assert!(
         !output.directives.iter().any(|d| {
             d.directive_type == "open"
@@ -5781,7 +5801,7 @@ fn test_effective_date_unconfigured_prefix_unchanged() {
                     DirectiveData::Open(o) if o.account.contains(":Hold:")
                 )
         }),
-        "unconfigured prefix should NOT generate holding-account Opens"
+        "nothing moved, so no holding-account Opens"
     );
     assert_eq!(
         output
@@ -5790,7 +5810,7 @@ fn test_effective_date_unconfigured_prefix_unchanged() {
             .filter(|d| d.directive_type == "transaction" && d.date == "2024-02-15")
             .count(),
         0,
-        "unconfigured prefix should NOT spawn a new effective-date txn"
+        "nothing moved, so no effective-date transaction"
     );
 }
 

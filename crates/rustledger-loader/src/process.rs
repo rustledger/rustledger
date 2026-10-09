@@ -112,7 +112,12 @@ impl LoadOptions {
 #[derive(Debug, Error)]
 pub enum ProcessError {
     /// Loading failed.
-    #[error("loading failed: {0}")]
+    ///
+    /// Transparent: the message and source chain are the [`LoadError`]'s own.
+    /// A `"loading failed: {0}"` message alongside `#[from]` (which makes the
+    /// `LoadError` the source too) printed the whole load error twice under a
+    /// chain printer such as `{e:#}` (#2515).
+    #[error(transparent)]
     Load(#[from] LoadError),
 
     /// Booking/interpolation error.

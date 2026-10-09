@@ -345,8 +345,14 @@ impl Inventory {
     /// needs 40 digits are booked on purpose, recounting the total exactly
     /// where it matters (#2363) -- so demanding an exact total here would
     /// refuse reductions from inventories `add` accepted.
+    ///
+    /// The cached total may sit below the lots' exact total, so near the
+    /// ceiling the exact total is what is checked
+    /// ([`Self::exact_total_in_range_near_ceiling`]).
     fn net_after(&self, units: &Amount) -> Option<Decimal> {
-        crate::decimal::checked_add_python_scale(self.units(&units.currency), units.number)
+        crate::decimal::checked_add_python_scale(self.units(&units.currency), units.number).filter(
+            |&after| self.exact_total_in_range_near_ceiling(&units.currency, after, units.number),
+        )
     }
 
     /// Whether the EXACT total of `units.currency`, once `units` is booked,
@@ -1646,21 +1652,29 @@ impl Inventory {
         let requested = units.number.abs();
 
         if requested >= available {
-            // About to short what is left over (or to drain it all), so
-            // `available` must be exact,
-            // and the cached total is allowed to round (#2363): lots summing
-            // to `...169.6` cached as `...170` shorted against the wrong
-            // number, or reported a shortfall NONE never has (#2554 review).
-            // Recounted only here, where a short is about to be booked.
+            // About to short what is left over (or to drain it all), and the
+            // cached total is allowed to round (#2363): lots summing to
+            // `...169.6` cached as `...170` shorted against the wrong number,
+            // or reported a shortfall NONE never has (#2554 review). So the
+            // lots are recounted exactly, here only.
             let exact: bigdecimal::BigDecimal = self
                 .positions
                 .iter()
                 .filter(|p| p.units.currency == units.currency)
                 .map(|p| crate::to_bigdecimal(p.units.number))
                 .sum();
-            // The cached total when it is right: it carries the widest scale
-            // seen, which is what the short has always been booked at.
-            if exact != crate::to_bigdecimal(total_units) {
+            let exact_available = exact.abs();
+            if exact_available >= crate::to_bigdecimal(requested)
+                && exact.sign() == crate::to_bigdecimal(total_units).sign()
+            {
+                // Enough is held: a plain drain, which books exactly whether or
+                // not the account's total has a `Decimal` form. Not a short.
+                available = requested;
+            } else if exact != crate::to_bigdecimal(total_units) {
+                // A short against a wrong cache: it needs the exact total, and
+                // one no `Decimal` holds cannot be shorted against.
+                // (When the cache is right it is kept, for its scale: the
+                // widest seen, which is what the short has always carried.)
                 available = crate::decimal::decimal_from_big_exact(&exact)
                     .filter(|net| net.signum() == total_units.signum())
                     .ok_or_else(|| {
@@ -3498,19 +3512,15 @@ mod reduction_tests {
             assert_eq!(holdings(&inv), before, "a failed reduction changes nothing");
         }
 
-        /// `remaining -= take` rounded `MAX - 0.48` back to `MAX`, so the walk
-        /// went on to take all of the second lot: `MAX + 0.48` units sold for a
-        /// posting of `MAX`, and the account emptied. (Added ceiling first, so
-        /// `add`'s running total rounds `MAX + 0.48` down and accepts it.)
+        /// `remaining -= take` rounded `MAX - 1 - 0.48` back to `MAX - 1`, so
+        /// the walk went on to take all of the second lot: `MAX - 0.52` units
+        /// sold for a posting of `MAX - 1`, and the account emptied.
         #[test]
         fn a_rounded_remainder_never_drains_more_than_was_sold() {
-            let mut inv = mk([corp(Decimal::MAX, dec!(0.01), 2), corp(dec!(0.48), d(1), 1)]);
+            let big = Decimal::MAX - d(1);
+            let mut inv = mk([corp(big, dec!(0.01), 2), corp(dec!(0.48), d(1), 1)]);
             let before = holdings(&inv);
-            let r = inv.reduce(
-                &sell(Decimal::MAX),
-                Some(&CostSpec::default()),
-                BookingMethod::Fifo,
-            );
+            let r = inv.reduce(&sell(big), Some(&CostSpec::default()), BookingMethod::Fifo);
             assert!(is_overflow(&r), "got {r:?}");
             assert_eq!(holdings(&inv), before);
         }
@@ -3704,6 +3714,42 @@ mod reduction_tests {
             assert_eq!(lots, ["-3.000"]);
         }
 
+        /// Review of #2554, round 4 (`fuzz_booking`): `add` kept its total with
+        /// `checked_add`, which rounds, so a total at `MAX` took `0.3` more and
+        /// still read `MAX`. A failed transaction's rollback then rebuilt the
+        /// caches from the lots, totaled `MAX + 0.3` exactly, and hit the
+        /// rebuild's range assertion. Near the ceiling `add` checks the exact
+        /// total.
+        #[test]
+        fn add_refuses_an_exact_total_past_the_range() {
+            let mut inv = mk([corp(Decimal::MAX, d(1), 1)]);
+            // And the guard `apply` asks first must agree that the add can
+            // fail, or the transaction is applied without an undo snapshot.
+            assert!(!inv.add_headroom_for("CORP", dec!(0.3)));
+            let r = inv.add(corp(dec!(0.3), d(2), 2));
+            assert!(r.is_err(), "got {r:?}");
+            assert_eq!(holdings(&inv), [Decimal::MAX]);
+            // Below the ceiling nothing changes: rounding stays allowed.
+            let mut inv = mk([corp(Decimal::MAX - d(1), d(1), 1)]);
+            inv.add(corp(dec!(0.3), d(2), 2))
+                .expect("MAX - 0.7 is in range");
+        }
+
+        /// Review of #2554, round 4: the exact recount refused a NONE sale
+        /// that needs no short when the account's total has no `Decimal`
+        /// (`10 + 1e-28`, cached as `10.000...0`). Selling `10` is a plain
+        /// drain, as FIFO books it.
+        #[test]
+        fn a_none_drain_against_a_total_without_a_decimal_books() {
+            let mut inv = mk([corp(d(10), d(1), 1), corp(Decimal::new(1, 28), d(1), 2)]);
+            let r = inv
+                .reduce(&sell(d(10)), None, BookingMethod::None)
+                .expect("enough is held");
+            let matched: Vec<Decimal> = r.matched.iter().map(|p| p.units.number).collect();
+            assert_eq!(matched, [d(10)]);
+            assert_eq!(holdings(&inv), [Decimal::new(1, 28)]);
+        }
+
         /// Review of #2554: the fix first adjusted the units cache by the
         /// sale's own `-10.00`, which widened an ordinary total to `1.00`
         /// where beancount and `main` say `1`. Values were equal; the scale,
@@ -3729,7 +3775,7 @@ mod reduction_tests {
         /// that then drained every lot). Neither is a total match: lots at
         /// different costs, part of them sold, is ambiguous.
         ///
-        /// No lot holds exactly the `MAX` sold, so `STRICT_WITH_SIZE` reaches
+        /// No lot holds exactly the units sold, so `STRICT_WITH_SIZE` reaches
         /// the same exception rather than its exact-size pick.
         #[test]
         fn strict_total_match_is_decided_exactly() {
@@ -3748,18 +3794,19 @@ mod reduction_tests {
                     .expect("fits");
                 inv
             };
-            // `(MAX - 1) + 1.48`, which `Decimal` rounds to exactly `MAX`.
+            // `(MAX - 2) + 1.48`, which `Decimal` rounds to exactly `MAX - 1`,
+            // the sale below.
             let rounds_to_the_sale =
-                move || mk([corp(below, dec!(0.01), 2), corp(dec!(1.48), d(1), 1)]);
-            let fixtures: [(&str, &dyn Fn() -> Inventory); 2] = [
-                ("sum past the range", &past_the_range),
-                ("sum that rounds", &rounds_to_the_sale),
+                move || mk([corp(below - d(1), dec!(0.01), 2), corp(dec!(1.48), d(1), 1)]);
+            let fixtures: [(&str, &dyn Fn() -> Inventory, Decimal); 2] = [
+                ("sum past the range", &past_the_range, Decimal::MAX),
+                ("sum that rounds", &rounds_to_the_sale, below),
             ];
-            for (what, build) in fixtures {
+            for (what, build, sale) in fixtures {
                 for method in [BookingMethod::Strict, BookingMethod::StrictWithSize] {
                     let mut inv = build();
                     let before = holdings(&inv);
-                    let r = inv.reduce(&sell(Decimal::MAX), Some(&CostSpec::default()), method);
+                    let r = inv.reduce(&sell(sale), Some(&CostSpec::default()), method);
                     assert!(
                         matches!(r, Err(BookingError::AmbiguousMatch { .. })),
                         "{what} {method:?}: got {r:?}"

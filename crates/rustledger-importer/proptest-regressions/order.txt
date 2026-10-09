@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc f0a96420b009566b1a11c2e0c56f175b060385096b25b5b8a13905d792f4cf48 # shrinks to f = [("2024-01-01", "r0"), ("2024-01-03", "r1"), ("2024-01-05", "r2"), ("2024-01-06", "r3"), ("2024-01-07", "r4"), ("2024-01-09", "r5"), ("2024-01-11", "r6"), ("2024-01-12", "r7"), ("2024-01-14", "r8"), ("2024-01-16", "r9"), ("2024-01-17", "r10"), ("2024-01-18", "r11"), ("2024-01-19", "r12"), ("2024-01-21", "r13"), ("2024-01-22", "r14"), ("2024-01-24", "r15"), ("2024-01-26", "r16"), ("2024-01-28", "r17"), ("2024-01-30", "r18"), ("2024-01-31", "r19"), ("2024-01-32", "r20")]

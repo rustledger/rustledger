@@ -20,6 +20,7 @@
 //! Opt-in via `--ledger`. Without it nothing here runs, so no existing
 //! invocation changes behavior.
 
+use super::ledgers::Ledgers;
 use anyhow::{Result, anyhow};
 use rustledger_core::{Directive, MetaValue, Metadata};
 use std::path::Path;
@@ -47,16 +48,17 @@ pub(super) struct LedgerProfile {
     pub currency: Option<String>,
 }
 
-/// Load a ledger for reading its `open` directives: includes resolved,
-/// plugins and validation skipped (neither changes which accounts are opened
-/// with which currencies, and both cost time on every import).
-fn load_unvalidated(path: &Path) -> Result<rustledger_loader::Ledger> {
-    let options = rustledger_loader::LoadOptions {
-        run_plugins: false,
-        validate: false,
-        ..Default::default()
-    };
-    rustledger_loader::load(path, &options)
+/// The ledger at `path` from this run's shared loads, for reading its `open`
+/// directives: includes resolved, plugins and validation skipped (neither
+/// changes which accounts are opened with which currencies, and both cost
+/// time on every import).
+fn load_unvalidated<'a>(
+    ledgers: &'a mut Ledgers,
+    path: &Path,
+) -> Result<&'a rustledger_loader::Ledger> {
+    ledgers
+        .get(path)
+        .as_ref()
         .map_err(|e| anyhow!("failed to load ledger {}: {e}", path.display()))
 }
 
@@ -67,8 +69,11 @@ fn load_unvalidated(path: &Path) -> Result<rustledger_loader::Ledger> {
 /// is an error rather than a silent skip: it can never match a file, so it is
 /// a typo or an unfinished edit, and staying quiet about it is how a user ends
 /// up believing their profile works.
-pub(super) fn load_profiles(path: &Path) -> Result<Vec<(glob::Pattern, LedgerProfile)>> {
-    let ledger = load_unvalidated(path)?;
+pub(super) fn load_profiles(
+    ledgers: &mut Ledgers,
+    path: &Path,
+) -> Result<Vec<(glob::Pattern, LedgerProfile)>> {
+    let ledger = load_unvalidated(ledgers, path)?;
 
     // `load` reports parse failures through `Ledger::errors` rather than an
     // `Err`, so a ledger that does not parse arrives here looking like a
@@ -165,8 +170,12 @@ pub(super) struct OpenLookup {
 /// Used to fill in a CSV importer entry that names no currency (#2464): the
 /// `open` directive is where the account's currency is declared, so it is
 /// the authority a missing config value defers to.
-pub(super) fn open_currencies(path: &Path, account: &str) -> Result<OpenLookup> {
-    let ledger = load_unvalidated(path)?;
+pub(super) fn open_currencies(
+    ledgers: &mut Ledgers,
+    path: &Path,
+    account: &str,
+) -> Result<OpenLookup> {
+    let ledger = load_unvalidated(ledgers, path)?;
     let errors: Vec<&rustledger_loader::LedgerError> = ledger
         .errors
         .iter()
@@ -269,7 +278,7 @@ mod tests {
             "2024-01-01 open Liabilities:CreditCard USD\n  \
              importer: \"ofx\"\n  importer-pattern: \"*.qfx\"\n",
         );
-        let profiles = load_profiles(f.path()).unwrap();
+        let profiles = load_profiles(&mut Ledgers::default(), f.path()).unwrap();
         assert_eq!(profiles.len(), 1);
         let (pattern, p) = &profiles[0];
         assert_eq!(pattern.as_str(), "*.qfx");
@@ -287,14 +296,20 @@ mod tests {
              2024-01-01 open Expenses:Food\n\
              2024-01-02 * \"Lunch\"\n  Expenses:Food  5.00 USD\n  Assets:Bank:Checking\n",
         );
-        assert!(load_profiles(f.path()).unwrap().is_empty());
+        assert!(
+            load_profiles(&mut Ledgers::default(), f.path())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// A profile that can never match a file is a typo, not a preference.
     #[test]
     fn importer_without_a_pattern_is_an_error() {
         let f = ledger("2024-01-01 open Liabilities:Card USD\n  importer: \"ofx\"\n");
-        let err = load_profiles(f.path()).unwrap_err().to_string();
+        let err = load_profiles(&mut Ledgers::default(), f.path())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("Liabilities:Card"), "got: {err}");
         assert!(err.contains("importer-pattern"), "got: {err}");
     }
@@ -308,7 +323,9 @@ mod tests {
             "2024-01-01 open Liabilities:Card USD\n  importer: \"ofx\"\n  \
              importer-pattern: \"[unclosed\"\n",
         );
-        let err = load_profiles(f.path()).unwrap_err().to_string();
+        let err = load_profiles(&mut Ledgers::default(), f.path())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("not a"), "got: {err}");
         assert!(err.contains("Liabilities:Card"), "got: {err}");
     }
@@ -320,7 +337,9 @@ mod tests {
     #[test]
     fn a_ledger_that_does_not_parse_is_an_error() {
         let f = ledger("this is not valid beancount ~~~\n");
-        let err = load_profiles(f.path()).unwrap_err().to_string();
+        let err = load_profiles(&mut Ledgers::default(), f.path())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("cannot be read"), "got: {err}");
     }
 
@@ -332,7 +351,11 @@ mod tests {
             "2024-01-01 open Assets:Bank USD\n\
              2024-01-02 * \"Lunch\"\n  Assets:Bank  -5.00 USD\n  Expenses:Food\n",
         );
-        assert!(load_profiles(f.path()).unwrap().is_empty());
+        assert!(
+            load_profiles(&mut Ledgers::default(), f.path())
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// Second review pass on #2262: the two halves of a profile were treated
@@ -341,7 +364,9 @@ mod tests {
     #[test]
     fn a_pattern_without_an_importer_is_an_error() {
         let f = ledger("2024-01-01 open Liabilities:Card USD\n  importer-pattern: \"*.qfx\"\n");
-        let err = load_profiles(f.path()).unwrap_err().to_string();
+        let err = load_profiles(&mut Ledgers::default(), f.path())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("Liabilities:Card"), "got: {err}");
         assert!(err.contains("importer"), "got: {err}");
     }
@@ -357,7 +382,9 @@ mod tests {
              importer-pattern: 42\n",
         ] {
             let f = ledger(src);
-            let err = load_profiles(f.path()).unwrap_err().to_string();
+            let err = load_profiles(&mut Ledgers::default(), f.path())
+                .unwrap_err()
+                .to_string();
             assert!(
                 err.contains("must be a quoted string"),
                 "expected a type error, got: {err}"
@@ -373,12 +400,22 @@ mod tests {
             "2024-01-01 open Assets:X USD,EUR\n  \
              importer: \"csv\"\n  importer-pattern: \"*.csv\"\n",
         );
-        assert_eq!(load_profiles(multi.path()).unwrap()[0].1.currency, None);
+        assert_eq!(
+            load_profiles(&mut Ledgers::default(), multi.path()).unwrap()[0]
+                .1
+                .currency,
+            None
+        );
 
         let none = ledger(
             "2024-01-01 open Assets:X\n  importer: \"csv\"\n  importer-pattern: \"*.csv\"\n",
         );
-        assert_eq!(load_profiles(none.path()).unwrap()[0].1.currency, None);
+        assert_eq!(
+            load_profiles(&mut Ledgers::default(), none.path()).unwrap()[0]
+                .1
+                .currency,
+            None
+        );
     }
 
     #[test]

@@ -107,22 +107,15 @@ impl CsvImporter {
             );
         }
 
-        let mut reader = csv::ReaderBuilder::new()
-            .has_headers(csv_config.has_header)
-            .delimiter(csv_config.delimiter as u8)
-            .from_reader(content.as_bytes());
+        let mut reader = Self::reader(content, csv_config);
 
         // Build column name to index map from headers
-        let header_map: HashMap<String, usize> = if csv_config.has_header {
-            reader
-                .headers()?
-                .iter()
-                .enumerate()
-                .map(|(i, h)| (h.to_string(), i))
-                .collect()
-        } else {
-            HashMap::default()
-        };
+        let header_map: HashMap<String, usize> = Self::read_header(&mut reader, csv_config)?
+            .unwrap_or_default()
+            .into_iter()
+            .enumerate()
+            .map(|(i, h)| (h, i))
+            .collect();
 
         if let Some(id_col) = &csv_config.transaction_id_column {
             Self::check_transaction_id_column(id_col, csv_config, &header_map)?;
@@ -444,6 +437,45 @@ impl CsvImporter {
         Ok(Some(txn))
     }
 
+    /// The CSV reader every pass over a file uses, so the header that
+    /// [`Self::header`] reports is the header extraction reads.
+    fn reader<'a>(content: &'a str, csv_config: &CsvConfig) -> csv::Reader<&'a [u8]> {
+        csv::ReaderBuilder::new()
+            .has_headers(csv_config.has_header)
+            .delimiter(csv_config.delimiter as u8)
+            .from_reader(content.as_bytes())
+    }
+
+    /// The header row's column names, in order, or `None` for a headerless
+    /// config.
+    fn read_header(
+        reader: &mut csv::Reader<&[u8]>,
+        csv_config: &CsvConfig,
+    ) -> Result<Option<Vec<String>>> {
+        if !csv_config.has_header {
+            return Ok(None);
+        }
+        Ok(Some(
+            reader.headers()?.iter().map(ToString::to_string).collect(),
+        ))
+    }
+
+    /// The column names of `content`'s header row as extraction would read
+    /// them under `csv_config` (its delimiter and `has_header`; `skip_rows`
+    /// skips data rows after the header, so it does not move the header), or
+    /// `None` when the config says the file has no header.
+    ///
+    /// For choosing between importer entries by the columns a file has
+    /// (#2295): it shares the reader with extraction, so a column this
+    /// reports is one a column name in the config will find.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the header row is not valid CSV.
+    pub fn header(content: &str, csv_config: &CsvConfig) -> Result<Option<Vec<String>>> {
+        Self::read_header(&mut Self::reader(content, csv_config), csv_config)
+    }
+
     /// Misconfigurations of `transaction_id_column` caught once, up front,
     /// with a message naming the key, rather than as one context-free warning
     /// per row followed by "no transactions were extracted" (or, worse, as
@@ -669,6 +701,28 @@ mod tests {
     use super::*;
     use crate::config::{AmountFormat, ImporterType};
     use std::str::FromStr;
+
+    /// `header` reads the header row with the config's delimiter, and is
+    /// `None` for a headerless config.
+    #[test]
+    fn header_reads_the_row_extraction_reads() {
+        let semicolons = CsvConfig {
+            delimiter: ';',
+            ..CsvConfig::default()
+        };
+        assert_eq!(
+            CsvImporter::header("Date;Amount (EUR)\n2024-01-01;1\n", &semicolons).unwrap(),
+            Some(vec!["Date".to_string(), "Amount (EUR)".to_string()])
+        );
+        let headerless = CsvConfig {
+            has_header: false,
+            ..CsvConfig::default()
+        };
+        assert_eq!(
+            CsvImporter::header("2024-01-01,1\n", &headerless).unwrap(),
+            None
+        );
+    }
 
     #[test]
     fn test_parse_money_string() {

@@ -2039,3 +2039,114 @@ fn test_check_json_missing_include_points_at_include_directive() {
         "message must name the missing target: {diag}"
     );
 }
+
+/// #2319: a newest-first statement is written oldest-first, keeping the
+/// within-day sequence reversed with it; `--existing` reports skipped rows in
+/// that output order; and the `--balance` assertion is still the last thing
+/// written.
+#[test]
+fn test_extract_writes_a_newest_first_statement_oldest_first() {
+    let bin = require_rledger!();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let csv = dir.path().join("statement.csv");
+    std::fs::write(
+        &csv,
+        "Date,Description,Amount\n\
+         2024-01-03,Late B,-4.00\n\
+         2024-01-03,Late A,-3.00\n\
+         2024-01-02,Mid,-2.00\n\
+         2024-01-01,Early B,-1.50\n\
+         2024-01-01,Early A,-1.00\n",
+    )
+    .expect("write csv");
+    let existing = dir.path().join("ledger.beancount");
+    std::fs::write(
+        &existing,
+        "2024-01-01 open Assets:Bank USD\n2024-01-01 open Expenses:X\n\
+         2024-01-03 * \"Late B\"\n  Assets:Bank  -4.00 USD\n  Expenses:X\n\
+         2024-01-01 * \"Early A\"\n  Assets:Bank  -1.00 USD\n  Expenses:X\n",
+    )
+    .expect("write ledger");
+
+    let output = Command::new(&bin)
+        .arg("extract")
+        .arg(&csv)
+        .args(["-a", "Assets:Bank", "--currency", "USD"])
+        .arg("--existing")
+        .arg(&existing)
+        .args(["--balance", "100.00", "--balance-date", "2023-12-31"])
+        .output()
+        .expect("run extract");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+
+    let heads: Vec<&str> = stdout.lines().filter(|l| l.starts_with("20")).collect();
+    assert_eq!(
+        heads,
+        [
+            "2024-01-01 * \"Early B\"",
+            "2024-01-02 * \"Mid\"",
+            "2024-01-03 * \"Late A\"",
+            // Dated before every row, but `--balance` is appended last.
+            "2023-12-31 balance Assets:Bank 100.00 USD",
+        ],
+        "stdout: {stdout}"
+    );
+
+    let skipped: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.trim_start().starts_with("skipped"))
+        .collect();
+    assert_eq!(skipped.len(), 2, "stderr: {stderr}");
+    assert!(skipped[0].contains("\"Early A\""), "stderr: {stderr}");
+    assert!(skipped[1].contains("\"Late B\""), "stderr: {stderr}");
+}
+
+/// #2319: two statements imported one after the other each keep their own
+/// block, in the order they were imported, even when the second is older:
+/// ordering is per input file, never across files.
+#[test]
+fn test_extract_orders_each_file_on_its_own() {
+    let bin = require_rledger!();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let feb = dir.path().join("feb.csv");
+    std::fs::write(
+        &feb,
+        "Date,Description,Amount\n2024-02-02,Feb B,-2.00\n2024-02-01,Feb A,-1.00\n",
+    )
+    .expect("write feb");
+    let jan = dir.path().join("jan.csv");
+    std::fs::write(
+        &jan,
+        "Date,Description,Amount\n2024-01-01,Jan A,-1.00\n2024-01-02,Jan B,-2.00\n",
+    )
+    .expect("write jan");
+
+    let mut appended = String::new();
+    for file in [&feb, &jan] {
+        let output = Command::new(&bin)
+            .arg("extract")
+            .arg(file)
+            .args(["-a", "Assets:Bank", "--currency", "USD"])
+            .output()
+            .expect("run extract");
+        assert!(
+            output.status.success(),
+            "stderr: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        appended.push_str(&String::from_utf8_lossy(&output.stdout));
+    }
+    let heads: Vec<&str> = appended.lines().filter(|l| l.starts_with("20")).collect();
+    assert_eq!(
+        heads,
+        [
+            "2024-02-01 * \"Feb A\"",
+            "2024-02-02 * \"Feb B\"",
+            "2024-01-01 * \"Jan A\"",
+            "2024-01-02 * \"Jan B\"",
+        ],
+        "{appended}"
+    );
+}

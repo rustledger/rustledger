@@ -8944,3 +8944,208 @@ fn noduplicates_locates_the_later_copy() {
     assert_eq!(messages(&output), ["Duplicate entry: 2024-01-02 \"Lunch\""]);
     assert_eq!(output.errors[0].line_number, Some(8));
 }
+
+// ============================================================================
+// CheckOptionExpiryPlugin Tests
+// ============================================================================
+
+use rustledger_plugin::native::CheckOptionExpiryPlugin;
+
+const OPT_ACCT: &str = "Assets:Broker:Options";
+const CASH_ACCT: &str = "Assets:Broker:Cash";
+
+/// One option leg against cash. `units` is signed contracts: `-1` sells to
+/// open (or closes a long), `1` buys to open (or closes a short).
+fn option_txn(date: &str, account: &str, units: &str, symbol: &str) -> DirectiveWrapper {
+    make_transaction(
+        date,
+        "option leg",
+        vec![(account, units, symbol), (CASH_ACCT, "0", "USD")],
+    )
+}
+
+/// A transaction with no option postings, used to move the ledger's last
+/// date forward.
+fn later_entry(date: &str) -> DirectiveWrapper {
+    make_transaction(
+        date,
+        "unrelated",
+        vec![
+            (CASH_ACCT, "-1.00", "USD"),
+            ("Expenses:Fees", "1.00", "USD"),
+        ],
+    )
+}
+
+fn option_expiry_errors(directives: Vec<DirectiveWrapper>) -> Vec<PluginError> {
+    let plugin = CheckOptionExpiryPlugin;
+    let mut all = vec![
+        make_open("2026-01-01", OPT_ACCT),
+        make_open("2026-01-01", CASH_ACCT),
+        make_open("2026-01-01", "Expenses:Fees"),
+    ];
+    all.extend(directives);
+    let input = make_input(all);
+    let n = input.directives.len();
+    let output = process_and_materialize(&plugin, input);
+    // The plugin never inserts, deletes, or modifies directives.
+    assert_eq!(output.directives.len(), n);
+    output.errors
+}
+
+/// T01: a short closed before expiry is not reported.
+#[test]
+fn test_option_expiry_closed_before_expiry() {
+    let errors = option_expiry_errors(vec![
+        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+        option_txn("2026-09-20", OPT_ACCT, "1", "AAPL261016P00230000"),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// T02: a close dated on the expiry day itself is not reported.
+#[test]
+fn test_option_expiry_closed_on_expiry_day() {
+    let errors = option_expiry_errors(vec![
+        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+        option_txn("2026-10-16", OPT_ACCT, "1", "AAPL261016P00230000"),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// T03: a short left open past expiry is reported once, at the opening
+/// entry, naming the symbol, expiry date, quantity, and account.
+#[test]
+fn test_option_expiry_short_left_open() {
+    let mut open = option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000");
+    open.filename = Some("ledger.beancount".to_string());
+    open.lineno = Some(42);
+    let errors = option_expiry_errors(vec![open, later_entry("2026-10-17")]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    let e = &errors[0];
+    assert_eq!(e.severity, PluginErrorSeverity::Error);
+    assert_eq!(
+        e.message,
+        "AAPL261016P00230000 expired 2026-10-16 but -1 contract(s) remain open in Assets:Broker:Options"
+    );
+    assert_eq!(e.source_file.as_deref(), Some("ledger.beancount"));
+    assert_eq!(e.line_number, Some(42));
+}
+
+/// T04: a long left open past expiry is reported.
+#[test]
+fn test_option_expiry_long_left_open() {
+    let errors = option_expiry_errors(vec![
+        option_txn("2026-09-03", OPT_ACCT, "1", "SPXW261030C06800000"),
+        later_entry("2026-11-02"),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].message.contains(" but 1 contract(s) "),
+        "{errors:?}"
+    );
+}
+
+/// T05: an open contract is not reported when the ledger ends on or
+/// before its expiry date.
+#[test]
+fn test_option_expiry_ledger_ends_before_expiry() {
+    let on_expiry = option_expiry_errors(vec![
+        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+        later_entry("2026-10-16"),
+    ]);
+    assert_eq!(on_expiry.len(), 0, "{on_expiry:?}");
+
+    let before = option_expiry_errors(vec![option_txn(
+        "2026-09-02",
+        OPT_ACCT,
+        "-1",
+        "AAPL261016P00230000",
+    )]);
+    assert_eq!(before.len(), 0, "{before:?}");
+}
+
+/// T06: the same contract in two accounts is tracked per account.
+#[test]
+fn test_option_expiry_tracked_per_account() {
+    let ira = "Assets:IRA:Options";
+    let errors = option_expiry_errors(vec![
+        make_open("2026-01-01", ira),
+        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+        option_txn("2026-09-02", ira, "-1", "AAPL261016P00230000"),
+        option_txn("2026-09-20", OPT_ACCT, "1", "AAPL261016P00230000"),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].message.ends_with(ira), "{errors:?}");
+}
+
+/// T07: a partial close reports only the remaining quantity.
+#[test]
+fn test_option_expiry_partial_close() {
+    let errors = option_expiry_errors(vec![
+        option_txn("2026-09-02", OPT_ACCT, "-3", "AAPL261016P00232500"),
+        option_txn("2026-09-20", OPT_ACCT, "2", "AAPL261016P00232500"),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].message.contains(" but -1 contract(s) "),
+        "{errors:?}"
+    );
+}
+
+/// T08: commodities that are not valid OCC option symbols are ignored.
+#[test]
+fn test_option_expiry_ignores_non_option_commodities() {
+    let errors = option_expiry_errors(vec![
+        option_txn("2026-09-02", OPT_ACCT, "100", "AAPL"),
+        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261316P00230000"), // month 13
+        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261032P00230000"), // day 32
+        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016X00230000"), // not C/P
+        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P0023000"),  // 7 strike digits
+        option_txn("2026-09-02", OPT_ACCT, "-1", "TOOLONGX261016P00230000"), // root > 6
+        later_entry("2027-01-01"),
+    ]);
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// T09: a roll closes the old leg and opens a later one; neither is
+/// reported while the new leg has not expired.
+#[test]
+fn test_option_expiry_roll() {
+    let roll = make_transaction(
+        "2026-09-15",
+        "roll",
+        vec![
+            (OPT_ACCT, "1", "AAPL260918C00270000"),
+            (OPT_ACCT, "-1", "AAPL261016C00280000"),
+            (CASH_ACCT, "0", "USD"),
+        ],
+    );
+    let errors = option_expiry_errors(vec![
+        option_txn("2026-09-05", OPT_ACCT, "-1", "AAPL260918C00270000"),
+        roll,
+        later_entry("2026-10-01"),
+    ]);
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// T10: each expired open contract is reported separately.
+#[test]
+fn test_option_expiry_two_contracts() {
+    let errors = option_expiry_errors(vec![
+        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+        option_txn("2026-09-03", OPT_ACCT, "1", "SPY261016C00700000"),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(errors.len(), 2, "{errors:?}");
+}
+
+/// The plugin is reachable by name through the registry.
+#[test]
+fn test_option_expiry_registered() {
+    assert!(NativePluginRegistry::global().has("check_option_expiry"));
+}

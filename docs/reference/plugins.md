@@ -126,7 +126,7 @@ plugin "beancount.plugins.implicit_prices"
 
 ## Built-in Plugins
 
-rustledger includes 31 native plugins. Here are the most commonly used:
+rustledger includes 32 native plugins. Here are the most commonly used:
 
 ### Validation Plugins
 
@@ -136,6 +136,7 @@ rustledger includes 31 native plugins. Here are the most commonly used:
 | `check_closing` | Zero balance assertion on posting with `closing: TRUE` |
 | `check_commodity` | Ensure commodities are declared |
 | `check_drained` | Zero balance assertion on balance sheet account close |
+| `check_option_expiry` | Error on option contracts open past expiry |
 | `coherent_cost` | A currency is held at cost everywhere or nowhere |
 | `commodity_attr` | Validate commodity metadata attributes |
 | `leafonly` | Restrict postings to leaf accounts |
@@ -172,7 +173,7 @@ rustledger includes 31 native plugins. Here are the most commonly used:
 ### All Built-in Plugins
 
 <details>
-<summary>Complete list of 31 native plugins</summary>
+<summary>Complete list of 32 native plugins</summary>
 
 | Plugin | Description |
 |--------|-------------|
@@ -185,6 +186,7 @@ rustledger includes 31 native plugins. Here are the most commonly used:
 | `check_closing` | Zero balance on account close |
 | `check_commodity` | Validate commodity declarations |
 | `check_drained` | Ensure accounts drained before close |
+| `check_option_expiry` | Error on option contracts open past expiry |
 | `close_tree` | Close descendant accounts |
 | `coherent_cost` | Held at cost everywhere or nowhere |
 | `commodity_attr` | Validate commodity attributes |
@@ -465,6 +467,30 @@ plugin "beancount.plugins.check_drained"
 2024-12-31 close Assets:Bank
 ; Generates: 2025-01-01 balance Assets:Bank 0 USD
 ```
+
+Options: None
+
+### check_option_expiry
+
+Reports an error for each option contract whose net position in an account is non-zero after its expiry date. Contracts are recognized by their OCC symbol with spaces removed: a root of 1–6 characters, the expiry as `YYMMDD`, `C` or `P`, and the strike × 1000 as 8 digits (`AAPL261016P00230000` is the AAPL 2026-10-16 230 put). Other commodities are ignored.
+
+"Today" is the date of the last directive in the ledger, so the check is deterministic. A close dated on the expiry day is accepted, and a ledger that ends on or before expiry is not reported. The plugin only reports; it never inserts or changes directives.
+
+```beancount
+plugin "check_option_expiry"
+
+2026-01-01 open Assets:Broker:Cash USD
+2026-01-01 open Assets:Broker:Options
+
+2026-09-02 * "Sell to open 1 AAPL 2026-10-16 230 put"
+  Assets:Broker:Options  -1 AAPL261016P00230000 {250.00 USD}
+  Assets:Broker:Cash     250.00 USD
+
+2026-10-20 balance Assets:Broker:Cash 250.00 USD
+; Error: AAPL261016P00230000 expired 2026-10-16 but -1 contract(s) remain open in Assets:Broker:Options
+```
+
+This plugin is native to rustledger and has no Python beancount equivalent, so a `plugin` directive for it makes the file fail in Python beancount. To keep the file portable, enable it on the command line instead: `rledger check --native-plugin check_option_expiry ledger.beancount`.
 
 Options: None
 

@@ -151,8 +151,7 @@ impl NativePlugin for EffectiveDatePlugin {
                     continue;
                 };
                 let plan = match value {
-                    // Upstream skips a non-date value silently, leaving the
-                    // posting where it is.
+                    // As upstream, which reports it and keeps the entry.
                     MetaValueData::Date(date) if *date == entry_date => {
                         Err("Effective and actual dates are identical".to_string())
                     }
@@ -172,6 +171,8 @@ impl NativePlugin for EffectiveDatePlugin {
                             None => Err("no holding account is configured for it".to_string()),
                         }
                     }
+                    // Upstream skips a non-date value silently, leaving
+                    // the posting where it is.
                     other => Err(format!(
                         "its `effective_date` is not a date: {}",
                         describe_meta(other)

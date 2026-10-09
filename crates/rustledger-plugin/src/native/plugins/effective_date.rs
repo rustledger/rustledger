@@ -12,25 +12,8 @@
 //! }"
 //! ```
 
-use regex::Regex;
 use std::collections::{BTreeSet, HashSet};
-use std::sync::LazyLock;
 use std::sync::atomic::{AtomicUsize, Ordering};
-
-/// Regex for parsing holding account configuration entries.
-/// Format: `'Prefix': {'earlier': 'Account1', 'later': 'Account2'}`
-/// One `'Prefix': {...}` entry of the config dict, either quote style.
-static HOLDING_ACCOUNT_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?:'([^']+)'|"([^"]+)")\s*:\s*\{([^{}]*)\}"#)
-        .expect("HOLDING_ACCOUNT_RE: invalid regex pattern")
-});
-
-/// One `'earlier': 'Account'` / `'later': 'Account'` field of an entry, in
-/// either order and either quote style, as the Python dict literal allows.
-static HOLDING_FIELD_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?:'(earlier|later)'|"(earlier|later)")\s*:\s*(?:'([^']+)'|"([^"]+)")"#)
-        .expect("HOLDING_FIELD_RE: invalid regex pattern")
-});
 
 use crate::types::{
     AmountData, DirectiveData, DirectiveWrapper, MetaValueData, OpenData, PluginError,
@@ -353,65 +336,55 @@ fn generate_link(date: &str) -> String {
     format!("edate-{}-{:03x}", date_short, counter % 4096)
 }
 
-/// Parse the configuration string: a Python dict literal mapping each
-/// account prefix to its `earlier` and `later` holding accounts.
+/// Parse the configuration string the way upstream does: `if config:
+/// literal_eval(config)`, with a falsy result meaning the default config.
 ///
-/// An empty dict means the default config, as upstream (`if not
-/// holding_accts`). Anything else must read as such a dict, in either quote
-/// style and with the two fields in either order; text that does not is an
-/// error rather than being skipped.
+/// The value must then be a dict mapping each account prefix to a dict with
+/// string `earlier` and `later` entries (other entries are ignored, as
+/// upstream ignores them). Upstream only fails on a malformed entry when a
+/// posting reaches it (`KeyError`, `TypeError`); this reports it up front.
+/// A text `literal_eval` rejects is an error here too.
 fn parse_config(config: &str) -> Result<HoldingAccounts, String> {
-    let mut result: HoldingAccounts = Vec::new();
+    use super::py_literal::{self, PyValue};
 
-    for cap in HOLDING_ACCOUNT_RE.captures_iter(config) {
-        let prefix = cap.get(1).or_else(|| cap.get(2)).map_or("", |m| m.as_str());
-        let (mut earlier, mut later) = (None, None);
-        for field in HOLDING_FIELD_RE.captures_iter(&cap[3]) {
-            let key = field
-                .get(1)
-                .or_else(|| field.get(2))
-                .map_or("", |m| m.as_str());
-            let value = field
-                .get(3)
-                .or_else(|| field.get(4))
-                .map(|m| m.as_str().to_string());
-            if key == "earlier" {
-                earlier = value;
-            } else {
-                later = value;
-            }
-        }
-        let (Some(earlier), Some(later)) = (earlier, later) else {
-            return Err(format!(
-                "the entry for '{prefix}' needs both 'earlier' and 'later'"
-            ));
+    if config.is_empty() {
+        return Ok(default_holding_accounts());
+    }
+    let value = py_literal::parse(config)?;
+    if !value.is_truthy() {
+        return Ok(default_holding_accounts());
+    }
+    let PyValue::Dict(entries) = value else {
+        return Err("expected a dict of holding accounts".to_string());
+    };
+    let mut result: HoldingAccounts = Vec::new();
+    for (key, holding) in entries {
+        let PyValue::Str(prefix) = key else {
+            return Err(format!("a prefix must be a string, found {key:?}"));
         };
+        let field = |name: &str| -> Result<String, String> {
+            let PyValue::Dict(fields) = &holding else {
+                return Err(format!("the entry for '{prefix}' must be a dict"));
+            };
+            // The last value of a repeated key wins, as in a Python dict.
+            match fields
+                .iter()
+                .rev()
+                .find(|(k, _)| matches!(k, PyValue::Str(k) if k == name))
+            {
+                Some((_, PyValue::Str(account))) => Ok(account.clone()),
+                Some(_) => Err(format!("'{name}' for '{prefix}' must be a string")),
+                None => Err(format!("the entry for '{prefix}' needs '{name}'")),
+            }
+        };
+        let accounts = (field("earlier")?, field("later")?);
         // A repeated key keeps its first position and takes the new value,
         // as a Python dict literal does.
-        if let Some(entry) = result.iter_mut().find(|(p, _)| p == prefix) {
-            entry.1 = (earlier, later);
+        if let Some(entry) = result.iter_mut().find(|(p, _)| *p == prefix) {
+            entry.1 = accounts;
         } else {
-            result.push((prefix.to_string(), (earlier, later)));
+            result.push((prefix, accounts));
         }
-    }
-
-    // Whatever the entries did not account for may only be the dict's own
-    // braces, commas and whitespace.
-    let rest = HOLDING_ACCOUNT_RE.replace_all(config, "");
-    if let Some(stray) = rest
-        .chars()
-        .find(|c| !(c.is_whitespace() || matches!(c, '{' | '}' | ',')))
-    {
-        return Err(format!(
-            "unexpected `{stray}`; expected a dict of holding accounts"
-        ));
-    }
-    if rest.matches('{').count() != rest.matches('}').count() {
-        return Err("unbalanced braces".to_string());
-    }
-
-    if result.is_empty() {
-        return Ok(default_holding_accounts());
     }
     Ok(result)
 }
@@ -781,5 +754,217 @@ mod tests {
             "Effective and actual dates are identical"
         );
         assert_eq!(materialize_ops(&directives, &output), directives);
+    }
+
+    enum Expect {
+        Ok(Vec<(&'static str, &'static str, &'static str)>),
+        Default,
+        Err,
+    }
+
+    /// `parse_config` accepts and rejects what upstream's `if config:
+    /// literal_eval(config)` does. Every expectation below is Python's own
+    /// (3.13 `ast.literal_eval`), classified as: a usable dict, a falsy value
+    /// meaning the default config, or an error. "Unusable" values (a dict
+    /// missing `later`, a non-string account, a list) parse in Python and
+    /// fail when a posting reaches them; they are errors here up front.
+    #[test]
+    fn the_config_reads_as_literal_eval_reads_it() {
+        let cases: Vec<(&str, Expect)> = vec![
+            (
+                r"{'Expenses': {'earlier': 'L:H', 'later': 'A:H'}}",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (
+                r#"{"Expenses": {"earlier": "L:H", "later": "A:H"}}"#,
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (
+                r"{'Expenses': {'later': 'A:H', 'earlier': 'L:H'}}",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (
+                r"{'Expenses': {'earlier': 'L:H', 'later': 'A:H',},}",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (
+                r"  {  'Expenses'  :  {'earlier':'L:H','later':'A:H'}  }  ",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (
+                r"{'Expenses':
+ {'earlier': 'L:H',
+  'later': 'A:H'}}",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (
+                r"{'Ex\x70enses': {'earlier': 'L:H', 'later': 'A:H'}}",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (
+                r"{'Expenses': {'earlier': 'L:\u0048', 'later': 'A:H'}}",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (
+                r"{'Exp' 'enses': {'earlier': 'L:H', 'later': 'A:H'}}",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (
+                r"{r'Expenses': {'earlier': 'L:H', 'later': 'A:H'}}",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (
+                r"{u'Expenses': {'earlier': 'L:H', 'later': 'A:H'}}",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (
+                r"{'Expenses': {'earlier': 'L:H', 'later': 'A:H', 'note': 'x'}}",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (
+                r"{'Expenses': {'earlier': 'L:H', 'later': 'A:H', 'nested': {'a': 1}}}",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (r"{'Expenses': {'earlier': 'L:H'}}", Expect::Err), // unusable
+            (r"{'Expenses': {'earlier': 1, 'later': 'A:H'}}", Expect::Err), // unusable
+            (r"{'Expenses': 'L:H'}", Expect::Err),              // unusable
+            (r"{}", Expect::Default),
+            (r"", Expect::Default),
+            (r"  ", Expect::Err), // error
+            (r"None", Expect::Default),
+            (r"[]", Expect::Default),
+            (r"''", Expect::Default),
+            (r"0", Expect::Default),
+            (r"False", Expect::Default),
+            (r"()", Expect::Default),
+            (r"['Expenses']", Expect::Err), // unusable
+            (r"'Expenses'", Expect::Err),   // unusable
+            (r"1", Expect::Err),            // unusable
+            (
+                r"{'Expenses': {'earlier': 'L:H', 'later': 'A:H'}",
+                Expect::Err,
+            ), // error
+            (
+                r"{'Expenses' {'earlier': 'L:H', 'later': 'A:H'}}",
+                Expect::Err,
+            ), // error
+            (
+                r"{'Expenses': {'earlier': 'L:H', 'later': 'A:H'},, }",
+                Expect::Err,
+            ), // error
+            (
+                r"{'Expenses': {'earlier': 'L:H', 'later': 'A:H'}} junk",
+                Expect::Err,
+            ), // error
+            (
+                r"{Expenses: {'earlier': 'L:H', 'later': 'A:H'}}",
+                Expect::Err,
+            ), // error
+            (
+                r"{'Expenses': {'earlier': 'L:H', 'later': 'A:H'}, 'Expenses': {'earlier': 'L:X', 'later': 'A:X'}}",
+                Expect::Ok(vec![("Expenses", "L:X", "A:X")]),
+            ),
+            (
+                r"{'Expenses': {'earlier': 'L:H', 'later': 'A:H'}, # c
+}",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (r"dict(Expenses=1)", Expect::Err), // error
+            (
+                r"{'Expenses': {'earlier': 'L:H', 'later': 'A:H'}}
+",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (
+                r#"{"Exp'enses": {'earlier': 'L:H', 'later': 'A:H'}}"#,
+                Expect::Ok(vec![("Exp'enses", "L:H", "A:H")]),
+            ),
+            (
+                r"{'Expenses': {'earlier': f'L:H', 'later': 'A:H'}}",
+                Expect::Err,
+            ), // error
+            (
+                r"{'Expenses': {'earlier': b'L:H', 'later': 'A:H'}}",
+                Expect::Err,
+            ), // unusable
+            (r"{'Expenses', 'Income'}", Expect::Err), // unusable
+            (
+                r"( {'Expenses': {'earlier': 'L:H', 'later': 'A:H'}} )",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (
+                r"{'Expenses': {'earlier': 'L:H', 'later': 'A:H'}}  # trailing comment",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (
+                r"
+{'Expenses': {'earlier': 'L:H', 'later': 'A:H'}}",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (r"-0", Expect::Default),
+            (r"0.0", Expect::Default),
+            (r"0x0", Expect::Default),
+            (r"1_000", Expect::Err), // unusable
+            (
+                r"{'Expenses': {'earlier': 'L:H', 'later': 'A:H'}}
+
+",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (r"'''x'''", Expect::Err), // unusable
+            (
+                r"{'''Expenses''': {'earlier': 'L:H', 'later': 'A:H'}}",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (
+                r"{'Expenses': {'earlier': 'L:H', 'later': 'A:H'}} \
+",
+                Expect::Err,
+            ), // error
+            (
+                r"{'Expenses': {'earlier': 'L:H' 'X', 'later': 'A:H'}}",
+                Expect::Ok(vec![("Expenses", "L:HX", "A:H")]),
+            ),
+            (
+                r"{'Expenses': {'earlier': 'L:H', 'later': 'A:H'}}
+# c",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (r"{1: {'earlier': 'L:H', 'later': 'A:H'}}", Expect::Err), // unusable
+            (
+                r"{'Expenses': {'earlier': 'L:H', 'later': 'A:H', 'later': 'A:Z'}}",
+                Expect::Ok(vec![("Expenses", "L:H", "A:Z")]),
+            ),
+            (
+                r"{'Expenses':	{'earlier': 'L:H', 'later': 'A:H'}}",
+                Expect::Ok(vec![("Expenses", "L:H", "A:H")]),
+            ),
+            (
+                r#"{"""Exp
+enses""": {'earlier': 'L:H', 'later': 'A:H'}}"#,
+                Expect::Ok(vec![("Exp\nenses", "L:H", "A:H")]),
+            ),
+            (
+                r"{'Expenses': {'earlier': 'L:H', 'later': 'A:H'}}
+{'x': 1}",
+                Expect::Err,
+            ), // error
+            (r"07", Expect::Err),        // error
+            (r"{'a': 1,}", Expect::Err), // unusable
+        ];
+        for (config, expect) in cases {
+            let got = parse_config(config);
+            match expect {
+                Expect::Ok(want) => {
+                    let want: HoldingAccounts = want
+                        .into_iter()
+                        .map(|(p, e, l)| (p.to_string(), (e.to_string(), l.to_string())))
+                        .collect();
+                    assert_eq!(got, Ok(want), "{config:?}");
+                }
+                Expect::Default => assert_eq!(got, Ok(default_holding_accounts()), "{config:?}"),
+                Expect::Err => assert!(got.is_err(), "{config:?} should be rejected: {got:?}"),
+            }
+        }
     }
 }

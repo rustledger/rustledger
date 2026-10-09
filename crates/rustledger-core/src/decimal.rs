@@ -105,6 +105,70 @@ where
     Some(sum)
 }
 
+/// `a - b`, or `None` when no `Decimal` holds the difference EXACTLY.
+///
+/// `checked_sub` fails only past `Decimal::MAX`. Where the exact difference
+/// needs more than the 96-bit mantissa at the operands' scale it ROUNDS and
+/// still answers `Some`: `MAX - 0.48` comes back as `MAX`. A quantity that
+/// keeps shrinking through such a subtraction (a reduction's units still to
+/// find, #2554) then never shrinks, and more is taken than was asked for.
+///
+/// An exact difference keeps the wider operand scale, so a narrower one is
+/// the cheap signal -- the fast path costs one comparison. It is only a
+/// signal: an exact result whose dropped digits were zeros, and
+/// `rust_decimal`'s shortcut for a zero operand, narrow the scale as well, so
+/// a narrower result is confirmed in `BigDecimal` before it is refused.
+#[must_use]
+pub fn checked_sub_exact(a: Decimal, b: Decimal) -> Option<Decimal> {
+    let diff = a.checked_sub(b)?;
+    if diff.scale() >= a.scale().max(b.scale()) {
+        return Some(diff);
+    }
+    (to_bigdecimal(a) - to_bigdecimal(b) == to_bigdecimal(diff)).then_some(diff)
+}
+
+/// `a + b`, or `None` when no `Decimal` holds the sum EXACTLY -- see
+/// [`checked_sub_exact`]. `checked_add(MAX, 0.48)` is `Some(MAX)`.
+#[must_use]
+pub fn checked_add_exact(a: Decimal, b: Decimal) -> Option<Decimal> {
+    let sum = a.checked_add(b)?;
+    if sum.scale() >= a.scale().max(b.scale()) {
+        return Some(sum);
+    }
+    (to_bigdecimal(a) + to_bigdecimal(b) == to_bigdecimal(sum)).then_some(sum)
+}
+
+/// [`checked_add_python_scale`] that also refuses a sum it would have to ROUND.
+///
+/// For what a lot holds once a reduction is taken from it, where a rounded
+/// sum keeps units the lot sold (`MAX` less `0.48` is still `MAX`, #2554).
+///
+/// Stricter than Python, deliberately: beancount subtracts in a 28-digit
+/// context and rounds the same lot without a word. A lot is a count, and a
+/// count that changes by a rounding step is a wrong number.
+#[must_use]
+pub fn checked_add_exact_python_scale(a: Decimal, b: Decimal) -> Option<Decimal> {
+    let mut sum = checked_add_exact(a, b)?;
+    let target = a.scale().max(b.scale());
+    if sum.scale() < target {
+        sum.rescale(target);
+    }
+    Some(sum)
+}
+
+/// The `Decimal` equal to `exact`, or `None` when there is none: the value is
+/// out of range, or needs more digits than the mantissa holds.
+///
+/// Parsing alone is not enough -- `Decimal`'s parser ROUNDS excess digits --
+/// so the parsed value is compared back against `exact`.
+#[must_use]
+pub fn decimal_from_big_exact(exact: &bigdecimal::BigDecimal) -> Option<Decimal> {
+    // `to_plain_string`, as in `checked_exact_sum_python_scale`: `Display`
+    // switches to exponent form, which the parser rejects.
+    let parsed = <Decimal as core::str::FromStr>::from_str(&exact.to_plain_string()).ok()?;
+    (to_bigdecimal(parsed) == *exact).then_some(parsed)
+}
+
 /// Overflow-checked [`sub_python_scale`] — see [`checked_add_python_scale`].
 #[must_use]
 pub fn checked_sub_python_scale(a: Decimal, b: Decimal) -> Option<Decimal> {

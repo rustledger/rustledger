@@ -194,7 +194,13 @@ use crate::types::{Error, LedgerOptions};
 /// and one whose currency was read off the residual now fails. `ParsedLedger`
 /// and `Ledger` archive booked directives and their errors, so a v32 blob
 /// would keep serving the old answer.
-pub const CACHE_VERSION: u32 = 33;
+/// v34: a reduction whose take, lot or running total needs more digits than
+/// `Decimal` holds is an overflow error instead of a rounded booking (#2554):
+/// selling `MAX` from lots of `0.48` and `MAX` drained both, and now fails;
+/// STRICT's total match is decided exactly, so a sale that only rounded to the
+/// lots' total is now ambiguous. Loader v37, unchanged -- parsed directives
+/// did not move. A v33 blob would serve the old booked lots with no error.
+pub const CACHE_VERSION: u32 = 34;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

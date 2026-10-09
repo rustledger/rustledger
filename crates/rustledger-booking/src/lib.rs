@@ -170,7 +170,7 @@ pub fn transaction_tolerances(
     // across postings, then max'd with the existing tolerance per currency.
     if opts.infer_from_cost {
         // Accumulated cost/price tolerances per currency
-        let mut cost_tolerances: FxHashMap<rustledger_core::Currency, Decimal> =
+        let mut cost_tolerances: FxHashMap<rustledger_core::Currency, ToleranceSum> =
             FxHashMap::with_capacity_and_hasher(txn.postings.len().min(4), Default::default());
 
         for posting in &txn.postings {
@@ -202,8 +202,10 @@ pub fn transaction_tolerances(
                     && let Some(cost_per_unit) = cost_spec.number.and_then(|cn| cn.per_unit())
                     && let Some(cost_currency) = &cost_spec.currency
                 {
-                    let cost_tolerance = tolerance * cost_per_unit;
-                    *cost_tolerances.entry(cost_currency.clone()).or_default() += cost_tolerance;
+                    cost_tolerances
+                        .entry(cost_currency.clone())
+                        .or_default()
+                        .add_product(tolerance, cost_per_unit);
                 }
 
                 // Price contribution: only complete amounts contribute
@@ -217,16 +219,17 @@ pub fn transaction_tolerances(
                         .as_ref()
                         .and_then(rustledger_core::IncompleteAmount::as_amount)
                 {
-                    let price_tolerance = tolerance * price_amt.number;
-                    *cost_tolerances
+                    cost_tolerances
                         .entry(price_amt.currency.clone())
-                        .or_default() += price_tolerance;
+                        .or_default()
+                        .add_product(tolerance, price_amt.number);
                 }
             }
         }
 
         // Merge cost tolerances: take max of existing and cost-inferred
         for (currency, cost_tol) in cost_tolerances {
+            let cost_tol = cost_tol.value();
             tolerances
                 .entry(currency)
                 .and_modify(|t| *t = (*t).max(cost_tol))
@@ -267,6 +270,76 @@ pub fn transaction_tolerances(
     }
 
     tolerances
+}
+
+/// One currency's accumulated cost/price tolerance: a sum of
+/// `units tolerance x cost or price` contributions.
+///
+/// The bare `*` and `+=` it replaces PANICKED: a price near `Decimal::MAX`
+/// times a tolerance of `0.05`, accumulated over twenty-odd postings, leaves
+/// the range, and so does one product under a large `tolerance_multiplier`
+/// (#2554). An ordinary transaction stays on the `Decimal` sum; the first
+/// product or sum that would overflow moves this currency to `BigDecimal`,
+/// where nothing does.
+#[derive(Debug)]
+enum ToleranceSum {
+    Fast(Decimal),
+    Exact(BigDecimal),
+}
+
+impl Default for ToleranceSum {
+    fn default() -> Self {
+        Self::Fast(Decimal::ZERO)
+    }
+}
+
+impl ToleranceSum {
+    fn add_product(&mut self, tolerance: Decimal, rate: Decimal) {
+        if let Self::Fast(sum) = self {
+            if let Some(next) = tolerance
+                .checked_mul(rate)
+                .and_then(|product| sum.checked_add(product))
+            {
+                *sum = next;
+                return;
+            }
+            *self = Self::Exact(to_big(*sum));
+        }
+        if let Self::Exact(sum) = self {
+            *sum += to_big(tolerance) * to_big(rate);
+        }
+    }
+
+    /// The tolerance, CLAMPED to `±Decimal::MAX` when the exact sum is past it.
+    ///
+    /// The one place this crate clamps, and why it is not the saturation #1863
+    /// rejected: that fabricated an AMOUNT, which flows into balances. A
+    /// tolerance is only ever the right-hand side of `|residual| <= tolerance`.
+    /// A booked residual is a `Decimal`, at most `MAX`, so every one of them is
+    /// inside both the true tolerance and the clamped one -- the comparison
+    /// gives the same answer. Only the validator's exact residual
+    /// (`calculate_residual_precise`, a `BigDecimal`) can exceed `MAX`, and
+    /// against it the clamp is the STRICTER bound: it can report an imbalance
+    /// the true tolerance would have allowed, never hide one. A negative sum
+    /// (negative prices, E4005) past `-MAX` loses to the base tolerance in the
+    /// `max` that follows, exactly as the true value would.
+    fn value(self) -> Decimal {
+        match self {
+            Self::Fast(sum) => sum,
+            Self::Exact(sum) => {
+                // `to_plain_string`, not `Display` (exponent form); parsing
+                // rounds the digits and fails only on magnitude.
+                use std::str::FromStr;
+                Decimal::from_str(&sum.to_plain_string()).unwrap_or_else(|_| {
+                    if sum.sign() == bigdecimal::num_bigint::Sign::Minus {
+                        -Decimal::MAX
+                    } else {
+                        Decimal::MAX
+                    }
+                })
+            }
+        }
+    }
 }
 
 /// Calculate the tolerance for a bare set of amounts (low-level primitive).
@@ -1938,5 +2011,77 @@ mod tests {
 
         let inferred = infer_cost_currency_from_postings(&txn);
         assert_eq!(inferred.as_deref(), Some("JPY"));
+    }
+
+    /// #2554: the cost/price tolerance accumulated with bare `*` and `+=`.
+    /// Twenty-two postings at a price of `MAX` sum `22 x 0.05 x MAX`, and
+    /// one posting under a large multiplier overflows its own product: both
+    /// panicked. The true tolerance is past `MAX`, so it clamps.
+    #[test]
+    fn cost_tolerance_past_the_range_clamps_instead_of_panicking() {
+        let price = |n: Decimal| PriceAnnotation {
+            kind: rustledger_core::PriceKind::Unit,
+            amount: Some(IncompleteAmount::Complete(Amount::new(n, "USD"))),
+        };
+        let at = |units: Decimal, p: Decimal| {
+            Posting::new("Assets:Stock", Amount::new(units, "CORP")).with_price(price(p))
+        };
+        let defaults = FxHashMap::default();
+        let opts = |multiplier| ToleranceOptions {
+            multiplier,
+            infer_from_cost: true,
+            defaults: &defaults,
+        };
+        let usd = Currency::from("USD");
+
+        let mut many = Transaction::new(NaiveDate::default(), "many");
+        for i in 0..22 {
+            let units = if i % 2 == 0 { dec!(0.1) } else { dec!(-0.1) };
+            many = many.with_synthesized_posting(at(units, Decimal::MAX));
+        }
+        assert_eq!(
+            transaction_tolerances(&many, &opts(dec!(0.5)))[&usd],
+            Decimal::MAX
+        );
+    }
+
+    /// The product alone: `0.1 x 1,000,000 x 9e23` is `9e28`, past `MAX`.
+    #[test]
+    fn one_cost_tolerance_product_past_the_range_clamps() {
+        let price = |n: Decimal| PriceAnnotation {
+            kind: rustledger_core::PriceKind::Unit,
+            amount: Some(IncompleteAmount::Complete(Amount::new(n, "USD"))),
+        };
+        let defaults = FxHashMap::default();
+        let opts = ToleranceOptions {
+            multiplier: dec!(1000000),
+            infer_from_cost: true,
+            defaults: &defaults,
+        };
+        let one = Transaction::new(NaiveDate::default(), "one").with_synthesized_posting(
+            Posting::new("Assets:Stock", Amount::new(dec!(0.1), "CORP"))
+                .with_price(price(dec!(900000000000000000000000))),
+        );
+        assert_eq!(
+            transaction_tolerances(&one, &opts)[&Currency::from("USD")],
+            Decimal::MAX
+        );
+    }
+
+    /// A sum that leaves the range and comes back is exact, not clamped:
+    /// `MAX + MAX - MAX` is `MAX`, and `MAX + MAX - MAX - 1` is `MAX - 1`.
+    #[test]
+    fn tolerance_sum_recovers_an_in_range_total_exactly() {
+        let mut sum = ToleranceSum::default();
+        sum.add_product(Decimal::MAX, Decimal::ONE);
+        sum.add_product(Decimal::MAX, Decimal::ONE);
+        sum.add_product(Decimal::MAX, Decimal::NEGATIVE_ONE);
+        sum.add_product(Decimal::ONE, Decimal::NEGATIVE_ONE);
+        assert_eq!(sum.value(), Decimal::MAX - Decimal::ONE);
+
+        let mut negative = ToleranceSum::default();
+        negative.add_product(Decimal::MAX, Decimal::NEGATIVE_ONE);
+        negative.add_product(Decimal::MAX, Decimal::NEGATIVE_ONE);
+        assert_eq!(negative.value(), -Decimal::MAX);
     }
 }

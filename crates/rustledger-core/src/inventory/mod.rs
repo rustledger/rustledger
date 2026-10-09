@@ -335,9 +335,9 @@ impl fmt::Display for OverflowError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} amount exceeds the representable range (±7.9e28); \
-             split the transaction, or denominate it in larger units \
-             (thousands, millions) so the number is smaller",
+            "{} amount exceeds the representable range (±7.9e28, at most \
+             28-29 significant digits); split the transaction, or denominate \
+             it in larger units (thousands, millions) so the number is smaller",
             self.currency
         )
     }

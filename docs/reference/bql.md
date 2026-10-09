@@ -52,7 +52,7 @@ Each row in a default `SELECT` is one posting from one transaction. The columns 
 | `accounts` | StringSet | The accounts of every posting in the transaction, sorted, each once |
 | `year`, `month`, `day` | Integer | Date parts (shortcuts for `year(date)` etc.) |
 | `id` | Integer? | Stable directive index (matches Python beancount's `id`) |
-| `type` | String | Always `"Transaction"` for default `SELECT` |
+| `type` | String | Always `"transaction"` for default `SELECT` |
 | `entry` | Object | Whole transaction as a structured object (`date`, `flag`, `payee`, `narration`, `tags`, `links`, `meta`) |
 
 **Posting columns**

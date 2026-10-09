@@ -226,14 +226,13 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
 
                         let gain = (cost_number - price_number) * units_number.abs();
 
-                        // Check if long-term (> 1 year)
-                        let days_held = entry_date.since(cost_date).map_or(0, |s| s.get_days());
-                        let years_held = (days_held / 365) as u32;
-                        let is_long_term = years_held > 1
-                            || (years_held == 1
-                                && (entry_date.month() > cost_date.month()
-                                    || (entry_date.month() == cost_date.month()
-                                        && entry_date.day() >= cost_date.day())));
+                        // Long-term means held more than one calendar year:
+                        // the sale falls after the lot's one-year anniversary.
+                        // jiff anniversaries a Feb-29 acquisition to Feb-28.
+                        // Same rule as the `capgains` report's `is_long_term`.
+                        let is_long_term = cost_date
+                            .checked_add(jiff::Span::new().years(1))
+                            .is_ok_and(|one_year| entry_date > one_year);
 
                         if is_long_term {
                             long_gains += gain;

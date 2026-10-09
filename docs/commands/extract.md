@@ -305,6 +305,13 @@ also compared by its net movement, so a transfer already imported from the
 other account's statement is recognized. Which rows are kept does not depend
 on the order the statement or the ledger lists them in.
 
+Text is compared ignoring case and Unicode normalization form: an `é` written
+as one character and one written as `e` plus a combining accent are the same
+text, whichever form the bank's export and the ledger each use. Compatibility
+forms are deliberately not folded (`ﬁ` is not `fi`, `²` is not `2`): they are
+not always the same text, and a false match would silently drop a row, where a
+missed one only leaves a duplicate you can see.
+
 Each existing transaction absorbs at most one new one: two identical coffees on
 one day both import when the ledger already holds only one. Skips are counted
 on stderr, and up to 20 of each kind are listed (the rest are summarized as

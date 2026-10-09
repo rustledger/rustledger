@@ -50,6 +50,7 @@ pub mod runtime;
 pub mod sandbox;
 pub mod test_helpers;
 pub mod types;
+pub mod untrusted;
 #[cfg(feature = "wasm-runtime")]
 pub mod wasm_dir_scan;
 
@@ -58,8 +59,8 @@ pub use convert::{
     directives_to_wrappers, wrapper_to_directive, wrappers_to_directives,
 };
 pub use dispatch::{
-    ExternalPluginKind, PluginPass, PluginResolveError, PluginRunError, ResolvedPlugin,
-    classify_external_plugin, find_native_plugin, resolve_plugin,
+    ExternalPluginKind, PluginLimits, PluginPass, PluginResolveError, PluginRunError,
+    ResolvedPlugin, classify_external_plugin, find_native_plugin, resolve_plugin,
 };
 pub use native::{
     AUTO_ACCOUNTS_NAME, DOCUMENT_DISCOVERY_NAME, NativePlugin, NativePluginRegistry, RegularPlugin,
@@ -74,3 +75,4 @@ pub use types::{
     DirectiveWrapper, PluginAccountTypes, PluginError, PluginErrorSeverity, PluginInput, PluginOp,
     PluginOptions, PluginOutput, validate_op_coverage,
 };
+pub use untrusted::{escape_untrusted_line, escape_untrusted_text};

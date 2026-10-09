@@ -115,7 +115,13 @@ pub enum WasmImporterError {
         source: std::io::Error,
     },
     /// The WASM module is malformed or uses unsupported features.
-    #[error("failed to compile WASM module {path}: {source}")]
+    // The module's own text (names in its name section, its import
+    // names, strings in what it returns) shows up in these messages; it is
+    // escaped like any importer text (see `rustledger_plugin::untrusted`).
+    #[error(
+        "failed to compile WASM module {path}: {}",
+        rustledger_plugin::escape_untrusted_text(&format!("{source:#}"))
+    )]
     Compile {
         /// Path of the module that failed to compile.
         path: PathBuf,
@@ -125,7 +131,9 @@ pub enum WasmImporterError {
     /// The WASM module has imports — they're forbidden in the importer
     /// sandbox. Importers must be self-contained.
     #[error(
-        "WASM importer has forbidden import {module}::{name} — importers must be self-contained"
+        "WASM importer has forbidden import {}::{} — importers must be self-contained",
+        rustledger_plugin::escape_untrusted_line(module),
+        rustledger_plugin::escape_untrusted_line(name)
     )]
     ForbiddenImport {
         /// Import module namespace (e.g. `env`, `wasi_snapshot_preview1`).
@@ -140,10 +148,16 @@ pub enum WasmImporterError {
     /// memory limit, etc.).
     // `{0:#}` prints the anyhow chain: a fuel trap's cause, `all fuel consumed
     // by WebAssembly`, is its innermost layer, below the wasm backtrace.
-    #[error("WASM importer runtime error: {0:#}")]
+    #[error(
+        "WASM importer runtime error: {}",
+        rustledger_plugin::escape_untrusted_text(&format!("{:#}", .0))
+    )]
     Runtime(#[source] anyhow::Error),
     /// `MessagePack` decode error on the WASM-returned bytes.
-    #[error("WASM importer returned malformed MessagePack: {0}")]
+    #[error(
+        "WASM importer returned malformed MessagePack: {}",
+        rustledger_plugin::escape_untrusted_text(&.0.to_string())
+    )]
     Decode(#[source] rmp_serde::decode::Error),
     /// `MessagePack` encode error on the input being sent to the WASM
     /// importer. Practically only happens if `ImporterConfig` carries
@@ -339,8 +353,9 @@ impl WasmImporter {
 
         Ok(Self {
             path,
-            name: metadata.name,
-            description: metadata.description,
+            name: rustledger_plugin::escape_untrusted_line(&metadata.name).into_owned(),
+            description: rustledger_plugin::escape_untrusted_line(&metadata.description)
+                .into_owned(),
             module,
             engine,
             config,
@@ -486,7 +501,16 @@ fn call_msgpack_with<I: Serialize, O: DeserializeOwned>(
             source: anyhow::Error::from(e),
         })?;
 
-    let input_ptr = alloc.call(&mut store, input_len).map_err(runtime_err)?;
+    let limited = |e: wasmtime::Error, store: &wasmtime::Store<sandbox::StoreState>| {
+        WasmImporterError::Runtime(sandbox::with_limit_context(
+            e,
+            store.data().limiter(),
+            config.max_time_secs,
+        ))
+    };
+    let input_ptr = alloc
+        .call(&mut store, input_len)
+        .map_err(|e| limited(e, &store))?;
     memory
         .write(&mut store, input_ptr as usize, &input_bytes)
         .map_err(|e| WasmImporterError::Runtime(e.into()))?;
@@ -500,7 +524,7 @@ fn call_msgpack_with<I: Serialize, O: DeserializeOwned>(
 
     let packed = func
         .call(&mut store, (input_ptr, input_len))
-        .map_err(runtime_err)?;
+        .map_err(|e| limited(e, &store))?;
 
     let out_bytes = read_packed_output(&store, &memory, packed)?;
     rmp_serde::from_slice(&out_bytes).map_err(WasmImporterError::Decode)
@@ -647,7 +671,11 @@ fn format_plugin_error(e: &PluginError) -> String {
         (None, Some(n)) => format!(" line {n}"),
         (None, None) => String::new(),
     };
-    format!("{severity}{location}: {}", e.message)
+    format!(
+        "{severity}{}: {}",
+        rustledger_plugin::escape_untrusted_line(&location),
+        rustledger_plugin::escape_untrusted_text(&e.message)
+    )
 }
 
 /// Materialize an [`ImporterOutput`] wire-format value back to the
@@ -675,8 +703,10 @@ fn output_to_import_result(out: ImporterOutput) -> anyhow::Result<ImportResult> 
         directives.push(d);
     }
     let mut result = ImportResult::new(directives);
+    // An importer's text is shown to the user: escape its control
+    // characters (see `rustledger_plugin::untrusted`).
     for w in out.warnings {
-        result = result.with_warning(w);
+        result = result.with_warning(rustledger_plugin::escape_untrusted_text(&w).into_owned());
     }
     // Errors and warnings flow through the same `warnings` channel,
     // but the formatted string preserves the severity prefix so a
@@ -818,11 +848,13 @@ fn bridge_enriched_output(output: EnrichedImporterOutput) -> anyhow::Result<Enri
         entries.push((dir, enrichment));
     }
     let mut enriched = EnrichedImportResult::new(entries);
+    // These quote the importer's own strings (a method name, a
+    // fingerprint), so they are escaped like its warnings.
     for w in bridge_warnings {
-        enriched = enriched.with_warning(w);
+        enriched = enriched.with_warning(rustledger_plugin::escape_untrusted_text(&w).into_owned());
     }
     for w in output.warnings {
-        enriched = enriched.with_warning(w);
+        enriched = enriched.with_warning(rustledger_plugin::escape_untrusted_text(&w).into_owned());
     }
     for e in &output.errors {
         enriched = enriched.with_warning(format_plugin_error(e));
@@ -1527,6 +1559,34 @@ mod tests {
             bridged.warnings[0].contains("merchant_dict"),
             "warning should name the unknown method: {}",
             bridged.warnings[0]
+        );
+    }
+
+    /// The importer's own strings quoted in bridge warnings (an unknown
+    /// method, a malformed fingerprint) have their control characters
+    /// escaped (#2500 review).
+    #[test]
+    fn bridge_warnings_escape_importer_text() {
+        let out = EnrichedImporterOutput {
+            entries: vec![(
+                open_wrapper("Assets:Bank"),
+                enrichment_wrapper("x\u{1b}[2J", Some("zz\u{1b}]0;pwned\u{7}".to_string())),
+            )],
+            warnings: vec![],
+            errors: vec![],
+        };
+        let bridged = bridge_enriched_output(out).expect("bridge succeeds");
+        assert_eq!(bridged.warnings.len(), 2, "{:?}", bridged.warnings);
+        for w in &bridged.warnings {
+            assert!(
+                !w.contains('\u{1b}') && !w.contains('\u{7}'),
+                "raw control: {w:?}"
+            );
+        }
+        assert!(
+            bridged.warnings[0].contains("x\\u{1b}[2J"),
+            "{:?}",
+            bridged.warnings
         );
     }
 

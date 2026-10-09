@@ -162,6 +162,7 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
     let options = LoadOptions {
         validate: true,
         plugin_max_time_secs: crate::plugin_budget::max_time_secs(),
+        plugin_max_memory_mb: crate::plugin_budget::max_memory_mb(),
         ..Default::default()
     };
 

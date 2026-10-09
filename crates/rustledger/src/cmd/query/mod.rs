@@ -20,6 +20,7 @@ use clap::Parser;
 use rustledger_booking::merge_with_padding_spanned;
 use rustledger_core::DisplayContext;
 use rustledger_loader::LoadOptions;
+use rustledger_validate::is_advisory_only_code;
 use std::fs;
 use std::io;
 use std::path::PathBuf;
@@ -192,11 +193,35 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
     // reachable through a flag about verbosity.
     crate::cmd::loadcache::bail_on_booking_errors(&ledger, file)?;
 
-    // Report errors to stderr (matching bean-query behavior)
-    // Continue with successfully parsed directives rather than bailing
-    if !ledger.errors.is_empty() && !args.no_errors {
-        for err in &ledger.errors {
-            eprintln!("{}: {}", err.code, err.message);
+    // Report diagnostics to stderr (matching bean-query behavior), then
+    // continue with the directives that loaded rather than bailing.
+    //
+    // The option diagnostics (E7001 unknown option, E7002 bad value, ...) come
+    // first, as in `check` and bean-query. They live on `options.warnings`,
+    // not `errors`, so this loop never printed them: a misspelled option was
+    // reported by `check` and bean-query and passed over in silence here.
+    //
+    // Advisory-only codes are skipped, as `check` skips them: beancount does
+    // not flag closing an account that still holds a balance (E1004), so
+    // bean-query prints nothing for it. They are `rledger lint`'s to report.
+    // #2238 turned validation on here without this skip, so `query` printed
+    // an E1004 that `check` and bean-query both stay silent on.
+    let reported: Vec<(&str, &str)> = ledger
+        .options
+        .warnings
+        .iter()
+        .map(|w| (w.code, w.message.as_str()))
+        .chain(
+            ledger
+                .errors
+                .iter()
+                .filter(|err| !is_advisory_only_code(&err.code))
+                .map(|err| (err.code.as_str(), err.message.as_str())),
+        )
+        .collect();
+    if !reported.is_empty() && !args.no_errors {
+        for (code, message) in reported {
+            eprintln!("{code}: {message}");
         }
         eprintln!();
     }

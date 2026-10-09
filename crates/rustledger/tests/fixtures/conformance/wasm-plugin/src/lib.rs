@@ -4,7 +4,8 @@
 //! naming how many directives it saw, so every command that runs
 //! plugins can show its effect. The `plugin` directive's config string
 //! picks a misbehavior for the limit cases: `burn` loops until the time
-//! budget stops it, `alloc` asks for more memory than the sandbox allows.
+//! budget stops it, `alloc` asks for more memory than the sandbox allows,
+//! `ansi` puts terminal control sequences in its message.
 
 use rustledger_plugin_types::{
     DirectiveData, DirectiveWrapper, PluginError, PluginInput, PluginOp, PluginOutput,
@@ -46,10 +47,15 @@ fn process(input: PluginInput) -> PluginOutput {
             _ => ops.push(PluginOp::Keep(i)),
         }
     }
+    let tail = if input.config.as_deref() == Some("ansi") {
+        " \u{1b}[2J\u{1b}]0;pwned\u{7}"
+    } else {
+        ""
+    };
     PluginOutput {
         ops,
         errors: vec![PluginError::warning(format!(
-            "conformance: WASM plugin ran over {n} directives"
+            "conformance: WASM plugin ran over {n} directives{tail}"
         ))],
     }
 }

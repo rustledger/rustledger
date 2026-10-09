@@ -50,6 +50,7 @@ pub mod runtime;
 pub mod sandbox;
 pub mod test_helpers;
 pub mod types;
+pub mod untrusted;
 #[cfg(feature = "wasm-runtime")]
 pub mod wasm_dir_scan;
 
@@ -74,3 +75,4 @@ pub use types::{
     DirectiveWrapper, PluginAccountTypes, PluginError, PluginErrorSeverity, PluginInput, PluginOp,
     PluginOptions, PluginOutput, validate_op_coverage,
 };
+pub use untrusted::{escape_untrusted_line, escape_untrusted_text};

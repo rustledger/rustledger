@@ -1324,12 +1324,15 @@ fn record_plugin_errors(
     source_map: &SourceMap,
 ) {
     for err in plugin_errors {
+        // A plugin's text is shown to the user: escape its control
+        // characters (see `rustledger_plugin::untrusted`).
+        let message = rustledger_plugin::escape_untrusted_text(&err.message).into_owned();
         let mut ledger_err = match err.severity {
             rustledger_plugin::PluginErrorSeverity::Error => {
-                LedgerError::error("PLUGIN", err.message).with_phase("plugin")
+                LedgerError::error("PLUGIN", message).with_phase("plugin")
             }
             rustledger_plugin::PluginErrorSeverity::Warning => {
-                LedgerError::warning("PLUGIN", err.message).with_phase("plugin")
+                LedgerError::warning("PLUGIN", message).with_phase("plugin")
             }
         };
         // Propagate plugin-set source location into `ErrorLocation`.
@@ -1338,7 +1341,14 @@ fn record_plugin_errors(
         if let (Some(file), Some(line)) = (&err.source_file, err.line_number) {
             let resolved_path = source_map
                 .get_by_path(std::path::Path::new(file))
-                .map_or_else(|| std::path::PathBuf::from(file), |f| f.path.clone());
+                .map_or_else(
+                    || {
+                        std::path::PathBuf::from(
+                            rustledger_plugin::escape_untrusted_line(file).into_owned(),
+                        )
+                    },
+                    |f| f.path.clone(),
+                );
             ledger_err = ledger_err.with_location(ErrorLocation {
                 file: resolved_path,
                 line: line as usize,
@@ -1864,15 +1874,23 @@ fn resolve_error_to_ledger(e: &rustledger_plugin::PluginResolveError) -> LedgerE
 #[cfg(feature = "plugins")]
 fn run_error_to_ledger(e: &rustledger_plugin::PluginRunError) -> LedgerError {
     use rustledger_plugin::PluginRunError as Rn;
+    // The message can carry guest-chosen text (a Python exception's
+    // message, a WASM module's function names in a backtrace).
     match e {
         Rn::WasmFailed { path, message } => LedgerError::error(
             "PLUGIN",
-            format!("WASM plugin {} failed: {message}", path.display()),
+            format!(
+                "WASM plugin {} failed: {}",
+                path.display(),
+                rustledger_plugin::escape_untrusted_text(message)
+            ),
         )
         .with_phase("plugin"),
-        Rn::PythonFailed { message } => {
-            LedgerError::error("E8002", message.clone()).with_phase("plugin")
-        }
+        Rn::PythonFailed { message } => LedgerError::error(
+            "E8002",
+            rustledger_plugin::escape_untrusted_text(message).into_owned(),
+        )
+        .with_phase("plugin"),
     }
 }
 

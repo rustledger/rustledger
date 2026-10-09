@@ -120,8 +120,12 @@ const STDERR_CAP: usize = 4 << 20;
 fn forward_guest_stderr(bytes: &[u8]) {
     use std::io::Write;
     if !bytes.is_empty() {
+        // What the plugin printed, with its control characters escaped
+        // (see `crate::untrusted`): it is the plugin's text on the
+        // user's terminal.
+        let text = String::from_utf8_lossy(bytes);
         let mut err = std::io::stderr().lock();
-        let _ = err.write_all(bytes);
+        let _ = err.write_all(crate::escape_untrusted_text(&text).as_bytes());
         if bytes.len() >= STDERR_CAP {
             let _ = writeln!(
                 err,
@@ -461,7 +465,18 @@ impl PythonRuntime {
         entries: usize,
     ) -> Result<impl AsRef<[u8]> + use<>, PythonError> {
         // Create a work directory for script and output
-        let work_dir = tempfile::tempdir().map_err(PythonError::Io)?;
+        // Private to the user (0700 on Unix; the default followed the
+        // umask, 0775 here, so other local users could read the ledger's
+        // entries while a plugin ran, and after a Ctrl-C, which leaves
+        // the directory behind, #2500's third review). Windows' temp
+        // directory is per-user already.
+        let mut builder = tempfile::Builder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            builder.permissions(std::fs::Permissions::from_mode(0o700));
+        }
+        let work_dir = builder.tempdir().map_err(PythonError::Io)?;
         for (name, contents) in files {
             std::fs::write(work_dir.path().join(name), contents)?;
         }
@@ -622,7 +637,11 @@ fn run_start(
         std::thread::Builder::new()
             .name("rledger-python-plugin".to_string())
             .spawn_scoped(scope, move || {
+                // The guest is single-threaded and its file operations run
+                // one at a time, so a couple of blocking threads do; the
+                // default (512) let one call start dozens.
                 let rt = tokio::runtime::Builder::new_current_thread()
+                    .max_blocking_threads(2)
                     .enable_all()
                     .build()
                     .map_err(PythonError::Io)?;

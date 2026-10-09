@@ -111,13 +111,21 @@ fn bin() -> PathBuf {
 
 /// Run `rledger <args>` in `dir`, with `dir` as the only config source.
 fn run(dir: &Path, args: &[&str]) -> Out {
-    let output = Command::new(bin())
+    run_env(dir, args, &[])
+}
+
+/// [`run`] with extra environment variables.
+fn run_env(dir: &Path, args: &[&str], env: &[(&str, &Path)]) -> Out {
+    let mut command = Command::new(bin());
+    command
         .args(args)
         .current_dir(dir)
         .env("RLEDGER_CONFIG_DIR", dir)
-        .env("PROGRAMDATA", dir)
-        .output()
-        .expect("run rledger");
+        .env("PROGRAMDATA", dir);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().expect("run rledger");
     Out {
         text: format!(
             "{}{}",
@@ -1027,4 +1035,146 @@ fn native_leafonly_counts_opened_children() {
     run(dir.path(), &["check", "ledger.beancount"])
         .has("Posting to non-leaf account 'Assets:Bank'")
         .lacks("Python");
+}
+
+// ---------------------------------------------------------------------------
+// Plugin text is escaped (#2500 third review)
+// ---------------------------------------------------------------------------
+
+/// `ESC [2J` (clear screen) and an OSC title sequence, as escaped.
+const ANSI_ESCAPED: &str = "\\u{1b}[2J\\u{1b}]0;pwned\\u{7}";
+
+#[track_caller]
+fn no_raw_controls(out: &Out) {
+    assert!(
+        !out.text.contains('\u{1b}') && !out.text.contains('\u{7}'),
+        "a raw control character reached the output:\n{:?}",
+        out.text
+    );
+}
+
+/// What a plugin or importer says reaches the user's terminal; its control
+/// characters are escaped, in every place one can put them: a Python
+/// plugin's message, claimed file, exception and prints, a WASM plugin's
+/// message (as a directive and through `check --plugin`), and a WASM
+/// importer's warning.
+#[test]
+fn plugin_text_control_characters_are_escaped() {
+    if python_ready() {
+        let dir = python_plugin(
+            "loud",
+            "import sys\n__plugins__ = ['loud']\n\
+             def loud(entries, options_map):\n    \
+                 print('\\x1b[2J\\x1b]0;pwned\\x07 printed')\n    \
+                 return entries, [ValidationError({'filename': 'f\\x1b[2J\\x1b]0;pwned\\x07', 'lineno': 3},\n                     \
+                 'said \\x1b[2J\\x1b]0;pwned\\x07', None)]\n",
+        );
+        let out = run(dir.path(), &["check", "ledger.beancount"]);
+        out.has(&format!("said {ANSI_ESCAPED}"))
+            .has(&format!("f{ANSI_ESCAPED}:3"))
+            .has(&format!("{ANSI_ESCAPED} printed"));
+        no_raw_controls(&out);
+        let dir = python_plugin(
+            "raise",
+            "__plugins__ = ['raise']\nraise ValueError('\\x1b[2J\\x1b]0;pwned\\x07')\n",
+        );
+        let out = run(dir.path(), &["check", "ledger.beancount"]);
+        out.has(ANSI_ESCAPED);
+        no_raw_controls(&out);
+    }
+    let Some(guests) = guests() else { return };
+    let dir = ledger("plugin \"conformance.wasm\" \"ansi\"");
+    install_wasm_plugin(dir.path(), guests);
+    let out = run(dir.path(), &["check", "ledger.beancount"]);
+    out.has(&format!("ran over 5 directives {ANSI_ESCAPED}"));
+    no_raw_controls(&out);
+    let dir = tempfile::tempdir().unwrap();
+    let out = extract(dir.path(), guests, "ansi", &[]);
+    out.has(&format!("conformance: WASM importer ran {ANSI_ESCAPED}"));
+    no_raw_controls(&out);
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle (#2500 third review)
+// ---------------------------------------------------------------------------
+
+/// Python plugins back to back, two of them stopped at the deadline
+/// mid-sleep: each is reported, the next one still runs, the process ends
+/// promptly (no guest thread or runtime outlives its call), and no plugin
+/// leaves its temp directory behind.
+#[test]
+fn python_plugins_back_to_back_after_a_timeout() {
+    if !python_ready() {
+        return;
+    }
+    let dir = ledger("plugin \"nap.py\"\nplugin \"nap.py\"\nplugin \"error_plugin.py\"");
+    install_python_fixtures(dir.path());
+    std::fs::write(
+        dir.path().join("nap.py"),
+        "import time\n__plugins__ = ['nap']\ndef nap(entries, options_map):\n    \
+         time.sleep(90)\n    return entries, []\n",
+    )
+    .unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let start = std::time::Instant::now();
+    let out = run_env(
+        dir.path(),
+        &["--plugin-max-time-secs", "2", "check", "ledger.beancount"],
+        &[("TMPDIR", tmp.path())],
+    );
+    out.failed_cleanly()
+        .has("Transaction on 2024-01-03 has no payee");
+    assert_eq!(out.text.matches(&budget(2)).count(), 2, "{}", out.text);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(60),
+        "took {:?}",
+        start.elapsed()
+    );
+    let left: Vec<_> = std::fs::read_dir(tmp.path()).unwrap().collect();
+    assert!(left.is_empty(), "temp files left behind: {left:?}");
+}
+
+/// A Python plugin's inputs (the ledger's entries) sit in a temp
+/// directory while it runs, and remain after a Ctrl-C; the directory is
+/// the user's alone (it followed the umask, 0775, before).
+#[cfg(unix)]
+#[test]
+fn python_plugin_work_dir_is_private() {
+    use std::os::unix::fs::PermissionsExt;
+    if !python_ready() {
+        return;
+    }
+    let dir = python_plugin(
+        "slow",
+        "import time\n__plugins__ = ['slow']\ndef slow(entries, options_map):\n    \
+         time.sleep(5)\n    return entries, []\n",
+    );
+    let tmp = tempfile::tempdir().unwrap();
+    let mut child = Command::new(bin())
+        .args(["check", "ledger.beancount"])
+        .current_dir(dir.path())
+        .env("RLEDGER_CONFIG_DIR", dir.path())
+        .env("TMPDIR", tmp.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let mode = loop {
+        let found = std::fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .find(|e| e.path().join("entries.jsonl").exists());
+        if let Some(entry) = found {
+            break entry.metadata().unwrap().permissions().mode();
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the plugin's work directory never appeared"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    };
+    let _ = child.kill();
+    let _ = child.wait();
+    assert_eq!(mode & 0o077, 0, "work directory mode {mode:o}");
 }

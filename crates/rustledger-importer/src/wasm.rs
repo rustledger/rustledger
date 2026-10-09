@@ -339,8 +339,9 @@ impl WasmImporter {
 
         Ok(Self {
             path,
-            name: metadata.name,
-            description: metadata.description,
+            name: rustledger_plugin::escape_untrusted_line(&metadata.name).into_owned(),
+            description: rustledger_plugin::escape_untrusted_line(&metadata.description)
+                .into_owned(),
             module,
             engine,
             config,
@@ -656,7 +657,11 @@ fn format_plugin_error(e: &PluginError) -> String {
         (None, Some(n)) => format!(" line {n}"),
         (None, None) => String::new(),
     };
-    format!("{severity}{location}: {}", e.message)
+    format!(
+        "{severity}{}: {}",
+        rustledger_plugin::escape_untrusted_line(&location),
+        rustledger_plugin::escape_untrusted_text(&e.message)
+    )
 }
 
 /// Materialize an [`ImporterOutput`] wire-format value back to the
@@ -684,8 +689,10 @@ fn output_to_import_result(out: ImporterOutput) -> anyhow::Result<ImportResult> 
         directives.push(d);
     }
     let mut result = ImportResult::new(directives);
+    // An importer's text is shown to the user: escape its control
+    // characters (see `rustledger_plugin::untrusted`).
     for w in out.warnings {
-        result = result.with_warning(w);
+        result = result.with_warning(rustledger_plugin::escape_untrusted_text(&w).into_owned());
     }
     // Errors and warnings flow through the same `warnings` channel,
     // but the formatted string preserves the severity prefix so a
@@ -831,7 +838,7 @@ fn bridge_enriched_output(output: EnrichedImporterOutput) -> anyhow::Result<Enri
         enriched = enriched.with_warning(w);
     }
     for w in output.warnings {
-        enriched = enriched.with_warning(w);
+        enriched = enriched.with_warning(rustledger_plugin::escape_untrusted_text(&w).into_owned());
     }
     for e in &output.errors {
         enriched = enriched.with_warning(format_plugin_error(e));

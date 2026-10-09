@@ -3,7 +3,8 @@
 //! Identifies `*.conformance` files and imports one transaction
 //! narrated `conformance import` into the target account, with a warning. A file whose content
 //! is `burn` or `alloc` makes it loop until the time budget stops it, or
-//! ask for more memory than the sandbox allows.
+//! ask for more memory than the sandbox allows; `ansi` puts terminal
+//! control sequences in its warning.
 
 use rustledger_plugin_types::{
     AmountData, DirectiveData, DirectiveWrapper, ImporterInput, ImporterOutput, PostingData,
@@ -15,7 +16,8 @@ fn identify(path: &str) -> bool {
 }
 
 fn extract(input: ImporterInput) -> ImporterOutput {
-    match String::from_utf8_lossy(&input.content).trim() {
+    let content = String::from_utf8_lossy(&input.content).trim().to_string();
+    match content.as_str() {
         "burn" => {
             let mut x: u64 = 0;
             loop {
@@ -59,8 +61,13 @@ fn extract(input: ImporterInput) -> ImporterOutput {
         }),
     };
     let mut out = ImporterOutput::new(vec![txn]);
+    let tail = if content == "ansi" {
+        " \u{1b}[2J\u{1b}]0;pwned\u{7}"
+    } else {
+        ""
+    };
     out.warnings
-        .push("conformance: WASM importer ran".to_string());
+        .push(format!("conformance: WASM importer ran{tail}"));
     out
 }
 

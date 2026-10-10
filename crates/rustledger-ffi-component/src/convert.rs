@@ -212,6 +212,16 @@ fn directive_from_core(d: &Directive, line: u32, filename: &str) -> wit::Directi
             date: n.date.to_string(),
             account: n.account.to_string(),
             comment: n.comment.clone(),
+            tags: n
+                .tags
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
+            links: n
+                .links
+                .iter()
+                .map(std::string::ToString::to_string)
+                .collect(),
             meta: meta(&n.meta),
         }),
         Directive::Document(doc) => wit::Directive::Document(wit::DocumentDir {
@@ -1239,6 +1249,8 @@ fn input_entry(d: &wit::InputDirective) -> ffi::InputEntry {
             date: n.date.clone(),
             account: n.account.clone(),
             comment: n.comment.clone(),
+            tags: n.tags.clone(),
+            links: n.links.clone(),
             meta: input_meta(&n.meta),
         },
         I::Document(doc) => E::Document {
@@ -1520,6 +1532,8 @@ fn loaded_directive_to_input(d: &wit::Directive) -> ffi::InputEntry {
             date: n.date.clone(),
             account: n.account.clone(),
             comment: n.comment.clone(),
+            tags: n.tags.clone(),
+            links: n.links.clone(),
             meta: loaded_meta(&n.meta),
         },
         D::Document(doc) => E::Document {
@@ -2417,6 +2431,58 @@ mod tests {
         assert_eq!(cu.currency, "USD");
         assert!(cash.cost.is_none());
         assert!(cash.price.is_none());
+    }
+
+    /// A note's tags (its own and a `pushtag` block's) and links leave
+    /// through `note-dir` and come back through `input-note` and through a
+    /// loaded directive passed back in (#2573: all three dropped them).
+    #[test]
+    fn note_tags_and_links_round_trip() {
+        let loaded = ffi::helpers::load_source(
+            "2024-01-01 open Assets:Cash\n\
+             pushtag #pushed\n\
+             2024-03-05 note Assets:Cash \"called\" #ntag ^nlink\n\
+             poptag #pushed\n",
+        );
+        assert!(loaded.errors.is_empty());
+        let wit_note = loaded
+            .directives
+            .iter()
+            .map(|d| directive_from_core(d, 1, "<test>"))
+            .find(|w| matches!(w, wit::Directive::Note(_)))
+            .expect("note");
+        let wit::Directive::Note(n) = &wit_note else {
+            unreachable!()
+        };
+        assert_eq!(n.tags, ["ntag", "pushed"]);
+        assert_eq!(n.links, ["nlink"]);
+
+        let note_tags = |d: Directive| match d {
+            Directive::Note(n) => (
+                n.tags.iter().map(ToString::to_string).collect::<Vec<_>>(),
+                n.links.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            ),
+            other => panic!("expected a note, got {other:?}"),
+        };
+        let back = ffi::input_entry_to_directive(&super::loaded_directive_to_input(&wit_note))
+            .expect("converts");
+        assert_eq!(
+            note_tags(back),
+            (vec!["ntag".into(), "pushed".into()], vec!["nlink".into()])
+        );
+        let input = wit::InputDirective::Note(wit::InputNote {
+            date: "2024-03-05".into(),
+            account: "Assets:Cash".into(),
+            comment: "called".into(),
+            tags: vec!["b".into(), "a".into()],
+            links: vec!["l".into()],
+            meta: vec![],
+        });
+        let back = ffi::input_entry_to_directive(&super::input_entry(&input)).expect("converts");
+        assert_eq!(
+            note_tags(back),
+            (vec!["a".into(), "b".into()], vec!["l".into()])
+        );
     }
 
     /// Spot-check the remaining directive shapes (balance/price/commodity/

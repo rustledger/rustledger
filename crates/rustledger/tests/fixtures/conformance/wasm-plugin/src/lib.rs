@@ -5,7 +5,9 @@
 //! plugins can show its effect. The `plugin` directive's config string
 //! picks a misbehavior for the limit cases: `burn` loops until the time
 //! budget stops it, `alloc` asks for more memory than the sandbox allows,
-//! `ansi` puts terminal control sequences in its message.
+//! `ansi` puts terminal control sequences in its message, and `rebuild`
+//! returns every directive as a modification instead of keeping it, so
+//! each one makes the full trip through the wire and back (#2573).
 
 use rustledger_plugin_types::{
     DirectiveData, DirectiveWrapper, PluginError, PluginInput, PluginOp, PluginOutput,
@@ -32,6 +34,7 @@ fn process(input: PluginInput) -> PluginOutput {
     misbehave(input.config.as_deref());
     let n = input.directives.len();
     let mut ops = Vec::with_capacity(n);
+    let rebuild = input.config.as_deref() == Some("rebuild");
     for (i, wrapper) in input.directives.into_iter().enumerate() {
         match wrapper.data {
             DirectiveData::Transaction(mut txn) => {
@@ -44,6 +47,13 @@ fn process(input: PluginInput) -> PluginOutput {
                     },
                 ));
             }
+            data if rebuild => ops.push(PluginOp::Modify(
+                i,
+                DirectiveWrapper {
+                    data,
+                    ..wrapper
+                },
+            )),
             _ => ops.push(PluginOp::Keep(i)),
         }
     }

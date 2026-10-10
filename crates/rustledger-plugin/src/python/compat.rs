@@ -56,7 +56,10 @@ Pad = namedtuple('Pad', ['meta', 'date', 'account', 'source_account'])
 
 Event = namedtuple('Event', ['meta', 'date', 'type', 'description'])
 
-Note = namedtuple('Note', ['meta', 'date', 'account', 'comment'])
+# `tags` and `links` as in beancount 3 (#2573); they default to empty so a
+# plugin building a note the old way, with four fields, still works.
+Note = namedtuple('Note', ['meta', 'date', 'account', 'comment', 'tags', 'links'],
+                  defaults=(frozenset(), frozenset()))
 
 Document = namedtuple('Document', [
     'meta', 'date', 'account', 'filename', 'tags', 'links'
@@ -377,14 +380,16 @@ def _dict_to_directive(d):
             meta=meta,
             date=date_val,
             account=d.get('account', ''),
-            comment=d.get('comment', '')
+            comment=d.get('comment', ''),
+            tags=frozenset(d.get('tags', [])),
+            links=frozenset(d.get('links', []))
         )
     elif dtype == 'document':
         return Document(
             meta=meta,
             date=date_val,
             account=d.get('account', ''),
-            filename=d.get('filename', ''),
+            filename=d.get('path', ''),
             tags=frozenset(d.get('tags', [])),
             links=frozenset(d.get('links', []))
         )
@@ -591,7 +596,9 @@ def _directive_to_dict(entry):
             'metadata': _serialize_meta(entry.meta),
             'date': _serialize_date(entry.date),
             'account': entry.account,
-            'comment': entry.comment
+            'comment': entry.comment,
+            'tags': list(entry.tags) if entry.tags else [],
+            'links': list(entry.links) if entry.links else []
         }
     elif isinstance(entry, Document):
         return {
@@ -599,7 +606,7 @@ def _directive_to_dict(entry):
             'metadata': _serialize_meta(entry.meta),
             'date': _serialize_date(entry.date),
             'account': entry.account,
-            'filename': entry.filename,
+            'path': entry.filename,
             'tags': list(entry.tags) if entry.tags else [],
             'links': list(entry.links) if entry.links else []
         }

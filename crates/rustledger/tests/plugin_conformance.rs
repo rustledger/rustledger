@@ -16,6 +16,7 @@
 //! | Python built-in | `plugin "python:leafonly"` / `"python:check_commodity"` force the Python implementation | check |
 //! | native + Python together | `with_plugins.beancount` fixture | check |
 //! | WASM importer (a `wasm_importer_main!` guest) | `extract --wasm-importer x.wasm` | extract |
+//! | WASM + Python | an entry returned whole keeps its tags and links (notes and documents) | query |
 //!
 //! And the LIMITS of each sandboxed kind (WASM plugin, Python plugin,
 //! WASM importer), through the same commands:
@@ -584,7 +585,7 @@ fn wasm_guests_cannot_import_host_functions() {
         (import "wasi_snapshot_preview1" "fd_read" (func (param i32 i32 i32 i32) (result i32)))
         (memory (export "memory") 1)
         (func (export "alloc") (param i32) (result i32) i32.const 0)
-        (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+        (func (export "__rustledger_abi_version") (result i32) i32.const 2)
         (func (export "process") (param i32 i32) (result i64) i64.const 0)
         (func (export "identify") (param i32 i32) (result i64) i64.const 0)
         (func (export "extract") (param i32 i32) (result i64) i64.const 0)
@@ -674,6 +675,88 @@ def probe(entries, options_map):
         );
     }
     out.has("reads=").has("writes=").has("net=");
+}
+
+// ---------------------------------------------------------------------------
+// Round trip
+// ---------------------------------------------------------------------------
+
+/// A note and a document whose tags come from their own header and from a
+/// `pushtag` block, with links.
+const TAGGED_NOTE_AND_DOCUMENT: &str = "\
+pushtag #pushed
+2024-01-04 note Assets:Bank \"called the bank\" #ntag ^nlink
+2024-01-04 document Assets:Bank \"statement.pdf\" #dtag ^dlink
+poptag #pushed
+";
+
+/// The note's and the document's tags and links, as `query` lists them.
+fn note_and_document_tags(dir: &Path) -> Out {
+    run(
+        dir,
+        &[
+            "query",
+            "ledger.beancount",
+            "SELECT type, tags, links FROM #entries WHERE type = 'note' OR type = 'document'",
+        ],
+    )
+}
+
+#[track_caller]
+fn assert_tags_kept(out: &Out) {
+    for want in ["ntag", "dtag", "nlink", "dlink"] {
+        out.has(want);
+    }
+    // Both entries carry the pushed tag.
+    assert_eq!(out.text.matches("pushed").count(), 2, "{}", out.text);
+}
+
+/// A plugin that hands every entry back (a WASM guest returning each as a
+/// modification, a Python plugin returning its input) keeps a note's tags
+/// and links, including those `pushtag` gives it, and a document's. A note
+/// came back with none before #2573: neither the wire nor the Python compat
+/// layer carried them.
+#[test]
+fn tags_and_links_survive_a_plugin_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |header: &str| {
+        std::fs::write(
+            dir.path().join("ledger.beancount"),
+            format!("{header}\n\n{BODY}\n{TAGGED_NOTE_AND_DOCUMENT}"),
+        )
+        .unwrap();
+    };
+    write("");
+    assert_tags_kept(&note_and_document_tags(dir.path()));
+
+    if let Some(guests) = guests() {
+        install_wasm_plugin(dir.path(), guests);
+        write("plugin \"conformance.wasm\" \"rebuild\"");
+        let out = note_and_document_tags(dir.path());
+        out.has("conformance: WASM plugin ran over 7 directives")
+            .lacks("plugin execution failed");
+        assert_tags_kept(&out);
+    }
+
+    if python_ready() {
+        // It reports what it saw of the document, so the test sees it ran
+        // and read the document's own path (it read the entry's source
+        // file there, and wrote it back under a key the host rejected,
+        // before #2573's review).
+        std::fs::write(
+            dir.path().join("passthrough.py"),
+            "__plugins__ = ['passthrough']\n\
+             def passthrough(entries, options_map):\n    \
+             docs = [e.filename for e in entries if type(e).__name__ == 'Document']\n    \
+             return list(entries), [ValidationError(None, f'passthrough saw {docs}', None)]\n",
+        )
+        .unwrap();
+        write("plugin \"passthrough.py\"");
+        let out = note_and_document_tags(dir.path());
+        out.has("passthrough saw ['statement.pdf']")
+            .lacks("plugin execution failed");
+        assert_tags_kept(&out);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1188,7 +1271,7 @@ fn wasm_module_text_in_load_errors_is_escaped() {
         (import "m\1b[2J\1b]0;pwned\07" "f" (func))
         (memory (export "memory") 1)
         (func (export "alloc") (param i32) (result i32) i32.const 0)
-        (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+        (func (export "__rustledger_abi_version") (result i32) i32.const 2)
         (func (export "process") (param i32 i32) (result i64) i64.const 0)
         (func (export "identify") (param i32 i32) (result i64) i64.const 0)
         (func (export "extract") (param i32 i32) (result i64) i64.const 0)
@@ -1239,7 +1322,7 @@ fn wasm_importer_trap_and_decode_text_is_escaped() {
     let trap = r#"(module
         (memory (export "memory") 1)
         (func (export "alloc") (param i32) (result i32) i32.const 1024)
-        (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+        (func (export "__rustledger_abi_version") (result i32) i32.const 2)
         (func (export "identify") (param i32 i32) (result i64) i64.const 0)
         (func (export "extract") (param i32 i32) (result i64) i64.const 0)
         (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 0)
@@ -1252,7 +1335,7 @@ fn wasm_importer_trap_and_decode_text_is_escaped() {
   (data (i32.const 256) "\81\a7\6d\61\74\63\68\65\73\c3")
   (data (i32.const 512) "\83\aa\64\69\72\65\63\74\69\76\65\73\91\82\a4\64\61\74\65\aa\32\30\32\34\2d\30\31\2d\30\31\a4\74\79\70\65\ae\1b\5b\32\4a\1b\5d\30\3b\70\77\6e\65\64\07\a8\77\61\72\6e\69\6e\67\73\90\a6\65\72\72\6f\72\73\90")
   (func (export "alloc") (param i32) (result i32) i32.const 4096)
-  (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+  (func (export "__rustledger_abi_version") (result i32) i32.const 2)
   (func (export "identify") (param i32 i32) (result i64) i64.const 1099511627786)
   (func (export "extract") (param i32 i32) (result i64) i64.const 2199023255620)
   (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 2199023255620)

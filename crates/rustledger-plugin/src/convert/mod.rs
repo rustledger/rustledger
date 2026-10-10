@@ -428,6 +428,28 @@ mod tests {
         }
     }
 
+    /// #2573: a note's tags and links (`pushtag` tags notes since #2565)
+    /// survive both legs of the plugin round-trip; both dropped them.
+    #[test]
+    fn test_roundtrip_note_tags_and_links_2573() {
+        let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
+        let directive = Directive::Note(Note {
+            date,
+            account: "Assets:Bank".into(),
+            comment: "called the bank".to_string(),
+            tags: vec!["trip".into(), "bank".into()].into(),
+            links: vec!["call-1".into()].into(),
+            meta: Metadata::default(),
+        });
+        let wrapper = directive_to_wrapper(&directive);
+        let DirectiveData::Note(data) = &wrapper.data else {
+            panic!("expected note data");
+        };
+        assert_eq!(data.tags, ["bank", "trip"]);
+        assert_eq!(data.links, ["call-1"]);
+        assert_eq!(wrapper_to_directive(&wrapper).unwrap(), directive);
+    }
+
     #[test]
     fn test_roundtrip_all_directive_types() {
         let date = rustledger_core::naive_date(2024, 1, 1).unwrap();

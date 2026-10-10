@@ -289,6 +289,15 @@ export type DirectiveJson =
       date: string;
       account: string;
       comment: string;
+      /**
+       * Tags attached to the note, its own and a `pushtag` block's
+       * (issue #2573).
+       */
+      tags?: Array<string>;
+      /**
+       * Links attached to the note (issue #2573).
+       */
+      links?: Array<string>;
       meta?: { [key in string]: MetaValueJson };
     }
   | {

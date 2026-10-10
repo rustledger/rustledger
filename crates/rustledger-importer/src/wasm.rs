@@ -1096,12 +1096,12 @@ mod tests {
                 i64.const 0x20_0000_0004)
 
             ;; ABI handshake export. Must equal sandbox::HOST_ABI_VERSION
-            ;; (rustledger_plugin_types::ABI_VERSION = 1). If the ABI
+            ;; (rustledger_plugin_types::ABI_VERSION = 2). If the ABI
             ;; version is ever bumped, this literal moves in lockstep —
             ;; the deliberate test update that proves a real guest would
             ;; need rebuilding too.
             (func (export "__rustledger_abi_version") (result i32)
-                i32.const 1)
+                i32.const 2)
         )
         "#
     }
@@ -1232,7 +1232,7 @@ mod tests {
                 (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 0)
                 ;; ABI handshake passes so the oversized-metadata check
                 ;; downstream is what rejects this module (issue #1234).
-                (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+                (func (export "__rustledger_abi_version") (result i32) i32.const 2)
             )
         "#;
         let bytes = wat::parse_str(wat).expect("WAT parses");
@@ -1397,7 +1397,7 @@ mod tests {
                 (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 0)
                 ;; Correct ABI so the check passes and the metadata
                 ;; signature mismatch is what surfaces (issue #1234).
-                (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+                (func (export "__rustledger_abi_version") (result i32) i32.const 2)
             )
         "#;
         let bytes = wat::parse_str(wat).expect("WAT parses");

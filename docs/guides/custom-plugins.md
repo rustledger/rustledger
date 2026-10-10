@@ -266,10 +266,11 @@ pub extern "C" fn alloc(size: u32) -> *mut u8 {
 
 // ABI version export. The host checks this right after instantiation and
 // refuses to run a plugin built against an incompatible rustledger-plugin-types.
-// Must return the host's current ABI version (1).
+// Must return the host's current ABI version (2; version 1 notes had no
+// tags or links).
 #[no_mangle]
 pub extern "C" fn __rustledger_abi_version() -> u32 {
-    1
+    2
 }
 
 // Main plugin entry point

@@ -962,7 +962,7 @@ pub fn interpolate_with_tolerances(
     transaction: &Transaction,
     tolerance_options: &crate::ToleranceOptions<'_>,
 ) -> Result<InterpolationResult, InterpolationError> {
-    let tolerances = crate::transaction_tolerances(transaction, tolerance_options);
+    let tolerances = crate::interpolation_tolerances(transaction, tolerance_options);
     interpolate_with_tolerance_map(transaction, &tolerances)
 }
 
@@ -1159,9 +1159,11 @@ fn interpolate_inner<S: std::hash::BuildHasher>(
 
     // `tolerances` (computed above from the INPUT transaction) is the rounding
     // grid for every solved number — see `round_interpolated`. It comes from
-    // the canonical `transaction_tolerances`, the same function the balance
-    // validator uses, so interpolation cannot round to a precision the
-    // validator would then reject.
+    // `interpolation_tolerances`, the same computation as the balance
+    // validator's `transaction_tolerances`, so interpolation cannot round to a
+    // precision the validator would then reject. The two differ only for a
+    // tolerance needing more digits than a `Decimal` holds, which the grid
+    // rounds to nearest and the check rounds down (#2582).
     //
     // Only NON-INTEGER posting units establish a tolerance, so a currency with
     // no fractional units in the transaction gets none and its residual passes

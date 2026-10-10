@@ -136,10 +136,51 @@ pub fn decimal_quantum(value: Decimal) -> Decimal {
 /// quantum tolerance for that currency. (The doc used to claim the
 /// per-posting maximum — the implementation, moved verbatim from the
 /// validator, has always summed.)
+///
+/// A tolerance needing more digits than a `Decimal` holds is rounded DOWN,
+/// so the balance check is never looser than the exact tolerance (#2582).
+/// Interpolation's rounding grid uses [`interpolation_tolerances`] instead.
 #[must_use]
 pub fn transaction_tolerances(
     txn: &Transaction,
     opts: &ToleranceOptions<'_>,
+) -> FxHashMap<rustledger_core::Currency, Decimal> {
+    tolerances_rounded(txn, opts, ToleranceRounding::Down)
+}
+
+/// [`transaction_tolerances`] rounded to nearest, for interpolation's grid.
+///
+/// A tolerance that needs more digits than a `Decimal` holds is rounded to
+/// NEAREST here: this is the grid interpolation quantizes a solved amount to
+/// (`round_interpolated`), never the balance check.
+///
+/// Rounding down is right for the check and wrong for the grid. The grid is
+/// the last digit of `2 x tolerance`, so `0.0049999…9` (28 digits, the floor
+/// of an exact `0.00499999999999999999999999995`) quantizes nothing where
+/// `0.005` quantizes to cents, and an auto-posting booked
+/// `-0.9999999999999999999999999999` where beancount, which rounds its
+/// tolerances to 28 digits, books `-1.00` (#2582 review).
+#[must_use]
+pub fn interpolation_tolerances(
+    txn: &Transaction,
+    opts: &ToleranceOptions<'_>,
+) -> FxHashMap<rustledger_core::Currency, Decimal> {
+    tolerances_rounded(txn, opts, ToleranceRounding::Nearest)
+}
+
+/// Which way a tolerance needing more digits than a `Decimal` holds rounds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ToleranceRounding {
+    /// Toward negative infinity: never looser, for the balance check.
+    Down,
+    /// To nearest: for interpolation's rounding grid.
+    Nearest,
+}
+
+fn tolerances_rounded(
+    txn: &Transaction,
+    opts: &ToleranceOptions<'_>,
+    rounding: ToleranceRounding,
 ) -> FxHashMap<rustledger_core::Currency, Decimal> {
     // Pre-allocate for typical case (1-2 currencies)
     let mut tolerances: FxHashMap<rustledger_core::Currency, Decimal> =
@@ -160,7 +201,7 @@ pub fn transaction_tolerances(
             // `*` rounds to nearest, which can widen the tolerance (#2582).
             let base_tolerance = rustledger_core::checked_mul_exact(quantum, opts.multiplier)
                 .unwrap_or_else(|| {
-                    ToleranceSum::Exact(to_big(quantum) * to_big(opts.multiplier)).value()
+                    ToleranceSum::Exact(to_big(quantum) * to_big(opts.multiplier)).value(rounding)
                 });
 
             tolerances
@@ -234,7 +275,7 @@ pub fn transaction_tolerances(
 
         // Merge cost tolerances: take max of existing and cost-inferred
         for (currency, cost_tol) in cost_tolerances {
-            let cost_tol = cost_tol.value();
+            let cost_tol = cost_tol.value(rounding);
             tolerances
                 .entry(currency)
                 .and_modify(|t| *t = (*t).max(cost_tol))
@@ -343,9 +384,25 @@ impl ToleranceSum {
     /// tolerance wider than the true one, which could pass a residual the
     /// true tolerance fails. Rounded down it can only be stricter
     /// (`a_tolerance_is_never_looser_than_its_exact_sum`).
-    fn value(self) -> Decimal {
+    ///
+    /// [`ToleranceRounding::Nearest`] rounds an in-range sum to nearest
+    /// instead, for interpolation's grid only (see
+    /// [`interpolation_tolerances`]); the cap is the same.
+    fn value(self, rounding: ToleranceRounding) -> Decimal {
         match self {
             Self::Fast(sum) => sum,
+            Self::Exact(sum) if rounding == ToleranceRounding::Nearest => {
+                use std::str::FromStr;
+                let cap = if sum.sign() == bigdecimal::num_bigint::Sign::Minus {
+                    -Decimal::MAX
+                } else {
+                    Decimal::MAX
+                };
+                // The parser rounds excess digits to nearest itself; 28
+                // places first so it is never handed more than that scale.
+                let rounded = sum.with_scale_round(28, bigdecimal::RoundingMode::HalfEven);
+                Decimal::from_str(&rounded.to_plain_string()).unwrap_or(cap)
+            }
             Self::Exact(sum) => {
                 use std::str::FromStr;
                 let cap = if sum.sign() == bigdecimal::num_bigint::Sign::Minus {
@@ -2128,6 +2185,41 @@ mod tests {
         assert_eq!(tolerance.to_string(), "0.0061728394506172839450617283");
     }
 
+    /// #2582 review: interpolation's grid takes the tolerance rounded to
+    /// NEAREST. The exact `0.005 x 0.9999999999999999999999999999` needs 31
+    /// digits; floored it is `0.0049999…9`, whose doubled last digit is in the
+    /// 28th place, so an auto-posting went unquantized
+    /// (`-0.9999999999999999999999999999`) where main and beancount book
+    /// `-1.00`. The balance check keeps the floor.
+    #[test]
+    fn the_interpolation_grid_rounds_a_long_tolerance_to_nearest() {
+        let defaults = FxHashMap::default();
+        let opts = ToleranceOptions {
+            multiplier: dec!(0.5),
+            infer_from_cost: true,
+            defaults: &defaults,
+        };
+        let txn = Transaction::new(NaiveDate::default(), "t")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(1.00), "CORP")).with_price(
+                    PriceAnnotation::unit(Amount::new(dec!(0.9999999999999999999999999999), "USD")),
+                ),
+            )
+            .with_synthesized_posting(Posting::auto("Assets:Cash"));
+        let usd = Currency::from("USD");
+        assert_eq!(
+            transaction_tolerances(&txn, &opts)[&usd].to_string(),
+            "0.0049999999999999999999999999"
+        );
+        assert_eq!(
+            interpolation_tolerances(&txn, &opts)[&usd].to_string(),
+            "0.0050000000000000000000000000"
+        );
+        let booked = crate::interpolate_with_tolerances(&txn, &opts).expect("interpolates");
+        let cash = booked.transaction.postings[1].amount().expect("filled");
+        assert_eq!(cash.number, dec!(-1.00));
+    }
+
     /// The units tolerance `quantum x tolerance_multiplier` rounds down too:
     /// with a multiplier written to 28 places, `0.01 x` it needs 30, and a
     /// bare `*` rounded `...5` up (#2582).
@@ -2156,12 +2248,15 @@ mod tests {
         sum.add_product(Decimal::MAX, Decimal::ONE, Decimal::ONE);
         sum.add_product(Decimal::MAX, Decimal::ONE, Decimal::NEGATIVE_ONE);
         sum.add_product(Decimal::ONE, Decimal::ONE, Decimal::NEGATIVE_ONE);
-        assert_eq!(sum.value(), Decimal::MAX - Decimal::ONE);
+        assert_eq!(
+            sum.value(ToleranceRounding::Down),
+            Decimal::MAX - Decimal::ONE
+        );
 
         let mut negative = ToleranceSum::default();
         negative.add_product(Decimal::MAX, Decimal::ONE, Decimal::NEGATIVE_ONE);
         negative.add_product(Decimal::MAX, Decimal::ONE, Decimal::NEGATIVE_ONE);
-        assert_eq!(negative.value(), -Decimal::MAX);
+        assert_eq!(negative.value(ToleranceRounding::Down), -Decimal::MAX);
     }
 
     /// The tolerance a `ToleranceSum` hands out is never LOOSER than the exact
@@ -2235,7 +2330,7 @@ mod tests {
                 sum.add_product(tolerance, Decimal::ONE, rate);
                 exact += big(tolerance) * big(rate);
             }
-            let value = sum.value();
+            let value = sum.value(ToleranceRounding::Down);
             // A negative sum is capped at `-MAX`, above it, but every negative
             // tolerance fails every residual alike: it only has to stay
             // negative.

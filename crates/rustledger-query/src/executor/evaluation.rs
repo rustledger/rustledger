@@ -34,6 +34,7 @@ impl Executor<'_> {
             balance: None,
             account_balance: None,
             directive_index,
+            txn_accounts: None,
         };
         // Handle special FROM predicates
         match filter {
@@ -475,21 +476,24 @@ impl Executor<'_> {
             }
             // All accounts in the transaction, as a sorted set
             // (bean-query: `{p.account for p in entry.postings}`).
-            "accounts" => Ok(Value::StringSet(
-                TxnAccounts::of(&ctx.transaction).accounts(),
-            )),
+            "accounts" => Ok(Value::StringSet(ctx.txn_accounts.as_ref().map_or_else(
+                || TxnAccounts::of(&ctx.transaction).accounts(),
+                |set| set.accounts(),
+            ))),
             // The accounts of every OTHER posting, as a sorted set. Only this
             // posting is excluded: another posting to the same account still
             // counts (bean-query: `sorted({p.account for p in entry.postings
             // if p is not context.posting})`, #2483).
             //
-            // Built per row, so one transaction of n postings costs O(n^2)
-            // on this table, where `#postings` builds it once per
-            // transaction. Sharing one set across a transaction's rows here
-            // means carrying it on `PostingContext`, which is public API.
-            "other_accounts" => Ok(Value::StringSet(
-                TxnAccounts::of(&ctx.transaction).others(posting.account.as_ref()),
-            )),
+            // The scan builds the set once per transaction (#2504); a context
+            // built without it (a FROM filter's) builds it here.
+            "other_accounts" => {
+                let account = posting.account.as_ref();
+                Ok(Value::StringSet(ctx.txn_accounts.as_ref().map_or_else(
+                    || TxnAccounts::of(&ctx.transaction).others(account),
+                    |set| set.others(account),
+                )))
+            }
             // Posting metadata as dictionary
             "meta" => Ok(Value::Metadata(Box::new(Self::augmented_meta(
                 &posting.meta,
@@ -573,13 +577,12 @@ impl Executor<'_> {
                         .map_or(Value::Null, |p| Value::String(p.to_string())),
                 );
                 row.push(Value::String(ctx.transaction.narration.to_string()));
-                let posting = &ctx.transaction.postings[ctx.posting_index];
-                row.push(Value::String(posting.account.to_string()));
-                row.push(
-                    posting
-                        .amount()
-                        .map_or(Value::Null, |u| Value::Amount(u.clone())),
-                );
+                row.push(self.evaluate_column("account", ctx)?);
+                // The `position` column itself, cost included, as bean-query's
+                // `SELECT *` gives it. This pushed the units alone, so a held
+                // lot lost its cost, and a table or subquery built from
+                // `SELECT *` summed units where `SELECT position` sums lots.
+                row.push(self.evaluate_column("position", ctx)?);
             } else if let Expr::Window(wf) = &target.expr {
                 // Handle window function
                 row.push(self.evaluate_window_function(wf, window_ctx)?);

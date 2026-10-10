@@ -194,10 +194,21 @@ use crate::types::{Error, LedgerOptions};
 /// and one whose currency was read off the residual now fails. `ParsedLedger`
 /// and `Ledger` archive booked directives and their errors, so a v32 blob
 /// would keep serving the old answer.
-/// v34: loader v38, tags and links are a sorted, deduplicated set (#2545) and
+/// v34: a reduction whose take, lot or running total needs more digits than
+/// `Decimal` holds is an overflow error instead of a rounded booking (#2554):
+/// selling `MAX` from lots of `0.48` and `MAX` drained both, and now fails;
+/// STRICT's total match is decided exactly, so a sale that only rounded to the
+/// lots' total is now ambiguous. Loader v37, unchanged -- parsed directives
+/// did not move. A v33 blob would serve the old booked lots with no error.
+/// v35: an entry with no source location (one a plugin inserted) sorts first
+/// among same-date, same-type entries instead of last (#2553). Loader v37,
+/// unchanged -- the loader archives parsed directives, which have no such
+/// entries. `Ledger` archives the processed, sorted directives, so a v34 blob
+/// would keep serving the old order.
+/// v36: loader v38, tags and links are a sorted, deduplicated set (#2545) and
 /// `pushtag` reaches `document` and `note` entries (#2544). Parsed directives
-/// changed, so a v33 blob would serve tags in written order with duplicates.
-pub const CACHE_VERSION: u32 = 34;
+/// changed, so a v35 blob would serve tags in written order with duplicates.
+pub const CACHE_VERSION: u32 = 36;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

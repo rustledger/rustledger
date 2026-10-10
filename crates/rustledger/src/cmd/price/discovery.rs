@@ -82,6 +82,28 @@ struct PriceSpec {
     ticker: String,
 }
 
+/// [`discover_symbols_with_warnings`], warning on stderr. For tests.
+#[cfg(test)]
+#[allow(clippy::implicit_hasher)]
+pub fn discover_symbols(
+    directives: &[Spanned<Directive>],
+    options: &Options,
+    inactive: bool,
+    undeclared: bool,
+    as_of: Option<NaiveDate>,
+    config_mapping: &HashMap<String, CommodityMapping>,
+) -> HashMap<String, DiscoveredCommodity> {
+    discover_symbols_with_warnings(
+        directives,
+        options,
+        inactive,
+        undeclared,
+        as_of,
+        config_mapping,
+        &mut std::io::stderr(),
+    )
+}
+
 /// Discover the set of commodities to fetch prices for from a loaded ledger.
 ///
 /// Returns a map from commodity symbol to discovery info, covering only
@@ -121,14 +143,18 @@ struct PriceSpec {
 // default hasher (it's the type stored in `PriceConfig`); generalizing
 // over `BuildHasher` would just bloat the signature without unblocking
 // any real consumer.
+///
+/// Warnings (a malformed `price:` value) go to `err_out`: the process's
+/// stderr for `rledger`, the envelope for `ag-rledger`.
 #[allow(clippy::implicit_hasher)]
-pub fn discover_symbols(
+pub fn discover_symbols_with_warnings(
     directives: &[Spanned<Directive>],
     options: &Options,
     inactive: bool,
     undeclared: bool,
     as_of: Option<NaiveDate>,
     config_mapping: &HashMap<String, CommodityMapping>,
+    err_out: &mut dyn std::io::Write,
 ) -> HashMap<String, DiscoveredCommodity> {
     let active = if inactive {
         None
@@ -172,7 +198,8 @@ pub fn discover_symbols(
         // case. We still skip the commodity (no source to fetch from);
         // the warning surfaces the misconfiguration.
         if classification.malformed_price {
-            eprintln!(
+            let _ = writeln!(
+                err_out,
                 "warning: commodity {symbol} has malformed `price:` metadata; \
                  expected `<quote>:<source>/<ticker>` (e.g. `USD:yahoo/AAPL`). Skipping."
             );

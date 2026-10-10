@@ -1433,6 +1433,13 @@ impl BookingEngine {
                 None => return true,
             }
         }
+        // `checked_add` rounds rather than failing, so `MAX + 0.3` came back
+        // as `MAX` and an account with no inventory read as safe -- while
+        // `add` checks the exact total near the ceiling and refuses it, which
+        // is `apply`'s "the guard is unsound" assertion (#2554 review).
+        if rustledger_core::Inventory::is_near_ceiling(sum_abs) {
+            return true;
+        }
 
         !txn.postings.iter().all(|posting| {
             let Some(units) = posting.amount() else {
@@ -4703,5 +4710,37 @@ mod tests {
             "an account that predates the failed transaction must be restored to \
              its prior value, not left doubled or cleared"
         );
+    }
+
+    /// #2554, review round 5: `add` now refuses an exact total past `MAX`
+    /// near the ceiling, and `overflow_is_possible` summed the transaction
+    /// with a rounding `checked_add` (`MAX + 0.3 == MAX`) and called an
+    /// account with no inventory safe. So `apply` ran without its undo log,
+    /// the second add failed, and the "guard is unsound" `assert!` aborted --
+    /// in release too. It must be an error.
+    #[test]
+    fn apply_near_the_ceiling_fails_cleanly() {
+        use rustledger_core::{Amount, CostNumber, CostSpec, IncompleteAmount};
+        let date = rustledger_core::naive_date(2020, 1, 2).unwrap();
+        let txn = Transaction::new(date, "t")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(Decimal::MAX, "CORP")).with_cost(
+                    CostSpec::empty()
+                        .with_number(CostNumber::Total {
+                            value: Decimal::new(1, 28),
+                        })
+                        .with_currency("USD"),
+                ),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Stock", Amount::new(dec!(0.3), "CORP")))
+            .with_synthesized_posting(Posting::with_incomplete(
+                "Assets:Cash",
+                IncompleteAmount::CurrencyOnly("USD".into()),
+            ))
+            .with_synthesized_posting(Posting::new("Equity:Bal", Amount::new(dec!(-0.3), "CORP")));
+        let mut engine = BookingEngine::new();
+        let booked = engine.book_and_interpolate(&txn).expect("books");
+        let r = engine.apply(&booked.transaction);
+        assert!(r.is_err(), "got {r:?}");
     }
 }

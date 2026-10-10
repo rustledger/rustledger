@@ -1204,7 +1204,8 @@ mod tests {
     use super::*;
     use rust_decimal_macros::dec;
     use rustledger_core::{
-        Amount, Balance, Close, Document, MetaValue, NaiveDate, Open, Pad, Posting, Transaction,
+        Amount, Balance, Close, Document, MetaValue, NaiveDate, Note, Open, Pad, Posting,
+        Transaction,
     };
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
@@ -1326,6 +1327,113 @@ mod tests {
         assert!(errors
             .iter()
             .any(|e| e.code == ErrorCode::AccountNotOpen && e.message.contains("Income:Salary")));
+    }
+
+    /// #2514: a reference to an unopened account whose root is not one of
+    /// the ledger's roots reports E1005 "Invalid account name" (the fix is an
+    /// option renaming a root), not E1001 "never opened" (whose fix, an
+    /// `open`, is rejected too). Beancount says `Invalid account name` here.
+    /// Every kind of reference goes through the same check.
+    #[test]
+    fn unopened_account_with_unknown_root_is_an_invalid_name() {
+        let bad = "Actifs:CCM:Courant";
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 2), "posting")
+                    .with_synthesized_posting(Posting::new(bad, Amount::new(dec!(10), "EUR")))
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(-10), "EUR"),
+                    )),
+            ),
+            Directive::Pad(Pad::new(date(2024, 1, 3), bad, "Assets:Cash")),
+            Directive::Pad(Pad::new(date(2024, 1, 3), "Assets:Cash", bad)),
+            Directive::Balance(Balance::new(
+                date(2024, 1, 4),
+                bad,
+                Amount::new(dec!(10), "EUR"),
+            )),
+            Directive::Note(Note::new(date(2024, 1, 5), bad, "hi")),
+            Directive::Document(Document::new(date(2024, 1, 5), bad, "r.pdf")),
+            Directive::Close(Close::new(date(2024, 1, 6), bad)),
+        ];
+        let errors = validate(&directives);
+        let about_bad: Vec<&ValidationError> =
+            errors.iter().filter(|e| e.message.contains(bad)).collect();
+        assert!(
+            about_bad
+                .iter()
+                .all(|e| e.code != ErrorCode::AccountNotOpen),
+            "no E1001 for an invalid name: {about_bad:#?}"
+        );
+        let invalid: Vec<&ValidationError> = about_bad
+            .iter()
+            .copied()
+            .filter(|e| e.code == ErrorCode::InvalidAccountName)
+            .collect();
+        // posting, pad target, pad source, balance, note, document, close.
+        assert_eq!(invalid.len(), 7, "{errors:#?}");
+        assert!(
+            invalid[0].message.contains("name_income"),
+            "the message names the option that renames a root: {}",
+            invalid[0].message
+        );
+    }
+
+    /// With the root renamed by an option, the same name is valid and an
+    /// unopened reference is plain E1001 again; so is an unopened account
+    /// under a default root.
+    #[test]
+    fn unopened_account_with_known_root_is_still_never_opened() {
+        let txn = |account: &str| {
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 2), "posting")
+                    .with_synthesized_posting(Posting::new(account, Amount::new(dec!(10), "EUR")))
+                    .with_synthesized_posting(Posting::new(
+                        "Equity:Open",
+                        Amount::new(dec!(-10), "EUR"),
+                    )),
+            )
+        };
+        let renamed = ValidationOptions::default().with_account_types(
+            ["Actifs", "Liabilities", "Equity", "Income", "Expenses"]
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+        );
+        let errors = validate_with_options(
+            &[
+                Directive::Open(Open::new(date(2024, 1, 1), "Equity:Open")),
+                txn("Actifs:CCM:Courant"),
+            ],
+            renamed,
+        );
+        assert!(
+            errors.iter().any(|e| e.code == ErrorCode::AccountNotOpen),
+            "{errors:#?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .all(|e| e.code != ErrorCode::InvalidAccountName),
+            "{errors:#?}"
+        );
+
+        let errors = validate(&[
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:Open")),
+            txn("Assets:Never"),
+        ]);
+        assert!(
+            errors.iter().any(|e| e.code == ErrorCode::AccountNotOpen),
+            "{errors:#?}"
+        );
+        assert!(
+            errors
+                .iter()
+                .all(|e| e.code != ErrorCode::InvalidAccountName),
+            "{errors:#?}"
+        );
     }
 
     #[test]

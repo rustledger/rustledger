@@ -130,21 +130,21 @@ See [BQL Reference](../reference/bql.md) for complete query language documentati
 ### Quick Reference
 
 ```sql
--- Select columns
+/* Select columns */
 SELECT date, narration, account, position
 
--- Filter rows
+/* Filter rows */
 WHERE account ~ 'Expenses' AND year(date) = 2024
 
--- Aggregate
+/* Aggregate */
 GROUP BY account
 HAVING sum(number) > 100
 
--- Sort and limit
+/* Sort and limit */
 ORDER BY date DESC
 LIMIT 10
 
--- Built-in reports
+/* Built-in reports */
 BALANCES [FROM ...]
 JOURNAL 'Account:Name'
 ```

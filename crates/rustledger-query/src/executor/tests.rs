@@ -2896,6 +2896,80 @@ fn inventory_sort_paths_agree() {
     assert_eq!(direct, want, "compare_values_for_sort");
 }
 
+/// The default table's scan builds each transaction's account set ONCE and
+/// shares it across that transaction's rows (#2504), whether the output or
+/// only the WHERE reads `accounts`/`other_accounts`, and builds none for a
+/// query that reads neither. Rebuilding it per row made one transaction of n
+/// postings cost O(n^2).
+#[test]
+fn scan_shares_one_account_set_per_transaction() {
+    let mut big = Transaction::new(rustledger_core::naive_date(2024, 1, 1).unwrap(), "big");
+    for a in ["Expenses:A", "Expenses:B", "Expenses:A", "Assets:Bank"] {
+        big = big.with_synthesized_posting(Posting::new(a, Amount::new(dec!(1), "USD")));
+    }
+    let mut small = Transaction::new(rustledger_core::naive_date(2024, 1, 2).unwrap(), "small");
+    for a in ["Expenses:C", "Assets:Bank"] {
+        small = small.with_synthesized_posting(Posting::new(a, Amount::new(dec!(1), "USD")));
+    }
+    let directives = vec![Directive::Transaction(big), Directive::Transaction(small)];
+    let executor = Executor::new(&directives);
+    let contexts = |sql: &str| {
+        let Query::Select(query) = parse(sql).expect("parses") else {
+            panic!("a SELECT");
+        };
+        executor.collect_postings(&query).expect("scans")
+    };
+
+    for sql in [
+        "SELECT account, accounts",
+        "SELECT other_accounts",
+        "SELECT account WHERE 'Assets:Bank' IN accounts",
+        "SELECT account ORDER BY accounts",
+    ] {
+        let rows = contexts(sql);
+        assert_eq!(rows.len(), 6, "{sql}");
+        let sets: Vec<_> = rows
+            .iter()
+            .map(|c| {
+                c.txn_accounts
+                    .clone()
+                    .unwrap_or_else(|| panic!("{sql}: a row without its transaction's set"))
+            })
+            .collect();
+        for i in 1..4 {
+            assert!(std::sync::Arc::ptr_eq(&sets[0], &sets[i]), "{sql}: row {i}");
+        }
+        assert!(std::sync::Arc::ptr_eq(&sets[4], &sets[5]), "{sql}");
+        assert!(!std::sync::Arc::ptr_eq(&sets[0], &sets[4]), "{sql}");
+        assert_eq!(
+            sets[0].accounts(),
+            ["Assets:Bank", "Expenses:A", "Expenses:B"]
+        );
+        assert_eq!(sets[4].accounts(), ["Assets:Bank", "Expenses:C"]);
+    }
+    assert!(
+        contexts("SELECT account, position")
+            .iter()
+            .all(|c| c.txn_accounts.is_none()),
+        "a query reading neither column pays for no set",
+    );
+
+    // And the shared set answers what the per-row one did.
+    let mut executor = Executor::new(&directives);
+    let result = executor
+        .execute(&parse("SELECT account, accounts, other_accounts").expect("parses"))
+        .expect("runs");
+    let set = |v: &[&str]| Value::StringSet(v.iter().map(ToString::to_string).collect());
+    assert_eq!(
+        result.rows[0][2],
+        set(&["Assets:Bank", "Expenses:A", "Expenses:B"])
+    );
+    assert_eq!(result.rows[1][2], set(&["Assets:Bank", "Expenses:A"]));
+    assert_eq!(result.rows[3][2], set(&["Expenses:A", "Expenses:B"]));
+    assert_eq!(result.rows[4][1], set(&["Assets:Bank", "Expenses:C"]));
+    assert_eq!(result.rows[5][2], set(&["Expenses:C"]));
+}
+
 /// `TxnAccounts::others` (built once per transaction) equals the definition
 /// it stands in for: the sorted, deduped accounts of every posting except the
 /// one at this index (#2483).
@@ -2932,6 +3006,120 @@ fn txn_accounts_others_matches_excluding_by_index() {
             assert_eq!(set.others(a), expected, "{accounts:?} posting {i}");
             assert_eq!(owned.others(a), expected, "{accounts:?} posting {i}");
         }
+    }
+}
+
+/// The names `evaluate_column`'s `match` accepts, read from its source.
+fn evaluator_column_arms() -> Vec<String> {
+    let source = include_str!("evaluation.rs");
+    let body = source
+        .split_once("fn evaluate_column(")
+        .and_then(|(_, rest)| rest.split_once("_ => Err(QueryError::UnknownColumn"))
+        .expect("evaluate_column's match is where this test expects it")
+        .0;
+    let arm = regex::Regex::new(r#"(?m)^\s*"([a-z_]+)" =>"#).expect("regex");
+    arm.captures_iter(body).map(|c| c[1].to_string()).collect()
+}
+
+/// `POSTING_COLUMNS`, which completion and `.describe` read, is exactly the
+/// set of columns the default row evaluator accepts (#2505). Completion used
+/// a hand-written list that had drifted: it lacked `accounts`,
+/// `other_accounts`, `description`, `posting_flag`, `price`, `filename`,
+/// `lineno`, `location`, `type` and `id`.
+#[test]
+fn posting_columns_match_the_evaluator() {
+    let listed: Vec<&str> = POSTING_COLUMNS.iter().map(|c| c.name).collect();
+    let unique: std::collections::BTreeSet<&str> = listed.iter().copied().collect();
+    assert_eq!(
+        unique.len(),
+        listed.len(),
+        "a name is listed twice: {listed:?}"
+    );
+
+    let arms = evaluator_column_arms();
+    // Not vacuous if the `match` is reshaped: the pattern must still see a
+    // column with a multi-line arm and one at the end.
+    assert!(
+        arms.len() > 30 && arms.iter().any(|c| c == "cost") && arms.iter().any(|c| c == "id"),
+        "the arms came back: {arms:?}",
+    );
+    let arm_set: std::collections::BTreeSet<&str> = arms.iter().map(String::as_str).collect();
+    let missing: Vec<&&str> = arm_set.difference(&unique).collect();
+    let extra: Vec<&&str> = unique.difference(&arm_set).collect();
+    assert!(
+        missing.is_empty() && extra.is_empty(),
+        "POSTING_COLUMNS drifted from evaluate_column: not listed {missing:?}, \
+         listed but not evaluated {extra:?}",
+    );
+
+    // bean-query 0.2.0's `.describe postings`, verbatim and in its order:
+    // every one of its columns is listed, with its type (except `id`, an
+    // integer here and a hash string there), and in its order.
+    let bean_query = [
+        ("type", "str"),
+        ("id", "int"),
+        ("date", "date"),
+        ("year", "int"),
+        ("month", "int"),
+        ("day", "int"),
+        ("filename", "str"),
+        ("lineno", "int"),
+        ("location", "str"),
+        ("flag", "str"),
+        ("payee", "str"),
+        ("narration", "str"),
+        ("description", "str"),
+        ("tags", "set"),
+        ("links", "set"),
+        ("posting_flag", "str"),
+        ("account", "str"),
+        ("other_accounts", "set"),
+        ("number", "decimal"),
+        ("currency", "str"),
+        ("cost_number", "decimal"),
+        ("cost_currency", "str"),
+        ("cost_date", "date"),
+        ("cost_label", "str"),
+        ("position", "position"),
+        ("price", "amount"),
+        ("weight", "amount"),
+        ("balance", "inventory"),
+        ("meta", "dict"),
+        ("entry", "transaction"),
+        ("accounts", "set[str]"),
+    ];
+    let shared: Vec<(&str, &str)> = POSTING_COLUMNS
+        .iter()
+        .filter(|c| bean_query.iter().any(|(n, _)| *n == c.name))
+        .map(|c| (c.name, c.type_name))
+        .collect();
+    assert_eq!(
+        shared, bean_query,
+        "`.describe postings` differs from bean-query's"
+    );
+
+    // Every listed column runs, and `#postings` has no visible column the
+    // default table lacks (its hidden ones are `_`- or NUL-prefixed).
+    let directives = sample_directives();
+    for name in &listed {
+        let mut executor = Executor::new(&directives);
+        let query = parse(&format!("SELECT {name}")).expect("parses");
+        if let Err(e) = executor.execute(&query) {
+            panic!("`{name}` is listed but `SELECT {name}` fails: {e}");
+        }
+    }
+    let mut executor = Executor::new(&directives);
+    let postings = executor
+        .execute(&parse("SELECT * FROM #postings").expect("parses"))
+        .expect("#postings");
+    for column in &postings.columns {
+        if column.starts_with('_') || column.starts_with('\0') {
+            continue;
+        }
+        assert!(
+            unique.contains(column.as_str()),
+            "`#postings` has `{column}` but POSTING_COLUMNS does not",
+        );
     }
 }
 
@@ -2994,15 +3182,7 @@ fn from_filter_column_lists_match_the_executor() {
     // The row evaluator's own arms, read from its source: the one list that
     // has every posting-row column, including rledger's `units`, `cost` and
     // `has_cost`, which no schema lists. A new arm is checked the day it lands.
-    let source = include_str!("evaluation.rs");
-    let body = source
-        .split_once("fn evaluate_column(")
-        .and_then(|(_, rest)| rest.split_once("_ => Err(QueryError::UnknownColumn"))
-        .expect("evaluate_column's match is where this test expects it")
-        .0;
-    let arm = regex::Regex::new(r#"(?m)^\s*"([a-z_]+)" =>"#).expect("regex");
-    let evaluator_columns: Vec<String> =
-        arm.captures_iter(body).map(|c| c[1].to_string()).collect();
+    let evaluator_columns = evaluator_column_arms();
     assert!(
         evaluator_columns.len() > 30 && evaluator_columns.iter().any(|c| c == "has_cost"),
         "the arms came back: {evaluator_columns:?}",

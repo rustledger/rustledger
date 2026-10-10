@@ -2040,6 +2040,38 @@ fn test_check_json_missing_include_points_at_include_directive() {
     );
 }
 
+/// #2515: a load failure names the OS error once. `LoadError::Io` put the
+/// `io::Error` in its message AND exposed it as its source, so the top-level
+/// `{e:#}` chain printed `No such file or directory (os error 2)` twice under
+/// any command that adds context to a load error (and three times where a
+/// `ProcessError::Load`, which did the same with the whole `LoadError`, sat in
+/// between, as `rledger extract --existing` showed).
+#[test]
+fn test_load_failure_names_the_os_error_once() {
+    let bin = require_rledger!();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let missing = dir.path().join("missing.beancount");
+    let os_error = std::fs::read(&missing)
+        .expect_err("must not exist")
+        .to_string();
+
+    for sub in ["stats", "missing-open", "display-context"] {
+        let output = Command::new(&bin)
+            .args(["doctor", sub])
+            .arg(&missing)
+            .output()
+            .expect("run doctor");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(!output.status.success(), "{sub}: {stderr}");
+        assert!(stderr.contains("missing.beancount"), "{sub}: {stderr}");
+        assert_eq!(
+            stderr.matches(os_error.as_str()).count(),
+            1,
+            "doctor {sub}: the OS error must appear exactly once: {stderr}"
+        );
+    }
+}
+
 /// #2319: a newest-first statement is written oldest-first, keeping the
 /// within-day sequence reversed with it; `--existing` reports skipped rows in
 /// that output order; and the `--balance` assertion is still the last thing

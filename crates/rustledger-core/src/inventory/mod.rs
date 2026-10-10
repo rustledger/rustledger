@@ -335,9 +335,10 @@ impl fmt::Display for OverflowError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "{} amount exceeds the representable range (±7.9e28); \
-             split the transaction, or denominate it in larger units \
-             (thousands, millions) so the number is smaller",
+            "{} amount exceeds the representable range (±7.9e28, at most \
+             28-29 significant digits); split the transaction, denominate it \
+             in larger units (thousands, millions) so the number is smaller, \
+             or write fewer decimal places",
             self.currency
         )
     }
@@ -1858,6 +1859,11 @@ impl Inventory {
         // transaction cannot be rolled back. Cheap insurance on a `pub` method
         // whose failure mode is silent corruption.
         let needed = needed.abs();
+        // Near the ceiling `add` checks the lots' exact total, which no
+        // cached figure bounds (#2554). An empty or unseen currency included.
+        if Self::is_near_ceiling(needed) {
+            return false;
+        }
 
         // `units_cache` and `simple_index` are `#[serde(skip)]`, so a
         // deserialized inventory carries its positions with both caches empty
@@ -1895,7 +1901,16 @@ impl Inventory {
         let Some(stats) = self.units_cache.get(currency) else {
             return true;
         };
-        if !fits(stats.total) {
+        // One sum for both tests. Near the ceiling `add` also checks the lots'
+        // EXACT total, which the rounded `stats.total` may understate
+        // (`exact_total_in_range_near_ceiling`, #2554), so an add can fail
+        // there even though the cached sum fits: answer "cannot prove it".
+        if stats
+            .total
+            .abs()
+            .checked_add(needed)
+            .is_none_or(Self::is_near_ceiling)
+        {
             return false;
         }
         // `stats.total` bounds every individual lot ONLY when they all share a
@@ -2156,6 +2171,57 @@ impl Inventory {
         Ok(totals)
     }
 
+    /// `1e28`. Below it a cached running total cannot be within its rounding
+    /// drift of `Decimal::MAX` (~7.9e28): each rounded step drifts at most
+    /// half a unit, so closing the gap takes ~1e29 of them. At or above it,
+    /// [`Self::add`] checks the lots' exact total, so a caller predicting
+    /// whether an add can fail ([`Self::add_headroom_for`],
+    /// `rustledger_booking`'s rollback guard) must answer "it can" (#2554).
+    pub const NEAR_CEILING: Decimal =
+        Decimal::from_parts(268_435_456, 1_042_612_833, 542_101_086, false, 0);
+
+    /// Whether `value` is at or beyond [`Self::NEAR_CEILING`] in magnitude.
+    ///
+    /// Read off the representation rather than compared as a `Decimal`: this
+    /// runs on every `add`, and a `Decimal` comparison across scales has to
+    /// rescale one side first (the comparison form cost ~2% of the
+    /// instructions of `rledger check` on the `simple` profiling workload). A
+    /// magnitude of `1e28` or more needs scale 0 --
+    /// at scale 1 the 96-bit mantissa tops out at ~7.9e27 -- so the test is
+    /// the scale and the mantissa.
+    #[must_use]
+    pub const fn is_near_ceiling(value: Decimal) -> bool {
+        value.scale() == 0 && value.mantissa().unsigned_abs() >= 10_u128.pow(28)
+    }
+
+    /// Whether `currency`'s EXACT total, plus `delta`, is within `Decimal`'s
+    /// range, given that the cached total plus `delta` is `cached_after`.
+    ///
+    /// The cached total is kept with `checked_add`, which rounds, so it can
+    /// drift from the lots' exact total (#2363 allows that). The drift is at
+    /// most half a unit in the last place per rounded step, so while the
+    /// cached result is below `1e28` the exact one cannot be anywhere near
+    /// `MAX` (~7.9e28) and this answers `true` in O(1). Above it -- no real
+    /// ledger -- the lots are summed exactly (#2554).
+    pub(super) fn exact_total_in_range_near_ceiling(
+        &self,
+        currency: &str,
+        cached_after: Decimal,
+        delta: impl FnOnce() -> bigdecimal::BigDecimal,
+    ) -> bool {
+        if !Self::is_near_ceiling(cached_after) {
+            return true;
+        }
+        let exact: bigdecimal::BigDecimal = self
+            .positions
+            .iter()
+            .filter(|p| p.units.currency == currency)
+            .map(|p| crate::to_bigdecimal(p.units.number))
+            .sum::<bigdecimal::BigDecimal>()
+            + delta();
+        exact.abs() <= crate::to_bigdecimal(Decimal::MAX)
+    }
+
     /// Add a position to the inventory.
     ///
     /// For positions without cost, this merges with existing positions
@@ -2281,6 +2347,25 @@ impl Inventory {
                 .ok_or_else(overflow)
             })
             .transpose()?;
+
+        // `checked_add` ROUNDS rather than failing, so a cache at `MAX` takes
+        // `0.3` and still reads `MAX` while the lots total `MAX + 0.3`. Each
+        // add looked in range; the rebuild after a later rollback totals the
+        // lots exactly and hit its "past the Decimal range" assertion (#2554
+        // review, `fuzz_booking`). Near the ceiling, check the exact total --
+        // with the merged lot as it will actually be stored, since that sum
+        // rounds too.
+        if !self.exact_total_in_range_near_ceiling(&position.units.currency, new_cached, || {
+            match merge_idx.zip(merged_units) {
+                Some((idx, merged)) => {
+                    crate::to_bigdecimal(merged)
+                        - crate::to_bigdecimal(self.positions[idx].units.number)
+                }
+                None => crate::to_bigdecimal(position.units.number),
+            }
+        }) {
+            return Err(overflow());
+        }
 
         // Bucket changes, worked out before touching the cache so the whole
         // update lands in ONE lookup below. A cost-less merge can flip the

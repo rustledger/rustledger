@@ -760,7 +760,86 @@ pub fn resolve_elided_units_currencies<'a>(
     txn: &Transaction,
     held: impl Fn(&rustledger_core::Account) -> Option<&'a rustledger_core::Inventory>,
 ) -> Result<Vec<(usize, Currency)>, InterpolationError> {
+    resolve_elided_currencies(txn, held).units_or_refuse(txn)
+}
+
+/// What [`resolve_elided_currencies`] resolved: a currency for every units
+/// number written without one, and for every cost spec written without one
+/// that beancount's rule resolves.
+#[derive(Debug, Default)]
+pub struct ElidedCurrencies {
+    /// `(posting index, currency)` for each currency-less units number;
+    /// `None` where no step resolves it.
+    units: Vec<(usize, Option<Currency>)>,
+    /// `(posting index, currency)` for each cost spec naming no currency
+    /// (`{}`, `{11.00}`, `{2020-01-02}`) whose currency the rule resolves.
+    pub costs: Vec<(usize, Currency)>,
+}
+
+impl ElidedCurrencies {
+    /// The units currencies, or [`InterpolationError::CannotInferCurrency`]
+    /// for the first currency-less units number no step resolves.
+    pub fn units_or_refuse(
+        self,
+        txn: &Transaction,
+    ) -> Result<Vec<(usize, Currency)>, InterpolationError> {
+        self.units
+            .into_iter()
+            .map(|(i, currency)| {
+                currency
+                    .map(|c| (i, c))
+                    .ok_or_else(|| InterpolationError::CannotInferCurrency {
+                        account: txn.postings[i].account.clone(),
+                    })
+            })
+            .collect()
+    }
+}
+
+/// [`resolve_elided_units_currencies`], plus the currency of every cost spec
+/// written without one (#2571).
+///
+/// Both come out of ONE categorization of the transaction as written, as in
+/// beancount's `categorize_by_currency`, because each counts the other: a
+/// currency-less units number is an unknown that keeps a `{}` from taking the
+/// other postings' currency, and resolving the units first and the cost
+/// afterwards would let it.
+///
+/// A cost spec's currency, when not written:
+///
+/// 1. is its price's currency, when the posting has a priced currency
+///    (beancount: "cost-currency and price-currency must match");
+/// 2. else, when it is the transaction's only posting whose group is
+///    undetermined and every other posting (auto-postings aside) falls in ONE
+///    currency group, that group's currency;
+/// 3. else the one cost currency the account's lots are held in before this
+///    transaction (beancount's `Inventory.cost_currencies`, across every
+///    commodity the account holds).
+///
+/// Step 2 is what refuses `-1 HOOL {}` beside `Assets:Cash 13.00 USD` when the
+/// lots cost EUR: the sale's cost currency is USD, no lot matches, and the
+/// EUR lot is not sold for a "gain" in two currencies with no rate between
+/// them.
+///
+/// Two departures from beancount, both where its rule refuses a well-defined
+/// sale that booked before #2571 (compatibility.md, Known Differences 17):
+///
+/// - Step 2 skips a group that is the posting's own commodity. Beside `10 X`
+///   moved in from elsewhere, beancount gives `-4 X {}` the cost currency X,
+///   which no lot of X is ever held in, and finds no position.
+/// - A cost spec no step resolves is left out of `costs`, and booking treats
+///   its currency as a wildcard as before. Beancount refuses such a posting
+///   ("Failed to categorize posting"); here a FIFO sale with only
+///   auto-postings beside it, from an account holding lots in two cost
+///   currencies, still sells the oldest lot.
+pub fn resolve_elided_currencies<'a>(
+    txn: &Transaction,
+    held: impl Fn(&rustledger_core::Account) -> Option<&'a rustledger_core::Inventory>,
+) -> ElidedCurrencies {
+    // (index, plain unknown) for each currency-less units number, and
+    // (index, price-or-None) for each cost spec naming no currency.
     let mut targets: Vec<(usize, bool)> = Vec::new();
+    let mut cost_targets: Vec<(usize, Option<&Currency>)> = Vec::new();
     let mut group: Option<&Currency> = None;
     let mut several_groups = false;
     let mut unknowns = 0usize;
@@ -787,13 +866,32 @@ pub fn resolve_elided_units_currencies<'a>(
             let plain = cost == Slot::Absent && price == Slot::Absent;
             targets.push((i, plain && bucket.is_none()));
         }
+        if posting
+            .cost
+            .as_ref()
+            .is_some_and(|spec| spec.currency.is_none())
+        {
+            // `currency_slots` has already filled the cost from the price.
+            cost_targets.push((
+                i,
+                match cost {
+                    Slot::Known(c) => Some(c),
+                    _ => None,
+                },
+            ));
+        }
     }
+    let sole_group = if unknowns == 1 && !several_groups {
+        group
+    } else {
+        None
+    };
 
-    let mut resolved = Vec::with_capacity(targets.len());
+    let mut units = Vec::with_capacity(targets.len());
     for (i, plain_unknown) in targets {
         let posting = &txn.postings[i];
-        let from_group = if plain_unknown && unknowns == 1 && !several_groups {
-            group.cloned()
+        let from_group = if plain_unknown {
+            sole_group.cloned()
         } else {
             None
         };
@@ -804,16 +902,51 @@ pub fn resolve_elided_units_currencies<'a>(
                 _ => None,
             }
         });
-        match currency {
-            Some(currency) => resolved.push((i, currency)),
-            None => {
-                return Err(InterpolationError::CannotInferCurrency {
-                    account: posting.account.clone(),
-                });
-            }
+        units.push((i, currency));
+    }
+
+    let mut costs = Vec::with_capacity(cost_targets.len());
+    for (i, from_price) in cost_targets {
+        // Not the posting's own commodity: a lot of X is never held at a cost
+        // in X, so a group that is X (`10 X` moved in beside `-4 X {}`) says
+        // nothing about what the lot cost. Beancount takes it anyway and
+        // refuses a sale it cannot match; this reads the account instead
+        // (compatibility.md, Known Differences 17).
+        let commodity: Option<&Currency> = match &txn.postings[i].units {
+            Some(IncompleteAmount::Complete(amount)) => Some(&amount.currency),
+            Some(IncompleteAmount::CurrencyOnly(currency)) => Some(currency),
+            Some(IncompleteAmount::NumberOnly(_)) => units
+                .iter()
+                .find(|(j, _)| *j == i)
+                .and_then(|(_, c)| c.as_ref()),
+            None => None,
+        };
+        let from_group = sole_group.filter(|g| Some(*g) != commodity);
+        let currency = from_price
+            .or(from_group)
+            .cloned()
+            .or_else(|| held_cost_currency(held(&txn.postings[i].account)?));
+        if let Some(currency) = currency {
+            costs.push((i, currency));
         }
     }
-    Ok(resolved)
+    ElidedCurrencies { units, costs }
+}
+
+/// The one currency `inventory`'s lots are held at cost in, across every
+/// commodity it holds, or `None` for none or several. Beancount's
+/// `Inventory.cost_currencies`, which never sees an empty position.
+fn held_cost_currency(inventory: &rustledger_core::Inventory) -> Option<Currency> {
+    let mut found: Option<&Currency> = None;
+    for position in inventory.positions().filter(|p| !p.is_empty()) {
+        let Some(cost) = &position.cost else { continue };
+        match found {
+            None => found = Some(&cost.currency),
+            Some(c) if *c != cost.currency => return None,
+            Some(_) => {}
+        }
+    }
+    found.cloned()
 }
 
 /// Which residual an elided posting's unknown will be solved from.

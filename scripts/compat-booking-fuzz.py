@@ -56,10 +56,13 @@ aims a shape at each branch (`NUMBER_ONLY_SHAPES`) over accounts holding one
 currency, several, none, or one since sold off, and the report tallies
 agreement per shape and per holding, including how many ledgers both engines
 booked and how many both refused (#2513). It is drawn from its own RNG, so
-every seed's lot-selection ledger is unchanged. A reduction's price and cash
-leg stay in its lots' cost currency: outside that, the engines diverge with
-the commodity written too (see `gen_number_only_ledger`), which is a question
-for the booking of costs, not for the currency of a bare number.
+every seed's lot-selection ledger is unchanged.
+
+The same ledger also varies the CURRENCIES around a reduction (#2571): a price
+in another currency than the lot's cost (which beancount refuses, "Cost and
+price currencies must match"), a cash leg in another currency (which gives a
+`{}` that currency as its cost currency, so no lot matches), and accounts
+holding lots in two cost currencies. `CURRENCY_CASES` tallies each.
 
 Usage:
     scripts/compat-booking-fuzz.py --runs 200
@@ -305,6 +308,21 @@ HOLDING_WEIGHTS = [5, 2, 1, 1]
 
 CASH_CURRENCIES = ["USD", "EUR", "GBP"]
 
+# How a `cost-reduce` transaction's currencies relate to its lots' (#2571).
+# Each is tallied, so a case the generator stopped producing shows as 0/0.
+CURRENCY_CASES = [
+    # The price names another currency than the cost: beancount refuses it
+    # ("Cost and price currencies must match"), and so must rledger.
+    "price-other-currency",
+    # The cash leg is in another currency than the lot's cost. Beside an
+    # elided cost currency this gives `{}` the cash's currency, so no lot
+    # matches; beside a written one it books a gain in two currencies, which
+    # both engines accept.
+    "cash-other-currency",
+    # The account holds lots in two cost currencies.
+    "mixed-cost-currencies",
+]
+
 
 def _num(rng: random.Random, low: int = 1, high: int = 400) -> Decimal:
     """A positive number at a random precision.
@@ -328,11 +346,12 @@ def _is_number_only_posting(line: str) -> bool:
     return bool(_NUMBER_ONLY_POSTING.match(line))
 
 
-def gen_number_only_ledger(rng: random.Random) -> tuple[str, list[str]]:
+def gen_number_only_ledger(rng: random.Random) -> tuple[str, list[str], list[str]]:
     """A ledger whose interesting transactions write units without a currency.
 
-    Returns the source and the shapes it exercises, each tagged with the
-    holding of the account it reads (`plain-no-group/several`).
+    Returns the source, the shapes it exercises, each tagged with the
+    holding of the account it reads (`plain-no-group/several`), and the
+    `CURRENCY_CASES` its reductions reach.
     """
     method = rng.choice(METHODS)
     lines = [f'option "booking_method" "{method}"']
@@ -353,6 +372,9 @@ def gen_number_only_ledger(rng: random.Random) -> tuple[str, list[str]]:
         lines.append(f'2020-01-01 open {acct}  "{rng.choice(METHODS)}"')
 
     holding: dict[str, str] = {}
+    # The cost currencies each stock account's lots may be held in, setup
+    # and `cost-augment` alike.
+    cost_curs: dict[str, set[str]] = {}
     # What each account holds once the setup is booked: units currency ->
     # list of (units, per-unit cost or None, cost currency or None).
     held: dict[str, dict[str, list[tuple[Decimal, Decimal | None, str | None]]]] = {}
@@ -376,6 +398,7 @@ def gen_number_only_ledger(rng: random.Random) -> tuple[str, list[str]]:
             f"  Equity:Opening  {-(qty * cost)} {cost_cur}",
         ])
         held.setdefault(acct, {}).setdefault(commodity, []).append((qty, cost, cost_cur))
+        cost_curs.setdefault(acct, set()).add(cost_cur)
 
     for acct in cash_accts:
         kind = rng.choices(HOLDINGS, weights=HOLDING_WEIGHTS)[0]
@@ -408,6 +431,10 @@ def gen_number_only_ledger(rng: random.Random) -> tuple[str, list[str]]:
         cost_cur = "USD" if rng.random() < 0.8 else "EUR"
         if kind == "one":
             for day in range(2, 2 + rng.randint(1, 3)):
+                # Now and then a later lot in the other cost currency, so an
+                # elided cost currency has two to choose from (#2571).
+                if day > 2 and rng.random() < 0.25:
+                    cost_cur = "EUR" if cost_cur == "USD" else "USD"
                 buy(acct, commodities[0], day, cost_cur)
         elif kind == "several":
             buy(acct, commodities[0], 2, cost_cur)
@@ -421,6 +448,7 @@ def gen_number_only_ledger(rng: random.Random) -> tuple[str, list[str]]:
                 f"  Equity:Opening  {qty * cost} {cost_cur}",
             ])
             held[acct] = {}
+            cost_curs[acct] = set()
     lines += setup
 
     def lots_of(acct: str) -> list[tuple[str, Decimal, Decimal | None, str | None]]:
@@ -428,6 +456,7 @@ def gen_number_only_ledger(rng: random.Random) -> tuple[str, list[str]]:
                 for u, c, cc in ls]
 
     shapes: list[str] = []
+    cases: list[str] = []
     n_txns = rng.choices([1, 2, 3], weights=[7, 2, 1])[0]
     for t in range(n_txns):
         shape = rng.choice(NUMBER_ONLY_SHAPES)
@@ -488,15 +517,16 @@ def gen_number_only_ledger(rng: random.Random) -> tuple[str, list[str]]:
             acct = rng.choice(stock_accts)
             lots = lots_of(acct)
             qty = Decimal(rng.randint(1, max(1, int(lots[0][1]) if lots else 5)))
-            # The price and the cash leg are in the lots' cost currency. Two
-            # divergences that have nothing to do with a currency-less units
-            # number live outside that, and reproduce with the commodity
-            # written (#2513 campaign, reported for a decision of their own):
-            # beancount refuses a reduction priced in another currency than
-            # its cost ("Cost and price currencies must match"), and gives a
-            # `{}` the other postings' currency as its cost currency, so
-            # `{}` beside a USD cash leg finds no EUR lot. rledger books both.
-            lot_cur = lots[0][3] if lots else "USD"
+            # The lot's cost currency, and mostly the price and cash leg's
+            # too. Each departs from it now and then (#2571): a price in
+            # another currency is refused by beancount ("Cost and price
+            # currencies must match"), and a cash leg in another one gives
+            # a `{}` ITS currency as the cost currency, so no lot matches.
+            lot_cur = rng.choice(lots)[3] if lots else "USD"
+            other_cur = "EUR" if lot_cur == "USD" else "USD"
+            mixed = len(cost_curs.get(acct, set())) > 1
+            if mixed:
+                cases.append("mixed-cost-currencies")
             roll = rng.random()
             if roll < 0.45 or not lots:
                 spec = "{}"
@@ -508,11 +538,26 @@ def gen_number_only_ledger(rng: random.Random) -> tuple[str, list[str]]:
                 spec = f"{{{rng.choice(lots)[2]}}}"
             price = ""
             if rng.random() < 0.3:
-                price = f" @ {rng.choice(PRICES)} {lot_cur}"
-            proceeds = qty * Decimal("13.00")
-            cash = f"  Assets:CashA  {proceeds} {lot_cur}"
+                price_cur = lot_cur
+                if rng.random() < 0.3:
+                    price_cur = other_cur
+                    cases.append("price-other-currency")
+                price = f" @ {rng.choice(PRICES)} {price_cur}"
+            cash_cur = lot_cur
             if rng.random() < 0.25:
-                # The cash leg number-only as well.
+                cash_cur = other_cur
+                cases.append("cash-other-currency")
+            proceeds = qty * Decimal("13.00")
+            cash = f"  Assets:CashA  {proceeds} {cash_cur}"
+            # The cash leg number-only as well -- except beside a cost
+            # currency nothing else names, from an account holding lots in
+            # two: then no step of beancount's rule resolves it, and
+            # beancount refuses ("Failed to categorize posting") what
+            # rledger books by the account's method. That divergence is
+            # documented (compatibility.md, Known Differences 17) and open
+            # for a decision, so it is not generated.
+            undecided = mixed and "USD}" not in spec and "EUR}" not in spec and not price
+            if rng.random() < 0.25 and not undecided:
                 cash = f"  Assets:CashA  {proceeds}"
             postings += [f"  {acct}  {-qty} {spec}{price}", cash, "  Income:Gains"]
         elif shape == "cost-augment":
@@ -520,6 +565,7 @@ def gen_number_only_ledger(rng: random.Random) -> tuple[str, list[str]]:
             qty = Decimal(rng.randint(1, 10))
             cost = Decimal(rng.choice(["10.00", "14.00", "8.50"]))
             cost_cur = rng.choice(["USD", "USD", "EUR"])
+            cost_curs.setdefault(acct, set()).add(cost_cur)
             postings += [f"  {acct}  {qty} {{{cost} {cost_cur}}}",
                          f"  Assets:CashA  {-(qty * cost)} {cost_cur}"]
             if rng.random() < 0.3:
@@ -550,7 +596,7 @@ def gen_number_only_ledger(rng: random.Random) -> tuple[str, list[str]]:
         lines += postings
         kinds = "+".join(holding.get(a, "?") for a in acct.split("+"))
         shapes.append(f"{shape}/{kinds}")
-    return "\n".join(lines) + "\n", shapes
+    return "\n".join(lines) + "\n", shapes, cases
 
 
 # A booked result is either an error or lot identity -> units.
@@ -742,23 +788,24 @@ def number_only_rng(seed: int) -> random.Random:
 
 def check_number_only(
     rledger: str, python: str, seed: int
-) -> tuple[str, list[str], list[str], str]:
+) -> tuple[str, list[str], list[str], list[str], str]:
     """Run the seed's number-only ledger through both engines.
 
     Returns a verdict ("agree" or "real"), the report, the shapes the ledger
-    exercises, and how both engines took it when they agreed ("booked" or
-    "rejected"; "" on a divergence).
+    exercises, the currency cases it reaches, and how both engines took it
+    when they agreed ("booked" or "rejected"; "" on a divergence).
     """
-    source, shapes = gen_number_only_ledger(number_only_rng(seed))
+    source, shapes, cases = gen_number_only_ledger(number_only_rng(seed))
     rl, bq = run_engines(rledger, python, source)
     diffs = compare(rl, bq)
     if not diffs:
-        return "agree", [], shapes, "rejected" if rl == ERROR else "booked"
+        return "agree", [], shapes, cases, "rejected" if rl == ERROR else "booked"
     return "real", [
-        f"seed={seed} ledger=number-only shapes={','.join(shapes)}",
+        f"seed={seed} ledger=number-only shapes={','.join(shapes)} "
+        f"cases={','.join(cases) or '-'}",
         *diffs,
         source,
-    ], shapes, ""
+    ], shapes, cases, ""
 
 
 def self_test(rledger: str, python: str) -> int:
@@ -831,8 +878,10 @@ def self_test(rledger: str, python: str) -> int:
     # silently stopped producing would otherwise report 0/0 forever.
     seen_shapes: set[str] = set()
     seen_holdings: set[str] = set()
+    seen_cases: set[str] = set()
     for seed in range(300):
-        source, shapes = gen_number_only_ledger(number_only_rng(seed))
+        source, shapes, cases = gen_number_only_ledger(number_only_rng(seed))
+        seen_cases |= set(cases)
         seen_shapes |= {tag.split("/")[0] for tag in shapes}
         seen_holdings |= {k for tag in shapes for k in tag.split("/")[1].split("+")}
         if not any(_is_number_only_posting(line) for line in source.splitlines()):
@@ -842,6 +891,7 @@ def self_test(rledger: str, python: str) -> int:
     for name, want, seen in (
         ("shape", NUMBER_ONLY_SHAPES, seen_shapes),
         ("holding", HOLDINGS, seen_holdings),
+        ("currency case", CURRENCY_CASES, seen_cases),
     ):
         missing = sorted(set(want) - seen)
         if missing:
@@ -898,6 +948,7 @@ def main() -> int:
     # counts once under each distinct shape and holding it contains.
     shape_tally = {shape: [0, 0, 0, 0] for shape in NUMBER_ONLY_SHAPES}
     holding_tally = {kind: [0, 0, 0, 0] for kind in HOLDINGS}
+    case_tally = {case: [0, 0, 0, 0] for case in CURRENCY_CASES}
     for seed in seeds:
         verdict, report = check_one(args.rledger, args.python, seed)
         if verdict != "agree":
@@ -908,12 +959,16 @@ def main() -> int:
             print("\n".join(report))
             print("-" * 60)
 
-        verdict, report, shapes, both = check_number_only(
+        verdict, report, shapes, cases, both = check_number_only(
             args.rledger, args.python, seed
         )
         bases = {tag.split("/")[0] for tag in shapes}
         kinds = {k for tag in shapes for k in tag.split("/")[1].split("+")}
-        for tally, keys in ((shape_tally, bases), (holding_tally, kinds)):
+        for tally, keys in (
+            (shape_tally, bases),
+            (holding_tally, kinds),
+            (case_tally, set(cases)),
+        ):
             for key in keys:
                 row = tally[key]
                 row[0] += 1
@@ -936,7 +991,11 @@ def main() -> int:
     # vanish. "both booked" / "both rejected" show each shape reached both
     # sides of the rule, not just one.
     print(f"{total - number_only_real}/{total} number-only ledgers agreed")
-    for label, tally in (("shape", shape_tally), ("holding", holding_tally)):
+    for label, tally in (
+        ("shape", shape_tally),
+        ("holding", holding_tally),
+        ("currency case", case_tally),
+    ):
         for key, (n, ok, booked, rejected) in tally.items():
             print(
                 f"  number-only {label} {key}: {ok}/{n} agreed "

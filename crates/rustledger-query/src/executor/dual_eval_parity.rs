@@ -73,6 +73,7 @@ fn run_both(
                 balance: None,
                 account_balance: None,
                 directive_index: None,
+                txn_accounts: None,
             };
             let call = FunctionCall {
                 name: name.to_string(),

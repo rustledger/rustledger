@@ -3,7 +3,7 @@
 //! Fetches current prices for commodities from configurable online sources.
 
 use crate::cmd::completions::ShellType;
-use crate::cmd::price::discovery::{DiscoveredCommodity, discover_symbols};
+use crate::cmd::price::discovery::{DiscoveredCommodity, discover_symbols_with_warnings};
 use crate::cmd::price::sources::PriceSource;
 use crate::cmd::price::{PriceRequest, PriceSourceRegistry};
 use crate::config::{CommodityMapping, PriceConfig};
@@ -132,7 +132,7 @@ pub struct PriceArgs {
 /// emitted `price` directives can be captured into an envelope.
 pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
     let mut stdout = io::stdout().lock();
-    run_with_writer(args, price_config, &mut stdout)
+    run_with_writer(args, price_config, &mut stdout, &mut io::stderr())
 }
 
 /// Dedup key for a `(symbol, quote-currency, date)` price identity:
@@ -150,15 +150,17 @@ fn dedup_key(symbol: &str, currency: &str, date: NaiveDate) -> (String, String, 
 /// Run the price command, writing fetched prices / plans / source listings
 /// to `out`.
 ///
-/// Behavior matches the original `run()`: progress, warnings and fetch
-/// errors still go to stderr, the on-disk price cache still applies, and
-/// network fetches are unchanged. Only the stdout-bound output (the
-/// `price` directives, `--dry-run` plan, and `--list-sources` listing) is
-/// redirected to the injected writer.
+/// The stdout-bound output (the `price` directives, `--dry-run` plan, and
+/// `--list-sources` listing) goes to `out`. Progress, warnings and fetch
+/// errors go to `err_out`, which `rledger` points at stderr. `ag-rledger`
+/// passes a buffer for its envelope: on the process's stderr, a symbol that
+/// failed to fetch left an `ok` envelope with that price silently missing
+/// (#2546).
 pub fn run_with_writer<W: Write>(
     args: &PriceArgs,
     price_config: &PriceConfig,
     out: &mut W,
+    err_out: &mut dyn Write,
 ) -> Result<()> {
     use crate::cmd::price::cache::{PriceCache, cache_key};
 
@@ -171,7 +173,7 @@ pub fn run_with_writer<W: Write>(
         let mut c = PriceCache::load(cache_ttl);
         c.clear();
         if args.verbose {
-            eprintln!("Price cache cleared");
+            let _ = writeln!(err_out, "Price cache cleared");
         }
     }
 
@@ -201,7 +203,8 @@ pub fn run_with_writer<W: Write>(
     // the active-commodity filter, matching `bean-price` semantics
     // (issues #948, #962).
     if args.all_commodities {
-        eprintln!(
+        let _ = writeln!(
+            err_out,
             "warning: `--all-commodities` is deprecated; use `--inactive --undeclared` instead. \
              It will be removed in a future release."
         );
@@ -245,13 +248,14 @@ pub fn run_with_writer<W: Write>(
         };
         let ledger = rustledger_loader::load(file, &opts)
             .with_context(|| format!("failed to load {} for symbol discovery", file.display()))?;
-        let discovered = discover_symbols(
+        let discovered = discover_symbols_with_warnings(
             &ledger.directives,
             &ledger.options,
             effective_inactive,
             effective_undeclared,
             date,
             &price_config.mapping,
+            err_out,
         );
         let mut existing = HashSet::new();
         for spanned in &ledger.directives {
@@ -287,18 +291,21 @@ pub fn run_with_writer<W: Write>(
     symbols_to_fetch.dedup();
 
     if symbols_to_fetch.is_empty() {
-        eprintln!(
+        let _ = writeln!(
+            err_out,
             "No symbols to fetch. Provide symbols as arguments or use -f with a beancount file."
         );
         if args.file.is_some() {
             if !effective_undeclared {
-                eprintln!(
+                let _ = writeln!(
+                    err_out,
                     "Hint: only commodities with `price:` or `quote_currency:` metadata are \
                      fetched by default. Pass --undeclared to also include ticker-shaped names."
                 );
             }
             if !effective_inactive {
-                eprintln!(
+                let _ = writeln!(
+                    err_out,
                     "Hint: only commodities currently held are fetched by default. \
                      Pass --inactive to include those with zero balance."
                 );
@@ -308,7 +315,7 @@ pub fn run_with_writer<W: Write>(
     }
 
     if args.verbose {
-        eprintln!("Fetching prices for: {symbols_to_fetch:?}");
+        let _ = writeln!(err_out, "Fetching prices for: {symbols_to_fetch:?}");
     }
 
     let combined_mapping = build_combined_mapping(&price_config.mapping, &discovered, &cli_mapping);
@@ -340,6 +347,7 @@ pub fn run_with_writer<W: Write>(
             &discovered,
             &existing_prices,
             out,
+            err_out,
         );
     }
 
@@ -398,7 +406,8 @@ pub fn run_with_writer<W: Write>(
                 let fetch_date = date.unwrap_or_else(|| jiff::Zoned::now().date());
                 if existing_prices.contains(&dedup_key(symbol, &effective_currency, fetch_date)) {
                     if args.verbose {
-                        eprintln!(
+                        let _ = writeln!(
+                            err_out,
                             "{symbol}: skipped (existing price for {fetch_date} {effective_currency}; pass --clobber to refetch)"
                         );
                     }
@@ -420,7 +429,8 @@ pub fn run_with_writer<W: Write>(
                     && existing_prices.contains(&dedup_key(symbol, &cached.currency, cached.date))
                 {
                     if args.verbose {
-                        eprintln!(
+                        let _ = writeln!(
+                            err_out,
                             "{symbol}: skipped from cache (cached date {} {} matches existing directive)",
                             cached.date, cached.currency
                         );
@@ -428,7 +438,7 @@ pub fn run_with_writer<W: Write>(
                     continue;
                 }
                 if args.verbose {
-                    eprintln!("{symbol}: cached (source: {})", cached.source);
+                    let _ = writeln!(err_out, "{symbol}: cached (source: {})", cached.source);
                 }
                 write_price(out, symbol, &cached, args.beancount, args.source_meta)?;
                 continue;
@@ -500,7 +510,8 @@ pub fn run_with_writer<W: Write>(
                         ))
                     {
                         if args.verbose {
-                            eprintln!(
+                            let _ = writeln!(
+                                err_out,
                                 "{symbol}: skipped after fetch (response dated {} {} matches existing directive)",
                                 response.date, response.currency
                             );
@@ -511,9 +522,9 @@ pub fn run_with_writer<W: Write>(
                 }
                 Err(e) => {
                     if args.verbose {
-                        eprintln!("Error fetching {symbol}: {e}");
+                        let _ = writeln!(err_out, "Error fetching {symbol}: {e}");
                     } else {
-                        eprintln!("; Failed to fetch {symbol}: {e}");
+                        let _ = writeln!(err_out, "; Failed to fetch {symbol}: {e}");
                     }
                 }
             }
@@ -809,6 +820,9 @@ fn write_price(
 }
 
 /// Run with an ad-hoc external command.
+// Nine: the eighth and ninth are the two output sinks (`handle` for prices,
+// `err_out` for fetch errors), which a struct would only rename.
+#[allow(clippy::too_many_arguments)]
 fn run_with_external_command<W: Write>(
     args: &PriceArgs,
     cmd: &str,
@@ -818,6 +832,7 @@ fn run_with_external_command<W: Write>(
     discovered: &HashMap<String, DiscoveredCommodity>,
     existing_prices: &HashSet<(String, String, NaiveDate)>,
     handle: &mut W,
+    err_out: &mut dyn Write,
 ) -> Result<()> {
     use crate::cmd::price::external::ExternalCommandSource;
 
@@ -874,7 +889,8 @@ fn run_with_external_command<W: Write>(
                 let fetch_date = date.unwrap_or_else(|| jiff::Zoned::now().date());
                 if existing_prices.contains(&dedup_key(symbol, &effective_currency, fetch_date)) {
                     if args.verbose {
-                        eprintln!(
+                        let _ = writeln!(
+                            err_out,
                             "{symbol}: skipped (existing price for {fetch_date} {effective_currency}; pass --clobber to refetch)"
                         );
                     }
@@ -902,7 +918,8 @@ fn run_with_external_command<W: Write>(
                         ))
                     {
                         if args.verbose {
-                            eprintln!(
+                            let _ = writeln!(
+                                err_out,
                                 "{symbol}: skipped after fetch (response dated {} {} matches existing directive)",
                                 response.date, response.currency
                             );
@@ -913,9 +930,9 @@ fn run_with_external_command<W: Write>(
                 }
                 Err(e) => {
                     if args.verbose {
-                        eprintln!("Error fetching {symbol}: {e}");
+                        let _ = writeln!(err_out, "Error fetching {symbol}: {e}");
                     } else {
-                        eprintln!("; Failed to fetch {symbol}: {e}");
+                        let _ = writeln!(err_out, "; Failed to fetch {symbol}: {e}");
                     }
                 }
             }

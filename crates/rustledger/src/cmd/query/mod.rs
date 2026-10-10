@@ -131,18 +131,28 @@ impl std::fmt::Display for OutputFormat {
 /// directly since it has no agent-native equivalent.
 pub fn run(args: &Args) -> Result<()> {
     let mut stdout = io::stdout();
-    run_with_writer(args, &mut stdout)
+    run_with_writer(args, &mut stdout, None, &mut io::stderr())
 }
 
 /// Run the query command with the given arguments, writing batch query
 /// results to `out`.
 ///
-/// Behavior matches the original `run()`: a `--output` file still takes
-/// precedence over `out`, validation errors still go to stderr, and
-/// interactive mode (no query text) is unchanged. Only the default
-/// stdout sink for batch results is replaced by the injected writer, so
-/// `ag-rledger` can capture query output into a JSON envelope.
-pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
+/// A `--output` file still takes precedence over `out`, and interactive
+/// mode (no query text) is unchanged.
+///
+/// The ledger's diagnostics go to `diagnostics` when one is given, one
+/// record per diagnostic, and otherwise to `err` as the lines `bean-query`
+/// prints. `err` also receives the `--verbose` progress lines. `rledger`
+/// passes `None` and the process's stderr; `ag-rledger` passes its own
+/// sinks, because it emits a single JSON envelope and the process's stderr
+/// is not part of it. Written straight to stderr, an agent reading the
+/// envelope saw a clean result for a ledger with a failing balance (#2546).
+pub fn run_with_writer<W: io::Write>(
+    args: &Args,
+    out: &mut W,
+    diagnostics: Option<&mut dyn crate::cmd::report_cmd::Diagnostics>,
+    err: &mut dyn io::Write,
+) -> Result<()> {
     // File is required (the --generate-completions flag is only for standalone bean-query)
     let Some(file) = args.file.as_ref() else {
         anyhow::bail!("FILE is required");
@@ -176,7 +186,7 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
     // identical to the uncached path. Disable with `--no-cache` or
     // `BEANCOUNT_DISABLE_LOAD_CACHE`.
     let (raw, _from_cache) =
-        crate::cmd::loadcache::load_result_cached(file, args.no_cache, args.verbose)?;
+        crate::cmd::loadcache::load_result_cached(file, args.no_cache, args.verbose, err)?;
     // Deliberate deviation from bean-query (#1908) — see `bail_on_parse_errors`.
     crate::cmd::loadcache::bail_on_parse_errors(&raw, file)?;
     let ledger = rustledger_loader::process(raw, &options)
@@ -220,10 +230,21 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
         )
         .collect();
     if !reported.is_empty() && !args.no_errors {
-        for (code, message) in reported {
-            eprintln!("{code}: {message}");
+        if let Some(sink) = diagnostics {
+            for (code, message) in reported {
+                sink.emit(crate::cmd::report_cmd::Diagnostic {
+                    code: Some(code.to_string()),
+                    ..crate::cmd::report_cmd::Diagnostic::message(message)
+                });
+            }
+        } else {
+            // A failed write to the diagnostics stream must not cost the
+            // reader the query's results.
+            for (code, message) in reported {
+                let _ = writeln!(err, "{code}: {message}");
+            }
+            let _ = writeln!(err);
         }
-        eprintln!();
     }
 
     // Merge pad-synthesized transactions into the directive stream
@@ -242,7 +263,7 @@ pub fn run_with_writer<W: io::Write>(args: &Args, out: &mut W) -> Result<()> {
     let display_context = ledger.display_context;
 
     if args.verbose {
-        eprintln!("Loaded {} directives", directives.len());
+        let _ = writeln!(err, "Loaded {} directives", directives.len());
     }
 
     // The QUERY positional is `trailing_var_arg` (so an unquoted query works),

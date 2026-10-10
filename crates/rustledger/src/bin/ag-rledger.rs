@@ -111,8 +111,8 @@ fn check_command(name: &'static str, description: &'static str) -> Command {
                 if args.file.is_none() {
                     args.file = default_file(&config, globals.profile.as_deref());
                 }
-                run_buffered("check", |out| {
-                    rustledger::cmd::check::run_with_writer(&args, out).map(exit_code_to_i32)
+                run_buffered_with_stderr("check", |out, err| {
+                    rustledger::cmd::check::run_with_writer(&args, out, err).map(exit_code_to_i32)
                 })
             })
         })
@@ -156,8 +156,9 @@ fn query_command(name: &'static str, description: &'static str) -> Command {
                     )
                     .exit_code(agcli::ExitCode::USAGE));
                 }
-                run_buffered("query", |out| {
-                    rustledger::cmd::query::run_with_writer(&args, out).map(|()| 0)
+                run_buffered_with_warnings("query", |out, warnings, err| {
+                    rustledger::cmd::query::run_with_writer(&args, out, Some(warnings), err)
+                        .map(|()| 0)
                 })
             })
         })
@@ -185,8 +186,8 @@ fn format_command(name: &'static str, description: &'static str) -> Command {
                 {
                     args.files.push(file);
                 }
-                run_buffered("format", |out| {
-                    rustledger::cmd::format::run_with_writer(&args, out).map(exit_code_to_i32)
+                run_buffered_with_stderr("format", |out, err| {
+                    rustledger::cmd::format::run_with_writer(&args, out, err).map(exit_code_to_i32)
                 })
             })
         })
@@ -395,7 +396,7 @@ fn report_command(name: &'static str, description: &'static str) -> Command {
                             .unwrap_or("text"),
                     )?,
                 };
-                run_buffered_with_warnings("report", |out, warnings| {
+                run_buffered_with_warnings("report", |out, warnings, err| {
                     rustledger::cmd::report_cmd::run_with_writer(
                         &file,
                         &args.report,
@@ -404,6 +405,7 @@ fn report_command(name: &'static str, description: &'static str) -> Command {
                         &format,
                         out,
                         warnings,
+                        err,
                     )
                     .map(|()| 0)
                 })
@@ -459,8 +461,8 @@ fn extract_command(name: &'static str, description: &'static str) -> Command {
                 // A WASM importer runs under the plugin budget.
                 load_config(&globals.budget)?;
                 if args.list_importers {
-                    return run_buffered("extract list-importers", |out| {
-                        rustledger::cmd::extract_cmd::list_importers_with_writer(&args, out)
+                    return run_buffered_with_stderr("extract list-importers", |out, err| {
+                        rustledger::cmd::extract_cmd::list_importers_with_writer(&args, out, err)
                             .map(|()| 0)
                     });
                 }
@@ -472,8 +474,9 @@ fn extract_command(name: &'static str, description: &'static str) -> Command {
                     .file
                     .clone()
                     .ok_or_else(|| missing_file_error("extract"))?;
-                run_buffered("extract", |out| {
-                    rustledger::cmd::extract_cmd::run_with_writer(&args, &file, out).map(|()| 0)
+                run_buffered_with_stderr("extract", |out, err| {
+                    rustledger::cmd::extract_cmd::run_with_writer(&args, &file, out, err)
+                        .map(|()| 0)
                 })
             })
         })
@@ -499,8 +502,8 @@ fn price_command(name: &'static str, description: &'static str) -> Command {
             Box::pin(async move {
                 let (args, globals) = parsed?;
                 let config = load_config(&globals.budget)?;
-                run_buffered("price", |out| {
-                    rustledger::cmd::price_cmd::run_with_writer(&args, &config.price, out)
+                run_buffered_with_stderr("price", |out, err| {
+                    rustledger::cmd::price_cmd::run_with_writer(&args, &config.price, out, err)
                         .map(|()| 0)
                 })
             })
@@ -608,11 +611,12 @@ fn compat_command() -> Command {
                 .exit_code(agcli::ExitCode::USAGE)
             })?;
             match action.as_str() {
-                "install" => run_buffered("compat install", |out| {
-                    rustledger::cmd::compat::install_with_writer(prefix.as_deref(), out).map(|()| 0)
+                "install" => run_buffered_with_stderr("compat install", |out, err| {
+                    rustledger::cmd::compat::install_with_writer(prefix.as_deref(), out, err)
+                        .map(|()| 0)
                 }),
-                "uninstall" => run_buffered("compat uninstall", |out| {
-                    rustledger::cmd::compat::uninstall_with_writer(prefix.as_deref(), out)
+                "uninstall" => run_buffered_with_stderr("compat uninstall", |out, err| {
+                    rustledger::cmd::compat::uninstall_with_writer(prefix.as_deref(), out, err)
                         .map(|()| 0)
                 }),
                 _ => Err(CommandError::new(
@@ -1152,56 +1156,74 @@ fn build_lint_args(req: &Req<'_>) -> Result<rustledger::cmd::lint::Args, Command
     })
 }
 
+/// Run a command whose output is all on `out`: nothing it calls writes to
+/// stderr (`doctor`, `config`, `add`, `lint`).
 fn run_buffered<F>(command: &str, run: F) -> Result<CommandOutput, CommandError>
 where
     F: FnOnce(&mut Vec<u8>) -> anyhow::Result<i32>,
 {
-    run_buffered_with_warnings(command, |out, _| run(out))
+    run_buffered_with_warnings(command, |out, _, _| run(out))
 }
 
-/// [`run_buffered`], for commands that also produce DIAGNOSTICS.
+/// [`run_buffered`], for a command that also writes what `rledger` sends to
+/// stderr: progress, `--diff` hunks, fetch errors, warnings. It goes to the
+/// envelope's `result.stderr`, not the process's stderr, which the envelope
+/// does not carry (#2546).
+fn run_buffered_with_stderr<F>(command: &str, run: F) -> Result<CommandOutput, CommandError>
+where
+    F: FnOnce(&mut Vec<u8>, &mut Vec<u8>) -> anyhow::Result<i32>,
+{
+    run_buffered_with_warnings(command, |out, _, err| run(out, err))
+}
+
+/// [`run_buffered_with_stderr`], for commands that also produce DIAGNOSTICS.
 ///
-/// The envelope carries them in `warnings`. Reports write theirs to a sink
-/// rather than the process's stderr precisely so this can happen: an agent
-/// asking for a text or CSV budget report used to get a tidy `0.0%`-used row
-/// for a budget on a misspelled account, with the warning that says so written
-/// to a stream this envelope discards.
+/// The envelope carries them in `warnings`, one object per diagnostic.
+/// Reports and queries write theirs to a sink rather than the process's
+/// stderr precisely so this can happen: an agent asking for a text or CSV
+/// budget report used to get a tidy `0.0%`-used row for a budget on a
+/// misspelled account, with the warning that says so written to a stream
+/// this envelope discards, and `query` reported a failing balance the same
+/// way (#2546).
 fn run_buffered_with_warnings<F>(command: &str, run: F) -> Result<CommandOutput, CommandError>
 where
-    F: FnOnce(&mut Vec<u8>, &mut CollectedDiagnostics) -> anyhow::Result<i32>,
+    F: FnOnce(&mut Vec<u8>, &mut CollectedDiagnostics, &mut Vec<u8>) -> anyhow::Result<i32>,
 {
     let mut stdout = Vec::new();
     let mut diagnostics = CollectedDiagnostics::default();
-    let exit_code = run(&mut stdout, &mut diagnostics).map_err(|e| command_failed(&e))?;
+    let mut stderr = Vec::new();
+    let outcome = run(&mut stdout, &mut diagnostics, &mut stderr);
+    let stderr = String::from_utf8_lossy(&stderr).into_owned();
+    let warnings = warnings_json(&diagnostics);
+    let exit_code = match outcome {
+        Ok(code) => code,
+        Err(e) => {
+            // What the command wrote before it failed is often the reason
+            // (`format` lists each parse error, then fails), so it rides on
+            // the error rather than being dropped with the result.
+            let mut error = command_failed(&e);
+            let mut data = serde_json::Map::new();
+            if !stderr.is_empty() {
+                data.insert("stderr".to_string(), json!(stderr));
+            }
+            if let Some(items) = warnings {
+                data.insert("warnings".to_string(), items);
+            }
+            if !data.is_empty() {
+                error = error.data(Value::Object(data));
+            }
+            return Err(error);
+        }
+    };
     let stdout = String::from_utf8_lossy(&stdout).into_owned();
     let mut result = command_result(command, &stdout, exit_code);
-    if !diagnostics.0.is_empty()
-        && let Value::Object(map) = &mut result
-    {
-        // One OBJECT per diagnostic, carrying the fields the report already
-        // knew. Reports used to hand over formatted lines, so this had to
-        // rebuild records by splitting on newlines — which a message carrying
-        // its own newline broke in half, and which discarded the date and the
-        // account outright.
-        let items: Vec<Value> = diagnostics
-            .0
-            .iter()
-            .map(|d| {
-                let mut o = serde_json::Map::new();
-                if let Some(code) = &d.code {
-                    o.insert("code".to_string(), json!(code));
-                }
-                if let Some(date) = d.date {
-                    o.insert("date".to_string(), json!(date.to_string()));
-                }
-                if let Some(account) = &d.account {
-                    o.insert("account".to_string(), json!(account));
-                }
-                o.insert("message".to_string(), json!(d.message));
-                Value::Object(o)
-            })
-            .collect();
-        map.insert("warnings".to_string(), json!(items));
+    if let Value::Object(map) = &mut result {
+        if !stderr.is_empty() {
+            map.insert("stderr".to_string(), json!(stderr));
+        }
+        if let Some(items) = warnings {
+            map.insert("warnings".to_string(), items);
+        }
     }
     Ok(CommandOutput::new(result)
         .exit_code(exit_code)
@@ -1209,6 +1231,38 @@ where
             format!("ag-rledger {command} --help"),
             "Inspect command usage",
         )))
+}
+
+/// The diagnostics as the envelope's `warnings` array, or `None` when there
+/// are none.
+///
+/// One OBJECT per diagnostic, carrying the fields the command already knew.
+/// Reports used to hand over formatted lines, so this had to rebuild records
+/// by splitting on newlines — which a message carrying its own newline broke
+/// in half, and which discarded the date and the account outright.
+fn warnings_json(diagnostics: &CollectedDiagnostics) -> Option<Value> {
+    if diagnostics.0.is_empty() {
+        return None;
+    }
+    let items: Vec<Value> = diagnostics
+        .0
+        .iter()
+        .map(|d| {
+            let mut o = serde_json::Map::new();
+            if let Some(code) = &d.code {
+                o.insert("code".to_string(), json!(code));
+            }
+            if let Some(date) = d.date {
+                o.insert("date".to_string(), json!(date.to_string()));
+            }
+            if let Some(account) = &d.account {
+                o.insert("account".to_string(), json!(account));
+            }
+            o.insert("message".to_string(), json!(d.message));
+            Value::Object(o)
+        })
+        .collect();
+    Some(json!(items))
 }
 
 fn command_result(command: &str, stdout: &str, exit_code: i32) -> Value {

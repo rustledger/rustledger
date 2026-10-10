@@ -536,6 +536,13 @@ pub struct PostingContext<'a> {
     pub account_balance: Option<std::sync::Arc<Inventory>>,
     /// The directive index (for source location lookup).
     pub directive_index: Option<usize>,
+    /// The transaction's `accounts` set, built once per transaction by the
+    /// posting scan and shared by its rows, when the query reads `accounts`
+    /// or `other_accounts`. `None` means "build it from the transaction";
+    /// the columns read the same either way. Rebuilding it for every row
+    /// made a transaction of n postings cost O(n^2) on the default table
+    /// (#2504), where `#postings` already built it once per transaction.
+    pub(super) txn_accounts: Option<std::sync::Arc<super::system_tables::TxnAccounts<String>>>,
 }
 
 /// Context for window function evaluation.

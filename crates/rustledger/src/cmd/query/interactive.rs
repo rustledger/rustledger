@@ -103,6 +103,14 @@ pub(super) fn run_interactive(
 
                 let _ = rl.add_history_entry(line);
 
+                // A line holding only a `/* ... */` comment is no query
+                // (#2403). An unclosed one is left to the parser to report.
+                if rustledger_query::parser::strip_comments(line)
+                    .is_ok_and(|stripped| stripped.trim().is_empty())
+                {
+                    continue;
+                }
+
                 // Handle dot-commands
                 if let Some(cmd) = line.strip_prefix('.') {
                     if handle_dot_command(cmd, &mut settings, &mut executor, directives) {
@@ -300,37 +308,12 @@ fn handle_dot_command(
                         println!("  meta (object)");
                     }
                     "postings" => {
+                        // The executor's own column list, so this cannot
+                        // drift from what a query accepts (#2505).
                         println!("table postings:");
-                        println!("  type (str)");
-                        println!("  id (int)");
-                        println!("  date (date)");
-                        println!("  year (int)");
-                        println!("  month (int)");
-                        println!("  day (int)");
-                        println!("  filename (str)");
-                        println!("  lineno (int)");
-                        println!("  location (str)");
-                        println!("  flag (str)");
-                        println!("  payee (str)");
-                        println!("  narration (str)");
-                        println!("  description (str)");
-                        println!("  tags (set)");
-                        println!("  links (set)");
-                        println!("  posting_flag (str)");
-                        println!("  account (str)");
-                        println!("  other_accounts (set)");
-                        println!("  number (decimal)");
-                        println!("  currency (str)");
-                        println!("  cost_number (decimal)");
-                        println!("  cost_currency (str)");
-                        println!("  cost_date (date)");
-                        println!("  cost_label (str)");
-                        println!("  position (position)");
-                        println!("  price (amount)");
-                        println!("  weight (amount)");
-                        println!("  balance (inventory)");
-                        println!("  meta (dict)");
-                        println!("  accounts (set[str])");
+                        for column in rustledger_query::executor::POSTING_COLUMNS {
+                            println!("  {} ({})", column.name, column.type_name);
+                        }
                     }
                     _ => eprintln!("error: unknown table \"{}\"", args[0]),
                 }

@@ -42,7 +42,7 @@ pub fn validate_transaction_early(
         // on their pre-rewrite account name. The recorded key lets the late
         // phase skip re-reporting an elided posting that is still unopened.
         if posting.units.is_none() {
-            push_account_not_open(&posting.account, txn.date, "Account", errors);
+            push_account_not_open(state, &posting.account, txn.date, "Account", errors);
             // Key by the posting's source identity (not account/date) so the
             // late phase skips *this* posting only — a different posting that
             // merely shares the account on the same date is still reported.
@@ -113,7 +113,7 @@ pub fn validate_transaction_late(
             .account_not_open_early
             .contains(&(posting.file_id, posting.span))
         {
-            push_account_not_open(&posting.account, txn.date, "Account", errors);
+            push_account_not_open(state, &posting.account, txn.date, "Account", errors);
         }
     }
 

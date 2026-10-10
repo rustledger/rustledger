@@ -11,16 +11,16 @@ A collection of useful BQL queries for everyday financial reporting.
 ### Current Balances
 
 ```sql
--- All account balances
+/* All account balances */
 SELECT account, sum(position) AS balance
 GROUP BY account ORDER BY account
 
--- Specific account
+/* Specific account */
 SELECT account, sum(position) AS balance
 WHERE account ~ "Assets:Bank"
 GROUP BY account
 
--- Top-level summary
+/* Top-level summary */
 SELECT root(account, 1) AS type, sum(position) AS balance
 GROUP BY type
 ```
@@ -28,7 +28,7 @@ GROUP BY type
 ### Balance at Date
 
 ```sql
--- Balances as of a specific date
+/* Balances as of a specific date */
 SELECT account, sum(position) AS balance
 WHERE date <= 2024-06-30
 GROUP BY account
@@ -39,7 +39,7 @@ GROUP BY account
 ### Monthly Expenses
 
 ```sql
--- Total expenses by month
+/* Total expenses by month */
 SELECT year(date) AS year, month(date) AS month, sum(cost(position)) AS total
 WHERE account ~ "Expenses"
 GROUP BY year, month
@@ -49,7 +49,7 @@ ORDER BY year, month
 ### Expenses by Category
 
 ```sql
--- Breakdown by expense category
+/* Breakdown by expense category */
 SELECT root(account, 2) AS category, sum(cost(position)) AS total
 WHERE account ~ "Expenses"
 GROUP BY category
@@ -59,13 +59,13 @@ ORDER BY total DESC
 ### Year-over-Year Comparison
 
 ```sql
--- Compare years with separate queries
--- 2023 expenses:
+/* Compare years with separate queries */
+/* 2023 expenses: */
 SELECT root(account, 2) AS category, sum(cost(position)) AS total
 WHERE account ~ "Expenses" AND year(date) = 2023
 GROUP BY category ORDER BY total DESC
 
--- 2024 expenses:
+/* 2024 expenses: */
 SELECT root(account, 2) AS category, sum(cost(position)) AS total
 WHERE account ~ "Expenses" AND year(date) = 2024
 GROUP BY category ORDER BY total DESC
@@ -85,12 +85,12 @@ ORDER BY total
 ### Monthly Income vs Expenses
 
 ```sql
--- Monthly income
+/* Monthly income */
 SELECT year(date) AS year, month(date) AS month, sum(cost(position)) AS income
 WHERE account ~ "Income"
 GROUP BY year, month ORDER BY year, month
 
--- Monthly expenses
+/* Monthly expenses */
 SELECT year(date) AS year, month(date) AS month, sum(cost(position)) AS expenses
 WHERE account ~ "Expenses"
 GROUP BY year, month ORDER BY year, month
@@ -101,7 +101,7 @@ GROUP BY year, month ORDER BY year, month
 ### Recent Transactions
 
 ```sql
--- Last 20 transactions
+/* Last 20 transactions */
 SELECT date, narration, account, position
 ORDER BY date DESC
 LIMIT 20
@@ -118,7 +118,7 @@ ORDER BY date DESC
 ### Large Transactions
 
 ```sql
--- Find transactions over $500 (filter results manually or use report command)
+/* Find transactions over $500 (filter results manually or use report command) */
 SELECT date, payee, narration, account, cost(position) AS amount
 WHERE account ~ "Expenses"
 ORDER BY date DESC
@@ -188,7 +188,7 @@ ORDER BY payee
 ### Account Activity
 
 ```sql
--- Find accounts with transactions in a date range
+/* Find accounts with transactions in a date range */
 SELECT DISTINCT account
 WHERE date >= 2024-01-01 AND date <= 2024-03-31
 ORDER BY account

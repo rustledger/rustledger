@@ -269,7 +269,7 @@ fn textual_normalize(path: &str) -> PathBuf {
 fn not_found(path: &Path, message: &str) -> LoadError {
     LoadError::Io {
         path: path.to_path_buf(),
-        source: std::io::Error::new(std::io::ErrorKind::NotFound, message.to_string()),
+        error: std::io::Error::new(std::io::ErrorKind::NotFound, message.to_string()),
         include_site: None,
     }
 }

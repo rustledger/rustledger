@@ -8112,9 +8112,9 @@ proptest::proptest! {
 //
 // `long_short` rebooks generic `Income:.*Capital-Gains` postings into
 // `:Short` / `:Long` accounts based on holding period. The plugin
-// classifies as long-term when `years_held > 1`, OR when
-// `years_held == 1` AND the entry's month/day is on/after the cost's
-// month/day (i.e. the holding has crossed the 1-year anniversary).
+// classifies as long-term when the sale date is after the lot's one-year
+// anniversary (held more than one calendar year), the same rule as the
+// `capgains` report.
 //
 // Config format:
 //   {'pattern': ['account_to_replace', 'short_replacement', 'long_replacement']}
@@ -8407,6 +8407,81 @@ fn test_capital_gains_long_short_classifies_long_term() {
         "long_term gain amount = (cost - price) * |units| = -500"
     );
     assert_eq!(long_units.currency, "USD");
+}
+
+/// Classify one sale and return which bucket its gain landed in.
+fn long_short_bucket(entry_date: &str, cost_date: &str) -> &'static str {
+    let plugin = CapitalGainsLongShortPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_open("2020-01-01", "Assets:Stock"),
+            make_open("2020-01-01", "Assets:Cash"),
+            make_open("2020-01-01", "Income:Capital-Gains"),
+            make_long_short_sale(
+                entry_date,
+                cost_date,
+                ("-10", "AAPL"),
+                ("100", "USD"),
+                ("150", "USD"),
+                "Income:Capital-Gains",
+                ("-500", "USD"),
+            ),
+        ],
+        LONG_SHORT_CFG,
+    );
+    let output = process_and_materialize(&plugin, input);
+    assert_eq!(output.errors.len(), 0);
+    let DirectiveData::Transaction(data) = &output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("transaction present")
+        .data
+    else {
+        panic!("not a transaction");
+    };
+    let short = data
+        .postings
+        .iter()
+        .filter(|p| p.account.ends_with(":Short"))
+        .count();
+    let long = data
+        .postings
+        .iter()
+        .filter(|p| p.account.ends_with(":Long"))
+        .count();
+    match (short, long) {
+        (1, 0) => "short",
+        (0, 1) => "long",
+        other => panic!("expected exactly one bucket, got (short, long) = {other:?}"),
+    }
+}
+
+/// Long-term means held MORE than one calendar year: the sale must fall
+/// after the acquisition's one-year anniversary. Pins the boundary on both
+/// sides, a sale in the calendar year after the anniversary year (which a
+/// month/day-only comparison misreads), and a leap-day acquisition.
+#[test]
+fn test_capital_gains_long_short_one_year_boundary() {
+    let cases = [
+        // (sold, acquired, expected)
+        ("2025-09-02", "2024-09-03", "short"), // day before anniversary
+        ("2025-09-03", "2024-09-03", "short"), // anniversary: exactly one year
+        ("2025-09-04", "2024-09-03", "long"),  // day after anniversary
+        ("2026-01-16", "2024-09-03", "long"),  // 500 days, earlier month-day
+        ("2026-09-02", "2024-09-03", "long"),  // just under two years
+        ("2025-12-31", "2025-01-15", "short"), // same calendar year span
+        ("2025-12-31", "2024-01-15", "long"),  // 716 days, later month-day
+        ("2025-02-28", "2024-02-29", "short"), // leap day: anniversary is Feb 28
+        ("2025-03-01", "2024-02-29", "long"),
+    ];
+    for (sold, acquired, expected) in cases {
+        assert_eq!(
+            long_short_bucket(sold, acquired),
+            expected,
+            "acquired {acquired}, sold {sold}"
+        );
+    }
 }
 
 /// Reduction posting with NO cost date, generic `Income:Capital-Gains`

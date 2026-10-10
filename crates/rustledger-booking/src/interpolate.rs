@@ -771,9 +771,23 @@ pub struct ElidedCurrencies {
     /// `(posting index, currency)` for each currency-less units number;
     /// `None` where no step resolves it.
     units: Vec<(usize, Option<Currency>)>,
-    /// `(posting index, currency)` for each cost spec naming no currency
-    /// (`{}`, `{11.00}`, `{2020-01-02}`) whose currency the rule resolves.
+    /// The currencies of the cost specs naming none.
+    pub costs: ElidedCosts,
+}
+
+/// The currency of each cost spec written without one (`{}`, `{11.00}`,
+/// `{2020-01-02}`), by posting index.
+#[derive(Debug, Default)]
+pub struct ElidedCosts {
+    /// Beancount's answer, for each spec its rule resolves.
     pub costs: Vec<(usize, Currency)>,
+    /// For a spec whose answer is its own commodity (`10 X` moved in beside
+    /// `-4 X {}`), the account's one cost currency (or `None`), which a
+    /// REDUCTION takes instead: no lot of X is held at a cost in X, so the
+    /// commodity's own postings say nothing about which lot is sold. An
+    /// augmentation keeps beancount's answer and is booked at a cost in X, as
+    /// beancount books it (#2571 review).
+    pub reduction_overrides: Vec<(usize, Option<Currency>)>,
 }
 
 impl ElidedCurrencies {
@@ -824,14 +838,14 @@ impl ElidedCurrencies {
 /// Two departures from beancount, both where its rule refuses a well-defined
 /// sale that booked before #2571 (compatibility.md, Known Differences 17):
 ///
-/// - Step 2 skips a group that is the posting's own commodity. Beside `10 X`
-///   moved in from elsewhere, beancount gives `-4 X {}` the cost currency X,
-///   which no lot of X is ever held in, and finds no position.
-/// - A cost spec no step resolves is left out of `costs`, and booking treats
-///   its currency as a wildcard as before. Beancount refuses such a posting
-///   ("Failed to categorize posting"); here a FIFO sale with only
-///   auto-postings beside it, from an account holding lots in two cost
-///   currencies, still sells the oldest lot.
+/// - A SALE skips a group that is its own commodity. Beside `10 X` moved in
+///   from elsewhere, beancount gives `-4 X {}` the cost currency X, which no
+///   lot of X is held in, and finds no position.
+/// - A cost spec no step resolves is left out of `costs`. Beancount refuses
+///   such a posting ("Failed to categorize posting"), and so does booking a
+///   sale, unless every other posting is an auto-posting: then it sells by the
+///   account's method as before, and the auto-postings absorb whatever
+///   currency that lot cost.
 pub fn resolve_elided_currencies<'a>(
     txn: &Transaction,
     held: impl Fn(&rustledger_core::Account) -> Option<&'a rustledger_core::Inventory>,
@@ -905,12 +919,11 @@ pub fn resolve_elided_currencies<'a>(
         units.push((i, currency));
     }
 
-    let mut costs = Vec::with_capacity(cost_targets.len());
+    let mut costs = ElidedCosts::default();
     for (i, from_price) in cost_targets {
-        // Not the posting's own commodity: a lot of X is never held at a cost
-        // in X, so a group that is X (`10 X` moved in beside `-4 X {}`) says
-        // nothing about what the lot cost. Beancount takes it anyway and
-        // refuses a sale it cannot match; this reads the account instead
+        // The posting's own commodity as the group: a sale reads the account
+        // instead (see `ElidedCosts::reduction_overrides`). Beancount takes
+        // the group anyway and refuses a sale it cannot match
         // (compatibility.md, Known Differences 17).
         let commodity: Option<&Currency> = match &txn.postings[i].units {
             Some(IncompleteAmount::Complete(amount)) => Some(&amount.currency),
@@ -921,13 +934,14 @@ pub fn resolve_elided_currencies<'a>(
                 .and_then(|(_, c)| c.as_ref()),
             None => None,
         };
-        let from_group = sole_group.filter(|g| Some(*g) != commodity);
-        let currency = from_price
-            .or(from_group)
-            .cloned()
-            .or_else(|| held_cost_currency(held(&txn.postings[i].account)?));
+        let from_account = || held_cost_currency(held(&txn.postings[i].account)?);
+        let currency = from_price.or(sole_group).cloned().or_else(from_account);
+        let own_commodity = sole_group.is_some_and(|g| Some(g) == commodity);
+        if from_price.is_none() && own_commodity {
+            costs.reduction_overrides.push((i, from_account()));
+        }
         if let Some(currency) = currency {
-            costs.push((i, currency));
+            costs.costs.push((i, currency));
         }
     }
     ElidedCurrencies { units, costs }

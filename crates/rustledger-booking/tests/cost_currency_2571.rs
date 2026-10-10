@@ -17,7 +17,7 @@
 //!
 //! Three cases are NOT beancount's answer, and are pinned so that changing them
 //! is a decision rather than an accident; see the #2571 PR:
-//! - an augmentation priced in another currency than its cost still books
+//! - a purchase priced in another currency than its cost still books
 //!   (beancount: "Cost and price currencies must match"); nothing is
 //!   disposed of, so no gain is computed from the two;
 //! - a `{}` sale no step resolves (only auto-postings beside it, lots in two
@@ -418,4 +418,129 @@ fn the_commoditys_own_postings_do_not_name_its_cost_currency() {
         got.contains(&"Assets:Stock -1 HOOL {11.00 EUR}".to_string()),
         "{got:?}"
     );
+}
+
+/// Review finding: a `{}` sale no step resolves, with other postings that name
+/// currencies, is refused as beancount refuses it ("Failed to categorize
+/// posting"). The other postings span USD and EUR, and the account holds
+/// lots in both; the wildcard sold the EUR lot for USD cash.
+#[test]
+fn an_unresolved_empty_cost_beside_written_postings_is_refused() {
+    let history = vec![
+        buy(2, "Assets:Stock", dec!(2), dec!(11.00), "EUR"),
+        buy(3, "Assets:Stock", dec!(1), dec!(12.00), "USD"),
+    ];
+    let sell = txn(
+        5,
+        vec![
+            hool("Assets:Stock", dec!(-1), spec(None, None)),
+            cash("Assets:Cash", dec!(13.00), "USD"),
+            cash("Expenses:Fees", dec!(1.00), "EUR"),
+            cash("Assets:CashEUR", dec!(-1.00), "EUR"),
+            Posting::auto("Income:Gains"),
+        ],
+    );
+    match book(BookingMethod::Fifo, history.clone(), sell) {
+        Err(BookingError::Interpolation(
+            rustledger_booking::InterpolationError::AmbiguousInferredCostCurrency { candidates },
+        )) => assert_eq!(candidates, "EUR, USD"),
+        other => panic!("expected AmbiguousInferredCostCurrency, got {other:?}"),
+    }
+    // A currency-less cash number is a written posting too.
+    let mut funded = history;
+    funded.push(txn(
+        4,
+        vec![
+            cash("Assets:Cash", dec!(100), "USD"),
+            Posting::auto("Equity:Opening"),
+        ],
+    ));
+    let sell = txn(
+        5,
+        vec![
+            hool("Assets:Stock", dec!(-1), spec(None, None)),
+            Posting::with_incomplete("Assets:Cash", IncompleteAmount::NumberOnly(dec!(13))),
+            Posting::auto("Income:Gains"),
+        ],
+    );
+    assert!(matches!(
+        book(BookingMethod::Fifo, funded, sell),
+        Err(BookingError::Interpolation(
+            rustledger_booking::InterpolationError::AmbiguousInferredCostCurrency { .. }
+        ))
+    ));
+}
+
+/// Review finding: a sale that is not a reduction, under NONE or opening a
+/// short, disposes all the same, and its gain absorbed both currencies.
+/// Beancount refuses both ("Cost and price currencies must match").
+#[test]
+fn a_non_reducing_sale_priced_in_another_currency_is_refused() {
+    let priced_sale = || {
+        txn(
+            5,
+            vec![
+                hool(
+                    "Assets:Stock",
+                    dec!(-1),
+                    spec(Some(dec!(11.00)), Some("EUR")),
+                )
+                .with_price(PriceAnnotation::unit(Amount::new(dec!(13.00), "USD"))),
+                cash("Assets:Cash", dec!(13.00), "USD"),
+                Posting::auto("Income:Gains"),
+            ],
+        )
+    };
+    assert_cost_price_mismatch(book(BookingMethod::None, eur_lots(), priced_sale()));
+    // Opening a short: the account holds nothing.
+    assert_cost_price_mismatch(book(BookingMethod::Fifo, vec![], priced_sale()));
+}
+
+/// Review finding: the own-commodity rule is for sales. An augmentation whose
+/// only other group is its commodity keeps beancount's answer, a cost in
+/// that commodity, as main and beancount book it (`5 HOOL {1 HOOL}`).
+#[test]
+fn an_augmentation_beside_its_own_commodity_keeps_beancounts_cost_currency() {
+    let history = vec![
+        txn(
+            2,
+            vec![
+                Posting::new("Assets:A", Amount::new(dec!(5), "HOOL")),
+                Posting::new("Assets:Cash", Amount::new(dec!(-5), "HOOL")),
+            ],
+        ),
+        buy(2, "Assets:Stock", dec!(1), dec!(10), "USD"),
+    ];
+    let mv = txn(
+        3,
+        vec![
+            Posting::new("Assets:A", Amount::new(dec!(-5), "HOOL")),
+            hool("Assets:Stock", dec!(5), spec(None, None)),
+        ],
+    );
+    let got = book(BookingMethod::Fifo, history, mv).unwrap();
+    assert_eq!(got[1], "Assets:Stock 5 HOOL {1 HOOL}");
+}
+
+/// Review finding: the inferred-currency message is for a lot excluded by its
+/// currency. A wrong cost number beside a lot in the right currency is the
+/// ordinary "no matching lot".
+#[test]
+fn a_wrong_cost_number_is_an_ordinary_no_match() {
+    let history = vec![buy(2, "Assets:Stock", dec!(2), dec!(10), "USD")];
+    let sell = txn(
+        5,
+        vec![
+            hool("Assets:Stock", dec!(-1), spec(Some(dec!(11)), None)),
+            cash("Assets:Cash", dec!(13), "USD"),
+            Posting::auto("Income:Gains"),
+        ],
+    );
+    match book(BookingMethod::Fifo, history, sell) {
+        Err(BookingError::Inventory(e)) => assert!(
+            matches!(e.error, rustledger_core::BookingError::NoMatchingLot { .. }),
+            "{e:?}"
+        ),
+        other => panic!("expected the ordinary NoMatchingLot, got {other:?}"),
+    }
 }

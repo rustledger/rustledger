@@ -71,7 +71,7 @@ pub enum BookingError {
     /// words.
     #[error(
         "Cost and price currencies must match: {cost} != {price} \
-         (a reduction of {account} priced in another currency than its cost has no gain \
+         (a sale from {account} priced in another currency than its cost has no gain \
          without an exchange rate)"
     )]
     CostPriceCurrencyMismatch {
@@ -93,8 +93,8 @@ pub enum BookingError {
     /// never wrote the currency that excluded the lots they can see.
     #[error(
         "No matching lot for {commodity} in {account} held at a cost in {cost}: the cost \
-         spec names no currency, so it takes {cost} from the transaction; write the cost \
-         currency to reduce a lot held in another"
+         spec names no currency, so it takes {cost} from its price, the other postings or \
+         the account's lots; write the cost currency to reduce a lot held in another"
     )]
     NoLotInInferredCostCurrency {
         /// The account being reduced.
@@ -370,7 +370,7 @@ impl BookingEngine {
     /// points ([`Self::book_interpolate_apply`]) resolve it first.
     pub fn book(&self, txn: &Transaction) -> Result<BookedTransaction, BookingError> {
         if !txn.postings.iter().any(|p| p.cost.is_some()) {
-            return self.book_with(txn, &[]);
+            return self.book_with(txn, &crate::interpolate::ElidedCosts::default());
         }
         let costs = crate::interpolate::resolve_elided_currencies(txn, |account| {
             self.inventories.get(account).map(AsRef::as_ref)
@@ -385,7 +385,7 @@ impl BookingEngine {
     fn book_with(
         &self,
         txn: &Transaction,
-        cost_currencies: &[(usize, rustledger_core::Currency)],
+        cost_currencies: &crate::interpolate::ElidedCosts,
     ) -> Result<BookedTransaction, BookingError> {
         // Fast path: if no postings have cost specs, no booking is needed.
         // This avoids expensive inventory cloning for simple transactions.
@@ -497,12 +497,45 @@ impl BookingEngine {
                 // question and the augmentation's fill-in (#2571). Matching
                 // `{}` as a wildcard sold a EUR lot for USD cash and booked a
                 // "gain" in two currencies with no rate between them.
-                let filled_currency = cost_spec
+                let mut filled_currency = cost_spec
                     .currency
                     .is_none()
-                    .then(|| cost_currencies.iter().find(|(i, _)| *i == idx))
-                    .flatten()
-                    .map(|(_, currency)| currency.clone());
+                    .then(|| {
+                        cost_currencies
+                            .costs
+                            .iter()
+                            .find(|(i, _)| *i == idx)
+                            .map(|(_, c)| c.clone())
+                    })
+                    .flatten();
+                // A sale whose only other group is its own commodity reads the
+                // account instead; asked of the spec as the sale would fill
+                // it, since the reduction question needs a per-unit cost's
+                // currency (see `ElidedCosts::reduction_overrides`).
+                if cost_spec.currency.is_none()
+                    && let Some((_, alternative)) = cost_currencies
+                        .reduction_overrides
+                        .iter()
+                        .find(|(i, _)| *i == idx)
+                {
+                    let probe = CostSpec {
+                        currency: alternative.clone(),
+                        ..(**cost_spec).clone()
+                    };
+                    let sells = working_inventories
+                        .get(&posting.account)
+                        .or_else(|| self.inventories.get(&posting.account).map(AsRef::as_ref))
+                        .is_some_and(|inv| {
+                            inv.is_booking_reduction(
+                                units,
+                                Some(&probe),
+                                self.method_for(&posting.account),
+                            )
+                        });
+                    if sells {
+                        filled_currency.clone_from(alternative);
+                    }
+                }
                 let filled_owned;
                 let cost_spec: &CostSpec = if let Some(currency) = &filled_currency {
                     filled_owned = CostSpec {
@@ -519,15 +552,34 @@ impl BookingEngine {
                 // one currency, the lot what they cost in another, and nothing
                 // relates the two. Beancount refuses every such posting ("Cost
                 // and price currencies must match"); a reduction is refused
-                // here, below, once it is known to be one. An augmentation is
-                // deliberately not: it disposes of nothing, so no gain is
-                // computed from the two, and its price is only a price
-                // (compatibility.md, Known Differences 17).
+                // below once it is known to be one, and a sale that is not
+                // a reduction just after. A purchase is deliberately not: it
+                // disposes of nothing, so no gain is computed from the two,
+                // and its price is only a price (compatibility.md, Known
+                // Differences 17).
                 let price_currency: Option<&str> = posting
                     .price
                     .as_ref()
                     .and_then(|p| p.amount.as_ref())
                     .and_then(IncompleteAmount::currency);
+                let mismatch = || match (&cost_spec.currency, price_currency) {
+                    (Some(cost), Some(price)) if cost.as_str() != price => {
+                        Some(BookingError::CostPriceCurrencyMismatch {
+                            account: posting.account.clone(),
+                            cost: cost.clone(),
+                            price: price.into(),
+                        })
+                    }
+                    _ => None,
+                };
+                // A sale that is not a reduction disposes all the same: one
+                // under NONE, or one opening a short. Its gain absorbs both
+                // currencies just as a reduction's does (#2571 review).
+                if units.number.is_sign_negative()
+                    && let Some(e) = mismatch()
+                {
+                    return Err(e);
+                }
                 // Normalize compound `{a # b}` up front (#1700): both the
                 // reduction path (which uses the spec as a lot-match filter
                 // via `per_unit()`) and apply() (which re-reduces from the
@@ -669,15 +721,38 @@ impl BookingEngine {
                     };
                     let is_reduction = inv.is_booking_reduction(units, Some(classify_as), method);
 
+                    if is_reduction && let Some(e) = mismatch() {
+                        return Err(e);
+                    }
+                    // A sale whose cost currency no step of the rule resolves
+                    // (other postings in several currencies, lots in several
+                    // cost currencies) is refused, as beancount refuses it,
+                    // unless every other posting is an auto-posting: then
+                    // nothing names a currency, the account's method picks the
+                    // lot, and the auto-postings absorb what it cost
+                    // (compatibility.md, Known Differences 17). A wildcard
+                    // beside USD cash sold a EUR lot for a gain in two
+                    // currencies (#2571 review).
                     if is_reduction
-                        && let (Some(cost), Some(price)) = (&cost_spec.currency, price_currency)
-                        && cost.as_str() != price
+                        && cost_spec.currency.is_none()
+                        && txn
+                            .postings
+                            .iter()
+                            .enumerate()
+                            .any(|(j, other)| j != idx && other.units.is_some())
                     {
-                        return Err(BookingError::CostPriceCurrencyMismatch {
-                            account: posting.account.clone(),
-                            cost: cost.clone(),
-                            price: price.into(),
-                        });
+                        let mut candidates: Vec<&str> = inv
+                            .positions()
+                            .filter(|p| !p.is_empty())
+                            .filter_map(|p| p.cost.as_ref().map(|c| c.currency.as_str()))
+                            .collect();
+                        candidates.sort_unstable();
+                        candidates.dedup();
+                        return Err(BookingError::Interpolation(
+                            InterpolationError::AmbiguousInferredCostCurrency {
+                                candidates: candidates.join(", "),
+                            },
+                        ));
                     }
 
                     if is_reduction {
@@ -760,10 +835,22 @@ impl BookingEngine {
                             ),
                         }
                         .map_err(|e| match (&e, &filled_currency) {
+                            // Only when the currency is what excluded the lots:
+                            // a wrong number or date beside the right currency
+                            // is the ordinary "no matching lot".
                             (
                                 rustledger_core::BookingError::NoMatchingLot { .. },
                                 Some(currency),
-                            ) => no_lot_in_filled(currency),
+                            ) if self.inventories.get(&posting.account).is_some_and(|inv| {
+                                let wildcard = CostSpec {
+                                    currency: None,
+                                    ..match_spec.clone()
+                                };
+                                inv.try_reduce(units, Some(&wildcard), method).is_ok()
+                            }) =>
+                            {
+                                no_lot_in_filled(currency)
+                            }
                             _ => convert_core_booking_error(e, &posting.account),
                         })?;
                         // The ordered methods filter lots by the spec's
@@ -1902,8 +1989,7 @@ impl BookingEngine {
     fn resolve_elided_currencies(
         &self,
         txn: &Transaction,
-    ) -> Result<(Option<Transaction>, Vec<(usize, rustledger_core::Currency)>), InterpolationError>
-    {
+    ) -> Result<(Option<Transaction>, crate::interpolate::ElidedCosts), InterpolationError> {
         let number_only = txn
             .postings
             .iter()
@@ -1913,7 +1999,7 @@ impl BookingEngine {
             .iter()
             .any(|p| p.cost.as_ref().is_some_and(|c| c.currency.is_none()));
         if !number_only && !cost_elided {
-            return Ok((None, Vec::new()));
+            return Ok((None, crate::interpolate::ElidedCosts::default()));
         }
         let mut resolved = crate::interpolate::resolve_elided_currencies(txn, |account| {
             self.inventories.get(account).map(AsRef::as_ref)
@@ -1991,7 +2077,7 @@ impl BookingEngine {
         &mut self,
         txn: &mut Transaction,
         tolerances: &FxHashMap<rustledger_core::Currency, Decimal>,
-        cost_currencies: &[(usize, rustledger_core::Currency)],
+        cost_currencies: &crate::interpolate::ElidedCosts,
     ) -> Result<Vec<CapitalGain>, BookingError> {
         // Fast path, as in `book_and_interpolate_with_gains`: with no cost
         // specs `book` is an identity, so interpolate the transaction itself.
@@ -2065,7 +2151,7 @@ struct Prepared {
     resolved: Option<Transaction>,
     /// The currency of each cost spec written without one, where beancount's
     /// rule resolves it (#2571).
-    cost_currencies: Vec<(usize, rustledger_core::Currency)>,
+    cost_currencies: crate::interpolate::ElidedCosts,
 }
 
 /// The cost number to book for taking `units` (the posting's, signed) from a

@@ -546,19 +546,18 @@ def gen_number_only_ledger(rng: random.Random) -> tuple[str, list[str], list[str
             cash_cur = lot_cur
             if rng.random() < 0.25:
                 cash_cur = other_cur
-                cases.append("cash-other-currency")
             proceeds = qty * Decimal("13.00")
             cash = f"  Assets:CashA  {proceeds} {cash_cur}"
-            # The cash leg number-only as well -- except beside a cost
-            # currency nothing else names, from an account holding lots in
-            # two: then no step of beancount's rule resolves it, and
-            # beancount refuses ("Failed to categorize posting") what
-            # rledger books by the account's method. That divergence is
-            # documented (compatibility.md, Known Differences 17) and open
-            # for a decision, so it is not generated.
-            undecided = mixed and "USD}" not in spec and "EUR}" not in spec and not price
-            if rng.random() < 0.25 and not undecided:
+            # The cash leg number-only as well. Beside a cost currency
+            # nothing else names, from an account holding lots in two, no
+            # step of beancount's rule resolves the cost currency and both
+            # engines refuse the sale.
+            if rng.random() < 0.25:
                 cash = f"  Assets:CashA  {proceeds}"
+            elif cash_cur != lot_cur:
+                # Tallied only when written: a currency-less cash number
+                # takes its account's currency, not `cash_cur`.
+                cases.append("cash-other-currency")
             postings += [f"  {acct}  {-qty} {spec}{price}", cash, "  Income:Gains"]
         elif shape == "cost-augment":
             acct = rng.choice(stock_accts)

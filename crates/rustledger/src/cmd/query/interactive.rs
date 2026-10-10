@@ -1,6 +1,6 @@
 //! Interactive REPL mode for BQL queries.
 
-use super::output::execute_query;
+use super::output::{execute_query, session_executor};
 use super::{OutputFormat, SYSTEM_TABLES, ShellSettings};
 use anyhow::Result;
 use rustledger_core::{Directive, Spanned};
@@ -87,6 +87,10 @@ pub(super) fn run_interactive(
     );
     println!();
 
+    // One executor for the session, so a table a statement creates is there
+    // for the next (#2518).
+    let mut executor = session_executor(directives, source_map, &settings);
+
     loop {
         let readline = rl.readline("beanquery> ");
 
@@ -99,9 +103,17 @@ pub(super) fn run_interactive(
 
                 let _ = rl.add_history_entry(line);
 
+                // A line holding only a `/* ... */` comment is no query
+                // (#2403). An unclosed one is left to the parser to report.
+                if rustledger_query::parser::strip_comments(line)
+                    .is_ok_and(|stripped| stripped.trim().is_empty())
+                {
+                    continue;
+                }
+
                 // Handle dot-commands
                 if let Some(cmd) = line.strip_prefix('.') {
-                    if handle_dot_command(cmd, &mut settings, directives, source_map) {
+                    if handle_dot_command(cmd, &mut settings, &mut executor, directives) {
                         break;
                     }
                     continue;
@@ -117,7 +129,7 @@ pub(super) fn run_interactive(
                         "warning: commands without \".\" prefix are deprecated. use \".{lower}\" instead"
                     );
 
-                    if handle_dot_command(&lower, &mut settings, directives, source_map) {
+                    if handle_dot_command(&lower, &mut settings, &mut executor, directives) {
                         break;
                     }
                     continue;
@@ -126,9 +138,7 @@ pub(super) fn run_interactive(
                 // Execute as BQL query
                 let result = if let Some(ref output_path) = settings.output_file {
                     match fs::File::create(output_path) {
-                        Ok(mut file) => {
-                            execute_query(line, directives, source_map, &settings, &mut file)
-                        }
+                        Ok(mut file) => execute_query(line, &mut executor, &settings, &mut file),
                         Err(e) => {
                             eprintln!("error: failed to open {}: {}", output_path.display(), e);
                             continue;
@@ -136,7 +146,7 @@ pub(super) fn run_interactive(
                     }
                 } else {
                     let mut stdout = io::stdout();
-                    execute_query(line, directives, source_map, &settings, &mut stdout)
+                    execute_query(line, &mut executor, &settings, &mut stdout)
                 };
                 match result {
                     Ok(()) => {}
@@ -170,8 +180,8 @@ pub(super) fn run_interactive(
 fn handle_dot_command(
     cmd: &str,
     settings: &mut ShellSettings,
+    executor: &mut rustledger_query::Executor<'_>,
     directives: &[Spanned<Directive>],
-    source_map: &SourceMap,
 ) -> bool {
     let parts: Vec<&str> = cmd.split_whitespace().collect();
     let command = parts.first().map(|s| s.to_lowercase()).unwrap_or_default();
@@ -298,37 +308,12 @@ fn handle_dot_command(
                         println!("  meta (object)");
                     }
                     "postings" => {
+                        // The executor's own column list, so this cannot
+                        // drift from what a query accepts (#2505).
                         println!("table postings:");
-                        println!("  type (str)");
-                        println!("  id (int)");
-                        println!("  date (date)");
-                        println!("  year (int)");
-                        println!("  month (int)");
-                        println!("  day (int)");
-                        println!("  filename (str)");
-                        println!("  lineno (int)");
-                        println!("  location (str)");
-                        println!("  flag (str)");
-                        println!("  payee (str)");
-                        println!("  narration (str)");
-                        println!("  description (str)");
-                        println!("  tags (set)");
-                        println!("  links (set)");
-                        println!("  posting_flag (str)");
-                        println!("  account (str)");
-                        println!("  other_accounts (set)");
-                        println!("  number (decimal)");
-                        println!("  currency (str)");
-                        println!("  cost_number (decimal)");
-                        println!("  cost_currency (str)");
-                        println!("  cost_date (date)");
-                        println!("  cost_label (str)");
-                        println!("  position (position)");
-                        println!("  price (amount)");
-                        println!("  weight (amount)");
-                        println!("  balance (inventory)");
-                        println!("  meta (dict)");
-                        println!("  accounts (set[str])");
+                        for column in rustledger_query::executor::POSTING_COLUMNS {
+                            println!("  {} ({})", column.name, column.type_name);
+                        }
                     }
                     _ => eprintln!("error: unknown table \"{}\"", args[0]),
                 }
@@ -384,9 +369,7 @@ fn handle_dot_command(
                         println!("Running: {query}");
                         let result = if let Some(ref output_path) = settings.output_file {
                             match fs::File::create(output_path) {
-                                Ok(mut file) => execute_query(
-                                    query, directives, source_map, settings, &mut file,
-                                ),
+                                Ok(mut file) => execute_query(query, executor, settings, &mut file),
                                 Err(e) => {
                                     eprintln!(
                                         "error: failed to open {}: {}",
@@ -398,7 +381,7 @@ fn handle_dot_command(
                             }
                         } else {
                             let mut stdout = io::stdout();
-                            execute_query(query, directives, source_map, settings, &mut stdout)
+                            execute_query(query, executor, settings, &mut stdout)
                         };
                         if let Err(e) = result {
                             eprintln!("error: {e:#}");

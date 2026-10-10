@@ -251,7 +251,7 @@ impl RuleFilter {
 /// envelope.
 pub fn run(args: &Args) -> Result<ExitCode> {
     let mut stdout = io::stdout().lock();
-    run_with_writer(args, &mut stdout)
+    run_with_writer(args, &mut stdout, &mut io::stderr())
 }
 
 /// Run the check command with the given arguments, writing diagnostics to
@@ -260,8 +260,14 @@ pub fn run(args: &Args) -> Result<ExitCode> {
 /// Behavior is identical to the original `run()`; the only change is that
 /// human-readable and JSON output go to the injected writer instead of a
 /// hard-coded `io::stdout().lock()`. This lets `ag-rledger` buffer the
-/// output into an agent envelope without spawning a subprocess.
-pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode> {
+/// output into an agent envelope without spawning a subprocess. `err`
+/// receives what `rledger` writes to stderr (the parse cache's `--verbose`
+/// lines), so `ag-rledger` can carry that too.
+pub fn run_with_writer<W: Write>(
+    args: &Args,
+    stdout: &mut W,
+    err: &mut dyn Write,
+) -> Result<ExitCode> {
     let start = std::time::Instant::now();
 
     // File is required (the --generate-completions flag is only for standalone bean-check)
@@ -292,6 +298,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
         file,
         args.no_cache,
         args.verbose && !args.quiet,
+        err,
     )?;
 
     // Count errors split by phase
@@ -353,7 +360,7 @@ pub fn run_with_writer<W: Write>(args: &Args, stdout: &mut W) -> Result<ExitCode
             }
             LoadError::Io {
                 path,
-                source,
+                error: source,
                 include_site,
             } => {
                 let path_str = path.display().to_string();
@@ -1154,7 +1161,7 @@ mod tests {
         argv.extend_from_slice(extra);
         let args = Args::parse_from(argv);
         let mut out = Vec::new();
-        let code = run_with_writer(&args, &mut out).expect("check runs");
+        let code = run_with_writer(&args, &mut out, &mut std::io::sink()).expect("check runs");
         (code, String::from_utf8(out).unwrap())
     }
 
@@ -1271,7 +1278,7 @@ mod tests {
             argv.extend_from_slice(extra);
             let args = Args::parse_from(argv);
             let mut out = Vec::new();
-            run_with_writer(&args, &mut out).unwrap();
+            run_with_writer(&args, &mut out, &mut std::io::sink()).unwrap();
             let v: serde_json::Value = serde_json::from_slice(&out).expect("valid json");
             v["warning_count"].as_u64().unwrap()
         };

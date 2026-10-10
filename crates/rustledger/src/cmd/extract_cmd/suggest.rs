@@ -40,6 +40,7 @@ pub(super) fn apply_ml_suggestions(
     directives: &mut [Directive],
     existing_txns: &[Transaction],
     fallback_accounts: &[String],
+    err_out: &mut dyn std::io::Write,
 ) -> Result<SuggestStats> {
     // Wrap existing transactions as core `Directive`s for the ML API (clone is
     // unavoidable — `existing_txns` is also used for duplicate detection in the
@@ -54,7 +55,8 @@ pub(super) fn apply_ml_suggestions(
     let model = match CategorizationModel::train(&training_directives) {
         Ok(m) => m,
         Err(rustledger_ops::ml::MlError::InsufficientData(reason)) => {
-            eprintln!(
+            let _ = writeln!(
+                err_out,
                 "warning: --suggest-categories: insufficient training data ({reason}); skipping ML suggestions"
             );
             return Ok(SuggestStats::default());
@@ -101,16 +103,18 @@ pub(super) fn apply_ml_suggestions(
     Ok(stats)
 }
 
-/// Convenience wrapper: prints a one-line summary to stderr.
+/// Convenience wrapper: writes a one-line summary to `err_out`.
 pub(super) fn apply_ml_suggestions_with_summary(
     directives: &mut [Directive],
     existing_txns: &[Transaction],
     fallback_accounts: &[String],
+    err_out: &mut dyn std::io::Write,
 ) -> Result<()> {
-    let stats = apply_ml_suggestions(directives, existing_txns, fallback_accounts)
+    let stats = apply_ml_suggestions(directives, existing_txns, fallback_accounts, err_out)
         .context("applying ML category suggestions")?;
     if stats.inspected > 0 {
-        eprintln!(
+        let _ = writeln!(
+            err_out,
             "ML suggestions: re-categorized {}/{} fallback transaction(s)",
             stats.modified, stats.inspected
         );
@@ -162,8 +166,13 @@ mod tests {
             "Expenses:Unknown",
             55,
         ))];
-        let stats =
-            apply_ml_suggestions(&mut new_directives, &existing, &default_fallbacks()).unwrap();
+        let stats = apply_ml_suggestions(
+            &mut new_directives,
+            &existing,
+            &default_fallbacks(),
+            &mut std::io::sink(),
+        )
+        .unwrap();
         assert_eq!(stats.inspected, 1);
         assert_eq!(stats.modified, 1);
         let Directive::Transaction(t) = &new_directives[0] else {
@@ -181,8 +190,13 @@ mod tests {
             "Expenses:Groceries", // already categorized; should not touch
             55,
         ))];
-        let stats =
-            apply_ml_suggestions(&mut new_directives, &existing, &default_fallbacks()).unwrap();
+        let stats = apply_ml_suggestions(
+            &mut new_directives,
+            &existing,
+            &default_fallbacks(),
+            &mut std::io::sink(),
+        )
+        .unwrap();
         assert_eq!(stats.inspected, 0);
         assert_eq!(stats.modified, 0);
         let Directive::Transaction(t) = &new_directives[0] else {
@@ -201,8 +215,13 @@ mod tests {
             "Expenses:Unknown",
             55,
         ))];
-        let stats =
-            apply_ml_suggestions(&mut new_directives, &existing, &default_fallbacks()).unwrap();
+        let stats = apply_ml_suggestions(
+            &mut new_directives,
+            &existing,
+            &default_fallbacks(),
+            &mut std::io::sink(),
+        )
+        .unwrap();
         assert_eq!(stats.modified, 0);
         // Untouched.
         let Directive::Transaction(t) = &new_directives[0] else {
@@ -223,7 +242,13 @@ mod tests {
             55,
         ))];
         let custom = vec!["Expenses:Uncategorized".to_string()];
-        let stats = apply_ml_suggestions(&mut new_directives, &existing, &custom).unwrap();
+        let stats = apply_ml_suggestions(
+            &mut new_directives,
+            &existing,
+            &custom,
+            &mut std::io::sink(),
+        )
+        .unwrap();
         assert_eq!(stats.inspected, 1);
         assert_eq!(stats.modified, 1);
         let Directive::Transaction(t) = &new_directives[0] else {

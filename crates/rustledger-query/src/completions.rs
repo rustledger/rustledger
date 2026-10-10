@@ -491,38 +491,14 @@ fn function(text: &str, description: &str) -> Completion {
     }
 }
 
-/// Get column completions.
+/// Get column completions: every column of the default posting row source,
+/// read from the executor's own list ([`crate::executor::POSTING_COLUMNS`]),
+/// so completion cannot offer a subset of what a query accepts (#2505).
 fn column_completions() -> Vec<Completion> {
-    vec![
-        column("account", "Account name"),
-        column("date", "Transaction date"),
-        column("narration", "Transaction description"),
-        column("payee", "Transaction payee"),
-        column("flag", "Transaction flag"),
-        column("tags", "Transaction tags"),
-        column("links", "Document links"),
-        column("position", "Posting amount"),
-        column("units", "Posting units"),
-        column("cost", "Cost basis"),
-        column("weight", "Balancing weight"),
-        column(
-            "balance",
-            "Cumulative running balance across WHERE-filtered postings",
-        ),
-        column("account_balance", "Per-account running balance"),
-        column("year", "Transaction year"),
-        column("month", "Transaction month"),
-        column("day", "Transaction day"),
-        column("currency", "Posting currency"),
-        column("number", "Posting amount number"),
-        column("cost_number", "Per-unit cost number"),
-        column("cost_currency", "Cost currency"),
-        column("cost_date", "Cost lot date"),
-        column("cost_label", "Cost lot label"),
-        column("has_cost", "Whether posting has cost"),
-        column("entry", "Parent transaction object"),
-        column("meta", "All metadata as object"),
-    ]
+    crate::executor::POSTING_COLUMNS
+        .iter()
+        .map(|c| column(c.name, c.description))
+        .collect()
 }
 
 /// Get function completions.
@@ -606,6 +582,47 @@ mod tests {
         let result = complete("SELECT * GROUP ", 15);
         assert_eq!(result.context, BqlContext::AfterGroup);
         assert!(result.completions.iter().any(|c| c.text == "BY"));
+    }
+
+    /// Every column of the default table is offered wherever columns are
+    /// (#2505). `POSTING_COLUMNS` is checked against the row evaluator
+    /// itself in the executor's tests, so together they pin "every column
+    /// the executor accepts is offered".
+    #[test]
+    fn every_executor_column_is_offered() {
+        for (query, context) in [
+            ("SELECT ", BqlContext::AfterSelect),
+            ("SELECT * WHERE ", BqlContext::AfterWhere),
+            ("SELECT * GROUP BY ", BqlContext::AfterGroupBy),
+            ("SELECT * ORDER BY ", BqlContext::AfterOrderBy),
+        ] {
+            let result = complete(query, query.len());
+            assert_eq!(result.context, context, "{query}");
+            for col in crate::executor::POSTING_COLUMNS {
+                assert!(
+                    result
+                        .completions
+                        .iter()
+                        .any(|c| c.text == col.name && c.category == CompletionCategory::Column),
+                    "`{query}` does not offer the column `{}`",
+                    col.name,
+                );
+            }
+        }
+        // The ones the issue named, spelled out so the list cannot shrink
+        // under this test.
+        let offered = complete("SELECT ", 7).completions;
+        for name in [
+            "accounts",
+            "other_accounts",
+            "description",
+            "posting_flag",
+            "price",
+            "filename",
+            "lineno",
+        ] {
+            assert!(offered.iter().any(|c| c.text == name), "`{name}` missing");
+        }
     }
 
     #[test]

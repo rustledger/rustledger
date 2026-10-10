@@ -99,12 +99,17 @@ fn is_rledger_wrapper(path: &Path) -> bool {
 /// binary; `ag-rledger` calls `install_with_writer` with a buffer.
 pub fn install(prefix: Option<&Path>) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
-    install_with_writer(prefix, &mut stdout)
+    install_with_writer(prefix, &mut stdout, &mut std::io::stderr())
 }
 
 /// Install bean-* compatibility wrapper scripts, writing progress lines to
-/// `out`. Skip notices for non-rledger files still go to stderr.
-pub fn install_with_writer<W: Write>(prefix: Option<&Path>, out: &mut W) -> Result<()> {
+/// `out`. Skip notices for non-rledger files go to `err_out` (stderr for
+/// `rledger`, the envelope for `ag-rledger`).
+pub fn install_with_writer<W: Write>(
+    prefix: Option<&Path>,
+    out: &mut W,
+    err_out: &mut dyn Write,
+) -> Result<()> {
     // Resolve the binary once: the shims exec this absolute path (so they work
     // even when the install dir is off PATH), and — absent `--prefix` — it also
     // determines the install directory. Computing `current_exe()` a single time
@@ -138,7 +143,8 @@ pub fn install_with_writer<W: Write>(prefix: Option<&Path>, out: &mut W) -> Resu
         let path = dir.join(&filename);
 
         if path.exists() && !is_rledger_wrapper(&path) {
-            eprintln!(
+            let _ = writeln!(
+                err_out,
                 "  skip: {} (exists and is not an rledger wrapper)",
                 path.display()
             );
@@ -185,12 +191,16 @@ pub fn install_with_writer<W: Write>(prefix: Option<&Path>, out: &mut W) -> Resu
 /// Thin wrapper over [`uninstall_with_writer`].
 pub fn uninstall(prefix: Option<&Path>) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
-    uninstall_with_writer(prefix, &mut stdout)
+    uninstall_with_writer(prefix, &mut stdout, &mut std::io::stderr())
 }
 
 /// Uninstall bean-* compatibility wrapper scripts, writing progress lines
-/// to `out`. Skip notices for non-rledger files still go to stderr.
-pub fn uninstall_with_writer<W: Write>(prefix: Option<&Path>, out: &mut W) -> Result<()> {
+/// to `out`. Skip notices for non-rledger files go to `err_out`.
+pub fn uninstall_with_writer<W: Write>(
+    prefix: Option<&Path>,
+    out: &mut W,
+    err_out: &mut dyn Write,
+) -> Result<()> {
     let dir = resolve_target_dir(prefix)?;
     let mut removed = 0;
 
@@ -204,7 +214,11 @@ pub fn uninstall_with_writer<W: Write>(prefix: Option<&Path>, out: &mut W) -> Re
 
         // Only remove if it's one of our wrappers
         if !is_rledger_wrapper(&path) {
-            eprintln!("  skip: {} (not an rledger wrapper)", path.display());
+            let _ = writeln!(
+                err_out,
+                "  skip: {} (not an rledger wrapper)",
+                path.display()
+            );
             continue;
         }
 

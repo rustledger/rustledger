@@ -352,6 +352,207 @@ const DETACH_ACCOUNT_BALANCE_AT: usize = 4;
 pub const WILDCARD_COLUMNS: &[&str] =
     &["date", "flag", "payee", "narration", "account", "position"];
 
+/// One column of the default posting row source (a `SELECT` with no `FROM`
+/// table): its name, its value type, and a one-line description.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct ColumnInfo {
+    /// The column's name, as a query writes it.
+    pub name: &'static str,
+    /// The column's value type, as bean-query's `.describe postings` names
+    /// it (`str`, `set`, `amount`, ...), except `id`, which is an `int` here
+    /// where bean-query's is a `str` hash. Most columns can be NULL.
+    pub type_name: &'static str,
+    /// What the column holds.
+    pub description: &'static str,
+}
+
+/// Every column of the default posting row source, in `.describe postings`
+/// order.
+///
+/// The one list of them: query completion and the REPL's `.describe` read
+/// it, and a test checks it against the row evaluator's arms in both
+/// directions, so a column added to one cannot go missing from the other.
+/// Completion offered a hand-written subset that lacked `accounts`,
+/// `other_accounts`, `description`, `price`, `filename` and others (#2505).
+pub const POSTING_COLUMNS: &[ColumnInfo] = &[
+    ColumnInfo {
+        name: "type",
+        type_name: "str",
+        description: "Directive type (always `transaction`)",
+    },
+    ColumnInfo {
+        name: "id",
+        type_name: "int",
+        description: "Directive index",
+    },
+    ColumnInfo {
+        name: "date",
+        type_name: "date",
+        description: "Transaction date",
+    },
+    ColumnInfo {
+        name: "year",
+        type_name: "int",
+        description: "Transaction year",
+    },
+    ColumnInfo {
+        name: "month",
+        type_name: "int",
+        description: "Transaction month",
+    },
+    ColumnInfo {
+        name: "day",
+        type_name: "int",
+        description: "Transaction day",
+    },
+    ColumnInfo {
+        name: "filename",
+        type_name: "str",
+        description: "Source file of the posting",
+    },
+    ColumnInfo {
+        name: "lineno",
+        type_name: "int",
+        description: "Source line of the posting",
+    },
+    ColumnInfo {
+        name: "location",
+        type_name: "str",
+        description: "Source location as filename:lineno",
+    },
+    ColumnInfo {
+        name: "flag",
+        type_name: "str",
+        description: "Transaction flag",
+    },
+    ColumnInfo {
+        name: "payee",
+        type_name: "str",
+        description: "Transaction payee",
+    },
+    ColumnInfo {
+        name: "narration",
+        type_name: "str",
+        description: "Transaction narration",
+    },
+    ColumnInfo {
+        name: "description",
+        type_name: "str",
+        description: "Payee and narration joined by ` | `",
+    },
+    ColumnInfo {
+        name: "tags",
+        type_name: "set",
+        description: "Transaction tags",
+    },
+    ColumnInfo {
+        name: "links",
+        type_name: "set",
+        description: "Transaction links",
+    },
+    ColumnInfo {
+        name: "posting_flag",
+        type_name: "str",
+        description: "Posting flag",
+    },
+    ColumnInfo {
+        name: "account",
+        type_name: "str",
+        description: "Posting account",
+    },
+    ColumnInfo {
+        name: "other_accounts",
+        type_name: "set",
+        description: "Accounts of the transaction's other postings",
+    },
+    ColumnInfo {
+        name: "number",
+        type_name: "decimal",
+        description: "Number of the posting's units",
+    },
+    ColumnInfo {
+        name: "currency",
+        type_name: "str",
+        description: "Currency of the posting's units",
+    },
+    ColumnInfo {
+        name: "cost_number",
+        type_name: "decimal",
+        description: "Per-unit cost number",
+    },
+    ColumnInfo {
+        name: "cost_currency",
+        type_name: "str",
+        description: "Cost currency",
+    },
+    ColumnInfo {
+        name: "cost_date",
+        type_name: "date",
+        description: "Cost lot date",
+    },
+    ColumnInfo {
+        name: "cost_label",
+        type_name: "str",
+        description: "Cost lot label",
+    },
+    ColumnInfo {
+        name: "position",
+        type_name: "position",
+        description: "Posting units and cost",
+    },
+    ColumnInfo {
+        name: "units",
+        type_name: "amount",
+        description: "Posting units",
+    },
+    ColumnInfo {
+        name: "cost",
+        type_name: "amount",
+        description: "Total cost of the posting",
+    },
+    ColumnInfo {
+        name: "has_cost",
+        type_name: "bool",
+        description: "Whether the posting has a cost",
+    },
+    ColumnInfo {
+        name: "price",
+        type_name: "amount",
+        description: "Posting price annotation",
+    },
+    ColumnInfo {
+        name: "weight",
+        type_name: "amount",
+        description: "Balancing weight",
+    },
+    ColumnInfo {
+        name: "balance",
+        type_name: "inventory",
+        description: "Running balance across WHERE-filtered postings",
+    },
+    ColumnInfo {
+        name: "account_balance",
+        type_name: "inventory",
+        description: "Per-account running balance",
+    },
+    ColumnInfo {
+        name: "meta",
+        type_name: "dict",
+        description: "Posting metadata",
+    },
+    ColumnInfo {
+        name: "entry",
+        type_name: "transaction",
+        description: "Parent transaction",
+    },
+    ColumnInfo {
+        name: "accounts",
+        type_name: "set[str]",
+        description: "Accounts of all the transaction's postings",
+    },
+];
+
 /// Result of [`Executor::scan_postings`]: the per-posting contexts plus the
 /// final per-account running balances. `account_balances` is only meaningful
 /// when the scan was asked for it (`needs_account_balance`); it honors the same
@@ -760,6 +961,7 @@ impl<'a> Executor<'a> {
                     where_reads_balance: false,
                     where_reads_account_balance: false,
                     output_reads_account_balance: true,
+                    txn_accounts: false,
                 },
                 false,
             )?
@@ -822,6 +1024,8 @@ impl<'a> Executor<'a> {
                     where_reads_balance,
                     where_reads_account_balance,
                     output_reads_account_balance,
+                    txn_accounts: query_references_column(query, "accounts")
+                        || query_references_column(query, "other_accounts"),
                 },
                 true,
             )?
@@ -1003,6 +1207,7 @@ impl<'a> Executor<'a> {
             where_reads_balance,
             where_reads_account_balance,
             output_reads_account_balance,
+            txn_accounts: needs_txn_accounts,
         } = needs;
         let mut postings = Vec::new();
         // Per-account running balance — accumulates every posting the FROM clause
@@ -1103,6 +1308,9 @@ impl<'a> Executor<'a> {
                         .map_err(|e| QueryError::Evaluation(e.to_string()))
                 })
             };
+            // One account set per transaction, shared by its rows (#2504).
+            let txn_accounts = (needs_txn_accounts && collect_contexts)
+                .then(|| std::sync::Arc::new(system_tables::TxnAccounts::of(&txn).into_owned()));
             for (i, posting) in txn.postings.iter().enumerate() {
                 // Update the account-level running balance regardless of
                 // whether this posting passes WHERE — `account_balance`
@@ -1219,6 +1427,7 @@ impl<'a> Executor<'a> {
                         None
                     },
                     directive_index,
+                    txn_accounts: txn_accounts.clone(),
                 };
 
                 // Check WHERE clause (posting-level filter)
@@ -3068,6 +3277,10 @@ struct ScanNeeds {
     /// Something other than the WHERE reads `account_balance`, so the snapshot
     /// has to outlive the filter.
     output_reads_account_balance: bool,
+    /// `accounts` or `other_accounts` is read anywhere, the WHERE included,
+    /// so each transaction's account set is built once and shared by its
+    /// rows (#2504).
+    txn_accounts: bool,
 }
 
 /// Return `true` if any part of a `SelectQuery` OTHER than its `WHERE` clause

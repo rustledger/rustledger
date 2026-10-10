@@ -262,9 +262,12 @@ This document catalogs all validation errors and warnings with their trigger con
 
 **Condition:** An amount, or a running total derived from one, exceeds the range
 of rledger's decimal type (a 96-bit type, roughly ±7.9×10²⁸ with ~28 significant
-digits).
+digits). A reduction also raises it when what it takes from a lot, or what the
+lot keeps, needs more significant digits than the type holds: a lot of
+`100000000000` sold down by `0.000000000000000001` has no exact remainder, and
+rounding it would keep units the sale took.
 
-**Message:** `{currency} amount exceeds the representable range (±7.9e28); split the transaction, or denominate it in larger units (thousands, millions) so the number is smaller`
+**Message:** `{currency} amount exceeds the representable range (±7.9e28, at most 28-29 significant digits); split the transaction, denominate it in larger units (thousands, millions) so the number is smaller, or write fewer decimal places`
 
 **Severity:** Error
 

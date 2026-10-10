@@ -80,17 +80,23 @@ pub struct Args {
 /// binary; `ag-rledger` calls `run_with_writer` with a buffer.
 pub fn run(args: &Args) -> Result<ExitCode> {
     let mut stdout = io::stdout().lock();
-    run_with_writer(args, &mut stdout)
+    run_with_writer(args, &mut stdout, &mut io::stderr())
 }
 
 /// Run the format command, writing any stdout-bound formatted output to
 /// `out`.
 ///
 /// Only the default "print formatted file to stdout" path is redirected
-/// to `out`; `--in-place` and `--output <file>` still write to disk, and
-/// `--check`/`--diff`/verbose notes still go to stderr, exactly as in the
-/// original `run()`.
-pub fn run_with_writer<W: Write>(args: &Args, out: &mut W) -> Result<ExitCode> {
+/// to `out`; `--in-place` and `--output <file>` still write to disk.
+/// `--diff` hunks, parse errors and verbose notes go to `err_out`, which
+/// `rledger` points at stderr. `ag-rledger` passes a buffer for its
+/// envelope: on the process's stderr, `ag-rledger format --check --diff`
+/// returned the exit status and dropped the diff (#2546).
+pub fn run_with_writer<W: Write>(
+    args: &Args,
+    out: &mut W,
+    err_out: &mut dyn Write,
+) -> Result<ExitCode> {
     if args.files.is_empty() {
         anyhow::bail!("FILE is required (or set default.file in config)");
     }
@@ -118,7 +124,7 @@ pub fn run_with_writer<W: Write>(args: &Args, out: &mut W) -> Result<ExitCode> {
     let mut ledgers: HashMap<PathBuf, Option<Ledger>> = HashMap::new();
     for root in roots.iter().flatten() {
         if !ledgers.contains_key(root) {
-            let ledger = load_ledger_declarations(root, explicit, args.verbose)?;
+            let ledger = load_ledger_declarations(root, explicit, args.verbose, err_out)?;
             ledgers.insert(root.clone(), ledger);
         }
     }
@@ -135,7 +141,7 @@ pub fn run_with_writer<W: Write>(args: &Args, out: &mut W) -> Result<ExitCode> {
             .map_or_else(GroupingStyle::default, |l| {
                 GroupingStyle::from_context(&l.display_context)
             });
-        let result = format_file(file, args, style, out)?;
+        let result = format_file(file, args, style, out, err_out)?;
         if result == ExitCode::from(1) {
             any_needs_formatting = true;
         }
@@ -225,8 +231,13 @@ fn resolve_root(file: &Path, args: &Args) -> Option<PathBuf> {
 /// format their ledger the wrong way and say nothing. A DISCOVERED root that
 /// will not load is not an error — nobody asked for it — so it degrades to no
 /// declarations, exactly as if none had been found.
-fn load_ledger_declarations(root: &Path, explicit: bool, verbose: bool) -> Result<Option<Ledger>> {
-    match crate::cmd::loadcache::load_result_cached(root, false, verbose) {
+fn load_ledger_declarations(
+    root: &Path,
+    explicit: bool,
+    verbose: bool,
+    err_out: &mut dyn Write,
+) -> Result<Option<Ledger>> {
+    match crate::cmd::loadcache::load_result_cached(root, false, verbose, err_out) {
         Ok((raw, _from_cache)) => {
             let files = raw
                 .source_map
@@ -245,7 +256,8 @@ fn load_ledger_declarations(root: &Path, explicit: bool, verbose: bool) -> Resul
         }
         Err(e) => {
             if verbose {
-                eprintln!(
+                let _ = writeln!(
+                    err_out,
                     "note: ignoring discovered ledger {} ({e}); formatting without declarations",
                     root.display()
                 );
@@ -260,6 +272,7 @@ fn format_file<W: Write>(
     args: &Args,
     style: GroupingStyle<'_>,
     out: &mut W,
+    err_out: &mut dyn Write,
 ) -> Result<ExitCode> {
     if !file.exists() {
         anyhow::bail!("file not found: {}", file.display());
@@ -280,8 +293,8 @@ fn format_file<W: Write>(
     let formatted = match try_format_source_grouped(&original_content, style) {
         Ok(out) => out,
         Err(errors) => {
-            for err in &errors {
-                eprintln!("error: {err}");
+            for error in &errors {
+                let _ = writeln!(err_out, "error: {error}");
             }
             anyhow::bail!("file has parse errors, cannot format");
         }
@@ -299,15 +312,15 @@ fn format_file<W: Write>(
         // formatted" here would let CI miss a real rewrite.
         if formatted == original_content && !had_invalid_utf8 {
             if args.verbose {
-                eprintln!("File is already formatted: {}", file.display());
+                let _ = writeln!(err_out, "File is already formatted: {}", file.display());
             }
             Ok(ExitCode::SUCCESS)
         } else {
             if args.verbose {
-                eprintln!("File needs formatting: {}", file.display());
+                let _ = writeln!(err_out, "File needs formatting: {}", file.display());
             }
             if args.diff {
-                emit_diff(file, &original_content, &formatted);
+                emit_diff(file, &original_content, &formatted, err_out);
             }
             Ok(ExitCode::from(1))
         }
@@ -315,14 +328,19 @@ fn format_file<W: Write>(
         fs::write(file, &formatted)
             .with_context(|| format!("failed to write {}", file.display()))?;
         if args.verbose {
-            eprintln!("Formatted: {}", file.display());
+            let _ = writeln!(err_out, "Formatted: {}", file.display());
         }
         Ok(ExitCode::SUCCESS)
     } else if let Some(ref output_path) = args.output {
         fs::write(output_path, &formatted)
             .with_context(|| format!("failed to write {}", output_path.display()))?;
         if args.verbose {
-            eprintln!("Formatted {} -> {}", file.display(), output_path.display());
+            let _ = writeln!(
+                err_out,
+                "Formatted {} -> {}",
+                file.display(),
+                output_path.display()
+            );
         }
         Ok(ExitCode::SUCCESS)
     } else {
@@ -344,9 +362,9 @@ fn format_file<W: Write>(
 ///   diff that just shows BOMs and `\r`s.
 /// - **Line-by-line replacements.** Otherwise emit `@@ line N @@`
 ///   per-line diff hunks.
-fn emit_diff(file: &PathBuf, original: &str, formatted: &str) {
-    eprintln!("--- {}", file.display());
-    eprintln!("+++ {} (formatted)", file.display());
+fn emit_diff(file: &PathBuf, original: &str, formatted: &str, err_out: &mut dyn Write) {
+    let _ = writeln!(err_out, "--- {}", file.display());
+    let _ = writeln!(err_out, "+++ {} (formatted)", file.display());
 
     // Compute the canonical-noise-stripped view of the original:
     // drop the BOM, normalize CR-bearing line endings to LF outside
@@ -391,12 +409,14 @@ fn emit_diff(file: &PathBuf, original: &str, formatted: &str) {
             // can only happen on byte-identical input, which the
             // caller already gates against. Defensive message in
             // case a future caller invokes emit_diff regardless.
-            eprintln!(
+            let _ = writeln!(
+                err_out,
                 "  (no per-line content change; the difference is in \
                  leading/trailing whitespace that `.lines()` strips)"
             );
         } else {
-            eprintln!(
+            let _ = writeln!(
+                err_out,
                 "  (no per-line content change; canonical normalization: {} — \
                  run `rledger format -i` to rewrite)",
                 causes.join(", "),
@@ -409,20 +429,20 @@ fn emit_diff(file: &PathBuf, original: &str, formatted: &str) {
     let fmt_lines: Vec<&str> = formatted.lines().collect();
     for (i, (orig, fmt)) in orig_lines.iter().zip(fmt_lines.iter()).enumerate() {
         if orig != fmt {
-            eprintln!("@@ line {} @@", i + 1);
-            eprintln!("-{orig}");
-            eprintln!("+{fmt}");
+            let _ = writeln!(err_out, "@@ line {} @@", i + 1);
+            let _ = writeln!(err_out, "-{orig}");
+            let _ = writeln!(err_out, "+{fmt}");
         }
     }
     if orig_lines.len() != fmt_lines.len() {
         let min_len = orig_lines.len().min(fmt_lines.len());
         for (i, line) in orig_lines.iter().skip(min_len).enumerate() {
-            eprintln!("@@ line {} (removed) @@", min_len + i + 1);
-            eprintln!("-{line}");
+            let _ = writeln!(err_out, "@@ line {} (removed) @@", min_len + i + 1);
+            let _ = writeln!(err_out, "-{line}");
         }
         for (i, line) in fmt_lines.iter().skip(min_len).enumerate() {
-            eprintln!("@@ line {} (added) @@", min_len + i + 1);
-            eprintln!("+{line}");
+            let _ = writeln!(err_out, "@@ line {} (added) @@", min_len + i + 1);
+            let _ = writeln!(err_out, "+{line}");
         }
     }
 }

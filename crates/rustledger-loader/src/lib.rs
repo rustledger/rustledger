@@ -131,13 +131,23 @@ pub struct IncludeSite {
 #[derive(Debug, Error)]
 pub enum LoadError {
     /// IO error reading a file.
-    #[error("failed to read file {path}: {source}")]
+    ///
+    /// The message is complete on its own, OS error included, because nearly
+    /// every consumer shows a `LoadError` through `to_string()` (the loader's
+    /// `LOAD` diagnostics, the wasm and LSP error lists, `doctor`). So the
+    /// `io::Error` is deliberately NOT exposed through
+    /// [`std::error::Error::source`]: a chain printer (`{e:#}`, anyhow) would
+    /// then print it again after this message. With the field once named
+    /// `source` (which `thiserror` treats as the source) and the variant also
+    /// wrapped by [`ProcessError::Load`], `rledger extract --existing` printed
+    /// the OS error three times (#2515).
+    #[error("failed to read file {path}: {error}")]
     Io {
         /// The path that failed to read.
         path: PathBuf,
-        /// The underlying IO error.
-        #[source]
-        source: std::io::Error,
+        /// The underlying IO error. Part of the message, not the source chain;
+        /// see the variant docs.
+        error: std::io::Error,
         /// When this failure came from resolving an `include`, the include site.
         include_site: Option<IncludeSite>,
     },
@@ -857,6 +867,93 @@ mod tests {
     use super::*;
     use std::io::Write;
     use tempfile::NamedTempFile;
+
+    /// What a chain printer (`{e:#}`, anyhow's alternate Display) shows: each
+    /// error's message, then each source's, joined by `": "`.
+    fn chain(e: &dyn std::error::Error) -> String {
+        let mut out = e.to_string();
+        let mut cur = e.source();
+        while let Some(s) = cur {
+            out.push_str(": ");
+            out.push_str(&s.to_string());
+            cur = s.source();
+        }
+        out
+    }
+
+    /// One of every `LoadError` variant, so a variant added later without a
+    /// case here fails to compile in the exhaustive match below.
+    fn every_load_error() -> Vec<LoadError> {
+        let all = vec![
+            LoadError::Io {
+                path: PathBuf::from("/nonexistent/x.beancount"),
+                error: std::io::Error::new(std::io::ErrorKind::NotFound, "OS-ERROR-TEXT"),
+                include_site: None,
+            },
+            LoadError::IncludeCycle {
+                cycle: vec!["a".into(), "b".into(), "a".into()],
+            },
+            LoadError::DuplicateInclude { path: "a".into() },
+            LoadError::ParseErrors {
+                path: PathBuf::from("a"),
+                errors: Vec::new(),
+            },
+            LoadError::PathTraversal {
+                include_path: "../x".into(),
+                base_dir: PathBuf::from("/b"),
+            },
+            LoadError::Decryption {
+                path: PathBuf::from("a"),
+                message: "gpg said no".into(),
+            },
+            LoadError::GlobNoMatch {
+                pattern: "*.bean".into(),
+            },
+            LoadError::GlobError {
+                pattern: "[".into(),
+                message: "bad glob".into(),
+            },
+            LoadError::TooManyFiles { limit: 1 },
+        ];
+        for e in &all {
+            // Exhaustive: a new variant must be added to the list above.
+            match e {
+                LoadError::Io { .. }
+                | LoadError::IncludeCycle { .. }
+                | LoadError::DuplicateInclude { .. }
+                | LoadError::ParseErrors { .. }
+                | LoadError::PathTraversal { .. }
+                | LoadError::Decryption { .. }
+                | LoadError::GlobNoMatch { .. }
+                | LoadError::GlobError { .. }
+                | LoadError::TooManyFiles { .. } => {}
+            }
+        }
+        all
+    }
+
+    /// #2515: no error repeats its source's text. A `LoadError` printed
+    /// through a chain (`rledger`'s top-level `{e:#}`), alone or wrapped in
+    /// `ProcessError::Load`, says each thing once; and the OS error stays in
+    /// the plain `to_string()` message every list-of-errors consumer shows.
+    #[test]
+    fn load_errors_name_each_cause_once() {
+        for e in every_load_error() {
+            let plain = e.to_string();
+            let chained = chain(&e);
+            assert_eq!(
+                chained, plain,
+                "a LoadError has no source to repeat: {chained}"
+            );
+            let wrapped = crate::ProcessError::Load(e);
+            assert_eq!(chain(&wrapped), plain, "ProcessError::Load adds nothing");
+        }
+        let io = &every_load_error()[0];
+        assert_eq!(
+            io.to_string(),
+            "failed to read file /nonexistent/x.beancount: OS-ERROR-TEXT"
+        );
+    }
 
     #[test]
     fn file_id_to_u16_rejects_the_reserved_sentinel_not_panic() {

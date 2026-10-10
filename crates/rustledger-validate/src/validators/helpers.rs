@@ -5,23 +5,73 @@ use rustledger_core::{Account, NaiveDate};
 use crate::LedgerState;
 use crate::error::{ErrorCode, ValidationError};
 
-/// Push an `E1001` (`AccountNotOpen`) error for `account` at `date`. `subject`
+/// The `E1005` (`InvalidAccountName`) error for `account`, with `reason` from
+/// [`validate_account_name`]. The one definition of that message, shared by
+/// the `open` check and the unknown-account checks below.
+pub fn invalid_account_name_error(
+    account: &Account,
+    reason: &str,
+    date: NaiveDate,
+) -> ValidationError {
+    ValidationError::new(
+        ErrorCode::InvalidAccountName,
+        format!("Invalid account name \"{account}\": {reason}"),
+        date,
+    )
+    .with_context(account.to_string())
+}
+
+/// Report a reference to an account that is not open.
+///
+/// When the name itself is invalid under this ledger's roots (say
+/// `Actifs:CCM:Courant` without `option "name_assets" "Actifs"`), that is the
+/// error: `E1005` naming the configured roots and the option that renames
+/// one. Reporting `E1001` "never opened" there pointed at the wrong fix, since
+/// the `open` it suggests is rejected too (#2514). Beancount reports
+/// `Invalid account name` for such an account as well. Otherwise this pushes
+/// `E1001` with `unopened_message`.
+///
+/// Every unknown-account report goes through here, so the name check cannot
+/// be skipped by one directive kind.
+pub fn push_unknown_account(
+    state: &LedgerState,
+    account: &Account,
+    date: NaiveDate,
+    unopened_message: impl FnOnce() -> String,
+    errors: &mut Vec<ValidationError>,
+) {
+    if let Some(reason) = validate_account_name(account, &state.options.account_types) {
+        errors.push(invalid_account_name_error(account, &reason, date));
+        return;
+    }
+    errors.push(ValidationError::new(
+        ErrorCode::AccountNotOpen,
+        unopened_message(),
+        date,
+    ));
+}
+
+/// Push an `E1001` (`AccountNotOpen`) error for `account` at `date` (or
+/// `E1005` for an invalid name, see [`push_unknown_account`]). `subject`
 /// names the account's role in the message — `"Account"`, `"Pad target
 /// account"`, `"Pad source account"` — producing
 /// `"<subject> <account> was never opened"`. This is the single definition of
 /// the E1001 message and code, shared by every directive validator that reports
 /// an unopened account.
 pub fn push_account_not_open(
+    state: &LedgerState,
     account: &Account,
     date: NaiveDate,
     subject: &str,
     errors: &mut Vec<ValidationError>,
 ) {
-    errors.push(ValidationError::new(
-        ErrorCode::AccountNotOpen,
-        format!("{subject} {account} was never opened"),
+    push_unknown_account(
+        state,
+        account,
         date,
-    ));
+        || format!("{subject} {account} was never opened"),
+        errors,
+    );
 }
 
 /// Account-presence check for E1001. `state.accounts` is populated in date
@@ -39,7 +89,7 @@ pub fn require_account_open(
     if state.accounts.contains_key(account) {
         return true;
     }
-    push_account_not_open(account, date, subject, errors);
+    push_account_not_open(state, account, date, subject, errors);
     false
 }
 

@@ -281,6 +281,7 @@ pub fn run(
         verbose,
         no_cache,
         &mut DiagnosticsToWriter(io::stderr()),
+        &mut io::stderr(),
     )?;
 
     let use_pager = !no_pager && matches!(format, OutputFormat::Text);
@@ -416,6 +417,9 @@ impl Diagnostics for CollectedDiagnostics {
 /// `no_cache` is `rledger report --no-cache`: load without the parse cache.
 /// It was hardwired to `false` here, so `ag-rledger report --no-cache` was
 /// accepted and ignored (#2522).
+///
+/// `err` receives the rest of what `rledger` writes to stderr: the parse
+/// cache's `--verbose` progress lines.
 pub fn run_with_writer<W: io::Write>(
     file: &PathBuf,
     report: &Report,
@@ -424,11 +428,12 @@ pub fn run_with_writer<W: io::Write>(
     format: &OutputFormat,
     out: &mut W,
     warnings: &mut dyn Diagnostics,
+    err: &mut dyn io::Write,
 ) -> Result<()> {
     // Existence-check → load → render(buffer): the same two-phase split the
     // production `run()` uses, minus the pager. Producing identical report
     // bytes is guaranteed because both paths funnel through `load` + `render`.
-    let loaded = load(file, report, verbose, no_cache, warnings)?;
+    let loaded = load(file, report, verbose, no_cache, warnings, err)?;
     render(&loaded, report, file, format, out, warnings)
 }
 
@@ -480,6 +485,7 @@ fn load(
     verbose: bool,
     no_cache: bool,
     warnings: &mut dyn Diagnostics,
+    err: &mut dyn io::Write,
 ) -> Result<LoadedReport> {
     // Check if file exists
     if !file.exists() {
@@ -506,7 +512,8 @@ fn load(
     // entirely. The cached `LoadResult` is the parsed (pre-booking)
     // stream; `process` books it exactly as the uncached `load` did.
     // Disable with `--no-cache` or `BEANCOUNT_DISABLE_LOAD_CACHE`.
-    let (raw, _from_cache) = crate::cmd::loadcache::load_result_cached(file, no_cache, verbose)?;
+    let (raw, _from_cache) =
+        crate::cmd::loadcache::load_result_cached(file, no_cache, verbose, err)?;
     // Deliberate deviation from bean-query (#1908) — see `bail_on_parse_errors`.
     crate::cmd::loadcache::bail_on_parse_errors(&raw, file)?;
     let ledger = rustledger_loader::process(raw, &options)

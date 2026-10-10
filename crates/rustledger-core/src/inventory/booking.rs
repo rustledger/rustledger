@@ -376,17 +376,19 @@ impl Inventory {
     /// (#2554 review). The remainder is taken as it will be STORED: the pool
     /// total it comes from may itself have rounded (`...333.5` up to
     /// `...334`), so "the lots plus the sale" is not what the rebuild sees.
-    /// Both paths are O(lots) already.
+    /// Both paths are O(lots) already, and `in_pool` must be O(1) to keep
+    /// this one so: a `Vec::contains` there made a sale from a pool of 80k
+    /// lots four times slower than `main` (independent review of #2554).
     fn exact_total_after_in_range(
         &self,
         currency: &crate::Currency,
-        in_pool: impl Fn(usize) -> bool,
+        in_pool: impl Fn(usize, &Position) -> bool,
         remainder: Decimal,
     ) -> bool {
         let exact: bigdecimal::BigDecimal = self
             .positions
             .iter_slots()
-            .filter(|(i, p)| p.units.currency == *currency && !in_pool(*i))
+            .filter(|(i, p)| p.units.currency == *currency && !in_pool(*i, p))
             .map(|(_, p)| crate::to_bigdecimal(p.units.number))
             .sum::<bigdecimal::BigDecimal>()
             + crate::to_bigdecimal(remainder);
@@ -1352,7 +1354,8 @@ impl Inventory {
         .ok_or_else(overflow)?;
         if !self.exact_total_after_in_range(
             &units.currency,
-            |i| matching_slots.contains(&i),
+            // The predicate that chose `matching_slots`, in O(1).
+            |_, p| on_reduced_side(p),
             new_units,
         ) {
             return Err(overflow());
@@ -1589,7 +1592,7 @@ impl Inventory {
         .ok_or_else(overflow)?;
         if !self.exact_total_after_in_range(
             &units.currency,
-            |i| matching_indices.contains(&i),
+            |i, _| matching_indices.contains(&i),
             remaining,
         ) {
             return Err(overflow());

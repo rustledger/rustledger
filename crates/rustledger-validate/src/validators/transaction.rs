@@ -762,6 +762,57 @@ mod tolerance_tests {
         assert_eq!(t.get(&cur("USD")), Some(&dec!(0.2)));
         assert_eq!(t.len(), 1, "only the USD currency should appear");
     }
+
+    /// #2554 (robcohen's decision): a cost/price tolerance past
+    /// `Decimal::MAX` is capped at `MAX`. Pinned end to end through the
+    /// balance validator, whose residual is EXACT and can itself pass `MAX`:
+    /// the cap never turns a failing balance check into a passing one. Here
+    /// the true USD tolerance is `22 x 0.05 x MAX = 1.1 MAX`.
+    /// - a residual of `0.5 MAX` is inside both, and passes;
+    /// - a residual of `1.05 MAX` is inside the true tolerance but not the
+    ///   cap, and FAILS: the cap is the stricter bound;
+    /// - a residual of `1.2 MAX` is outside both, and fails.
+    #[test]
+    fn the_capped_tolerance_never_passes_an_imbalance_the_true_one_fails() {
+        let max = Decimal::MAX;
+        let opts = ValidationOptions {
+            infer_tolerance_from_cost: true,
+            ..ValidationOptions::default()
+        };
+        let unbalanced = |cash: &[Decimal]| {
+            let mut postings: Vec<Posting> = (0..22)
+                .map(|i| {
+                    let units = if i % 2 == 0 { dec!(0.1) } else { dec!(-0.1) };
+                    Posting::new("Assets:Stock", Amount::new(units, "CORP")).with_price(
+                        rustledger_core::PriceAnnotation::unit(Amount::new(max, "USD")),
+                    )
+                })
+                .collect();
+            for &n in cash {
+                postings.push(Posting::new("Assets:Cash", Amount::new(n, "USD")));
+            }
+            let txn = mk_txn(postings);
+            let tolerances = calculate_tolerances(&txn, &opts);
+            assert_eq!(tolerances.get(&cur("USD")), Some(&max), "the cap");
+            let mut errors = Vec::new();
+            validate_transaction_balance(&txn, &tolerances, &mut errors);
+            errors
+                .iter()
+                .filter(|e| e.code == ErrorCode::TransactionUnbalanced)
+                .count()
+        };
+        let half = Decimal::from_str_exact("39614081257132168796771975167").unwrap();
+        let twentieth = Decimal::from_str_exact("3961408125713216879677197517").unwrap();
+        let fifth = Decimal::from_str_exact("15845632502852867518708790067").unwrap();
+        // 0.5 MAX.
+        assert_eq!(unbalanced(&[half]), 0, "within both bounds");
+        // MAX itself: a `Decimal` residual is never outside the cap.
+        assert_eq!(unbalanced(&[max]), 0, "MAX is within the cap");
+        // ~1.05 MAX: the exact residual is past the cap.
+        assert_eq!(unbalanced(&[max, twentieth]), 1, "stricter than 1.1 MAX");
+        // ~1.2 MAX: past both.
+        assert_eq!(unbalanced(&[max, fifth]), 1, "past both bounds");
+    }
 }
 
 #[cfg(test)]

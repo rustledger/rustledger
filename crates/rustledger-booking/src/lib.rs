@@ -323,20 +323,39 @@ impl ToleranceSum {
     /// the true tolerance would have allowed, never hide one. A negative sum
     /// (negative prices, E4005) past `-MAX` loses to the base tolerance in the
     /// `max` that follows, exactly as the true value would.
+    ///
+    /// An exact sum back inside the range is rounded DOWN, never to nearest,
+    /// for the same reason: rounding `MAX - 0.4` to nearest gave `MAX`, a
+    /// tolerance wider than the true one, which could pass a residual the
+    /// true tolerance fails. Rounded down it can only be stricter
+    /// (`a_tolerance_is_never_looser_than_its_exact_sum`).
     fn value(self) -> Decimal {
         match self {
             Self::Fast(sum) => sum,
             Self::Exact(sum) => {
-                // `to_plain_string`, not `Display` (exponent form); parsing
-                // rounds the digits and fails only on magnitude.
                 use std::str::FromStr;
-                Decimal::from_str(&sum.to_plain_string()).unwrap_or_else(|_| {
-                    if sum.sign() == bigdecimal::num_bigint::Sign::Minus {
-                        -Decimal::MAX
-                    } else {
-                        Decimal::MAX
-                    }
-                })
+                let cap = if sum.sign() == bigdecimal::num_bigint::Sign::Minus {
+                    -Decimal::MAX
+                } else {
+                    Decimal::MAX
+                };
+                // At most 28 fractional digits, floored, so the parser is
+                // never handed more than a `Decimal`'s scale; `to_plain_string`,
+                // not `Display` (exponent form). The parser still rounds the
+                // digits to NEAREST and fails only on magnitude.
+                let floored = sum.with_scale_round(28, bigdecimal::RoundingMode::Floor);
+                let Ok(nearest) = Decimal::from_str(&floored.to_plain_string()) else {
+                    return cap;
+                };
+                if to_big(nearest) <= sum {
+                    return nearest;
+                }
+                // Rounded up: step one unit in its last place down. Nearest
+                // rounding is off by at most half that unit, so the step lands
+                // below `sum`. The only step that leaves the mantissa's range
+                // is below `-MAX`, where any negative tolerance answers alike.
+                Decimal::try_from_i128_with_scale(nearest.mantissa() - 1, nearest.scale())
+                    .unwrap_or(-Decimal::MAX)
             }
         }
     }
@@ -2083,5 +2102,105 @@ mod tests {
         negative.add_product(Decimal::MAX, Decimal::NEGATIVE_ONE);
         negative.add_product(Decimal::MAX, Decimal::NEGATIVE_ONE);
         assert_eq!(negative.value(), -Decimal::MAX);
+    }
+
+    /// The tolerance a `ToleranceSum` hands out is never LOOSER than the exact
+    /// sum it stands for (#2554, robcohen's decision on the cap). The balance
+    /// check is `|residual| <= tolerance`, so a value at or below the exact
+    /// sum can only turn a pass into a failure, never a failure into a pass --
+    /// against booking's `Decimal` residuals and the validator's exact
+    /// `BigDecimal` one alike.
+    ///
+    /// Two ways out of the exact sum: the cap at `±MAX`, and parsing an
+    /// in-range sum back into a `Decimal`, which ROUNDS to nearest. The second
+    /// rounded `MAX - 0.4` up to `MAX`, a tolerance 0.4 wider than the true
+    /// one (independent review of #2554).
+    #[test]
+    fn a_tolerance_is_never_looser_than_its_exact_sum() {
+        let big = |d: Decimal| rustledger_core::to_bigdecimal(d);
+        let max = Decimal::MAX;
+        let tenth = dec!(0.1);
+        // (tolerance, rate) contributions, each run through the sum.
+        let cases: Vec<Vec<(Decimal, Decimal)>> = vec![
+            // Past the range: capped at MAX.
+            vec![(max, Decimal::ONE), (max, Decimal::ONE)],
+            vec![(tenth, max); 11],
+            // Past the range and back in, landing on a sum with more digits
+            // than a `Decimal` holds, rounding UP and rounding down.
+            vec![
+                (max, Decimal::ONE),
+                (max, Decimal::ONE),
+                (max, Decimal::NEGATIVE_ONE),
+                (dec!(0.4), Decimal::NEGATIVE_ONE),
+            ],
+            vec![
+                (max, Decimal::ONE),
+                (max, Decimal::ONE),
+                (max, Decimal::NEGATIVE_ONE),
+                (dec!(0.6), Decimal::NEGATIVE_ONE),
+            ],
+            // Back in range with a long fraction.
+            vec![
+                (max, Decimal::ONE),
+                (max, Decimal::ONE),
+                (max, Decimal::NEGATIVE_ONE),
+                (max, Decimal::NEGATIVE_ONE),
+                (dec!(1.0000000000000000000000000001), dec!(0.7)),
+                (dec!(0.0000000000000000000000000001), dec!(0.5)),
+            ],
+            // A negative sum: no residual passes it, capped or not.
+            vec![(max, Decimal::NEGATIVE_ONE), (max, Decimal::NEGATIVE_ONE)],
+            vec![
+                (max, Decimal::ONE),
+                (max, Decimal::NEGATIVE_ONE),
+                (max, Decimal::NEGATIVE_ONE),
+                (dec!(0.4), Decimal::ONE),
+            ],
+            // Ordinary sums stay exact.
+            vec![(dec!(0.005), dec!(101.25)), (dec!(0.05), dec!(3))],
+        ];
+        for contributions in cases {
+            let mut sum = ToleranceSum::default();
+            let mut exact = BigDecimal::from(0);
+            for &(tolerance, rate) in &contributions {
+                sum.add_product(tolerance, rate);
+                exact += big(tolerance) * big(rate);
+            }
+            let value = sum.value();
+            // A negative sum is capped at `-MAX`, above it, but every negative
+            // tolerance fails every residual alike: it only has to stay
+            // negative.
+            assert!(
+                big(value) <= exact
+                    || (exact.sign() == bigdecimal::num_bigint::Sign::Minus
+                        && value < Decimal::ZERO),
+                "{contributions:?}: tolerance {value} is looser than the exact {exact}"
+            );
+            // The balance check never passes where the exact tolerance fails:
+            // probe residuals at, around and past both bounds.
+            let ulp = BigDecimal::new(1.into(), 40);
+            for residual in [
+                BigDecimal::from(0),
+                big(value),
+                big(value) + &ulp,
+                exact.clone(),
+                exact.clone() + &ulp,
+                big(max),
+                big(max) + &ulp,
+                big(max) * BigDecimal::from(2),
+            ] {
+                if residual.abs() <= big(value) {
+                    assert!(
+                        residual.abs() <= exact,
+                        "{contributions:?}: residual {residual} passes {value} but not {exact}"
+                    );
+                }
+            }
+            // Against any `Decimal` residual (all a booked residual can be),
+            // a positive tolerance at or past `MAX` answers as the true one.
+            if exact >= big(max) {
+                assert_eq!(value, max, "{contributions:?}");
+            }
+        }
     }
 }

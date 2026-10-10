@@ -18,24 +18,41 @@ use std::io::Write;
 /// JOURNAL queries with thousands of lots in the `balance` column (#1086).
 const MAX_COLUMN_WIDTH: usize = u16::MAX as usize;
 
+/// The executor a query runs on, set up from the loaded ledger.
+///
+/// The REPL keeps ONE for the whole session, so a table one statement
+/// creates (`CREATE TABLE t AS SELECT ...`) is there for the next, as in
+/// bean-query's shell, whose connection lives as long as the shell. A new
+/// executor per statement threw each table away as soon as it was made
+/// (#2518). A batch run (`rledger query FILE QUERY`, `-F`) is one statement
+/// and gets one executor.
+///
+/// Uses the source-map-aware constructor so the `filename`/`lineno` columns
+/// (and `meta`-derived location lookups) resolve to real source positions
+/// instead of NULL.
+pub(super) fn session_executor<'a>(
+    directives: &'a [Spanned<Directive>],
+    source_map: &'a SourceMap,
+    settings: &ShellSettings,
+) -> Executor<'a> {
+    let mut executor = Executor::new_with_sources(directives, source_map);
+    executor.set_account_types(settings.account_types.clone());
+    executor.set_booking_method(settings.booking_method);
+    executor.set_summary_accounts(settings.summary_accounts.clone());
+    executor.set_balance_discrepancies(settings.balance_discrepancies.iter().cloned());
+    executor
+}
+
+/// Parse `query_str`, run it on `executor` and write the result.
 pub(super) fn execute_query<W: Write>(
     query_str: &str,
-    directives: &[Spanned<Directive>],
-    source_map: &SourceMap,
+    executor: &mut Executor<'_>,
     settings: &ShellSettings,
     writer: &mut W,
 ) -> Result<()> {
     // Parse the query
     let query = parse_query(query_str).with_context(|| "failed to parse query")?;
 
-    // Execute. Use the source-map-aware constructor so the `filename`/`lineno`
-    // columns (and `meta`-derived location lookups) resolve to real source
-    // positions instead of NULL.
-    let mut executor = Executor::new_with_sources(directives, source_map);
-    executor.set_account_types(settings.account_types.clone());
-    executor.set_booking_method(settings.booking_method);
-    executor.set_summary_accounts(settings.summary_accounts.clone());
-    executor.set_balance_discrepancies(settings.balance_discrepancies.iter().cloned());
     let result = executor
         .execute(&query)
         .with_context(|| "failed to execute query")?;

@@ -329,12 +329,13 @@ pub fn run_with_writer<W: io::Write>(
 
     // Batch query: no pager (matching Python bean-query behavior).
     // Pager is only used in interactive REPL mode.
+    let mut executor = output::session_executor(&directives, &source_map, &settings);
     if let Some(ref output_path) = settings.output_file {
         let mut file = fs::File::create(output_path)
             .with_context(|| format!("failed to create output file {}", output_path.display()))?;
-        output::execute_query(&query_str, &directives, &source_map, &settings, &mut file)
+        output::execute_query(&query_str, &mut executor, &settings, &mut file)
     } else {
-        output::execute_query(&query_str, &directives, &source_map, &settings, out)
+        output::execute_query(&query_str, &mut executor, &settings, out)
     }
 }
 

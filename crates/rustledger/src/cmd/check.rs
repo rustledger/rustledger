@@ -360,7 +360,7 @@ pub fn run_with_writer<W: Write>(
             }
             LoadError::Io {
                 path,
-                source,
+                error: source,
                 include_site,
             } => {
                 let path_str = path.display().to_string();

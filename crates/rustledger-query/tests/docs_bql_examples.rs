@@ -3,7 +3,7 @@
 //! BQL's comments are `/* ... */`, as in bean-query. `--` is not one: it
 //! reads `3--2` as `3 - -2`, so a `-- note` line is part of the query. The
 //! docs annotated their examples with `-- ...`, which made every such example
-//! fail to parse. This reads every ```sql block of the BQL docs, refuses a
+//! fail to parse. This reads every `sql` code block of the BQL docs, refuses a
 //! `--` annotation, and parses each complete statement in it. A block may
 //! also hold clause fragments (`WHERE ...`) and syntax sketches
 //! (`BALANCES [FROM ...]`); those are not statements and are skipped.
@@ -11,8 +11,8 @@
 use rustledger_query::parse;
 use rustledger_query::parser::strip_comments;
 
-/// The docs whose ```sql blocks are BQL. (`docs/development/
-/// import-architecture.md`'s are SQLite schemas.)
+/// The docs whose `sql` code blocks are BQL. (The ones in
+/// `docs/development/import-architecture.md` are SQLite schemas.)
 const BQL_DOCS: &[&str] = &[
     "docs/reference/bql.md",
     "docs/commands/query.md",

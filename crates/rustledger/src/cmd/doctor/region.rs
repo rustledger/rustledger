@@ -4,8 +4,63 @@ use rust_decimal;
 use rustledger_core::Directive;
 use rustledger_loader::Loader;
 use std::collections::BTreeMap;
+use std::fmt;
 use std::io::Write;
 use std::path::PathBuf;
+
+/// A number this command prints: a `Decimal` while one holds it exactly, the
+/// exact `BigDecimal` once none does (#2572).
+///
+/// A lot's cost total, `units × per-unit`, and the running net of a region
+/// both leave `Decimal`'s range on ledgers well inside it, and a bare `*` or
+/// `+=` there panicked. A clamped or rounded figure would be worse: this
+/// command exists to show what a region of the ledger adds up to. Ordinary
+/// numbers stay `Decimal` and print exactly as they always did.
+enum Number {
+    Fast(rust_decimal::Decimal),
+    Exact(bigdecimal::BigDecimal),
+}
+
+impl Number {
+    fn add(&mut self, other: &Self) {
+        if let (Self::Fast(a), Self::Fast(b)) = (&*self, other)
+            && let Some(sum) = rustledger_core::checked_add_exact(*a, *b)
+        {
+            *self = Self::Fast(sum);
+            return;
+        }
+        *self = Self::Exact(self.exact() + other.exact());
+    }
+
+    fn exact(&self) -> bigdecimal::BigDecimal {
+        match self {
+            Self::Fast(d) => rustledger_core::to_bigdecimal(*d),
+            Self::Exact(b) => b.clone(),
+        }
+    }
+
+    fn is_zero(&self) -> bool {
+        match self {
+            Self::Fast(d) => d.is_zero(),
+            Self::Exact(b) => bigdecimal::Zero::is_zero(b),
+        }
+    }
+}
+
+impl fmt::Display for Number {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Fast(d) => write!(f, "{d}"),
+            // Back to `Decimal` when a sum returns to its range, so it prints
+            // as the ordinary figures beside it; `to_plain_string`, not
+            // `Display`, which switches to exponent form.
+            Self::Exact(b) => match rustledger_core::decimal_from_big_exact(b) {
+                Some(d) => write!(f, "{d}"),
+                None => f.write_str(&b.to_plain_string()),
+            },
+        }
+    }
+}
 
 pub(super) fn cmd_region<W: Write>(
     file: &PathBuf,
@@ -72,7 +127,7 @@ pub(super) fn cmd_region<W: Write>(
     writeln!(writer)?;
 
     // Calculate balances for these transactions
-    let mut balances: BTreeMap<String, rust_decimal::Decimal> = BTreeMap::new();
+    let mut balances: BTreeMap<String, Number> = BTreeMap::new();
 
     for txn in &region_transactions {
         writeln!(writer, "{} {} \"{}\"", txn.date, txn.flag, txn.narration)?;
@@ -100,14 +155,19 @@ pub(super) fn cmd_region<W: Write>(
                             // below — labeling the unit count with the cost
                             // currency would be the same mislabel bug in a
                             // different coat (review catch).
-                            let total_cost = number.total_for(amount.number);
+                            // Exact past `Decimal`'s range (#2572): `total_for`
+                            // answers only where a `Decimal` holds the total.
+                            let total_cost = number.total_for(amount.number).map_or_else(
+                                || Number::Exact(number.total_for_exact(amount.number)),
+                                Number::Fast,
+                            );
                             let currency = cost
                                 .currency
                                 .clone()
                                 .unwrap_or_else(|| amount.currency.clone());
                             (total_cost, currency)
                         } else {
-                            (amount.number, amount.currency.clone())
+                            (Number::Fast(amount.number), amount.currency.clone())
                         }
                     }
                     Some(Conversion::Value) => {
@@ -117,18 +177,19 @@ pub(super) fn cmd_region<W: Write>(
                             writer,
                             "  (Note: value conversion requires price database, showing units)"
                         )?;
-                        (amount.number, amount.currency.clone())
+                        (Number::Fast(amount.number), amount.currency.clone())
                     }
-                    None => (amount.number, amount.currency.clone()),
+                    None => (Number::Fast(amount.number), amount.currency.clone()),
                 };
                 writeln!(
                     writer,
                     "  {} {} {}",
                     posting.account, display_number, display_currency
                 )?;
-                *balances
+                balances
                     .entry(format!("{}:{}", posting.account, display_currency))
-                    .or_default() += display_number;
+                    .or_insert(Number::Fast(rust_decimal::Decimal::ZERO))
+                    .add(&display_number);
             } else {
                 writeln!(writer, "  {}", posting.account)?;
             }

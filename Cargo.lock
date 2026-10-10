@@ -3290,6 +3290,7 @@ version = "0.24.0"
 dependencies = [
  "agcli",
  "anyhow",
+ "bigdecimal",
  "clap",
  "clap_complete",
  "clap_complete_nushell",

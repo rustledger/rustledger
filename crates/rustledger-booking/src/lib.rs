@@ -154,8 +154,14 @@ pub fn transaction_tolerances(
             && units.number.scale() > 0
         {
             let quantum = decimal_quantum(units.number);
-            // Use half the quantum as base tolerance (like Python beancount)
-            let base_tolerance = quantum * opts.multiplier;
+            // Use half the quantum as base tolerance (like Python beancount).
+            // Exact, or rounded DOWN when the product needs more digits than
+            // a `Decimal` holds (a multiplier written to many places): a bare
+            // `*` rounds to nearest, which can widen the tolerance (#2582).
+            let base_tolerance = rustledger_core::checked_mul_exact(quantum, opts.multiplier)
+                .unwrap_or_else(|| {
+                    ToleranceSum::Exact(to_big(quantum) * to_big(opts.multiplier)).value()
+                });
 
             tolerances
                 .entry(units.currency.clone())
@@ -193,7 +199,6 @@ pub fn transaction_tolerances(
                     continue;
                 }
                 let units_quantum = decimal_quantum(units_number);
-                let tolerance = units_quantum * opts.multiplier;
 
                 // Cost contribution — only per-unit cost feeds into
                 // tolerance inference. `PerUnitFromTotal` and `PerUnit`
@@ -205,7 +210,7 @@ pub fn transaction_tolerances(
                     cost_tolerances
                         .entry(cost_currency.clone())
                         .or_default()
-                        .add_product(tolerance, cost_per_unit);
+                        .add_product(units_quantum, opts.multiplier, cost_per_unit);
                 }
 
                 // Price contribution: only complete amounts contribute
@@ -222,7 +227,7 @@ pub fn transaction_tolerances(
                     cost_tolerances
                         .entry(price_amt.currency.clone())
                         .or_default()
-                        .add_product(tolerance, price_amt.number);
+                        .add_product(units_quantum, opts.multiplier, price_amt.number);
                 }
             }
         }
@@ -273,14 +278,17 @@ pub fn transaction_tolerances(
 }
 
 /// One currency's accumulated cost/price tolerance: a sum of
-/// `units tolerance x cost or price` contributions.
+/// `units quantum x multiplier x cost or price` contributions.
 ///
 /// The bare `*` and `+=` it replaces PANICKED: a price near `Decimal::MAX`
 /// times a tolerance of `0.05`, accumulated over twenty-odd postings, leaves
 /// the range, and so does one product under a large `tolerance_multiplier`
 /// (#2554). An ordinary transaction stays on the `Decimal` sum; the first
-/// product or sum that would overflow moves this currency to `BigDecimal`,
-/// where nothing does.
+/// product or sum that would overflow, OR ROUND, moves this currency to
+/// `BigDecimal`, where nothing does. Rounding counts because `checked_mul`
+/// and `checked_add` round to nearest past 28 digits and still answer:
+/// `0.005 x 1.23456789012345678901234567` came back `...7284` against an
+/// exact `...72835`, a tolerance wider than the true one (#2582).
 #[derive(Debug)]
 enum ToleranceSum {
     Fast(Decimal),
@@ -294,11 +302,17 @@ impl Default for ToleranceSum {
 }
 
 impl ToleranceSum {
-    fn add_product(&mut self, tolerance: Decimal, rate: Decimal) {
+    /// Add `quantum x multiplier x rate`, exactly.
+    ///
+    /// The units tolerance `quantum x multiplier` is a factor here, not a
+    /// precomputed `Decimal`: rounding it first would carry its error into the
+    /// product, and in either direction, since a rate can be negative.
+    fn add_product(&mut self, quantum: Decimal, multiplier: Decimal, rate: Decimal) {
+        use rustledger_core::{checked_add_exact, checked_mul_exact};
         if let Self::Fast(sum) = self {
-            if let Some(next) = tolerance
-                .checked_mul(rate)
-                .and_then(|product| sum.checked_add(product))
+            if let Some(next) = checked_mul_exact(quantum, multiplier)
+                .and_then(|tolerance| checked_mul_exact(tolerance, rate))
+                .and_then(|product| checked_add_exact(*sum, product))
             {
                 *sum = next;
                 return;
@@ -306,7 +320,7 @@ impl ToleranceSum {
             *self = Self::Exact(to_big(*sum));
         }
         if let Self::Exact(sum) = self {
-            *sum += to_big(tolerance) * to_big(rate);
+            *sum += to_big(quantum) * to_big(multiplier) * to_big(rate);
         }
     }
 
@@ -2087,20 +2101,66 @@ mod tests {
         );
     }
 
+    /// #2582: the issue's transaction. `1.00 CORP @ 1.23456789012345678901234567
+    /// USD` has an exact cost tolerance of `0.005 x` the price,
+    /// `0.00617283945061728394506172835`, one digit more than a `Decimal`
+    /// holds. `checked_mul` rounded it UP to `...7284`, so a residual `5e-30`
+    /// past the true tolerance passed. It is rounded down now.
+    #[test]
+    fn a_cost_tolerance_needing_a_29th_digit_rounds_down() {
+        let defaults = FxHashMap::default();
+        let opts = ToleranceOptions {
+            multiplier: dec!(0.5),
+            infer_from_cost: true,
+            defaults: &defaults,
+        };
+        let txn = Transaction::new(NaiveDate::default(), "t")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(1.00), "CORP")).with_price(
+                    PriceAnnotation::unit(Amount::new(dec!(1.23456789012345678901234567), "USD")),
+                ),
+            )
+            .with_synthesized_posting(Posting::new(
+                "Assets:Cash",
+                Amount::new(dec!(-1.2283950506728395050672839416), "USD"),
+            ));
+        let tolerance = transaction_tolerances(&txn, &opts)[&Currency::from("USD")];
+        assert_eq!(tolerance.to_string(), "0.0061728394506172839450617283");
+    }
+
+    /// The units tolerance `quantum x tolerance_multiplier` rounds down too:
+    /// with a multiplier written to 28 places, `0.01 x` it needs 30, and a
+    /// bare `*` rounded `...5` up (#2582).
+    #[test]
+    fn a_units_tolerance_needing_more_digits_rounds_down() {
+        let defaults = FxHashMap::default();
+        let opts = ToleranceOptions {
+            multiplier: dec!(0.5555555555555555555555555555),
+            infer_from_cost: false,
+            defaults: &defaults,
+        };
+        let txn = Transaction::new(NaiveDate::default(), "t")
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(1.00), "USD")))
+            .with_synthesized_posting(Posting::auto("Equity:Opening"));
+        let tolerance = transaction_tolerances(&txn, &opts)[&Currency::from("USD")];
+        // Exact: 0.005555555555555555555555555555.
+        assert_eq!(tolerance.to_string(), "0.0055555555555555555555555555");
+    }
+
     /// A sum that leaves the range and comes back is exact, not clamped:
     /// `MAX + MAX - MAX` is `MAX`, and `MAX + MAX - MAX - 1` is `MAX - 1`.
     #[test]
     fn tolerance_sum_recovers_an_in_range_total_exactly() {
         let mut sum = ToleranceSum::default();
-        sum.add_product(Decimal::MAX, Decimal::ONE);
-        sum.add_product(Decimal::MAX, Decimal::ONE);
-        sum.add_product(Decimal::MAX, Decimal::NEGATIVE_ONE);
-        sum.add_product(Decimal::ONE, Decimal::NEGATIVE_ONE);
+        sum.add_product(Decimal::MAX, Decimal::ONE, Decimal::ONE);
+        sum.add_product(Decimal::MAX, Decimal::ONE, Decimal::ONE);
+        sum.add_product(Decimal::MAX, Decimal::ONE, Decimal::NEGATIVE_ONE);
+        sum.add_product(Decimal::ONE, Decimal::ONE, Decimal::NEGATIVE_ONE);
         assert_eq!(sum.value(), Decimal::MAX - Decimal::ONE);
 
         let mut negative = ToleranceSum::default();
-        negative.add_product(Decimal::MAX, Decimal::NEGATIVE_ONE);
-        negative.add_product(Decimal::MAX, Decimal::NEGATIVE_ONE);
+        negative.add_product(Decimal::MAX, Decimal::ONE, Decimal::NEGATIVE_ONE);
+        negative.add_product(Decimal::MAX, Decimal::ONE, Decimal::NEGATIVE_ONE);
         assert_eq!(negative.value(), -Decimal::MAX);
     }
 
@@ -2158,12 +2218,21 @@ mod tests {
             ],
             // Ordinary sums stay exact.
             vec![(dec!(0.005), dec!(101.25)), (dec!(0.05), dec!(3))],
+            // In range, but the product needs a 29th digit: `checked_mul`
+            // rounded it UP, a unit in the 28th place past the exact
+            // `0.00617283945061728394506172835` (#2582).
+            vec![(dec!(0.005), dec!(1.23456789012345678901234567))],
+            // And the sum: two products exact alone, their sum rounded up.
+            vec![
+                (dec!(1), dec!(4.0000000000000000000000000007)),
+                (dec!(1), dec!(4)),
+            ],
         ];
         for contributions in cases {
             let mut sum = ToleranceSum::default();
             let mut exact = BigDecimal::from(0);
             for &(tolerance, rate) in &contributions {
-                sum.add_product(tolerance, rate);
+                sum.add_product(tolerance, Decimal::ONE, rate);
                 exact += big(tolerance) * big(rate);
             }
             let value = sum.value();

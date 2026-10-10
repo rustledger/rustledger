@@ -655,15 +655,43 @@ impl CostNumber {
     /// than chaining the `total()`/`per_unit()` accessors — both return
     /// `None` for `Compound`, and accessor-chain fallbacks silently
     /// miscost compound lots (the doctor/clamp bug class).
+    ///
+    /// `None` when no `Decimal` holds the total EXACTLY: a per-unit cost times
+    /// units past `Decimal::MAX` (a bare `*` here panicked, #2572), or a
+    /// product needing more digits than the mantissa holds, which `checked_mul`
+    /// would round. Never a clamped or rounded figure; [`Self::total_for_exact`]
+    /// gives the exact total for a caller that can carry a `BigDecimal`.
     #[must_use]
-    pub fn total_for(&self, units: Decimal) -> Decimal {
+    pub fn total_for(&self, units: Decimal) -> Option<Decimal> {
         use rust_decimal::prelude::Signed;
+        // `signum` is -1, 0 or 1, so a stored total times it cannot leave the
+        // range or round.
         let signum = units.signum();
         match self {
-            Self::Total { value } => *value * signum,
-            Self::PerUnitFromTotal(b) => b.total * signum,
-            Self::PerUnit { value } => *value * units,
-            Self::Compound { per_unit, total } => *per_unit * units + *total * signum,
+            Self::Total { value } => Some(*value * signum),
+            Self::PerUnitFromTotal(b) => Some(b.total * signum),
+            Self::PerUnit { value } => crate::checked_mul_exact(*value, units),
+            Self::Compound { per_unit, total } => crate::checked_add_exact(
+                crate::checked_mul_exact(*per_unit, units)?,
+                *total * signum,
+            ),
+        }
+    }
+
+    /// [`Self::total_for`], exactly, whatever its size: the same total in
+    /// `BigDecimal`, where nothing overflows or rounds.
+    #[must_use]
+    pub fn total_for_exact(&self, units: Decimal) -> bigdecimal::BigDecimal {
+        use rust_decimal::prelude::Signed;
+        let big = crate::to_bigdecimal;
+        let signum = big(units.signum());
+        match self {
+            Self::Total { value } => big(*value) * signum,
+            Self::PerUnitFromTotal(b) => big(b.total) * signum,
+            Self::PerUnit { value } => big(*value) * big(units),
+            Self::Compound { per_unit, total } => {
+                big(*per_unit) * big(units) + big(*total) * signum
+            }
         }
     }
 }
@@ -979,19 +1007,21 @@ mod tests {
             CostNumber::PerUnit {
                 value: Decimal::new(500, 2)
             }
-            .total_for(n),
+            .total_for(n)
+            .unwrap(),
             Decimal::new(5000, 2), // 10 * 5.00
         );
         assert_eq!(
             CostNumber::Total {
                 value: Decimal::new(6000, 2)
             }
-            .total_for(n),
+            .total_for(n)
+            .unwrap(),
             Decimal::new(6000, 2), // stored total, precision-exact
         );
         let booked = BookedCost::new(Decimal::new(600, 2), Decimal::new(6000, 2), n);
         assert_eq!(
-            CostNumber::PerUnitFromTotal(booked).total_for(n),
+            CostNumber::PerUnitFromTotal(booked).total_for(n).unwrap(),
             Decimal::new(6000, 2), // stored total preferred
         );
         assert_eq!(
@@ -999,7 +1029,8 @@ mod tests {
                 per_unit: Decimal::new(500, 2),
                 total: Decimal::new(1000, 2),
             }
-            .total_for(n),
+            .total_for(n)
+            .unwrap(),
             Decimal::new(6000, 2), // 10*5.00 + 10.00 = N*a + b
         );
     }
@@ -1016,19 +1047,21 @@ mod tests {
             CostNumber::PerUnit {
                 value: Decimal::new(500, 2)
             }
-            .total_for(n),
+            .total_for(n)
+            .unwrap(),
             Decimal::new(-5000, 2),
         );
         assert_eq!(
             CostNumber::Total {
                 value: Decimal::new(6000, 2)
             }
-            .total_for(n),
+            .total_for(n)
+            .unwrap(),
             Decimal::new(-6000, 2),
         );
         let booked = BookedCost::new(Decimal::new(600, 2), Decimal::new(6000, 2), n.abs());
         assert_eq!(
-            CostNumber::PerUnitFromTotal(booked).total_for(n),
+            CostNumber::PerUnitFromTotal(booked).total_for(n).unwrap(),
             Decimal::new(-6000, 2),
         );
         assert_eq!(
@@ -1036,7 +1069,8 @@ mod tests {
                 per_unit: Decimal::new(500, 2),
                 total: Decimal::new(1000, 2),
             }
-            .total_for(n),
+            .total_for(n)
+            .unwrap(),
             Decimal::new(-6000, 2), // -10*5.00 + 10.00*sign(-10)
         );
         // Zero units: everything costs zero.
@@ -1045,7 +1079,58 @@ mod tests {
                 value: Decimal::new(6000, 2)
             }
             .total_for(Decimal::ZERO),
-            Decimal::ZERO,
+            Some(Decimal::ZERO),
+        );
+    }
+
+    /// A total past `Decimal::MAX` is `None`, not a panic (#2572), and the
+    /// exact total is still there for a caller that can carry it.
+    #[test]
+    fn total_for_reports_a_total_past_the_range() {
+        let units = Decimal::from(10_000_000_000_000_000_i64);
+        let per_unit = CostNumber::PerUnit {
+            value: Decimal::from(10_000_000_000_000_i64),
+        };
+        assert_eq!(per_unit.total_for(units), None);
+        assert_eq!(
+            per_unit.total_for_exact(units).to_string(),
+            "100000000000000000000000000000"
+        );
+        let compound = CostNumber::Compound {
+            per_unit: Decimal::MAX,
+            total: Decimal::from(1),
+        };
+        assert_eq!(compound.total_for(Decimal::from(1)), None);
+        assert_eq!(
+            compound.total_for_exact(Decimal::from(1)),
+            crate::to_bigdecimal(Decimal::MAX) + crate::to_bigdecimal(Decimal::from(1))
+        );
+        assert_eq!(compound.total_for_exact(Decimal::from(-1)), {
+            -crate::to_bigdecimal(Decimal::MAX) - crate::to_bigdecimal(Decimal::from(1))
+        });
+    }
+
+    /// A total `checked_mul` would round, at the bottom of the range or the
+    /// 28th digit, is `None` too: a rounded total is not the lot's cost.
+    #[test]
+    fn total_for_reports_a_total_it_would_round() {
+        let tiny = CostNumber::PerUnit {
+            value: dec!(0.000000000000001),
+        };
+        assert_eq!(tiny.total_for(dec!(0.000000000000001)), None);
+        assert_eq!(
+            tiny.total_for_exact(dec!(0.000000000000001)),
+            crate::to_bigdecimal(dec!(0.000000000000001))
+                * crate::to_bigdecimal(dec!(0.000000000000001))
+        );
+        let digits = CostNumber::PerUnit {
+            value: dec!(1.23456789012345678901234567),
+        };
+        assert_eq!(digits.total_for(dec!(0.005)), None);
+        // Inside the mantissa it is the exact product, scale and all.
+        assert_eq!(
+            digits.total_for(dec!(2)).map(|t| t.to_string()),
+            Some("2.46913578024691357802469134".to_string())
         );
     }
 

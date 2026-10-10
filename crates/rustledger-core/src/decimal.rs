@@ -138,6 +138,25 @@ pub fn checked_add_exact(a: Decimal, b: Decimal) -> Option<Decimal> {
     (to_bigdecimal(a) + to_bigdecimal(b) == to_bigdecimal(sum)).then_some(sum)
 }
 
+/// `a × b`, or `None` when no `Decimal` holds the product EXACTLY -- see
+/// [`checked_sub_exact`].
+///
+/// `checked_mul` fails only past `Decimal::MAX`. A product needing more than
+/// 28 fractional digits, or more than the mantissa at its scale, is ROUNDED to
+/// nearest and still answers `Some`: `0.005 × 1.23456789012345678901234567`
+/// comes back a unit in the 28th place too large (#2582), and `1e-15 × 1e-15`
+/// comes back `0`. An exact product carries `scale(a) + scale(b)`, so a
+/// narrower one is the cheap signal, confirmed in `BigDecimal` because a
+/// product whose dropped digits were zeros narrows too.
+#[must_use]
+pub fn checked_mul_exact(a: Decimal, b: Decimal) -> Option<Decimal> {
+    let product = a.checked_mul(b)?;
+    if product.scale() >= a.scale() + b.scale() {
+        return Some(product);
+    }
+    (to_bigdecimal(a) * to_bigdecimal(b) == to_bigdecimal(product)).then_some(product)
+}
+
 /// [`checked_add_python_scale`] that also refuses a sum it would have to ROUND.
 ///
 /// For what a lot holds once a reduction is taken from it, where a rounded

@@ -544,3 +544,34 @@ fn a_wrong_cost_number_is_an_ordinary_no_match() {
         other => panic!("expected the ordinary NoMatchingLot, got {other:?}"),
     }
 }
+
+/// Review round 2: whether a lot "in another currency" would have matched is
+/// asked of the inventory as this transaction left it. The first posting
+/// takes the only lot at 10; the second, `{10}` beside EUR, then matches
+/// nothing in any currency (the USD lot costs 20), so the message must not
+/// suggest writing another currency.
+#[test]
+fn the_currency_blaming_message_reads_this_transactions_inventory() {
+    let history = vec![
+        buy(2, "Assets:Stock", dec!(1), dec!(10), "EUR"),
+        buy(3, "Assets:Stock", dec!(1), dec!(20), "USD"),
+    ];
+    let sell = txn(
+        5,
+        vec![
+            hool("Assets:Stock", dec!(-1), spec(Some(dec!(10)), Some("EUR")))
+                .with_price(PriceAnnotation::unit(Amount::new(dec!(13), "EUR"))),
+            hool("Assets:Stock", dec!(-1), spec(Some(dec!(10)), None))
+                .with_price(PriceAnnotation::unit(Amount::new(dec!(13), "EUR"))),
+            cash("Assets:CashEUR", dec!(26), "EUR"),
+            Posting::auto("Income:Gains"),
+        ],
+    );
+    match book(BookingMethod::Fifo, history, sell) {
+        Err(BookingError::Inventory(e)) => assert!(
+            matches!(e.error, rustledger_core::BookingError::NoMatchingLot { .. }),
+            "{e:?}"
+        ),
+        other => panic!("expected the ordinary NoMatchingLot, got {other:?}"),
+    }
+}

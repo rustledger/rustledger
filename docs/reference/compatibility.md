@@ -506,6 +506,13 @@ sale takes (a purchase there keeps beancount's cost in X). Each answer is
 well defined and is what rustledger booked before #2571, so it is kept;
 whether to refuse them as beancount does is an open decision.
 
+One more, older than #2571 and outside it: a cost spec with no currency on
+a posting that does not reduce a lot (a purchase, a sale under NONE, or one
+opening a short), where no step of beancount's rule resolves the currency,
+still takes the currency rustledger infers from the other postings, where
+beancount refuses (`Failed to categorize posting`). No gain lands in two
+currencies there.
+
 Pinned by `crates/rustledger-booking/tests/cost_currency_2571.rs`
 (`an_augmentation_priced_in_another_currency_still_books`,
 `an_unresolved_empty_cost_sells_by_the_accounts_method`,

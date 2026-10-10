@@ -841,13 +841,18 @@ impl BookingEngine {
                             (
                                 rustledger_core::BookingError::NoMatchingLot { .. },
                                 Some(currency),
-                            ) if self.inventories.get(&posting.account).is_some_and(|inv| {
-                                let wildcard = CostSpec {
-                                    currency: None,
-                                    ..match_spec.clone()
-                                };
-                                inv.try_reduce(units, Some(&wildcard), method).is_ok()
-                            }) =>
+                            ) if working_inventories
+                                .get(&posting.account)
+                                .or_else(|| {
+                                    self.inventories.get(&posting.account).map(AsRef::as_ref)
+                                })
+                                .is_some_and(|inv| {
+                                    let wildcard = CostSpec {
+                                        currency: None,
+                                        ..match_spec.clone()
+                                    };
+                                    inv.try_reduce(units, Some(&wildcard), method).is_ok()
+                                }) =>
                             {
                                 no_lot_in_filled(currency)
                             }

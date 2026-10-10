@@ -1861,7 +1861,7 @@ impl Inventory {
         let needed = needed.abs();
         // Near the ceiling `add` checks the lots' exact total, which no
         // cached figure bounds (#2554). An empty or unseen currency included.
-        if needed >= Self::NEAR_CEILING {
+        if Self::is_near_ceiling(needed) {
             return false;
         }
 
@@ -1901,18 +1901,15 @@ impl Inventory {
         let Some(stats) = self.units_cache.get(currency) else {
             return true;
         };
-        if !fits(stats.total) {
-            return false;
-        }
-        // Near the ceiling `add` also checks the lots' EXACT total, which the
-        // rounded `stats.total` may understate
+        // One sum for both tests. Near the ceiling `add` also checks the lots'
+        // EXACT total, which the rounded `stats.total` may understate
         // (`exact_total_in_range_near_ceiling`, #2554), so an add can fail
-        // here even though the cached sum fits. Answer "cannot prove it".
+        // there even though the cached sum fits: answer "cannot prove it".
         if stats
             .total
             .abs()
             .checked_add(needed)
-            .is_none_or(|v| v >= Self::NEAR_CEILING)
+            .is_none_or(Self::is_near_ceiling)
         {
             return false;
         }
@@ -2183,6 +2180,20 @@ impl Inventory {
     pub const NEAR_CEILING: Decimal =
         Decimal::from_parts(268_435_456, 1_042_612_833, 542_101_086, false, 0);
 
+    /// Whether `value` is at or beyond [`Self::NEAR_CEILING`] in magnitude.
+    ///
+    /// Read off the representation rather than compared as a `Decimal`: this
+    /// runs on every `add`, and a `Decimal` comparison across scales has to
+    /// rescale one side first (the comparison form cost ~2% of the
+    /// instructions of `rledger check` on the `simple` profiling workload). A
+    /// magnitude of `1e28` or more needs scale 0 --
+    /// at scale 1 the 96-bit mantissa tops out at ~7.9e27 -- so the test is
+    /// the scale and the mantissa.
+    #[must_use]
+    pub const fn is_near_ceiling(value: Decimal) -> bool {
+        value.scale() == 0 && value.mantissa().unsigned_abs() >= 10_u128.pow(28)
+    }
+
     /// Whether `currency`'s EXACT total, plus `delta`, is within `Decimal`'s
     /// range, given that the cached total plus `delta` is `cached_after`.
     ///
@@ -2198,7 +2209,7 @@ impl Inventory {
         cached_after: Decimal,
         delta: impl FnOnce() -> bigdecimal::BigDecimal,
     ) -> bool {
-        if cached_after.abs() < Self::NEAR_CEILING {
+        if !Self::is_near_ceiling(cached_after) {
             return true;
         }
         let exact: bigdecimal::BigDecimal = self

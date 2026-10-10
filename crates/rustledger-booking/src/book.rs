@@ -1437,7 +1437,7 @@ impl BookingEngine {
         // as `MAX` and an account with no inventory read as safe -- while
         // `add` checks the exact total near the ceiling and refuses it, which
         // is `apply`'s "the guard is unsound" assertion (#2554 review).
-        if sum_abs >= rustledger_core::Inventory::NEAR_CEILING {
+        if rustledger_core::Inventory::is_near_ceiling(sum_abs) {
             return true;
         }
 

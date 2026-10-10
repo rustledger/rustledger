@@ -333,8 +333,8 @@ impl Inventory {
         }
     }
 
-    /// The running total of `units.currency` once `units` is booked against
-    /// it, or `None` when it leaves `Decimal`'s range.
+    /// Whether the running total of `units.currency` stays within `Decimal`'s
+    /// range once `units` is booked against it.
     ///
     /// A reduction moves its lots by exactly `units`, so this is the total the
     /// commit writes. The plans check it so the commit cannot fail: it used to
@@ -346,17 +346,22 @@ impl Inventory {
     /// where it matters (#2363) -- so demanding an exact total here would
     /// refuse reductions from inventories `add` accepted.
     ///
-    /// The cached total may sit below the lots' exact total, so near the
-    /// ceiling the exact total is what is checked
-    /// ([`Self::exact_total_in_range_near_ceiling`]).
-    fn net_after(&self, units: &Amount) -> Option<Decimal> {
-        crate::decimal::checked_add_python_scale(self.units(&units.currency), units.number).filter(
-            |&after| {
-                self.exact_total_in_range_near_ceiling(&units.currency, after, || {
-                    crate::to_bigdecimal(units.number)
-                })
-            },
-        )
+    /// The ordinary case is answered from the signs alone: a reduction against
+    /// a total of the other sign (selling a long the account is net long in)
+    /// only shrinks it, exact and cached alike. Otherwise the cached sum is
+    /// checked, and near the ceiling the lots' exact total
+    /// ([`Self::exact_total_in_range_near_ceiling`]), which the cached total
+    /// may understate.
+    fn net_stays_in_range(&self, units: &Amount) -> bool {
+        let total = self.units(&units.currency);
+        if total.is_zero() || total.is_sign_negative() != units.number.is_sign_negative() {
+            return true;
+        }
+        crate::decimal::checked_add_python_scale(total, units.number).is_some_and(|after| {
+            self.exact_total_in_range_near_ceiling(&units.currency, after, || {
+                crate::to_bigdecimal(units.number)
+            })
+        })
     }
 
     /// Whether the EXACT total of `currency` is within `Decimal`'s range once
@@ -365,7 +370,7 @@ impl Inventory {
     ///
     /// For AVERAGE and the `{*}` merge, which rebuild the caches from the
     /// lots afterwards: the rebuild totals the lots exactly, so the cached
-    /// (possibly rounded, #2363) total that [`Self::net_after`] reads can pass
+    /// (possibly rounded, #2363) total that [`Self::net_stays_in_range`] reads can pass
     /// a reduction whose exact total the rebuild then cannot hold -- a
     /// `rebuild_index` assertion in debug, a wrong cached total in release
     /// (#2554 review). The remainder is taken as it will be STORED: the pool
@@ -1092,7 +1097,7 @@ impl Inventory {
         }
         // The running total the commit will write. In range, or the
         // reduction cannot be applied: `commit_updates` adds `units` to it.
-        if overflow.is_none() && self.net_after(units).is_none() {
+        if overflow.is_none() && !self.net_stays_in_range(units) {
             overflow = Some(OverflowError {
                 currency: units.currency.clone(),
             });
@@ -1193,7 +1198,7 @@ impl Inventory {
         //
         // The lots moved by exactly `units` -- the plan's takes sum to it
         // exactly -- so `delta` equals `units.number` in value, and the plan
-        // has proved `total + units` in range (`net_after`): this addition
+        // has proved `total + units` in range (`net_stays_in_range`): this addition
         // cannot panic. The per-lot sum is used when it is provably exact,
         // for its scale; `units.number` otherwise, for its value (#2554).
         let delta = match delta {
@@ -1811,7 +1816,9 @@ impl Inventory {
         let new_units =
             crate::decimal::checked_add_exact_python_scale(pos.units.number, units.number)
                 .ok_or_else(overflow)?;
-        self.net_after(units).ok_or_else(overflow)?;
+        if !self.net_stays_in_range(units) {
+            return Err(overflow());
+        }
 
         Ok((
             BookingResult {
@@ -1843,7 +1850,7 @@ impl Inventory {
         self.sign_index_bump(idx, 1);
 
         // Update units cache incrementally (units.number is negative for
-        // reductions). `plan_from_lot` proved the sum in range (`net_after`),
+        // reductions). `plan_from_lot` proved the sum in range (`net_stays_in_range`),
         // so the unchecked addition cannot panic.
         if let Some(stats) = self.units_cache.get_mut(&currency) {
             stats.total = crate::decimal::add_python_scale(stats.total, units.number);
@@ -3868,6 +3875,21 @@ mod reduction_tests {
                 assert!(is_overflow(&r), "{method:?}: got {r:?}");
                 assert_eq!(holdings(&inv), before, "{method:?}");
             }
+        }
+
+        /// `is_near_ceiling` reads the representation; pin its boundary.
+        #[test]
+        fn near_ceiling_boundary() {
+            let e28 = Decimal::from_str_exact("10000000000000000000000000000").unwrap();
+            assert!(Inventory::is_near_ceiling(e28));
+            assert!(Inventory::is_near_ceiling(-e28));
+            assert!(Inventory::is_near_ceiling(Decimal::MAX));
+            assert!(!Inventory::is_near_ceiling(e28 - d(1)));
+            assert!(!Inventory::is_near_ceiling(dec!(
+                7922816251426433759354395033.5
+            )));
+            assert!(!Inventory::is_near_ceiling(Decimal::ZERO));
+            assert_eq!(Inventory::NEAR_CEILING, e28);
         }
 
         /// Review of #2554: the fix first adjusted the units cache by the

@@ -9,6 +9,7 @@
 use crate::types::{PluginInput, PluginOp, PluginOutput};
 
 use super::super::{NativePlugin, RegularPlugin};
+use super::utils::at_entry;
 
 /// Plugin that detects duplicate transactions based on structural hash.
 pub struct NoDuplicatesPlugin;
@@ -24,9 +25,11 @@ impl NativePlugin for NoDuplicatesPlugin {
 
     fn process(&self, input: PluginInput) -> PluginOutput {
         let duplicates = rustledger_ops::dedup::find_structural_duplicates(&input.directives);
+        // Each located at the later copy, as beancount's `noduplicates`
+        // locates it (#2539; before, unlocated).
         let errors = duplicates
             .iter()
-            .map(rustledger_ops::dedup::StructuralDuplicate::to_plugin_error)
+            .map(|d| at_entry(d.to_plugin_error(), &input.directives[d.index]))
             .collect();
 
         PluginOutput {

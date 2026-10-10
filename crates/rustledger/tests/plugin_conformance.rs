@@ -15,6 +15,7 @@
 //! | Python module | `plugin "python:module"`: rejected by design (#1432) | check |
 //! | Python built-in | `plugin "python:leafonly"` / `"python:check_commodity"` force the Python implementation | check |
 //! | native + Python together | `with_plugins.beancount` fixture | check |
+//! | native vs Python | each plugin with both implementations reports beancount's message, severity and location either way | check |
 //! | WASM importer (a `wasm_importer_main!` guest) | `extract --wasm-importer x.wasm` | extract |
 //!
 //! And the LIMITS of each sandboxed kind (WASM plugin, Python plugin,
@@ -45,6 +46,11 @@ mod common;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
+
+/// What a run that started the Python runtime prints, telling a Python
+/// implementation's output from a native one's now that their messages
+/// agree (#2539).
+const PYTHON_RAN: &str = "Loading Python plugin runtime";
 
 /// Printed when the WASM guests cannot be built; CI fails on it.
 const WASM_SKIP_MARKER: &str = "Skipping: conformance WASM guests unavailable";
@@ -265,7 +271,7 @@ fn install_python_fixtures(dir: &Path) {
 fn native_directive_in_check_query_report() {
     let dir = ledger("plugin \"check_commodity\"\nplugin \"auto_tag\"");
     for (cmd, out) in all_commands(dir.path()) {
-        out.has("commodity 'USD' used but not declared");
+        out.has("Missing Commodity directive for 'USD' in 'Assets:Bank'");
         if cmd == "query" {
             out.has("food");
         }
@@ -285,7 +291,7 @@ fn native_flag_in_check() {
             "ledger.beancount",
         ],
     )
-    .has("commodity 'USD' used but not declared");
+    .has("error[PLUGIN]: Missing Commodity directive for 'USD' in 'Assets:Bank'");
 }
 
 /// `beancount.plugins.*` names resolve to the native plugins: no Python
@@ -299,7 +305,7 @@ fn native_is_preferred_for_beancount_plugin_names() {
         .lacks("Python");
     let dir = ledger("plugin \"beancount.plugins.check_commodity\"");
     run(dir.path(), &["check", "ledger.beancount"])
-        .has("commodity 'USD' used but not declared")
+        .has("error[PLUGIN]: Missing Commodity directive for 'USD' in 'Assets:Bank'")
         .lacks("Python");
 }
 
@@ -388,11 +394,182 @@ fn python_prefix_forces_builtin_python_plugins() {
     let dir = ledger("plugin \"python:leafonly\"");
     run(dir.path(), &["check", "ledger.beancount"])
         .has("ledger.beancount:3:1: error[PLUGIN]: Non-leaf account 'Assets:Bank' has postings on it")
-        .lacks("Posting to non-leaf account");
+        .has(PYTHON_RAN);
     let dir = ledger("plugin \"python:beancount.plugins.check_commodity\"");
     run(dir.path(), &["check", "ledger.beancount"])
         .has("Missing Commodity directive for 'USD' in 'Assets:Bank'")
-        .lacks("used but not declared");
+        .has(PYTHON_RAN);
+}
+
+/// The plugin diagnostics in `out`, one per line, as `file:line: severity:
+/// message` with the column dropped, sorted, so implementations can be
+/// compared line for line.
+fn plugin_diagnostics(out: &Out) -> Vec<String> {
+    let mut lines: Vec<String> = out
+        .text
+        .lines()
+        .filter_map(|l| {
+            let at = l
+                .find(" error[PLUGIN]")
+                .or_else(|| l.find(" warning[PLUGIN]"))?;
+            let (location, rest) = l.split_at(at);
+            // `<dir>/ledger.beancount:3:1:` -> `ledger.beancount:3:`.
+            let location = location.rsplit(['/', '\\']).next().unwrap_or(location);
+            let location = if location.ends_with(":1:") {
+                &location[..location.len() - 2]
+            } else {
+                location
+            };
+            Some(format!("{location}{rest}"))
+        })
+        .collect();
+    lines.sort();
+    lines
+}
+
+/// Every plugin rledger has both natively and in Python reports the same
+/// thing either way, and what bean-check reports: its message, an error
+/// (never a warning), at the same entry (#2539). Before, the native
+/// implementations had messages of their own, `check_commodity` warned, and
+/// `leafonly` reported every posting with no location.
+///
+/// Both implementations, compared line for line: `check_commodity` and
+/// `leafonly`, native and `python:` built-in. The other plugins whose
+/// beancount module also runs as a Python plugin (`coherent_cost`,
+/// `onecommodity`, `unique_prices`, `commodity_attr`, `noduplicates`;
+/// beancount's code is not vendored here) are held to the text bean-check
+/// prints for the same ledger.
+#[test]
+fn native_and_python_implementations_agree() {
+    // `check_commodity` and `leafonly` on BODY, which uses USD without a
+    // `commodity` and posts to Assets:Bank, a parent.
+    // The config exempts USD in Assets:Bank, so Expenses:Food reports it;
+    // a `pad` posts to both its accounts, so Equity:Opening (a parent) is
+    // reported too.
+    let pad = "\n2024-01-01 open Equity:Opening\n2024-01-01 open Equity:Opening:Sub\n\
+               2024-01-04 pad Assets:Bank:Sub Equity:Opening\n\
+               2024-01-05 balance Assets:Bank:Sub 5 USD";
+    for (plugin, extra, expected) in [
+        (
+            "check_commodity",
+            "",
+            &["<unknown>: error[PLUGIN]: Missing Commodity directive for 'USD' in 'Assets:Bank'"][..],
+        ),
+        (
+            "check_commodity\" \"{'Assets:B.*': 'USD'}",
+            "",
+            &["<unknown>: error[PLUGIN]: Missing Commodity directive for 'USD' in 'Expenses:Food'"],
+        ),
+        (
+            "leafonly",
+            "",
+            &[
+                "ledger.beancount:3: error[PLUGIN]: Non-leaf account 'Assets:Bank' has postings on it",
+            ],
+        ),
+        (
+            "leafonly",
+            pad,
+            &[
+                "ledger.beancount:15: error[PLUGIN]: Non-leaf account 'Equity:Opening' has postings on it",
+                "ledger.beancount:3: error[PLUGIN]: Non-leaf account 'Assets:Bank' has postings on it",
+            ],
+        ),
+    ] {
+        let write = |dir: &Path, header: String| {
+            std::fs::write(
+                dir.join("ledger.beancount"),
+                format!("{header}\n\n{BODY}{extra}\n"),
+            )
+            .unwrap();
+        };
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), format!("plugin \"beancount.plugins.{plugin}\""));
+        let native = run(dir.path(), &["check", "ledger.beancount"]);
+        assert_eq!(plugin_diagnostics(&native), expected, "{}", native.text);
+        native.failed_cleanly().lacks(PYTHON_RAN);
+        if python_ready() {
+            let dir = tempfile::tempdir().unwrap();
+            write(dir.path(), format!("plugin \"python:{plugin}\""));
+            let python = run(dir.path(), &["check", "ledger.beancount"]);
+            python.has(PYTHON_RAN);
+            assert_eq!(
+                plugin_diagnostics(&python),
+                plugin_diagnostics(&native),
+                "{}",
+                python.text
+            );
+        }
+    }
+
+    // The rest, each on a ledger of its own: (plugin and config, ledger
+    // body after a header line and a blank line, what bean-check prints).
+    // Where beancount joins a set (onecommodity's currencies, commodity_attr's
+    // valid options) its order changes from run to run; rledger sorts the
+    // currencies and keeps the options in the order the config writes them.
+    let cases: [(&str, &str, &[&str]); 5] = [
+        (
+            "coherent_cost",
+            "2024-01-01 open Assets:Stock\n2024-01-01 open Assets:Bank\n\
+             2024-01-02 * \"Buy\"\n  Assets:Stock  1 HOOL {5 USD}\n  Assets:Bank  -5 USD\n\
+             2024-01-03 * \"Gift\"\n  Assets:Stock  1 HOOL\n  Assets:Bank  -1 HOOL\n",
+            &[
+                "ledger.beancount:8: error[PLUGIN]: Currency 'HOOL' is used both with and without cost",
+            ],
+        ),
+        (
+            "onecommodity",
+            "2024-01-01 open Assets:Bank\n2024-01-01 open Expenses:Food\n\
+             2024-01-02 * \"a\"\n  Assets:Bank  -10 USD\n  Expenses:Food\n\
+             2024-01-03 * \"b\"\n  Assets:Bank  -10 EUR\n  Expenses:Food\n",
+            &[
+                "ledger.beancount:8: error[PLUGIN]: More than one currency in account 'Assets:Bank': EUR,USD",
+                "ledger.beancount:8: error[PLUGIN]: More than one currency in account 'Expenses:Food': EUR,USD",
+            ],
+        ),
+        (
+            "unique_prices",
+            "2024-01-01 commodity HOOL\n2024-01-02 price HOOL 10 USD\n\
+             2024-01-02 price HOOL 11 USD\n2024-01-03 price HOOL 12 USD\n\
+             2024-01-03 price HOOL 12 USD\n",
+            &["ledger.beancount:4: error[PLUGIN]: Disagreeing price entries"],
+        ),
+        (
+            "commodity_attr\" \"{'name': None, 'asset-class': ('stock', 'bond')}",
+            "2024-01-01 commodity HOOL\n  name: \"Hooli\"\n  asset-class: \"stock\"\n\
+             2024-01-01 commodity EUR\n  asset-class: \"bogus\"\n",
+            &[
+                "ledger.beancount:6: error[PLUGIN]: Invalid value 'bogus' for attribute asset-class, Commodity directive EUR; valid options: stock, bond",
+                "ledger.beancount:6: error[PLUGIN]: Missing attribute 'name' for Commodity directive EUR",
+            ],
+        ),
+        (
+            "noduplicates",
+            "2024-01-01 open Assets:Bank\n2024-01-01 open Expenses:Food\n\
+             2024-01-02 * \"Shop\" \"Lunch\"\n  Assets:Bank  -10 USD\n  Expenses:Food  10 USD\n\
+             2024-01-02 * \"Shop\" \"Lunch\"\n  Assets:Bank  -10 USD\n  Expenses:Food  10 USD\n",
+            // beancount follows "Duplicate entry: " with both entries'
+            // Python reprs; rledger names the duplicate (the documented
+            // divergence).
+            &["ledger.beancount:8: error[PLUGIN]: Duplicate entry: 2024-01-02 \"Lunch\""],
+        ),
+    ];
+    for (plugin, body, expected) in cases {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("ledger.beancount"),
+            format!("plugin \"beancount.plugins.{plugin}\"\n\n{body}"),
+        )
+        .unwrap();
+        let out = run(dir.path(), &["check", "ledger.beancount"]);
+        assert_eq!(
+            plugin_diagnostics(&out),
+            expected,
+            "{plugin}:\n{}",
+            out.text
+        );
+        out.failed_cleanly();
+    }
 }
 
 /// Native and Python plugins in one ledger (the `with_plugins` fixture):
@@ -406,7 +583,7 @@ fn native_and_python_together() {
     install_python_fixtures(dir.path());
     run(dir.path(), &["check", "with_plugins.beancount"])
         .has("with_plugins.beancount:21:1: error[PLUGIN]: Transaction on 2020-01-15 has no payee")
-        .has("Posting to non-leaf account 'Expenses:Food'");
+        .has("with_plugins.beancount:17:1: error[PLUGIN]: Non-leaf account 'Expenses:Food' has postings on it");
 }
 
 /// What a plugin prints goes to stderr and leaves its result intact.
@@ -1033,7 +1210,7 @@ fn python_plugin_crafted_output_is_rejected() {
 fn native_leafonly_counts_opened_children() {
     let dir = ledger("plugin \"leafonly\"");
     run(dir.path(), &["check", "ledger.beancount"])
-        .has("Posting to non-leaf account 'Assets:Bank'")
+        .has("ledger.beancount:3:1: error[PLUGIN]: Non-leaf account 'Assets:Bank' has postings on it")
         .lacks("Python");
 }
 

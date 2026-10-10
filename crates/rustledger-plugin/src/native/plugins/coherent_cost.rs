@@ -1,17 +1,20 @@
-//! Enforce consistent cost tracking per currency.
+//! A currency is held at cost everywhere or nowhere.
 
-use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutput};
+use crate::types::{
+    DirectiveData, DirectiveWrapper, PluginError, PluginInput, PluginOp, PluginOutput,
+};
 
 use super::super::{NativePlugin, RegularPlugin};
+use super::utils::at_entry;
 
-/// Plugin that ensures currencies are tracked consistently with cost or price-only.
+/// Plugin that checks every currency is held either always at cost or
+/// never at cost.
 ///
-/// If a currency is used with cost notation `{...}` in some postings, it should
-/// not be used with price-only notation `@` (without cost) in other postings,
-/// as this indicates inconsistent tracking.
-///
-/// Note: Having BOTH cost AND price on the same posting is valid and common
-/// when selling positions (cost = acquisition price, price = sale price).
+/// As beancount's `coherent_cost` (#2539): a currency some posting holds at
+/// cost (`{...}`) and another holds without one is an error, located at the
+/// first transaction holding it without cost. Before, only a posting with a
+/// price and no cost counted as "without cost", so `10 HOOL {5 USD}` next to
+/// a plain `1 HOOL` passed, where bean-check reports it.
 pub struct CoherentCostPlugin;
 
 impl NativePlugin for CoherentCostPlugin {
@@ -24,46 +27,42 @@ impl NativePlugin for CoherentCostPlugin {
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
-        use std::collections::HashSet;
+        use std::collections::HashMap;
 
-        // Track currencies used with cost (with or without price)
-        // Use references to avoid cloning currency strings
-        let mut currencies_with_cost: HashSet<&str> = HashSet::new();
-        // Track currencies used with price-only (no cost)
-        let mut currencies_with_price_only: HashSet<&str> = HashSet::new();
-
+        // Each currency's first transaction with and without cost.
+        let mut with_cost: HashMap<&str, &DirectiveWrapper> = HashMap::new();
+        let mut without_cost: HashMap<&str, &DirectiveWrapper> = HashMap::new();
         for wrapper in &input.directives {
             if let DirectiveData::Transaction(txn) = &wrapper.data {
                 for posting in &txn.postings {
                     if let Some(units) = &posting.units {
-                        let currency = units.currency.as_str();
-
-                        // Check if this posting has cost
-                        if posting.cost.is_some() {
-                            currencies_with_cost.insert(currency);
-                        } else if posting.price.is_some() {
-                            // Price-only (no cost) - this is the problematic case
-                            currencies_with_price_only.insert(currency);
-                        }
+                        let target = if posting.cost.is_some() {
+                            &mut with_cost
+                        } else {
+                            &mut without_cost
+                        };
+                        target.entry(units.currency.as_str()).or_insert(wrapper);
                     }
                 }
             }
         }
 
-        // Find currencies used with cost in some places and price-only in others
-        // Collect and sort for deterministic error ordering
-        let mut inconsistent: Vec<_> = currencies_with_cost
-            .intersection(&currencies_with_price_only)
-            .copied()
-            .collect();
-        inconsistent.sort_unstable();
-
-        let errors: Vec<_> = inconsistent
+        // Sorted by currency: beancount iterates a set, whose order varies
+        // from run to run.
+        let mut inconsistent: Vec<(&str, &DirectiveWrapper)> = without_cost
             .into_iter()
-            .map(|currency| {
-                PluginError::error(format!(
-                    "Currency '{currency}' is used with both cost and price-only notation - this may cause inconsistencies"
-                ))
+            .filter(|(currency, _)| with_cost.contains_key(currency))
+            .collect();
+        inconsistent.sort_unstable_by_key(|(currency, _)| *currency);
+        let errors = inconsistent
+            .into_iter()
+            .map(|(currency, wrapper)| {
+                at_entry(
+                    PluginError::error(format!(
+                        "Currency '{currency}' is used both with and without cost"
+                    )),
+                    wrapper,
+                )
             })
             .collect();
 

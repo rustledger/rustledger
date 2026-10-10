@@ -1,8 +1,11 @@
 //! Validate Commodity directives have required metadata attributes.
 
-use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutput};
+use crate::types::{
+    DirectiveData, MetaValueData, PluginError, PluginInput, PluginOp, PluginOutput,
+};
 
 use super::super::{NativePlugin, RegularPlugin};
+use super::utils::at_entry;
 
 /// Plugin that validates Commodity directives have required metadata attributes.
 ///
@@ -28,6 +31,47 @@ impl CommodityAttrPlugin {
         Self {
             required_attrs: attrs,
         }
+    }
+
+    /// Read the config: a Python dict literal, as beancount evaluates it,
+    /// of attribute name to `None` (any value) or a list, tuple or set of
+    /// the allowed strings (in the order written, repeats dropped); or the
+    /// older form [`Self::parse_config`] reads, with `null` for `None`.
+    /// `None` when it is neither.
+    fn read_config(config: &str) -> Option<Vec<(String, Option<Vec<String>>)>> {
+        use super::py_literal::{self, PyValue};
+        let Ok(PyValue::Dict(entries)) = py_literal::parse(config) else {
+            let legacy = Self::parse_config(config);
+            return (!legacy.is_empty()).then_some(legacy);
+        };
+        let mut required: Vec<(String, Option<Vec<String>>)> = Vec::new();
+        for (key, value) in entries {
+            let PyValue::Str(key) = key else { return None };
+            let allowed = match value {
+                PyValue::None => None,
+                PyValue::Seq(items) => {
+                    let mut allowed: Vec<String> = Vec::new();
+                    for item in items {
+                        let PyValue::Str(item) = item else {
+                            return None;
+                        };
+                        if !allowed.contains(&item) {
+                            allowed.push(item);
+                        }
+                    }
+                    Some(allowed)
+                }
+                _ => return None,
+            };
+            // A repeated key keeps its place and takes the last value, as
+            // in a Python dict.
+            if let Some(slot) = required.iter_mut().find(|(k, _)| *k == key) {
+                slot.1 = allowed;
+            } else {
+                required.push((key, allowed));
+            }
+        }
+        Some(required)
     }
 
     /// Parse configuration string in Python dict-like format.
@@ -116,61 +160,72 @@ impl NativePlugin for CommodityAttrPlugin {
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
-        // Parse config if provided
-        let required = if let Some(config) = &input.config {
-            Self::parse_config(config)
-        } else {
-            self.required_attrs.clone()
+        let ops = (0..input.directives.len()).map(PluginOp::Keep).collect();
+        let required = match &input.config {
+            Some(config) => match Self::read_config(config) {
+                Some(required) => required,
+                None => {
+                    return PluginOutput {
+                        ops,
+                        errors: vec![PluginError::error(
+                            "Invalid configuration for commodity_attr plugin; skipping.",
+                        )],
+                    };
+                }
+            },
+            None => self.required_attrs.clone(),
         };
 
-        // If no required attributes configured, pass through
-        if required.is_empty() {
-            return PluginOutput {
-                ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
-                errors: Vec::new(),
-            };
-        }
-
+        // As beancount's `commodity_attr` reports them (#2539), each at its
+        // `commodity` directive. Before, a value outside the allowed set
+        // was only checked when the config wrote a list (a tuple or set,
+        // as beancount's own examples write, was ignored), and the
+        // messages were rledger's own.
         let mut errors = Vec::new();
-
         for wrapper in &input.directives {
-            if let DirectiveData::Commodity(comm) = &wrapper.data {
-                // Check each required attribute
-                for (attr_name, allowed_values) in &required {
-                    // Find the attribute in metadata
-                    let found = comm.metadata.iter().find(|(k, _)| k == attr_name);
-
-                    match found {
-                        None => {
-                            errors.push(PluginError::error(format!(
-                                "Commodity '{}' missing required attribute '{}'",
-                                comm.currency, attr_name
-                            )));
+            let DirectiveData::Commodity(comm) = &wrapper.data else {
+                continue;
+            };
+            for (attr_name, allowed_values) in &required {
+                let Some((_, value)) = comm.metadata.iter().find(|(k, _)| k == attr_name) else {
+                    errors.push(at_entry(
+                        PluginError::error(format!(
+                            "Missing attribute '{attr_name}' for Commodity directive {}",
+                            comm.currency
+                        )),
+                        wrapper,
+                    ));
+                    continue;
+                };
+                let Some(allowed) = allowed_values.as_ref().filter(|a| !a.is_empty()) else {
+                    continue;
+                };
+                // Only a string can equal one of the allowed strings.
+                let shown = match value {
+                    MetaValueData::String(s) => {
+                        if allowed.contains(s) {
+                            continue;
                         }
-                        Some((_, value)) => {
-                            // Check if value is in allowed list (if specified)
-                            if let Some(allowed) = allowed_values {
-                                let value_str = match value {
-                                    crate::types::MetaValueData::String(s) => s.clone(),
-                                    other => format!("{other:?}"),
-                                };
-                                if !allowed.contains(&value_str) {
-                                    errors.push(PluginError::error(format!(
-                                        "Commodity '{}' attribute '{}' has invalid value '{}' (allowed: {:?})",
-                                        comm.currency, attr_name, value_str, allowed
-                                    )));
-                                }
-                            }
-                        }
+                        s.clone()
                     }
-                }
+                    MetaValueData::Number(n) => n.clone(),
+                    MetaValueData::Bool(true) => "True".to_string(),
+                    MetaValueData::Bool(false) => "False".to_string(),
+                    other => format!("{other:?}"),
+                };
+                errors.push(at_entry(
+                    PluginError::error(format!(
+                        "Invalid value '{shown}' for attribute {attr_name}, Commodity directive \
+                         {}; valid options: {}",
+                        comm.currency,
+                        allowed.join(", ")
+                    )),
+                    wrapper,
+                ));
             }
         }
 
-        PluginOutput {
-            ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
-            errors,
-        }
+        PluginOutput { ops, errors }
     }
 }
 
@@ -206,7 +261,7 @@ mod commodity_attr_tests {
 
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 1);
-        assert!(output.errors[0].message.contains("missing required"));
+        assert!(output.errors[0].message.contains("Missing attribute"));
         assert!(output.errors[0].message.contains("name"));
     }
 
@@ -268,7 +323,7 @@ mod commodity_attr_tests {
 
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 1);
-        assert!(output.errors[0].message.contains("invalid value"));
+        assert!(output.errors[0].message.contains("Invalid value"));
         assert!(output.errors[0].message.contains("Healthcare"));
     }
 

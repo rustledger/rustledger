@@ -1128,18 +1128,49 @@ fn parse_plugin_output(output: &[u8], input_len: usize) -> Result<PluginOutput, 
 
 /// Python implementation of `check_commodity` plugin.
 ///
-/// Behaves as beancount's `beancount.plugins.check_commodity` (without
-/// its config-string ignore map): a currency counts as declared only by
+/// Behaves as beancount's `beancount.plugins.check_commodity`, and as the
+/// native `check_commodity` (#2539), config ignore map included (read with
+/// `ast.literal_eval`, where beancount uses `eval`): a currency counts as declared only by
 /// a `commodity` directive, and each undeclared one is reported once,
 /// with the first account it appears in (in sorted order), or `Price Directive Context`
 /// when it appears only in price directives. Before #2500's review this
 /// counted an `open`'s currencies as declarations, so it reported
 /// nothing for most ledgers that beancount flags.
 const CHECK_COMMODITY_PLUGIN: &str = r#"
+import re
+
 __plugins__ = ('plugin',)
 
 def plugin(entries, options_map, config=None):
-    """Find commodities used without a Commodity directive."""
+    """Find commodities used without a Commodity directive.
+
+    The config, as in beancount, is a dict of account regex to currency
+    regex: a currency matching in a matching account is exempt.
+    """
+    errors = []
+    ignore = []
+    if config:
+        import ast
+        try:
+            config_obj = ast.literal_eval(config)
+        except (ValueError, SyntaxError):
+            config_obj = None
+        if not isinstance(config_obj, dict):
+            return entries, [ValidationError(
+                new_metadata('<check_commodity>', 0),
+                'Invalid configuration for check_commodity plugin; skipping.', None)]
+        for key, value in config_obj.items():
+            compiled = []
+            for pattern in (key, value):
+                try:
+                    compiled.append(re.compile(pattern).match)
+                except (re.error, TypeError):
+                    errors.append(ValidationError(
+                        new_metadata('<check_commodity>', 0),
+                        f"Invalid regexp: '{value}' for {key}", None))
+            if len(compiled) == 2:
+                ignore.append(compiled)
+
     declared = set()
     occurrences = set()
     anonymous = set()
@@ -1160,25 +1191,40 @@ def plugin(entries, options_map, config=None):
             anonymous.add(('Price Directive Context', entry.currency))
             anonymous.add(('Price Directive Context', entry.amount.currency))
 
-    errors = []
     issued = set()
-    for context, currency in sorted(occurrences) + sorted(anonymous):
+    ignored = set()
+    for context, currency in sorted(occurrences):
         if currency in declared or currency in issued:
+            continue
+        if any(a(context) and c(currency) for a, c in ignore):
+            ignored.add(currency)
             continue
         errors.append(ValidationError(
             new_metadata('<check_commodity>', 0),
             f"Missing Commodity directive for '{currency}' in '{context}'",
             None))
         issued.add(currency)
+    for context, currency in sorted(anonymous):
+        if currency in declared or currency in issued or currency in ignored:
+            continue
+        errors.append(ValidationError(
+            new_metadata('<check_commodity>', 0),
+            f"Missing Commodity directive for '{currency}' in '{context}'",
+            None))
     return entries, errors
 "#;
 
 /// Python implementation of leafonly plugin.
 ///
-/// Behaves as beancount's `beancount.plugins.leafonly`: one error per
-/// account that has child accounts and is posted to by a transaction,
-/// located at the account's `open` (beancount reports it there, once).
+/// Behaves as beancount's `beancount.plugins.leafonly`, and as the native
+/// `leafonly` (#2539): one error per account that has child accounts and
+/// is posted to by a transaction or a `pad`, located at the account's
+/// `open` (beancount reports it there, once), in the account tree's order.
 /// Before #2500's review this reported every posting separately.
+///
+/// Deliberate divergence, as in the native plugin (`leaf_only.rs`):
+/// beancount also reports a parent account named only by a `note`,
+/// `document`, `close` or `custom`, none of which posts anything.
 const LEAFONLY_PLUGIN: &str = r#"
 __plugins__ = ('plugin',)
 
@@ -1197,6 +1243,13 @@ def plugin(entries, options_map, config=None):
             for posting in entry.postings:
                 accounts.add(posting.account)
                 posted.add(posting.account)
+        elif isinstance(entry, Pad):
+            # Its padding posts to both accounts.
+            for account in (entry.account, entry.source_account):
+                accounts.add(account)
+                posted.add(account)
+        elif isinstance(entry, (Close, Note, Document)):
+            accounts.add(entry.account)
     parents = set()
     for account in accounts:
         parts = account.split(':')
@@ -1204,7 +1257,8 @@ def plugin(entries, options_map, config=None):
             parents.add(':'.join(parts[:i]))
 
     errors = []
-    for account in sorted(posted & parents):
+    # The account tree's order, depth-first, children by name.
+    for account in sorted(posted & parents, key=lambda a: a.split(':')):
         open_entry = opens.get(account)
         errors.append(ValidationError(
             open_entry.meta if open_entry else new_metadata('<leafonly>', 0),

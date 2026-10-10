@@ -1,8 +1,13 @@
 //! Error on postings to non-leaf accounts.
 
-use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutput};
+use std::collections::{BTreeSet, HashMap};
+
+use crate::types::{
+    DirectiveData, DirectiveWrapper, PluginError, PluginInput, PluginOp, PluginOutput,
+};
 
 use super::super::{NativePlugin, RegularPlugin};
+use super::utils::at_entry;
 
 /// Plugin that errors when posting to non-leaf (parent) accounts.
 pub struct LeafOnlyPlugin;
@@ -55,20 +60,55 @@ impl NativePlugin for LeafOnlyPlugin {
             }
         }
 
-        // Check for postings to parent accounts
-        let mut errors = Vec::new();
+        // A parent account is reported once, at its `open`, when something
+        // puts amounts on it: a posting, or a `pad` (its padding posts to
+        // both accounts). As beancount's `leafonly` reports it (#2539):
+        // before, every posting was reported, with no location.
+        //
+        // Deliberate divergence: beancount's realization also counts a
+        // `note`, `document`, `close` or `custom` naming the account, so
+        // bean-check reports "Non-leaf account ... has postings on it" for
+        // a note on a parent account. None of those posts anything, so they
+        // are not counted here (nor in the `python:leafonly` built-in,
+        // `LEAFONLY_PLUGIN` in `python/runtime.rs`, which says the same).
+        let mut posted: BTreeSet<Vec<&str>> = BTreeSet::new();
+        let mut opens: HashMap<&str, &DirectiveWrapper> = HashMap::new();
         for wrapper in &input.directives {
-            if let DirectiveData::Transaction(txn) = &wrapper.data {
-                for posting in &txn.postings {
-                    if parent_accounts.contains(posting.account.as_str()) {
-                        errors.push(PluginError::error(format!(
-                            "Posting to non-leaf account '{}' - has child accounts",
-                            posting.account
-                        )));
+            match &wrapper.data {
+                DirectiveData::Transaction(txn) => {
+                    for posting in &txn.postings {
+                        if parent_accounts.contains(posting.account.as_str()) {
+                            posted.insert(posting.account.split(':').collect());
+                        }
                     }
                 }
+                DirectiveData::Pad(pad) => {
+                    for account in [&pad.account, &pad.source_account] {
+                        if parent_accounts.contains(account.as_str()) {
+                            posted.insert(account.split(':').collect());
+                        }
+                    }
+                }
+                DirectiveData::Open(open) => {
+                    opens.entry(open.account.as_str()).or_insert(wrapper);
+                }
+                _ => {}
             }
         }
+        // In beancount's order: the account tree depth-first, children by
+        // name, which is the order of the accounts' components.
+        let errors = posted
+            .into_iter()
+            .map(|components| {
+                let account = components.join(":");
+                let error =
+                    PluginError::error(format!("Non-leaf account '{account}' has postings on it"));
+                match opens.get(account.as_str()) {
+                    Some(open) => at_entry(error, open),
+                    None => error,
+                }
+            })
+            .collect();
 
         PluginOutput {
             ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),

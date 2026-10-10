@@ -1134,6 +1134,23 @@ fn python_plugins_back_to_back_after_a_timeout() {
     assert!(left.is_empty(), "temp files left behind: {left:?}");
 }
 
+/// The entries arrive on the guest's stdin, but a plugin reading
+/// `sys.stdin` (an `input()` left in, say) gets end of file, as before
+/// #2551, and does not take the entries from the plugin runner.
+#[test]
+fn python_plugin_stdin_reads_nothing() {
+    if !python_ready() {
+        return;
+    }
+    let dir = python_plugin(
+        "reader",
+        "import sys\nTAKEN = sys.stdin.read()\n__plugins__ = ['reader']\n\
+         def reader(entries, options_map):\n    \
+         return entries, [ValidationError(None, f'took {len(TAKEN)} saw {len(entries)}', None)]\n",
+    );
+    run(dir.path(), &["check", "ledger.beancount"]).has("took 0 saw 5");
+}
+
 /// A Python plugin's inputs (the ledger's entries) reach it from memory,
 /// so a Ctrl-C mid-run leaves nothing on disk. Before #2551 they sat in a
 /// temp directory, which rledger, killed by the signal, left behind.

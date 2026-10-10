@@ -214,6 +214,12 @@ _compat_source = _section()
 _plugin_source = _section()
 _options_json = _section()
 _invocation = json.loads(_section())
+# The rest of stdin is the entries, for `run_plugin` alone: a plugin that
+# reads `sys.stdin` (an `input()` left in) gets end of file, as it did
+# when stdin was empty, instead of consuming the entries and running on
+# none.
+_entries_in = io.TextIOWrapper(_stdin, encoding='utf-8')
+sys.stdin = io.StringIO('')
 
 # The result goes to stdout; anything the plugin prints goes to stderr,
 # so it cannot corrupt the result.
@@ -235,7 +241,7 @@ del _plugin_source
 entries_out, errors_out = run_plugin(
     _plugin_module,
     _invocation['plugin_name'],
-    io.TextIOWrapper(_stdin, encoding='utf-8'),
+    _entries_in,
     _options_json,
     _invocation['config'],
     _invocation['entry_points'],

@@ -12,7 +12,7 @@ use anyhow::Result;
 use std::sync::Arc;
 use wasmtime::{Config, Engine, Linker, Module, Store};
 use wasmtime_wasi::p1;
-use wasmtime_wasi::p2::pipe::MemoryOutputPipe;
+use wasmtime_wasi::p2::pipe::{MemoryInputPipe, MemoryOutputPipe};
 use wasmtime_wasi::{FsPerms, WasiCtxBuilder};
 
 /// Per-instance linear-memory cap for the Python plugin runtime.
@@ -174,21 +174,46 @@ const MAX_GUEST_RESOURCES: usize = 256;
 /// (about every few milliseconds of guest work).
 const FUEL_YIELD_INTERVAL: u64 = 10_000_000;
 
-/// The script `CPython` runs: load the compat layer, load the plugin file
-/// as a module of its own, run it, and write the result.
+/// The script `CPython` runs (as `python -c`): load the compat layer,
+/// load the plugin as a module of its own, run it, and write the result.
 ///
-/// Inputs arrive as files in `/work` (see [`PythonRuntime::execute`]), so
-/// no value is ever spliced into Python source. The plugin module starts
-/// with the compat layer's names (`Transaction`, `ValidationError`, ...)
-/// already defined, as when plugin code was exec'd into the compat
-/// namespace, but keeps its own namespace, so `__plugins__` and the
-/// functions it names are looked up on the module, as beancount does.
+/// Every input arrives on stdin (see [`PythonRuntime::execute`]): the
+/// compat layer, the plugin's source, the options and the invocation,
+/// each as a line holding its length in bytes followed by that many
+/// bytes, then the entries, one JSON object per line, to the end. Nothing
+/// is written to the host's disk, so there is nothing to clean up when a
+/// run is cut short (a Ctrl-C left a work directory holding the ledger's
+/// entries in the temp directory before #2551), and no value is ever
+/// spliced into Python source. The plugin module starts with the compat
+/// layer's names (`Transaction`, `ValidationError`, ...) already defined,
+/// as when plugin code was exec'd into the compat namespace, but keeps
+/// its own namespace, so `__plugins__` and the functions it names are
+/// looked up on the module, as beancount does.
 const PLUGIN_SCRIPT: &str = r#"
+import io
 import json
+import linecache
 import sys
 import types
 
-sys.path.insert(0, '/work')
+_stdin = sys.stdin.buffer
+
+def _section():
+    size = int(_stdin.readline())
+    data = _stdin.read(size)
+    if len(data) != size:
+        raise EOFError('rledger: truncated plugin input')
+    return data.decode('utf-8')
+
+def _source(text, filename):
+    # Tracebacks show the source lines, though no file holds them.
+    linecache.cache[filename] = (len(text), None, text.splitlines(True), filename)
+    return compile(text, filename, 'exec')
+
+_compat_source = _section()
+_plugin_source = _section()
+_options_json = _section()
+_invocation = json.loads(_section())
 
 # The result goes to stdout; anything the plugin prints goes to stderr,
 # so it cannot corrupt the result.
@@ -196,25 +221,21 @@ _result_out = sys.stdout
 sys.stdout = sys.stderr
 
 # Load compatibility layer (defines types like ValidationError, Transaction, etc.)
-exec(open('/work/compat.py').read())
+exec(_source(_compat_source, '<rledger beancount compat>'))
+del _compat_source
 
-with open('/work/invocation.json') as f:
-    _invocation = json.load(f)
-
+_plugin_file = _invocation['plugin_name']
 _plugin_module = types.ModuleType(_invocation['module_name'])
 _plugin_module.__dict__.update(
     {k: v for k, v in globals().items() if not (k.startswith('__') and k.endswith('__'))})
-_plugin_module.__file__ = '/work/plugin.py'
-with open('/work/plugin.py') as f:
-    exec(compile(f.read(), '/work/plugin.py', 'exec'), _plugin_module.__dict__)
-
-with open('/work/options.json') as f:
-    _options_json = f.read()
+_plugin_module.__file__ = _plugin_file
+exec(_source(_plugin_source, _plugin_file), _plugin_module.__dict__)
+del _plugin_source
 
 entries_out, errors_out = run_plugin(
     _plugin_module,
     _invocation['plugin_name'],
-    '/work/entries.jsonl',
+    io.TextIOWrapper(_stdin, encoding='utf-8'),
     _options_json,
     _invocation['config'],
     _invocation['entry_points'],
@@ -349,10 +370,10 @@ impl PythonRuntime {
         entry_points: Option<&[&str]>,
         input: &PluginInput,
     ) -> Result<PluginOutput, PythonError> {
-        // Everything the script needs goes through files, so nothing is
-        // spliced into Python source: a narration with a quote or a
-        // backslash once broke the JSON embedded in a string literal.
-        let entries_jsonl = serialize_directives_to_json_lines(&input.directives)?;
+        // Everything the script needs goes through stdin (see
+        // `PLUGIN_SCRIPT`), so nothing is spliced into Python source (a
+        // narration with a quote or a backslash once broke the JSON
+        // embedded in a string literal) and nothing touches the disk.
         let options_json = serde_json::to_string(&input.options)
             .map_err(|e| PythonError::Serialization(e.to_string()))?;
         let module_name = std::path::Path::new(plugin_name)
@@ -366,19 +387,14 @@ impl PythonRuntime {
             "entry_points": entry_points,
         })
         .to_string();
+        let mut stdin = Vec::new();
+        for section in [BEANCOUNT_COMPAT_PY, plugin_code, &options_json, &invocation] {
+            stdin.extend_from_slice(format!("{}\n", section.len()).as_bytes());
+            stdin.extend_from_slice(section.as_bytes());
+        }
+        serialize_directives_to_json_lines(&input.directives, &mut stdin)?;
 
-        let output = self.run_python(
-            &[
-                ("script.py", PLUGIN_SCRIPT),
-                ("compat.py", BEANCOUNT_COMPAT_PY),
-                ("plugin.py", plugin_code),
-                ("entries.jsonl", &entries_jsonl),
-                ("options.json", &options_json),
-                ("invocation.json", &invocation),
-            ],
-            input.directives.len(),
-        )?;
-        drop(entries_jsonl);
+        let output = self.run_python(stdin, input.directives.len())?;
 
         // Parse output (pass input length so the Python bridge can
         // encode the opaque rebuild as `Delete(all-input) + Insert(all-output)`).
@@ -453,36 +469,26 @@ impl PythonRuntime {
         self.execute(source, module_name, None, input)
     }
 
-    /// Run `/work/script.py` with `files` written into `/work` (a fresh
-    /// temp dir, deleted when this returns, on every path, including a
-    /// trap), and return what it wrote to stdout.
+    /// Run [`PLUGIN_SCRIPT`] with `stdin` as its standard input, and
+    /// return what it wrote to stdout. Nothing is written to the host's
+    /// disk (#2551).
     ///
     /// `entries` is how many directives the input holds, for the
     /// messages when the plugin runs out of time or memory.
     fn run_python(
         &self,
-        files: &[(&str, &str)],
+        stdin: Vec<u8>,
         entries: usize,
     ) -> Result<impl AsRef<[u8]> + use<>, PythonError> {
-        // Create a work directory for script and output
-        // Private to the user (0700 on Unix; the default followed the
-        // umask, 0775 here, so other local users could read the ledger's
-        // entries while a plugin ran, and after a Ctrl-C, which leaves
-        // the directory behind, #2500's third review). Windows' temp
-        // directory is per-user already.
-        let mut builder = tempfile::Builder::new();
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            builder.permissions(std::fs::Permissions::from_mode(0o700));
-        }
-        let work_dir = builder.tempdir().map_err(PythonError::Io)?;
-        for (name, contents) in files {
-            std::fs::write(work_dir.path().join(name), contents)?;
-        }
-
         // Build WASI context
         let mut wasi_builder = WasiCtxBuilder::new();
+
+        // The inputs come from memory, on stdin. Before #2551 they were
+        // files in a temp directory preopened as `/work`, which a Ctrl-C
+        // (rledger exits at once) left behind, holding a copy of the
+        // ledger's entries.
+        let input_bytes = stdin.len();
+        wasi_builder.stdin(MemoryInputPipe::new(stdin));
 
         // The guest writes nothing to the host filesystem: its result goes
         // to stdout, and stdout and stderr go to capped in-memory pipes.
@@ -490,7 +496,6 @@ impl PythonRuntime {
         // gigabytes of host temp space for almost no fuel (1 GiB cost
         // 0.07G fuel, measured), and an inherited stderr let it flood the
         // host's. A write past a cap traps the call.
-        let input_bytes: usize = files.iter().map(|(_, contents)| contents.len()).sum();
         let stdout = MemoryOutputPipe::new(output_cap(input_bytes));
         let stderr = MemoryOutputPipe::new(STDERR_CAP);
         wasi_builder.stdout(stdout.clone());
@@ -504,18 +509,12 @@ impl PythonRuntime {
             .preopened_dir(&self.stdlib_path, "/lib", FsPerms::ReadOnly)
             .map_err(PythonError::Wasm)?;
 
-        // The inputs, read-only.
-        wasi_builder
-            .preopened_dir(work_dir.path(), "/work", FsPerms::ReadOnly)
-            .map_err(PythonError::Wasm)?;
-
         // Set environment for Python - use absolute paths from guest perspective
         wasi_builder
             .env("PYTHONHOME", "/")
             .env("PYTHONPATH", "/lib")
             .env("PYTHONDONTWRITEBYTECODE", "1")
-            // Set args: python /work/script.py
-            .args(&["python", "/work/script.py"]);
+            .args(&["python", "-c", PLUGIN_SCRIPT]);
 
         let wasi_ctx = wasi_builder.build_p1();
 
@@ -619,7 +618,6 @@ impl PythonRuntime {
             PythonError::Execution(format!("{cause}{e:#}"))
         })?;
 
-        drop(work_dir);
         Ok(stdout.contents())
     }
 }
@@ -1002,15 +1000,14 @@ pub fn is_python_available() -> bool {
 /// `serde_json` escapes newlines inside strings, so a line is a directive.
 fn serialize_directives_to_json_lines(
     directives: &[crate::types::DirectiveWrapper],
-) -> Result<String, PythonError> {
-    let mut out = String::new();
+    out: &mut Vec<u8>,
+) -> Result<(), PythonError> {
     for d in directives {
-        out.push_str(
-            &serde_json::to_string(d).map_err(|e| PythonError::Serialization(e.to_string()))?,
-        );
-        out.push('\n');
+        serde_json::to_writer(&mut *out, d)
+            .map_err(|e| PythonError::Serialization(e.to_string()))?;
+        out.push(b'\n');
     }
-    Ok(out)
+    Ok(())
 }
 
 /// One output line: an input the plugin returned (possibly rebuilt),

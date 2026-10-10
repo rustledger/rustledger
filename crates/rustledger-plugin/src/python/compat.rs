@@ -647,15 +647,16 @@ def serialize_entries(entries):
     return json.dumps([_directive_to_dict(e) for e in entries], default=str)
 
 
-def load_entries(path):
-    """Read directives written one JSON object per line.
+def load_entries(f):
+    """Read directives written one JSON object per line from the text
+    file object `f` (the rest of the guest's stdin, see the host's
+    `PLUGIN_SCRIPT`).
 
     Line by line, so the whole input never sits in memory as one string
     next to the objects parsed from it (#2500 review: a 100k-transaction
     ledger exhausted the sandbox's memory that way).
     """
-    with open(path) as f:
-        return [_dict_to_directive(json.loads(line)) for line in f if line.strip()]
+    return [_dict_to_directive(json.loads(line)) for line in f if line.strip()]
 
 
 def dump_entries(entries, f, inputs=()):
@@ -731,7 +732,7 @@ def _entry_point_name(item):
     return item if isinstance(item, str) else getattr(item, '__name__', repr(item))
 
 
-def run_plugin(module, plugin_name, entries_path, options_json, config=None,
+def run_plugin(module, plugin_name, entries_file, options_json, config=None,
                entry_points=None):
     """
     Run a plugin module the way beancount's loader does.
@@ -756,7 +757,8 @@ def run_plugin(module, plugin_name, entries_path, options_json, config=None,
     Args:
         module: The plugin's module object
         plugin_name: The plugin reference, for messages
-        entries_path: File of directives, one JSON object per line
+        entries_file: Text file object of directives, one JSON object
+            per line
         options_json: JSON-serialized options dict
         config: Optional plugin config string
         entry_points: Names of the functions to run instead of
@@ -794,7 +796,7 @@ def run_plugin(module, plugin_name, entries_path, options_json, config=None,
                 f'"{_entry_point_name(item)}", which is not a function')
         callbacks.append((_entry_point_name(item), callback))
 
-    entries = load_entries(entries_path)
+    entries = load_entries(entries_file)
     inputs = list(entries)
     options = json.loads(options_json) if options_json else {}
     args = () if config is None else (config,)

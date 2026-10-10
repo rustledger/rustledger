@@ -200,7 +200,12 @@ use crate::types::{Error, LedgerOptions};
 /// STRICT's total match is decided exactly, so a sale that only rounded to the
 /// lots' total is now ambiguous. Loader v37, unchanged -- parsed directives
 /// did not move. A v33 blob would serve the old booked lots with no error.
-pub const CACHE_VERSION: u32 = 34;
+/// v35: an entry with no source location (one a plugin inserted) sorts first
+/// among same-date, same-type entries instead of last (#2553). Loader v37,
+/// unchanged -- the loader archives parsed directives, which have no such
+/// entries. `Ledger` archives the processed, sorted directives, so a v34 blob
+/// would keep serving the old order.
+pub const CACHE_VERSION: u32 = 35;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

@@ -99,6 +99,14 @@ pub(super) fn run_interactive(
 
                 let _ = rl.add_history_entry(line);
 
+                // A line holding only a `/* ... */` comment is no query
+                // (#2403). An unclosed one is left to the parser to report.
+                if rustledger_query::parser::strip_comments(line)
+                    .is_ok_and(|stripped| stripped.trim().is_empty())
+                {
+                    continue;
+                }
+
                 // Handle dot-commands
                 if let Some(cmd) = line.strip_prefix('.') {
                     if handle_dot_command(cmd, &mut settings, directives, source_map) {

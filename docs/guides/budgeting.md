@@ -254,7 +254,7 @@ rledger query "$LEDGER" "
 ### Year-to-Date Comparison
 
 ```sql
--- Query each month separately
+/* Query each month separately */
 SELECT root(account, 2) AS category, sum(cost(position)) AS total
 WHERE account ~ "Expenses" AND year(date) = 2024 AND month(date) = 1
 GROUP BY category ORDER BY category
@@ -310,7 +310,7 @@ Your first budget will be wrong. Adjust based on actual spending patterns.
 Instead of fixed budgets, track 3-month averages:
 
 ```sql
--- Get last 3 months of expenses (adjust date range as needed)
+/* Get last 3 months of expenses (adjust date range as needed) */
 SELECT root(account, 2),
        sum(number(cost(position))) / 3 AS monthly_avg
 WHERE account ~ "Expenses"

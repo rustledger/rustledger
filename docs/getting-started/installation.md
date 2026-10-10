@@ -74,6 +74,30 @@ Download from [GitHub Releases](https://github.com/rustledger/rustledger/release
 
 Replace `<VERSION>` with the release version (e.g., `0.15.0`).
 
+## Plugin Runtimes
+
+The install routes above do not all give the same `rledger`. Release binaries are built without the WASM and Python plugin runtimes, on purpose (smaller, and no plugin sandbox to trust). They run every [built-in native plugin](../reference/plugins.md#built-in-plugins), but not:
+
+- Python plugins (`plugin "my_plugin.py"`, `plugin "python:..."`),
+- WASM plugins (`plugin "my_plugin.wasm"`, `rledger check --plugin`),
+- WASM importers (`rledger extract --wasm-importer`, `--wasm-importer-dir`).
+
+Asked for one of these, a release binary stops with an error saying the runtimes are missing and naming `cargo install rustledger`.
+
+| Route | Plugin runtimes |
+|-------|-----------------|
+| GitHub Releases binaries, `cargo binstall`, Homebrew, Scoop, `rustledger-bin` (AUR) | No (release binaries) |
+| `cargo install rustledger` | Yes (the default `python-plugin-wasm` feature) |
+| Building from source (`cargo build`), `rustledger` (AUR), Fedora COPR, Docker, Nix | Yes (default features) |
+
+To run Python or WASM plugins or WASM importers, install with:
+
+```bash
+cargo install rustledger
+```
+
+A source build with `--no-default-features` (for a platform the WASM runtime does not build on, such as Termux) leaves them out, as the release binaries do.
+
 ## Verify Installation
 
 ```bash

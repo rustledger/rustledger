@@ -707,6 +707,11 @@ jobs:
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Forbid wasmtime in --no-default-features build
         run: ./scripts/check-slim-no-wasmtime.sh
+      # The slim build is what release binaries are (#2541): every way of
+      # asking it for a WASM or Python plugin, or a WASM importer, must say
+      # the runtimes are missing and name `cargo install rustledger`.
+      - name: Slim build names the build with plugin runtimes
+        run: cargo test -p rustledger --no-default-features --test cli_commands_test release_build_names_the_build_with_plugin_runtimes
 
   # WIT/Component-Model parity (#1384/#1402). The `rustledger-ffi-component-tests`
   # tests SKIP unless the wasip2 artifact exists, and the `Test` job above never

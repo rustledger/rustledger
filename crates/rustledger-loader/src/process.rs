@@ -1872,6 +1872,14 @@ fn module_ref_message(raw_name: &str, file: Option<&str>) -> String {
 /// preserving the loader's plugin error codes (`E8001`/`E8004`/`E8005`/`PLUGIN`)
 /// and messages. The `rustledger-plugin` dispatcher is runtime-knowledge-pure
 /// and does not own these codes; this is where the host convention is applied.
+/// Appended to the "requires the ... feature" errors: rledger's release
+/// binaries are built without the plugin runtimes on purpose, so the user
+/// needs to know which build has them (#2541). The phrase before it is
+/// what `rustledger-ffi-component-tests`' corpus skip matches; keep it.
+#[cfg(feature = "plugins")]
+const NO_RUNTIMES_HINT: &str = ", which this build lacks: rledger's release binaries ship \
+     without the WASM and Python plugin runtimes; `cargo install rustledger` includes them";
+
 #[cfg(feature = "plugins")]
 fn resolve_error_to_ledger(e: &rustledger_plugin::PluginResolveError) -> LedgerError {
     use rustledger_plugin::PluginResolveError as Re;
@@ -1883,12 +1891,14 @@ fn resolve_error_to_ledger(e: &rustledger_plugin::PluginResolveError) -> LedgerE
         .with_phase("plugin"),
         Re::WasmFeatureDisabled { name } => LedgerError::error(
             "PLUGIN",
-            format!("WASM plugin '{name}' requires the wasm-plugins feature"),
+            format!("WASM plugin '{name}' requires the wasm-plugins feature{NO_RUNTIMES_HINT}"),
         )
         .with_phase("plugin"),
         Re::PythonFeatureDisabled { name } => LedgerError::error(
             "E8005",
-            format!("Python plugin \"{name}\" requires the python-plugins feature"),
+            format!(
+                "Python plugin \"{name}\" requires the python-plugins feature{NO_RUNTIMES_HINT}"
+            ),
         )
         .with_phase("plugin"),
         Re::PythonModuleName {

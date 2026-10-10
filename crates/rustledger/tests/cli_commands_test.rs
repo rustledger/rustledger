@@ -2182,3 +2182,83 @@ fn test_extract_orders_each_file_on_its_own() {
         "{appended}"
     );
 }
+
+/// A build without the plugin runtimes (a release binary) says so, and names
+/// the build that has them, for every way of asking for one: a `.py` and a
+/// `.wasm` `plugin` directive, `check --plugin` (rejected by clap as an
+/// unknown argument before #2541) and `extract --wasm-importer` /
+/// `--wasm-importer-dir` (accepted and ignored before, so the run reported
+/// only that nothing was extracted).
+#[cfg(not(feature = "python-plugin-wasm"))]
+#[test]
+fn release_build_names_the_build_with_plugin_runtimes() {
+    let rledger = require_rledger!();
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let dir = tmp.path();
+    std::fs::copy(
+        wasm_plugins_dir().join("passthrough.wasm"),
+        dir.join("passthrough.wasm"),
+    )
+    .expect("copy wasm");
+    std::fs::write(dir.join("p.py"), "__plugins__ = []\n").expect("write");
+    std::fs::create_dir(dir.join("importers")).expect("mkdir");
+    std::fs::write(dir.join("s.csv"), "date,amount\n").expect("write");
+    let open = "2024-01-01 open Assets:Cash\n";
+    std::fs::write(dir.join("plain.beancount"), open).expect("write");
+    for (name, header) in [
+        ("py", "plugin \"p.py\""),
+        ("wasm", "plugin \"passthrough.wasm\""),
+    ] {
+        std::fs::write(
+            dir.join(format!("{name}.beancount")),
+            format!("{header}\n{open}"),
+        )
+        .expect("write");
+    }
+    let cases: [&[&str]; 5] = [
+        &["check", "--no-cache", "py.beancount"],
+        &["check", "--no-cache", "wasm.beancount"],
+        &[
+            "check",
+            "--no-cache",
+            "--plugin",
+            "passthrough.wasm",
+            "plain.beancount",
+        ],
+        &[
+            "extract",
+            "--wasm-importer",
+            "passthrough.wasm",
+            "-a",
+            "Assets:Cash",
+            "s.csv",
+        ],
+        &[
+            "extract",
+            "--wasm-importer-dir",
+            "importers",
+            "-a",
+            "Assets:Cash",
+            "s.csv",
+        ],
+    ];
+    for args in cases {
+        let output = Command::new(&rledger)
+            .args(args)
+            .current_dir(dir)
+            .env("RLEDGER_CONFIG_DIR", dir)
+            .output()
+            .expect("run rledger");
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(!output.status.success(), "{args:?} succeeded:\n{text}");
+        assert!(
+            text.contains("release binaries ship without")
+                && text.contains("cargo install rustledger"),
+            "{args:?} does not name the build with plugin runtimes:\n{text}"
+        );
+    }
+}

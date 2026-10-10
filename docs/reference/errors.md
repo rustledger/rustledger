@@ -381,9 +381,9 @@ has no leaf form: these options can only name accounts under equity.
 
 ### E8005: Python Plugin Requires Feature
 
-**Cause**: A Python plugin was referenced in a build without the `python-plugins` feature.
+**Cause**: A Python plugin was referenced in a build without the plugin runtimes. Release binaries (GitHub Releases, Homebrew, Scoop, `cargo binstall`) are built that way on purpose. A WASM plugin in such a build is the same error under the code `PLUGIN` ("requires the wasm-plugins feature"), and `check --plugin` and `extract --wasm-importer` stop with a message saying the runtimes are missing.
 
-**Fix**: Use a build with Python plugin support, or switch to a native/WASM plugin.
+**Fix**: Install with `cargo install rustledger` (or build from source with default features), which includes the Python and WASM plugin runtimes; or use a built-in native plugin. See [Plugin Runtimes](../getting-started/installation.md#plugin-runtimes).
 
 ## Date Warnings (E10xxx)
 

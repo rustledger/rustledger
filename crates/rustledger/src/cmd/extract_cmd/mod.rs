@@ -1485,7 +1485,21 @@ fn build_registry_to(args: &Args, err_out: &mut dyn Write) -> Result<ImporterReg
     // 1 + 2. WASM importer loading (sandboxed `.wasm` importers). Gated behind
     //    `python-plugin-wasm` so a `--no-default-features` build carries no
     //    `wasmtime`/cranelift dependency (#1427); without the feature the
-    //    `--wasm-importer`/`--wasm-importer-dir` flags are accepted but inert.
+    //    `--wasm-importer`/`--wasm-importer-dir` flags are an error naming
+    //    what is missing (before #2541 they were accepted and ignored, so
+    //    the run reported only that nothing was extracted).
+    #[cfg(not(feature = "python-plugin-wasm"))]
+    if let Some(path) = args
+        .wasm_importer
+        .first()
+        .or(args.wasm_importer_dir.first())
+    {
+        anyhow::bail!(
+            "cannot load WASM importers from {}: {}",
+            path.display(),
+            crate::plugin_budget::NO_PLUGIN_RUNTIMES
+        );
+    }
     #[cfg(feature = "python-plugin-wasm")]
     {
         // The host's time budget, if one is configured (`[plugins]

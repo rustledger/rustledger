@@ -127,8 +127,8 @@ pub struct Args {
     #[arg(short = 'a', long)]
     pub auto: bool,
 
-    /// Load a WASM plugin (can be specified multiple times)
-    #[cfg(feature = "python-plugin-wasm")]
+    /// Load a WASM plugin (can be specified multiple times). Needs the
+    /// plugin runtimes, which release binaries do not include
     #[arg(long = "plugin", value_name = "WASM_FILE")]
     pub plugins: Vec<PathBuf>,
 
@@ -278,6 +278,17 @@ pub fn run_with_writer<W: Write>(
     // Check if file exists
     if !file.exists() {
         anyhow::bail!("file not found: {}", file.display());
+    }
+
+    // The flag is accepted in every build, so a build without the runtimes
+    // says what is missing rather than "unexpected argument" (#2541).
+    #[cfg(not(feature = "python-plugin-wasm"))]
+    if let Some(path) = args.plugins.first() {
+        anyhow::bail!(
+            "cannot load WASM plugin {}: {}",
+            path.display(),
+            crate::plugin_budget::NO_PLUGIN_RUNTIMES
+        );
     }
 
     // Collect diagnostics for JSON output

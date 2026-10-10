@@ -698,6 +698,10 @@ For custom functionality, you can write plugins in two ways:
 
 ### WASM Plugins (Recommended)
 
+::: tip Needs the plugin runtimes
+WASM plugins, Python plugins and WASM importers run in builds with the plugin runtimes: `cargo install rustledger` and source builds. Release binaries (GitHub Releases, Homebrew, Scoop, `cargo binstall`) leave them out on purpose and report an error naming `cargo install rustledger`. See [Plugin Runtimes](../getting-started/installation.md#plugin-runtimes). Built-in native plugins run in every build.
+:::
+
 Write plugins in Rust, compile to WebAssembly, and use them without modifying rustledger.
 
 **Quick start:**
@@ -729,6 +733,8 @@ Python plugin support is experimental and significantly slower than native plugi
 :::
 
 rustledger can run some Python beancount plugins using CPython compiled to WebAssembly (WASI). This is primarily for migration purposes.
+
+Python plugins need a build with the plugin runtimes: `cargo install rustledger` or a source build. Release binaries leave them out; see [Plugin Runtimes](../getting-started/installation.md#plugin-runtimes).
 
 ### Referencing a Python Plugin
 

@@ -1,0 +1,66 @@
+name: Plugin conformance (macOS, Windows)
+
+# The plugin conformance matrix (`plugin_conformance`) and the Python plugin
+# suite (`python_plugin_wasi`) on macOS and Windows (#2537). The required
+# `Python-gated cargo tests` job runs them on Linux only, and the Python and
+# WASM plugin runtimes (the async guest on its own thread, the wall-clock
+# deadline, the guest stack, the capped WASI resource table) had never run
+# anywhere else.
+#
+# Not a required check: it runs nightly and on demand, and on a pull request
+# only when this file changes. It covers `cargo install` and source builds,
+# which get the plugin runtimes by default; release binaries are built with
+# `--no-default-features` and deliberately ship without them (#2541).
+#
+# RLEDGER_REQUIRE_PYTHON_WASI and RLEDGER_REQUIRE_WASM32 turn the suites'
+# skips (no CPython WASI runtime, no wasm32 guests) into failures, and the
+# last step fails on any skip marker, so a missing tool cannot pass green.
+
+on:
+  schedule:
+    - cron: '30 4 * * *' # Nightly, after compat.yml's 3 AM run
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - '.github/workflows/plugin-platforms.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: plugin-platforms-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  plugin-conformance:
+    name: Plugin conformance (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # stable
+        with:
+          toolchain: 1.98.1 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
+          # plugin_conformance builds its WASM plugin and importer guests.
+          targets: wasm32-unknown-unknown
+      - name: Run plugin suites
+        env:
+          CARGO_TERM_COLOR: always
+          RLEDGER_REQUIRE_PYTHON_WASI: '1'
+          RLEDGER_REQUIRE_WASM32: '1'
+        run: |
+          set -o pipefail
+          cargo test -p rustledger --test plugin_conformance --test python_plugin_wasi -- --nocapture 2>&1 | tee plugin-tests.log
+      - name: Fail on silent skips
+        run: |
+          if grep -Eq "Skipping: CPython WASI runtime unavailable|Skipping: conformance WASM guests unavailable|Skipping: rledger binary not found" plugin-tests.log; then
+            echo "::error::plugin suites skipped on ${{ matrix.os }} despite RLEDGER_REQUIRE_*"
+            exit 1
+          fi

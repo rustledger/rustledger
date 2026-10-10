@@ -679,7 +679,6 @@ fn build_check_args(req: &Req<'_>) -> Result<rustledger::cmd::check::Args, Comma
         no_cache: bool_flag(req, "no-cache", Some("C")),
         cache_filename: path_flag(req, "cache-filename", None),
         auto: bool_flag(req, "auto", Some("a")),
-        #[cfg(feature = "python-plugin-wasm")]
         plugins: flag_values(req, "plugin", None)
             .into_iter()
             .map(PathBuf::from)

@@ -151,3 +151,12 @@ pub fn max_memory_mb() -> Option<u64> {
 pub fn max_memory_bytes() -> Option<usize> {
     max_memory_mb().map(|mb| usize::try_from(mb.saturating_mul(1 << 20)).unwrap_or(usize::MAX))
 }
+
+/// Why a build without `python-plugin-wasm` cannot run a plugin (#2541).
+///
+/// It also names how to get a build that can: release binaries are built
+/// without the runtimes on purpose, and `cargo install rustledger` and
+/// source builds have them.
+pub const NO_PLUGIN_RUNTIMES: &str = "this rledger was built without the WASM and Python \
+     plugin runtimes (release binaries ship without them); install it with \
+     `cargo install rustledger`, which includes them";

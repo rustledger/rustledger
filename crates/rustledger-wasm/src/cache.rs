@@ -205,7 +205,10 @@ use crate::types::{Error, LedgerOptions};
 /// unchanged -- the loader archives parsed directives, which have no such
 /// entries. `Ledger` archives the processed, sorted directives, so a v34 blob
 /// would keep serving the old order.
-pub const CACHE_VERSION: u32 = 35;
+/// v36: loader v38, tags and links are a sorted, deduplicated set (#2545) and
+/// `pushtag` reaches `document` and `note` entries (#2544). Parsed directives
+/// changed, so a v35 blob would serve tags in written order with duplicates.
+pub const CACHE_VERSION: u32 = 36;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -237,7 +240,7 @@ pub const CACHE_VERSION: u32 = 35;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 37;
+const LOADER_CACHE_VERSION_PIN: u32 = 38;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

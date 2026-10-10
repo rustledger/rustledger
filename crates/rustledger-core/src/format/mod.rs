@@ -666,8 +666,8 @@ mod tests {
             date: date(2024, 3, 15),
             account: "Assets:Bank".into(),
             comment: "Called the bank about fee".to_string(),
-            tags: Vec::new(),
-            links: Vec::new(),
+            tags: Default::default(),
+            links: Default::default(),
             meta: Default::default(),
         };
         let config = FormatConfig::default();
@@ -684,8 +684,8 @@ mod tests {
             date: date(2024, 2, 10),
             account: "Assets:Bank".into(),
             path: "/docs/statement-2024-02.pdf".to_string(),
-            tags: vec![],
-            links: vec![],
+            tags: Default::default(),
+            links: Default::default(),
             meta: Default::default(),
         };
         let config = FormatConfig::default();
@@ -866,8 +866,8 @@ mod tests {
             flag: '*',
             payee: None,
             narration: "Purchase".into(),
-            tags: vec![],
-            links: vec![],
+            tags: Default::default(),
+            links: Default::default(),
             postings: vec![],
             meta,
             trailing_comments: Vec::new(),
@@ -1145,8 +1145,8 @@ mod tests {
             date: date(2024, 1, 1),
             account: "Assets:Bank".into(),
             comment: "test".to_string(),
-            tags: Vec::new(),
-            links: Vec::new(),
+            tags: Default::default(),
+            links: Default::default(),
             meta: Default::default(),
         };
         let formatted = format_directives([&Directive::Note(note)], &config);
@@ -1157,8 +1157,8 @@ mod tests {
             date: date(2024, 1, 1),
             account: "Assets:Bank".into(),
             path: "/path".to_string(),
-            tags: vec![],
-            links: vec![],
+            tags: Default::default(),
+            links: Default::default(),
             meta: Default::default(),
         };
         let formatted = format_directives([&Directive::Document(doc)], &config);
@@ -1345,8 +1345,8 @@ mod tests {
             flag: '*',
             payee: None,
             narration: "my expense".into(),
-            tags: vec![],
-            links: vec![],
+            tags: Default::default(),
+            links: Default::default(),
             postings: vec![
                 crate::Spanned::synthesized(posting),
                 crate::Spanned::synthesized(Posting::auto("Assets:Wallet")),

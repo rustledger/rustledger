@@ -38,8 +38,8 @@ use rust_decimal::Decimal;
 use rustledger_core::cost::{CostNumber, CostSpec};
 use rustledger_core::directive::{PriceAnnotation, PriceKind};
 use rustledger_core::{
-    Account, Amount, Currency, Directive, IncompleteAmount, InternedStr, Link, MetaValue, Metadata,
-    NaiveDate, Posting, Span, Spanned, Tag, naive_date,
+    Account, Amount, Currency, Directive, IncompleteAmount, InternedStr, Link, LinkSet, MetaValue,
+    Metadata, NaiveDate, Posting, Span, Spanned, Tag, TagSet, naive_date,
 };
 
 use crate::ParseResult;
@@ -583,9 +583,9 @@ fn convert_commodity(
 /// the comment for a `note`, the path for a `document`. Tags and links follow
 /// it on the same line, and metadata lines live in `META_ENTRY` child nodes
 /// rather than as direct tokens, so they cannot leak in.
-fn header_tags_and_links(node: &crate::SyntaxNode) -> (Vec<Tag>, Vec<Link>) {
-    let mut tags: Vec<Tag> = Vec::new();
-    let mut links: Vec<Link> = Vec::new();
+fn header_tags_and_links(node: &crate::SyntaxNode) -> (TagSet, LinkSet) {
+    let mut tags = TagSet::new();
+    let mut links = LinkSet::new();
     let mut header_started = false;
     for el in node.children_with_tokens() {
         let rowan::NodeOrToken::Token(t) = el else {
@@ -595,10 +595,10 @@ fn header_tags_and_links(node: &crate::SyntaxNode) -> (Vec<Tag>, Vec<Link>) {
             crate::SyntaxKind::STRING => header_started = true,
             crate::SyntaxKind::NEWLINE if header_started => break,
             crate::SyntaxKind::TAG => {
-                tags.push(Tag::new(t.text().trim_start_matches('#')));
+                tags.insert(Tag::new(t.text().trim_start_matches('#')));
             }
             crate::SyntaxKind::LINK => {
-                links.push(Link::new(t.text().trim_start_matches('^')));
+                links.insert(Link::new(t.text().trim_start_matches('^')));
             }
             _ => {}
         }
@@ -1287,11 +1287,11 @@ fn convert_transaction(
     // already exempts them from the malformed-body diagnostic for
     // this reason. Aggregate them here so they don't silently
     // disappear.
-    let mut tags: Vec<Tag> = node
+    let mut tags: TagSet = node
         .tags()
         .map(|t| Tag::new(t.text().trim_start_matches('#')))
         .collect();
-    let mut links: Vec<Link> = node
+    let mut links: LinkSet = node
         .links()
         .map(|l| Link::new(l.text().trim_start_matches('^')))
         .collect();
@@ -1304,17 +1304,11 @@ fn convert_transaction(
         match t.kind() {
             crate::SyntaxKind::TAG => {
                 let stripped = t.text().trim_start_matches('#');
-                let new_tag = Tag::new(stripped);
-                if !tags.contains(&new_tag) {
-                    tags.push(new_tag);
-                }
+                tags.insert(Tag::new(stripped));
             }
             crate::SyntaxKind::LINK => {
                 let stripped = t.text().trim_start_matches('^');
-                let new_link = Link::new(stripped);
-                if !links.contains(&new_link) {
-                    links.push(new_link);
-                }
+                links.insert(Link::new(stripped));
             }
             _ => {}
         }
@@ -2690,9 +2684,14 @@ pub(super) fn meta_value_from_tokens(tokens: impl Iterator<Item = impl TokenView
 // ---- Inherited state (pushtag/poptag/pushmeta/popmeta) ---------
 
 /// Merge active pushed-tag and pushed-meta state into a freshly
-/// converted directive's value. Mirrors the legacy parser's
-/// `apply_pushed_tags` + `apply_pushed_meta`: tags apply ONLY to
-/// `Transaction`; meta applies to every directive's `meta` field.
+/// converted directive's value.
+///
+/// Pushed tags apply to every directive that carries tags: `Transaction`,
+/// `Document` and `Note`, as beancount 3 does (its grammar unions the tag
+/// stack into each of those three). They used to apply to transactions only
+/// (#2544). The tags are a [`TagSet`], so a pushed tag the line already
+/// wrote is not added twice (#2545). Meta applies to every directive's
+/// `meta` field.
 ///
 /// The meta stack is a `Vec` (not a map) to preserve shadow/pop
 /// semantics - `pushmeta x: 1; pushmeta x: 2; popmeta x` should
@@ -2705,12 +2704,22 @@ fn apply_inherited_state(
     tag_stack: &[(Tag, Span)],
     meta_stack: &[(String, MetaValue, Span)],
 ) {
-    if let Directive::Transaction(txn) = value {
-        for (tag, _) in tag_stack {
-            if !txn.tags.contains(tag) {
-                txn.tags.push(tag.clone());
-            }
-        }
+    let tags = match value {
+        Directive::Transaction(d) => Some(&mut d.tags),
+        Directive::Document(d) => Some(&mut d.tags),
+        Directive::Note(d) => Some(&mut d.tags),
+        Directive::Balance(_)
+        | Directive::Open(_)
+        | Directive::Close(_)
+        | Directive::Commodity(_)
+        | Directive::Pad(_)
+        | Directive::Event(_)
+        | Directive::Query(_)
+        | Directive::Price(_)
+        | Directive::Custom(_) => None,
+    };
+    if let Some(tags) = tags {
+        tags.extend(tag_stack.iter().map(|(tag, _)| tag.clone()));
     }
     if meta_stack.is_empty() {
         return;

@@ -3107,6 +3107,27 @@ mod tests {
         assert_eq!(format_source(src), "plugin \"my.plugin\"\n");
     }
 
+    /// `rledger format` rewrites the source text, so tags and links stay in
+    /// the order written, duplicates included, on every directive that takes
+    /// them. The model's tags are a sorted set since #2545; that must not leak
+    /// into the formatter and reorder a user's file.
+    #[test]
+    fn tags_and_links_keep_written_order() {
+        let src = "2024-01-02 * \"x\" #zeta #alpha #zeta ^l2 ^l1\n  Assets:Cash  1 USD\n  Assets:Cash\n\n\
+                   2024-01-03 document Assets:Cash \"r.pdf\" #zeta #alpha ^l2 ^l1\n\n\
+                   2024-01-04 note Assets:Cash \"hi\" #zeta #alpha ^l2 ^l1\n";
+        let out = format_source(src);
+        assert!(
+            out.contains("\"x\" #zeta #alpha #zeta ^l2 ^l1\n"),
+            "transaction: {out}"
+        );
+        assert!(
+            out.contains("\"r.pdf\" #zeta #alpha ^l2 ^l1\n"),
+            "document: {out}"
+        );
+        assert!(out.contains("\"hi\" #zeta #alpha ^l2 ^l1\n"), "note: {out}");
+    }
+
     #[test]
     fn pushtag_poptag_canonical() {
         // No blank line in the source — preserved as grouped (#1325).

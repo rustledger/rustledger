@@ -1790,8 +1790,8 @@ mod tests {
                 date: date(2024, 1, 15),
                 account: "Assets:Bank".into(),
                 path: "/nonexistent/path/to/document.pdf".to_string(),
-                tags: vec![],
-                links: vec![],
+                tags: Default::default(),
+                links: Default::default(),
                 meta: Default::default(),
             }),
         ];
@@ -1818,8 +1818,8 @@ mod tests {
             date: date(2024, 1, 15),
             account: "Assets:Unknown".into(),
             path: "receipt.pdf".to_string(),
-            tags: vec![],
-            links: vec![],
+            tags: Default::default(),
+            links: Default::default(),
             meta: Default::default(),
         })];
 
@@ -1847,8 +1847,8 @@ mod tests {
                 date: date(2024, 1, 15),
                 account: "Assets:Bank".into(),
                 path: filename.to_string(),
-                tags: vec![],
-                links: vec![],
+                tags: Default::default(),
+                links: Default::default(),
                 meta: Default::default(),
             }),
         ];
@@ -1883,8 +1883,8 @@ mod tests {
                 date: date(2024, 1, 15),
                 account: "Assets:Bank".into(),
                 path: filename.to_string(),
-                tags: vec![],
-                links: vec![],
+                tags: Default::default(),
+                links: Default::default(),
                 meta: Default::default(),
             }),
         ];
@@ -1911,8 +1911,8 @@ mod tests {
                 date: date(2024, 1, 15),
                 account: "Assets:Bank".into(),
                 path: doc_subdir.join(filename).display().to_string(),
-                tags: vec![],
-                links: vec![],
+                tags: Default::default(),
+                links: Default::default(),
                 meta: Default::default(),
             }),
         ];
@@ -1954,8 +1954,8 @@ mod tests {
                 date: date(2024, 1, 15),
                 account: "Assets:Bank".into(),
                 path: filename,
-                tags: vec![],
-                links: vec![],
+                tags: Default::default(),
+                links: Default::default(),
                 meta: Default::default(),
             }));
         }

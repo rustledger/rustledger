@@ -288,8 +288,8 @@ mod tests {
             flag: '*',
             payee: None,
             narration: "Test".into(),
-            tags: vec![],
-            links: vec![],
+            tags: Default::default(),
+            links: Default::default(),
             meta,
             postings: vec![
                 rustledger_core::Spanned::synthesized(Posting::new(
@@ -421,8 +421,8 @@ mod tests {
             flag: '*',
             payee: None,
             narration: "Test".into(),
-            tags: vec![],
-            links: vec![],
+            tags: Default::default(),
+            links: Default::default(),
             meta,
             postings: vec![
                 rustledger_core::Spanned::synthesized(Posting::new(

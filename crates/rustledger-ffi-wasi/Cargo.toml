@@ -31,6 +31,7 @@ jiff.workspace = true
 # Filesystem fixture support for integration tests that exercise the
 # loader's path-security behavior via tempdir-rooted include graphs.
 tempfile.workspace = true
+proptest.workspace = true
 
 [lints]
 workspace = true

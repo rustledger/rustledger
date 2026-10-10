@@ -3423,6 +3423,7 @@ name = "rustledger-ffi-wasi"
 version = "0.24.0"
 dependencies = [
  "jiff",
+ "proptest",
  "rustc-hash 2.1.3",
  "rustledger-booking",
  "rustledger-core",

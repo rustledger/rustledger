@@ -7272,8 +7272,8 @@ fn notes_expose_tags_and_links_like_documents() {
     // always exposed them, and its `#notes` wildcard is
     // `date, account, comment, tags, links`.
     let mut note = Note::new(date(2024, 1, 5), "Assets:A", "note text");
-    note.tags = vec![rustledger_core::Tag::new("ntag")];
-    note.links = vec![rustledger_core::Link::new("nlink")];
+    note.tags = vec![rustledger_core::Tag::new("ntag")].into();
+    note.links = vec![rustledger_core::Link::new("nlink")].into();
     let directives = [
         Directive::Open(Open::new(date(2024, 1, 1), "Assets:A")),
         Directive::Note(note),

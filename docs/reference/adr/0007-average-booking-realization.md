@@ -124,6 +124,36 @@ A property test (`sum_position_balances_agreement`) holds `sum(position)` to
 `BALANCES` presented one pool per side, over generated ledgers and `FROM` and
 `WHERE` subsets.
 
+## Amendment: every surface presents the pool (#2543)
+
+The second seam above is closed. An AVERAGE account is presented as its pool
+on every surface, before a sale and after one: `BALANCES`, `sum(position)`,
+the running `balance` column of `SELECT` and `JOURNAL`, `account_balance`, and
+`report balances`. This is presentation only; booking is unchanged, so the
+dated lots and their exact totals stay underneath for what needs them
+(`report capgains`).
+
+- **Pool key:** commodity, cost currency and side. X held at a USD cost never
+  pools with X at a EUR cost; each pools its own lots. `merge_average` used to
+  leave a side with mixed cost currencies unmerged altogether.
+- **Pool contents:** undated, at the exact total cost of its lots; the
+  per-unit cost is rounded only for display (`report balances` printed it at
+  full `Decimal` precision). A single lot is a pool too, so it shows undated.
+- **One implementation:** `rustledger_booking::present_inventory`, which is
+  `merge_average` for an AVERAGE account and nothing for any other.
+  `BookingEngine::into_presented_inventories` applies it to a realization,
+  for `BALANCES` and `report balances`; `account_balance` applies it to its
+  snapshot; the running `balance` column realizes each AVERAGE account's
+  rows as `sum(position)` does (each transaction's rows replayed as one, in
+  booking's order) and applies it to that.
+
+The running `balance` column was never realized at all: after a sale it listed
+both lots bought plus the sale as a negative lot, which the account never held.
+It keeps the plain sum, unmerged, for rows booking cannot realize, as
+`sum(position)` does. Every other account's rows are still summed as
+bean-query sums them. The property test now holds `sum(position)` to `BALANCES`
+exactly, and the running balance's last row to `sum(position)`.
+
 ## Prior art
 
 - hledger `SPEC-lots` — single running pool; pool cost rewritten on acquisition.

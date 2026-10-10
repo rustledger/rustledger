@@ -334,6 +334,7 @@ mod aggregation;
 mod evaluation;
 mod execution;
 mod operators;
+mod running_balance;
 mod sort;
 mod system_tables;
 mod window;
@@ -1235,7 +1236,9 @@ impl<'a> Executor<'a> {
         // SHARED backing: cloned once per output row below. A contiguous
         // copy per row is what #1086 is about — 2000 lots x 2000 rows holds
         // ~2M positions at once (measured 395 MB vs 31 MB).
-        let mut cumulative_balance: Inventory = Inventory::new_shared();
+        // AVERAGE accounts presented as their pools (#2543), see
+        // `RunningBalance`.
+        let mut cumulative_balance = running_balance::RunningBalance::new();
 
         // Create an iterator over (directive_index, directive) pairs
         // Handle both spanned and unspanned directives
@@ -1301,12 +1304,30 @@ impl<'a> Executor<'a> {
             // (#2380). A posting's `account_balance` is the state the walk
             // reaches over the postings up to and including it.
             let mut replay = needs_account_balance.then(|| engine.begin_replay(&txn));
+            // An AVERAGE account's running balance is presented as its pools,
+            // as `BALANCES` presents it (#2543). Anything else shares the
+            // engine's copy (#2086).
             let snapshot = |replay: &Option<rustledger_booking::TransactionReplay<'_, '_>>,
-                            account: &rustledger_core::Account| {
-                replay.as_ref().map_or(Ok(None), |r| {
-                    r.account_snapshot(account)
-                        .map_err(|e| QueryError::Evaluation(e.to_string()))
-                })
+                            account: &rustledger_core::Account|
+             -> Result<Option<std::sync::Arc<Inventory>>, QueryError> {
+                let eval = |e: String| QueryError::Evaluation(e);
+                let Some(shared) = replay
+                    .as_ref()
+                    .map_or(Ok(None), |r| r.account_snapshot(account))
+                    .map_err(|e| eval(e.to_string()))?
+                else {
+                    return Ok(None);
+                };
+                if !self.account_is_average(account) {
+                    return Ok(Some(shared));
+                }
+                let mut pooled = (*shared).clone();
+                rustledger_booking::present_inventory(
+                    rustledger_core::BookingMethod::Average,
+                    &mut pooled,
+                )
+                .map_err(|e| eval(e.to_string()))?;
+                Ok(Some(std::sync::Arc::new(pooled)))
             };
             // One account set per transaction, shared by its rows (#2504).
             let txn_accounts = (needs_txn_accounts && collect_contexts)
@@ -1405,7 +1426,7 @@ impl<'a> Executor<'a> {
                     transaction: txn.clone(),
                     posting_index: i,
                     balance: if where_reads_balance {
-                        Some(cumulative_balance.clone())
+                        Some(cumulative_balance.snapshot()?)
                     } else {
                         None
                     },
@@ -1443,11 +1464,14 @@ impl<'a> Executor<'a> {
                 // query doesn't read `balance`.
                 if needs_balance {
                     if let Some(pos) = resolved {
-                        cumulative_balance
-                            .add(pos)
-                            .map_err(|e| QueryError::Evaluation(e.to_string()))?;
+                        cumulative_balance.add(
+                            posting,
+                            txn.date,
+                            pos,
+                            self.account_is_average(&posting.account),
+                        )?;
                     }
-                    ctx.balance = Some(cumulative_balance.clone());
+                    ctx.balance = Some(cumulative_balance.snapshot()?);
                 }
                 // The deferred half of the gate above: this row survived, so
                 // it is one of the few that will actually be read.
@@ -1485,6 +1509,7 @@ impl<'a> Executor<'a> {
                 }
                 postings.push(ctx);
             }
+            cumulative_balance.end_transaction();
             if let Some(replay) = replay {
                 replay
                     .finish()
@@ -1492,7 +1517,11 @@ impl<'a> Executor<'a> {
             }
         }
 
-        let mut account_balances = engine.into_inventories();
+        // As each account is presented: an AVERAGE account as its pools,
+        // before a sale as after one (#2543).
+        let mut account_balances = engine
+            .into_presented_inventories()
+            .map_err(|e| QueryError::Evaluation(e.to_string()))?;
         if row_filter.is_some() {
             // Under a row filter an account's total is the sum of its
             // selected postings (beanquery's BALANCES is `SUM(position)`
@@ -1506,12 +1535,13 @@ impl<'a> Executor<'a> {
                 .retain(|account, _| selection.get(account).is_some_and(|s| s.selected));
             for (account, mut chosen) in selection {
                 if chosen.selected && chosen.rejected {
-                    // As `SUM(position)` realizes an AVERAGE account.
+                    // As `SUM(position)` presents an AVERAGE account.
                     if self.account_is_average(&account) {
-                        chosen
-                            .sum
-                            .merge_average()
-                            .map_err(|e| QueryError::Evaluation(e.to_string()))?;
+                        rustledger_booking::present_inventory(
+                            rustledger_core::BookingMethod::Average,
+                            &mut chosen.sum,
+                        )
+                        .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                     }
                     account_balances.insert(account, chosen.sum);
                 }

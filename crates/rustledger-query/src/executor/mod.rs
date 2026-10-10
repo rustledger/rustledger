@@ -3113,9 +3113,12 @@ impl<'a> Executor<'a> {
                 // Expand wildcard using shared constant (must match evaluate_row expansion)
                 names.extend(WILDCARD_COLUMNS.iter().map(|s| (*s).to_string()));
             } else if let Some(alias) = &target.alias {
-                // bean-query lowercases the alias too: `AS LatestDate`
-                // heads the result `latestdate` (#2164).
-                names.push(alias.to_lowercase());
+                // As the parser left it. bean-query folds an UNQUOTED alias
+                // to lower case (`AS LatestDate` heads `latestdate`, #2164)
+                // and keeps a quoted one as written (`AS "2023"`), so the
+                // parser does the folding, where the two are told apart
+                // (#2577). Folding here too lowered the quoted ones.
+                names.push(alias.clone());
             } else {
                 names.push(self.expr_to_name(&target.expr));
             }

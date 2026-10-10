@@ -1722,7 +1722,9 @@ impl BookingEngine {
         ),
         InterpolationError,
     > {
-        let tolerances = crate::transaction_tolerances(txn, &self.tolerance.options());
+        // The grid interpolation rounds to, so to nearest (#2582 review): the
+        // balance check that rounds DOWN is the validator's.
+        let tolerances = crate::interpolation_tolerances(txn, &self.tolerance.options());
         Ok((tolerances, self.resolve_elided_units_currencies(txn)?))
     }
 

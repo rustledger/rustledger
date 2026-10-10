@@ -422,42 +422,30 @@ fn round_interpolated(residual: Decimal, tolerance: Option<Decimal>) -> Decimal 
         return interpolated;
     };
     let (digits, exponent) = normalized_parts(quantum);
-    let exponent = if digits < MAX_TOLERANCE_DIGITS {
-        exponent
-    } else {
-        // A tolerance needing more digits than a `Decimal` holds is rounded
-        // DOWN to 28 places, so the balance check is never looser (#2582).
-        // The grid is not a check: `0.0049999…9`, the floor of an exact
-        // `0.00499999999999999999999999995`, is the tolerance `0.005` one unit
-        // in its last place down, and quantizes to cents, as beancount, which
-        // rounds tolerances to 28 digits, quantizes it. So a tolerance at the
-        // full 28 places takes the grid of the value one unit above it, when
-        // that one is short; anything else is genuinely long and quantizes
-        // nothing, as before.
-        let Some(up) = (tolerance.scale() == 28)
-            .then(|| tolerance.checked_add(Decimal::new(1, 28)))
-            .flatten()
-            .and_then(|t| t.checked_mul(Decimal::TWO))
-        else {
-            return interpolated;
-        };
-        let (digits, exponent) = normalized_parts(up);
-        if digits >= MAX_TOLERANCE_DIGITS {
-            return interpolated;
-        }
-        exponent
-    };
+    if digits >= MAX_TOLERANCE_DIGITS {
+        return interpolated;
+    }
     let Some(quantized) = quantize_to_exponent(interpolated, exponent) else {
         return interpolated;
     };
-    // The quantized amount must still balance against the tolerance the
-    // validator checks. On a grid from the tolerance itself it always does
-    // (half a unit of `2 x tolerance`'s last digit is at most the tolerance);
-    // on the grid of the value above a floored one it can miss by that unit,
-    // and then the amount is left unquantized rather than booked unbalanced
-    // (#2582 review).
+    // The grid's tolerance is rounded to NEAREST (`interpolation_tolerances`);
+    // the validator checks one rounded DOWN (#2582). They differ only for a
+    // tolerance needing more digits than a `Decimal` holds, by at most a unit
+    // in the 28th place, and on such a grid the quantized amount can miss the
+    // floor by that unit: under multiplier 0.25 the cash solved to
+    // `-2.005…` and cents gave `-2.00`, a residual of `0.005` against
+    // `0.0049999…9` (E3001 on a number nobody wrote, #2582 review). Keep the
+    // quantized amount only within a bound a unit below a 28-place grid
+    // tolerance, which is at or below the floor; else book the exact amount,
+    // which balances. On an ordinary grid this never fires: half a unit of
+    // `2 x tolerance`'s last digit is at most the tolerance.
+    let bound = if tolerance.scale() == 28 {
+        tolerance.abs() - Decimal::new(1, 28)
+    } else {
+        tolerance.abs()
+    };
     match quantized.checked_sub(interpolated) {
-        Some(error) if error.abs() <= tolerance.abs() => quantized,
+        Some(error) if error.abs() <= bound => quantized,
         _ => interpolated,
     }
 }
@@ -996,7 +984,7 @@ pub fn interpolate_with_tolerances(
     transaction: &Transaction,
     tolerance_options: &crate::ToleranceOptions<'_>,
 ) -> Result<InterpolationResult, InterpolationError> {
-    let tolerances = crate::transaction_tolerances(transaction, tolerance_options);
+    let tolerances = crate::interpolation_tolerances(transaction, tolerance_options);
     interpolate_with_tolerance_map(transaction, &tolerances)
 }
 
@@ -1193,9 +1181,11 @@ fn interpolate_inner<S: std::hash::BuildHasher>(
 
     // `tolerances` (computed above from the INPUT transaction) is the rounding
     // grid for every solved number — see `round_interpolated`. It comes from
-    // the canonical `transaction_tolerances`, the same function the balance
-    // validator uses, so interpolation cannot round to a precision the
-    // validator would then reject.
+    // `interpolation_tolerances`, the same computation as the balance
+    // validator's `transaction_tolerances`, so interpolation cannot round to a
+    // precision the validator would then reject. The two differ only for a
+    // tolerance needing more digits than a `Decimal` holds, which the grid
+    // rounds to nearest and the check rounds down (#2582).
     //
     // Only NON-INTEGER posting units establish a tolerance, so a currency with
     // no fractional units in the transaction gets none and its residual passes

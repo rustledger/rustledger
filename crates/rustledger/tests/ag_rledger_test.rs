@@ -468,10 +468,12 @@ fn run_in(dir: &std::path::Path, args: &[&str]) -> (i32, Value, String) {
         .args(args)
         // `dir` is the user config dir and the cwd, so no stray project
         // config is found above it; PROGRAMDATA covers the Windows system
-        // config path.
+        // config path. The parse cache is off so `--verbose` reports a
+        // fresh load every time.
         .current_dir(dir)
         .env("RLEDGER_CONFIG_DIR", dir)
         .env("PROGRAMDATA", dir)
+        .env("BEANCOUNT_DISABLE_LOAD_CACHE", "1")
         .env_remove("RLEDGER_PROFILE")
         .env_remove("AG_RLEDGER_PROFILE")
         .output()
@@ -485,6 +487,214 @@ fn run_in(dir: &std::path::Path, args: &[&str]) -> (i32, Value, String) {
         envelope,
         String::from_utf8_lossy(&output.stderr).into_owned(),
     )
+}
+
+/// An unknown option, a failing balance assertion, and an account closed
+/// with money in it: E7001, E2001, and the advisory-only E1004.
+const DIAGNOSTICS_LEDGER: &str = "\
+option \"not_a_real_option\" \"x\"
+
+2024-01-01 open Assets:Cash
+2024-01-01 open Expenses:Food
+
+2024-01-07 * \"lunch\"
+  Expenses:Food   12.50 USD
+  Assets:Cash
+
+2024-01-08 balance Assets:Cash  0.00 USD
+
+2024-02-20 close Expenses:Food
+";
+
+/// #2546: `ag-rledger query` wrote the ledger's diagnostics to the process's
+/// stderr, which the envelope does not carry, so an agent saw a clean result
+/// for a ledger with a failing balance. They are now the envelope's
+/// `warnings`, in the shape `report` uses, and the process's stderr is empty.
+#[test]
+fn query_diagnostics_are_envelope_warnings_not_stderr() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "diag.beancount", DIAGNOSTICS_LEDGER);
+    let file = file.to_str().unwrap();
+
+    let (code, env, stderr) = run_in(
+        tmp.path(),
+        &["query", file, "SELECT account", "--format", "json"],
+    );
+    assert_eq!(code, 0, "{env}");
+    assert!(stderr.is_empty(), "stderr must stay clean, got: {stderr}");
+
+    let warnings = env["result"]["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warnings in the envelope: {env}"));
+    let codes: Vec<&str> = warnings
+        .iter()
+        .map(|w| w["code"].as_str().expect("each warning has a code"))
+        .collect();
+    // Option diagnostics first, as `rledger query` and bean-query print
+    // them; the advisory E1004 is left out, as `check` leaves it out.
+    assert_eq!(codes, vec!["E7001", "E2001"], "{env}");
+    for w in warnings {
+        assert!(
+            w["message"].as_str().is_some_and(|m| !m.is_empty()),
+            "each warning carries its message: {w}"
+        );
+    }
+    // The query's own answer is untouched.
+    assert!(
+        env["result"]["data"].is_array() || env["result"]["data"].is_object(),
+        "{env}"
+    );
+}
+
+/// The warnings are exactly what `rledger query` prints, so the two surfaces
+/// cannot drift apart.
+#[test]
+fn query_warnings_match_what_rledger_query_prints() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "diag.beancount", DIAGNOSTICS_LEDGER);
+    let file = file.to_str().unwrap();
+
+    let rledger = Command::new(env!("CARGO_BIN_EXE_rledger"))
+        .args(["query", file, "SELECT account"])
+        .current_dir(tmp.path())
+        .env("RLEDGER_CONFIG_DIR", tmp.path())
+        .env("PROGRAMDATA", tmp.path())
+        .env("BEANCOUNT_DISABLE_LOAD_CACHE", "1")
+        .output()
+        .expect("spawn rledger");
+    let printed: Vec<String> = String::from_utf8_lossy(&rledger.stderr)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(str::to_string)
+        .collect();
+    assert!(
+        !printed.is_empty(),
+        "rledger printed nothing to compare against"
+    );
+
+    let (_, env, _) = run_in(tmp.path(), &["query", file, "SELECT account"]);
+    let carried: Vec<String> = env["result"]["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warnings: {env}"))
+        .iter()
+        .map(|w| {
+            format!(
+                "{}: {}",
+                w["code"].as_str().unwrap(),
+                w["message"].as_str().unwrap()
+            )
+        })
+        .collect();
+    assert_eq!(carried, printed);
+}
+
+/// `--no-errors` suppresses the diagnostics in the envelope as it does on
+/// the terminal.
+#[test]
+fn query_no_errors_suppresses_the_warnings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "diag.beancount", DIAGNOSTICS_LEDGER);
+    let (code, env, stderr) = run_in(
+        tmp.path(),
+        &[
+            "query",
+            file.to_str().unwrap(),
+            "SELECT account",
+            "--no-errors",
+        ],
+    );
+    assert_eq!(code, 0, "{env}");
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(env["result"].get("warnings").is_none(), "{env}");
+}
+
+/// #2546's audit: every other command that wrote to the process's stderr
+/// now writes to the envelope's `result.stderr`, and the process's stderr
+/// stays empty. Each case names what used to be lost.
+#[test]
+fn no_command_writes_to_the_process_stderr() {
+    let tmp = tempfile::tempdir().unwrap();
+    let good = write_fixture(tmp.path(), "good.beancount", GOOD_LEDGER);
+    let good = good.to_str().unwrap();
+    let unformatted = write_fixture(
+        tmp.path(),
+        "messy.beancount",
+        "2024-01-01   open   Assets:Cash\n",
+    );
+    let unformatted = unformatted.to_str().unwrap();
+    let csv = write_fixture(
+        tmp.path(),
+        "bank.csv",
+        "Date,Description,Amount\n2024-01-02,Coffee,-4.50\n2024-01-03,Lunch,not-a-number\n",
+    );
+    let csv = csv.to_str().unwrap();
+    let priced = write_fixture(
+        tmp.path(),
+        "priced.beancount",
+        "2024-01-01 commodity AAPL\n  price: \"garbage\"\n",
+    );
+    let priced = priced.to_str().unwrap();
+    let prefix = tmp.path().join("bin");
+    std::fs::create_dir(&prefix).unwrap();
+    let wrapper = if cfg!(windows) {
+        "bean-check.cmd"
+    } else {
+        "bean-check"
+    };
+    std::fs::write(prefix.join(wrapper), "not ours\n").unwrap();
+    let prefix = prefix.to_str().unwrap();
+
+    for (args, expected) in [
+        // `--verbose` progress from the parse cache.
+        (vec!["check", good, "--verbose"], "Loading "),
+        (vec!["report", good, "balances", "--verbose"], "Loading "),
+        // The diff itself: `--check --diff` returned an exit status and no diff.
+        (
+            vec!["format", unformatted, "--check", "--diff"],
+            "@@ line 1 @@",
+        ),
+        // A row the importer skipped.
+        (
+            vec!["extract", csv, "--account", "Assets:Bank"],
+            "warning: Row 2",
+        ),
+        // A malformed `price:` value, found without touching the network.
+        (
+            vec!["price", "--file", priced, "--dry-run"],
+            "malformed `price:` metadata",
+        ),
+        // A file in the way that is not a wrapper.
+        (vec!["compat", "uninstall", "--prefix", prefix], "skip:"),
+    ] {
+        let (_, env, stderr) = run_in(tmp.path(), &args);
+        assert!(stderr.is_empty(), "{args:?} wrote to stderr: {stderr}");
+        let carried = env["result"]["stderr"]
+            .as_str()
+            // A failed command's buffer rides on the envelope's `data`.
+            .or_else(|| env["data"]["stderr"].as_str())
+            .unwrap_or_default();
+        assert!(
+            carried.contains(expected),
+            "{args:?}: {expected:?} missing from the envelope: {env}"
+        );
+    }
+}
+
+/// A command that fails keeps what it wrote before failing: `format`
+/// lists each parse error, then refuses the file.
+#[test]
+fn a_failing_command_carries_its_stderr_on_the_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let broken = write_fixture(tmp.path(), "broken.beancount", "2024-01-01 open\n");
+    let (code, env, stderr) = run_in(tmp.path(), &["format", broken.to_str().unwrap()]);
+    assert_ne!(code, 0, "{env}");
+    assert!(stderr.is_empty(), "{stderr}");
+    assert!(
+        env["data"]["stderr"]
+            .as_str()
+            .is_some_and(|s| s.contains("error: ")),
+        "the parse errors must ride on the error: {env}"
+    );
 }
 
 /// #2522: a config file that fails to load was dropped for defaults

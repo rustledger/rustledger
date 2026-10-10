@@ -100,7 +100,7 @@ impl FileSystem for DiskFileSystem {
     fn read(&self, path: &Path) -> Result<Arc<str>, LoadError> {
         let bytes = fs::read(path).map_err(|e| LoadError::Io {
             path: path.to_path_buf(),
-            source: e,
+            error: e,
             include_site: None,
         })?;
 
@@ -268,7 +268,7 @@ impl FileSystem for VirtualFileSystem {
             .cloned()
             .ok_or_else(|| LoadError::Io {
                 path: path.to_path_buf(),
-                source: std::io::Error::new(
+                error: std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     format!("file not found in virtual filesystem: {}", path.display()),
                 ),

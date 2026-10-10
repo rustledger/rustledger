@@ -4,6 +4,7 @@ use rustc_hash::FxHashMap;
 use rustledger_core::{Document, Note};
 use std::path::Path;
 
+use super::helpers::push_unknown_account;
 use crate::LedgerState;
 use crate::error::{ErrorCode, ValidationError};
 
@@ -13,11 +14,13 @@ use crate::error::{ErrorCode, ValidationError};
 pub fn validate_note(state: &LedgerState, note: &Note, errors: &mut Vec<ValidationError>) {
     // Check account exists
     if !state.accounts.contains_key(&note.account) {
-        errors.push(ValidationError::new(
-            ErrorCode::AccountNotOpen,
-            format!("Invalid reference to unknown account '{}'", note.account),
+        push_unknown_account(
+            state,
+            &note.account,
             note.date,
-        ));
+            || format!("Invalid reference to unknown account '{}'", note.account),
+            errors,
+        );
     }
 }
 
@@ -54,11 +57,13 @@ pub fn validate_document(
 ) {
     // Check account exists
     if !state.accounts.contains_key(&doc.account) {
-        errors.push(ValidationError::new(
-            ErrorCode::AccountNotOpen,
-            format!("Invalid reference to unknown account '{}'", doc.account),
+        push_unknown_account(
+            state,
+            &doc.account,
             doc.date,
-        ));
+            || format!("Invalid reference to unknown account '{}'", doc.account),
+            errors,
+        );
     }
 
     // Check if document file exists (if enabled)

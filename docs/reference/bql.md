@@ -28,23 +28,23 @@ WHERE account ~ '^(Assets|Liabilities):'
 
 A comment may span lines and end the query without a newline after it. It does not nest (the first `*/` closes it), text inside a string is never a comment, and an unclosed `/*` is an error.
 
-`--` is **not** a comment, in bean-query or here: `SELECT 3--2` is `3 - -2`. Text other than whitespace and comments after the `;` that ends a query is an error; bean-query drops it without a word. (The `-- ...` lines in the examples on this page are annotations, not part of the query.)
+`--` is **not** a comment, in bean-query or here: `SELECT 3--2` is `3 - -2`. Text other than whitespace and comments after the `;` that ends a query is an error; bean-query drops it without a word.
 
 ## SELECT Clause
 
 ### Columns
 
 ```sql
--- Basic columns
+/* Basic columns */
 SELECT account, date, narration, payee, position
 
--- All columns
+/* All columns */
 SELECT *
 
--- Expressions
+/* Expressions */
 SELECT account, sum(position) AS total
 
--- Functions
+/* Functions */
 SELECT year(date), month(date), sum(cost(position))
 ```
 
@@ -129,10 +129,10 @@ WHERE date != 2024-01-15
 ### String Matching
 
 ```sql
--- Exact match
+/* Exact match */
 WHERE account = "Assets:Bank:Checking"
 
--- Regex match (case-insensitive by default)
+/* Regex match (case-insensitive by default) */
 WHERE account ~ "Assets:Bank"
 WHERE narration ~ "coffee"
 WHERE payee ~ "Amazon"
@@ -158,15 +158,15 @@ WHERE payee IS NULL
 `IN` does scalar membership against a literal list, and set membership against a `StringSet` column.
 
 ```sql
--- Scalar in a literal set
+/* Scalar in a literal set */
 WHERE account IN ("Assets:Bank", "Assets:Cash")
 WHERE currency IN ("USD", "EUR")
 
--- Scalar in a column-valued set
+/* Scalar in a column-valued set */
 WHERE "vacation" IN tags
 WHERE "Assets:Investments:Cash-USD" IN other_accounts
 
--- Negated form
+/* Negated form */
 WHERE "draft" NOT IN tags
 WHERE account NOT IN ("Equity:Opening", "Equity:Closing")
 ```
@@ -176,7 +176,7 @@ WHERE account NOT IN ("Equity:Opening", "Equity:Closing")
 `tags`, `links`, `accounts`, and `other_accounts` are `StringSet`-typed. Equality (`=`) and regex (`~`) don't apply to sets; the only operators that work are `IN` and `NOT IN`. To filter a transaction by which other accounts appear on its postings, put the account literal on the left:
 
 ```sql
--- All dividend postings whose other side(s) include Cash-USD
+/* All dividend postings whose other side(s) include Cash-USD */
 SELECT date, narration, account, position
 WHERE account ~ '^Income:Investment:Dividend'
   AND 'Assets:Investments:Cash-USD' IN other_accounts
@@ -190,11 +190,11 @@ WHERE account ~ '^Income:Investment:Dividend'
 SELECT account, sum(position)
 GROUP BY account
 
--- Multiple columns
+/* Multiple columns */
 SELECT year(date), month(date), sum(position)
 GROUP BY year(date), month(date)
 
--- By position (1-indexed)
+/* By position (1-indexed) */
 SELECT year(date), sum(position)
 GROUP BY 1
 ```
@@ -206,10 +206,10 @@ ORDER BY date
 ORDER BY date DESC
 ORDER BY account ASC
 
--- Multiple columns
+/* Multiple columns */
 ORDER BY year(date), month(date)
 
--- By expression
+/* By expression */
 ORDER BY sum(position) DESC
 ```
 
@@ -231,7 +231,7 @@ LIMIT 100
 Pivot results to create columns from row values:
 
 ```sql
--- Expenses by category and year, pivoted by year
+/* Expenses by category and year, pivoted by year */
 SELECT root(account, 2), year(date), sum(cost(position))
 WHERE account ~ "Expenses"
 GROUP BY 1, 2
@@ -405,16 +405,16 @@ to the **last** declaration.
 ```
 
 ```sql
--- Doesn't match: budget-category is on the transaction, not the posting.
+/* Doesn't match: budget-category is on the transaction, not the posting. */
 SELECT account WHERE meta('budget-category') = 'food'
 
--- Matches every posting in the transaction.
+/* Matches every posting in the transaction. */
 SELECT account WHERE entry_meta('budget-category') = 'food'
 
--- Matches whichever level happens to carry the key.
+/* Matches whichever level happens to carry the key. */
 SELECT account WHERE any_meta('budget-category') = 'food'
 
--- Matches only the Expenses posting, since receipt-id is per-posting.
+/* Matches only the Expenses posting, since receipt-id is per-posting. */
 SELECT account WHERE meta('receipt-id') = 'R-12345'
 ```
 
@@ -424,12 +424,12 @@ exactly, so queries are portable between the two engines.
 ### Examples
 
 ```sql
--- Expense by category
+/* Expense by category */
 SELECT root(account, 2) AS category, sum(cost(position))
 WHERE account ~ "Expenses"
 GROUP BY category
 
--- Monthly totals
+/* Monthly totals */
 SELECT year(date) AS y, month(date) AS m, sum(cost(position))
 GROUP BY y, m
 ORDER BY y, m
@@ -445,13 +445,13 @@ BQL distinguishes between:
 ### Converting Positions
 
 ```sql
--- Get cost in operating currency
+/* Get cost in operating currency */
 SELECT sum(cost(position))
 
--- Get units (number + currency)
+/* Get units (number + currency) */
 SELECT sum(units(position))
 
--- Get currency
+/* Get currency */
 SELECT currency(position)
 ```
 
@@ -573,13 +573,13 @@ WHERE account ~ "Assets" OR account ~ "Liabilities"
 ### Year-over-Year
 
 ```sql
--- Run separate queries for each year
-SELECT root(account, 2), sum(cost(position)) AS "2023"
+/* Run separate queries for each year */
+SELECT root(account, 2), sum(cost(position)) AS y2023
 WHERE account ~ "Expenses" AND year(date) = 2023
 GROUP BY 1
 ORDER BY 1
 
-SELECT root(account, 2), sum(cost(position)) AS "2024"
+SELECT root(account, 2), sum(cost(position)) AS y2024
 WHERE account ~ "Expenses" AND year(date) = 2024
 GROUP BY 1
 ORDER BY 1
@@ -603,33 +603,33 @@ rledger query -f json ledger.beancount "SELECT ..."
 ### Use Regex for Account Matching
 
 ```sql
--- Match all bank accounts
+/* Match all bank accounts */
 WHERE account ~ "Assets:Bank"
 
--- Match any asset
+/* Match any asset */
 WHERE account ~ "^Assets:"
 ```
 
 ### Group by Account Hierarchy
 
 ```sql
--- Top-level categories
+/* Top-level categories */
 SELECT root(account, 1), sum(position) GROUP BY 1
 
--- Two levels deep
+/* Two levels deep */
 SELECT root(account, 2), sum(position) GROUP BY 1
 ```
 
 ### Date Range Filtering
 
 ```sql
--- This year
+/* This year */
 WHERE year(date) = year(today())
 
--- This month
+/* This month */
 WHERE year(date) = year(today()) AND month(date) = month(today())
 
--- Specific date range
+/* Specific date range */
 WHERE date >= 2024-01-01 AND date < 2024-02-01
 ```
 

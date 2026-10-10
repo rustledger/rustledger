@@ -2896,6 +2896,80 @@ fn inventory_sort_paths_agree() {
     assert_eq!(direct, want, "compare_values_for_sort");
 }
 
+/// The default table's scan builds each transaction's account set ONCE and
+/// shares it across that transaction's rows (#2504), whether the output or
+/// only the WHERE reads `accounts`/`other_accounts`, and builds none for a
+/// query that reads neither. Rebuilding it per row made one transaction of n
+/// postings cost O(n^2).
+#[test]
+fn scan_shares_one_account_set_per_transaction() {
+    let mut big = Transaction::new(rustledger_core::naive_date(2024, 1, 1).unwrap(), "big");
+    for a in ["Expenses:A", "Expenses:B", "Expenses:A", "Assets:Bank"] {
+        big = big.with_synthesized_posting(Posting::new(a, Amount::new(dec!(1), "USD")));
+    }
+    let mut small = Transaction::new(rustledger_core::naive_date(2024, 1, 2).unwrap(), "small");
+    for a in ["Expenses:C", "Assets:Bank"] {
+        small = small.with_synthesized_posting(Posting::new(a, Amount::new(dec!(1), "USD")));
+    }
+    let directives = vec![Directive::Transaction(big), Directive::Transaction(small)];
+    let executor = Executor::new(&directives);
+    let contexts = |sql: &str| {
+        let Query::Select(query) = parse(sql).expect("parses") else {
+            panic!("a SELECT");
+        };
+        executor.collect_postings(&query).expect("scans")
+    };
+
+    for sql in [
+        "SELECT account, accounts",
+        "SELECT other_accounts",
+        "SELECT account WHERE 'Assets:Bank' IN accounts",
+        "SELECT account ORDER BY accounts",
+    ] {
+        let rows = contexts(sql);
+        assert_eq!(rows.len(), 6, "{sql}");
+        let sets: Vec<_> = rows
+            .iter()
+            .map(|c| {
+                c.txn_accounts
+                    .clone()
+                    .unwrap_or_else(|| panic!("{sql}: a row without its transaction's set"))
+            })
+            .collect();
+        for i in 1..4 {
+            assert!(std::sync::Arc::ptr_eq(&sets[0], &sets[i]), "{sql}: row {i}");
+        }
+        assert!(std::sync::Arc::ptr_eq(&sets[4], &sets[5]), "{sql}");
+        assert!(!std::sync::Arc::ptr_eq(&sets[0], &sets[4]), "{sql}");
+        assert_eq!(
+            sets[0].accounts(),
+            ["Assets:Bank", "Expenses:A", "Expenses:B"]
+        );
+        assert_eq!(sets[4].accounts(), ["Assets:Bank", "Expenses:C"]);
+    }
+    assert!(
+        contexts("SELECT account, position")
+            .iter()
+            .all(|c| c.txn_accounts.is_none()),
+        "a query reading neither column pays for no set",
+    );
+
+    // And the shared set answers what the per-row one did.
+    let mut executor = Executor::new(&directives);
+    let result = executor
+        .execute(&parse("SELECT account, accounts, other_accounts").expect("parses"))
+        .expect("runs");
+    let set = |v: &[&str]| Value::StringSet(v.iter().map(ToString::to_string).collect());
+    assert_eq!(
+        result.rows[0][2],
+        set(&["Assets:Bank", "Expenses:A", "Expenses:B"])
+    );
+    assert_eq!(result.rows[1][2], set(&["Assets:Bank", "Expenses:A"]));
+    assert_eq!(result.rows[3][2], set(&["Expenses:A", "Expenses:B"]));
+    assert_eq!(result.rows[4][1], set(&["Assets:Bank", "Expenses:C"]));
+    assert_eq!(result.rows[5][2], set(&["Expenses:C"]));
+}
+
 /// `TxnAccounts::others` (built once per transaction) equals the definition
 /// it stands in for: the sorted, deduped accounts of every posting except the
 /// one at this index (#2483).

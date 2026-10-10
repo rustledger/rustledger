@@ -11524,3 +11524,86 @@ fn account_balance_reads_a_same_transaction_short_as_booked() {
         ],
     );
 }
+
+#[test]
+fn unquoted_identifiers_are_case_insensitive_like_bean_query() {
+    // bean-query folds every unquoted identifier to lower case
+    // (`unquoted_identifier` -> `value.lower()`), so a column, a table or an
+    // alias may be written in any case. `SELECT ACCOUNT` failed here as an
+    // unknown column (#2577). Each query must give the rows its lower-case
+    // spelling gives.
+    let directives = make_test_directives();
+    for (upper, lower) in [
+        ("SELECT ACCOUNT", "SELECT account"),
+        (
+            "SELECT Account, Sum(Position) GROUP BY Account ORDER BY ACCOUNT",
+            "SELECT account, sum(position) GROUP BY account ORDER BY account",
+        ),
+        (
+            "SELECT DATE, NARRATION WHERE ACCOUNT ~ 'Food' AND Year(DATE) = 2024",
+            "SELECT date, narration WHERE account ~ 'Food' AND year(date) = 2024",
+        ),
+        (
+            "SELECT account FROM POSTINGS WHERE account ~ 'Food'",
+            "SELECT account FROM postings WHERE account ~ 'Food'",
+        ),
+        (
+            "SELECT account AS Acc GROUP BY ACC ORDER BY acc",
+            "SELECT account AS acc GROUP BY acc ORDER BY acc",
+        ),
+    ] {
+        let got = execute_query(upper, &directives);
+        let want = execute_query(lower, &directives);
+        assert!(!want.rows.is_empty(), "{lower} returns rows");
+        assert_eq!(got.rows, want.rows, "{upper} reads as {lower}");
+    }
+
+    // A bare column heads its own (lower-case) name, an unquoted alias is
+    // folded, and a function keeps its source spelling, as in bean-query.
+    let result = execute_query("SELECT ACCOUNT, Count(*) AS N GROUP BY 1", &directives);
+    assert_eq!(result.columns, vec!["account", "n"]);
+    let result = execute_query("SELECT COUNT(*)", &directives);
+    assert_eq!(result.columns, vec!["COUNT(*)"]);
+}
+
+#[test]
+fn a_table_made_in_any_case_is_found_in_any_case() {
+    // The table name is an unquoted identifier too: `CREATE TABLE Foo` and
+    // `FROM FOO` name the same table, as in bean-query.
+    let directives = make_test_directives();
+    let mut executor = Executor::new(&directives);
+    for q in [
+        "CREATE TABLE Foo (Name, Amount)",
+        "INSERT INTO FOO (NAME, amount) VALUES ('a', 1)",
+    ] {
+        executor
+            .execute(&parse(q).expect("parses"))
+            .expect("executes");
+    }
+    let result = executor
+        .execute(&parse("SELECT NAME, Amount FROM foo").expect("parses"))
+        .expect("the table is found");
+    assert_eq!(result.columns, vec!["name", "amount"]);
+    assert_eq!(result.rows.len(), 1);
+}
+
+#[test]
+fn a_quoted_alias_keeps_its_case_and_characters() {
+    // bean-query: `quoted_identifier = /"((?:[^"]|"")+)"/`, case kept, `""`
+    // for one `"`. `AS "2023"` failed to parse with "unexpected token 'AS'"
+    // (#2577); the docs' year-over-year example had to be rewritten around it.
+    let directives = make_test_directives();
+    for (query, expected) in [
+        ("SELECT sum(position) AS \"2023\"", "2023"),
+        ("SELECT sum(position) AS \"Net Worth\"", "Net Worth"),
+        ("SELECT sum(position) AS \"Foo\"\"q\"", "Foo\"q"),
+        ("SELECT sum(position) AS\"MiXed\"", "MiXed"),
+        ("SELECT sum(position) AS \"from\"", "from"),
+    ] {
+        let result = execute_query(query, &directives);
+        assert_eq!(result.columns, vec![expected], "{query}");
+    }
+
+    // An empty quoted name is not one, in bean-query either.
+    assert!(parse("SELECT account AS \"\"").is_err());
+}

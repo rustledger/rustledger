@@ -450,8 +450,7 @@ fn target<'a>() -> impl Parser<'a, ParserInput<'a>, Target, ParserExtra<'a>> + C
         .then(
             ws1()
                 .ignore_then(kw("AS"))
-                .ignore_then(ws1())
-                .ignore_then(identifier())
+                .ignore_then(alias_identifier())
                 .or_not(),
         )
         .map(|(expr, alias)| Target { expr, alias })
@@ -811,7 +810,8 @@ fn at_function<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtra<'a>
     ws1()
         .ignore_then(kw("AT"))
         .ignore_then(ws1())
-        .ignore_then(identifier())
+        // As written: the mode is matched case-insensitively (`AtMode`).
+        .ignore_then(text::ident().map(ToString::to_string))
 }
 
 /// Parse an expression (with precedence climbing).
@@ -1102,7 +1102,11 @@ fn primary_expr<'a>(
 fn function_call_or_column<'a>(
     expr: impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> + Clone + 'a,
 ) -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> + Clone {
-    identifier()
+    // The name as written: a function keeps it (its lookup is
+    // case-insensitive and its header echoes the source), a column is
+    // folded to lower case like every other unquoted identifier (#2577).
+    text::ident()
+        .map(ToString::to_string)
         .then(
             ws().ignore_then(just('('))
                 .ignore_then(ws())
@@ -1137,7 +1141,7 @@ fn function_call_or_column<'a>(
                     Expr::Function(FunctionCall { name, args })
                 }
             } else {
-                Expr::Column(name)
+                Expr::Column(name.to_lowercase())
             }
         })
 }
@@ -1227,9 +1231,48 @@ fn literal<'a>() -> impl Parser<'a, ParserInput<'a>, Literal, ParserExtra<'a>> +
     ))
 }
 
-/// Parse an identifier (column name, function name).
+/// Parse an unquoted identifier (column, attribute, table or alias name),
+/// folded to lower case.
+///
+/// bean-query folds every unquoted identifier to lower case
+/// (`def unquoted_identifier(self, value): return value.lower()` in its
+/// parser semantics), so `SELECT ACCOUNT` reads the `account` column and
+/// `AS Total` names the result `total`. Read case-sensitively, `ACCOUNT`
+/// was an unknown column (#2577). Keywords were already case-insensitive
+/// (`kw`).
+///
+/// A FUNCTION name keeps its spelling, see [`function_call_or_column`]:
+/// lookup is case-insensitive there, and the header echoes the source
+/// text, as bean-query's does (`SUM(position)` heads `SUM(position)`).
 fn identifier<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtra<'a>> + Clone {
-    text::ident().map(|s: &str| s.to_string())
+    text::ident().map(str::to_lowercase)
+}
+
+/// Parse a double-quoted identifier, case kept: `"2023"`, `"Net Worth"`.
+///
+/// bean-query's grammar: `quoted_identifier = /\"((?:[^\"]|\"\")+)\"/`,
+/// with `""` standing for one `"` (`value.replace('""', '"')`). It is not
+/// folded to lower case and may hold any character, a leading digit or a
+/// space included, which is what an unquoted name cannot (#2577).
+fn quoted_identifier<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtra<'a>> + Clone {
+    just('"')
+        .ignore_then(
+            choice((just("\"\"").to('"'), none_of('"')))
+                .repeated()
+                .at_least(1)
+                .collect::<String>(),
+        )
+        .then_ignore(just('"'))
+}
+
+/// The name after `AS`: an unquoted identifier (folded to lower case) after
+/// whitespace, or a quoted one, case kept (#2577). Whitespace is optional
+/// before the quote, as in bean-query, whose tokens need no separator there.
+fn alias_identifier<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtra<'a>> + Clone {
+    choice((
+        ws().ignore_then(quoted_identifier()),
+        ws1().ignore_then(identifier()),
+    ))
 }
 
 /// Parse a table identifier, which can be a regular identifier or a system table
@@ -1240,8 +1283,11 @@ fn table_identifier<'a>() -> impl Parser<'a, ParserInput<'a>, String, ParserExtr
         just('#')
             .ignore_then(text::ident())
             .map(|s: &str| format!("#{s}")),
-        // Regular table identifier
-        text::ident().map(|s: &str| s.to_string()),
+        // Regular table identifier, folded to lower case like every unquoted
+        // identifier (#2577), so `FROM Postings` and a table made by
+        // `CREATE TABLE Foo` (whose name `identifier` folds) are found. A
+        // `#` system table name is matched as written, as in bean-query.
+        identifier(),
     ))
 }
 
@@ -2420,7 +2466,9 @@ mod tests {
         match query {
             Query::Select(sel) => {
                 let from = sel.from.unwrap();
-                assert_eq!(from.table_name, Some("MyTable".to_string()));
+                // Folded to lower case, as bean-query folds an unquoted
+                // identifier (#2577).
+                assert_eq!(from.table_name, Some("mytable".to_string()));
             }
             _ => panic!("Expected SELECT query"),
         }
@@ -2456,7 +2504,7 @@ mod tests {
                 "SELECT count(*) FROM (SELECT * FROM #accounts)",
                 "#accounts",
             ),
-            ("SELECT x FROM (SELECT x FROM MyTable)", "MyTable"),
+            ("SELECT x FROM (SELECT x FROM MyTable)", "mytable"),
             (
                 "SELECT account FROM (SELECT account FROM (SELECT account FROM #postings))",
                 "",

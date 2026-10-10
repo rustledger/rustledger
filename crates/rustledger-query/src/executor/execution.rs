@@ -1040,9 +1040,9 @@ impl Executor<'_> {
         let mut names = Vec::new();
         for target in targets {
             if let Some(alias) = &target.alias {
-                // bean-query lowercases the alias too: `AS LatestDate`
-                // heads the result `latestdate` (#2164).
-                names.push(alias.to_lowercase());
+                // As the parser left it: an unquoted alias is already folded
+                // to lower case (#2164), a quoted one keeps its case (#2577).
+                names.push(alias.clone());
             } else if matches!(target.expr, Expr::Wildcard) {
                 // Expand wildcard to all VISIBLE inner columns.
                 names.extend(

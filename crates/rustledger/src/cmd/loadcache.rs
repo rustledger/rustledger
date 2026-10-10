@@ -28,7 +28,8 @@ use rustledger_loader::{
 /// `no_cache` (a CLI `--no-cache`-style flag) or the
 /// `BEANCOUNT_DISABLE_LOAD_CACHE` env var disables both reading and
 /// writing the cache. `verbose` gates the same progress lines `check`
-/// emits.
+/// emits, written to `err` (the process's stderr for `rledger`, a buffer
+/// for `ag-rledger`'s envelope).
 ///
 /// # Errors
 ///
@@ -39,6 +40,7 @@ pub fn load_result_cached(
     file: &Path,
     no_cache: bool,
     verbose: bool,
+    err: &mut dyn std::io::Write,
 ) -> Result<(LoadResult, bool)> {
     let cache_disabled = no_cache || cache_disabled_by_env();
 
@@ -50,7 +52,11 @@ pub fn load_result_cached(
 
     if let Some(entry) = cache_entry {
         if verbose {
-            eprintln!("Loaded {} directives from cache", entry.directives.len());
+            let _ = writeln!(
+                err,
+                "Loaded {} directives from cache",
+                entry.directives.len()
+            );
         }
 
         // No `reintern_directives` here. That pass exists because each parsed
@@ -73,7 +79,7 @@ pub fn load_result_cached(
 
     // Cache miss (or disabled): parse fresh.
     if verbose {
-        eprintln!("Loading {}...", file.display());
+        let _ = writeln!(err, "Loading {}...", file.display());
     }
     let mut loader = Loader::new();
     let result = loader
@@ -113,10 +119,10 @@ pub fn load_result_cached(
 
         if let Err(e) = save_cache_entry(file, &entry) {
             if verbose {
-                eprintln!("Warning: failed to save cache: {e}");
+                let _ = writeln!(err, "Warning: failed to save cache: {e}");
             }
         } else if verbose {
-            eprintln!("Saved {} directives to cache", result.directives.len());
+            let _ = writeln!(err, "Saved {} directives to cache", result.directives.len());
         }
     }
 

@@ -2970,6 +2970,70 @@ fn scan_shares_one_account_set_per_transaction() {
     assert_eq!(result.rows[5][2], set(&["Expenses:C"]));
 }
 
+/// A posting-level FROM filter reading `accounts` / `other_accounts` shares
+/// its transaction's set across the postings it reads, on every path that
+/// evaluates one per posting: SELECT's scan, `BALANCES` and `JOURNAL`
+/// (#2580). It built the set again for every posting, so one transaction of
+/// n postings cost O(n^2) before a single row was kept.
+#[test]
+fn a_from_row_filter_shares_one_account_set_per_transaction() {
+    use super::system_tables::TXN_ACCOUNTS_BUILT;
+    let mut big = Transaction::new(rustledger_core::naive_date(2024, 1, 1).unwrap(), "big");
+    for i in 0..40 {
+        big = big.with_synthesized_posting(Posting::new(
+            format!("Assets:A{i}"),
+            Amount::new(dec!(1), "USD"),
+        ));
+    }
+    big = big.with_synthesized_posting(Posting::new("Equity:Open", Amount::new(dec!(-40), "USD")));
+    let mut small = Transaction::new(rustledger_core::naive_date(2024, 1, 2).unwrap(), "small");
+    for a in ["Assets:A1", "Equity:Open"] {
+        small = small.with_synthesized_posting(Posting::new(a, Amount::new(dec!(1), "USD")));
+    }
+    let directives = vec![Directive::Transaction(big), Directive::Transaction(small)];
+    let built = |sql: &str| {
+        let mut executor = Executor::new(&directives);
+        TXN_ACCOUNTS_BUILT.with(|n| n.set(0));
+        let result = executor
+            .execute(&parse(sql).expect("parses"))
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        (TXN_ACCOUNTS_BUILT.with(std::cell::Cell::get), result)
+    };
+
+    // `other_accounts` is a posting column, so each filter below is a row
+    // filter, evaluated per posting. Each path is checked before any is
+    // asserted, so a regression names every path it reaches.
+    let mut builds = Vec::new();
+    for (sql, rows) in [
+        // Every posting of `big` but A1's own, and `small`'s Equity posting.
+        (
+            "SELECT account FROM 'Assets:A1' IN other_accounts",
+            Some(41),
+        ),
+        // The filter and the rows share one set.
+        (
+            "SELECT account, accounts FROM 'Assets:A1' IN other_accounts",
+            Some(41),
+        ),
+        ("BALANCES FROM 'Assets:A1' IN other_accounts", None),
+        // `big`'s Assets postings but A1's own.
+        (
+            "JOURNAL 'Assets' FROM 'Assets:A1' IN other_accounts",
+            Some(39),
+        ),
+    ] {
+        let (n, result) = built(sql);
+        if let Some(rows) = rows {
+            assert_eq!(result.rows.len(), rows, "{sql}");
+        }
+        builds.push((sql, n));
+    }
+    assert!(
+        builds.iter().all(|&(_, n)| n == 2),
+        "one set per transaction, not per posting: {builds:?}"
+    );
+}
+
 /// `TxnAccounts::others` (built once per transaction) equals the definition
 /// it stands in for: the sorted, deduped accounts of every posting except the
 /// one at this index (#2483).

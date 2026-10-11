@@ -8,9 +8,11 @@ use std::path::Path;
 // the canonical `rustledger_importer::toml_entry` module (shared with the
 // WASI component's `importer` interface); this module keeps only file
 // discovery and the CLI-side `ImportersFile` wrapper.
+use rustledger_importer::payees::PayeeRules;
 pub(super) use rustledger_importer::toml_entry::{
     ImporterEntry, apply_column, build_config_from_entry,
 };
+use rustledger_importer::toml_entry::{PayeeTable, SHARED_PAYEES};
 #[cfg(feature = "python-plugin-wasm")]
 use std::path::PathBuf;
 
@@ -28,6 +30,39 @@ pub(super) struct ImportersFile {
     pub(super) wasm_importer_dir: WasmDirSetting,
     #[serde(default)]
     pub(super) importers: Vec<ImporterEntry>,
+    /// Payee rewrites shared by every entry (#2550): pattern → canonical
+    /// payee, in file order. An entry's own `[importers.payees]` is tried
+    /// first. Applies on every import that finds this file, whichever
+    /// importer reads the statement.
+    #[serde(default)]
+    pub(super) payees: PayeeTable,
+}
+
+impl ImportersFile {
+    /// The payee rewrite rules for a statement imported through the entry
+    /// named `entry_name` (none for an import that used no entry): that
+    /// entry's `[importers.payees]`, then the shared `[payees]` table.
+    pub(super) fn payee_rules(&self, entry_name: Option<&str>) -> Result<PayeeRules> {
+        if let Some(entry) =
+            entry_name.and_then(|name| self.importers.iter().find(|e| e.name == name))
+        {
+            return entry.payee_rules(Some(&self.payees));
+        }
+        let mut rules = PayeeRules::new();
+        self.payees.extend_rules(&mut rules, SHARED_PAYEES)?;
+        Ok(rules)
+    }
+
+    /// Check every payee table compiles, so a bad pattern is reported by
+    /// whatever reads the file (`--list-importers` included), naming the
+    /// table it is in, rather than only by an import that reaches it.
+    fn validate_payees(&self) -> Result<()> {
+        self.payee_rules(None)?;
+        for entry in &self.importers {
+            entry.payee_rules(None)?;
+        }
+        Ok(())
+    }
 }
 
 #[cfg(feature = "python-plugin-wasm")]
@@ -135,6 +170,9 @@ pub(super) fn load_importers_config(path: &Path) -> Result<ImportersFile> {
         .with_context(|| format!("Failed to read importers config: {}", path.display()))?;
     let config: ImportersFile = toml::from_str(&content)
         .with_context(|| format!("Failed to parse importers config: {}", path.display()))?;
+    config
+        .validate_payees()
+        .with_context(|| format!("Invalid importers config: {}", path.display()))?;
     Ok(config)
 }
 

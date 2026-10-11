@@ -340,8 +340,7 @@ impl<'a> Executor<'a> {
             .into_values()
             .next()
             .unwrap_or_default();
-        realized
-            .merge_average()
+        rustledger_booking::present_inventory(BookingMethod::Average, &mut realized)
             .map_err(|e| QueryError::Evaluation(e.to_string()))?;
         Ok(Some(realized))
     }

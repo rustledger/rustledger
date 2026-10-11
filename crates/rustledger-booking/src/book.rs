@@ -61,6 +61,49 @@ pub enum BookingError {
         /// The account whose posting was not booked.
         account: rustledger_core::Account,
     },
+
+    /// A reduction is priced in another currency than its cost (#2571).
+    ///
+    /// The price says what the units fetched in one currency and the lot what
+    /// they cost in another, and with no rate between the two the gain cannot
+    /// be computed: an interpolated gains posting absorbed both currencies
+    /// and reported nothing. Beancount refuses the same posting with the same
+    /// words.
+    #[error(
+        "Cost and price currencies must match: {cost} != {price} \
+         (a sale from {account} priced in another currency than its cost has no gain \
+         without an exchange rate)"
+    )]
+    CostPriceCurrencyMismatch {
+        /// The account being reduced.
+        account: rustledger_core::Account,
+        /// The cost currency of the reduction.
+        cost: rustledger_core::Currency,
+        /// The currency its price names.
+        price: rustledger_core::Currency,
+    },
+
+    /// A reduction whose cost spec names no currency took one from the
+    /// transaction (its price, the other postings' one currency, or the
+    /// account's one cost currency), and no lot is held at a cost in it
+    /// (#2571).
+    ///
+    /// Beancount's "No position matches" for the same posting. Separate from
+    /// [`BookingError::Inventory`]'s "no matching lot" because the author
+    /// never wrote the currency that excluded the lots they can see.
+    #[error(
+        "No matching lot for {commodity} in {account} held at a cost in {cost}: the cost \
+         spec names no currency, so it takes {cost} from its price, the other postings or \
+         the account's lots; write the cost currency to reduce a lot held in another"
+    )]
+    NoLotInInferredCostCurrency {
+        /// The account being reduced.
+        account: rustledger_core::Account,
+        /// The commodity being reduced.
+        commodity: rustledger_core::Currency,
+        /// The cost currency the spec took.
+        cost: rustledger_core::Currency,
+    },
 }
 
 impl BookingError {
@@ -74,7 +117,9 @@ impl BookingError {
     pub const fn account(&self) -> Option<&rustledger_core::Account> {
         match self {
             Self::Inventory(e) => Some(&e.account),
-            Self::NotBooked { account } => Some(account),
+            Self::NotBooked { account }
+            | Self::CostPriceCurrencyMismatch { account, .. }
+            | Self::NoLotInInferredCostCurrency { account, .. } => Some(account),
             Self::Interpolation(e) => e.account(),
         }
     }
@@ -108,11 +153,10 @@ pub struct CapitalGain {
     pub units: Decimal,
     /// Cost basis of this lot (units × per-unit cost), in the lot's cost currency.
     pub cost_basis: Amount,
-    /// Sale proceeds attributable to this lot, in the sale-price currency. Equals
-    /// the cost-basis currency for an ordinary same-currency disposal; a consumer
-    /// derives the realized gain as `proceeds − cost_basis` when the two currencies
-    /// match (they cannot be subtracted across currencies without an FX rate — that
-    /// policy is the consumer's, not the booking engine's).
+    /// Sale proceeds attributable to this lot, in the sale-price currency, which is
+    /// the cost-basis currency: booking refuses a reduction priced in another
+    /// currency than its lot's cost (#2571), because `proceeds − cost_basis` has no
+    /// value across currencies without an FX rate.
     pub proceeds: Amount,
     /// The date of the disposing transaction (the sale/cover date).
     pub sale_date: rustledger_core::NaiveDate,
@@ -126,8 +170,38 @@ pub struct CapitalGain {
     pub short_sale: bool,
 }
 
+/// Present a REALIZED inventory the way every surface shows it.
+///
+/// An account booked AVERAGE (`method`) is shown as one pool per commodity,
+/// cost currency and side, undated, at its exact total cost
+/// ([`Inventory::merge_average`]); any other account as it is.
+///
+/// THE one place this decision lives (#2543). `BALANCES`, `report balances`,
+/// `sum(position)` and the running `balance` column all present an AVERAGE
+/// account through here, so it has one shape on each of them, before and
+/// after a sale. Booking is not changed: the dated lots, and their exact
+/// totals, stay underneath for whatever needs them (`report capgains`).
+///
+/// # Errors
+///
+/// [`rustledger_core::OverflowError`] when a pool sums outside `Decimal`'s
+/// range.
+pub fn present_inventory(
+    method: BookingMethod,
+    inventory: &mut Inventory,
+) -> Result<(), rustledger_core::OverflowError> {
+    if method == BookingMethod::Average {
+        inventory.merge_average()?;
+    }
+    Ok(())
+}
+
 /// Booking engine that tracks inventory across transactions.
-#[derive(Debug, Default)]
+///
+/// `Clone` is cheap: the inventories are behind `Arc`, so a clone shares
+/// them until either side changes one. The query's running balance clones
+/// one to try a transaction's rows so far without committing them (#2543).
+#[derive(Debug, Default, Clone)]
 pub struct BookingEngine {
     /// Inventory per account.
     /// Per-account inventories, behind `Arc` so a caller can take a snapshot
@@ -296,6 +370,43 @@ impl BookingEngine {
             .collect()
     }
 
+    /// Consume the engine and return each account's inventory as it is
+    /// PRESENTED: [`into_inventories`](Self::into_inventories), with every
+    /// AVERAGE account shown as its pools ([`present_inventory`]).
+    ///
+    /// For callers that SHOW balances (`BALANCES`, `report balances`):
+    /// booking merges an AVERAGE account's lots only when a sale runs, so the
+    /// raw realization lists separate lots before the first sale and a pool
+    /// after it (#2543). Callers that need the dated lots underneath, such
+    /// as a gains computation, read [`into_inventories`](Self::into_inventories).
+    ///
+    /// # Errors
+    ///
+    /// [`rustledger_core::OverflowError`] when a pool sums outside `Decimal`'s
+    /// range; a presented total must not be a clamped one (#1863).
+    pub fn into_presented_inventories(
+        self,
+    ) -> Result<FxHashMap<rustledger_core::Account, Inventory>, rustledger_core::OverflowError>
+    {
+        let methods: FxHashMap<rustledger_core::Account, BookingMethod> = self
+            .inventories
+            .keys()
+            .map(|account| (account.clone(), self.method_for(account)))
+            .collect();
+        let mut inventories = self.into_inventories();
+        for (account, inventory) in &mut inventories {
+            present_inventory(methods[account], inventory)?;
+        }
+        Ok(inventories)
+    }
+
+    /// The booking method `account` books with: its `open`'s, else the
+    /// engine's default. The method [`present_inventory`] presents it by.
+    #[must_use]
+    pub fn account_method(&self, account: &rustledger_core::Account) -> BookingMethod {
+        self.method_for(account)
+    }
+
     /// Borrow the realized per-account inventories without consuming the engine.
     ///
     /// The borrowing counterpart to [`into_inventories`](Self::into_inventories),
@@ -318,7 +429,31 @@ impl BookingEngine {
     /// When a reduction matches multiple lots (e.g., selling shares that were purchased
     /// across multiple buy transactions), the posting is expanded into multiple postings,
     /// one for each matched lot. This matches Python beancount's behavior.
+    ///
+    /// A cost spec written without a currency (`{}`) takes the one beancount's
+    /// rule gives it before any lot is matched (#2571): see
+    /// `resolve_elided_currencies` in the `interpolate` module. A units number
+    /// written without a currency is not resolved here; the booking entry
+    /// points ([`Self::book_interpolate_apply`]) resolve it first.
     pub fn book(&self, txn: &Transaction) -> Result<BookedTransaction, BookingError> {
+        if !txn.postings.iter().any(|p| p.cost.is_some()) {
+            return self.book_with(txn, &crate::interpolate::ElidedCosts::default());
+        }
+        let costs = crate::interpolate::resolve_elided_currencies(txn, |account| {
+            self.inventories.get(account).map(AsRef::as_ref)
+        })
+        .costs;
+        self.book_with(txn, &costs)
+    }
+
+    /// [`Self::book`], with the currencies of the cost specs written without
+    /// one already resolved from the transaction as written (`cost_currencies`,
+    /// by posting index).
+    fn book_with(
+        &self,
+        txn: &Transaction,
+        cost_currencies: &crate::interpolate::ElidedCosts,
+    ) -> Result<BookedTransaction, BookingError> {
         // Fast path: if no postings have cost specs, no booking is needed.
         // This avoids expensive inventory cloning for simple transactions.
         let has_cost_specs = txn.postings.iter().any(|p| p.cost.is_some());
@@ -423,6 +558,95 @@ impl BookingEngine {
             if let Some(IncompleteAmount::Complete(units)) = &posting.units
                 && let Some(cost_spec) = &posting.cost
             {
+                // A cost spec written without a currency takes the one
+                // beancount's categorization gives it, before anything below
+                // reads the spec: the lot match, the reduction-or-augmentation
+                // question and the augmentation's fill-in (#2571). Matching
+                // `{}` as a wildcard sold a EUR lot for USD cash and booked a
+                // "gain" in two currencies with no rate between them.
+                let mut filled_currency = cost_spec
+                    .currency
+                    .is_none()
+                    .then(|| {
+                        cost_currencies
+                            .costs
+                            .iter()
+                            .find(|(i, _)| *i == idx)
+                            .map(|(_, c)| c.clone())
+                    })
+                    .flatten();
+                // A sale whose only other group is its own commodity reads the
+                // account instead; asked of the spec as the sale would fill
+                // it, since the reduction question needs a per-unit cost's
+                // currency (see `ElidedCosts::reduction_overrides`).
+                if cost_spec.currency.is_none()
+                    && let Some((_, alternative)) = cost_currencies
+                        .reduction_overrides
+                        .iter()
+                        .find(|(i, _)| *i == idx)
+                {
+                    let probe = CostSpec {
+                        currency: alternative.clone(),
+                        ..(**cost_spec).clone()
+                    };
+                    let sells = working_inventories
+                        .get(&posting.account)
+                        .or_else(|| self.inventories.get(&posting.account).map(AsRef::as_ref))
+                        .is_some_and(|inv| {
+                            inv.is_booking_reduction(
+                                units,
+                                Some(&probe),
+                                self.method_for(&posting.account),
+                            )
+                        });
+                    if sells {
+                        filled_currency.clone_from(alternative);
+                    }
+                }
+                let filled_owned;
+                let cost_spec: &CostSpec = if let Some(currency) = &filled_currency {
+                    filled_owned = CostSpec {
+                        currency: Some(currency.clone()),
+                        ..(**cost_spec).clone()
+                    };
+                    result.postings[idx].cost = Some(Box::new(filled_owned.clone()));
+                    &filled_owned
+                } else {
+                    cost_spec
+                };
+                // A reduction priced in another currency than its cost has no
+                // computable gain: the price says what the units fetched in
+                // one currency, the lot what they cost in another, and nothing
+                // relates the two. Beancount refuses every such posting ("Cost
+                // and price currencies must match"); a reduction is refused
+                // below once it is known to be one, and a sale that is not
+                // a reduction just after. A purchase is deliberately not: it
+                // disposes of nothing, so no gain is computed from the two,
+                // and its price is only a price (compatibility.md, Known
+                // Differences 17).
+                let price_currency: Option<&str> = posting
+                    .price
+                    .as_ref()
+                    .and_then(|p| p.amount.as_ref())
+                    .and_then(IncompleteAmount::currency);
+                let mismatch = || match (&cost_spec.currency, price_currency) {
+                    (Some(cost), Some(price)) if cost.as_str() != price => {
+                        Some(BookingError::CostPriceCurrencyMismatch {
+                            account: posting.account.clone(),
+                            cost: cost.clone(),
+                            price: price.into(),
+                        })
+                    }
+                    _ => None,
+                };
+                // A sale that is not a reduction disposes all the same: one
+                // under NONE, or one opening a short. Its gain absorbs both
+                // currencies just as a reduction's does (#2571 review).
+                if units.number.is_sign_negative()
+                    && let Some(e) = mismatch()
+                {
+                    return Err(e);
+                }
                 // Normalize compound `{a # b}` up front (#1700): both the
                 // reduction path (which uses the spec as a lot-match filter
                 // via `per_unit()`) and apply() (which re-reduces from the
@@ -564,6 +788,40 @@ impl BookingEngine {
                     };
                     let is_reduction = inv.is_booking_reduction(units, Some(classify_as), method);
 
+                    if is_reduction && let Some(e) = mismatch() {
+                        return Err(e);
+                    }
+                    // A sale whose cost currency no step of the rule resolves
+                    // (other postings in several currencies, lots in several
+                    // cost currencies) is refused, as beancount refuses it,
+                    // unless every other posting is an auto-posting: then
+                    // nothing names a currency, the account's method picks the
+                    // lot, and the auto-postings absorb what it cost
+                    // (compatibility.md, Known Differences 17). A wildcard
+                    // beside USD cash sold a EUR lot for a gain in two
+                    // currencies (#2571 review).
+                    if is_reduction
+                        && cost_spec.currency.is_none()
+                        && txn
+                            .postings
+                            .iter()
+                            .enumerate()
+                            .any(|(j, other)| j != idx && other.units.is_some())
+                    {
+                        let mut candidates: Vec<&str> = inv
+                            .positions()
+                            .filter(|p| !p.is_empty())
+                            .filter_map(|p| p.cost.as_ref().map(|c| c.currency.as_str()))
+                            .collect();
+                        candidates.sort_unstable();
+                        candidates.dedup();
+                        return Err(BookingError::Interpolation(
+                            InterpolationError::AmbiguousInferredCostCurrency {
+                                candidates: candidates.join(", "),
+                            },
+                        ));
+                    }
+
                     if is_reduction {
                         // Use reduce (not try_reduce) to actually update the working inventory.
                         // This ensures subsequent postings in the same transaction see
@@ -621,6 +879,16 @@ impl BookingEngine {
                             }
                             _ => cost_spec,
                         };
+                        // A lot missing only in the currency the spec was
+                        // GIVEN gets its own message: "no matching lot"
+                        // beside lots the author can see reads as a bug.
+                        let no_lot_in_filled = |currency: &rustledger_core::Currency| {
+                            BookingError::NoLotInInferredCostCurrency {
+                                account: posting.account.clone(),
+                                commodity: units.currency.clone(),
+                                cost: currency.clone(),
+                            }
+                        };
                         let booking_result = match working_inventories.get_mut(&posting.account) {
                             Some(working) => working.reduce(units, Some(match_spec), method),
                             // Indexing cannot panic here: reaching this arm
@@ -633,7 +901,63 @@ impl BookingEngine {
                                 method,
                             ),
                         }
-                        .map_err(|e| convert_core_booking_error(e, &posting.account))?;
+                        .map_err(|e| match (&e, &filled_currency) {
+                            // Only when the currency is what excluded the lots:
+                            // a wrong number or date beside the right currency
+                            // is the ordinary "no matching lot".
+                            (
+                                rustledger_core::BookingError::NoMatchingLot { .. },
+                                Some(currency),
+                            ) if working_inventories
+                                .get(&posting.account)
+                                .or_else(|| {
+                                    self.inventories.get(&posting.account).map(AsRef::as_ref)
+                                })
+                                .is_some_and(|inv| {
+                                    let wildcard = CostSpec {
+                                        currency: None,
+                                        ..match_spec.clone()
+                                    };
+                                    inv.try_reduce(units, Some(&wildcard), method).is_ok()
+                                }) =>
+                            {
+                                no_lot_in_filled(currency)
+                            }
+                            _ => convert_core_booking_error(e, &posting.account),
+                        })?;
+                        // The ordered methods filter lots by the spec's
+                        // currency, so this only ever fires for the two that
+                        // pool the account instead, AVERAGE and `{*}`: their
+                        // pool ignores the spec, and a pool held in EUR would
+                        // be sold for the USD the categorization gave a `{}`,
+                        // or the USD written in `{USD} @ 13 USD`, booking a
+                        // gain across two currencies (#2571). A currency
+                        // written on a `{*}` is the claim `check_merge_spec`
+                        // reports in its own words.
+                        let claimed = filled_currency.as_ref().or(if cost_spec.merge {
+                            None
+                        } else {
+                            cost_spec.currency.as_ref()
+                        });
+                        if let Some(currency) = claimed
+                            && booking_result
+                                .matched
+                                .iter()
+                                .filter_map(|m| m.cost.as_ref())
+                                .any(|cost| cost.currency != *currency)
+                        {
+                            return Err(if filled_currency.is_some() {
+                                no_lot_in_filled(currency)
+                            } else {
+                                convert_core_booking_error(
+                                    rustledger_core::BookingError::NoMatchingLot {
+                                        currency: units.currency.clone(),
+                                        cost_spec: cost_spec.clone(),
+                                    },
+                                    &posting.account,
+                                )
+                            });
+                        }
                         // Only here: `apply`, the validator and the query
                         // replay see the BOOKED posting, whose cost is the
                         // pool's own by then, and a filtered replay builds a
@@ -787,11 +1111,9 @@ impl BookingEngine {
                             for (lot, m) in booking_result.matched.iter().enumerate() {
                                 // A matched cost-bearing lot always carries a cost; skip a
                                 // (defensive) cost-less one since it has no basis. The
-                                // cost and sale currencies are recorded as-is — a
-                                // cross-currency disposal (sale price in a different
-                                // currency than the lot's cost) is NOT dropped here; whether
-                                // its `proceeds − cost_basis` gain is computable is the
-                                // consumer's policy, not the booking engine's.
+                                // sale and cost currencies agree by now: a reduction
+                                // priced in another currency than its lot's cost was
+                                // refused above (#2571).
                                 let Some(cost) = &m.cost else { continue };
                                 let lot_units = m.units.number.abs();
                                 // The lot's cost value (in the cost currency).
@@ -1699,9 +2021,10 @@ impl BookingEngine {
     }
 
     /// What both booking entry points need before they book `txn`, computed
-    /// in one place so they cannot drift: its tolerances, and `txn` with any
+    /// in one place so they cannot drift: its tolerances, `txn` with any
     /// currency-less units number given its currency (`None` when there is
-    /// none, which is almost always).
+    /// none, which is almost always), and the currencies of its cost specs
+    /// written without one (#2571).
     ///
     /// The order is the point. Tolerances come from the transaction AS
     /// WRITTEN, matching beancount's `booking_full.book`, which infers them
@@ -1712,50 +2035,60 @@ impl BookingEngine {
     /// after resolving let the posting's own precision loosen its currency,
     /// so an auto-posting beside `42.5` booked `-32.400 USD` where beancount
     /// books `-32.377 USD` (#2465).
-    fn prepare(
-        &self,
-        txn: &Transaction,
-    ) -> Result<
-        (
-            FxHashMap<rustledger_core::Currency, Decimal>,
-            Option<Transaction>,
-        ),
-        InterpolationError,
-    > {
+    fn prepare(&self, txn: &Transaction) -> Result<Prepared, InterpolationError> {
         let tolerances = crate::transaction_tolerances(txn, &self.tolerance.options());
-        Ok((tolerances, self.resolve_elided_units_currencies(txn)?))
+        let (resolved, cost_currencies) = self.resolve_elided_currencies(txn)?;
+        Ok(Prepared {
+            tolerances,
+            resolved,
+            cost_currencies,
+        })
     }
 
     /// `txn` with every units number written without a currency
-    /// (`Assets:Foo  42.50`) given one, or `None` when it has no such posting.
+    /// (`Assets:Foo  42.50`) given one, or `None` when it has no such posting,
+    /// and the currency of every cost spec written without one that
+    /// beancount's rule resolves (#2571).
     ///
     /// The rule is beancount's — see
-    /// [`crate::interpolate::resolve_elided_units_currencies`] — and this is
-    /// the only caller that can apply all of it, because its second step reads
-    /// the account's running balance (#2465). It runs before booking, because
-    /// booking a reduction needs the commodity to find the lot.
-    fn resolve_elided_units_currencies(
+    /// [`crate::interpolate::resolve_elided_currencies`] — and this is
+    /// the only caller that can apply all of it, because it reads the
+    /// accounts' running balances (#2465). It runs before booking, because
+    /// booking a reduction needs the commodity, and the cost currency, to
+    /// find the lot. Both are resolved from the transaction AS WRITTEN, in
+    /// one pass: resolving the units first would change which cost
+    /// currencies resolve.
+    fn resolve_elided_currencies(
         &self,
         txn: &Transaction,
-    ) -> Result<Option<Transaction>, InterpolationError> {
-        if !txn
+    ) -> Result<(Option<Transaction>, crate::interpolate::ElidedCosts), InterpolationError> {
+        let number_only = txn
             .postings
             .iter()
-            .any(|p| matches!(p.units, Some(IncompleteAmount::NumberOnly(_))))
-        {
-            return Ok(None);
+            .any(|p| matches!(p.units, Some(IncompleteAmount::NumberOnly(_))));
+        let cost_elided = txn
+            .postings
+            .iter()
+            .any(|p| p.cost.as_ref().is_some_and(|c| c.currency.is_none()));
+        if !number_only && !cost_elided {
+            return Ok((None, crate::interpolate::ElidedCosts::default()));
         }
-        let resolved = crate::interpolate::resolve_elided_units_currencies(txn, |account| {
+        let mut resolved = crate::interpolate::resolve_elided_currencies(txn, |account| {
             self.inventories.get(account).map(AsRef::as_ref)
-        })?;
+        });
+        let costs = std::mem::take(&mut resolved.costs);
+        if !number_only {
+            return Ok((None, costs));
+        }
+        let units = resolved.units_or_refuse(txn)?;
         let mut txn = txn.clone();
-        for (idx, currency) in resolved {
+        for (idx, currency) in units {
             let posting = &mut txn.postings[idx];
             if let Some(IncompleteAmount::NumberOnly(number)) = posting.units {
                 posting.units = Some(IncompleteAmount::Complete(Amount::new(number, currency)));
             }
         }
-        Ok(Some(txn))
+        Ok((Some(txn), costs))
     }
 
     /// Book and interpolate a transaction.
@@ -1796,13 +2129,18 @@ impl BookingEngine {
         // A units number written without its currency is rare, and resolving
         // it rewrites the posting, so that path works on a copy and commits it
         // only once everything has succeeded (#2465).
-        let (tolerances, resolved) = self.prepare(txn)?;
+        let Prepared {
+            tolerances,
+            resolved,
+            cost_currencies,
+        } = self.prepare(txn)?;
         if let Some(mut resolved) = resolved {
-            let gains = self.book_interpolate_apply_with(&mut resolved, &tolerances)?;
+            let gains =
+                self.book_interpolate_apply_with(&mut resolved, &tolerances, &cost_currencies)?;
             *txn = resolved;
             return Ok(gains);
         }
-        self.book_interpolate_apply_with(txn, &tolerances)
+        self.book_interpolate_apply_with(txn, &tolerances, &cost_currencies)
     }
 
     /// [`Self::book_interpolate_apply`] with the tolerances already computed
@@ -1811,6 +2149,7 @@ impl BookingEngine {
         &mut self,
         txn: &mut Transaction,
         tolerances: &FxHashMap<rustledger_core::Currency, Decimal>,
+        cost_currencies: &crate::interpolate::ElidedCosts,
     ) -> Result<Vec<CapitalGain>, BookingError> {
         // Fast path, as in `book_and_interpolate_with_gains`: with no cost
         // specs `book` is an identity, so interpolate the transaction itself.
@@ -1825,7 +2164,7 @@ impl BookingEngine {
         // Slow path: `book` already produces an owned transaction, so work on
         // that and commit only once apply has succeeded. Nothing needs undoing
         // — `txn` is not touched until the end.
-        let booked = self.book(txn)?;
+        let booked = self.book_with(txn, cost_currencies)?;
         let mut candidate = booked.transaction;
         let _ = crate::interpolate::interpolate_in_place_undoable(&mut candidate, tolerances)?;
         self.apply(&candidate)?;
@@ -1849,7 +2188,11 @@ impl BookingEngine {
         &self,
         txn: &Transaction,
     ) -> Result<(InterpolationResult, Vec<CapitalGain>), BookingError> {
-        let (tolerances, resolved) = self.prepare(txn)?;
+        let Prepared {
+            tolerances,
+            resolved,
+            cost_currencies,
+        } = self.prepare(txn)?;
         let txn = resolved.as_ref().unwrap_or(txn);
         // Fast path: with no cost specs, `book` is an identity that only clones
         // `txn` verbatim (profiling flagged that clone as ~6 MB / 10k txns — the
@@ -1865,10 +2208,22 @@ impl BookingEngine {
             ));
         }
         // First book (fill in costs + compute gains), then interpolate amounts.
-        let booked = self.book(txn)?;
+        let booked = self.book_with(txn, &cost_currencies)?;
         let result = interpolate_with_tolerance_map(&booked.transaction, &tolerances)?;
         Ok((result, booked.gains))
     }
+}
+
+/// What [`BookingEngine::prepare`] computes from a transaction as written.
+struct Prepared {
+    /// Its tolerances.
+    tolerances: FxHashMap<rustledger_core::Currency, Decimal>,
+    /// The transaction with its currency-less units numbers resolved, or
+    /// `None` when it has none.
+    resolved: Option<Transaction>,
+    /// The currency of each cost spec written without one, where beancount's
+    /// rule resolves it (#2571).
+    cost_currencies: crate::interpolate::ElidedCosts,
 }
 
 /// The cost number to book for taking `units` (the posting's, signed) from a
@@ -3932,12 +4287,12 @@ mod tests {
         assert_eq!(total.round_dp(2), dec!(2.00), "shares sum to the total");
     }
 
-    /// A disposal whose sale-price currency differs from the lot's cost currency is
-    /// RECORDED with proceeds in the sale currency and basis in the cost currency
-    /// (the booking engine does not decide whether a cross-currency gain is
-    /// computable — that policy is the consumer's; the report filters such rows).
+    /// A `{}` sale priced in another currency than its lot's cost takes the
+    /// price's currency as its cost currency, so no lot matches and nothing is
+    /// recorded (#2571). This used to record a disposal with proceeds in EUR and
+    /// a basis in USD, whose gain has no value without an FX rate.
     #[test]
-    fn test_book_cross_currency_disposal_records_both_currencies() {
+    fn test_book_cross_currency_disposal_is_refused() {
         let mut engine = BookingEngine::new();
         // Buy 3 AAPL at cost 30 USD.
         engine
@@ -3966,44 +4321,26 @@ mod tests {
                     .with_price(PriceAnnotation::unit(Amount::new(dec!(50), "EUR"))),
             )
             .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(150), "EUR")));
-        let g = engine.book(&sell).unwrap().gains;
-        assert_eq!(g.len(), 1);
-        // Proceeds in the sale currency (EUR), basis in the cost currency (USD).
-        assert_eq!(g[0].proceeds.number, dec!(150));
-        assert_eq!(g[0].proceeds.currency.as_ref(), "EUR");
-        assert_eq!(g[0].cost_basis.number, dec!(90));
-        assert_eq!(g[0].cost_basis.currency.as_ref(), "USD");
+        match engine.book(&sell) {
+            Err(BookingError::NoLotInInferredCostCurrency { cost, .. }) => {
+                assert_eq!(cost.as_str(), "EUR");
+            }
+            other => panic!("expected NoLotInInferredCostCurrency(EUR), got {other:?}"),
+        }
     }
 
-    /// A sale that FIFO-matches lots held in DIFFERENT cost currencies records the
-    /// same-currency lot AND the cross-currency lot — both are recorded, each with
-    /// its own proceeds/basis currencies (the report, not the booking engine,
-    /// decides a cross-currency row's gain is not computable).
+    /// A `{}` sale priced in USD from lots held in USD and EUR sells only from
+    /// the USD lots, even when the EUR lot is older and the method is FIFO
+    /// (#2571), so every disposal recorded has proceeds and basis in one
+    /// currency. It used to take the older EUR lot first and record a disposal
+    /// across the two.
     #[test]
-    fn test_book_mixed_currency_lots_records_both() {
+    fn test_book_priced_sale_takes_only_lots_in_the_price_currency() {
         let mut engine = BookingEngine::new(); // FIFO
-        // Lot 1: 5 AAPL at 100 USD (2020). Lot 2: 5 AAPL at 90 EUR (2021).
+        // Lot 1: 5 AAPL at 90 EUR (2020). Lot 2: 5 AAPL at 100 USD (2021).
         engine
             .apply(
-                &Transaction::new(date(2020, 1, 1), "buy usd")
-                    .with_synthesized_posting(
-                        Posting::new("Assets:Stock", Amount::new(dec!(5), "AAPL")).with_cost(
-                            CostSpec::empty()
-                                .with_number(rustledger_core::CostNumber::PerUnit {
-                                    value: dec!(100),
-                                })
-                                .with_currency("USD"),
-                        ),
-                    )
-                    .with_synthesized_posting(Posting::new(
-                        "Assets:Cash",
-                        Amount::new(dec!(-500), "USD"),
-                    )),
-            )
-            .expect("fixture fits in Decimal");
-        engine
-            .apply(
-                &Transaction::new(date(2021, 1, 1), "buy eur")
+                &Transaction::new(date(2020, 1, 1), "buy eur")
                     .with_synthesized_posting(
                         Posting::new("Assets:Stock", Amount::new(dec!(5), "AAPL")).with_cost(
                             CostSpec::empty()
@@ -4019,28 +4356,44 @@ mod tests {
                     )),
             )
             .expect("fixture fits in Decimal");
-        // Sell 8 @ 150 USD: FIFO takes 5 from the USD lot, 3 from the EUR lot.
-        let sell = Transaction::new(date(2023, 1, 1), "sell")
-            .with_synthesized_posting(
-                Posting::new("Assets:Stock", Amount::new(dec!(-8), "AAPL"))
-                    .with_cost(CostSpec::empty())
-                    .with_price(PriceAnnotation::unit(Amount::new(dec!(150), "USD"))),
+        engine
+            .apply(
+                &Transaction::new(date(2021, 1, 1), "buy usd")
+                    .with_synthesized_posting(
+                        Posting::new("Assets:Stock", Amount::new(dec!(5), "AAPL")).with_cost(
+                            CostSpec::empty()
+                                .with_number(rustledger_core::CostNumber::PerUnit {
+                                    value: dec!(100),
+                                })
+                                .with_currency("USD"),
+                        ),
+                    )
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(dec!(-500), "USD"),
+                    )),
             )
-            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(1200), "USD")));
-        let g = engine.book(&sell).unwrap().gains;
-        assert_eq!(g.len(), 2, "both lots recorded: {g:?}");
-        // USD lot: same-currency, computable gain 250.
+            .expect("fixture fits in Decimal");
+        let sell = |n| {
+            Transaction::new(date(2023, 1, 1), "sell")
+                .with_synthesized_posting(
+                    Posting::new("Assets:Stock", Amount::new(n, "AAPL"))
+                        .with_cost(CostSpec::empty())
+                        .with_price(PriceAnnotation::unit(Amount::new(dec!(150), "USD"))),
+                )
+                .with_synthesized_posting(Posting::auto("Assets:Cash"))
+        };
+        let g = engine.book(&sell(dec!(-5))).unwrap().gains;
+        assert_eq!(g.len(), 1, "only the USD lot: {g:?}");
         assert_eq!(g[0].units, dec!(5));
-        assert_eq!(g[0].cost_basis.number, dec!(500));
-        assert_eq!(g[0].cost_basis.currency.as_ref(), "USD");
-        assert_eq!(g[0].proceeds.number, dec!(750));
-        assert_eq!(g[0].proceeds.currency.as_ref(), "USD");
-        // EUR lot: cross-currency — proceeds in USD (the sale price), basis in EUR.
-        assert_eq!(g[1].units, dec!(3));
-        assert_eq!(g[1].proceeds.number, dec!(450));
-        assert_eq!(g[1].proceeds.currency.as_ref(), "USD");
-        assert_eq!(g[1].cost_basis.number, dec!(270));
-        assert_eq!(g[1].cost_basis.currency.as_ref(), "EUR");
+        assert_eq!(g[0].cost_basis, Amount::new(dec!(500), "USD"));
+        assert_eq!(g[0].proceeds, Amount::new(dec!(750), "USD"));
+        // Eight is more than the USD lots hold: the EUR lot does not make up
+        // the difference.
+        assert!(matches!(
+            engine.book(&sell(dec!(-8))),
+            Err(BookingError::Inventory(_))
+        ));
     }
 
     /// Closing a SHORT position: the gain sign and proceeds/basis are the mirror of

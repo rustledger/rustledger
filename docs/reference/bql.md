@@ -94,10 +94,12 @@ Each row in a default `SELECT` is one posting from one transaction. The columns 
 
 | Column | Type | Description |
 |--------|------|-------------|
-| `balance` | Inventory? | Cumulative running total across `WHERE`-filtered postings (matches `bean-query`) |
+| `balance` | Inventory? | Cumulative running total across `WHERE`-filtered postings (matches `bean-query`; an `AVERAGE` account is shown as its pool, see below) |
 | `account_balance` | Inventory? | Per-account running balance, independent of `WHERE`. Within a transaction it follows booking: a sale never reduces a lot bought earlier in the same transaction (see below) |
 
-`account_balance` realizes lots through the booking engine, the same way `report balances` does. Booking reads each sale against the inventory before its transaction plus the transaction's earlier sales, never its purchases, so the row for a posting shows the account after the transaction's postings up to and including it, read that way. For an `AVERAGE` account or a `{*}` sale, a purchase written earlier in the same transaction therefore stays out of the pool the sale is taken from, matching the cost the journal books the sale at. `balance` is unaffected: it adds positions as `bean-query` does.
+`account_balance` realizes lots through the booking engine, the same way `report balances` does. Booking reads each sale against the inventory before its transaction plus the transaction's earlier sales, never its purchases, so the row for a posting shows the account after the transaction's postings up to and including it, read that way. For an `AVERAGE` account or a `{*}` sale, a purchase written earlier in the same transaction therefore stays out of the pool the sale is taken from, matching the cost the journal books the sale at. `balance` adds positions as `bean-query` does, except for an `AVERAGE` account's.
+
+An `AVERAGE` account is shown as its pool on every surface, before a sale and after one: `BALANCES`, `sum(position)`, `balance`, `account_balance`, `JOURNAL` and `report balances`. A pool is one lot per commodity, cost currency and side (long or short), undated, at the weighted-average cost of the lots it holds; `X` held at a USD cost and at a EUR cost are two pools. Booking is unchanged underneath: the dated lots stay for `report capgains`. In `balance`, an `AVERAGE` account's rows are realized as `sum(position)` realizes them (below), so after a sale it shows the pool that remains, not the lots bought plus the sale as a negative lot.
 
 **Source location columns**
 
@@ -111,7 +113,10 @@ Each row in a default `SELECT` is one posting from one transaction. The columns 
 
 ```sql
 SELECT account AS acc, sum(position) AS balance
+SELECT year(date), sum(cost(position)) AS "Total spent" GROUP BY 1
 ```
+
+Keywords, column names, function names and table names are case-insensitive, as in bean-query: `SELECT ACCOUNT` reads the `account` column. An unquoted alias is folded to lower case (`AS Total` heads the column `total`). An alias in double quotes keeps its case and may start with a digit or hold spaces (`AS "2023"`); write `""` for a `"` inside it.
 
 ## WHERE Clause
 
@@ -276,16 +281,17 @@ bean-query answers `5 EUR` there; see section 15 of the
 through its `open` or the ledger's `booking_method` option; with `GROUP BY
 account`, or a `WHERE` that keeps one account) shows the account's holding the
 way booking realizes it: the selected postings are replayed through the
-booking engine, as `BALANCES` does, and each side is then shown as one lot at
-its weighted-average cost. A long and a short stay apart, so `3 X {102 USD}`
-beside `-2 X {101 USD}` is shown as both, never netted into one lot. Every
-other sum adds positions, as bean-query does.
+booking engine, as `BALANCES` does, and each pool (commodity, cost currency
+and side) is then shown as one lot at its weighted-average cost. A long and a
+short stay apart, so `3 X {102 USD}` beside `-2 X {101 USD}` is shown as both,
+never netted into one lot. Every other sum adds positions, as bean-query does.
 
 When the selected postings cannot be realized on their own, because a `WHERE`
 keeps a sale but not enough of the purchases it sold from, the result is the
 plain sum of those postings: the sale appears as a negative lot at the cost
-it was booked at, beside the purchases that were kept. `BALANCES` over the
-same `FROM` subset reports an error instead. Python beancount has no `AVERAGE`
+it was booked at, beside the purchases that were kept. `balance` does the same
+for those rows. `BALANCES` over the same `FROM` subset reports an error
+instead. Python beancount has no `AVERAGE`
 booking, so there is no bean-query answer to compare with.
 
 ## Scalar Functions
@@ -574,12 +580,12 @@ WHERE account ~ "Assets" OR account ~ "Liabilities"
 
 ```sql
 /* Run separate queries for each year */
-SELECT root(account, 2), sum(cost(position)) AS y2023
+SELECT root(account, 2), sum(cost(position)) AS "2023"
 WHERE account ~ "Expenses" AND year(date) = 2023
 GROUP BY 1
 ORDER BY 1
 
-SELECT root(account, 2), sum(cost(position)) AS y2024
+SELECT root(account, 2), sum(cost(position)) AS "2024"
 WHERE account ~ "Expenses" AND year(date) = 2024
 GROUP BY 1
 ORDER BY 1

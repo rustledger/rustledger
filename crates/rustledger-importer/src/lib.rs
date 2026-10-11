@@ -37,6 +37,7 @@ pub mod csv_importer;
 pub mod csv_inference;
 pub mod ofx_importer;
 pub mod order;
+pub mod payees;
 pub mod registry;
 pub mod test_fixtures;
 #[cfg(feature = "toml-config")]

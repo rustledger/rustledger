@@ -5,11 +5,19 @@
 //! executor for every statement, so `CREATE TABLE t AS SELECT ...` followed
 //! by `SELECT ... FROM t` failed with "table 't' does not exist", and no
 //! user surface could reach a created table at all.
+//!
+//! The shell runs only on a terminal: a piped stdin is one query, read whole,
+//! as bean-query reads it (#2578). So these drive the shell through a
+//! pseudo-terminal, util-linux `script`, typing each statement once the
+//! prompt for it is up. Linux only, which is where this crate's tests run.
+#![cfg(target_os = "linux")]
 
 mod common;
 
-use std::io::Write;
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
 
 const LEDGER: &str = r#"2024-01-01 open Assets:E
 2024-01-01 open Assets:C
@@ -24,35 +32,84 @@ const LEDGER: &str = r#"2024-01-01 open Assets:E
   Assets:C
 "#;
 
-/// Feed `input` to the shell line by line (stdin is not a terminal, so the
-/// shell reads it as typed lines) and return (stdout, stderr).
+const PROMPT: &str = "beanquery> ";
+
+/// Single-quote `s` for `sh -c`.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Type `input` into the shell on a terminal, one line per prompt, then
+/// `.quit`, and return (what the terminal showed, stderr).
+///
+/// Each line is written only once the shell's prompt for it is showing:
+/// line editing reads the terminal raw from then on, and typing ahead of it
+/// can be discarded when it switches modes.
 fn shell(bin: &std::path::Path, input: &str) -> (String, String) {
     let dir = tempfile::tempdir().expect("tempdir");
     let file = dir.path().join("ledger.beancount");
     std::fs::write(&file, LEDGER).expect("write ledger");
-    let mut child = Command::new(bin)
-        .arg("query")
-        .arg("--no-cache")
-        .arg(&file)
+    let err_file = dir.path().join("stderr.txt");
+    let command = format!(
+        "exec {} query --no-cache {} 2>{}",
+        sh_quote(bin.to_str().expect("utf8 path")),
+        sh_quote(file.to_str().expect("utf8 path")),
+        sh_quote(err_file.to_str().expect("utf8 path")),
+    );
+    // `script` gives the shell a pseudo-terminal; a missing `script` fails
+    // the test rather than skipping it.
+    let mut child = Command::new("script")
+        .args(["-q", "-e", "-c", &command, "/dev/null"])
         .env("HOME", dir.path())
         .env("XDG_CONFIG_HOME", dir.path())
+        .env("TERM", "dumb")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .expect("run rledger query");
-    child
-        .stdin
-        .take()
-        .expect("stdin")
-        .write_all(input.as_bytes())
-        .expect("write the session");
-    let out = child.wait_with_output().expect("wait");
-    assert!(out.status.success(), "the shell exits cleanly: {out:?}");
-    (
-        String::from_utf8(out.stdout).expect("utf8"),
-        String::from_utf8(out.stderr).expect("utf8"),
-    )
+        .expect("run `script` (util-linux) to give the shell a terminal");
+    let shown = Arc::new(Mutex::new(Vec::<u8>::new()));
+    let mut stdout = child.stdout.take().expect("stdout");
+    let reader = {
+        let shown = Arc::clone(&shown);
+        std::thread::spawn(move || {
+            let mut buf = [0u8; 4096];
+            while let Ok(n) = stdout.read(&mut buf) {
+                if n == 0 {
+                    break;
+                }
+                shown.lock().expect("lock").extend_from_slice(&buf[..n]);
+            }
+        })
+    };
+    let prompts = || {
+        String::from_utf8_lossy(&shown.lock().expect("lock"))
+            .matches(PROMPT)
+            .count()
+    };
+    let mut stdin = child.stdin.take().expect("stdin");
+    for (i, line) in input.lines().chain([".quit"]).enumerate() {
+        let deadline = Instant::now() + Duration::from_secs(60);
+        while prompts() <= i {
+            assert!(
+                Instant::now() < deadline,
+                "no prompt for line {i}: {}",
+                String::from_utf8_lossy(&shown.lock().expect("lock"))
+            );
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        stdin
+            .write_all(format!("{line}\r").as_bytes())
+            .expect("type a line");
+        stdin.flush().expect("flush");
+    }
+    let status = child.wait().expect("wait");
+    drop(stdin);
+    reader.join().expect("reader");
+    assert!(status.success(), "the shell exits cleanly: {status:?}");
+    let shown = String::from_utf8(shown.lock().expect("lock").clone()).expect("utf8");
+    let stderr = std::fs::read_to_string(&err_file).unwrap_or_default();
+    (shown.replace('\r', ""), stderr)
 }
 
 #[test]

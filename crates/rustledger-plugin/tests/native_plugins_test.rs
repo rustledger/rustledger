@@ -1906,44 +1906,29 @@ fn test_onecommodity_independent_accounts_ok() {
     assert!(output.errors[0].message.contains("Equity:Open"));
 }
 
-/// Three different currencies in one account → cascading errors. Each
-/// posting after the first that doesn't match the recorded currency
-/// produces an error.
+/// Three different currencies in one account → one error naming all three,
+/// sorted, located at the last entry that added a currency (beancount's
+/// `onecommodity`, #2539; before, every posting after the first that did
+/// not match was an error of its own).
 #[test]
 fn test_onecommodity_three_currencies_cascade() {
     let plugin = OneCommodityPlugin;
+    let mut gbp = make_transaction("2024-01-17", "GBP", vec![("Assets:Mixed", "30.00", "GBP")]);
+    gbp.filename = Some("ledger.beancount".to_string());
+    gbp.lineno = Some(9);
     let input = make_input(vec![
         make_open("2024-01-01", "Assets:Mixed"),
         make_transaction("2024-01-15", "USD", vec![("Assets:Mixed", "100.00", "USD")]),
         make_transaction("2024-01-16", "EUR", vec![("Assets:Mixed", "50.00", "EUR")]),
-        make_transaction("2024-01-17", "GBP", vec![("Assets:Mixed", "30.00", "GBP")]),
+        gbp,
     ]);
     let output = process_and_materialize(&plugin, input);
-    // First-seen currency for Assets:Mixed = USD. EUR and GBP each fail
-    // the match check against the recorded USD. → exactly 2 errors, each
-    // pairing the recorded USD with the offending currency. (A bug that
-    // recorded EUR or GBP as the "first" would still produce 2 errors but
-    // with different pairings — so we check the pairings, not just the count.)
-    assert_eq!(output.errors.len(), 2, "got: {:?}", output.errors);
-    let messages: Vec<_> = output.errors.iter().map(|e| e.message.as_str()).collect();
-    // Format-strict: the source emits "...uses multiple currencies: <existing> and <new>",
-    // so the recorded USD must come first in each pairing. A bug that recorded
-    // EUR or GBP first (or reversed the format) would not match.
-    assert!(
-        messages.iter().any(|m| m.contains("USD and EUR")),
-        "expected literal `USD and EUR` pairing in: {messages:?}"
+    assert_eq!(output.errors.len(), 1, "got: {:?}", output.errors);
+    assert_eq!(
+        output.errors[0].message,
+        "More than one currency in account 'Assets:Mixed': EUR,GBP,USD"
     );
-    assert!(
-        messages.iter().any(|m| m.contains("USD and GBP")),
-        "expected literal `USD and GBP` pairing in: {messages:?}"
-    );
-    // Both errors should reference the offending account.
-    for m in &messages {
-        assert!(
-            m.contains("Assets:Mixed"),
-            "every error should name Assets:Mixed: {m}"
-        );
-    }
+    assert_eq!(output.errors[0].line_number, Some(9));
 }
 
 /// Non-Transaction directives are ignored. Pins the "only Transaction
@@ -2036,10 +2021,11 @@ fn test_check_commodity_empty_input() {
     assert_eq!(output.directives.len(), 0);
 }
 
-/// Diagnostics emitted by `check_commodity` must be `Warning`, never `Error`,
-/// because undeclared commodities are advisory — they don't prevent loading.
+/// `check_commodity` reports an undeclared commodity as an error, as
+/// beancount's does (bean-check exits 1). It was a warning before #2539, so
+/// the native and Python implementations disagreed on the same ledger.
 #[test]
-fn test_check_commodity_severity_is_warning() {
+fn test_check_commodity_severity_is_error() {
     let plugin = CheckCommodityPlugin;
     let input = make_input(vec![
         make_open("2024-01-01", "Assets:Bank"),
@@ -2057,8 +2043,12 @@ fn test_check_commodity_severity_is_warning() {
     assert_eq!(output.errors.len(), 1);
     assert_eq!(
         output.errors[0].severity,
-        PluginErrorSeverity::Warning,
-        "check_commodity diagnostics must be warnings"
+        PluginErrorSeverity::Error,
+        "check_commodity diagnostics are errors, as in beancount"
+    );
+    assert_eq!(
+        output.errors[0].message,
+        "Missing Commodity directive for 'USD' in 'Assets:Bank'"
     );
 }
 
@@ -2328,10 +2318,21 @@ fn test_unique_prices_duplicate_error() {
     let output = process_and_materialize(&plugin, input);
 
     assert_eq!(output.errors.len(), 1, "expected 1 duplicate price error");
-    assert!(
-        output.errors[0].message.contains("Duplicate price"),
-        "error should mention duplicate"
-    );
+    assert_eq!(output.errors[0].message, "Disagreeing price entries");
+}
+
+/// Prices of one pair on one day that agree are allowed, as in beancount's
+/// `unique_prices`; only disagreeing ones are an error (#2539: a repeated,
+/// identical price was an error before).
+#[test]
+fn test_unique_prices_agreeing_duplicates_are_allowed() {
+    let plugin = UniquePricesPlugin;
+    let input = make_input(vec![
+        make_price("2024-01-15", "HOOL", "520.00", "USD"),
+        make_price("2024-01-15", "HOOL", "520", "USD"),
+    ]);
+    let output = process_and_materialize(&plugin, input);
+    assert!(output.errors.is_empty(), "{:?}", output.errors);
 }
 
 /// Test prices on different days pass.
@@ -4667,8 +4668,8 @@ fn test_pedantic_runs_multiple_validators() {
     assert_eq!(
         messages,
         [
-            "Posting to non-leaf account 'Expenses:Food' - has child accounts",
-            "commodity 'USD' used but not declared"
+            "Non-leaf account 'Expenses:Food' has postings on it",
+            "Missing Commodity directive for 'USD' in 'Assets:Cash'"
         ]
     );
 }
@@ -8868,4 +8869,346 @@ fn test_split_expenses_splits_a_renamed_expense_root() {
         "one sub-posting per member; 1 means the renamed root was not \
          recognized and nothing split",
     );
+}
+
+// ============================================================================
+// Alignment with beancount's implementations (#2539)
+// ============================================================================
+//
+// Each message below is the text bean-check prints for the same input,
+// checked against beancount 3.
+
+/// `w` with a source location.
+fn located(mut w: DirectiveWrapper, line: u32) -> DirectiveWrapper {
+    w.filename = Some("ledger.beancount".to_string());
+    w.lineno = Some(line);
+    w
+}
+
+fn messages(output: &PluginOutput) -> Vec<&str> {
+    output.errors.iter().map(|e| e.message.as_str()).collect()
+}
+
+fn wrap(date: &str, directive_type: &str, data: DirectiveData) -> DirectiveWrapper {
+    DirectiveWrapper {
+        directive_type: directive_type.to_string(),
+        date: date.to_string(),
+        filename: None,
+        lineno: None,
+        data,
+    }
+}
+
+/// An `open`'s currencies, a price annotation's currency, and a cost's
+/// count as uses; each currency is reported once, with the first account
+/// (sorted) using it, or the price context; and the config exempts a
+/// currency in matching accounts.
+#[test]
+fn check_commodity_reports_as_beancount_does() {
+    let input = make_input(vec![
+        make_open_with_currencies("2024-01-01", "Assets:Broker", vec!["CAD"]),
+        make_transaction_with_price(
+            "2024-01-02",
+            "fx",
+            "Assets:Bank",
+            ("10", "EUR"),
+            ("1.1", "USD"),
+            "Assets:Cash",
+        ),
+        make_transaction_with_cost(
+            "2024-01-03",
+            "buy",
+            "Assets:Stock",
+            ("1", "HOOL"),
+            ("5", "GBP"),
+            "Assets:Cash",
+        ),
+        make_price("2024-01-04", "JPY", "0.01", "CHF"),
+        make_commodity("2024-01-01", "EUR"),
+    ]);
+    let output = CheckCommodityPlugin.process(input);
+    assert_eq!(
+        messages(&output),
+        [
+            "Missing Commodity directive for 'USD' in 'Assets:Bank'",
+            "Missing Commodity directive for 'CAD' in 'Assets:Broker'",
+            "Missing Commodity directive for 'GBP' in 'Assets:Stock'",
+            "Missing Commodity directive for 'HOOL' in 'Assets:Stock'",
+            "Missing Commodity directive for 'CHF' in 'Price Directive Context'",
+            "Missing Commodity directive for 'JPY' in 'Price Directive Context'",
+        ]
+    );
+    assert!(
+        output
+            .errors
+            .iter()
+            .all(|e| e.severity == PluginErrorSeverity::Error)
+    );
+
+    let input = make_input_with_config(
+        vec![
+            make_transaction(
+                "2024-01-02",
+                "x",
+                vec![
+                    ("Assets:Options", "1", "SPX_1P"),
+                    ("Assets:Cash", "-1", "SPX_1P"),
+                ],
+            ),
+            make_price("2024-01-04", "SPX_1P", "1", "USD"),
+        ],
+        "{'Assets:Opt.*': 'SPX_.*'}",
+    );
+    // Exempt in Assets:Options, so its price is not reported either; not
+    // in Assets:Cash, which sorts first and reports it.
+    assert_eq!(
+        messages(&CheckCommodityPlugin.process(input)),
+        [
+            "Missing Commodity directive for 'SPX_1P' in 'Assets:Cash'",
+            "Missing Commodity directive for 'USD' in 'Price Directive Context'",
+        ]
+    );
+    let input = make_input_with_config(vec![], "['not', 'a', 'dict']");
+    assert_eq!(
+        messages(&CheckCommodityPlugin.process(input)),
+        ["Invalid configuration for check_commodity plugin; skipping."]
+    );
+}
+
+/// One error per parent account, at its `open`, in tree order; a `pad`
+/// posts, a `note` does not (the documented divergence from beancount).
+#[test]
+fn leafonly_reports_once_per_account_at_its_open() {
+    let input = make_input(vec![
+        located(make_open("2024-01-01", "Assets:B"), 2),
+        located(make_open("2024-01-01", "Assets:B:Sub"), 3),
+        located(make_open("2024-01-01", "Assets:A"), 4),
+        located(make_open("2024-01-01", "Assets:A:Sub"), 5),
+        located(make_open("2024-01-01", "Equity:E"), 6),
+        located(make_open("2024-01-01", "Equity:E:Sub"), 7),
+        located(make_open("2024-01-01", "Assets:N"), 8),
+        located(make_open("2024-01-01", "Assets:N:Sub"), 9),
+        make_transaction(
+            "2024-01-02",
+            "a",
+            vec![("Assets:B", "1", "USD"), ("Assets:B:Sub", "-1", "USD")],
+        ),
+        make_transaction(
+            "2024-01-03",
+            "b",
+            vec![("Assets:B", "1", "USD"), ("Assets:A", "-1", "USD")],
+        ),
+        wrap(
+            "2024-01-04",
+            "pad",
+            DirectiveData::Pad(PadData {
+                account: "Assets:A:Sub".to_string(),
+                source_account: "Equity:E".to_string(),
+                metadata: vec![],
+            }),
+        ),
+        wrap(
+            "2024-01-04",
+            "note",
+            DirectiveData::Note(NoteData {
+                account: "Assets:N".to_string(),
+                comment: "hi".to_string(),
+                tags: vec![],
+                links: vec![],
+                metadata: vec![],
+            }),
+        ),
+    ]);
+    let output = LeafOnlyPlugin.process(input);
+    assert_eq!(
+        messages(&output),
+        [
+            "Non-leaf account 'Assets:A' has postings on it",
+            "Non-leaf account 'Assets:B' has postings on it",
+            "Non-leaf account 'Equity:E' has postings on it",
+        ]
+    );
+    let lines: Vec<_> = output.errors.iter().map(|e| e.line_number).collect();
+    assert_eq!(lines, [Some(4), Some(2), Some(6)]);
+}
+
+/// A currency held at cost in one posting and without cost (no price
+/// needed) in another, located at the first one without cost.
+#[test]
+fn coherent_cost_reports_with_and_without_cost() {
+    let input = make_input(vec![
+        make_transaction_with_cost(
+            "2024-01-02",
+            "buy",
+            "Assets:Stock",
+            ("1", "HOOL"),
+            ("5", "USD"),
+            "Assets:Cash",
+        ),
+        located(
+            make_transaction(
+                "2024-01-03",
+                "gift",
+                vec![("Assets:Stock", "1", "HOOL"), ("Income:Gift", "-1", "HOOL")],
+            ),
+            8,
+        ),
+    ]);
+    let output = CoherentCostPlugin.process(input);
+    assert_eq!(
+        messages(&output),
+        ["Currency 'HOOL' is used both with and without cost"]
+    );
+    assert_eq!(output.errors[0].line_number, Some(8));
+}
+
+/// The config's account regex, the `onecommodity: FALSE` opt-out, an
+/// `open` listing several currencies, cost currencies and balances.
+#[test]
+fn onecommodity_honors_config_opt_out_costs_and_balances() {
+    let mut opted_out = make_open("2024-01-01", "Assets:Free");
+    if let DirectiveData::Open(open) = &mut opted_out.data {
+        open.metadata
+            .push(("onecommodity".to_string(), MetaValueData::Bool(false)));
+    }
+    let two = |date: &str, account: &'static str| {
+        vec![
+            make_transaction(
+                date,
+                "u",
+                vec![(account, "1", "USD"), ("Equity:X", "-1", "USD")],
+            ),
+            make_transaction(
+                date,
+                "e",
+                vec![(account, "1", "EUR"), ("Equity:X", "-1", "EUR")],
+            ),
+        ]
+    };
+    let mut directives = vec![
+        opted_out,
+        make_open_with_currencies("2024-01-01", "Assets:Multi", vec!["USD", "EUR"]),
+        make_open("2024-01-01", "Equity:X"),
+        make_open("2024-01-01", "Assets:Lots"),
+        make_transaction_with_cost(
+            "2024-01-02",
+            "a",
+            "Assets:Lots",
+            ("1", "HOOL"),
+            ("5", "USD"),
+            "Equity:X",
+        ),
+        make_transaction_with_cost(
+            "2024-01-03",
+            "b",
+            "Assets:Lots",
+            ("1", "HOOL"),
+            ("5", "EUR"),
+            "Equity:X",
+        ),
+        wrap(
+            "2024-01-04",
+            "balance",
+            DirectiveData::Balance(BalanceData {
+                account: "Assets:Bal".to_string(),
+                amount: AmountData {
+                    number: "0".to_string(),
+                    currency: "CAD".to_string(),
+                },
+                tolerance: None,
+                metadata: vec![],
+            }),
+        ),
+        make_transaction(
+            "2024-01-05",
+            "c",
+            vec![("Assets:Bal", "1", "USD"), ("Equity:X", "-1", "USD")],
+        ),
+    ];
+    directives.extend(two("2024-01-02", "Assets:Free"));
+    directives.extend(two("2024-01-02", "Assets:Multi"));
+    let output = OneCommodityPlugin.process(make_input(directives.clone()));
+    assert_eq!(
+        messages(&output),
+        [
+            "More than one currency in account 'Assets:Bal': CAD,USD",
+            "More than one currency in account 'Equity:X': EUR,USD",
+            "More than one cost currency in account 'Assets:Lots': EUR,USD",
+        ]
+    );
+    // An account whose `open` the regex does not match at the start is
+    // skipped; one with no `open` (Assets:Bal) is checked, as in beancount.
+    let output = OneCommodityPlugin.process(make_input_with_config(directives, "Assets:B"));
+    assert_eq!(
+        messages(&output),
+        ["More than one currency in account 'Assets:Bal': CAD,USD"]
+    );
+}
+
+/// beancount's `unique_prices` locates the error at the last entry holding
+/// the first number given.
+#[test]
+fn unique_prices_locates_as_beancount_does() {
+    let input = make_input(vec![
+        located(make_price("2024-01-15", "HOOL", "10", "USD"), 3),
+        located(make_price("2024-01-15", "HOOL", "10.0", "USD"), 4),
+        located(make_price("2024-01-15", "HOOL", "11", "USD"), 5),
+    ]);
+    let output = UniquePricesPlugin.process(input);
+    assert_eq!(messages(&output), ["Disagreeing price entries"]);
+    assert_eq!(output.errors[0].line_number, Some(4));
+}
+
+/// A tuple of allowed values, as beancount's examples write them, is
+/// checked; the messages are beancount's, at the `commodity` directive.
+#[test]
+fn commodity_attr_reads_tuples_and_reports_as_beancount_does() {
+    let mut eur = located(make_commodity("2024-01-01", "EUR"), 7);
+    if let DirectiveData::Commodity(c) = &mut eur.data {
+        c.metadata.push((
+            "asset-class".to_string(),
+            MetaValueData::String("bogus".to_string()),
+        ));
+    }
+    let input = make_input_with_config(
+        vec![located(make_commodity("2024-01-01", "USD"), 6), eur],
+        "{'name': None, 'asset-class': ('stock', 'bond')}",
+    );
+    let output = CommodityAttrPlugin::new().process(input);
+    assert_eq!(
+        messages(&output),
+        [
+            "Missing attribute 'name' for Commodity directive USD",
+            "Missing attribute 'asset-class' for Commodity directive USD",
+            "Missing attribute 'name' for Commodity directive EUR",
+            "Invalid value 'bogus' for attribute asset-class, Commodity directive EUR; \
+             valid options: stock, bond",
+        ]
+    );
+    let lines: Vec<_> = output.errors.iter().map(|e| e.line_number).collect();
+    assert_eq!(lines, [Some(6), Some(6), Some(7), Some(7)]);
+    let input = make_input_with_config(vec![], "['name']");
+    assert_eq!(
+        messages(&CommodityAttrPlugin::new().process(input)),
+        ["Invalid configuration for commodity_attr plugin; skipping."]
+    );
+}
+
+/// The duplicate is reported at the later copy, starting as beancount's
+/// message does.
+#[test]
+fn noduplicates_locates_the_later_copy() {
+    let txn = || {
+        make_transaction(
+            "2024-01-02",
+            "Lunch",
+            vec![
+                ("Assets:Bank", "-10", "USD"),
+                ("Expenses:Food", "10", "USD"),
+            ],
+        )
+    };
+    let output = NoDuplicatesPlugin.process(make_input(vec![located(txn(), 5), located(txn(), 8)]));
+    assert_eq!(messages(&output), ["Duplicate entry: 2024-01-02 \"Lunch\""]);
+    assert_eq!(output.errors[0].line_number, Some(8));
 }

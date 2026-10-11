@@ -62,3 +62,34 @@ pub fn increment_date(date: &str) -> Option<String> {
 
     Some(format!("{new_year:04}-{new_month:02}-{new_day:02}"))
 }
+
+/// `error` located at `wrapper`'s source line, as beancount locates a
+/// plugin error at an entry's `meta` (left unlocated when the entry has
+/// none, such as one a plugin inserted).
+#[must_use]
+pub fn at_entry(
+    error: crate::types::PluginError,
+    wrapper: &crate::types::DirectiveWrapper,
+) -> crate::types::PluginError {
+    match (&wrapper.filename, wrapper.lineno) {
+        (Some(file), Some(line)) => error.at(file.clone(), line),
+        _ => error,
+    }
+}
+
+/// Whether `regex` matches at the start of `text`, as Python's
+/// `re.match` does (it need not match to the end).
+#[must_use]
+pub fn python_match(regex: &regex::Regex, text: &str) -> bool {
+    regex.find(text).is_some_and(|m| m.start() == 0)
+}
+
+/// Compile `pattern` for [`python_match`]: anchored at the start, so the
+/// first match found is the one at the start if there is one.
+///
+/// # Errors
+///
+/// The pattern is not a valid regular expression.
+pub fn python_match_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
+    regex::Regex::new(&format!("^(?:{pattern})"))
+}

@@ -40,9 +40,14 @@ pub struct StructuralDuplicate {
 impl StructuralDuplicate {
     /// Convert to a [`PluginError`] for use in plugin wrappers.
     #[must_use]
+    ///
+    /// "Duplicate entry: ", as beancount's `noduplicates` begins its
+    /// message (#2539). Deliberate divergence: beancount goes on with the
+    /// Python `repr` of both entries; this names the duplicate's date and
+    /// narration.
     pub fn to_plugin_error(&self) -> PluginError {
         PluginError::error(format!(
-            "Duplicate transaction: {} \"{}\"",
+            "Duplicate entry: {} \"{}\"",
             self.date, self.narration
         ))
     }
@@ -773,7 +778,7 @@ mod tests {
             narration: "Test".to_string(),
         };
         let err = dup.to_plugin_error();
-        assert!(err.message.contains("Duplicate transaction"));
+        assert!(err.message.contains("Duplicate entry"));
         assert!(err.message.contains("2024-01-15"));
     }
 

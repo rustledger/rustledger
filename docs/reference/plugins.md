@@ -136,7 +136,7 @@ rustledger includes 31 native plugins. Here are the most commonly used:
 | `check_closing` | Zero balance assertion on posting with `closing: TRUE` |
 | `check_commodity` | Ensure commodities are declared |
 | `check_drained` | Zero balance assertion on balance sheet account close |
-| `coherent_cost` | Validate cost specifications |
+| `coherent_cost` | A currency is held at cost everywhere or nowhere |
 | `commodity_attr` | Validate commodity metadata attributes |
 | `leafonly` | Restrict postings to leaf accounts |
 | `noduplicates` | Detect duplicate transactions |
@@ -186,7 +186,7 @@ rustledger includes 31 native plugins. Here are the most commonly used:
 | `check_commodity` | Validate commodity declarations |
 | `check_drained` | Ensure accounts drained before close |
 | `close_tree` | Close descendant accounts |
-| `coherent_cost` | Enforce cost OR price (not both) |
+| `coherent_cost` | Held at cost everywhere or nowhere |
 | `commodity_attr` | Validate commodity attributes |
 | `currency_accounts` | Auto-generate currency trading postings |
 | `document_discovery` | Auto-discover documents from directories |
@@ -229,7 +229,7 @@ Options: None
 
 ### check_commodity
 
-Ensures all commodities are explicitly declared.
+Ensures all commodities are explicitly declared. Each undeclared currency is one error, `Missing Commodity directive for 'USD' in 'Assets:Bank'`, naming the first account (in sorted order) that uses it in a posting's units, cost or price, a `balance`, or an `open`'s currency list, or `Price Directive Context` when only `price` directives use it.
 
 ```beancount
 plugin "beancount.plugins.check_commodity"
@@ -238,17 +238,19 @@ plugin "beancount.plugins.check_commodity"
 2020-01-01 commodity AAPL
 ```
 
-Options: None
+Options: optionally a Python dict of account regex to currency regex, as in beancount: a currency matching the second in an account matching the first (both matched at the start) is exempt, and so are its prices.
+
+```beancount
+plugin "beancount.plugins.check_commodity" "{'Assets:Options:.*': 'SPX_.*'}"
+```
 
 ### coherent_cost
 
-Validates that cost specifications are consistent with prices.
+Checks that each currency is held either always at cost or never at cost. A currency some posting holds at cost (`{...}`) and another holds without one is an error, `Currency 'HOOL' is used both with and without cost`, located at the first transaction holding it without cost.
 
 ```beancount
 plugin "beancount.plugins.coherent_cost"
 ```
-
-This plugin checks that when both cost and price are specified, they're coherent (e.g., for capital gains transactions).
 
 Options: None
 
@@ -271,7 +273,9 @@ Options: None
 
 ### leafonly
 
-Restricts postings to leaf accounts only. Reports an error if you post to an account that has sub-accounts.
+Restricts postings to leaf accounts only. Reports an error if you post to an account that has sub-accounts: one per account, `Non-leaf account 'Expenses' has postings on it`, at its `open`. A `pad` counts as posting to both its accounts.
+
+Unlike beancount, a `note`, `document`, `close` or `custom` naming a parent account is not reported: none of them posts anything.
 
 ```beancount
 plugin "beancount.plugins.leafonly"
@@ -293,7 +297,7 @@ Options: None
 
 ### noduplicates
 
-Detects duplicate transactions based on date, payee, narration, and amounts.
+Detects duplicate transactions based on date, payee, narration, and amounts. Each later copy is an error, `Duplicate entry: 2024-01-02 "Lunch"`, at the copy. (Beancount follows `Duplicate entry:` with both entries' Python representations, and also compares directives other than transactions.)
 
 ```beancount
 plugin "beancount.plugins.noduplicates"
@@ -303,7 +307,7 @@ Options: None
 
 ### onecommodity
 
-Ensures each account only holds one commodity.
+Ensures each account only holds one commodity: its postings' and `balance` assertions' units in one currency, and its costs in one currency. An account with more is one error, `More than one currency in account 'Assets:Bank': EUR,USD` (or `More than one cost currency ...`), at the last entry that added a currency. An account whose `open` lists more than one currency, or has `onecommodity: FALSE`, is skipped.
 
 ```beancount
 plugin "beancount.plugins.onecommodity"
@@ -312,7 +316,7 @@ plugin "beancount.plugins.onecommodity"
 2020-01-01 open Assets:Bank:EUR   EUR
 ```
 
-Options: None
+Options: optionally a regular expression: only accounts whose `open` it matches (at the start) are checked.
 
 ### pedantic
 
@@ -360,7 +364,7 @@ Options: `"person1,person2 share1,share2"`
 
 ### unique_prices
 
-Ensures only one price directive per commodity per day.
+Ensures prices of one commodity pair on one day agree. Prices that disagree are one error, `Disagreeing price entries`; a repeated price with the same value is allowed, as in beancount.
 
 ```beancount
 plugin "beancount.plugins.unique_prices"
@@ -470,7 +474,7 @@ Options: None
 Validates that Commodity directives have required metadata attributes.
 
 ```beancount
-plugin "beancount.plugins.commodity_attr" "{'name': null, 'sector': ['Tech', 'Finance', 'Healthcare']}"
+plugin "beancount.plugins.commodity_attr" "{'name': None, 'sector': ('Tech', 'Finance', 'Healthcare')}"
 
 2024-01-01 commodity AAPL
   name: "Apple Inc"
@@ -480,8 +484,10 @@ plugin "beancount.plugins.commodity_attr" "{'name': null, 'sector': ['Tech', 'Fi
 Options: Python dict where:
 
 - Keys are attribute names
-- `null` means required but any value allowed
-- `['a', 'b']` means required and must be one of the listed values
+- `None` means required but any value allowed (`null` is accepted too)
+- a tuple, list or set such as `('a', 'b')` means required and must be one of the listed values
+
+A missing attribute is `Missing attribute 'name' for Commodity directive AAPL`, and a value not listed is `Invalid value 'x' for attribute sector, Commodity directive AAPL; valid options: Tech, Finance, Healthcare`, each at the `commodity` directive.
 
 ### currency_accounts
 

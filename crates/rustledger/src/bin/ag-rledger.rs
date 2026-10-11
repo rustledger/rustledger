@@ -2272,6 +2272,15 @@ mod tests {
         req.read.into_inner()
     }
 
+    /// Whether `build` accepts `ag-rledger <args...>`.
+    fn builds<T>(args: &[&str], build: impl FnOnce(&Req<'_>) -> Result<T, CommandError>) -> bool {
+        let mut argv = vec!["ag-rledger"];
+        argv.extend_from_slice(args);
+        let invocation = agcli::parse_invocation(argv).expect("argv parses");
+        let req = Req::new(&invocation, &invocation.positionals()[1..]);
+        build(&req).is_ok()
+    }
+
     /// Every flag name, long and short, that a `rledger` clap command
     /// defines directly (not its subcommands').
     fn rledger_flags(cmd: &clap::Command) -> BTreeSet<String> {
@@ -2358,15 +2367,8 @@ mod tests {
             if name == "returns" {
                 argv.extend(["--investments", "Assets"]);
             }
-            let built = {
-                let mut full = vec!["ag-rledger"];
-                full.extend_from_slice(&argv);
-                let invocation = agcli::parse_invocation(full).expect("argv parses");
-                let req = Req::new(&invocation, &invocation.positionals()[1..]);
-                build_report_args(&req).err().map(|e| format!("{e:?}"))
-            };
-            assert_eq!(
-                built, None,
+            assert!(
+                builds(&argv, build_report_args),
                 "`rledger report {name}` is not offered by `ag-rledger report`"
             );
             let read = flags_read(&argv, build_report_args);
@@ -2385,10 +2387,14 @@ mod tests {
             let name = sub.get_name();
             let mut rledger = top.clone();
             rledger.extend(rledger_flags(sub));
-            let read = flags_read(
-                &["doctor", name, "f.beancount", "1", "2"],
-                build_doctor_command,
+            let argv = ["doctor", name, "f.beancount", "1", "2"];
+            // Every doctor subcommand `rledger` has must build here, not just
+            // have its flags read: `flags_read` ignores a refusal (#2567).
+            assert!(
+                builds(&argv, build_doctor_command),
+                "`rledger doctor {name}` is not offered by `ag-rledger doctor`"
             );
+            let read = flags_read(&argv, build_doctor_command);
             assert_reads_rledger_flags(&format!("doctor {name}"), &rledger, &read, &[COMPLETIONS]);
         }
 
@@ -2403,6 +2409,10 @@ mod tests {
         let config = cmd::config_cmd::Args::augment_args(command("config"));
         for sub in config.get_subcommands() {
             let name = sub.get_name();
+            assert!(
+                builds(&["config", name], build_config_args),
+                "`rledger config {name}` is not offered by `ag-rledger config`"
+            );
             let read = flags_read(&["config", name], build_config_args);
             assert_reads_rledger_flags(&format!("config {name}"), &rledger_flags(sub), &read, &[]);
         }

@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
-# Regenerate the parser-output and formatter-output baseline manifests
-# under tests/baselines/.
+# Regenerate both corpus baseline manifests under tests/baselines/:
+#   - parser-corpus.manifest (crates/rustledger-parser/tests/corpus_baseline.rs)
+#   - cst-corpus.manifest    (crates/rustledger-parser/tests/cst_baseline.rs)
+#
+# Both are written from the same corpus in one run. The CST manifest used
+# to be left out, so it fell ~26 entries behind the parser manifest and new
+# corpus files never got a CST baseline (#2511).
 #
 # When to run:
 #   - An intentional parser change shifts output bytes on some corpus
@@ -62,9 +67,13 @@ echo "=== Regenerating parser-output baseline ==="
 BASELINE_UPDATE=1 cargo test -p rustledger-parser --test corpus_baseline parser_output_matches_baseline
 
 echo ""
+echo "=== Regenerating CST baseline ==="
+BASELINE_UPDATE=1 cargo test -p rustledger-parser --test cst_baseline cst_output_matches_baseline
+
+echo ""
 echo "Done. Review the diff:"
 echo "  git diff tests/baselines/"
 echo ""
 echo "If the diff looks correct, stage and commit:"
 echo "  git add tests/baselines/"
-echo "  git commit -m 'chore(baselines): regenerate parser manifest'"
+echo "  git commit -m 'chore(baselines): regenerate corpus manifests'"

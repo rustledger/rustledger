@@ -116,7 +116,7 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
         originals,
         operation: "merge",
         template: file.clone(),
-        mode_mask: strictest_mode(std::iter::once(&file).chain(&flat.order)),
+        mode_mask: strictest_mode(&file, &flat.order),
     };
     if args.output.is_some() && target.exists() {
         bail!(
@@ -305,22 +305,30 @@ fn resolve_include(base: &Path, include: &str) -> Result<Vec<(PathBuf, PathBuf)>
         .collect()
 }
 
-/// A mask that takes away group and other READ access that any of `files`
+/// A mask that takes away group and other READ access that any merged file
 /// withholds: the merged file holds the content of all of them, so it must be
-/// no more readable than the most private one. Only those read bits are
-/// narrowed; write and execute bits, and the owner's, stay as the merged
-/// file's own (a read-only archived year must not make the root read-only).
+/// no more readable than the most private one. A file in a different group
+/// than `file` (whose group the merged file keeps) withholds group read from
+/// the merged file, since its group's members are not the merged file's.
+/// Only read bits are narrowed; write and execute bits, and the owner's,
+/// stay as the merged file's own (a read-only archived year must not make the
+/// root read-only).
 #[cfg(unix)]
-fn strictest_mode<'a>(files: impl Iterator<Item = &'a PathBuf>) -> Option<u32> {
-    use std::os::unix::fs::PermissionsExt;
-    let readable = files
+fn strictest_mode(file: &Path, included: &[PathBuf]) -> Option<u32> {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let gid = std::fs::metadata(file).ok()?.gid();
+    let readable = std::iter::once(file)
+        .chain(included.iter().map(PathBuf::as_path))
         .filter_map(|f| std::fs::metadata(f).ok())
-        .map(|m| m.permissions().mode() & 0o044)
+        .map(|m| {
+            let bits = m.permissions().mode() & 0o044;
+            if m.gid() == gid { bits } else { bits & 0o004 }
+        })
         .reduce(|a, b| a & b)?;
     Some(!(0o044 & !readable) & 0o7777)
 }
 
 #[cfg(not(unix))]
-fn strictest_mode<'a>(_files: impl Iterator<Item = &'a PathBuf>) -> Option<u32> {
+fn strictest_mode(_file: &Path, _included: &[PathBuf]) -> Option<u32> {
     None
 }

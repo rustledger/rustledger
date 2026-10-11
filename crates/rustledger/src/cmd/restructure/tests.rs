@@ -854,3 +854,56 @@ fn merging_a_read_only_file_keeps_the_root_writable() {
     assert_eq!(code, ExitCode::SUCCESS, "{out}{err}");
     assert_eq!(mode(&root), 0o644);
 }
+
+/// New and backup files keep the original's group, and a merged file loses
+/// group read access when a merged file belongs to another group. Needs a
+/// second group to move files into; skipped (with a note) where the user has
+/// only one.
+#[cfg(unix)]
+#[test]
+fn group_ownership_carries_over() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let out = std::process::Command::new("id").arg("-G").output().unwrap();
+    let groups: Vec<u32> = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .filter_map(|g| g.parse().ok())
+        .collect();
+    let dir = tmp();
+    let probe = write(dir.path(), "probe", "");
+    let mine = fs::metadata(&probe).unwrap().gid();
+    let Some(&other) = groups.iter().find(|&&g| g != mine) else {
+        eprintln!("Skipping group_ownership_carries_over: only one group");
+        return;
+    };
+    let file = write(dir.path(), "ledger.beancount", LEDGER);
+    std::os::unix::fs::chown(&file, None, Some(other)).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
+    let (code, _, err) = run_split(&split_args(&file, Period::Year));
+    assert_eq!(code, ExitCode::SUCCESS, "{err}");
+    let gid = |p: &Path| fs::metadata(p).unwrap().gid();
+    assert_eq!(gid(&file), other);
+    assert_eq!(gid(&dir.path().join("ledger/2023.beancount")), other);
+    let backup = fs::read_dir(dir.path().join(".rledger-backup"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(gid(&backup.join("ledger.beancount.bak")), other);
+
+    // Merge a file of the user's own group into a root of `other`: the
+    // merged file keeps `other` but may not grant it the included content.
+    let dir = tmp();
+    let root = write(dir.path(), "main.beancount", "include \"a.beancount\"\n");
+    let a = write(dir.path(), "a.beancount", "2020-01-01 open Assets:Bank\n");
+    std::os::unix::fs::chown(&root, None, Some(other)).unwrap();
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o640)).unwrap();
+    fs::set_permissions(&a, fs::Permissions::from_mode(0o640)).unwrap();
+    let (code, out, err) = run_merge(&merge_args(&root));
+    assert_eq!(code, ExitCode::SUCCESS, "{out}{err}");
+    assert_eq!(gid(&root), other);
+    assert_eq!(
+        fs::metadata(&root).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+}

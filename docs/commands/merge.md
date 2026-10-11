@@ -64,8 +64,11 @@ Only plain files inside `FILE`'s directory are removed: an include outside it, o
 one reached through a symlink, may belong to another ledger and is left in place
 (the plan says so), together with everything it includes.
 
-The merged file is no more readable than the most private file merged into it,
-and backups keep the permissions of the files they copy.
+The merged file is no more readable than the most private file merged into it:
+it keeps `FILE`'s group, and loses group or other read access that any merged
+file withholds (a file in another group withholds group access). Backups keep
+the group and permissions of the files they copy. Where a group cannot be
+copied, group access is dropped instead.
 
 With `--output`, `FILE` is also loaded with the new file in place, so an output
 path that one of `FILE`'s include globs would pick up is refused.

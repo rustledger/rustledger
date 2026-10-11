@@ -96,9 +96,9 @@ different files and could change it, so it is not offered.
 
 ## Writing and backups
 
-The original is first copied to `.rledger-backup/<timestamp>-split/` (with a
-`manifest.txt` listing every file saved and created, and the original's
-permissions). The new files are then written next to their targets under
+The original is first copied to `.rledger-backup/<timestamp>-split/`, keeping
+its group and permissions, with a `manifest.txt` listing every file saved and
+created. The new files are then written next to their targets under
 temporary names and moved into place, the root last. Until the root is replaced
 the old ledger is intact, and once it is the new one is complete. If anything
 fails before that point, nothing but the backup is left on disk. `split` refuses

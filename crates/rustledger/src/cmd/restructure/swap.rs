@@ -173,16 +173,12 @@ fn stage(
             &plan.template
         };
         if let Ok(meta) = fs::metadata(template) {
-            let mut perms = meta.permissions();
-            #[cfg(unix)]
-            if target == &plan.commit
-                && let Some(mask) = plan.mode_mask
-            {
-                use std::os::unix::fs::PermissionsExt;
-                perms.set_mode(perms.mode() & mask);
-            }
-            fs::set_permissions(&tmp, perms)
-                .with_context(|| format!("failed to set permissions on {}", tmp.display()))?;
+            let mask = if target == &plan.commit {
+                plan.mode_mask
+            } else {
+                None
+            };
+            copy_access(&tmp, &meta, mask)?;
         }
         f.sync_all()
             .with_context(|| format!("failed to flush {}", tmp.display()))?;
@@ -281,8 +277,7 @@ fn make_backup(plan: &Plan) -> Result<PathBuf> {
         // not sit world-readable in the backup (and `restore` copies these
         // permissions back).
         if let Ok(meta) = fs::metadata(path) {
-            fs::set_permissions(&dest, meta.permissions())
-                .with_context(|| format!("failed to back up {}", path.display()))?;
+            copy_access(&dest, &meta, None)?;
         }
         f.sync_all()
             .with_context(|| format!("failed to back up {}", path.display()))?;
@@ -359,4 +354,28 @@ fn unique_suffix() -> String {
         .map_or(0, |d| d.as_nanos());
     let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     format!("{}-{nanos}-{n}", std::process::id())
+}
+
+/// Give `path` the group and permission bits of `template`, narrowed by
+/// `mask`. A new file belongs to the process's group, which may be shared
+/// more widely than the original's: the group is copied where the user may
+/// set it, and where not, group access is dropped rather than handed to a
+/// different group.
+fn copy_access(path: &Path, template: &fs::Metadata, mask: Option<u32>) -> Result<()> {
+    let mut perms = template.permissions();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let mut mode = perms.mode() & mask.unwrap_or(0o7777);
+        let regrouped = std::os::unix::fs::chown(path, None, Some(template.gid())).is_ok()
+            || fs::metadata(path).is_ok_and(|m| m.gid() == template.gid());
+        if !regrouped {
+            mode &= !0o070;
+        }
+        perms.set_mode(mode);
+    }
+    #[cfg(not(unix))]
+    let _ = mask;
+    fs::set_permissions(path, perms)
+        .with_context(|| format!("failed to set permissions on {}", path.display()))
 }

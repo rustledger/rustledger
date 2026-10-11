@@ -224,8 +224,8 @@ not. The verdict depends only on the claim and the pool, never on the
 transaction's other postings or on `infer_tolerance_from_cost`. A total cost is
 compared as a total: it must round what the units sold cost at the average, to
 half a unit in the total's last digit. A compound `{a # b}` states the total
-`a × units + b`, and holds within `units × ` half a unit of `a` plus half a
-unit of `b`, since each part is rounded to its own places. A spec that names no
+`a × units + b`, and holds within the units sold times half a unit of `a`,
+plus half a unit of `b`, since each part is rounded to its own places. A spec that names no
 cost (`{}` or `{EUR}`) books at the pool as before. Beancount has no `AVERAGE`
 booking (it refuses the method), so this rule is rustledger's own.
 

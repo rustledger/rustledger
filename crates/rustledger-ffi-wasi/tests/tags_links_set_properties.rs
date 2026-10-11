@@ -107,6 +107,7 @@ proptest! {
         for original in [
             Directive::Transaction(rustledger_core::Transaction::new(date, "x")),
             Directive::Document(rustledger_core::Document::new(date, "Assets:A", "r.pdf")),
+            Directive::Note(rustledger_core::Note::new(date, "Assets:A", "hi")),
         ] {
             let mut w = directive_to_wrapper(&original);
             match &mut w.data {
@@ -118,6 +119,10 @@ proptest! {
                     d.tags.clone_from(&tags);
                     d.links.clone_from(&links);
                 }
+                DirectiveData::Note(n) => {
+                    n.tags.clone_from(&tags);
+                    n.links.clone_from(&links);
+                }
                 _ => unreachable!(),
             }
             let back = wrapper_to_directive(&w).expect("converts");
@@ -127,15 +132,17 @@ proptest! {
         }
     }
 
-    /// FFI input: a host-built transaction or document holds the set.
+    /// FFI input: a host-built transaction, document or note holds the set
+    /// (a note's were dropped before #2573).
     #[test]
     fn ffi_input_is_normalized(tags in names(), links in names()) {
-        for kind in ["transaction", "document"] {
+        for kind in ["transaction", "document", "note"] {
             let json = serde_json::json!({
                 "type": kind,
                 "date": "2024-01-01",
                 "account": "Assets:A",
                 "path": "r.pdf",
+                "comment": "hi",
                 "tags": tags,
                 "links": links,
             });

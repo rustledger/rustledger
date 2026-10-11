@@ -193,8 +193,11 @@ fn oversized_cost_basis_on_reduction_is_reported() {
         \x20 Assets:Cash  -10000000000000000 CASHU\n\
          2024-03-01 * \"sell\"\n\
         \x20 Assets:Stock -10000000000000000 HOOL {}\n\
-        \x20 Assets:Cash   10000000000000000 CASHU\n",
+        \x20 Assets:Cash   10000000000000000 USD\n",
     );
+    // The sale's cash is in the lot's cost currency: beside cash in another
+    // one, the `{}` takes that currency and matches no lot before the reduce
+    // path is reached (#2571).
     assert_reported_not_panicked(code, &out, "oversized cost basis");
     if code.is_none() {
         return;

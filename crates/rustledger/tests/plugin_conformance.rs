@@ -15,8 +15,11 @@
 //! | Python module | `plugin "python:module"`: rejected by design (#1432) | check |
 //! | Python built-in | `plugin "python:leafonly"` / `"python:check_commodity"` force the Python implementation | check |
 //! | native + Python together | `with_plugins.beancount` fixture | check |
+//! | Python compat layer | `beancount.core.realization` and `.compare`, as beancount's `leafonly` and `noduplicates` use them | check |
 //! | native vs Python | each plugin with both implementations reports beancount's message, severity and location either way | check |
 //! | WASM importer (a `wasm_importer_main!` guest) | `extract --wasm-importer x.wasm` | extract |
+//! | WASM importer + `importers.toml` `[payees]` | `extract --wasm-importer x.wasm` | extract |
+//! | WASM + Python | an entry returned whole keeps its tags and links (notes and documents) | query |
 //!
 //! And the LIMITS of each sandboxed kind (WASM plugin, Python plugin,
 //! WASM importer), through the same commands:
@@ -28,8 +31,8 @@
 //! - a plugin that allocates past the 256 MiB sandbox cap is stopped with
 //!   a memory error, and rledger itself survives to report it;
 //! - isolation: a WASM guest cannot import anything (so no filesystem, no
-//!   network); a Python plugin sees exactly `/lib` and `/work`, both
-//!   read-only, and cannot reach the ledger's directory, `$HOME`,
+//!   network); a Python plugin sees exactly `/lib`, read-only (its inputs
+//!   arrive on stdin), and cannot reach the ledger's directory, `$HOME`,
 //!   `/etc/passwd` or the network;
 //! - a plugin's error is reported with its message and source location.
 //!
@@ -572,6 +575,99 @@ fn native_and_python_implementations_agree() {
     }
 }
 
+/// `beancount.core.realization` and `beancount.core.compare`, which
+/// beancount's own `leafonly` and `noduplicates` import, are in the compat
+/// layer (#2540; the import failed before). These plugins call them as
+/// beancount's do: `realize(entries, compute_balance=False)` and its tree
+/// walk, and `compare.hash_entries(entries, exclude_meta=True)`.
+#[test]
+fn python_compat_realization_and_compare() {
+    if !python_ready() {
+        return;
+    }
+    // As beancount's `leafonly`: a non-leaf account holding anything but
+    // an open or a balance, reported at its open.
+    let dir = python_plugin(
+        "leaves",
+        "from beancount.core import data, getters, realization\n\
+         __plugins__ = ['leaves']\n\
+         def leaves(entries, options_map):\n    \
+             root = realization.realize(entries, compute_balance=False)\n    \
+             opens = getters.get_account_open_close(entries)\n    \
+             errors = []\n    \
+             for real in realization.iter_children(root):\n        \
+                 if len(real) == 0 or not real.txn_postings:\n            \
+                     continue\n        \
+                 if all(isinstance(p, (data.Open, data.Balance)) for p in real.txn_postings):\n            \
+                     continue\n        \
+                 open_entry = opens[real.account][0]\n        \
+                 errors.append(ValidationError(open_entry.meta,\n            \
+                     f\"Non-leaf account '{real.account}' has postings on it\", open_entry))\n    \
+             assert realization.get(root, 'Assets:Bank:Sub').account == 'Assets:Bank:Sub'\n    \
+             assert realization.contains(root, 'Expenses') and not realization.contains(root, 'Income')\n    \
+             leaves = [r.account for r in realization.iter_children(root, leaf_only=True)]\n    \
+             errors.append(ValidationError(None, f'leaves={leaves}', None))\n    \
+             return entries, errors\n",
+    );
+    run(dir.path(), &["check", "ledger.beancount"])
+        .failed_cleanly()
+        .has("ledger.beancount:3:1: error[PLUGIN]: Non-leaf account 'Assets:Bank' has postings on it")
+        .has("leaves=['Assets:Bank:Sub', 'Expenses:Food']")
+        .lacks("Traceback");
+
+    // As beancount's `noduplicates`, plus `includes_entries`.
+    let dir = python_plugin(
+        "dups",
+        "from beancount.core import compare\n\
+         __plugins__ = ['dups']\n\
+         def dups(entries, options_map):\n    \
+             _, errors = compare.hash_entries(entries, exclude_meta=True)\n    \
+             unique = list({compare.hash_entry(e, exclude_meta=True): e for e in entries}.values())\n    \
+             ok, missing = compare.includes_entries(unique[:2], unique)\n    \
+             assert ok and missing == [], (ok, missing)\n    \
+             ok, missing = compare.includes_entries(unique, unique[:2])\n    \
+             errors.append(ValidationError(None, f'includes={ok} missing={len(missing)}', None))\n    \
+             return entries, errors\n",
+    );
+    let snack = "2024-01-03 * \"Snack\"\n  Assets:Bank  -2 USD\n  Expenses:Food\n";
+    let source = std::fs::read_to_string(dir.path().join("ledger.beancount")).unwrap();
+    std::fs::write(
+        dir.path().join("ledger.beancount"),
+        format!("{source}\n{snack}"),
+    )
+    .unwrap();
+    let out = run(dir.path(), &["check", "ledger.beancount"]);
+    out.failed_cleanly()
+        .has(&format!(
+            "ledger.beancount:{}:1: error[PLUGIN]: Duplicate entry: ",
+            SNACK_LINE + 4
+        ))
+        .has("includes=False missing=3")
+        .lacks("Traceback");
+    assert_eq!(
+        out.text.matches("Duplicate entry").count(),
+        1,
+        "{}",
+        out.text
+    );
+
+    // The balance needs `beancount.core.inventory`, which is not there:
+    // asking for it is an error naming the way around, not a tree without
+    // balances.
+    let dir = python_plugin(
+        "balances",
+        "from beancount.core import realization\n\
+         __plugins__ = ['balances']\n\
+         def balances(entries, options_map):\n    \
+             realization.realize(entries)\n    \
+             return entries, []\n",
+    );
+    run(dir.path(), &["check", "ledger.beancount"])
+        .failed_cleanly()
+        .has("NotImplementedError")
+        .has("pass compute_balance=False");
+}
+
 /// Native and Python plugins in one ledger (the `with_plugins` fixture):
 /// each one's effect shows.
 #[test]
@@ -626,6 +722,22 @@ fn wasm_importer_in_extract() {
         .has("conformance: WASM importer ran")
         .has("2024-01-15 * \"conformance import\"")
         .has("Expenses:Conformance   12.34 USD");
+}
+
+/// `importers.toml`'s `[payees]` rewrites a WASM importer's payee like a
+/// built-in's (#2550): the step runs on every importer's output. The guest
+/// writes no payee, so its narration is matched, and is kept.
+#[test]
+fn wasm_importer_output_gets_payee_rewrites() {
+    let Some(guests) = guests() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("importers.toml"),
+        "[payees]\n\"/^conformance\\\\b/\" = \"Conformance Bank\"\n",
+    )
+    .unwrap();
+    extract(dir.path(), guests, "statement", &[])
+        .has("2024-01-15 * \"Conformance Bank\" \"conformance import\"");
 }
 
 // ---------------------------------------------------------------------------
@@ -761,7 +873,7 @@ fn wasm_guests_cannot_import_host_functions() {
         (import "wasi_snapshot_preview1" "fd_read" (func (param i32 i32 i32 i32) (result i32)))
         (memory (export "memory") 1)
         (func (export "alloc") (param i32) (result i32) i32.const 0)
-        (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+        (func (export "__rustledger_abi_version") (result i32) i32.const 2)
         (func (export "process") (param i32 i32) (result i64) i64.const 0)
         (func (export "identify") (param i32 i32) (result i64) i64.const 0)
         (func (export "extract") (param i32 i32) (result i64) i64.const 0)
@@ -792,8 +904,8 @@ fn wasm_guests_cannot_import_host_functions() {
     .has("forbidden import wasi_snapshot_preview1::fd_read");
 }
 
-/// A Python plugin sees exactly `/lib` (the standard library) and `/work`
-/// (its inputs), both read-only, and nothing of the host: not the
+/// A Python plugin sees exactly `/lib` (the standard library), read-only,
+/// and nothing of the host (its inputs arrive on stdin): not the
 /// ledger's directory, not `$HOME`, not `/etc/passwd`, not the network.
 #[test]
 fn python_plugin_isolation() {
@@ -823,7 +935,7 @@ def probe(entries, options_map):
     reads = {{
         'secret': _try(lambda: open({secret:?}).read()),
         'passwd': _try(lambda: open('/etc/passwd').read()),
-        'escape': _try(lambda: open('/work/../../etc/passwd').read()),
+        'escape': _try(lambda: open('/lib/../../etc/passwd').read()),
     }}
     writes = {{p: _try(lambda: open(p, 'w').write('x'))
                for p in ['/work/x', '/lib/x', '/x', '/tmp/x']}}
@@ -839,7 +951,7 @@ def probe(entries, options_map):
     );
     std::fs::write(dir.path().join("probe.py"), probe).unwrap();
     let out = run(dir.path(), &["check", "ledger.beancount"]);
-    out.has("listable=['/lib', '/work']").lacks("host secret");
+    out.has("listable=['/lib']").lacks("host secret");
     for line in out
         .text
         .lines()
@@ -851,6 +963,88 @@ def probe(entries, options_map):
         );
     }
     out.has("reads=").has("writes=").has("net=");
+}
+
+// ---------------------------------------------------------------------------
+// Round trip
+// ---------------------------------------------------------------------------
+
+/// A note and a document whose tags come from their own header and from a
+/// `pushtag` block, with links.
+const TAGGED_NOTE_AND_DOCUMENT: &str = "\
+pushtag #pushed
+2024-01-04 note Assets:Bank \"called the bank\" #ntag ^nlink
+2024-01-04 document Assets:Bank \"statement.pdf\" #dtag ^dlink
+poptag #pushed
+";
+
+/// The note's and the document's tags and links, as `query` lists them.
+fn note_and_document_tags(dir: &Path) -> Out {
+    run(
+        dir,
+        &[
+            "query",
+            "ledger.beancount",
+            "SELECT type, tags, links FROM #entries WHERE type = 'note' OR type = 'document'",
+        ],
+    )
+}
+
+#[track_caller]
+fn assert_tags_kept(out: &Out) {
+    for want in ["ntag", "dtag", "nlink", "dlink"] {
+        out.has(want);
+    }
+    // Both entries carry the pushed tag.
+    assert_eq!(out.text.matches("pushed").count(), 2, "{}", out.text);
+}
+
+/// A plugin that hands every entry back (a WASM guest returning each as a
+/// modification, a Python plugin returning its input) keeps a note's tags
+/// and links, including those `pushtag` gives it, and a document's. A note
+/// came back with none before #2573: neither the wire nor the Python compat
+/// layer carried them.
+#[test]
+fn tags_and_links_survive_a_plugin_round_trip() {
+    let dir = tempfile::tempdir().unwrap();
+    let write = |header: &str| {
+        std::fs::write(
+            dir.path().join("ledger.beancount"),
+            format!("{header}\n\n{BODY}\n{TAGGED_NOTE_AND_DOCUMENT}"),
+        )
+        .unwrap();
+    };
+    write("");
+    assert_tags_kept(&note_and_document_tags(dir.path()));
+
+    if let Some(guests) = guests() {
+        install_wasm_plugin(dir.path(), guests);
+        write("plugin \"conformance.wasm\" \"rebuild\"");
+        let out = note_and_document_tags(dir.path());
+        out.has("conformance: WASM plugin ran over 7 directives")
+            .lacks("plugin execution failed");
+        assert_tags_kept(&out);
+    }
+
+    if python_ready() {
+        // It reports what it saw of the document, so the test sees it ran
+        // and read the document's own path (it read the entry's source
+        // file there, and wrote it back under a key the host rejected,
+        // before #2573's review).
+        std::fs::write(
+            dir.path().join("passthrough.py"),
+            "__plugins__ = ['passthrough']\n\
+             def passthrough(entries, options_map):\n    \
+             docs = [e.filename for e in entries if type(e).__name__ == 'Document']\n    \
+             return list(entries), [ValidationError(None, f'passthrough saw {docs}', None)]\n",
+        )
+        .unwrap();
+        write("plugin \"passthrough.py\"");
+        let out = note_and_document_tags(dir.path());
+        out.has("passthrough saw ['statement.pdf']")
+            .lacks("plugin execution failed");
+        assert_tags_kept(&out);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1153,7 +1347,7 @@ fn python_plugin_open_files_are_capped() {
     let dir = python_plugin(
         "hoard",
         "__plugins__ = ['hoard']\ndef hoard(entries, options_map):\n    \
-         held = []\n    while True:\n        held.append(open('/work/script.py', 'rb'))\n",
+         held = []\n    while True:\n        held.append(open('/lib/os.py', 'rb'))\n",
     );
     run(dir.path(), &["check", "ledger.beancount"])
         .failed_cleanly()
@@ -1277,8 +1471,8 @@ fn plugin_text_control_characters_are_escaped() {
 
 /// Python plugins back to back, two of them stopped at the deadline
 /// mid-sleep: each is reported, the next one still runs, the process ends
-/// promptly (no guest thread or runtime outlives its call), and no plugin
-/// leaves its temp directory behind.
+/// promptly (no guest thread or runtime outlives its call), and nothing
+/// is left in the temp directory.
 #[test]
 fn python_plugins_back_to_back_after_a_timeout() {
     if !python_ready() {
@@ -1311,49 +1505,90 @@ fn python_plugins_back_to_back_after_a_timeout() {
     assert!(left.is_empty(), "temp files left behind: {left:?}");
 }
 
-/// A Python plugin's inputs (the ledger's entries) sit in a temp
-/// directory while it runs, and remain after a Ctrl-C; the directory is
-/// the user's alone (it followed the umask, 0775, before).
-#[cfg(unix)]
+/// The entries arrive on the guest's stdin, but a plugin reading
+/// `sys.stdin` (an `input()` left in, say) gets end of file, as before
+/// #2551, and does not take the entries from the plugin runner.
 #[test]
-fn python_plugin_work_dir_is_private() {
-    use std::os::unix::fs::PermissionsExt;
+fn python_plugin_stdin_reads_nothing() {
+    if !python_ready() {
+        return;
+    }
+    let dir = python_plugin(
+        "reader",
+        "import sys\nTAKEN = sys.stdin.read()\n__plugins__ = ['reader']\n\
+         def reader(entries, options_map):\n    \
+         return entries, [ValidationError(None, f'took {len(TAKEN)} saw {len(entries)}', None)]\n",
+    );
+    run(dir.path(), &["check", "ledger.beancount"]).has("took 0 saw 5");
+}
+
+/// A Python plugin's inputs (the ledger's entries) reach it from memory,
+/// so a Ctrl-C mid-run leaves nothing on disk. Before #2551 they sat in a
+/// temp directory, which rledger, killed by the signal, left behind.
+///
+/// Linux only: the guest's thread (`rledger-python-plugin`, its name cut
+/// to 15 bytes in `/proc`) says the plugin has started.
+#[cfg(target_os = "linux")]
+#[test]
+fn python_plugin_leaves_nothing_on_disk_after_sigint() {
+    use std::os::unix::process::ExitStatusExt;
     if !python_ready() {
         return;
     }
     let dir = python_plugin(
         "slow",
         "import time\n__plugins__ = ['slow']\ndef slow(entries, options_map):\n    \
-         time.sleep(5)\n    return entries, []\n",
+         time.sleep(60)\n    return entries, []\n",
     );
     let tmp = tempfile::tempdir().unwrap();
     let mut child = Command::new(bin())
         .args(["check", "ledger.beancount"])
         .current_dir(dir.path())
         .env("RLEDGER_CONFIG_DIR", dir.path())
+        .env("PROGRAMDATA", dir.path())
         .env("TMPDIR", tmp.path())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let mode = loop {
-        let found = std::fs::read_dir(tmp.path())
-            .unwrap()
+    let guest_running = || {
+        std::fs::read_dir(format!("/proc/{}/task", child.id()))
+            .into_iter()
+            .flatten()
             .filter_map(Result::ok)
-            .find(|e| e.path().join("entries.jsonl").exists());
-        if let Some(entry) = found {
-            break entry.metadata().unwrap().permissions().mode();
-        }
+            .any(|task| {
+                std::fs::read_to_string(task.path().join("comm"))
+                    .is_ok_and(|name| name.starts_with("rledger-python"))
+            })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !guest_running() {
         assert!(
             std::time::Instant::now() < deadline,
-            "the plugin's work directory never appeared"
+            "the Python plugin never started"
         );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    };
-    let _ = child.kill();
-    let _ = child.wait();
-    assert_eq!(mode & 0o077, 0, "work directory mode {mode:o}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // Let the interpreter start and the plugin reach its sleep.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert!(guest_running(), "the Python plugin ended early");
+    let sent = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success());
+    let status = child.wait().unwrap();
+    assert_eq!(
+        status.signal(),
+        Some(2),
+        "rledger was not stopped by SIGINT: {status:?}"
+    );
+    let left: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .collect();
+    assert!(left.is_empty(), "left in $TMPDIR after Ctrl-C: {left:?}");
 }
 
 /// A module's own text in a load error (here its import names) is escaped
@@ -1365,7 +1600,7 @@ fn wasm_module_text_in_load_errors_is_escaped() {
         (import "m\1b[2J\1b]0;pwned\07" "f" (func))
         (memory (export "memory") 1)
         (func (export "alloc") (param i32) (result i32) i32.const 0)
-        (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+        (func (export "__rustledger_abi_version") (result i32) i32.const 2)
         (func (export "process") (param i32 i32) (result i64) i64.const 0)
         (func (export "identify") (param i32 i32) (result i64) i64.const 0)
         (func (export "extract") (param i32 i32) (result i64) i64.const 0)
@@ -1416,7 +1651,7 @@ fn wasm_importer_trap_and_decode_text_is_escaped() {
     let trap = r#"(module
         (memory (export "memory") 1)
         (func (export "alloc") (param i32) (result i32) i32.const 1024)
-        (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+        (func (export "__rustledger_abi_version") (result i32) i32.const 2)
         (func (export "identify") (param i32 i32) (result i64) i64.const 0)
         (func (export "extract") (param i32 i32) (result i64) i64.const 0)
         (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 0)
@@ -1429,7 +1664,7 @@ fn wasm_importer_trap_and_decode_text_is_escaped() {
   (data (i32.const 256) "\81\a7\6d\61\74\63\68\65\73\c3")
   (data (i32.const 512) "\83\aa\64\69\72\65\63\74\69\76\65\73\91\82\a4\64\61\74\65\aa\32\30\32\34\2d\30\31\2d\30\31\a4\74\79\70\65\ae\1b\5b\32\4a\1b\5d\30\3b\70\77\6e\65\64\07\a8\77\61\72\6e\69\6e\67\73\90\a6\65\72\72\6f\72\73\90")
   (func (export "alloc") (param i32) (result i32) i32.const 4096)
-  (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+  (func (export "__rustledger_abi_version") (result i32) i32.const 2)
   (func (export "identify") (param i32 i32) (result i64) i64.const 1099511627786)
   (func (export "extract") (param i32 i32) (result i64) i64.const 2199023255620)
   (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 2199023255620)

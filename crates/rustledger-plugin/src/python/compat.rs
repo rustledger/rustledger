@@ -56,7 +56,10 @@ Pad = namedtuple('Pad', ['meta', 'date', 'account', 'source_account'])
 
 Event = namedtuple('Event', ['meta', 'date', 'type', 'description'])
 
-Note = namedtuple('Note', ['meta', 'date', 'account', 'comment'])
+# `tags` and `links` as in beancount 3 (#2573); they default to empty so a
+# plugin building a note the old way, with four fields, still works.
+Note = namedtuple('Note', ['meta', 'date', 'account', 'comment', 'tags', 'links'],
+                  defaults=(frozenset(), frozenset()))
 
 Document = namedtuple('Document', [
     'meta', 'date', 'account', 'filename', 'tags', 'links'
@@ -377,14 +380,16 @@ def _dict_to_directive(d):
             meta=meta,
             date=date_val,
             account=d.get('account', ''),
-            comment=d.get('comment', '')
+            comment=d.get('comment', ''),
+            tags=frozenset(d.get('tags', [])),
+            links=frozenset(d.get('links', []))
         )
     elif dtype == 'document':
         return Document(
             meta=meta,
             date=date_val,
             account=d.get('account', ''),
-            filename=d.get('filename', ''),
+            filename=d.get('path', ''),
             tags=frozenset(d.get('tags', [])),
             links=frozenset(d.get('links', []))
         )
@@ -591,7 +596,9 @@ def _directive_to_dict(entry):
             'metadata': _serialize_meta(entry.meta),
             'date': _serialize_date(entry.date),
             'account': entry.account,
-            'comment': entry.comment
+            'comment': entry.comment,
+            'tags': list(entry.tags) if entry.tags else [],
+            'links': list(entry.links) if entry.links else []
         }
     elif isinstance(entry, Document):
         return {
@@ -599,7 +606,7 @@ def _directive_to_dict(entry):
             'metadata': _serialize_meta(entry.meta),
             'date': _serialize_date(entry.date),
             'account': entry.account,
-            'filename': entry.filename,
+            'path': entry.filename,
             'tags': list(entry.tags) if entry.tags else [],
             'links': list(entry.links) if entry.links else []
         }
@@ -647,15 +654,16 @@ def serialize_entries(entries):
     return json.dumps([_directive_to_dict(e) for e in entries], default=str)
 
 
-def load_entries(path):
-    """Read directives written one JSON object per line.
+def load_entries(f):
+    """Read directives written one JSON object per line from the text
+    file object `f` (the rest of the guest's stdin, see the host's
+    `PLUGIN_SCRIPT`).
 
     Line by line, so the whole input never sits in memory as one string
     next to the objects parsed from it (#2500 review: a 100k-transaction
     ledger exhausted the sandbox's memory that way).
     """
-    with open(path) as f:
-        return [_dict_to_directive(json.loads(line)) for line in f if line.strip()]
+    return [_dict_to_directive(json.loads(line)) for line in f if line.strip()]
 
 
 def dump_entries(entries, f, inputs=()):
@@ -731,7 +739,7 @@ def _entry_point_name(item):
     return item if isinstance(item, str) else getattr(item, '__name__', repr(item))
 
 
-def run_plugin(module, plugin_name, entries_path, options_json, config=None,
+def run_plugin(module, plugin_name, entries_file, options_json, config=None,
                entry_points=None):
     """
     Run a plugin module the way beancount's loader does.
@@ -756,7 +764,8 @@ def run_plugin(module, plugin_name, entries_path, options_json, config=None,
     Args:
         module: The plugin's module object
         plugin_name: The plugin reference, for messages
-        entries_path: File of directives, one JSON object per line
+        entries_file: Text file object of directives, one JSON object
+            per line
         options_json: JSON-serialized options dict
         config: Optional plugin config string
         entry_points: Names of the functions to run instead of
@@ -794,7 +803,7 @@ def run_plugin(module, plugin_name, entries_path, options_json, config=None,
                 f'"{_entry_point_name(item)}", which is not a function')
         callbacks.append((_entry_point_name(item), callback))
 
-    entries = load_entries(entries_path)
+    entries = load_entries(entries_file)
     inputs = list(entries)
     options = json.loads(options_json) if options_json else {}
     args = () if config is None else (config,)
@@ -928,6 +937,255 @@ _beancount.core.flags.FLAG_UNREALIZED = 'U'
 _beancount.core.flags.FLAG_RETURNS = 'R'
 _beancount.core.flags.FLAG_MERGING = 'M'
 
+# Create beancount.core.realization module (#2540): the account tree that
+# beancount's own `leafonly` walks. Ported from beancount 3's
+# `beancount.core.realization` without the balance, which needs
+# `beancount.core.inventory` (not provided here).
+_beancount.core.realization = FakeModule('beancount.core.realization')
+
+
+class RealAccount(dict):
+    """A realized account: a dict of child component name to RealAccount,
+    with the account's own `txn_postings` (TxnPosting for each posting of
+    a transaction, and the other directives that name the account)."""
+
+    __slots__ = ('account', 'txn_postings', 'balance')
+
+    def __init__(self, account_name, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        assert isinstance(account_name, str)
+        self.account = account_name
+        self.txn_postings = []
+        self.balance = None
+
+    def __setitem__(self, key, value):
+        if not isinstance(key, str) or not key:
+            raise KeyError("Invalid RealAccount key: '{}'".format(key))
+        if not isinstance(value, RealAccount):
+            raise ValueError("Invalid RealAccount value: '{}'".format(value))
+        if not value.account.endswith(key):
+            raise ValueError(
+                "RealAccount name '{}' inconsistent with key: '{}'".format(value.account, key))
+        return super().__setitem__(key, value)
+
+    def copy(self):
+        import copy as _copy
+        return _copy.copy(self)
+
+    def __eq__(self, other):
+        return (dict.__eq__(self, other)
+                and self.account == other.account
+                and self.balance == other.balance
+                and self.txn_postings == other.txn_postings)
+
+    def __ne__(self, other):
+        return not self.__eq__(other)
+
+    __hash__ = None
+
+
+def _realization_iter_children(real_account, leaf_only=False):
+    """This node and all its children, depth-first, children in name order."""
+    if not leaf_only or len(real_account) == 0:
+        yield real_account
+    for _, real_child in sorted(real_account.items()):
+        yield from _realization_iter_children(real_child, leaf_only)
+
+
+def _realization_get(real_account, account_name, default=None):
+    if not isinstance(account_name, str):
+        raise ValueError
+    for component in account_name.split(':'):
+        real_child = real_account.get(component, default)
+        if real_child is default:
+            return default
+        real_account = real_child
+    return real_account
+
+
+def _realization_get_or_create(real_account, account_name):
+    if not isinstance(account_name, str):
+        raise ValueError
+    path = []
+    for component in account_name.split(':'):
+        path.append(component)
+        real_child = real_account.get(component, None)
+        if real_child is None:
+            real_child = RealAccount(':'.join(path))
+            real_account[component] = real_child
+        real_account = real_child
+    return real_account
+
+
+def _realization_contains(real_account, account_name):
+    return _realization_get(real_account, account_name) is not None
+
+
+def _custom_value_account(value):
+    """The account a `custom` value names, or None: a beancount-style value
+    (`.dtype`) or this layer's `{"type": "account", "value": ...}`."""
+    dtype = getattr(value, 'dtype', None)
+    if dtype is not None:
+        return value.value if dtype == 'account' else None
+    if isinstance(value, dict) and value.get('type') == 'account':
+        return value.get('value')
+    return None
+
+
+def _realization_postings_by_account(entries):
+    """Account name to the TxnPostings and directives that name it, in
+    entry order (beancount's `postings_by_account`)."""
+    import collections as _collections
+    txn_postings_map = _collections.defaultdict(list)
+    for entry in entries:
+        if isinstance(entry, Transaction):
+            for posting in entry.postings:
+                txn_postings_map[posting.account].append(TxnPosting(entry, posting))
+        elif isinstance(entry, (Open, Close, Balance, Note, Document)):
+            txn_postings_map[entry.account].append(entry)
+        elif isinstance(entry, Pad):
+            txn_postings_map[entry.account].append(entry)
+            txn_postings_map[entry.source_account].append(entry)
+        elif isinstance(entry, Custom):
+            for value in entry.values or ():
+                account_name = _custom_value_account(value)
+                if account_name:
+                    txn_postings_map[account_name].append(entry)
+    return txn_postings_map
+
+
+def _realization_realize(entries, min_accounts=None, compute_balance=True):
+    """The root RealAccount of the tree of accounts `entries` name.
+
+    `compute_balance=True` (beancount's default) needs
+    `beancount.core.inventory`, which this layer does not provide, so it
+    raises rather than return a tree without balances; pass
+    `compute_balance=False`, as beancount's `leafonly` does.
+    """
+    if compute_balance:
+        raise NotImplementedError(
+            'beancount.core.realization.realize(compute_balance=True) needs '
+            'beancount.core.inventory, which rledger\'s Python compat layer does '
+            'not provide; pass compute_balance=False')
+    real_root = RealAccount('')
+    for account_name, txn_postings in _realization_postings_by_account(entries).items():
+        real_account = _realization_get_or_create(real_root, account_name)
+        real_account.txn_postings = txn_postings
+    for account_name in min_accounts or ():
+        _realization_get_or_create(real_root, account_name)
+    return real_root
+
+
+_beancount.core.realization.RealAccount = RealAccount
+_beancount.core.realization.realize = _realization_realize
+_beancount.core.realization.iter_children = _realization_iter_children
+_beancount.core.realization.get = _realization_get
+_beancount.core.realization.get_or_create = _realization_get_or_create
+_beancount.core.realization.contains = _realization_contains
+_beancount.core.realization.postings_by_account = _realization_postings_by_account
+
+
+# Create beancount.core.compare module (#2540): the stable entry hashes
+# beancount's own `noduplicates` uses. Ported from beancount 3's
+# `beancount.core.compare`.
+_beancount.core.compare = FakeModule('beancount.core.compare')
+
+CompareError = namedtuple('CompareError', ['source', 'message', 'entry'])
+
+_COMPARE_IGNORED_FIELD_NAMES = {'meta', 'diff_amount'}
+
+
+def _compare_stable_hash_namedtuple(objtuple, ignore=frozenset()):
+    """An MD5 hex digest of the namedtuple's fields but `ignore`, lists and
+    sets hashed element-wise and sorted, so their order does not count."""
+    import hashlib
+    hashobj = hashlib.md5()
+    for attr_name, attr_value in zip(objtuple._fields, objtuple):
+        if attr_name in ignore:
+            continue
+        if isinstance(attr_value, (list, set, frozenset)):
+            subhashes = []
+            for element in attr_value:
+                if isinstance(element, tuple) and hasattr(element, '_fields'):
+                    subhashes.append(_compare_stable_hash_namedtuple(element, ignore))
+                else:
+                    md5 = hashlib.md5()
+                    md5.update(str(element).encode())
+                    subhashes.append(md5.hexdigest())
+            for subhash in sorted(subhashes):
+                hashobj.update(subhash.encode())
+        else:
+            hashobj.update(str(attr_value).encode())
+    return hashobj.hexdigest()
+
+
+def _compare_hash_entry(entry, exclude_meta=False):
+    return _compare_stable_hash_namedtuple(
+        entry, _COMPARE_IGNORED_FIELD_NAMES if exclude_meta else frozenset())
+
+
+def _compare_hash_entries(entries, exclude_meta=False):
+    """(hash -> entry, errors): an error per entry equal to an earlier one,
+    except a Price, whose duplicates are legal."""
+    entry_hash_dict = {}
+    errors = []
+    for entry in entries:
+        hash_ = _compare_hash_entry(entry, exclude_meta)
+        if hash_ in entry_hash_dict and not isinstance(entry, Price):
+            other_entry = entry_hash_dict[hash_]
+            errors.append(CompareError(
+                entry.meta, 'Duplicate entry: {} == {}'.format(entry, other_entry), entry))
+        entry_hash_dict[hash_] = entry
+    return entry_hash_dict, errors
+
+
+def _compare_sorted(entries):
+    order = {'Open': -2, 'Balance': -1, 'Document': 1, 'Close': 2}
+    return sorted(entries, key=lambda e: (
+        e.date, order.get(type(e).__name__, 0), (e.meta or {}).get('lineno', 0)))
+
+
+def _compare_compare_entries(entries1, entries2):
+    hashes1, errors1 = _compare_hash_entries(entries1, exclude_meta=True)
+    hashes2, errors2 = _compare_hash_entries(entries2, exclude_meta=True)
+    if errors1 or errors2:
+        raise ValueError(str((errors1 + errors2)[0]))
+    keys1, keys2 = set(hashes1), set(hashes2)
+    return (keys1 == keys2,
+            _compare_sorted([hashes1[k] for k in keys1 - keys2]),
+            _compare_sorted([hashes2[k] for k in keys2 - keys1]))
+
+
+def _compare_includes_entries(subset_entries, entries):
+    """(whether every one of `subset_entries` is in `entries`, the missing)."""
+    subset_hashes, subset_errors = _compare_hash_entries(subset_entries, exclude_meta=True)
+    hashes, errors = _compare_hash_entries(entries, exclude_meta=True)
+    if subset_errors or errors:
+        raise ValueError(str((subset_errors + errors)[0]))
+    subset_keys, keys = set(subset_hashes), set(hashes)
+    return (subset_keys.issubset(keys),
+            _compare_sorted([subset_hashes[k] for k in subset_keys - keys]))
+
+
+def _compare_excludes_entries(subset_entries, entries):
+    """(whether none of `subset_entries` is in `entries`, the ones that are)."""
+    subset_hashes, subset_errors = _compare_hash_entries(subset_entries, exclude_meta=True)
+    hashes, errors = _compare_hash_entries(entries, exclude_meta=True)
+    if subset_errors or errors:
+        raise ValueError(str((subset_errors + errors)[0]))
+    intersection = set(subset_hashes) & set(hashes)
+    return (not intersection, _compare_sorted([subset_hashes[k] for k in intersection]))
+
+
+_beancount.core.compare.CompareError = CompareError
+_beancount.core.compare.IGNORED_FIELD_NAMES = _COMPARE_IGNORED_FIELD_NAMES
+_beancount.core.compare.stable_hash_namedtuple = _compare_stable_hash_namedtuple
+_beancount.core.compare.hash_entry = _compare_hash_entry
+_beancount.core.compare.hash_entries = _compare_hash_entries
+_beancount.core.compare.compare_entries = _compare_compare_entries
+_beancount.core.compare.includes_entries = _compare_includes_entries
+_beancount.core.compare.excludes_entries = _compare_excludes_entries
+
 # Install in sys.modules so imports work
 sys.modules['beancount'] = _beancount
 sys.modules['beancount.core'] = _beancount.core
@@ -935,6 +1193,8 @@ sys.modules['beancount.core.data'] = _beancount.core.data
 sys.modules['beancount.core.amount'] = _beancount.core.amount
 sys.modules['beancount.core.getters'] = _beancount.core.getters
 sys.modules['beancount.core.flags'] = _beancount.core.flags
+sys.modules['beancount.core.realization'] = _beancount.core.realization
+sys.modules['beancount.core.compare'] = _beancount.core.compare
 
 # Export for direct use
 __all__ = [

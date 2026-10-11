@@ -13,6 +13,7 @@
 
 use crate::ImporterConfig;
 use crate::config::{ColumnSpec, CsvConfigBuilder, ImporterType};
+use crate::payees::PayeeRules;
 use anyhow::{Result, anyhow};
 use format_num_pattern::Locale;
 use serde::Deserialize;
@@ -114,6 +115,11 @@ pub struct ImporterEntry {
     /// equal length the one written first wins (#2423).
     #[serde(default)]
     pub mappings: Mappings,
+    /// Payee rewrites for this entry: pattern → canonical payee, in file
+    /// order (#2550). Tried before the file's top-level `[payees]` table;
+    /// the first pattern that matches wins. See [`crate::payees`].
+    #[serde(default)]
+    pub payees: PayeeTable,
     /// Categorize via the built-in merchant dictionary (off by default).
     pub use_merchant_dict: Option<bool>,
     /// External preprocessing command (argv array). When set, the command
@@ -201,33 +207,88 @@ impl FromIterator<(String, String)> for Mappings {
 
 impl<'de> Deserialize<'de> for Mappings {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
-        struct Visitor;
-        impl<'de> serde::de::Visitor<'de> for Visitor {
-            type Value = Mappings;
-            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-                f.write_str("a table of pattern = \"Account\" strings")
-            }
-            fn visit_map<A: serde::de::MapAccess<'de>>(
-                self,
-                mut map: A,
-            ) -> Result<Mappings, A::Error> {
-                // The `toml` deserializer hands table keys over sorted, not
-                // in file order, so read each key's span and restore the
-                // order the file wrote them in from that.
-                let mut pairs = Vec::with_capacity(map.size_hint().unwrap_or(0));
-                while let Some((key, account)) =
-                    map.next_entry::<toml::Spanned<String>, String>()?
-                {
-                    pairs.push((key.span().start, key.into_inner(), account));
-                }
-                pairs.sort_by_key(|(start, _, _)| *start);
-                Ok(Mappings(
-                    pairs.into_iter().map(|(_, k, a)| (k, a)).collect(),
-                ))
-            }
-        }
-        deserializer.deserialize_map(Visitor)
+        deserialize_ordered_pairs(deserializer, "a table of pattern = \"Account\" strings")
+            .map(Mappings)
     }
+}
+
+/// A `[payees]` / `[importers.payees]` table: pattern → canonical payee, kept
+/// in file order, because the first pattern that matches wins (#2550).
+///
+/// A key is a case-insensitive substring, or a case-insensitive regular
+/// expression when written between slashes (`"/^AMZN Mktp/"`). The table is
+/// only parsed here; [`PayeeTable::extend_rules`] compiles and validates it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PayeeTable(Vec<(String, String)>);
+
+impl PayeeTable {
+    /// Whether the table is empty.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// The `(pattern, payee)` pairs in file order.
+    pub fn iter(&self) -> impl Iterator<Item = &(String, String)> {
+        self.0.iter()
+    }
+
+    /// Append this table's rules to `rules`, tried after the ones already
+    /// there. `source` names the table in an error.
+    ///
+    /// # Errors
+    ///
+    /// An invalid regular expression, an empty pattern or an empty payee;
+    /// see [`PayeeRules::extend_from`].
+    pub fn extend_rules(&self, rules: &mut PayeeRules, source: &str) -> Result<()> {
+        rules.extend_from(source, &self.0)
+    }
+}
+
+impl FromIterator<(String, String)> for PayeeTable {
+    fn from_iter<I: IntoIterator<Item = (String, String)>>(iter: I) -> Self {
+        Self(iter.into_iter().collect())
+    }
+}
+
+impl<'de> Deserialize<'de> for PayeeTable {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserialize_ordered_pairs(deserializer, "a table of pattern = \"Payee\" strings")
+            .map(PayeeTable)
+    }
+}
+
+/// Read a table of string keys to string values in the order the FILE wrote
+/// them.
+///
+/// The `toml` deserializer hands table keys over sorted, not in file order,
+/// so each key's span is read and the file's order restored from that. (A
+/// plain map cannot: `toml` without `preserve_order` yields keys sorted, and
+/// turning that feature on would reorder every other table the workspace
+/// serializes.)
+fn deserialize_ordered_pairs<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+    expecting: &'static str,
+) -> Result<Vec<(String, String)>, D::Error> {
+    struct Visitor(&'static str);
+    impl<'de> serde::de::Visitor<'de> for Visitor {
+        type Value = Vec<(String, String)>;
+        fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            f.write_str(self.0)
+        }
+        fn visit_map<A: serde::de::MapAccess<'de>>(
+            self,
+            mut map: A,
+        ) -> Result<Self::Value, A::Error> {
+            let mut pairs = Vec::with_capacity(map.size_hint().unwrap_or(0));
+            while let Some((key, value)) = map.next_entry::<toml::Spanned<String>, String>()? {
+                pairs.push((key.span().start, key.into_inner(), value));
+            }
+            pairs.sort_by_key(|(start, _, _)| *start);
+            Ok(pairs.into_iter().map(|(_, k, v)| (k, v)).collect())
+        }
+    }
+    deserializer.deserialize_map(Visitor(expecting))
 }
 
 impl ImporterEntry {
@@ -241,7 +302,30 @@ impl ImporterEntry {
     pub fn from_toml_str(toml_str: &str) -> Result<Self> {
         toml::from_str(toml_str).map_err(|e| anyhow!("invalid importer config: {e}"))
     }
+
+    /// The payee rewrite rules for a statement this entry imports: its own
+    /// `[importers.payees]` first, then `shared` (a file's top-level
+    /// `[payees]` table), each in file order (#2550).
+    ///
+    /// # Errors
+    ///
+    /// A bad pattern or payee in either table, naming this entry or the
+    /// shared table.
+    pub fn payee_rules(&self, shared: Option<&PayeeTable>) -> Result<PayeeRules> {
+        let mut rules = PayeeRules::new();
+        self.payees.extend_rules(
+            &mut rules,
+            &format!("importer '{}': [importers.payees]", self.name),
+        )?;
+        if let Some(shared) = shared {
+            shared.extend_rules(&mut rules, SHARED_PAYEES)?;
+        }
+        Ok(rules)
+    }
 }
+
+/// How an error names the top-level `[payees]` table of `importers.toml`.
+pub const SHARED_PAYEES: &str = "the top-level [payees] table";
 
 /// Apply a CSV column flag that may be a header name or a bare 0-based index.
 ///
@@ -399,6 +483,10 @@ pub fn build_config_from_entry(entry: &ImporterEntry) -> Result<ImporterConfig> 
     // to it, and the column fields it does not use are simply absent from the
     // built config. Only an unrecognized value is an error.
     entry.entry_format()?;
+    // The same reasoning for `[importers.payees]`: the payee rewrite runs
+    // after extraction, but a pattern that cannot compile is a config error
+    // on every path that reads the entry, not only the ones that apply it.
+    entry.payee_rules(None)?;
 
     let mut builder = ImporterConfig::csv();
 

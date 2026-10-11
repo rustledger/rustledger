@@ -1215,10 +1215,19 @@ pub(super) struct TxnAccounts<S> {
     repeated: Vec<S>,
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many account sets this thread has built: the tests count them to
+    /// pin that a scan builds one per transaction, not one per posting.
+    pub(super) static TXN_ACCOUNTS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl<'t> TxnAccounts<&'t str> {
     /// Sort `txn`'s posting accounts once, then read off the distinct ones
     /// and the repeated ones.
     pub(super) fn of(txn: &'t rustledger_core::Transaction) -> Self {
+        #[cfg(test)]
+        TXN_ACCOUNTS_BUILT.with(|n| n.set(n.get() + 1));
         let mut all: Vec<&str> = txn.postings.iter().map(|p| p.account.as_ref()).collect();
         all.sort_unstable();
         // Usually empty, so usually no allocation.

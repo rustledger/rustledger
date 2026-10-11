@@ -388,12 +388,10 @@ pub(super) fn data_to_note(data: &NoteData, date: NaiveDate) -> Note {
         date,
         account: data.account.clone().into(),
         comment: data.comment.clone(),
-        // The plugin WIT's `note` record carries no tags or links, so a note
-        // arriving from a plugin has none to restore. Empty, not dropped:
-        // the engine's `Note` gained the fields in #2160, and widening the
-        // plugin contract to match is a separate, versioned decision.
-        tags: Default::default(),
-        links: Default::default(),
+        // Carried since ABI version 2 (#2573); before it a note lost its
+        // tags (a `pushtag` block's included) in any plugin.
+        tags: data.tags.iter().map(|t| t.as_str().into()).collect(),
+        links: data.links.iter().map(|l| l.as_str().into()).collect(),
         meta: data
             .metadata
             .iter()

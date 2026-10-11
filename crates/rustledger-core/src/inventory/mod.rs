@@ -214,9 +214,10 @@ pub enum BookingError {
     /// An AVERAGE reduction sells at the pool's average cost, so a cost
     /// written on it can only be a claim about that average, the way a cost
     /// on any other method's sale is a filter no lot may fail. It is checked
-    /// within the transaction's tolerance for the cost currency rather than
-    /// dropped: `-1 X {99.00 EUR}` from a pool held at 11.00 EUR used to book
-    /// at 11.00 without a word.
+    /// rather than dropped: it must be a correct rounding of the pool's exact
+    /// average at the precision written, as a `{*}` claim must
+    /// ([`Self::MergeSpecMismatch`]). `-1 X {99.00 EUR}` from a pool held at
+    /// 11.00 EUR used to book at 11.00 without a word.
     AverageSpecMismatch {
         /// The commodity being reduced (e.g. `AAPL`).
         currency: crate::Currency,

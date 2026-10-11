@@ -154,6 +154,30 @@ It keeps the plain sum, unmerged, for rows booking cannot realize, as
 bean-query sums them. The property test now holds `sum(position)` to `BALANCES`
 exactly, and the running balance's last row to `sum(position)`.
 
+## Amendment: a stated cost is a claim about the pool (#2603)
+
+A sale is booked at the pool's average, so the cost number in its spec had no
+role, and it was dropped: `-1 X {99.00 EUR}` from a pool at 11.00 EUR booked at
+11.00 without a word. Under every other method a written cost is a filter and
+one no lot matches is an error, so here the number is a claim about the
+average, checked rather than discarded. The currency was already checked
+(#2589).
+
+The claim holds when it is within the transaction's tolerance for the cost
+currency of the pool's exact average: `|claim - total / units| <= tolerance`,
+compared as `|claim × units - total| <= tolerance × |units|` with the pool's
+exact unit and cost totals (each lot's kept exact total, #2425), so the average
+is never rounded. The tolerance is the balance check's, rounded down, so it is
+never looser than the one the transaction balances to (#2562, #2582). A
+transaction that infers none in that currency holds the claim to the places it
+is written to, half a unit in its last place, which is the rule a `{*}` claim
+follows (#2398); without that, no claim could hold for an average with no
+finite decimal. A total cost states the total divided by the units sold, and a
+compound cost `a + b / units`. The check runs in booking only, as the `{*}`
+check does: the validator and BQL see the booked posting, whose cost is the
+pool's by then, and a filtered BQL replay builds a different pool on purpose
+(#1985).
+
 ## Prior art
 
 - hledger `SPEC-lots` — single running pool; pool cost rewritten on acquisition.

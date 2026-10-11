@@ -202,6 +202,33 @@ pool to merge. Remove the `*`; to keep an account at its average cost, book it
 merge runs while booking, before interpolation could solve them. Beancount
 refuses every `{*}` (`Cost merging is not supported yet`).
 
+A sale from an account booked `AVERAGE` reports it when its spec states a cost
+the pool is not. The sale is booked at the pool's average cost, so a cost
+written on it is a claim about that average, checked the way a cost on any
+other method's sale must match a lot:
+
+```beancount
+2024-01-01 open Assets:Brokerage X "AVERAGE"
+; ... the pool holds 20 X at an average of 11.00 EUR
+2024-03-01 * "Sell"
+  Assets:Brokerage  -1 X {99.00 EUR}  ; the pool costs 11.00 EUR per unit
+  Assets:Cash       99.00 EUR
+  Income:Gains
+```
+
+The claim holds when it is within the transaction's tolerance for the cost
+currency of the pool's exact average, the tolerance the balance check uses. A
+rounded average such as `{166.67 USD}` for a pool of 500/3 USD holds beside a
+cash posting written to the cent (tolerance 0.005), and does not beside one
+written to the tenth of a cent (tolerance 0.0005). When the transaction infers
+no tolerance in that currency (its amounts there are all integers or elided),
+the claim is held to the places it is written to, half a unit in its last
+place, as a `{*}` claim is. A total (`-3 X` with a total cost of
+`500.00 USD`) states that total divided by the units sold, and a compound
+`{a # b}` states `a + b / units`. A spec that names no cost (`{}` or
+`{EUR}`) books at the pool as before. Beancount has no `AVERAGE` booking
+(it refuses the method), so this rule is rustledger's own.
+
 ### E4002: Insufficient Units
 
 **Cause**: Trying to reduce more units than available in the lot.

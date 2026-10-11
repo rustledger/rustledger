@@ -437,22 +437,30 @@ impl BookingEngine {
     /// points ([`Self::book_interpolate_apply`]) resolve it first.
     pub fn book(&self, txn: &Transaction) -> Result<BookedTransaction, BookingError> {
         if !txn.postings.iter().any(|p| p.cost.is_some()) {
-            return self.book_with(txn, &crate::interpolate::ElidedCosts::default());
+            return self.book_with(
+                txn,
+                &crate::interpolate::ElidedCosts::default(),
+                &crate::InterpolationTolerances::default(),
+            );
         }
         let costs = crate::interpolate::resolve_elided_currencies(txn, |account| {
             self.inventories.get(account).map(AsRef::as_ref)
         })
         .costs;
-        self.book_with(txn, &costs)
+        // From the transaction as written, as `prepare` computes them.
+        let tolerances = crate::interpolation_tolerances(txn, &self.tolerance.options());
+        self.book_with(txn, &costs, &tolerances)
     }
 
     /// [`Self::book`], with the currencies of the cost specs written without
     /// one already resolved from the transaction as written (`cost_currencies`,
-    /// by posting index).
+    /// by posting index), and its tolerances computed from it (`tolerances`:
+    /// a cost stated on an AVERAGE sale is held to them, #2603).
     fn book_with(
         &self,
         txn: &Transaction,
         cost_currencies: &crate::interpolate::ElidedCosts,
+        tolerances: &crate::InterpolationTolerances,
     ) -> Result<BookedTransaction, BookingError> {
         // Fast path: if no postings have cost specs, no booking is needed.
         // This avoids expensive inventory cloning for simple transactions.
@@ -889,6 +897,19 @@ impl BookingEngine {
                                 cost: currency.clone(),
                             }
                         };
+                        // The pool an AVERAGE sale stating a cost draws from,
+                        // summed exactly before the sale changes it (#2603).
+                        // `{*}` states its claim in `check_merge_spec` below.
+                        let average_claim = written_number
+                            .filter(|_| method == BookingMethod::Average && !cost_spec.merge);
+                        let average_pool = average_claim.and_then(|_| {
+                            working_inventories
+                                .get(&posting.account)
+                                .or_else(|| {
+                                    self.inventories.get(&posting.account).map(AsRef::as_ref)
+                                })
+                                .and_then(|inv| inv.reduction_pool_exact(units))
+                        });
                         let booking_result = match working_inventories.get_mut(&posting.account) {
                             Some(working) => working.reduce(units, Some(match_spec), method),
                             // Indexing cannot panic here: reaching this arm
@@ -961,7 +982,22 @@ impl BookingEngine {
                         // Only here: `apply`, the validator and the query
                         // replay see the BOOKED posting, whose cost is the
                         // pool's own by then, and a filtered replay builds a
-                        // different pool on purpose (#1985).
+                        // different pool on purpose (#1985). The same holds
+                        // for an AVERAGE sale's stated cost (#2603).
+                        if let (Some(written), Some(pool), Some(cost)) = (
+                            average_claim,
+                            average_pool.as_ref(),
+                            booking_result.matched.first().and_then(|m| m.cost.as_ref()),
+                        ) {
+                            check_average_spec(
+                                written,
+                                units,
+                                pool,
+                                &cost.currency,
+                                tolerances.bound.get(&cost.currency).copied(),
+                            )
+                            .map_err(|e| convert_core_booking_error(e, &posting.account))?;
+                        }
                         if cost_spec.merge {
                             check_merge_spec(cost_spec, written_number, units, &booking_result)
                                 .map_err(|e| convert_core_booking_error(e, &posting.account))?;
@@ -2166,7 +2202,7 @@ impl BookingEngine {
         // Slow path: `book` already produces an owned transaction, so work on
         // that and commit only once apply has succeeded. Nothing needs undoing
         // — `txn` is not touched until the end.
-        let booked = self.book_with(txn, cost_currencies)?;
+        let booked = self.book_with(txn, cost_currencies, tolerances)?;
         let mut candidate = booked.transaction;
         let _ = crate::interpolate::interpolate_in_place_undoable_with(&mut candidate, tolerances)?;
         self.apply(&candidate)?;
@@ -2210,7 +2246,7 @@ impl BookingEngine {
             ));
         }
         // First book (fill in costs + compute gains), then interpolate amounts.
-        let booked = self.book_with(txn, &cost_currencies)?;
+        let booked = self.book_with(txn, &cost_currencies, &tolerances)?;
         let result = crate::interpolate::interpolate_with_interpolation_tolerances(
             &booked.transaction,
             &tolerances,
@@ -2414,6 +2450,121 @@ fn check_merge_spec(
         }));
     }
     Ok(())
+}
+
+/// Check the cost an AVERAGE sale states against the pool it sells from
+/// (#2603).
+///
+/// An AVERAGE sale books at the pool's average, so a cost written on it is a
+/// claim about that average. Under every other method a written cost is a
+/// filter, and one no lot matches is an error; dropping it here booked
+/// `-1 X {99.00 EUR}` at a pool of 11.00 EUR without a word. Beancount has no
+/// AVERAGE booking (it refuses the method), so this is rledger's definition:
+///
+/// * The claim is per unit. A `{{T}}` total states `T / |units|`, and a
+///   compound `{a # b}` states `a + b / |units|`.
+/// * It holds when it is within the transaction's tolerance for the cost
+///   currency of the pool's exact average, the tolerance the balance check
+///   uses (rounded down, so never looser, #2562/#2582). A rounded average
+///   like `{166.67 USD}` for 500/3 holds beside a cash posting to the cent.
+/// * A transaction with no tolerance in that currency (its amounts there are
+///   all integers or elided) gives the claim the precision it is written to:
+///   half a unit in its last place, as `{*}` does ([`written_allowance`]).
+///   Without it, no claim could ever hold for a pool whose average has no
+///   finite decimal, and `{*}` would accept what AVERAGE refused.
+///
+/// The average is never rounded: `pool` is the exact `(units, total)`
+/// [`rustledger_core::Inventory::reduction_pool_exact`] sums, and the claim is
+/// compared as `|claim × units − total| <= allowance × |units|` in
+/// `BigDecimal`. A total's exact pool total is what #2427 keeps on the lots,
+/// so `{{500.00 USD}}` for 3 X bought at 100, 200 and 200 holds exactly.
+fn check_average_spec(
+    written: rustledger_core::CostNumber,
+    units: &rustledger_core::Amount,
+    pool: &(bigdecimal::BigDecimal, bigdecimal::BigDecimal),
+    currency: &rustledger_core::Currency,
+    tolerance: Option<Decimal>,
+) -> Result<(), rustledger_core::BookingError> {
+    use bigdecimal::BigDecimal;
+    use rustledger_core::{CostNumber, to_bigdecimal as big};
+    let reduction = units.number.abs();
+    let (pool_units, pool_total) = pool;
+    if reduction.is_zero() || pool_units == &BigDecimal::from(0) {
+        return Ok(());
+    }
+    let r = big(reduction);
+    // The claim is `numerator / denominator` per unit; `written` is the
+    // allowance its own precision gives it, already times the denominator,
+    // and `stated` what the message quotes.
+    let (numerator, denominator, written, stated) = match written {
+        CostNumber::PerUnit { value } => (big(value), None, big(written_allowance(value)), value),
+        CostNumber::Total { value } => (big(value), Some(r), big(written_allowance(value)), value),
+        // Not something a ledger writes; booking's own output.
+        CostNumber::PerUnitFromTotal(booked) => (
+            big(booked.total),
+            Some(r),
+            big(written_allowance(booked.total)),
+            booked.total,
+        ),
+        CostNumber::Compound { per_unit, total } => {
+            let combined = big(per_unit) * &r + big(total);
+            let allowance = &r * big(written_allowance(per_unit)) + big(written_allowance(total));
+            // Booking already refused a compound whose combined total leaves
+            // `Decimal`'s range (`cost_overflow`), so this is the value it
+            // booked; the fallback only keeps the message total-shaped.
+            let stated = reduction
+                .checked_mul(per_unit)
+                .and_then(|v| v.checked_add(total))
+                .unwrap_or(total);
+            (combined, Some(r), allowance, stated)
+        }
+    };
+    let scale = denominator.clone().unwrap_or_else(|| BigDecimal::from(1));
+    let allowance = tolerance.map_or(written, |t| big(t) * &scale);
+    let off = (&numerator * pool_units - pool_total * &scale).abs();
+    if off <= allowance * pool_units.abs() {
+        return Ok(());
+    }
+    // The pool in the claim's form: its average, or what the reduced units
+    // cost at it.
+    let exact = match &denominator {
+        None => pool_total / pool_units,
+        Some(r) => pool_total * r / pool_units,
+    };
+    Err(rustledger_core::BookingError::AverageSpecMismatch {
+        currency: units.currency.clone(),
+        stated: Amount::new(stated, currency.clone()),
+        pool: Amount::new(distinguishing_round(&exact, stated), currency.clone()),
+        total: denominator.is_some(),
+    })
+}
+
+/// `exact` rounded to the places `stated` is written to, or to more when that
+/// would print the stated number itself: a claim refused under a tolerance
+/// finer than its own last place (`{166.67 USD}` beside cash to the tenth of a
+/// cent) must not read "costs 166.67, not the 166.67 stated". At most 28
+/// places, and fewer when the integer part leaves no room for them.
+fn distinguishing_round(exact: &bigdecimal::BigDecimal, stated: Decimal) -> Decimal {
+    let parse = |places: u32| {
+        exact
+            .with_scale_round(i64::from(places), bigdecimal::RoundingMode::HalfEven)
+            .to_string()
+            .parse::<Decimal>()
+            .ok()
+    };
+    let mut best = None;
+    for places in stated.scale()..=28 {
+        match parse(places) {
+            Some(rounded) => {
+                best = Some(rounded);
+                if rounded != stated {
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+    best.unwrap_or(stated)
 }
 
 /// Whether `a` and `b` are more than `allowance` apart. Checked, since a

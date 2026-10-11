@@ -2015,9 +2015,40 @@ impl Inventory {
             .is_none_or(|lot| fits(lot.units.number))
     }
 
-    /// Get all currencies in this inventory.
+    /// Get all currencies in this inventory: those of its non-empty
+    /// positions, sorted.
+    ///
+    /// Answered from the per-currency sign counts the units cache keeps,
+    /// which leave a zero lot out exactly as this leaves out an empty
+    /// position. Booking asks this for every posting whose units name no
+    /// currency (`-5 {}`, #2490), and walking every lot made such sales from
+    /// a many-lot account O(lots) each: 1,000 / 2,000 / 4,000 lots grew 2.5x
+    /// then 2.9x per doubling (#2604).
     #[must_use]
     pub fn currencies(&self) -> Vec<&str> {
+        // An unbuilt cache over non-empty positions cannot answer; see
+        // `is_reduced_by`.
+        if self.units_cache.is_empty() && !self.positions.is_empty() {
+            return self.currencies_scan();
+        }
+        let mut currencies: Vec<&str> = self
+            .units_cache
+            .iter()
+            .filter(|(_, stats)| stats.counts.by_sign() != (0, 0))
+            .map(|(currency, _)| currency.as_str())
+            .collect();
+        currencies.sort_unstable();
+        debug_assert_eq!(
+            currencies,
+            self.currencies_scan(),
+            "the cached sign counts disagree with a scan of positions",
+        );
+        currencies
+    }
+
+    /// The walk [`Self::currencies`] replaced: its definition, and its
+    /// fallback.
+    fn currencies_scan(&self) -> Vec<&str> {
         let mut currencies: Vec<&str> = self
             .positions
             .iter()
@@ -6727,6 +6758,49 @@ mod tests {
     /// otherwise the lists grow without bound as lots close, and the whole
     /// point of the index erodes. Asserted directly, because the tolerant
     /// lookup means no behavioral test can see the difference.
+    /// `currencies` answers from the sign counts (#2604), and `units_cache`
+    /// never forgets a currency, so a currency whose lots were all sold, or
+    /// whose only lot nets to zero on the shared store, must not be listed.
+    #[test]
+    fn currencies_leaves_out_a_currency_with_only_empty_lots() {
+        let lot = |units: Decimal, commodity: &str| {
+            Position::with_cost(Amount::new(units, commodity), Cost::new(dec!(10), "USD"))
+        };
+        let mut inv = Inventory::new();
+        inv.add(lot(dec!(5), "AAPL")).expect("fits");
+        inv.add(lot(dec!(3), "MSFT")).expect("fits");
+        inv.add(Position::simple(Amount::new(dec!(7), "EUR")))
+            .expect("fits");
+        assert_eq!(inv.currencies(), ["AAPL", "EUR", "MSFT"]);
+
+        inv.reduce(
+            &Amount::new(dec!(-3), "MSFT"),
+            Some(&CostSpec::empty()),
+            BookingMethod::Fifo,
+        )
+        .expect("sells every MSFT");
+        assert!(
+            inv.units_cache.contains_key("MSFT"),
+            "the cache keeps the currency"
+        );
+        assert_eq!(inv.currencies(), ["AAPL", "EUR"], "MSFT was sold out");
+
+        inv.add(Position::simple(Amount::new(dec!(-7), "EUR")))
+            .expect("fits");
+        assert_eq!(inv.currencies(), ["AAPL"], "the cost-less EUR nets to zero");
+
+        let mut shared = Inventory::new_shared();
+        shared.add(lot(dec!(2), "AAPL")).expect("fits");
+        shared.add(lot(dec!(-2), "AAPL")).expect("fits");
+        assert_eq!(shared.len(), 1, "the shared store keeps the zero lot");
+        assert!(
+            shared.currencies().is_empty(),
+            "an empty lot holds no currency"
+        );
+        shared.add(lot(dec!(1), "MSFT")).expect("fits");
+        assert_eq!(shared.currencies(), ["MSFT"]);
+    }
+
     /// Draining lots removes exactly their entries from the ordered index
     /// (#2604): the removal finds the entry by binary search on the deque,
     /// whether it sits at the front (where every ordered method drains) or in

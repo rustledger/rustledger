@@ -762,6 +762,9 @@ jobs:
       # above, so this costs seconds; it fails if the tests stop existing.
       - name: Slim build names the build with plugin runtimes
         run: |
+          # The default `bash -e` has no pipefail, so without it `tee` would
+          # hide a failing (or uncompilable) test run.
+          set -o pipefail
           cargo test -p rustledger --no-default-features --features mimalloc,ag-rledger --test cli_commands_test release_build_ 2>&1 | tee slim-release-build.log
           if ! grep -qE '^test result: ok\. [1-9][0-9]* passed' slim-release-build.log; then
             echo "::error::no release_build_ test ran"

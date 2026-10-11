@@ -1387,6 +1387,14 @@ impl Executor<'_> {
         }
 
         // JOURNAL is a shorthand for SELECT with specific columns
+        //
+        // The account pattern is a pattern even when double-quoted and named
+        // like a column. Deliberately unlike bean-query, whose
+        // `transform_journal` turns it into `account ~ "<pattern>"` and so
+        // hands it to the double-quote rule (#2596, `quoted_columns.rs`):
+        // `JOURNAL "account"` there reads `account ~ account` and lists every
+        // posting, an artifact of the rewrite rather than a meaning anyone
+        // writes. Here it matches accounts containing `account`.
         let account_pattern = &query.account_pattern;
 
         // Try to compile as regex (using cache)

@@ -275,3 +275,12 @@ fn order_by_the_expression_of_a_target_grouped_by_position() {
         assert_eq!(result.columns.len(), 2, "{query}: no hidden column shows");
     }
 }
+
+#[test]
+fn a_journal_account_pattern_stays_a_pattern() {
+    // Deliberately unlike bean-query, where `JOURNAL "account"` becomes
+    // `account ~ account` and lists every posting: the argument is an account
+    // pattern, and no account contains `account`.
+    assert!(run("JOURNAL \"account\"").rows.is_empty());
+    assert_eq!(run("JOURNAL \"Cash\"").rows.len(), 2);
+}

@@ -27,6 +27,9 @@
 //! (`get_target_name` returns `target.expression.text` for anything that was
 //! not parsed as a column).
 //!
+//! `JOURNAL`'s account pattern is not an expression here and stays a pattern,
+//! deliberately unlike bean-query (see `execute_journal`).
+//!
 //! `PIVOT BY` is different: its grammar takes identifiers, not expressions,
 //! so a double-quoted name there is a quoted identifier whatever columns
 //! exist, naming a target (`AS "2023" ... PIVOT BY "2023", ...`, #2577).
@@ -118,6 +121,32 @@ impl Executor<'_> {
         query: &SelectQuery,
         is_column: impl Fn(&str) -> bool,
     ) -> Option<SelectQuery> {
+        // Most queries have nothing to rewrite: answer that without cloning.
+        let mut hit = false;
+        let mut look = |e: &Expr| {
+            hit |= double_quoted(e).is_some_and(&is_column);
+        };
+        for expr in query
+            .targets
+            .iter()
+            .map(|t| &t.expr)
+            .chain(query.from.iter().filter_map(|f| f.filter.as_ref()))
+            .chain(query.where_clause.iter())
+            .chain(query.having.iter())
+            .chain(query.group_by.iter().flatten())
+            .chain(query.order_by.iter().flatten().map(|o| &o.expr))
+        {
+            super::visit_expr(expr, &mut look);
+        }
+        hit |= query
+            .pivot_by
+            .iter()
+            .flatten()
+            .any(|e| double_quoted(e).is_some());
+        if !hit {
+            return None;
+        }
+
         let mut out = query.clone();
         let mut changed = false;
 

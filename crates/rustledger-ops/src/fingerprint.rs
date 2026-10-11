@@ -379,7 +379,7 @@ fn hash_posting<H: Hasher>(posting: &PostingData, hasher: &mut H) {
 /// `5.00`).
 ///
 /// `None`, leaving the price as written, when there is nothing to rewrite
-/// (a per-unit or incomplete price, units without a number, zero units), and
+/// (a per-unit or incomplete price, units without a number), and
 /// when the division is not exact: `3 X @@ 10 USD` is not `3 X @ 3.33…3 USD`
 /// for any number of 3s, whatever beancount's 28-digit quotient says, so
 /// postings whose totals differ never match.
@@ -394,14 +394,19 @@ fn per_unit_price(
     }
     let total_amount = price.amount.as_ref()?;
     let units = Decimal::from_str(&units?.number).ok()?.abs();
-    if units.is_zero() {
-        return None;
-    }
-    let total = Decimal::from_str(&total_amount.number).ok()?;
-    let per_unit = checked_div_python_scale(total, units)?;
-    if checked_mul_exact(per_unit, units)? != total {
-        return None;
-    }
+    let per_unit = if units.is_zero() {
+        // Zero units price at zero, as beancount's parser writes them
+        // (`ZERO if units.number == ZERO else ...`): `0 X @@ 10 USD` is
+        // `0 X @ 0 USD`, and its weight is zero in both tools.
+        Decimal::ZERO
+    } else {
+        let total = Decimal::from_str(&total_amount.number).ok()?;
+        let per_unit = checked_div_python_scale(total, units)?;
+        if checked_mul_exact(per_unit, units)? != total {
+            return None;
+        }
+        per_unit
+    };
     Some(PriceAnnotationData {
         is_total: false,
         amount: Some(AmountData {
@@ -1135,8 +1140,10 @@ mod tests {
             hash("3", (true, "10")),
             hash("3", (false, "3.3333333333333333333333333333"))
         );
-        // Zero units: left as written.
-        assert_ne!(hash("0", (true, "10")), hash("0", (false, "0")));
+        // Zero units price at zero, as beancount's parser writes them, with
+        // `ZERO`'s scale.
+        assert_eq!(hash("0", (true, "10")), hash("0", (false, "0")));
+        assert_ne!(hash("0", (true, "10")), hash("0", (false, "0.00")));
     }
 
     /// A booked `{{ total }}` cost is its per-unit cost when that says it

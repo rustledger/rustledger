@@ -123,7 +123,45 @@ impl BookingError {
             Self::Interpolation(e) => e.account(),
         }
     }
+
+    /// Where a diagnostic about this failure belongs in `txn`: the posting
+    /// the failure names, or `None` when it names none (the caller then
+    /// falls back to the whole directive).
+    ///
+    /// Shared by `rledger check` (the loader's booking pass) and the LSP, so
+    /// the editor squiggle and the CLI's line number point at the same
+    /// posting (#2330, #2510).
+    #[must_use]
+    pub fn posting_span(&self, txn: &Transaction) -> Option<rustledger_core::Span> {
+        let account = self.account()?;
+        txn.postings
+            .iter()
+            .find(|p| &p.value.account == account)
+            .map(|p| p.span)
+    }
+
+    /// The message a diagnostic for this failure carries: the failure,
+    /// then the transaction's date and narration so the reader can find it.
+    ///
+    /// Shared by `rledger check` and the LSP, so both say the same thing
+    /// about the same transaction (#2510).
+    #[must_use]
+    pub fn diagnostic_message(&self, txn: &Transaction) -> String {
+        format!("{} ({}, \"{}\")", self, txn.date, txn.narration)
+    }
 }
+
+/// The diagnostic code of a booking failure that no validation code
+/// describes.
+///
+/// `rledger check` (and every consumer of the loader's error stream: the
+/// WASM and FFI bindings, the report commands' refusal to run over an
+/// unbooked ledger) labels EVERY booking failure with it. The LSP gives a
+/// failure a validation code instead when one says exactly what went wrong
+/// (`rustledger_validate::ErrorCode::for_booking_failure`), and this label
+/// otherwise, so a failure no code describes reads the same in the editor
+/// as on the command line (#2510).
+pub const BOOKING_FAILURE_CODE: &str = "BOOK";
 
 /// Result of booking a single transaction.
 #[derive(Debug, Clone)]

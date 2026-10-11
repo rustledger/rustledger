@@ -216,6 +216,12 @@ refuses every `{*}` (`Cost merging is not supported yet`).
 
 ### BOOK: Cannot Infer Currency
 
+`BOOK` is the code for a transaction booking could not complete. `rledger
+check` gives it to every booking failure; the editor (LSP) gives it to every
+interpolation failure, the ones below and the others that leave a posting's
+amount, cost or price undetermined, and gives a lot-matching failure its
+E4xxx code. Both show the same message at the same posting.
+
 **Cause**: A posting writes a number but no currency (`Assets:Cash  42.50`),
 and nothing determines which currency it is in. Reported as
 `interpolation failed: cannot infer currency for posting to account Expenses:Food`

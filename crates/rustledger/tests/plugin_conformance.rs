@@ -28,8 +28,8 @@
 //! - a plugin that allocates past the 256 MiB sandbox cap is stopped with
 //!   a memory error, and rledger itself survives to report it;
 //! - isolation: a WASM guest cannot import anything (so no filesystem, no
-//!   network); a Python plugin sees exactly `/lib` and `/work`, both
-//!   read-only, and cannot reach the ledger's directory, `$HOME`,
+//!   network); a Python plugin sees exactly `/lib`, read-only (its inputs
+//!   arrive on stdin), and cannot reach the ledger's directory, `$HOME`,
 //!   `/etc/passwd` or the network;
 //! - a plugin's error is reported with its message and source location.
 //!
@@ -632,8 +632,8 @@ fn wasm_guests_cannot_import_host_functions() {
     .has("forbidden import wasi_snapshot_preview1::fd_read");
 }
 
-/// A Python plugin sees exactly `/lib` (the standard library) and `/work`
-/// (its inputs), both read-only, and nothing of the host: not the
+/// A Python plugin sees exactly `/lib` (the standard library), read-only,
+/// and nothing of the host (its inputs arrive on stdin): not the
 /// ledger's directory, not `$HOME`, not `/etc/passwd`, not the network.
 #[test]
 fn python_plugin_isolation() {
@@ -663,7 +663,7 @@ def probe(entries, options_map):
     reads = {{
         'secret': _try(lambda: open({secret:?}).read()),
         'passwd': _try(lambda: open('/etc/passwd').read()),
-        'escape': _try(lambda: open('/work/../../etc/passwd').read()),
+        'escape': _try(lambda: open('/lib/../../etc/passwd').read()),
     }}
     writes = {{p: _try(lambda: open(p, 'w').write('x'))
                for p in ['/work/x', '/lib/x', '/x', '/tmp/x']}}
@@ -679,7 +679,7 @@ def probe(entries, options_map):
     );
     std::fs::write(dir.path().join("probe.py"), probe).unwrap();
     let out = run(dir.path(), &["check", "ledger.beancount"]);
-    out.has("listable=['/lib', '/work']").lacks("host secret");
+    out.has("listable=['/lib']").lacks("host secret");
     for line in out
         .text
         .lines()
@@ -993,7 +993,7 @@ fn python_plugin_open_files_are_capped() {
     let dir = python_plugin(
         "hoard",
         "__plugins__ = ['hoard']\ndef hoard(entries, options_map):\n    \
-         held = []\n    while True:\n        held.append(open('/work/script.py', 'rb'))\n",
+         held = []\n    while True:\n        held.append(open('/lib/os.py', 'rb'))\n",
     );
     run(dir.path(), &["check", "ledger.beancount"])
         .failed_cleanly()
@@ -1117,8 +1117,8 @@ fn plugin_text_control_characters_are_escaped() {
 
 /// Python plugins back to back, two of them stopped at the deadline
 /// mid-sleep: each is reported, the next one still runs, the process ends
-/// promptly (no guest thread or runtime outlives its call), and no plugin
-/// leaves its temp directory behind.
+/// promptly (no guest thread or runtime outlives its call), and nothing
+/// is left in the temp directory.
 #[test]
 fn python_plugins_back_to_back_after_a_timeout() {
     if !python_ready() {
@@ -1151,49 +1151,90 @@ fn python_plugins_back_to_back_after_a_timeout() {
     assert!(left.is_empty(), "temp files left behind: {left:?}");
 }
 
-/// A Python plugin's inputs (the ledger's entries) sit in a temp
-/// directory while it runs, and remain after a Ctrl-C; the directory is
-/// the user's alone (it followed the umask, 0775, before).
-#[cfg(unix)]
+/// The entries arrive on the guest's stdin, but a plugin reading
+/// `sys.stdin` (an `input()` left in, say) gets end of file, as before
+/// #2551, and does not take the entries from the plugin runner.
 #[test]
-fn python_plugin_work_dir_is_private() {
-    use std::os::unix::fs::PermissionsExt;
+fn python_plugin_stdin_reads_nothing() {
+    if !python_ready() {
+        return;
+    }
+    let dir = python_plugin(
+        "reader",
+        "import sys\nTAKEN = sys.stdin.read()\n__plugins__ = ['reader']\n\
+         def reader(entries, options_map):\n    \
+         return entries, [ValidationError(None, f'took {len(TAKEN)} saw {len(entries)}', None)]\n",
+    );
+    run(dir.path(), &["check", "ledger.beancount"]).has("took 0 saw 5");
+}
+
+/// A Python plugin's inputs (the ledger's entries) reach it from memory,
+/// so a Ctrl-C mid-run leaves nothing on disk. Before #2551 they sat in a
+/// temp directory, which rledger, killed by the signal, left behind.
+///
+/// Linux only: the guest's thread (`rledger-python-plugin`, its name cut
+/// to 15 bytes in `/proc`) says the plugin has started.
+#[cfg(target_os = "linux")]
+#[test]
+fn python_plugin_leaves_nothing_on_disk_after_sigint() {
+    use std::os::unix::process::ExitStatusExt;
     if !python_ready() {
         return;
     }
     let dir = python_plugin(
         "slow",
         "import time\n__plugins__ = ['slow']\ndef slow(entries, options_map):\n    \
-         time.sleep(5)\n    return entries, []\n",
+         time.sleep(60)\n    return entries, []\n",
     );
     let tmp = tempfile::tempdir().unwrap();
     let mut child = Command::new(bin())
         .args(["check", "ledger.beancount"])
         .current_dir(dir.path())
         .env("RLEDGER_CONFIG_DIR", dir.path())
+        .env("PROGRAMDATA", dir.path())
         .env("TMPDIR", tmp.path())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
         .unwrap();
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-    let mode = loop {
-        let found = std::fs::read_dir(tmp.path())
-            .unwrap()
+    let guest_running = || {
+        std::fs::read_dir(format!("/proc/{}/task", child.id()))
+            .into_iter()
+            .flatten()
             .filter_map(Result::ok)
-            .find(|e| e.path().join("entries.jsonl").exists());
-        if let Some(entry) = found {
-            break entry.metadata().unwrap().permissions().mode();
-        }
+            .any(|task| {
+                std::fs::read_to_string(task.path().join("comm"))
+                    .is_ok_and(|name| name.starts_with("rledger-python"))
+            })
+    };
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !guest_running() {
         assert!(
             std::time::Instant::now() < deadline,
-            "the plugin's work directory never appeared"
+            "the Python plugin never started"
         );
-        std::thread::sleep(std::time::Duration::from_millis(50));
-    };
-    let _ = child.kill();
-    let _ = child.wait();
-    assert_eq!(mode & 0o077, 0, "work directory mode {mode:o}");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    // Let the interpreter start and the plugin reach its sleep.
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    assert!(guest_running(), "the Python plugin ended early");
+    let sent = Command::new("kill")
+        .args(["-INT", &child.id().to_string()])
+        .status()
+        .unwrap();
+    assert!(sent.success());
+    let status = child.wait().unwrap();
+    assert_eq!(
+        status.signal(),
+        Some(2),
+        "rledger was not stopped by SIGINT: {status:?}"
+    );
+    let left: Vec<_> = std::fs::read_dir(tmp.path())
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .collect();
+    assert!(left.is_empty(), "left in $TMPDIR after Ctrl-C: {left:?}");
 }
 
 /// A module's own text in a load error (here its import names) is escaped

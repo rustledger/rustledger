@@ -779,7 +779,7 @@ Python plugins run in a pinned CPython-WASI sandbox (wasmtime). On `sys.path` it
 - the **plugin source file**, plus a bundled `beancount.core.data` **compatibility shim**, and
 - the **bundled CPython standard library**.
 
-The plugin sees exactly two directories, both read-only: `/lib` (the standard library) and `/work` (its own inputs). It cannot write files, read the ledger's directory or anything else of the host, or open network connections. What it prints goes to rledger's stderr (up to 4 MiB); its result travels back separately, so a `print` cannot corrupt it.
+The plugin sees exactly one directory, read-only: `/lib` (the standard library). Its inputs (the entries, options and config) reach it from memory, so nothing of the ledger is written to disk while it runs, and an interrupted run (Ctrl-C) leaves nothing behind. It cannot write files, read the ledger's directory or anything else of the host, or open network connections. What it prints goes to rledger's stderr (up to 4 MiB); its result travels back separately, so a `print` cannot corrupt it.
 
 The host's virtualenv / `site-packages` is **never** mounted — there is no `VIRTUAL_ENV` or `site-packages` handling, by design (the sandbox has no host filesystem access). So even with the correct file-path reference, a plugin only loads if it is **self-contained**: standard library plus whatever the compat shim provides.
 

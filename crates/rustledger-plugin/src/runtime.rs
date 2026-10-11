@@ -1333,7 +1333,7 @@ mod tests {
                 (func (export "process") (param i32 i32) (result i64) i64.const 0)
                 ;; Correct ABI so the check passes and the alloc
                 ;; signature mismatch is what surfaces (issue #1234).
-                (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+                (func (export "__rustledger_abi_version") (result i32) i32.const 2)
             )
             "#,
         )
@@ -1373,7 +1373,7 @@ mod tests {
                 (func (export "process") (param i32 i32) (result i32) i32.const 0)
                 ;; Correct ABI so the check passes and the process
                 ;; signature mismatch is what surfaces (issue #1234).
-                (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+                (func (export "__rustledger_abi_version") (result i32) i32.const 2)
             )
             "#,
         )
@@ -1410,7 +1410,7 @@ mod tests {
             (func (export "process") (param i32 i32) (result i64) i64.const 0)
             ;; ABI handshake (issue #1234): matches the host so execute
             ;; reaches the process/decode path the fuel tests exercise.
-            (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+            (func (export "__rustledger_abi_version") (result i32) i32.const 2)
         )
         "#
     }
@@ -1498,7 +1498,7 @@ mod tests {
                 (func (export "alloc") (param i32) (result i32) i32.const 0)
                 (func (export "process") (param i32 i32) (result i64) i64.const 0)
                 ;; A valid plugin advertises the ABI version (issue #1234).
-                (func (export "__rustledger_abi_version") (result i32) i32.const 1)
+                (func (export "__rustledger_abi_version") (result i32) i32.const 2)
             )
             "#,
         )

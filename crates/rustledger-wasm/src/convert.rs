@@ -200,6 +200,8 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
             date: note.date.to_string(),
             account: note.account.to_string(),
             comment: note.comment.clone(),
+            tags: note.tags.iter().map(ToString::to_string).collect(),
+            links: note.links.iter().map(ToString::to_string).collect(),
             meta: metadata_to_json(&note.meta),
         },
         Directive::Document(doc) => DirectiveJson::Document {

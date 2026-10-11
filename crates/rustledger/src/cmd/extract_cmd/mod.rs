@@ -1331,6 +1331,44 @@ fn entry_for_minimal_config(
     }
 }
 
+/// The payee rewrite rules for this run (#2550): the `[importers.payees]` of
+/// the entry the statement was imported through (`entry_name`), then the
+/// file's shared `[payees]` table.
+///
+/// The shared table applies whenever an `importers.toml` is found, on every
+/// path, `--auto` and raw column flags included: it is a property of the
+/// user's ledger, not of one bank's layout, like `wasm_importer_dir`.
+///
+/// A config that fails to load is an error when the run already depends on it
+/// (named with `--config`, or an entry from it was used). Otherwise the file
+/// is one the run would not have read, and a broken one must not fail it (see
+/// `test_auto_is_not_failed_by_an_unparsable_config_it_never_reads`), so it is
+/// skipped with a warning rather than silently.
+fn resolve_payee_rules(
+    args: &Args,
+    entry_name: Option<&str>,
+    err_out: &mut dyn Write,
+) -> Result<rustledger_importer::payees::PayeeRules> {
+    let strict = args.config.is_some() || entry_name.is_some();
+    let path = match find_importers_config(args.config.as_deref()) {
+        Ok(Some(path)) => path,
+        Ok(None) => return Ok(rustledger_importer::payees::PayeeRules::new()),
+        Err(e) if strict => return Err(e),
+        Err(_) => return Ok(rustledger_importer::payees::PayeeRules::new()),
+    };
+    match load_importers_config(&path) {
+        Ok(file) => file.payee_rules(entry_name),
+        Err(e) if strict => Err(e),
+        Err(e) => {
+            let _ = writeln!(
+                err_out,
+                "warning: {e:#}; its payee rewrites ([payees]) are not applied"
+            );
+            Ok(rustledger_importer::payees::PayeeRules::new())
+        }
+    }
+}
+
 /// Pick the importer for a given file + CLI args.
 ///
 /// - If the user explicitly chose a TOML entry (`--importer <name>`),
@@ -1791,7 +1829,7 @@ fn run_with_ledgers<W: Write>(
     //   the WASM wire format projects via `options`.
     // - CSV dispatcher: builds the full CsvConfig from
     //   --importer/--config/--auto/raw-args sources.
-    let (config, fallback_accounts) = if dispatcher_needs_minimal_config {
+    let (config, fallback_accounts, used_entry) = if dispatcher_needs_minimal_config {
         // A flag outranks the entry, which outranks the default — the same
         // precedence the CSV path gets from `overlay_cli_args`, so the two
         // dispatchers cannot disagree about whose value wins. This branch has
@@ -1861,6 +1899,7 @@ fn run_with_ledgers<W: Write>(
         (
             cfg,
             vec!["Expenses:Unknown".to_string(), "Income:Unknown".to_string()],
+            entry.map(|e| e.name),
         )
     } else {
         // CSV branch: determine import config from --importer flag,
@@ -2096,12 +2135,22 @@ fn run_with_ledgers<W: Write>(
         };
         let config = resolve_entry_currency(config, used_entry.as_deref(), args, ledgers, err_out)?;
 
-        (config, fallbacks)
+        (config, fallbacks, used_entry)
     };
+
+    // Resolved before extracting, so a bad pattern fails the run before any
+    // import work is reported.
+    let payee_rules = resolve_payee_rules(args, used_entry.as_deref(), err_out)?;
 
     // `importer` was selected earlier so we could route config-
     // building correctly; here it's used for the actual dispatch.
     let mut result = importer.extract(file, &config)?;
+
+    // Canonical payees (#2550), for every importer type: after the importer,
+    // whose account mappings have already matched the bank's raw text, and
+    // before ordering and `--existing` dedup, so dedup compares the names the
+    // ledger uses.
+    payee_rules.apply(&mut result.directives);
 
     // Oldest first, keeping the export's sequence within a day, for every
     // importer type (#2319). Once, here: after the importer, so a CSV, OFX
@@ -2907,6 +2956,7 @@ preprocess = ["cat", "{input}"]
             filename_pattern: None,
             use_merchant_dict: None,
             preprocess: None,
+            payees: rustledger_importer::toml_entry::PayeeTable::default(),
         };
 
         let config = build_config_from_entry(&entry).unwrap();
@@ -2952,6 +3002,7 @@ preprocess = ["cat", "{input}"]
             filename_pattern: None,
             use_merchant_dict: None,
             preprocess: None,
+            payees: rustledger_importer::toml_entry::PayeeTable::default(),
         };
 
         let config = build_config_from_entry(&entry).unwrap();
@@ -2993,6 +3044,7 @@ preprocess = ["cat", "{input}"]
             filename_pattern: None,
             use_merchant_dict: None,
             preprocess: None,
+            payees: rustledger_importer::toml_entry::PayeeTable::default(),
         };
 
         let config = build_config_from_entry(&entry).unwrap();
@@ -3035,6 +3087,7 @@ preprocess = ["cat", "{input}"]
             filename_pattern: None,
             use_merchant_dict: None,
             preprocess: None,
+            payees: rustledger_importer::toml_entry::PayeeTable::default(),
         };
 
         let config = build_config_from_entry(&entry).unwrap();
@@ -6108,5 +6161,281 @@ filename_pattern = "statement*"
             expand_tilde(Path::new("~other/foo")),
             Path::new("~other/foo")
         );
+    }
+
+    // ===== Payee rewriting (#2550) =====
+
+    /// Run `extract` on `statement` (written as `name`) with `importers.toml`
+    /// = `config` passed by `--config`, plus `extra` args. Returns
+    /// (stdout, stderr) or the error.
+    fn extract_with_payees(
+        config: &str,
+        name: &str,
+        statement: &str,
+        extra: &[&str],
+    ) -> Result<(String, String)> {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let config_path = dir.path().join("importers.toml");
+        std::fs::write(&config_path, config).unwrap();
+        let file = dir.path().join(name);
+        std::fs::write(&file, statement).unwrap();
+        let mut argv = vec![
+            "extract".to_string(),
+            "--config".to_string(),
+            config_path.to_str().unwrap().to_string(),
+        ];
+        argv.extend(extra.iter().map(|a| (*a).to_string()));
+        argv.push(file.to_str().unwrap().to_string());
+        let args = Args::parse_from(argv);
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        run_with_writer(&args, &file, &mut out, &mut err)?;
+        Ok((
+            String::from_utf8(out).unwrap(),
+            String::from_utf8(err).unwrap(),
+        ))
+    }
+
+    const HOFER_ENTRY: &str = r#"
+[[importers]]
+name = "bank"
+filename_pattern = "*.csv"
+account = "Assets:Bank"
+currency = "EUR"
+date_column = "Date"
+payee_column = "Payee"
+narration_column = "Description"
+amount_column = "Amount"
+
+[importers.mappings]
+"HOFER DANKT" = "Expenses:Groceries"
+"#;
+
+    /// The CSV importer's payee is rewritten; the narration keeps the
+    /// bank's text, and the account mapping still matched the RAW payee
+    /// (`"HOFER DANKT"` would not match `Hofer`).
+    #[test]
+    fn payees_rewrite_csv_output_and_mappings_still_match_raw_text() {
+        let config = format!("[payees]\n\"Hofer Dankt\" = \"Hofer\"\n{HOFER_ENTRY}");
+        let (out, _) = extract_with_payees(
+            &config,
+            "statement.csv",
+            "Date,Payee,Description,Amount\n2024-01-15,HOFER DANKT,Card 0815 Wien,-12.50\n",
+            &[],
+        )
+        .unwrap();
+        assert!(
+            out.contains("2024-01-15 * \"Hofer\" \"Card 0815 Wien\""),
+            "payee rewritten, narration kept:\n{out}"
+        );
+        assert!(
+            out.contains("Expenses:Groceries"),
+            "the account mapping matches the raw payee:\n{out}"
+        );
+        assert!(
+            !out.contains("HOFER DANKT"),
+            "no copy of the original:\n{out}"
+        );
+    }
+
+    /// With no payee column, the narration is matched, and the payee is set.
+    #[test]
+    fn payees_match_the_narration_when_there_is_no_payee() {
+        let config = "[payees]\n\"/^hofer\\\\b/\" = \"Hofer\"\n\
+            [[importers]]\nname = \"bank\"\naccount = \"Assets:Bank\"\ncurrency = \"EUR\"\n\
+            date_column = \"Date\"\nnarration_column = \"Description\"\namount_column = \"Amount\"\n";
+        let (out, _) = extract_with_payees(
+            config,
+            "statement.csv",
+            "Date,Description,Amount\n2024-01-15,HOFER DANKT 0815,-12.50\n",
+            &[],
+        )
+        .unwrap();
+        assert!(
+            out.contains("2024-01-15 * \"Hofer\" \"HOFER DANKT 0815\""),
+            "{out}"
+        );
+    }
+
+    /// OFX output goes through the same step: the shared table applies to a
+    /// statement no `[[importers]]` entry describes.
+    #[test]
+    fn payees_rewrite_ofx_output() {
+        let ofx = "OFXHEADER:100\n<OFX><BANKMSGSRSV1><STMTTRNRS><STMTRS><CURDEF>EUR\n\
+             <BANKTRANLIST><STMTTRN><TRNTYPE>DEBIT<DTPOSTED>20240115<TRNAMT>-12.50\
+             <FITID>t1<NAME>HOFER DANKT 0815</STMTTRN></BANKTRANLIST>\n\
+             </STMTRS></STMTTRNRS></BANKMSGSRSV1></OFX>";
+        let (out, _) = extract_with_payees(
+            "[payees]\n\"hofer dankt\" = \"Hofer\"\n",
+            "bank.ofx",
+            ofx,
+            &["--account", "Assets:Bank", "--currency", "EUR"],
+        )
+        .unwrap();
+        // The OFX `NAME` is both payee and narration; only the payee changes.
+        assert!(
+            out.contains("2024-01-15 * \"Hofer\" \"HOFER DANKT 0815\""),
+            "{out}"
+        );
+    }
+
+    /// An entry's `[importers.payees]` is tried before the shared table, and
+    /// within a table the first pattern written wins, even when a later one
+    /// is longer (mappings would pick the longer one).
+    #[test]
+    fn payees_per_entry_first_then_shared_first_match_in_file_order() {
+        let config = format!(
+            "[payees]\n\"hofer\" = \"Shared Hofer\"\n\"zebra\" = \"Zebra\"\n\
+             {HOFER_ENTRY}\n[importers.payees]\n\"hofer\" = \"Entry Hofer\"\n\
+             \"hofer dankt\" = \"Longer Pattern\"\n"
+        );
+        let (out, _) = extract_with_payees(
+            &config,
+            "statement.csv",
+            "Date,Payee,Description,Amount\n\
+             2024-01-15,HOFER DANKT,a,-1.00\n\
+             2024-01-16,ZEBRA LTD,b,-2.00\n",
+            &[],
+        )
+        .unwrap();
+        assert!(out.contains("2024-01-15 * \"Entry Hofer\" \"a\""), "{out}");
+        // The shared table still applies to what the entry's does not match.
+        assert!(out.contains("2024-01-16 * \"Zebra\" \"b\""), "{out}");
+    }
+
+    /// The table keeps FILE order, not the sorted order `toml` hands keys
+    /// over in: `"dankt"` is written first, and wins over `"/d.nkt/"`, which
+    /// sorts first (`/` is before `d`).
+    #[test]
+    fn payees_keep_file_order_across_regex_and_substring() {
+        let config = format!(
+            "[payees]\n\"dankt\" = \"By Substring\"\n\"/d.nkt/\" = \"By Regex\"\n{HOFER_ENTRY}"
+        );
+        let (out, _) = extract_with_payees(
+            &config,
+            "statement.csv",
+            "Date,Payee,Description,Amount\n2024-01-15,HOFER DANKT,a,-1.00\n",
+            &[],
+        )
+        .unwrap();
+        assert!(out.contains("\"By Substring\""), "{out}");
+    }
+
+    /// `--existing` compares the canonical payee: a ledger that already
+    /// holds the row under `Amazon` absorbs the re-import. Without the
+    /// rewrite, `amzn mktp de*4z81t lastschrift` shares no word with
+    /// `amazon books`, and the row is imported twice; with it, `amazon` is
+    /// half the words, the fuzzy threshold.
+    #[test]
+    fn payees_dedup_matches_a_ledger_using_the_canonical_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let ledger = dir.path().join("ledger.beancount");
+        std::fs::write(
+            &ledger,
+            "2024-01-01 open Assets:Bank EUR\n\
+             2024-01-15 * \"Amazon\" \"Books\"\n  Assets:Bank  -12.50 EUR\n  Expenses:Books\n",
+        )
+        .unwrap();
+        let config = format!("[payees]\n\"/^amzn mktp/\" = \"Amazon\"\n{HOFER_ENTRY}");
+        let (out, err) = extract_with_payees(
+            &config,
+            "statement.csv",
+            "Date,Payee,Description,Amount\n\
+             2024-01-15,AMZN Mktp DE*4Z81T,Lastschrift,-12.50\n\
+             2024-01-16,AMZN Mktp DE*9Q22X,Lastschrift,-3.00\n",
+            &["--existing", ledger.to_str().unwrap()],
+        )
+        .unwrap();
+        assert!(!out.contains("2024-01-15"), "already in the ledger:\n{out}");
+        assert!(
+            out.contains("2024-01-16 * \"Amazon\" \"Lastschrift\""),
+            "{out}"
+        );
+        assert!(err.contains("Filtered 1 duplicate"), "{err}");
+    }
+
+    /// A bad pattern is a config error naming the table it is in, reported
+    /// before anything is imported, and by `--list-importers` too.
+    #[test]
+    fn payees_invalid_regex_is_a_config_error_naming_the_entry() {
+        use clap::Parser;
+        let csv = "Date,Payee,Description,Amount\n2024-01-15,X,a,-1.00\n";
+        let config = format!("{HOFER_ENTRY}\n[importers.payees]\n\"/(/\" = \"X\"\n");
+        let err = format!(
+            "{:#}",
+            extract_with_payees(&config, "statement.csv", csv, &[]).unwrap_err()
+        );
+        assert!(
+            err.contains("importer 'bank': [importers.payees]")
+                && err.contains("\"/(/\" is not a valid regular expression"),
+            "{err}"
+        );
+
+        let config = format!("[payees]\n\"/[/\" = \"X\"\n{HOFER_ENTRY}");
+        let err = format!(
+            "{:#}",
+            extract_with_payees(&config, "statement.csv", csv, &[]).unwrap_err()
+        );
+        assert!(
+            err.contains("the top-level [payees] table")
+                && err.contains("\"/[/\" is not a valid regular expression"),
+            "{err}"
+        );
+
+        // Config validation: listing the importers reads the file and says so.
+        let (dir, path) = write_temp_config(&config);
+        let args = Args::parse_from(["extract", "--config", path.to_str().unwrap()]);
+        let err =
+            list_importers_with_writer(&args, &mut Vec::new(), &mut std::io::sink()).unwrap_err();
+        assert!(
+            format!("{err:#}").contains("the top-level [payees] table"),
+            "{err:#}"
+        );
+        drop(dir);
+    }
+
+    /// `--list-importers` accepts a file using both tables.
+    #[test]
+    fn payees_tables_are_accepted_by_list_importers() {
+        use clap::Parser;
+        let (_dir, path) = write_temp_config(&format!(
+            "[payees]\n\"a\" = \"A\"\n{HOFER_ENTRY}\n[importers.payees]\n\"/b/\" = \"B\"\n"
+        ));
+        let args = Args::parse_from(["extract", "--config", path.to_str().unwrap()]);
+        let mut out = Vec::new();
+        list_importers_with_writer(&args, &mut out, &mut std::io::sink()).unwrap();
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .contains("bank (pattern: *.csv)")
+        );
+    }
+
+    /// The shared table applies on a run that names no config and no entry
+    /// (`--auto`), from an `importers.toml` found in the working directory.
+    #[cfg(unix)]
+    #[test]
+    fn payees_apply_on_the_auto_path_from_a_discovered_config() {
+        use clap::Parser;
+        let dir = tempfile::tempdir().unwrap();
+        let csv = dir.path().join("statement.csv");
+        std::fs::write(
+            &csv,
+            "Date,Description,Amount\n2026-07-01,HOFER DANKT,-4.50\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("importers.toml"),
+            "[payees]\n\"hofer\" = \"Hofer\"\n",
+        )
+        .unwrap();
+        let args = Args::parse_from(["extract", "--auto", csv.to_str().unwrap()]);
+        let mut out = Vec::new();
+        with_cwd(dir.path(), || {
+            run_with_writer(&args, &csv, &mut out, &mut std::io::sink())
+        })
+        .unwrap();
+        let out = String::from_utf8(out).unwrap();
+        assert!(out.contains("* \"Hofer\" \"HOFER DANKT\""), "{out}");
     }
 }

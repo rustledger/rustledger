@@ -515,7 +515,14 @@ class DirectiveJson8(BaseModel):
     account: str
     comment: str
     date: str
+    links: list[str] | None = Field(
+        None, description="Links attached to the note (issue #2573)."
+    )
     meta: dict[str, MetaValueJson] | None = None
+    tags: list[str] | None = Field(
+        None,
+        description="Tags attached to the note, its own and a `pushtag` block's\n(issue #2573).",
+    )
     type: Literal["note"]
 
 

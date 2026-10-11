@@ -334,6 +334,7 @@ mod aggregation;
 mod evaluation;
 mod execution;
 mod operators;
+mod running_balance;
 mod sort;
 mod system_tables;
 mod window;
@@ -1235,7 +1236,9 @@ impl<'a> Executor<'a> {
         // SHARED backing: cloned once per output row below. A contiguous
         // copy per row is what #1086 is about — 2000 lots x 2000 rows holds
         // ~2M positions at once (measured 395 MB vs 31 MB).
-        let mut cumulative_balance: Inventory = Inventory::new_shared();
+        // AVERAGE accounts presented as their pools (#2543), see
+        // `RunningBalance`.
+        let mut cumulative_balance = running_balance::RunningBalance::new();
 
         // Create an iterator over (directive_index, directive) pairs
         // Handle both spanned and unspanned directives
@@ -1271,6 +1274,11 @@ impl<'a> Executor<'a> {
         // become rows.
         let from_filter = from.and_then(|f| f.filter.as_ref());
         let row_filter = from_filter.filter(|f| evaluation::from_filter_reads_postings(f));
+        // A row filter reading `accounts` / `other_accounts` is evaluated per
+        // posting, so it reads the transaction's set once per posting: built
+        // per evaluation, that was a sort of every account for every posting,
+        // quadratic in a large transaction (#2580).
+        let filter_reads_accounts = row_filter.is_some_and(filter_reads_txn_accounts);
         // BALANCES' per-account totals under a row filter, where the engine's
         // whole-transaction replay above is not the answer for every account.
         let mut selection: FxHashMap<rustledger_core::Account, RowSelection> = FxHashMap::default();
@@ -1278,9 +1286,21 @@ impl<'a> Executor<'a> {
 
         for (directive_index, txn) in self.window_transactions(from, directive_iter)? {
             passes.clear();
+            // One account set per transaction, shared by the row filter and
+            // the rows (#2504, #2580). Built before the filter only when the
+            // filter reads it; otherwise only for a transaction that passes.
+            let account_set =
+                || std::sync::Arc::new(system_tables::TxnAccounts::of(&txn).into_owned());
+            let mut txn_accounts = filter_reads_accounts.then(account_set);
             if let Some(filter) = row_filter {
                 for i in 0..txn.postings.len() {
-                    passes.push(self.evaluate_from_filter(filter, &txn, i, directive_index)?);
+                    passes.push(self.evaluate_from_filter(
+                        filter,
+                        &txn,
+                        i,
+                        directive_index,
+                        txn_accounts.as_ref(),
+                    )?);
                 }
                 if !passes.contains(&true) {
                     continue;
@@ -1289,9 +1309,12 @@ impl<'a> Executor<'a> {
                 // A transaction without postings has no row for the filter
                 // to keep, and no posting for a column to read.
                 && (txn.postings.is_empty()
-                    || !self.evaluate_from_filter(filter, &txn, 0, directive_index)?)
+                    || !self.evaluate_from_filter(filter, &txn, 0, directive_index, None)?)
             {
                 continue;
+            }
+            if txn_accounts.is_none() && needs_txn_accounts && collect_contexts {
+                txn_accounts = Some(account_set());
             }
 
             // Replayed in the order `book` read the transaction, not one
@@ -1301,16 +1324,31 @@ impl<'a> Executor<'a> {
             // (#2380). A posting's `account_balance` is the state the walk
             // reaches over the postings up to and including it.
             let mut replay = needs_account_balance.then(|| engine.begin_replay(&txn));
+            // An AVERAGE account's running balance is presented as its pools,
+            // as `BALANCES` presents it (#2543). Anything else shares the
+            // engine's copy (#2086).
             let snapshot = |replay: &Option<rustledger_booking::TransactionReplay<'_, '_>>,
-                            account: &rustledger_core::Account| {
-                replay.as_ref().map_or(Ok(None), |r| {
-                    r.account_snapshot(account)
-                        .map_err(|e| QueryError::Evaluation(e.to_string()))
-                })
+                            account: &rustledger_core::Account|
+             -> Result<Option<std::sync::Arc<Inventory>>, QueryError> {
+                let eval = |e: String| QueryError::Evaluation(e);
+                let Some(shared) = replay
+                    .as_ref()
+                    .map_or(Ok(None), |r| r.account_snapshot(account))
+                    .map_err(|e| eval(e.to_string()))?
+                else {
+                    return Ok(None);
+                };
+                if !self.account_is_average(account) {
+                    return Ok(Some(shared));
+                }
+                let mut pooled = (*shared).clone();
+                rustledger_booking::present_inventory(
+                    rustledger_core::BookingMethod::Average,
+                    &mut pooled,
+                )
+                .map_err(|e| eval(e.to_string()))?;
+                Ok(Some(std::sync::Arc::new(pooled)))
             };
-            // One account set per transaction, shared by its rows (#2504).
-            let txn_accounts = (needs_txn_accounts && collect_contexts)
-                .then(|| std::sync::Arc::new(system_tables::TxnAccounts::of(&txn).into_owned()));
             for (i, posting) in txn.postings.iter().enumerate() {
                 // Update the account-level running balance regardless of
                 // whether this posting passes WHERE — `account_balance`
@@ -1405,7 +1443,7 @@ impl<'a> Executor<'a> {
                     transaction: txn.clone(),
                     posting_index: i,
                     balance: if where_reads_balance {
-                        Some(cumulative_balance.clone())
+                        Some(cumulative_balance.snapshot()?)
                     } else {
                         None
                     },
@@ -1443,11 +1481,14 @@ impl<'a> Executor<'a> {
                 // query doesn't read `balance`.
                 if needs_balance {
                     if let Some(pos) = resolved {
-                        cumulative_balance
-                            .add(pos)
-                            .map_err(|e| QueryError::Evaluation(e.to_string()))?;
+                        cumulative_balance.add(
+                            posting,
+                            txn.date,
+                            pos,
+                            self.account_is_average(&posting.account),
+                        )?;
                     }
-                    ctx.balance = Some(cumulative_balance.clone());
+                    ctx.balance = Some(cumulative_balance.snapshot()?);
                 }
                 // The deferred half of the gate above: this row survived, so
                 // it is one of the few that will actually be read.
@@ -1485,6 +1526,7 @@ impl<'a> Executor<'a> {
                 }
                 postings.push(ctx);
             }
+            cumulative_balance.end_transaction();
             if let Some(replay) = replay {
                 replay
                     .finish()
@@ -1492,7 +1534,11 @@ impl<'a> Executor<'a> {
             }
         }
 
-        let mut account_balances = engine.into_inventories();
+        // As each account is presented: an AVERAGE account as its pools,
+        // before a sale as after one (#2543).
+        let mut account_balances = engine
+            .into_presented_inventories()
+            .map_err(|e| QueryError::Evaluation(e.to_string()))?;
         if row_filter.is_some() {
             // Under a row filter an account's total is the sum of its
             // selected postings (beanquery's BALANCES is `SUM(position)`
@@ -1506,12 +1552,13 @@ impl<'a> Executor<'a> {
                 .retain(|account, _| selection.get(account).is_some_and(|s| s.selected));
             for (account, mut chosen) in selection {
                 if chosen.selected && chosen.rejected {
-                    // As `SUM(position)` realizes an AVERAGE account.
+                    // As `SUM(position)` presents an AVERAGE account.
                     if self.account_is_average(&account) {
-                        chosen
-                            .sum
-                            .merge_average()
-                            .map_err(|e| QueryError::Evaluation(e.to_string()))?;
+                        rustledger_booking::present_inventory(
+                            rustledger_core::BookingMethod::Average,
+                            &mut chosen.sum,
+                        )
+                        .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                     }
                     account_balances.insert(account, chosen.sum);
                 }
@@ -3113,9 +3160,12 @@ impl<'a> Executor<'a> {
                 // Expand wildcard using shared constant (must match evaluate_row expansion)
                 names.extend(WILDCARD_COLUMNS.iter().map(|s| (*s).to_string()));
             } else if let Some(alias) = &target.alias {
-                // bean-query lowercases the alias too: `AS LatestDate`
-                // heads the result `latestdate` (#2164).
-                names.push(alias.to_lowercase());
+                // As the parser left it. bean-query folds an UNQUOTED alias
+                // to lower case (`AS LatestDate` heads `latestdate`, #2164)
+                // and keeps a quoted one as written (`AS "2023"`), so the
+                // parser does the folding, where the two are told apart
+                // (#2577). Folding here too lowered the quoted ones.
+                names.push(alias.clone());
             } else {
                 names.push(self.expr_to_name(&target.expr));
             }
@@ -3439,6 +3489,13 @@ fn query_calls_any_function(query: &SelectQuery, names: &[&str]) -> bool {
 /// ORDER BY, and the FROM filter expression. A subquery in FROM is
 /// treated as opaque — its inner references don't surface to the
 /// outer query's posting iterator.
+/// Whether a FROM filter reads a transaction's account set (`accounts` or
+/// `other_accounts`), which a posting-level filter then shares per
+/// transaction (#2580).
+fn filter_reads_txn_accounts(filter: &Expr) -> bool {
+    expr_references_column(filter, "accounts") || expr_references_column(filter, "other_accounts")
+}
+
 fn query_references_column(query: &SelectQuery, name: &str) -> bool {
     if query
         .targets

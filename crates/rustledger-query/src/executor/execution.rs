@@ -631,7 +631,7 @@ impl Executor<'_> {
             ),
         );
         !matches!(
-            self.evaluate_from_filter(&Expr::Column(name.to_string()), &sample, 0, None),
+            self.evaluate_from_filter(&Expr::Column(name.to_string()), &sample, 0, None, None),
             Err(QueryError::UnknownColumn(_))
         )
     }
@@ -1040,9 +1040,9 @@ impl Executor<'_> {
         let mut names = Vec::new();
         for target in targets {
             if let Some(alias) = &target.alias {
-                // bean-query lowercases the alias too: `AS LatestDate`
-                // heads the result `latestdate` (#2164).
-                names.push(alias.to_lowercase());
+                // As the parser left it: an unquoted alias is already folded
+                // to lower case (#2164), a quoted one keeps its case (#2577).
+                names.push(alias.clone());
             } else if matches!(target.expr, Expr::Wildcard) {
                 // Expand wildcard to all VISIBLE inner columns.
                 names.extend(
@@ -1344,7 +1344,9 @@ impl Executor<'_> {
         // Aligns with the cumulative `balance` semantics introduced for SELECT
         // in PR #940; the JOURNAL command was missed in that change. Issue #955.
         // Same row-per-snapshot shape as `running_balance` above.
-        let mut cumulative_balance = rustledger_core::Inventory::new_shared();
+        // An AVERAGE account presented as its pools, as SELECT's running
+        // `balance` and `BALANCES` present it (#2543).
+        let mut cumulative_balance = super::running_balance::RunningBalance::new();
         // `AT COST`'s running balance: the sum of each row's cost, which is
         // what `at_cost` of the cumulative balance is, but exact. A lot bought
         // as `{{500 USD}}` of 3 costs 500 on its row (`compute_posting_cost`),
@@ -1374,16 +1376,23 @@ impl Executor<'_> {
         // it (#2414); an entry-level one keeps or drops the transaction.
         let from_filter = query.from.as_ref().and_then(|f| f.filter.as_ref());
         let row_filter = from_filter.is_some_and(super::evaluation::from_filter_reads_postings);
+        // A row filter reading `accounts` shares one set per transaction
+        // across its postings (#2580), as SELECT's scan does.
+        let filter_reads_accounts =
+            row_filter && from_filter.is_some_and(super::filter_reads_txn_accounts);
         for (directive_index, txn) in
             self.window_transactions(query.from.as_ref(), self.resolved_directives().enumerate())?
         {
             if let Some(filter) = from_filter
                 && !row_filter
                 && (txn.postings.is_empty()
-                    || !self.evaluate_from_filter(filter, &txn, 0, directive_index)?)
+                    || !self.evaluate_from_filter(filter, &txn, 0, directive_index, None)?)
             {
                 continue;
             }
+            let txn_accounts = filter_reads_accounts.then(|| {
+                std::sync::Arc::new(super::system_tables::TxnAccounts::of(&txn).into_owned())
+            });
 
             for (i, posting) in txn.postings.iter().enumerate() {
                 // Match account using regex or substring
@@ -1396,7 +1405,13 @@ impl Executor<'_> {
                     && row_filter
                     && let Some(filter) = from_filter
                 {
-                    matches = self.evaluate_from_filter(filter, &txn, i, directive_index)?;
+                    matches = self.evaluate_from_filter(
+                        filter,
+                        &txn,
+                        i,
+                        directive_index,
+                        txn_accounts.as_ref(),
+                    )?;
                 }
 
                 if matches {
@@ -1414,9 +1429,12 @@ impl Executor<'_> {
                     if let Some(ref p) = pos
                         && !matches!(at_mode, AtMode::Cost)
                     {
-                        cumulative_balance
-                            .add(p.clone())
-                            .map_err(|e| QueryError::Evaluation(e.to_string()))?;
+                        cumulative_balance.add(
+                            posting,
+                            txn.date,
+                            p.clone(),
+                            self.account_is_average(&posting.account),
+                        )?;
                     }
 
                     // Apply AT function if specified, using the at_mode
@@ -1482,9 +1500,10 @@ impl Executor<'_> {
                     let balance_for_row = match at_mode {
                         AtMode::Cost => cost_balance.clone(),
                         AtMode::Units => cumulative_balance
+                            .snapshot()?
                             .at_units()
                             .map_err(|e| QueryError::Evaluation(e.to_string()))?,
-                        AtMode::None | AtMode::Other => cumulative_balance.clone(),
+                        AtMode::None | AtMode::Other => cumulative_balance.snapshot()?,
                     };
 
                     // `JOURNAL` is defined by beancount as a SELECT whose
@@ -1525,6 +1544,7 @@ impl Executor<'_> {
                     result.add_row(row);
                 }
             }
+            cumulative_balance.end_transaction();
         }
 
         Ok(result)

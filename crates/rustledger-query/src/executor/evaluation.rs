@@ -21,12 +21,18 @@ impl Executor<'_> {
     /// filters ROWS (#2414). This used to be evaluated once per
     /// transaction against its FIRST posting, so `FROM account ~ 'Bank'`
     /// kept the transactions whose first posting was the bank's.
+    ///
+    /// `txn_accounts` is the transaction's `accounts` set when the caller
+    /// built it, shared by every posting the filter reads (#2580); `None`
+    /// builds it per evaluation, which a posting-level filter reading
+    /// `accounts` did for every posting of a transaction.
     pub(super) fn evaluate_from_filter(
         &self,
         filter: &Expr,
         txn: &Transaction,
         posting_index: usize,
         directive_index: Option<usize>,
+        txn_accounts: Option<&std::sync::Arc<super::system_tables::TxnAccounts<String>>>,
     ) -> Result<bool, QueryError> {
         let ctx = || PostingContext {
             transaction: txn.into(),
@@ -34,7 +40,7 @@ impl Executor<'_> {
             balance: None,
             account_balance: None,
             directive_index,
-            txn_accounts: None,
+            txn_accounts: txn_accounts.cloned(),
         };
         // Handle special FROM predicates
         match filter {

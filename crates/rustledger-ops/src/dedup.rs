@@ -996,6 +996,8 @@ mod tests {
             data: DirectiveData::Note(rustledger_plugin_types::NoteData {
                 account: "Assets:Bank".to_string(),
                 comment: "Same note".to_string(),
+                tags: vec![],
+                links: vec![],
                 metadata: vec![],
             }),
         };

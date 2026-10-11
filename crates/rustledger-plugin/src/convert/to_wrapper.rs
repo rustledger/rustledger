@@ -224,6 +224,8 @@ pub(super) fn note_to_data(note: &Note) -> NoteData {
     NoteData {
         account: note.account.to_string(),
         comment: note.comment.clone(),
+        tags: note.tags.iter().map(ToString::to_string).collect(),
+        links: note.links.iter().map(ToString::to_string).collect(),
         metadata: meta_to_data(&note.meta),
     }
 }

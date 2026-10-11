@@ -1223,6 +1223,7 @@ fn test_json_output_validation_errors() {
 // removed Python/WASM execution with no test to catch it.
 // ============================================================================
 
+#[cfg(feature = "python-plugin-wasm")]
 fn wasm_plugins_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm-plugins")
 }
@@ -2195,11 +2196,8 @@ fn release_build_names_the_build_with_plugin_runtimes() {
     let rledger = require_rledger!();
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let dir = tmp.path();
-    std::fs::copy(
-        wasm_plugins_dir().join("passthrough.wasm"),
-        dir.join("passthrough.wasm"),
-    )
-    .expect("copy wasm");
+    // Never loaded: the build has no runtime to load it with.
+    std::fs::write(dir.join("passthrough.wasm"), b"\0asm").expect("write wasm");
     std::fs::write(dir.join("p.py"), "__plugins__ = []\n").expect("write");
     std::fs::create_dir(dir.join("importers")).expect("mkdir");
     std::fs::write(dir.join("s.csv"), "date,amount\n").expect("write");

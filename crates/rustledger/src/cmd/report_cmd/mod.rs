@@ -896,7 +896,12 @@ pub(super) fn account_balances(
     }
     // FxHashMap has non-deterministic order; collect into a BTreeMap so report
     // rows come out account-sorted and stable across runs.
-    Ok(engine.into_inventories().into_iter().collect())
+    //
+    // Presented, as `BALANCES` presents them: an AVERAGE account as its pools,
+    // before a sale as after one (#2543). Booking merges the lots only when a
+    // sale runs, so the bare realization listed separate dated lots until the
+    // first sale and one pool after it.
+    Ok(engine.into_presented_inventories()?.into_iter().collect())
 }
 
 // CSV/JSON escaping: single-sourced in core. `escape_json` is the RFC-8259

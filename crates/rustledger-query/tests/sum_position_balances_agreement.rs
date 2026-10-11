@@ -8,13 +8,14 @@
 //! rejects is left out, so every ledger is one `check` accepts. For each
 //! `FROM` filter the two queries realize the same postings, and:
 //!
-//! - an AVERAGE account's sum equals its `BALANCES` inventory presented as
-//!   one pool per side ([`Inventory::merge_average`]). That presentation is
-//!   the one documented difference: booking keeps an AVERAGE account's buys
-//!   as separate lots until a sale merges them, and `sum(position)` shows
-//!   the pool they already form;
-//! - any other account's sum equals its `BALANCES` inventory exactly, as
-//!   bean-query's does.
+//! - every account's sum equals its `BALANCES` inventory exactly, as
+//!   bean-query's does. An AVERAGE account is presented as its pools on both
+//!   (#2543): booking keeps its buys as separate lots until a sale merges
+//!   them, and before #2543 `BALANCES` showed those lots where
+//!   `sum(position)` showed the pool;
+//! - the last row of the running `balance` column over one account's
+//!   selected postings equals that account's sum: the same postings,
+//!   realized and presented the same way (#2543).
 //!
 //! A subset booking cannot realize makes `BALANCES` fail, and leaves
 //! `sum(position)` the plain sum of its postings; the property counts those
@@ -259,24 +260,36 @@ proptest! {
                     default == BookingMethod::Average,
                     |m| m == "AVERAGE",
                 );
-                let want = if average {
-                    let mut pooled = balance.clone();
-                    pooled.merge_average().expect("fits");
+                if average {
                     if lots(balance).iter().any(|l| l.1.is_sign_negative())
                         && lots(balance).iter().any(|l| l.1.is_sign_positive() && l.2.is_some())
                     {
                         MIXED_AVERAGE.fetch_add(1, Ordering::Relaxed);
                     }
                     REALIZED_AVERAGE.fetch_add(1, Ordering::Relaxed);
-                    lots(&pooled)
-                } else {
-                    lots(balance)
-                };
+                }
+                let want = lots(balance);
                 let got = sums.get(account).map(lots).unwrap_or_default();
                 prop_assert_eq!(
                     &got, &want,
                     "{} ({}){}\n{}", account, if average { "AVERAGE" } else { "lot" }, filter, text
                 );
+            }
+            // The running balance over each account's selected postings ends
+            // where the account's sum is, AVERAGE accounts pooled on both.
+            for (account, sum) in &sums {
+                let joiner = if filter.contains(" WHERE ") { " AND" } else { " WHERE" };
+                let bql = format!("SELECT balance{filter}{joiner} account = '{account}'");
+                let mut executor = Executor::new(&directives);
+                executor.set_booking_method(default);
+                let result = executor
+                    .execute(&parse(&bql).expect("parses"))
+                    .expect("the running balance runs whenever sum(position) does");
+                let running = match result.rows.last().map(|r| &r[0]) {
+                    Some(Value::Inventory(inv)) => lots(inv),
+                    _ => Vec::new(),
+                };
+                prop_assert_eq!(&running, &lots(sum), "{}\n{}", bql, text);
             }
             }
         }

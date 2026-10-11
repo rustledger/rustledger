@@ -17,7 +17,7 @@ rledger query [OPTIONS] [FILE] [QUERY]
 | Argument | Description |
 |----------|-------------|
 | `FILE` | The beancount file (uses `$RLEDGER_FILE` or config if not specified) |
-| `QUERY` | BQL query string (interactive mode if not specified) |
+| `QUERY` | BQL query string (read from stdin when stdin is not a terminal, interactive mode otherwise, if not specified) |
 
 ## Options
 
@@ -39,6 +39,14 @@ rledger query [OPTIONS] [FILE] [QUERY]
 ```bash
 rledger query ledger.beancount "SELECT account, sum(position) GROUP BY account"
 ```
+
+### Query on stdin
+
+```bash
+rledger query ledger.beancount < query.bql
+```
+
+With no `QUERY` and no `-F`, a piped or redirected stdin is read whole and run as one query, as `-F` runs a file and as bean-query reads stdin. It is not fed to the interactive shell line by line, so a query may span lines. Empty input runs nothing.
 
 ### Interactive Mode
 

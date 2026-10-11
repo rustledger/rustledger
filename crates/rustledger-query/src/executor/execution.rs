@@ -1344,7 +1344,9 @@ impl Executor<'_> {
         // Aligns with the cumulative `balance` semantics introduced for SELECT
         // in PR #940; the JOURNAL command was missed in that change. Issue #955.
         // Same row-per-snapshot shape as `running_balance` above.
-        let mut cumulative_balance = rustledger_core::Inventory::new_shared();
+        // An AVERAGE account presented as its pools, as SELECT's running
+        // `balance` and `BALANCES` present it (#2543).
+        let mut cumulative_balance = super::running_balance::RunningBalance::new();
         // `AT COST`'s running balance: the sum of each row's cost, which is
         // what `at_cost` of the cumulative balance is, but exact. A lot bought
         // as `{{500 USD}}` of 3 costs 500 on its row (`compute_posting_cost`),
@@ -1427,9 +1429,12 @@ impl Executor<'_> {
                     if let Some(ref p) = pos
                         && !matches!(at_mode, AtMode::Cost)
                     {
-                        cumulative_balance
-                            .add(p.clone())
-                            .map_err(|e| QueryError::Evaluation(e.to_string()))?;
+                        cumulative_balance.add(
+                            posting,
+                            txn.date,
+                            p.clone(),
+                            self.account_is_average(&posting.account),
+                        )?;
                     }
 
                     // Apply AT function if specified, using the at_mode
@@ -1495,9 +1500,10 @@ impl Executor<'_> {
                     let balance_for_row = match at_mode {
                         AtMode::Cost => cost_balance.clone(),
                         AtMode::Units => cumulative_balance
+                            .snapshot()?
                             .at_units()
                             .map_err(|e| QueryError::Evaluation(e.to_string()))?,
-                        AtMode::None | AtMode::Other => cumulative_balance.clone(),
+                        AtMode::None | AtMode::Other => cumulative_balance.snapshot()?,
                     };
 
                     // `JOURNAL` is defined by beancount as a SELECT whose
@@ -1538,6 +1544,7 @@ impl Executor<'_> {
                     result.add_row(row);
                 }
             }
+            cumulative_balance.end_transaction();
         }
 
         Ok(result)

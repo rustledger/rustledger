@@ -57,6 +57,8 @@ rledger report ledger.beancount balances -a Expenses
 rledger report ledger.beancount balances -a Assets:Bank
 ```
 
+A commodity held at cost is listed by lot, with its per-unit cost and date (`2 X { 200.00 USD, 2024-01-03}`), numbers rendered at the ledger's display precision. An account booked `AVERAGE` is listed as its pool, one undated lot per commodity, cost currency and side at the weighted-average cost, as `BALANCES` shows it; see the [BQL reference](../reference/bql.md).
+
 ### Balance Sheet
 
 ```bash

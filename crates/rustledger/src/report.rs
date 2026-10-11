@@ -40,7 +40,7 @@ pub fn should_use_color() -> bool {
 /// The index finds the line holding the span by binary search; miette's own
 /// routine then runs over a window that starts a few lines earlier, and the
 /// result is rebased onto the whole file. The window starts at a line start
-/// at least `context_lines_before` lines before the span, so the lines the
+/// more than `context_lines_before` lines before the span, so the lines the
 /// routine keeps, its columns and its end are the ones it computes from byte
 /// 0. Lines are split exactly as miette splits them (`\n`, `\r\n`, or a
 /// lone `\r`). `windowed_read_matches_miettes_whole_file_read` pins that.
@@ -94,9 +94,15 @@ impl SourceCode for IndexedSource {
             .line_starts
             .partition_point(|&start| start <= span.offset())
             .saturating_sub(1);
-        // One line more than the context needs: harmless (the routine drops
-        // it like any line before the context), and it keeps the window from
-        // depending on where in its line the span starts.
+        // One line more than the context needs, and it is load-bearing. The
+        // routine computes the span's end as `(offset + len).saturating_sub(1)`,
+        // which clamps when a zero-length span sits at the very start of its
+        // input, so a window that began exactly at the span's line would see
+        // `"\n\n\n"`'s empty span at byte 1 as a different span than the
+        // whole file does. Starting a whole line earlier keeps the local
+        // offset at 1 or more, or the window at byte 0, where local and global
+        // agree. The extra line itself is dropped like any line before the
+        // context.
         let window_line = span_line.saturating_sub(context_lines_before.saturating_add(1));
         let window_start = self.line_starts[window_line];
         let window = &self.source.as_bytes()[window_start..];
@@ -365,35 +371,44 @@ mod tests {
             // which both must report. A START past the end panics inside
             // miette itself, so it is not compared.
             for offset in 0..=source.len() {
-                for len in 0..4 {
-                    for context in 0..4 {
-                        let span = SourceSpan::new(offset.into(), len);
-                        let at = format!("{source:?} span {offset}+{len} context {context}");
-                        let read = |src: &dyn SourceCode| {
-                            src.read_span(&span, context, context).map(|c| {
-                                (
-                                    c.data().to_vec(),
-                                    *c.span(),
-                                    c.line(),
-                                    c.column(),
-                                    c.line_count(),
-                                    c.name().map(str::to_string),
-                                )
-                            })
-                        };
-                        match (read(&indexed), read(&whole)) {
-                            (Ok(got), Ok(want)) => assert_eq!(got, want, "{at}"),
-                            (Err(_), Err(_)) => {}
-                            (got, want) => {
-                                panic!("{at}: indexed ok={} whole ok={}", got.is_ok(), want.is_ok())
+                // Lengths that stay inside a line, cross a few lines, and run
+                // past the end; a transaction's span covers several lines.
+                for len in [0, 1, 2, 3, 9, 40] {
+                    // Before and after apart: the window depends only on the
+                    // context BEFORE the span.
+                    for before in 0..4 {
+                        for after in 0..3 {
+                            let span = SourceSpan::new(offset.into(), len);
+                            let at =
+                                format!("{source:?} span {offset}+{len} context {before}/{after}");
+                            let read = |src: &dyn SourceCode| {
+                                src.read_span(&span, before, after).map(|c| {
+                                    (
+                                        c.data().to_vec(),
+                                        *c.span(),
+                                        c.line(),
+                                        c.column(),
+                                        c.line_count(),
+                                        c.name().map(str::to_string),
+                                    )
+                                })
+                            };
+                            match (read(&indexed), read(&whole)) {
+                                (Ok(got), Ok(want)) => assert_eq!(got, want, "{at}"),
+                                (Err(_), Err(_)) => {}
+                                (got, want) => panic!(
+                                    "{at}: indexed ok={} whole ok={}",
+                                    got.is_ok(),
+                                    want.is_ok()
+                                ),
                             }
+                            compared += 1;
                         }
-                        compared += 1;
                     }
                 }
             }
         }
-        assert!(compared > 50_000, "compared only {compared} reads");
+        assert!(compared > 200_000, "compared only {compared} reads");
     }
 
     #[test]

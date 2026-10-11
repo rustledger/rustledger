@@ -43,8 +43,20 @@ async fn main() {
     std::process::exit(run.exit_code());
 }
 
+/// The `rledger` commands `ag-rledger` deliberately does not offer, each
+/// with why. Listed in the root envelope (`unsupported_commands`), and each
+/// refused by name with code `UNSUPPORTED`, so an agent learns it is not
+/// available rather than meeting an unknown command.
+///
+/// The drift guard in `tests/ag_rledger_test.rs` fails when `rledger` has a
+/// command that is neither offered here nor listed in this table (#2567).
+const UNSUPPORTED_COMMANDS: &[(&str, &str)] = &[(
+    "completions",
+    "it writes a shell completion script, which is for an interactive shell, not an agent",
+)];
+
 fn build_cli() -> AgentCli {
-    let cli = AgentCli::new("ag-rledger", "Agent-native plain-text accounting CLI")
+    let mut cli = AgentCli::new("ag-rledger", "Agent-native plain-text accounting CLI")
         .version(env!("CARGO_PKG_VERSION"))
         .schema_version(SCHEMA_VERSION)
         .root_field(
@@ -81,7 +93,20 @@ fn build_cli() -> AgentCli {
         .command(add_command("add", "Add a transaction in quick mode"))
         .command(add_command("a", "Alias for add"))
         .command(compat_command())
-        .command(lint_command());
+        .command(explain_command())
+        .command(lint_command())
+        .root_field(
+            "unsupported_commands",
+            json!(
+                UNSUPPORTED_COMMANDS
+                    .iter()
+                    .map(|(name, why)| json!({"command": name, "reason": why}))
+                    .collect::<Vec<_>>()
+            ),
+        );
+    for (name, why) in UNSUPPORTED_COMMANDS {
+        cli = cli.command(unsupported_command(name, why));
+    }
 
     debug_assert!(
         cli.audit().is_clean(),
@@ -89,6 +114,32 @@ fn build_cli() -> AgentCli {
         cli.audit()
     );
     cli
+}
+
+/// A command `rledger` has and `ag-rledger` does not offer (see
+/// [`UNSUPPORTED_COMMANDS`]): refused by name, saying why.
+fn unsupported_command(name: &'static str, why: &'static str) -> Command {
+    Command::new(
+        name,
+        "Not offered by ag-rledger (see `unsupported_commands`)",
+    )
+    .usage("ag-rledger <command> (not offered; use rledger)")
+    .allow_unknown_flags()
+    .allow_extra_args()
+    .default_next_action(NextAction::new(
+        "ag-rledger",
+        "List the commands ag-rledger offers",
+    ))
+    .handler(move |_req, _ctx| {
+        Box::pin(async move {
+            Err(CommandError::new(
+                format!("`{name}` is not offered by ag-rledger: {why}"),
+                "UNSUPPORTED",
+                format!("Run `rledger {name}` instead."),
+            )
+            .exit_code(agcli::ExitCode::USAGE))
+        })
+    })
 }
 
 fn check_command(name: &'static str, description: &'static str) -> Command {
@@ -193,63 +244,99 @@ fn format_command(name: &'static str, description: &'static str) -> Command {
         })
 }
 
-/// Which report-specific flags each report actually reads.
+/// One report-specific flag, as `rledger` defines it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReportFlag {
+    long: String,
+    short: Option<char>,
+    /// The value it takes (`ACCOUNT`), or `None` for a boolean switch.
+    value: Option<String>,
+}
+
+/// Each report and the report-specific flags it reads, taken from `rledger`'s
+/// own clap definition of `report` (`cmd::report_cmd::Report`).
 ///
-/// One table, used both to build the usage string and to reject a flag that
-/// does not apply. They disagreed before: the usage string advertised the
-/// UNION for every report, `allow_unknown_flags` removed the safety net, and
-/// `build_report` read only the flags its variant had a field for — so
-/// `report income --from 2015-01-01` returned the whole-history figure with
-/// `"ok": true` (#2280). Deriving both from one list is what stops that
-/// recurring.
+/// One definition, used to build the usage string, to reject a flag that
+/// does not apply, and to list the valid report names. They disagreed
+/// before: the usage string advertised the UNION for every report,
+/// `allow_unknown_flags` removed the safety net, and `build_report` read only
+/// the flags its variant had a field for — so `report income --from
+/// 2015-01-01` returned the whole-history figure with `"ok": true` (#2280).
+/// A hand-kept table here fixed that, and then had to be kept in step with
+/// `rledger` by hand; reading the clap definition means a flag `rledger`
+/// gains is in the table the moment it exists, and the drift guard
+/// (`ag_rledger_reads_every_rledger_flag_or_refuses_it`) fails until
+/// `build_report` reads it (#2567).
 ///
 /// Flags handled for every report — `--file`, `--format`, `--verbose`,
-/// `--select`, `--compact`, `--profile` — are deliberately absent here.
-const REPORT_FLAGS: &[(&str, &[&str])] = &[
-    ("balances", &["account"]),
-    ("balsheet", &[]),
-    ("income", &[]),
-    ("journal", &["account", "limit"]),
-    ("holdings", &["account"]),
-    ("networth", &["period", "currency", "account", "no-zero"]),
-    ("accounts", &[]),
-    ("commodities", &[]),
-    ("stats", &[]),
-    ("prices", &["commodity"]),
-    ("budget", &["account", "from", "to", "children"]),
-];
+/// `--no-cache`, `--select`, `--compact`, `--profile` — are `report`'s own
+/// (global) flags, not a report's, so they are absent here.
+fn report_flags() -> &'static [(String, Vec<ReportFlag>)] {
+    static FLAGS: OnceLock<Vec<(String, Vec<ReportFlag>)>> = OnceLock::new();
+    FLAGS.get_or_init(|| {
+        use clap::Args as _;
+        let report = rustledger::cmd::report_cmd::Args::augment_args(clap::Command::new("report"));
+        report
+            .get_subcommands()
+            .map(|sub| {
+                let flags = sub
+                    .get_arguments()
+                    .filter(|arg| !arg.is_positional())
+                    .filter_map(|arg| {
+                        let long = arg.get_long()?;
+                        (long != "help").then(|| ReportFlag {
+                            long: long.to_string(),
+                            short: arg.get_short(),
+                            value: arg.get_action().takes_values().then(|| {
+                                arg.get_value_names()
+                                    .and_then(|names| names.first())
+                                    .map_or_else(
+                                        || long.to_ascii_uppercase().replace('-', "_"),
+                                        ToString::to_string,
+                                    )
+                            }),
+                        })
+                    })
+                    .collect();
+                (sub.get_name().to_string(), flags)
+            })
+            .collect()
+    })
+}
 
-/// The short form of each report-specific flag, where one exists.
-///
-/// Taken from the `string_flag(req, "x", Some("y"))` calls in `build_report`:
-/// a check that knows only the long spelling lets `-a` through, which is the
-/// same silent drop one keystroke away. `currency` and `commodity` share `-c`
-/// but belong to different reports, so they never compete.
-const FLAG_SHORTS: &[(&str, &str)] = &[
-    ("account", "a"),
-    ("limit", "l"),
-    ("period", "p"),
-    ("currency", "c"),
-    ("commodity", "c"),
-];
-
-fn short_for(long: &str) -> Option<&'static str> {
-    FLAG_SHORTS
+/// The report-specific flags `report` reads, or `None` for an unknown
+/// report.
+fn flags_of(report: &str) -> Option<&'static [ReportFlag]> {
+    report_flags()
         .iter()
-        .find(|(l, _)| *l == long)
-        .map(|(_, short)| *short)
+        .find(|(name, _)| name == report)
+        .map(|(_, flags)| flags.as_slice())
 }
 
 /// The report-specific flags, grouped by report, for the usage string.
 ///
-/// Built from [`REPORT_FLAGS`] so the usage text cannot promise a flag the
-/// handler ignores.
+/// Built from [`report_flags`] so the usage text cannot promise a flag the
+/// handler ignores. Bracketed as agcli reads a usage string: a flag without
+/// a `<VALUE>` is a boolean switch, so `--irr ledger.beancount` does not take
+/// the file as the switch's value.
 fn report_flag_usage() -> String {
-    REPORT_FLAGS
+    report_flags()
         .iter()
         .filter(|(_, flags)| !flags.is_empty())
         .map(|(report, flags)| {
-            let rendered: Vec<String> = flags.iter().map(|f| format!("--{f}")).collect();
+            let rendered: Vec<String> = flags
+                .iter()
+                .map(|f| {
+                    let mut spelled = format!("--{}", f.long);
+                    if let Some(short) = f.short {
+                        spelled.push_str(&format!("/-{short}"));
+                    }
+                    match &f.value {
+                        Some(value) => format!("[{spelled} <{value}>]"),
+                        None => format!("[{spelled}]"),
+                    }
+                })
+                .collect();
             format!("{report}: {}", rendered.join(" "))
         })
         .collect::<Vec<_>>()
@@ -268,19 +355,38 @@ fn reject_inapplicable_flags(report_name: &str, req: &Req<'_>) -> Result<(), Com
         // of valid ones. Saying it twice, differently, would be worse.
         return Ok(());
     };
-    let Some((_, applicable)) = REPORT_FLAGS.iter().find(|(r, _)| *r == canonical) else {
+    let Some(applicable) = flags_of(&canonical) else {
         return Ok(());
     };
+    let applies = |long: &str| applicable.iter().any(|f| f.long == long);
+    // A short form this report reads is its own, whichever other report's
+    // flag shares the letter: `-c` is `prices --commodity` and `networth
+    // --currency`, and must not be refused on `prices` as the currency.
+    let short_applies = |short: char| applicable.iter().any(|f| f.short == Some(short));
 
     // Every report-specific flag known to any report; anything outside this set
     // is a global flag or a genuine unknown, neither of which is ours to judge.
-    // Deduplicated: `account` appears in five entries, and listing it five
-    // times in the error would be its own small confusion.
-    let mut supplied: Vec<&str> = REPORT_FLAGS
+    // Deduplicated: `account` appears in several entries, and listing it
+    // several times in the error would be its own small confusion.
+    let mut supplied: Vec<String> = report_flags()
         .iter()
-        .flat_map(|(_, flags)| flags.iter().copied())
-        .filter(|flag| !applicable.contains(flag))
-        .filter(|flag| flag_was_supplied(req, flag))
+        .flat_map(|(_, flags)| flags.iter())
+        .filter(|f| !applies(&f.long))
+        .filter_map(|f| {
+            let short = f.short.filter(|s| !short_applies(*s));
+            if flag_was_supplied(req, &f.long, None) {
+                Some(match f.short {
+                    Some(s) => format!("--{}/-{s}", f.long),
+                    None => format!("--{}", f.long),
+                })
+            } else if let Some(short) = short
+                && flag_was_supplied(req, "", Some(short))
+            {
+                Some(format!("--{}/-{short}", f.long))
+            } else {
+                None
+            }
+        })
         .collect();
     supplied.sort_unstable();
     supplied.dedup();
@@ -289,24 +395,20 @@ fn reject_inapplicable_flags(report_name: &str, req: &Req<'_>) -> Result<(), Com
         return Ok(());
     }
 
-    let named: Vec<String> = supplied
-        .iter()
-        .map(|f| match short_for(f) {
-            Some(short) => format!("--{f}/-{short}"),
-            None => format!("--{f}"),
-        })
-        .collect();
     let hint = if applicable.is_empty() {
         format!("`{canonical}` takes no report-specific flags.")
     } else {
-        let ok: Vec<String> = applicable.iter().map(|f| format!("--{f}")).collect();
+        let ok: Vec<String> = applicable.iter().map(|f| format!("--{}", f.long)).collect();
         format!("`{canonical}` accepts: {}.", ok.join(", "))
     };
     // A distinct code, not a generic usage error: an agent that asked for a
     // date window needs to tell "the window was refused" apart from "the file
     // was wrong", and act on it.
     Err(CommandError::new(
-        format!("report `{canonical}` does not accept {}", named.join(", ")),
+        format!(
+            "report `{canonical}` does not accept {}",
+            supplied.join(", ")
+        ),
         "INAPPLICABLE_FLAG",
         hint,
     )
@@ -318,9 +420,13 @@ fn reject_inapplicable_flags(report_name: &str, req: &Req<'_>) -> Result<(), Com
 /// Read from the raw args rather than the parsed flags because a flag the
 /// handler never reads leaves no other trace — which is precisely how these
 /// went unnoticed.
-fn flag_was_supplied(req: &Req<'_>, long: &str) -> bool {
-    let mut spellings = vec![format!("--{long}"), format!("--{long}=")];
-    if let Some(short) = short_for(long) {
+fn flag_was_supplied(req: &Req<'_>, long: &str, short: Option<char>) -> bool {
+    let mut spellings = Vec::new();
+    if !long.is_empty() {
+        spellings.push(format!("--{long}"));
+        spellings.push(format!("--{long}="));
+    }
+    if let Some(short) = short {
         spellings.push(format!("-{short}"));
         spellings.push(format!("-{short}="));
     }
@@ -338,7 +444,7 @@ fn flag_was_supplied(req: &Req<'_>, long: &str) -> bool {
 /// The usage string, built once.
 ///
 /// `Command::usage` wants a `&'static str` and the report-specific part is
-/// computed from `REPORT_FLAGS`. Leaking a fresh `Box` per call would leak
+/// computed from [`report_flags`]. Leaking a fresh `Box` per call would leak
 /// once for `report` and again for the `r` alias, in a binary that may be
 /// driven as a long-running agent process. A `OnceLock` gives the same
 /// `'static` lifetime with one allocation for the life of the process.
@@ -630,11 +736,54 @@ fn compat_command() -> Command {
     })
 }
 
+fn explain_command() -> Command {
+    Command::new(
+        "explain",
+        "Explain a validation error code (e.g. E2001), or list all codes",
+    )
+    .usage(with_globals("ag-rledger explain [<code>]"))
+    .allow_unknown_flags()
+    .allow_extra_args()
+    .default_next_action(NextAction::new(
+        "ag-rledger explain <code>",
+        "Explain what a validation error code means and how to fix it",
+    ))
+    .handler(|req, _ctx| {
+        let parsed = parse_request("explain", req, build_explain_args);
+        Box::pin(async move {
+            let (args, globals) = parsed?;
+            // Read for its errors, as `rledger` does for every command but
+            // `config`.
+            load_config(&globals.budget)?;
+            run_buffered("explain", |out| {
+                // Exit status 1 for a code that does not exist, as in
+                // `rledger`; the text saying so is in `result.stdout`.
+                rustledger::cmd::explain::run_with_writer(&args, out).map(i32::from)
+            })
+        })
+    })
+}
+
+fn build_explain_args(req: &Req<'_>) -> Result<rustledger::cmd::explain::Args, CommandError> {
+    if req.positionals().len() > 1 {
+        return Err(CommandError::new(
+            "explain takes at most one error code",
+            "INVALID_ARGS",
+            "Pass one code (e.g. E2001), or none to list them all.",
+        )
+        .exit_code(agcli::ExitCode::USAGE));
+    }
+    Ok(rustledger::cmd::explain::Args {
+        code: req.arg(0).map(str::to_string),
+    })
+}
+
 fn lint_command() -> Command {
     Command::new("lint", "Run non-fatal advisory passes")
         .usage(with_globals(
-            "ag-rledger lint transfers <file>... [--min-confidence <n>] [--date-window <days>] \
-             [--amount-tolerance <amount>] [--apply] [--format <format>]",
+            "ag-rledger lint <transfers|closed-nonempty> <file>... [--format <format>]  |  \
+             transfers: [--min-confidence <n>] [--date-window <days>] \
+             [--amount-tolerance <amount>] [--apply]",
         ))
         .allow_unknown_flags()
         .allow_extra_args()
@@ -790,7 +939,7 @@ fn build_report_args(req: &Req<'_>) -> Result<ReportArgs, CommandError> {
         CommandError::new(
             "report subcommand is required",
             "MISSING_REPORT",
-            "Use balances, income, journal, holdings, networth, accounts, commodities, stats, prices, or budget.",
+            format!("Use one of: {}.", report_names().join(", ")),
         )
         .exit_code(agcli::ExitCode::USAGE)
     })?;
@@ -846,32 +995,81 @@ fn build_report(
             to: string_flag(req, "to", None),
             children: bool_flag(req, "children", None),
         }),
-        // Valid names come from REPORT_FLAGS rather than a third hand-kept
-        // list. Two lists that must agree is how the usage string came to
-        // advertise flags the handler ignored (#2280); three would be worse.
-        _ => Err(invalid_enum(
-            "report",
-            report_name,
-            &REPORT_FLAGS.iter().map(|(r, _)| *r).collect::<Vec<_>>(),
-        )),
+        Some("returns") => {
+            let investments = flag_values(req, "investments", Some("i"));
+            // Required by `rledger` too: the investment accounts ARE the
+            // portfolio, and there is no default that would mean anything.
+            if investments.is_empty() {
+                return Err(CommandError::new(
+                    "report returns requires --investments",
+                    "MISSING_FLAG",
+                    "Name the investment account prefix(es): --investments Assets:Investments \
+                     (repeatable).",
+                )
+                .exit_code(agcli::ExitCode::USAGE));
+            }
+            Ok(Report::Returns {
+                investments,
+                income: flag_values(req, "income", Some("n")),
+                currency: string_flag(req, "currency", Some("c")),
+                end: string_flag(req, "end", Some("e")),
+                by_group: bool_flag(req, "by-group", None),
+            })
+        }
+        Some("capgains") => Ok(Report::Capgains {
+            account: string_flag(req, "account", Some("a")),
+            year: optional_parse_flag(req, "year", Some("y"))?,
+            end: string_flag(req, "end", Some("e")),
+            long_term_days: optional_parse_flag(req, "long-term-days", None)?,
+            irr: bool_flag(req, "irr", None),
+        }),
+        // A report `rledger` has and this match does not: refused by name,
+        // never ignored. The drift guard
+        // (`ag_rledger_reads_every_rledger_flag_or_refuses_it`) fails until
+        // it is wired here.
+        Some(other) => Err(CommandError::new(
+            format!("report `{other}` is not offered by ag-rledger"),
+            "UNSUPPORTED",
+            "Run it with `rledger report`.",
+        )
+        .exit_code(agcli::ExitCode::USAGE)),
+        None => Err(invalid_enum("report", report_name, &report_names())),
     }
 }
 
+/// Every report's name, from `rledger`'s definition (see [`report_flags`]).
+fn report_names() -> Vec<&'static str> {
+    report_flags().iter().map(|(r, _)| r.as_str()).collect()
+}
+
+/// The report `name` refers to: a report's name or one of `rledger`'s
+/// aliases for it (`bal`, `is`, `register`), both read from `rledger`'s
+/// definition, or one of the longer spellings `ag-rledger` has always
+/// accepted.
 fn parse_report_name(name: &str) -> Option<String> {
-    match name {
-        "balances" => Some("balances".to_string()),
-        "bal" | "balsheet" | "balance-sheet" => Some("balsheet".to_string()),
-        "is" | "income" | "income-statement" => Some("income".to_string()),
-        "register" | "journal" => Some("journal".to_string()),
-        "holdings" => Some("holdings".to_string()),
-        "networth" | "net-worth" => Some("networth".to_string()),
-        "accounts" => Some("accounts".to_string()),
-        "commodities" => Some("commodities".to_string()),
-        "stats" => Some("stats".to_string()),
-        "prices" => Some("prices".to_string()),
-        "budget" => Some("budget".to_string()),
-        _ => None,
-    }
+    static ALIASES: OnceLock<Vec<(String, Vec<String>)>> = OnceLock::new();
+    let name = match name {
+        "balance-sheet" => "balsheet",
+        "income-statement" => "income",
+        "net-worth" => "networth",
+        other => other,
+    };
+    let aliases = ALIASES.get_or_init(|| {
+        use clap::Args as _;
+        rustledger::cmd::report_cmd::Args::augment_args(clap::Command::new("report"))
+            .get_subcommands()
+            .map(|sub| {
+                (
+                    sub.get_name().to_string(),
+                    sub.get_all_aliases().map(str::to_string).collect(),
+                )
+            })
+            .collect()
+    });
+    aliases
+        .iter()
+        .find(|(report, spellings)| report == name || spellings.iter().any(|s| s == name))
+        .map(|(report, _)| report.clone())
 }
 
 fn build_doctor_command(req: &Req<'_>) -> Result<rustledger::cmd::doctor::Command, CommandError> {
@@ -1123,36 +1321,53 @@ fn build_add_args(req: &Req<'_>) -> Result<rustledger::cmd::add_cmd::Args, Comma
     })
 }
 
+/// The lints `ag-rledger lint` runs: every `rledger lint` subcommand.
+const LINTS: &[&str] = &["transfers", "closed-nonempty"];
+
 fn build_lint_args(req: &Req<'_>) -> Result<rustledger::cmd::lint::Args, CommandError> {
-    use rustledger::cmd::lint::transfers::{Args as TransfersArgs, OutputFormat};
-    use rustledger::cmd::lint::{Args, LintKind};
+    use rustledger::cmd::lint::{Args, LintKind, closed_nonempty, transfers};
     let subcommand = req.arg(0).ok_or_else(|| {
-        CommandError::new("lint name is required", "MISSING_LINT", "Use `transfers`.")
-            .exit_code(agcli::ExitCode::USAGE)
+        CommandError::new(
+            "lint name is required",
+            "MISSING_LINT",
+            format!("Use one of: {}.", LINTS.join(", ")),
+        )
+        .exit_code(agcli::ExitCode::USAGE)
     })?;
-    if subcommand != "transfers" {
-        return Err(invalid_enum("lint", subcommand, &["transfers"]));
-    }
-    let format = match flag(req, "format", Some("f")).unwrap_or("text") {
-        "text" => OutputFormat::Text,
-        "json" => OutputFormat::Json,
-        other => return Err(invalid_enum("format", other, &["text", "json"])),
-    };
+    let format = flag(req, "format", Some("f")).unwrap_or("text");
     let files: Vec<PathBuf> = req.positionals()[1..].iter().map(PathBuf::from).collect();
-    if files.is_empty() {
-        return Err(missing_file_error("lint transfers"));
-    }
-    Ok(Args {
-        lint: LintKind::Transfers(TransfersArgs {
+    let lint = match subcommand {
+        "transfers" => LintKind::Transfers(transfers::Args {
             files,
             min_confidence: parse_flag(req, "min-confidence", None, 0.8)?,
             date_window: parse_flag(req, "date-window", None, 3)?,
             amount_tolerance: string_flag(req, "amount-tolerance", None)
                 .unwrap_or_else(|| "0.01".to_string()),
             apply: bool_flag(req, "apply", None),
-            format,
+            format: match format {
+                "text" => transfers::OutputFormat::Text,
+                "json" => transfers::OutputFormat::Json,
+                other => return Err(invalid_enum("format", other, &["text", "json"])),
+            },
         }),
-    })
+        "closed-nonempty" => LintKind::ClosedNonempty(closed_nonempty::Args {
+            files,
+            format: match format {
+                "text" => closed_nonempty::OutputFormat::Text,
+                "json" => closed_nonempty::OutputFormat::Json,
+                other => return Err(invalid_enum("format", other, &["text", "json"])),
+            },
+        }),
+        other => return Err(invalid_enum("lint", other, LINTS)),
+    };
+    let files = match &lint {
+        LintKind::Transfers(args) => &args.files,
+        LintKind::ClosedNonempty(args) => &args.files,
+    };
+    if files.is_empty() {
+        return Err(missing_file_error(&format!("lint {subcommand}")));
+    }
+    Ok(Args { lint })
 }
 
 /// Run a command whose output is all on `out`: nothing it calls writes to
@@ -1795,123 +2010,89 @@ fn parse_alias_expansion(expansion: &str) -> Vec<String> {
 mod tests {
     use super::*;
 
-    /// Every report in the flag table must be a report `build_report` handles.
-    ///
-    /// The table drives the usage string, the rejection, and the list of valid
-    /// names, so an entry `build_report` does not know about would advertise a
-    /// report that cannot run.
+    /// Every report `rledger` defines is one `parse_report_name` resolves,
+    /// by its name and by each of `rledger`'s aliases for it.
     #[test]
-    fn every_tabled_report_is_buildable() {
-        for (report, _) in REPORT_FLAGS {
-            assert!(
-                parse_report_name(report).is_some(),
-                "`{report}` is in REPORT_FLAGS but is not a recognized report name"
-            );
+    fn every_rledger_report_name_and_alias_resolves() {
+        use clap::Args as _;
+        let report = rustledger::cmd::report_cmd::Args::augment_args(clap::Command::new("report"));
+        for sub in report.get_subcommands() {
+            let name = sub.get_name();
+            assert_eq!(parse_report_name(name).as_deref(), Some(name));
+            for alias in sub.get_all_aliases() {
+                assert_eq!(parse_report_name(alias).as_deref(), Some(name), "{alias}");
+            }
         }
+        // The longer spellings ag-rledger has always taken still work.
+        assert_eq!(parse_report_name("net-worth").as_deref(), Some("networth"));
+        assert_eq!(
+            parse_report_name("balance-sheet").as_deref(),
+            Some("balsheet")
+        );
+        assert_eq!(
+            parse_report_name("income-statement").as_deref(),
+            Some("income")
+        );
+        assert_eq!(parse_report_name("nope"), None);
     }
 
     /// #2280: the usage string advertised the union of every report's flags,
     /// so `report income` promised `--from`/`--to`/`--period`/`--children` and
-    /// then discarded them. It is now derived from the table, so a report that
-    /// reads nothing cannot appear as accepting something.
+    /// then discarded them. It is derived from `rledger`'s definition, per
+    /// report, so a report that reads nothing cannot appear as accepting
+    /// something.
     #[test]
     fn the_usage_string_does_not_promise_flags_a_report_ignores() {
         let usage = report_flag_usage();
-        for (report, flags) in REPORT_FLAGS {
+        for (report, flags) in report_flags() {
+            let segment = usage
+                .split("; ")
+                .find(|seg| seg.starts_with(&format!("{report}: ")));
             if flags.is_empty() {
                 assert!(
-                    !usage.contains(&format!("{report}:")),
+                    segment.is_none(),
                     "`{report}` reads no report-specific flags but appears in the usage string"
                 );
-            } else {
-                // Check the report's own segment, not the whole string. An
-                // earlier draft searched all of `usage`, so dropping
-                // `--account` from `balances` still passed on `journal`'s
-                // copy of it: the shared flags were unguarded, which is most
-                // of them.
-                let segment = usage
-                    .split("; ")
-                    .find(|seg| seg.starts_with(&format!("{report}: ")))
-                    .unwrap_or_else(|| {
-                        panic!("`{report}` reads flags but is missing from the usage string")
-                    });
-                let listed: Vec<&str> = segment
-                    .split_once(": ")
-                    .expect("segment is `report: flags`")
-                    .1
-                    .split(' ')
-                    .collect();
-                let expected: Vec<String> = flags.iter().map(|f| format!("--{f}")).collect();
-                assert_eq!(
-                    listed, expected,
-                    "`{report}`'s usage segment disagrees with REPORT_FLAGS"
-                );
+                continue;
             }
+            let segment = segment.unwrap_or_else(|| {
+                panic!("`{report}` reads flags but is missing from the usage string")
+            });
+            let listed: Vec<&str> = segment
+                .split_once(": ")
+                .expect("segment is `report: flags`")
+                .1
+                .split("] [")
+                .map(|f| f.trim_matches(['[', ']']))
+                .map(|f| f.split([' ', '/']).next().unwrap_or_default())
+                .collect();
+            let expected: Vec<String> = flags.iter().map(|f| format!("--{}", f.long)).collect();
+            assert_eq!(listed, expected, "`{report}`'s usage segment disagrees");
         }
+    }
+
+    /// A switch is written `[--irr]` and a flag with a value `[--end <END>]`,
+    /// which is how agcli tells them apart: before, `--no-zero ledger.beancount`
+    /// would have taken the file as the switch's value.
+    #[test]
+    fn usage_brackets_switches_and_value_flags_as_agcli_reads_them() {
+        let usage = report_flag_usage();
+        for switch in ["[--irr]", "[--by-group]", "[--no-zero]", "[--children]"] {
+            assert!(usage.contains(switch), "{switch} missing from {usage}");
+        }
+        assert!(usage.contains("[--account/-a <ACCOUNT>]"), "{usage}");
+        assert!(
+            usage.contains("[--long-term-days <LONG_TERM_DAYS>]"),
+            "{usage}"
+        );
     }
 
     /// The reports from #2280 read no report-specific flags at all.
-    ///
-    /// Pinned by name rather than derived, so adding a flag to one of these
-    /// table entries fails here unless `build_report` is wired to read it —
-    /// which is the drift that caused the bug. (An earlier draft of this test
-    /// asserted `flags.contains(flag)` while iterating `flags`, which cannot
-    /// fail and proved nothing.)
     #[test]
     fn the_reports_that_take_no_flags_still_take_none() {
         for report in ["income", "balsheet", "accounts", "commodities", "stats"] {
-            let (_, flags) = REPORT_FLAGS
-                .iter()
-                .find(|(r, _)| *r == report)
-                .unwrap_or_else(|| panic!("`{report}` missing from REPORT_FLAGS"));
-            assert!(
-                flags.is_empty(),
-                "`{report}` now lists {flags:?}; wire them in build_report before adding them here"
-            );
-        }
-    }
-
-    /// Deep-review finding on #2289: the check knew only long spellings, so
-    /// `report income -a Foo` was still silently accepted. Half a fix is the
-    /// failure this whole change is about.
-    #[test]
-    fn every_flag_with_a_short_form_declares_it() {
-        // Mirrors the `string_flag(req, "x", Some("y"))` calls in
-        // `build_report`. If one gains or loses a short form there, this list
-        // has to move with it, and the assertion below is what says so.
-        let expected: &[(&str, &str)] = &[
-            ("account", "a"),
-            ("limit", "l"),
-            ("period", "p"),
-            ("currency", "c"),
-            ("commodity", "c"),
-        ];
-        assert_eq!(
-            FLAG_SHORTS, expected,
-            "FLAG_SHORTS drifted from build_report's short flags"
-        );
-
-        for (long, short) in expected {
-            assert_eq!(short_for(long), Some(*short), "--{long}");
-        }
-
-        // The assertion above only catches an edit to FLAG_SHORTS that skips
-        // this test. This one is a real cross-check: a short form declared for
-        // a flag no report reads is dead, and would mean the two tables have
-        // parted company.
-        for (long, _) in FLAG_SHORTS {
-            assert!(
-                REPORT_FLAGS.iter().any(|(_, flags)| flags.contains(long)),
-                "--{long} has a short form but no report reads it"
-            );
-        }
-    }
-
-    /// A flag with no short form must not invent one.
-    #[test]
-    fn flags_without_a_short_form_have_none() {
-        for long in ["from", "to", "children", "no-zero"] {
-            assert_eq!(short_for(long), None, "--{long} gained a short form");
+            let flags = flags_of(report).unwrap_or_else(|| panic!("`{report}` missing"));
+            assert!(flags.is_empty(), "`{report}` now lists {flags:?}");
         }
     }
 
@@ -1920,14 +2101,160 @@ mod tests {
     /// window reads as globally applicable.
     #[test]
     fn date_window_flags_belong_to_budget_only() {
-        for (report, flags) in REPORT_FLAGS {
-            let has_dates = flags.contains(&"from") || flags.contains(&"to");
-            assert_eq!(
-                has_dates,
-                *report == "budget",
-                "`{report}` date-flag ownership changed: {flags:?}"
-            );
+        for (report, flags) in report_flags() {
+            let has_dates = flags.iter().any(|f| f.long == "from" || f.long == "to");
+            assert_eq!(has_dates, report == "budget", "`{report}`: {flags:?}");
         }
+    }
+
+    /// Build `report <name> <args...>`, returning the error code if refused.
+    fn report_refusal(args: &[&str]) -> Option<String> {
+        let mut argv = vec!["ag-rledger", "report", "f.beancount"];
+        argv.extend_from_slice(args);
+        let invocation = agcli::parse_invocation(argv).expect("argv parses");
+        let req = Req::new(&invocation, &invocation.positionals()[1..]);
+        build_report_args(&req).err().map(|e| format!("{e:?}"))
+    }
+
+    /// Deep-review finding on #2289: the check knew only long spellings, so
+    /// `report income -a Foo` was silently accepted. Every short form comes
+    /// from `rledger`'s definition now.
+    #[test]
+    fn a_short_flag_the_report_does_not_read_is_refused() {
+        for args in [
+            &["income", "-a", "Assets"][..],
+            &["balances", "-l", "5"],
+            &["stats", "-i", "Assets"],
+            &["journal", "-y", "2024"],
+            &["balances", "-e", "2024-01-01"],
+        ] {
+            let refusal = report_refusal(args).unwrap_or_else(|| panic!("{args:?} accepted"));
+            assert!(refusal.contains("INAPPLICABLE_FLAG"), "{args:?}: {refusal}");
+        }
+    }
+
+    /// `-c` is `prices --commodity` and `networth --currency`: on `prices` it
+    /// is the commodity, not a currency flag `prices` does not read. The
+    /// hand-kept short-form table knew only one meaning per letter, so it
+    /// refused `report prices -c AAPL`.
+    #[test]
+    fn a_short_flag_shared_between_reports_belongs_to_the_one_asked_for() {
+        assert_eq!(report_refusal(&["prices", "-c", "AAPL"]), None);
+        assert_eq!(report_refusal(&["networth", "-c", "USD"]), None);
+        assert_eq!(
+            report_refusal(&["returns", "-i", "Assets", "-c", "USD"]),
+            None
+        );
+        // `-e` is `--end` on both returns and capgains.
+        assert_eq!(report_refusal(&["capgains", "-e", "2024-12-31"]), None);
+    }
+
+    /// #2567: `report returns` and `report capgains` are offered, each flag
+    /// read into `rledger`'s own `Report` variant.
+    #[test]
+    fn returns_and_capgains_read_their_flags() {
+        use rustledger::cmd::report_cmd::Report;
+        let build = |args: &[&str]| {
+            let mut argv = vec!["ag-rledger", "report", "f.beancount"];
+            argv.extend_from_slice(args);
+            let invocation = agcli::parse_invocation(argv).expect("argv parses");
+            let req = Req::new(&invocation, &invocation.positionals()[1..]);
+            let built = build_report_args(&req).map(|a| a.report);
+            assert!(req.unread_flags().is_empty(), "{:?}", req.unread_flags());
+            built
+        };
+        let Ok(Report::Returns {
+            investments,
+            income,
+            currency,
+            end,
+            by_group,
+        }) = build(&[
+            "returns",
+            "-i",
+            "Assets:Broker",
+            "--investments",
+            "Assets:Ira",
+            "-n",
+            "Income:Div",
+            "--currency=EUR",
+            "--end",
+            "2024-12-31",
+            "--by-group",
+        ])
+        else {
+            panic!("returns did not build");
+        };
+        assert_eq!(investments, ["Assets:Broker", "Assets:Ira"]);
+        assert_eq!(income, ["Income:Div"]);
+        assert_eq!(currency.as_deref(), Some("EUR"));
+        assert_eq!(end.as_deref(), Some("2024-12-31"));
+        assert!(by_group);
+
+        let refused = build(&["returns"]).err().map(|e| format!("{e:?}"));
+        assert!(
+            refused.is_some_and(|e| e.contains("MISSING_FLAG")),
+            "--investments is required, as in rledger"
+        );
+
+        let Ok(Report::Capgains {
+            account,
+            year,
+            end,
+            long_term_days,
+            irr,
+        }) = build(&[
+            "capgains",
+            "-a",
+            "Assets:Broker",
+            "-y",
+            "2024",
+            "-e",
+            "2024-06-30",
+            "--long-term-days",
+            "400",
+            "--irr",
+        ])
+        else {
+            panic!("capgains did not build");
+        };
+        assert_eq!(account.as_deref(), Some("Assets:Broker"));
+        assert_eq!(year, Some(2024));
+        assert_eq!(end.as_deref(), Some("2024-06-30"));
+        assert_eq!(long_term_days, Some(400));
+        assert!(irr);
+    }
+
+    /// #2567: `lint closed-nonempty` and `explain` are offered.
+    #[test]
+    fn closed_nonempty_and_explain_build() {
+        use rustledger::cmd::lint::{LintKind, closed_nonempty::OutputFormat};
+        let invocation = agcli::parse_invocation([
+            "ag-rledger",
+            "lint",
+            "closed-nonempty",
+            "a.beancount",
+            "b.beancount",
+            "--format",
+            "json",
+        ])
+        .unwrap();
+        let req = Req::new(&invocation, &invocation.positionals()[1..]);
+        let LintKind::ClosedNonempty(args) = build_lint_args(&req).unwrap().lint else {
+            panic!("not closed-nonempty");
+        };
+        assert_eq!(args.files.len(), 2);
+        assert!(matches!(args.format, OutputFormat::Json));
+
+        let invocation = agcli::parse_invocation(["ag-rledger", "explain", "E2001"]).unwrap();
+        let req = Req::new(&invocation, &invocation.positionals()[1..]);
+        assert_eq!(
+            build_explain_args(&req).unwrap().code.as_deref(),
+            Some("E2001")
+        );
+        let invocation = agcli::parse_invocation(["ag-rledger", "explain"]).unwrap();
+        let req = Req::new(&invocation, &invocation.positionals()[1..]);
+        assert_eq!(build_explain_args(&req).unwrap().code, None);
     }
 
     /// Run `build` on `ag-rledger <args...>` and return the flags it READ.
@@ -2022,14 +2349,27 @@ mod tests {
         let top = rledger_flags(&report);
         for sub in report.get_subcommands() {
             let name = sub.get_name();
-            // A report `ag-rledger` does not offer (`returns`, `capgains`,
-            // ...) is refused by name, so none of its flags can be ignored.
-            if parse_report_name(name).is_none() {
-                continue;
-            }
             let mut rledger = top.clone();
             rledger.extend(rledger_flags(sub));
-            let read = flags_read(&["report", "f.beancount", name], build_report_args);
+            // Every report `rledger` has must build: a report this binary
+            // does not offer is a failure here, not a silent skip (#2567).
+            // `returns` requires its portfolio, as in `rledger`.
+            let mut argv = vec!["report", "f.beancount", name];
+            if name == "returns" {
+                argv.extend(["--investments", "Assets"]);
+            }
+            let built = {
+                let mut full = vec!["ag-rledger"];
+                full.extend_from_slice(&argv);
+                let invocation = agcli::parse_invocation(full).expect("argv parses");
+                let req = Req::new(&invocation, &invocation.positionals()[1..]);
+                build_report_args(&req).err().map(|e| format!("{e:?}"))
+            };
+            assert_eq!(
+                built, None,
+                "`rledger report {name}` is not offered by `ag-rledger report`"
+            );
+            let read = flags_read(&argv, build_report_args);
             // `--no-pager`: the envelope is never paged.
             assert_reads_rledger_flags(
                 &format!("report {name}"),
@@ -2083,12 +2423,25 @@ mod tests {
         assert_reads_rledger_flags("add", &rledger, &read, &[]);
 
         let lint = cmd::lint::Args::augment_args(command("lint"));
-        let transfers = lint
-            .get_subcommands()
-            .find(|s| s.get_name() == "transfers")
-            .expect("rledger lint transfers");
-        let read = flags_read(&["lint", "transfers", "f.beancount"], build_lint_args);
-        assert_reads_rledger_flags("lint transfers", &rledger_flags(transfers), &read, &[]);
+        for sub in lint.get_subcommands() {
+            let name = sub.get_name();
+            // Every lint `rledger` has must be one this binary offers (#2567).
+            assert!(
+                LINTS.contains(&name),
+                "`rledger lint {name}` is not offered"
+            );
+            let read = flags_read(&["lint", name, "f.beancount"], build_lint_args);
+            assert_reads_rledger_flags(&format!("lint {name}"), &rledger_flags(sub), &read, &[]);
+        }
+        assert_eq!(
+            LINTS.len(),
+            lint.get_subcommands().count(),
+            "LINTS names a lint rledger does not have"
+        );
+
+        let rledger = rledger_flags(&cmd::explain::Args::augment_args(command("explain")));
+        let read = flags_read(&["explain", "E2001"], build_explain_args);
+        assert_reads_rledger_flags("explain", &rledger, &read, &[]);
     }
 
     /// A flag the command does not read is refused, a framework flag is not.

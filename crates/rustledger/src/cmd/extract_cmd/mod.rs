@@ -64,14 +64,12 @@ mod suggest;
 use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
+use config::expand_tilde;
 use config::{
     ConfigSource, ImporterEntry, ImportersFile, apply_column, build_config_from_entry,
     find_importers_config, find_importers_config_with_source, find_matching_importers,
     load_importers_config,
 };
-// Used only by the WASM-importer-dir resolution path (gated below).
-#[cfg(feature = "python-plugin-wasm")]
-use config::expand_tilde;
 #[cfg(test)]
 use duplicate::load_existing_transactions;
 use rustledger_core::{Directive, FormatConfig};
@@ -467,6 +465,9 @@ pub fn list_importers_with_writer<W: Write>(
     writeln!(out, "Registered importer engines:")?;
     for (name, description) in registry.list_importers() {
         writeln!(out, "  {name} - {description}")?;
+    }
+    if let Some(note) = untried_wasm_importers(args) {
+        writeln!(out, "  (not loaded: {note})")?;
     }
 
     Ok(())
@@ -1431,7 +1432,6 @@ fn resolve_scan_dirs(args: &Args) -> Result<Vec<PathBuf>> {
 /// (no flag, soft-discover from default locations, errors warn-and-
 /// degrade, the warning going to `err_out`). CLI `--wasm-importer-dir`
 /// flags override both and short-circuit the toml lookup entirely.
-#[cfg(feature = "python-plugin-wasm")]
 fn resolve_scan_dirs_to(args: &Args, err_out: &mut dyn Write) -> Result<Vec<PathBuf>> {
     if !args.wasm_importer_dir.is_empty() {
         return Ok(args.wasm_importer_dir.clone());
@@ -1445,7 +1445,6 @@ fn resolve_scan_dirs_to(args: &Args, err_out: &mut dyn Write) -> Result<Vec<Path
 /// User passed `--config <path>` explicitly. Missing or malformed
 /// file is a real error — the user asked for this file by name, so
 /// silently degrading would hide the bug they want to know about.
-#[cfg(feature = "python-plugin-wasm")]
 fn resolve_scan_dirs_explicit(path: &Path) -> Result<Vec<PathBuf>> {
     let cfg_path = find_importers_config(Some(path))?
         .ok_or_else(|| anyhow!("Importers config not found: {}", path.display()))?;
@@ -1463,7 +1462,6 @@ fn resolve_scan_dirs_explicit(path: &Path) -> Result<Vec<PathBuf>> {
 /// A missing file is expected; a malformed file is unusual but not
 /// fatal (the user didn't explicitly point at it). Print a warning
 /// for the malformed case so the user can find their mistake.
-#[cfg(feature = "python-plugin-wasm")]
 fn resolve_scan_dirs_implicit(err_out: &mut dyn Write) -> Vec<PathBuf> {
     let cfg_path = match find_importers_config(None) {
         Ok(Some(p)) => p,
@@ -1700,6 +1698,66 @@ pub fn run_with_writer<W: Write>(
     run_with_ledgers(args, file, out, err_out, &mut ledgers::Ledgers::default())
 }
 
+/// In a build without the WASM runtime, a note naming the `.wasm` importers
+/// that `wasm_importer_dir` (from `importers.toml`) points at: they cannot
+/// be loaded, so they were not tried (#2541). `None` when there are none,
+/// and always in a build with the runtime, which tries them.
+///
+/// The setting itself is accepted silently, since one `importers.toml` may
+/// serve full builds too; the note goes where its absence would mislead:
+/// an error that no importer matched or nothing was extracted, and a
+/// warning when another importer read the file instead.
+#[cfg(not(feature = "python-plugin-wasm"))]
+fn untried_wasm_importers(args: &Args) -> Option<String> {
+    // Its errors (an explicit config that is missing or malformed) are the
+    // CSV path's to report.
+    let dirs = resolve_scan_dirs_to(args, &mut io::sink()).ok()?;
+    let mut names = Vec::new();
+    let mut shown = Vec::new();
+    for dir in &dirs {
+        let Ok(scan) = rustledger_plugin::wasm_dir_scan::collect_wasm_paths(dir) else {
+            continue;
+        };
+        if scan.sorted_paths.is_empty() {
+            continue;
+        }
+        shown.push(dir.display().to_string());
+        names.extend(
+            scan.sorted_paths
+                .iter()
+                .filter_map(|p| p.file_name())
+                .map(|n| n.to_string_lossy().into_owned()),
+        );
+    }
+    let count = match names.len() {
+        0 => return None,
+        1 => "the WASM importer".to_string(),
+        n => format!("the {n} WASM importers"),
+    };
+    Some(format!(
+        "this rledger has no WASM runtime, so {count} in {} ({}) {} not tried; \
+         `cargo install rustledger` includes it",
+        shown.join(", "),
+        names.join(", "),
+        if names.len() == 1 { "was" } else { "were" }
+    ))
+}
+
+/// A build with the WASM runtime loads and tries every importer it names.
+#[cfg(feature = "python-plugin-wasm")]
+#[allow(clippy::unnecessary_wraps)]
+const fn untried_wasm_importers(_args: &Args) -> Option<String> {
+    None
+}
+
+/// `error` with `note` (from [`untried_wasm_importers`]) added, if any.
+fn with_wasm_note(error: anyhow::Error, note: Option<&str>) -> anyhow::Error {
+    match note {
+        Some(note) => anyhow!("{error:#}\n  note: {note}"),
+        None => error,
+    }
+}
+
 /// [`run_with_writer`], reading `--ledger` and `--existing` through `ledgers`.
 ///
 /// Every reader of those files (the profile lookup, the currency lookup and
@@ -1806,6 +1864,16 @@ fn run_with_ledgers<W: Write>(
     // invocation, the ledger is standing configuration.
     let effective_entry_name: Option<String> =
         args.importer.clone().or_else(|| profile_entry_name.clone());
+
+    // WASM importers a build without the runtime could not try. Only when
+    // no entry was named: a named entry is read by its own parser, and a
+    // full build would not have tried them either.
+    let wasm_note = if effective_entry_name.is_none() {
+        untried_wasm_importers(args)
+    } else {
+        None
+    };
+    let wasm_note = wasm_note.as_deref();
 
     // Resolve the config entry BEFORE dispatch so an entry can say which
     // parser it configures. Tolerant on purpose: discovery must not fail a
@@ -1973,9 +2041,15 @@ fn run_with_ledgers<W: Write>(
                 .file_name()
                 .map(|s| s.to_string_lossy())
                 .unwrap_or_default();
-            let entry = resolve_config_entry(args, &importers_file, source_file, &filename)?
+            let entry = resolve_config_entry(args, &importers_file, source_file, &filename)
+                .map_err(|e| with_wasm_note(e, wasm_note))?
                 .ok_or_else(|| {
-                    anyhow!("No importer matches file '{filename}'. Use --importer to select one.")
+                    with_wasm_note(
+                        anyhow!(
+                            "No importer matches file '{filename}'. Use --importer to select one."
+                        ),
+                        wasm_note,
+                    )
                 })?;
 
             let _ = writeln!(
@@ -2158,7 +2232,9 @@ fn run_with_ledgers<W: Write>(
 
     // `importer` was selected earlier so we could route config-
     // building correctly; here it's used for the actual dispatch.
-    let mut result = importer.extract(file, &config)?;
+    let mut result = importer
+        .extract(file, &config)
+        .map_err(|e| with_wasm_note(e, wasm_note))?;
 
     // Canonical payees (#2550), for every importer type: after the importer,
     // whose account mappings have already matched the bank's raw text, and
@@ -2190,13 +2266,29 @@ fn run_with_ledgers<W: Write>(
         .filter(|d| matches!(d, Directive::Transaction(_)))
         .count();
     if extracted_txns == 0 {
-        anyhow::bail!(
-            "no transactions were extracted from {}\n  \
-             the file may not match a recognized importer format, be empty, or \
-             use unexpected columns\n  \
-             try: --auto, an explicit importer (--importer), or column flags \
-             (--date-column, --amount-column, …)",
-            file.display()
+        return Err(with_wasm_note(
+            anyhow!(
+                "no transactions were extracted from {}\n  \
+                 the file may not match a recognized importer format, be empty, or \
+                 use unexpected columns\n  \
+                 try: --auto, an explicit importer (--importer), or column flags \
+                 (--date-column, --amount-column, …)",
+                file.display()
+            ),
+            wasm_note,
+        ));
+    }
+    // Another importer read the file, where a build with the runtime would
+    // have offered it to the WASM importers first.
+    if let Some(note) = wasm_note {
+        let reader = used_entry.as_deref().map_or_else(
+            || format!("the {} importer", importer.name()),
+            |entry| format!("importers.toml entry '{entry}'"),
+        );
+        let _ = writeln!(
+            err_out,
+            "warning: {} was read by {reader}, but {note}",
+            source_file.display()
         );
     }
 
@@ -3327,6 +3419,8 @@ default_expense = "Expenses:Uncategorized"
         assert_eq!(imp.name(), "CSV");
     }
 
+    // Loads WASM importers: needs the runtime.
+    #[cfg(feature = "python-plugin-wasm")]
     #[test]
     fn test_select_importer_config_alone_does_not_force_csv() {
         // Regression: `--config x.toml` alone (no --importer) used to
@@ -5889,6 +5983,7 @@ filename_pattern = "statement*"
     /// tests below can write WAT bytes in one call. Single source of
     /// truth for the WAT shape lives in `rustledger-importer`; the
     /// CLI tests just consume it.
+    #[cfg(feature = "python-plugin-wasm")]
     fn wasm_importer_with_name(name: &str) -> Vec<u8> {
         let wat = rustledger_importer::test_fixtures::metadata_wat(name);
         wat::parse_str(&wat).expect("WAT parses")
@@ -5905,6 +6000,8 @@ filename_pattern = "statement*"
         assert!(registry.find_by_name("OFX").is_some());
     }
 
+    // Loads WASM importers: needs the runtime.
+    #[cfg(feature = "python-plugin-wasm")]
     #[test]
     fn build_registry_loads_cli_wasm_importer_ahead_of_builtins() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5921,6 +6018,8 @@ filename_pattern = "statement*"
         assert!(registry.find_by_name("OFX").is_some());
     }
 
+    // Loads WASM importers: needs the runtime.
+    #[cfg(feature = "python-plugin-wasm")]
     #[test]
     fn build_registry_scans_directory_from_cli_flag() {
         let tmp = tempfile::tempdir().unwrap();
@@ -5939,6 +6038,8 @@ filename_pattern = "statement*"
         assert!(registry.find_by_name("bbb").is_some());
     }
 
+    // Loads WASM importers: needs the runtime.
+    #[cfg(feature = "python-plugin-wasm")]
     #[test]
     fn build_registry_reads_wasm_importer_dir_from_importers_toml() {
         // Two temp dirs: one for the .wasm modules, one for the
@@ -5966,6 +6067,8 @@ filename_pattern = "statement*"
         );
     }
 
+    // Loads WASM importers: needs the runtime.
+    #[cfg(feature = "python-plugin-wasm")]
     #[test]
     fn build_registry_cli_dir_flag_overrides_importers_toml_setting() {
         // toml setting points at a dir with 'tom.wasm'; CLI flag
@@ -6033,6 +6136,8 @@ filename_pattern = "statement*"
         );
     }
 
+    // Loads WASM importers: needs the runtime.
+    #[cfg(feature = "python-plugin-wasm")]
     #[test]
     fn build_registry_scans_multiple_cli_dirs_in_order() {
         // --wasm-importer-dir is repeatable; both dirs should be
@@ -6062,6 +6167,8 @@ filename_pattern = "statement*"
         assert!(registry.find_by_name("bbb").is_some(), "second dir loaded");
     }
 
+    // Loads WASM importers: needs the runtime.
+    #[cfg(feature = "python-plugin-wasm")]
     #[test]
     fn build_registry_accepts_toml_dir_as_list() {
         // wasm_importer_dir = ["a", "b"] in importers.toml.
@@ -6096,6 +6203,8 @@ filename_pattern = "statement*"
         assert!(registry.find_by_name("two").is_some());
     }
 
+    // Loads WASM importers: needs the runtime.
+    #[cfg(feature = "python-plugin-wasm")]
     #[test]
     fn build_registry_skip_and_collect_loads_good_modules_past_failures() {
         // Mix one valid and one invalid .wasm in a scanned dir. The
@@ -6118,6 +6227,8 @@ filename_pattern = "statement*"
         );
     }
 
+    // Loads WASM importers: needs the runtime.
+    #[cfg(feature = "python-plugin-wasm")]
     #[test]
     fn build_registry_cli_wasm_importer_wins_over_dir_scanned_same_name() {
         // Duplicate metadata.name from a CLI flag vs a scanned dir.

@@ -82,7 +82,7 @@ The install routes above do not all give the same `rledger`. Release binaries ar
 - WASM plugins (`plugin "my_plugin.wasm"`, `rledger check --plugin`),
 - WASM importers (`rledger extract --wasm-importer`, `--wasm-importer-dir`).
 
-Asked for one of these, a release binary stops with an error saying the runtimes are missing and naming `cargo install rustledger`.
+Asked for one of these, a release binary stops with an error saying the runtimes are missing and naming `cargo install rustledger`. A `wasm_importer_dir` in `importers.toml` is accepted (the same file may serve a full build), and its `.wasm` importers are not tried: when no importer matches a file, or nothing is extracted, the error names them, a file another importer reads instead gets a warning naming them, and `rledger extract --list-importers` lists them as not loaded.
 
 | Route | Plugin runtimes |
 |-------|-----------------|

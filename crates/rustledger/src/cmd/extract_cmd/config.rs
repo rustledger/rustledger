@@ -13,7 +13,6 @@ pub(super) use rustledger_importer::toml_entry::{
     ImporterEntry, apply_column, build_config_from_entry,
 };
 use rustledger_importer::toml_entry::{PayeeTable, SHARED_PAYEES};
-#[cfg(feature = "python-plugin-wasm")]
 use std::path::PathBuf;
 
 /// Top-level importers configuration file.
@@ -25,7 +24,6 @@ pub(super) struct ImportersFile {
     /// (`wasm_importer_dir = ["a", "b"]`). The CLI
     /// `--wasm-importer-dir` flag(s) override this setting entirely
     /// when present.
-    #[cfg(feature = "python-plugin-wasm")]
     #[serde(default)]
     pub(super) wasm_importer_dir: WasmDirSetting,
     #[serde(default)]
@@ -65,7 +63,6 @@ impl ImportersFile {
     }
 }
 
-#[cfg(feature = "python-plugin-wasm")]
 /// TOML-side representation of `wasm_importer_dir` — accepts a
 /// bare string or a list of strings so the common single-dir case
 /// stays ergonomic while multi-dir is also expressible.
@@ -78,7 +75,6 @@ pub(super) enum WasmDirSetting {
     Many(Vec<PathBuf>),
 }
 
-#[cfg(feature = "python-plugin-wasm")]
 impl WasmDirSetting {
     /// Normalize into a flat `Vec<PathBuf>` for the registry-build
     /// pipeline. Empty for [`Self::None`].
@@ -91,7 +87,6 @@ impl WasmDirSetting {
     }
 }
 
-#[cfg(feature = "python-plugin-wasm")]
 /// Expand a leading `~` in a path to the user's home directory.
 /// Without this, `wasm_importer_dir = "~/imp"` in `importers.toml`
 /// would be read as a literal `~/imp` path that doesn't exist — a

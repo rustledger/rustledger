@@ -9013,6 +9013,8 @@ fn leafonly_reports_once_per_account_at_its_open() {
             DirectiveData::Note(NoteData {
                 account: "Assets:N".to_string(),
                 comment: "hi".to_string(),
+                tags: vec![],
+                links: vec![],
                 metadata: vec![],
             }),
         ),

@@ -393,4 +393,7 @@ fn ag_rledger_carries_the_runtime_download_and_compile_notices() {
             "{expected} missing: {envelope}"
         );
     }
+    // For the CI log: the python-gated job caches the runtime for every
+    // other test, so this is the run's one download.
+    eprintln!("fresh XDG_CACHE_HOME: downloaded and compiled the CPython runtime ({codes:?})");
 }

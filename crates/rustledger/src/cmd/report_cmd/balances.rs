@@ -38,7 +38,7 @@ pub(super) fn report_balances<W: Write>(
             let cost = position
                 .cost
                 .as_ref()
-                .map(|c| format!("{c}"))
+                .map(|c| format_cost(c, ctx))
                 .unwrap_or_default();
             rows.push((
                 account,
@@ -101,4 +101,26 @@ pub(super) fn report_balances<W: Write>(
     }
 
     Ok(())
+}
+
+/// A lot's cost annotation, `{ 166.67 USD, 2024-01-02, "label"}`, with the
+/// per-unit cost rendered through the ledger's display context as every
+/// other number in the report is.
+///
+/// `Cost`'s `Display` prints the number at full `Decimal` precision, so an
+/// AVERAGE pool's per-unit cost, 500/3, came out as
+/// `166.66666666666666666666666667 USD` where BQL renders the same pool as
+/// `167 USD` (#2543). The pool keeps its exact total; only the display rounds.
+fn format_cost(cost: &rustledger_core::Cost, ctx: &DisplayContext) -> String {
+    let date = cost.date.map(|d| format!(", {d}")).unwrap_or_default();
+    let label = cost
+        .label
+        .as_ref()
+        .map(|l| format!(", \"{}\"", rustledger_core::format::escape_string(l)))
+        .unwrap_or_default();
+    format!(
+        "{{ {} {}{date}{label}}}",
+        ctx.format_amount_number(cost.number, &cost.currency),
+        cost.currency
+    )
 }

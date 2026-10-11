@@ -185,6 +185,17 @@ the file lists them, so when two equally long patterns both match (`"foo"` and
 `"bar"` against `FOOBAR`), the one written first wins, on every run. The first
 match wins.
 
+To change the payee itself, say from the bank's `Hofer Dankt` to the `Hofer`
+your ledger uses, add a `[payees]` table. Account mappings still match the
+bank's original text. See
+[Payee Rewriting](../commands/extract.md#payee-rewriting):
+
+```toml
+[payees]
+"Hofer Dankt" = "Hofer"
+"/^AMZN Mktp/" = "Amazon"
+```
+
 ## OFX Import
 
 OFX (Open Financial Exchange) files from banks import directly:

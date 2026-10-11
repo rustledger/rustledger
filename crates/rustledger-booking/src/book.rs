@@ -170,8 +170,38 @@ pub struct CapitalGain {
     pub short_sale: bool,
 }
 
+/// Present a REALIZED inventory the way every surface shows it.
+///
+/// An account booked AVERAGE (`method`) is shown as one pool per commodity,
+/// cost currency and side, undated, at its exact total cost
+/// ([`Inventory::merge_average`]); any other account as it is.
+///
+/// THE one place this decision lives (#2543). `BALANCES`, `report balances`,
+/// `sum(position)` and the running `balance` column all present an AVERAGE
+/// account through here, so it has one shape on each of them, before and
+/// after a sale. Booking is not changed: the dated lots, and their exact
+/// totals, stay underneath for whatever needs them (`report capgains`).
+///
+/// # Errors
+///
+/// [`rustledger_core::OverflowError`] when a pool sums outside `Decimal`'s
+/// range.
+pub fn present_inventory(
+    method: BookingMethod,
+    inventory: &mut Inventory,
+) -> Result<(), rustledger_core::OverflowError> {
+    if method == BookingMethod::Average {
+        inventory.merge_average()?;
+    }
+    Ok(())
+}
+
 /// Booking engine that tracks inventory across transactions.
-#[derive(Debug, Default)]
+///
+/// `Clone` is cheap: the inventories are behind `Arc`, so a clone shares
+/// them until either side changes one. The query's running balance clones
+/// one to try a transaction's rows so far without committing them (#2543).
+#[derive(Debug, Default, Clone)]
 pub struct BookingEngine {
     /// Inventory per account.
     /// Per-account inventories, behind `Arc` so a caller can take a snapshot
@@ -338,6 +368,43 @@ impl BookingEngine {
                 )
             })
             .collect()
+    }
+
+    /// Consume the engine and return each account's inventory as it is
+    /// PRESENTED: [`into_inventories`](Self::into_inventories), with every
+    /// AVERAGE account shown as its pools ([`present_inventory`]).
+    ///
+    /// For callers that SHOW balances (`BALANCES`, `report balances`):
+    /// booking merges an AVERAGE account's lots only when a sale runs, so the
+    /// raw realization lists separate lots before the first sale and a pool
+    /// after it (#2543). Callers that need the dated lots underneath, such
+    /// as a gains computation, read [`into_inventories`](Self::into_inventories).
+    ///
+    /// # Errors
+    ///
+    /// [`rustledger_core::OverflowError`] when a pool sums outside `Decimal`'s
+    /// range; a presented total must not be a clamped one (#1863).
+    pub fn into_presented_inventories(
+        self,
+    ) -> Result<FxHashMap<rustledger_core::Account, Inventory>, rustledger_core::OverflowError>
+    {
+        let methods: FxHashMap<rustledger_core::Account, BookingMethod> = self
+            .inventories
+            .keys()
+            .map(|account| (account.clone(), self.method_for(account)))
+            .collect();
+        let mut inventories = self.into_inventories();
+        for (account, inventory) in &mut inventories {
+            present_inventory(methods[account], inventory)?;
+        }
+        Ok(inventories)
+    }
+
+    /// The booking method `account` books with: its `open`'s, else the
+    /// engine's default. The method [`present_inventory`] presents it by.
+    #[must_use]
+    pub fn account_method(&self, account: &rustledger_core::Account) -> BookingMethod {
+        self.method_for(account)
     }
 
     /// Borrow the realized per-account inventories without consuming the engine.

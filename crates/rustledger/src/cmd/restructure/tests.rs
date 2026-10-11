@@ -1285,3 +1285,33 @@ fn a_failed_restore_names_a_complete_backup() {
     assert!(manifest.contains("created\t"), "{manifest}");
     assert!(manifest.contains("ledger/2023.beancount"), "{manifest}");
 }
+
+/// A symlinked FILE is refused. rledger resolves its includes next to the
+/// file it points to, beancount and fava next to the link, so the period
+/// files written next to the target (as they used to be) were not found by
+/// beancount: `bean-check link.beancount` failed with `File glob
+/// "main/2023.beancount" does not match any files`.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_file_is_not_split() {
+    let dir = tmp();
+    let target = write(dir.path(), "real/main.beancount", LEDGER);
+    fs::create_dir(dir.path().join("view")).unwrap();
+    let link = dir.path().join("view/main.beancount");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let before = tree(dir.path());
+    let e = split::run_with_writer(
+        &split_args(&link, Period::Year),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert!(format!("{e:#}").contains("is a symlink"), "{e:#}");
+    assert_eq!(tree(dir.path()), before);
+    // A link beside its target is read the same way by both, so it splits.
+    let beside = dir.path().join("real/current.beancount");
+    std::os::unix::fs::symlink("main.beancount", &beside).unwrap();
+    let (code, _, err) = run_split(&split_args(&beside, Period::Year));
+    assert_eq!(code, ExitCode::SUCCESS, "{err}");
+    assert!(dir.path().join("real/main/2024.beancount").is_file());
+}

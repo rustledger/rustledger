@@ -115,7 +115,25 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
     let Some(file) = &args.file else {
         bail!("FILE is required (or set default.file in config)");
     };
+    let given = file;
     let file = super::existing_file(file)?;
+    if std::fs::symlink_metadata(given).is_ok_and(|m| m.file_type().is_symlink()) {
+        // rledger resolves a file's includes next to the file a symlink
+        // points to; beancount and fava resolve them next to the link. Unless
+        // the two are in one directory, no include line is read the same way
+        // by both.
+        let link_dir = super::overlay::normalize(given.parent().unwrap_or_else(|| Path::new(".")));
+        if file.parent() != Some(link_dir.as_path()) {
+            bail!(
+                "{} is a symlink to a file in another directory; refusing to split it: \
+                 beancount and fava would look for the new period files next to the link, \
+                 rledger next to {}. Split that file instead if nothing opens the ledger \
+                 through the link",
+                given.display(),
+                file.display()
+            );
+        }
+    }
     let root = match &args.ledger {
         Some(r) => super::existing_file(r)?,
         None => file.clone(),

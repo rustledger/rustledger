@@ -25,7 +25,7 @@ rledger split --by <year|month> [OPTIONS] [FILE]
 | Option | Description |
 |--------|-------------|
 | `--by <year\|month>` | Period each new file covers (required) |
-| `--dir <DIR>` | Directory for the period files (default: a directory named after `FILE`, next to it; if `FILE` is a symlink, next to the file it points to) |
+| `--dir <DIR>` | Directory for the period files (default: a directory named after `FILE`, next to it) |
 | `--ledger <ROOT>` | The ledger root `FILE` belongs to, when `FILE` is itself included by another file. The equivalence check loads this root. |
 | `-n, --dry-run` | Show the plan and run the equivalence check, but write nothing |
 | `-P, --profile <PROFILE>` | Use a profile from config |
@@ -117,7 +117,11 @@ killed partway leaves the originals and the complete backup; it can also leave
 temporaries named `.<name>.rledger-tmp-...` and new period files, which the
 manifest lists as created and which are safe to delete.
 
-Files that are encrypted, not valid UTF-8, or have parse errors are refused.
+Files that are encrypted, not valid UTF-8, or have parse errors are refused. So
+is a `FILE` that is a symlink to a file in another directory: rledger resolves
+its includes next to the file the link points to, but beancount and fava resolve
+them next to the link, so no include line works for both. Split the file it points to if nothing opens the
+ledger through the link.
 
 ## Exit Codes
 

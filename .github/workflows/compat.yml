@@ -1624,7 +1624,9 @@ jobs:
           # run (a rerun inside an `if` would mask test failures and
           # cover only one suite — review catch).
           set -o pipefail
-          cargo test -p rustledger --test integration_test --test bean_price_compat --test python_plugin_wasi --test plugin_conformance -- --nocapture 2>&1 | tee /tmp/gated-tests.log
+          # `ag-rledger`: python_plugin_wasi also checks that ag-rledger
+          # carries the Python runtime's notices in its envelope (#2566).
+          cargo test -p rustledger --features ag-rledger --test integration_test --test bean_price_compat --test python_plugin_wasi --test plugin_conformance -- --nocapture 2>&1 | tee /tmp/gated-tests.log
           cargo test -p rustledger-core --test synthetic_generation -- --nocapture 2>&1 | tee -a /tmp/gated-tests.log
       - name: Fail on silent skips
         run: |

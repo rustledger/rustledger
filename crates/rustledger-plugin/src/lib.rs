@@ -42,6 +42,7 @@
 pub mod convert;
 pub mod dispatch;
 pub mod native;
+pub mod notice;
 #[cfg(feature = "python-plugins")]
 pub mod python;
 #[cfg(feature = "wasm-runtime")]

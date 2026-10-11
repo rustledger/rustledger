@@ -21,7 +21,7 @@
 use agcli::{
     ActionParam, AgentCli, Command, CommandError, CommandOutput, ExecutionContext, NextAction,
 };
-use rustledger::cmd::report_cmd::CollectedDiagnostics;
+use rustledger::cmd::report_cmd::{CollectedDiagnostics, Diagnostic};
 use rustledger::config::Config;
 use rustledger::plugin_budget::PluginBudgetArgs;
 use serde_json::{Value, json};
@@ -461,10 +461,18 @@ fn extract_command(name: &'static str, description: &'static str) -> Command {
                 // A WASM importer runs under the plugin budget.
                 load_config(&globals.budget)?;
                 if args.list_importers {
-                    return run_buffered_with_stderr("extract list-importers", |out, err| {
-                        rustledger::cmd::extract_cmd::list_importers_with_writer(&args, out, err)
+                    return run_buffered_with_warnings(
+                        "extract list-importers",
+                        |out, warnings, err| {
+                            rustledger::cmd::extract_cmd::list_importers_with_writer(
+                                &args,
+                                out,
+                                Some(warnings),
+                                err,
+                            )
                             .map(|()| 0)
-                    });
+                        },
+                    );
                 }
                 // Do NOT fall back to `default.file`: that is the ledger
                 // path, whereas `extract` reads a *bank statement* to import.
@@ -474,9 +482,15 @@ fn extract_command(name: &'static str, description: &'static str) -> Command {
                     .file
                     .clone()
                     .ok_or_else(|| missing_file_error("extract"))?;
-                run_buffered_with_stderr("extract", |out, err| {
-                    rustledger::cmd::extract_cmd::run_with_writer(&args, &file, out, err)
-                        .map(|()| 0)
+                run_buffered_with_warnings("extract", |out, warnings, err| {
+                    rustledger::cmd::extract_cmd::run_with_writer(
+                        &args,
+                        &file,
+                        out,
+                        Some(warnings),
+                        err,
+                    )
+                    .map(|()| 0)
                 })
             })
         })
@@ -502,9 +516,15 @@ fn price_command(name: &'static str, description: &'static str) -> Command {
             Box::pin(async move {
                 let (args, globals) = parsed?;
                 let config = load_config(&globals.budget)?;
-                run_buffered_with_stderr("price", |out, err| {
-                    rustledger::cmd::price_cmd::run_with_writer(&args, &config.price, out, err)
-                        .map(|()| 0)
+                run_buffered_with_warnings("price", |out, warnings, err| {
+                    rustledger::cmd::price_cmd::run_with_writer(
+                        &args,
+                        &config.price,
+                        out,
+                        Some(warnings),
+                        err,
+                    )
+                    .map(|()| 0)
                 })
             })
         })
@@ -1155,8 +1175,9 @@ fn build_lint_args(req: &Req<'_>) -> Result<rustledger::cmd::lint::Args, Command
     })
 }
 
-/// Run a command whose output is all on `out`: nothing it calls writes to
-/// stderr (`doctor`, `config`, `add`, `lint`).
+/// Run a command whose own output is all on `out` (`doctor`, `config`, `add`,
+/// `lint`). What the libraries it calls have to say still reaches the
+/// envelope: see [`run_buffered_with_warnings`].
 fn run_buffered<F>(command: &str, run: F) -> Result<CommandOutput, CommandError>
 where
     F: FnOnce(&mut Vec<u8>) -> anyhow::Result<i32>,
@@ -1184,14 +1205,24 @@ where
 /// misspelled account, with the warning that says so written to a stream
 /// this envelope discards, and `query` reported a failing balance the same
 /// way (#2546).
+///
+/// The libraries a command calls have messages of their own — the Python
+/// plugin runtime's download and compile notices, what a Python plugin
+/// prints, a WASM importer whose `identify` failed, the `RLEDGER_CONFIG`
+/// deprecation warning. They are emitted through
+/// [`rustledger_plugin::notice`], captured here rather than written to the
+/// process's stderr, and carried in `warnings` with their codes, ahead of the
+/// command's own (#2566).
 fn run_buffered_with_warnings<F>(command: &str, run: F) -> Result<CommandOutput, CommandError>
 where
     F: FnOnce(&mut Vec<u8>, &mut CollectedDiagnostics, &mut Vec<u8>) -> anyhow::Result<i32>,
 {
     let mut stdout = Vec::new();
-    let mut diagnostics = CollectedDiagnostics::default();
+    let mut own = CollectedDiagnostics::default();
     let mut stderr = Vec::new();
-    let outcome = run(&mut stdout, &mut diagnostics, &mut stderr);
+    let (outcome, notices) =
+        rustledger_plugin::notice::capture(|| run(&mut stdout, &mut own, &mut stderr));
+    let diagnostics = library_diagnostics(&notices, own);
     let stderr = String::from_utf8_lossy(&stderr).into_owned();
     let warnings = warnings_json(&diagnostics);
     let exit_code = match outcome {
@@ -1230,6 +1261,30 @@ where
             format!("ag-rledger {command} --help"),
             "Inspect command usage",
         )))
+}
+
+/// The library notices (those emitted while the config loaded, then those
+/// the command's run emitted) followed by the command's own diagnostics.
+///
+/// A run notice that repeats a config-loading notice verbatim is dropped:
+/// `config` loads the config file again, and its deprecation warning is one
+/// warning, not two. Other repeats are kept — a plugin that prints the same
+/// line on two runs printed it twice.
+fn library_diagnostics(
+    notices: &[rustledger_plugin::notice::Notice],
+    own: CollectedDiagnostics,
+) -> CollectedDiagnostics {
+    let at_load = config_notices();
+    let mut all: Vec<Diagnostic> = at_load
+        .iter()
+        .chain(notices.iter().filter(|n| !at_load.contains(n)))
+        .map(|n| Diagnostic {
+            code: Some(n.code.to_string()),
+            ..Diagnostic::message(n.message.clone())
+        })
+        .collect();
+    all.extend(own.0);
+    CollectedDiagnostics(all)
 }
 
 /// The diagnostics as the envelope's `warnings` array, or `None` when there
@@ -1543,19 +1598,43 @@ fn plugin_budget_flags(req: &Req<'_>) -> Result<PluginBudgetArgs, CommandError> 
     })
 }
 
-/// The config file, loaded once per process.
+/// The config file, loaded once per process, and the notices loading it
+/// emitted (the `RLEDGER_CONFIG` deprecation warning).
 ///
 /// Kept as a `Result` so a file that fails to load is reported, not
 /// replaced by defaults. `ag-rledger` used `unwrap_or_default()` here, so a
 /// typo anywhere in the file silently reset every setting (#2522), where
 /// `rledger` stops with the parse error (#1306).
-fn config_result() -> &'static Result<Config, String> {
-    static CONFIG: OnceLock<Result<Config, String>> = OnceLock::new();
+///
+/// The notices are captured rather than written to the process's stderr,
+/// which the envelope does not carry, and every command's `warnings` begins
+/// with them (#2566).
+#[allow(clippy::type_complexity)]
+fn loaded_config() -> &'static (
+    Result<Config, String>,
+    Vec<rustledger_plugin::notice::Notice>,
+) {
+    static CONFIG: OnceLock<(
+        Result<Config, String>,
+        Vec<rustledger_plugin::notice::Notice>,
+    )> = OnceLock::new();
     CONFIG.get_or_init(|| {
-        Config::load()
-            .map(|loaded| loaded.config)
-            .map_err(|e| rustledger_plugin::escape_untrusted_text(&format!("{e:#}")).into_owned())
+        rustledger_plugin::notice::capture(|| {
+            Config::load().map(|loaded| loaded.config).map_err(|e| {
+                rustledger_plugin::escape_untrusted_text(&format!("{e:#}")).into_owned()
+            })
+        })
     })
+}
+
+/// The config file, loaded once per process. See [`loaded_config`].
+fn config_result() -> &'static Result<Config, String> {
+    &loaded_config().0
+}
+
+/// What loading the config file had to say. See [`loaded_config`].
+fn config_notices() -> &'static [rustledger_plugin::notice::Notice] {
+    &loaded_config().1
 }
 
 /// The config, for a command that uses it, with the plugin budget applied.
@@ -2169,6 +2248,24 @@ mod tests {
         ] {
             assert!(parse(&bad).is_err(), "{bad:?} must be refused");
         }
+    }
+
+    /// A notice the command's run emits twice is reported twice: only a
+    /// repeat of a config-loading notice is dropped. (A plugin printing the
+    /// same line on two runs printed it twice.)
+    #[test]
+    fn repeated_run_notices_are_kept() {
+        let notice = rustledger_plugin::notice::Notice {
+            code: rustledger_plugin::notice::PLUGIN_STDERR,
+            message: "done".to_string(),
+        };
+        let all = library_diagnostics(&[notice.clone(), notice], CollectedDiagnostics::default());
+        let ours = all
+            .0
+            .iter()
+            .filter(|d| d.code.as_deref() == Some("PLUGIN_STDERR"))
+            .count();
+        assert_eq!(ours, 2, "{:?}", all.0);
     }
 
     /// The value of a global flag before the command is not the command, so

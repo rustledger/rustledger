@@ -289,3 +289,108 @@ def burn(entries, options_map):
     );
     assert!(small.success, "{}", small.out);
 }
+
+/// `ag-rledger <args>` in `dir`, with `env` set: the envelope and what the
+/// process wrote to stderr.
+#[cfg(feature = "ag-rledger")]
+fn ag_rledger(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> (serde_json::Value, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_ag-rledger"))
+        .args(args)
+        .envs(env.iter().copied())
+        .current_dir(dir)
+        .env("RLEDGER_CONFIG_DIR", dir)
+        .env("PROGRAMDATA", dir)
+        .output()
+        .expect("run ag-rledger");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let envelope = serde_json::from_str(stdout.trim())
+        .unwrap_or_else(|e| panic!("envelope is not JSON ({e}): {stdout}"));
+    (
+        envelope,
+        String::from_utf8_lossy(&output.stderr).into_owned(),
+    )
+}
+
+/// The `(code, message)` of each of the envelope's `warnings`.
+#[cfg(feature = "ag-rledger")]
+fn warnings(envelope: &serde_json::Value) -> Vec<(String, String)> {
+    envelope["result"]["warnings"]
+        .as_array()
+        .or_else(|| envelope["data"]["warnings"].as_array())
+        .into_iter()
+        .flatten()
+        .map(|w| {
+            (
+                w["code"].as_str().unwrap_or_default().to_string(),
+                w["message"].as_str().unwrap_or_default().to_string(),
+            )
+        })
+        .collect()
+}
+
+/// #2566: what a Python plugin prints, and the runtime's notice that it is
+/// loading, went to the process's stderr, which `ag-rledger`'s envelope does
+/// not carry. They are `warnings` now, the plugin's text escaped (#2525),
+/// and nothing reaches the process's stderr.
+#[cfg(feature = "ag-rledger")]
+#[test]
+fn ag_rledger_carries_python_plugin_output_in_its_envelope() {
+    if rledger_with_python().is_none() {
+        return;
+    }
+    let plugin = "import sys\n\
+        __plugins__ = ['noisy']\n\
+        def noisy(entries, options_map):\n    \
+            print('hello \\x1b[2J from the plugin', file=sys.stderr)\n    \
+            return entries, []\n";
+    let (dir, ledger) = setup(plugin, "plugin \"plugin.py\"");
+    let (envelope, stderr) = ag_rledger(dir.path(), &["check", ledger.to_str().unwrap()], &[]);
+    assert!(stderr.is_empty(), "ag-rledger wrote to stderr: {stderr}");
+    let warnings = warnings(&envelope);
+    assert!(
+        warnings
+            .iter()
+            .any(|(code, _)| code == "PYTHON_RUNTIME_LOADING"),
+        "{envelope}"
+    );
+    let printed: Vec<&String> = warnings
+        .iter()
+        .filter(|(code, _)| code == "PLUGIN_STDERR")
+        .map(|(_, message)| message)
+        .collect();
+    assert_eq!(
+        printed,
+        ["hello \\u{1b}[2J from the plugin"],
+        "the plugin's output, escaped: {envelope}"
+    );
+}
+
+/// #2566: the one-time `CPython` download and compile notices. A fresh cache
+/// directory (`XDG_CACHE_HOME`, which `dirs` reads on Linux) makes this run
+/// download and compile the runtime, and both are `warnings`, not stderr.
+#[cfg(all(feature = "ag-rledger", target_os = "linux"))]
+#[test]
+fn ag_rledger_carries_the_runtime_download_and_compile_notices() {
+    if rledger_with_python().is_none() {
+        return;
+    }
+    let (dir, ledger) = setup(PASSTHROUGH, "plugin \"plugin.py\"");
+    let cache = dir.path().join("cache");
+    let (envelope, stderr) = ag_rledger(
+        dir.path(),
+        &["check", ledger.to_str().unwrap()],
+        &[("XDG_CACHE_HOME", cache.to_str().unwrap())],
+    );
+    assert!(stderr.is_empty(), "ag-rledger wrote to stderr: {stderr}");
+    assert!(
+        cache.join("rustledger/python-wasi/python.wasm").exists(),
+        "the runtime was not downloaded into the fresh cache: {envelope}"
+    );
+    let codes: Vec<String> = warnings(&envelope).into_iter().map(|(c, _)| c).collect();
+    for expected in ["PYTHON_RUNTIME_DOWNLOAD", "PYTHON_RUNTIME_COMPILE"] {
+        assert!(
+            codes.iter().any(|c| c == expected),
+            "{expected} missing: {envelope}"
+        );
+    }
+}

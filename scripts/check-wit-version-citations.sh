@@ -2,7 +2,7 @@
 # CI gate (#2508): prose that cites the Component-Model contract version must
 # not drift from `crates/rustledger-ffi-component/wit/world.wit`.
 #
-# Docs cited `rustledger:ledger@3.0.0` through thirteen minor bumps, because
+# Docs cited the contract as version 3.0.0 through thirteen minor bumps, because
 # nothing tied the citations to the `package` line. This check does: every
 # `rustledger:ledger@<version>` in a tracked file must be either
 #   - the exact current version (`@3.14.0`), or

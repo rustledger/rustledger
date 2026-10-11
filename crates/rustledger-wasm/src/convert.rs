@@ -9,6 +9,35 @@ use crate::types::{
     PostingCostJson, PostingJson, TypedValueJson,
 };
 
+/// The wire form of an amount: its number (`Decimal`'s `Display`, which keeps
+/// the scale, so `1.50` stays `1.50`) and its currency.
+///
+/// Every amount this module puts on the wire goes through here: directive
+/// amounts (balance, price, a posting's units and price), a metadata amount,
+/// and the `Amount`, `Position` and `Inventory` query cells. They used to be
+/// built by hand at each site, which is how the inventory cell once lost its
+/// cost (#2402, #2520).
+fn amount_value(a: &rustledger_core::Amount) -> AmountValue {
+    AmountValue {
+        number: a.number.to_string(),
+        currency: a.currency.to_string(),
+    }
+}
+
+/// The wire form of a posting's units, which may be incomplete.
+///
+/// A complete amount goes through [`amount_value`]; a missing number or
+/// currency becomes an empty string, as before.
+fn incomplete_amount_value(u: &rustledger_core::IncompleteAmount) -> AmountValue {
+    u.as_amount().map_or_else(
+        || AmountValue {
+            number: u.number().map(|n| n.to_string()).unwrap_or_default(),
+            currency: u.currency().map(ToString::to_string).unwrap_or_default(),
+        },
+        amount_value,
+    )
+}
+
 /// Lower a host [`MetaValue`] to the wire [`MetaValueJson`].
 ///
 /// Mirrors `rustledger-ffi-wasi::meta_value_to_json` so the two
@@ -31,10 +60,10 @@ fn meta_value_to_json(value: &MetaValue) -> MetaValueJson {
         // portable.
         MetaValue::Number(n) => MetaValueJson::String(n.to_string()),
         MetaValue::Bool(b) => MetaValueJson::Bool(*b),
-        MetaValue::Amount(a) => MetaValueJson::Amount {
-            number: a.number.to_string(),
-            currency: a.currency.to_string(),
-        },
+        MetaValue::Amount(a) => {
+            let AmountValue { number, currency } = amount_value(a);
+            MetaValueJson::Amount { number, currency }
+        }
         MetaValue::None => MetaValueJson::Null,
         // Stringified like `Number` (MetaValueJson has no numeric case); the
         // typed variant below carries the "int" type tag.
@@ -81,10 +110,7 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
         pr.amount
             .as_ref()
             .and_then(rustledger_core::IncompleteAmount::as_amount)
-            .map(|a| AmountValue {
-                number: a.number.to_string(),
-                currency: a.currency.to_string(),
-            })
+            .map(amount_value)
     }
 
     match directive {
@@ -110,10 +136,7 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
                 .iter()
                 .map(|p| PostingJson {
                     account: p.account.to_string(),
-                    units: p.units.as_ref().map(|u| AmountValue {
-                        number: u.number().map(|n| n.to_string()).unwrap_or_default(),
-                        currency: u.currency().map(ToString::to_string).unwrap_or_default(),
-                    }),
+                    units: p.units.as_ref().map(incomplete_amount_value),
                     cost: p.cost.as_deref().map(|c| PostingCostJson {
                         // The wire `CostNumberJson` is a tagged enum
                         // mirroring `CostNumber`; JS branches on `kind`.
@@ -155,10 +178,7 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
         Directive::Balance(bal) => DirectiveJson::Balance {
             date: bal.date.to_string(),
             account: bal.account.to_string(),
-            amount: AmountValue {
-                number: bal.amount.number.to_string(),
-                currency: bal.amount.currency.to_string(),
-            },
+            amount: amount_value(&bal.amount),
             tolerance: bal.tolerance.map(|t| t.to_string()),
             meta: metadata_to_json(&bal.meta),
         },
@@ -215,10 +235,7 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
         Directive::Price(price) => DirectiveJson::Price {
             date: price.date.to_string(),
             currency: price.currency.to_string(),
-            amount: AmountValue {
-                number: price.amount.number.to_string(),
-                currency: price.amount.currency.to_string(),
-            },
+            amount: amount_value(&price.amount),
             meta: metadata_to_json(&price.meta),
         },
         Directive::Query(query) => DirectiveJson::Query {
@@ -241,10 +258,7 @@ pub fn directive_to_json(directive: &Directive) -> DirectiveJson {
 /// Shared by the `Position` and `Inventory` cells of [`value_to_cell`].
 fn position_value(p: &rustledger_core::Position) -> PositionValue {
     PositionValue {
-        units: AmountValue {
-            number: p.units.number.to_string(),
-            currency: p.units.currency.to_string(),
-        },
+        units: amount_value(&p.units),
         cost: p.cost.as_ref().map(|c| CostValue {
             number: c.number.to_string(),
             currency: c.currency.to_string(),
@@ -264,10 +278,10 @@ pub fn value_to_cell(value: &rustledger_query::Value) -> CellValue {
         Value::Integer(i) => CellValue::Integer(*i),
         Value::Date(d) => CellValue::String(d.to_string()),
         Value::Boolean(b) => CellValue::Boolean(*b),
-        Value::Amount(a) => CellValue::Amount {
-            number: a.number.to_string(),
-            currency: a.currency.to_string(),
-        },
+        Value::Amount(a) => {
+            let AmountValue { number, currency } = amount_value(a);
+            CellValue::Amount { number, currency }
+        }
         Value::Position(p) => {
             let PositionValue { units, cost } = position_value(p);
             CellValue::Position { units, cost }
@@ -762,5 +776,80 @@ mod tests {
             serde_json::to_value(value_to_cell(&Value::Position(Box::new(lot(5, 100, 2)))))
                 .unwrap();
         assert_eq!(x_lots[0], &single);
+    }
+    /// Every amount on the wire keeps its number, currency and scale (#2520):
+    /// each query cell built from an amount (`Amount`, a `Position`'s units,
+    /// each `Inventory` position's units) and each directive amount (balance,
+    /// price, a posting's units and price, a metadata amount). All of them go
+    /// through `amount_value`; this pins the observable, so a site that is
+    /// built by hand again and drops the scale or the currency fails here.
+    #[test]
+    fn every_amount_on_the_wire_keeps_number_currency_and_scale_2520() {
+        use rustledger_core::{Amount, Cost, Decimal, Inventory, Position};
+        use rustledger_query::Value;
+
+        let dec = |s: &str| s.parse::<Decimal>().unwrap();
+        let amount = |n: &str, c: &str| Amount::new(dec(n), c);
+        let wire = |n: &str, c: &str| serde_json::json!({"number": n, "currency": c});
+
+        // Query cells.
+        let cell = |v: Value| serde_json::to_value(value_to_cell(&v)).unwrap();
+
+        let a = cell(Value::Amount(amount("1.50", "USD")));
+        assert_eq!(a, serde_json::json!({"number": "1.50", "currency": "USD"}));
+
+        let lot = Position::with_cost(
+            amount("2.000", "X"),
+            Cost::new(dec("10.50"), "USD")
+                .with_date(rustledger_core::naive_date(2020, 1, 2).unwrap()),
+        );
+        let p = cell(Value::Position(Box::new(lot.clone())));
+        assert_eq!(p["units"], wire("2.000", "X"), "{p}");
+
+        let mut inv = Inventory::new();
+        inv.add(lot).unwrap();
+        inv.add(Position::simple(amount("-0.0100", "EUR"))).unwrap();
+        let i = cell(Value::Inventory(std::sync::Arc::new(inv)));
+        let mut units: Vec<_> = i["positions"]
+            .as_array()
+            .expect("positions array")
+            .iter()
+            .map(|p| p["units"].clone())
+            .collect();
+        units.sort_by_key(ToString::to_string);
+        assert_eq!(units, [wire("-0.0100", "EUR"), wire("2.000", "X")], "{i}");
+
+        // Directive amounts.
+        let source = r#"
+2024-01-01 open Assets:Bank
+2024-01-01 open Assets:Broker
+2024-01-15 * "Buy"
+  amt: 3.10 USD
+  Assets:Broker   5.00 X @ 1.250 EUR
+  Assets:Bank    -6.250 EUR
+2024-01-20 balance Assets:Bank -6.250 EUR
+2024-01-21 price X 1.2300 EUR
+"#;
+        let result = parse_beancount(source);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let jsons: Vec<_> = result
+            .directives
+            .iter()
+            .map(|d| serde_json::to_value(directive_to_json(&d.value)).unwrap())
+            .collect();
+        let of = |kind: &str| {
+            jsons
+                .iter()
+                .find(|j| j["type"] == kind)
+                .unwrap_or_else(|| panic!("no {kind} in {jsons:?}"))
+        };
+
+        let txn = of("transaction");
+        assert_eq!(txn["meta"]["amt"], wire("3.10", "USD"), "{txn}");
+        assert_eq!(txn["postings"][0]["units"], wire("5.00", "X"), "{txn}");
+        assert_eq!(txn["postings"][0]["price"], wire("1.250", "EUR"), "{txn}");
+        assert_eq!(txn["postings"][1]["units"], wire("-6.250", "EUR"), "{txn}");
+        assert_eq!(of("balance")["amount"], wire("-6.250", "EUR"));
+        assert_eq!(of("price")["amount"], wire("1.2300", "EUR"));
     }
 }

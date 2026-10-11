@@ -139,20 +139,29 @@ pub fn decimal_quantum(value: Decimal) -> Decimal {
 ///
 /// A tolerance needing more digits than a `Decimal` holds is rounded DOWN,
 /// so the balance check is never looser than the exact tolerance (#2582).
-/// Interpolation's rounding grid uses [`interpolation_tolerances`] instead.
+/// Interpolation's rounding grid is rounded to nearest instead (see
+/// `InterpolationTolerances`).
 #[must_use]
 pub fn transaction_tolerances(
     txn: &Transaction,
     opts: &ToleranceOptions<'_>,
 ) -> FxHashMap<rustledger_core::Currency, Decimal> {
-    tolerances_rounded(txn, opts, ToleranceRounding::Down)
+    tolerances_rounded(txn, opts, ToleranceRounding::Down).0
 }
 
-/// [`transaction_tolerances`] rounded to nearest, for interpolation's grid.
-///
-/// A tolerance that needs more digits than a `Decimal` holds is rounded to
-/// NEAREST here: this is the grid interpolation quantizes a solved amount to
-/// (`round_interpolated`), never the balance check.
+/// The tolerances interpolation rounds with (#2582): `bound`, the balance
+/// check's ([`transaction_tolerances`], rounded down), which a quantized
+/// amount must stay within, and the grid it quantizes to, rounded to nearest.
+/// `grid` is `None` when no tolerance needed rounding, so it IS `bound`, which
+/// is every ordinary transaction: the second computation is paid only by one
+/// with a tolerance past `Decimal`'s digits.
+#[derive(Debug, Clone)]
+pub(crate) struct InterpolationTolerances {
+    pub(crate) bound: FxHashMap<rustledger_core::Currency, Decimal>,
+    pub(crate) grid: Option<FxHashMap<rustledger_core::Currency, Decimal>>,
+}
+
+/// The tolerances booking interpolates with: see [`InterpolationTolerances`].
 ///
 /// Rounding down is right for the check and wrong for the grid. The grid is
 /// the last digit of `2 x tolerance`, so `0.0049999…9` (28 digits, the floor
@@ -161,11 +170,13 @@ pub fn transaction_tolerances(
 /// `-0.9999999999999999999999999999` where beancount, which rounds its
 /// tolerances to 28 digits, books `-1.00` (#2582 review).
 #[must_use]
-pub fn interpolation_tolerances(
+pub(crate) fn interpolation_tolerances(
     txn: &Transaction,
     opts: &ToleranceOptions<'_>,
-) -> FxHashMap<rustledger_core::Currency, Decimal> {
-    tolerances_rounded(txn, opts, ToleranceRounding::Nearest)
+) -> InterpolationTolerances {
+    let (bound, rounded) = tolerances_rounded(txn, opts, ToleranceRounding::Down);
+    let grid = rounded.then(|| tolerances_rounded(txn, opts, ToleranceRounding::Nearest).0);
+    InterpolationTolerances { bound, grid }
 }
 
 /// Which way a tolerance needing more digits than a `Decimal` holds rounds.
@@ -181,7 +192,9 @@ fn tolerances_rounded(
     txn: &Transaction,
     opts: &ToleranceOptions<'_>,
     rounding: ToleranceRounding,
-) -> FxHashMap<rustledger_core::Currency, Decimal> {
+) -> (FxHashMap<rustledger_core::Currency, Decimal>, bool) {
+    // Whether any tolerance needed rounding (its exact value has no `Decimal`).
+    let mut rounded = false;
     // Pre-allocate for typical case (1-2 currencies)
     let mut tolerances: FxHashMap<rustledger_core::Currency, Decimal> =
         FxHashMap::with_capacity_and_hasher(txn.postings.len().min(4), Default::default());
@@ -201,6 +214,7 @@ fn tolerances_rounded(
             // `*` rounds to nearest, which can widen the tolerance (#2582).
             let base_tolerance = rustledger_core::checked_mul_exact(quantum, opts.multiplier)
                 .unwrap_or_else(|| {
+                    rounded = true;
                     ToleranceSum::Exact(to_big(quantum) * to_big(opts.multiplier)).value(rounding)
                 });
 
@@ -275,6 +289,7 @@ fn tolerances_rounded(
 
         // Merge cost tolerances: take max of existing and cost-inferred
         for (currency, cost_tol) in cost_tolerances {
+            rounded |= matches!(cost_tol, ToleranceSum::Exact(_));
             let cost_tol = cost_tol.value(rounding);
             tolerances
                 .entry(currency)
@@ -315,7 +330,7 @@ fn tolerances_rounded(
         }
     }
 
-    tolerances
+    (tolerances, rounded)
 }
 
 /// One currency's accumulated cost/price tolerance: a sum of
@@ -2212,7 +2227,7 @@ mod tests {
             "0.0049999999999999999999999999"
         );
         assert_eq!(
-            interpolation_tolerances(&txn, &opts)[&usd].to_string(),
+            interpolation_tolerances(&txn, &opts).grid.expect("rounded")[&usd].to_string(),
             "0.0050000000000000000000000000"
         );
         let booked = crate::interpolate_with_tolerances(&txn, &opts).expect("interpolates");
@@ -2298,6 +2313,90 @@ mod tests {
             floored_tolerance_case(dec!(3), dec!(0.33333333333333333333333333), None);
         assert_eq!(tolerance.to_string(), "0.0099999999999999999999999999");
         assert_eq!(cash.to_string(), "-0.3333333333333333333333333300");
+    }
+
+    /// Book `postings` (each `(account, units, commodity, price or None)`)
+    /// plus an auto-posting to `Assets:Cash`, with `infer_tolerance_from_cost`
+    /// at the default multiplier. Returns the balance check's USD tolerance,
+    /// the cash amount booked, and the residual it leaves.
+    fn book_with_cash(
+        postings: &[(&str, Decimal, &str, Option<Decimal>)],
+    ) -> (Decimal, Decimal, Decimal) {
+        let defaults = FxHashMap::default();
+        let opts = ToleranceOptions {
+            multiplier: dec!(0.5),
+            infer_from_cost: true,
+            defaults: &defaults,
+        };
+        let mut txn = Transaction::new(NaiveDate::default(), "t");
+        let mut weight = Decimal::ZERO;
+        for &(account, units, commodity, price) in postings {
+            let mut posting = Posting::new(account, Amount::new(units, commodity));
+            if let Some(p) = price {
+                posting = posting.with_price(PriceAnnotation::unit(Amount::new(p, "USD")));
+                weight += units * p;
+            } else {
+                weight += units;
+            }
+            txn = txn.with_synthesized_posting(posting);
+        }
+        txn = txn.with_synthesized_posting(Posting::auto("Assets:Cash"));
+        let tolerance = transaction_tolerances(&txn, &opts)[&Currency::from("USD")];
+        let booked = crate::interpolate_with_tolerances(&txn, &opts).expect("interpolates");
+        let cash = booked
+            .transaction
+            .postings
+            .last()
+            .unwrap()
+            .amount()
+            .unwrap()
+            .number;
+        (tolerance, cash, weight + cash)
+    }
+
+    /// #2582 review, round 4: the bound is the balance check's tolerance
+    /// itself, not one guessed from the grid's scale. Here the nearest
+    /// tolerance is `50` at scale 27 (the parser re-rounds past the
+    /// mantissa), a whole unit at that scale above the floor; quantizing the
+    /// cash to hundreds missed the floor by that unit, an E3001.
+    #[test]
+    fn the_bound_is_the_floored_tolerance_whatever_its_scale() {
+        let (tolerance, _, residual) = book_with_cash(&[
+            (
+                "Assets:Stock",
+                dec!(1.00),
+                "CORP",
+                Some(dec!(9999.999999999999999999999999)),
+            ),
+            (
+                "Assets:Stock",
+                dec!(1.00),
+                "XYZ",
+                Some(dec!(0.0000000000000000000000009995)),
+            ),
+            ("Assets:Other", dec!(50), "USD", None),
+        ]);
+        assert!(
+            residual.abs() <= tolerance,
+            "residual {residual} past {tolerance}"
+        );
+    }
+
+    /// #2582 review, round 4: a tolerance exact at 28 places quantizes as on
+    /// main and in beancount, half-grid residual included: `0.1 x 0.5 x 0.1`
+    /// is exactly `0.005` at scale 28, and the cash books `-0.10`.
+    #[test]
+    fn an_exact_28_place_tolerance_quantizes_as_before() {
+        let (_, cash, _) = book_with_cash(&[
+            (
+                "Assets:Stock",
+                dec!(1.0),
+                "CORP",
+                Some(dec!(0.1000000000000000000000000000)),
+            ),
+            ("Assets:Other", dec!(0.005), "USD", None),
+        ]);
+        assert_eq!(cash, dec!(-0.10));
     }
 
     /// The units tolerance `quantum x tolerance_multiplier` rounds down too:

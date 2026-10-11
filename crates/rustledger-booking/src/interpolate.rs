@@ -408,7 +408,19 @@ fn quantize_to_exponent(value: Decimal, exponent: i64) -> Option<Decimal> {
 /// carve-out (#274) that kept full precision whenever rounding would land on
 /// zero — which is exactly when beancount rounds, and exactly the residual in
 /// #2034.
+#[cfg(test)]
 fn round_interpolated(residual: Decimal, tolerance: Option<Decimal>) -> Decimal {
+    round_interpolated_bounded(residual, tolerance, tolerance)
+}
+
+/// [`round_interpolated`] on the grid of `tolerance`, keeping the quantized
+/// amount only while it stays within `bound`, the tolerance the validator
+/// checks (see the guard at the end).
+fn round_interpolated_bounded(
+    residual: Decimal,
+    tolerance: Option<Decimal>,
+    bound: Option<Decimal>,
+) -> Decimal {
     let interpolated = -residual;
     // Beancount guards with a truthiness test (`if tolerance:`), so an absent
     // tolerance AND a tolerance of exactly zero both skip quantization. The
@@ -435,18 +447,51 @@ fn round_interpolated(residual: Decimal, tolerance: Option<Decimal>) -> Decimal 
     // floor by that unit: under multiplier 0.25 the cash solved to
     // `-2.005…` and cents gave `-2.00`, a residual of `0.005` against
     // `0.0049999…9` (E3001 on a number nobody wrote, #2582 review). Keep the
-    // quantized amount only within a bound a unit below a 28-place grid
-    // tolerance, which is at or below the floor; else book the exact amount,
-    // which balances. On an ordinary grid this never fires: half a unit of
+    // quantized amount only within `bound`, the floored tolerance itself; else
+    // book the exact amount, which balances. Inferring "rounded" from a
+    // tolerance's scale was wrong both ways (#2582 review, round 4). Where
+    // the two are the same tolerance this never fires: half a unit of
     // `2 x tolerance`'s last digit is at most the tolerance.
-    let bound = if tolerance.scale() == 28 {
-        tolerance.abs() - Decimal::new(1, 28)
-    } else {
-        tolerance.abs()
-    };
+    let bound = bound.unwrap_or(tolerance).abs();
     match quantized.checked_sub(interpolated) {
         Some(error) if error.abs() <= bound => quantized,
         _ => interpolated,
+    }
+}
+
+/// The tolerances interpolation rounds with: the grid it quantizes to, and the
+/// bound a quantized amount must stay within (the tolerance the validator
+/// checks). A plain map is both; booking passes
+/// [`crate::InterpolationTolerances`], whose grid is rounded to nearest and
+/// whose bound is rounded down (#2582).
+pub trait ToleranceLookup {
+    /// The tolerance whose `2 x` last digit is the rounding grid.
+    fn grid(&self, currency: &Currency) -> Option<Decimal>;
+    /// The tolerance a quantized amount must stay within.
+    fn bound(&self, currency: &Currency) -> Option<Decimal>;
+}
+
+impl<S: std::hash::BuildHasher> ToleranceLookup
+    for std::collections::HashMap<Currency, Decimal, S>
+{
+    fn grid(&self, currency: &Currency) -> Option<Decimal> {
+        self.get(currency).copied()
+    }
+    fn bound(&self, currency: &Currency) -> Option<Decimal> {
+        self.get(currency).copied()
+    }
+}
+
+impl ToleranceLookup for crate::InterpolationTolerances {
+    fn grid(&self, currency: &Currency) -> Option<Decimal> {
+        self.grid
+            .as_ref()
+            .unwrap_or(&self.bound)
+            .get(currency)
+            .copied()
+    }
+    fn bound(&self, currency: &Currency) -> Option<Decimal> {
+        self.bound.get(currency).copied()
     }
 }
 
@@ -985,7 +1030,7 @@ pub fn interpolate_with_tolerances(
     tolerance_options: &crate::ToleranceOptions<'_>,
 ) -> Result<InterpolationResult, InterpolationError> {
     let tolerances = crate::interpolation_tolerances(transaction, tolerance_options);
-    interpolate_with_tolerance_map(transaction, &tolerances)
+    interpolate_with_interpolation_tolerances(transaction, &tolerances)
 }
 
 /// [`interpolate`], quantizing against a tolerance map the caller supplies.
@@ -1105,20 +1150,36 @@ pub fn interpolate_in_place<S: std::hash::BuildHasher>(
     interpolate_capturing(transaction, tolerances).map(|(found, _)| found)
 }
 
-/// [`interpolate_in_place`], handing back the [`Rollback`] so a caller that
-/// does more fallible work afterwards — `apply`, in `book_interpolate_apply`
-/// — can put the transaction back if its own step fails.
-pub fn interpolate_in_place_undoable<S: std::hash::BuildHasher>(
+/// [`interpolate_in_place`] with booking's grid and bound (#2582), handing
+/// back the [`Rollback`] so a caller that does more fallible work afterwards —
+/// `apply`, in `book_interpolate_apply` — can put the transaction back if its
+/// own step fails.
+pub fn interpolate_in_place_undoable_with(
     transaction: &mut Transaction,
-    tolerances: &std::collections::HashMap<Currency, Decimal, S>,
+    tolerances: &crate::InterpolationTolerances,
 ) -> Result<Rollback, InterpolationError> {
     interpolate_capturing(transaction, tolerances).map(|(_, rollback)| rollback)
 }
 
+/// [`interpolate_with_tolerance_map`] with booking's grid and bound (#2582).
+pub fn interpolate_with_interpolation_tolerances(
+    transaction: &Transaction,
+    tolerances: &crate::InterpolationTolerances,
+) -> Result<InterpolationResult, InterpolationError> {
+    let mut owned = transaction.clone();
+    let (filled_indices, residuals) =
+        interpolate_capturing(&mut owned, tolerances).map(|(found, _)| found)?;
+    Ok(InterpolationResult {
+        transaction: owned,
+        filled_indices,
+        residuals,
+    })
+}
+
 /// Runs the analysis, restoring `transaction` if it fails.
-fn interpolate_capturing<S: std::hash::BuildHasher>(
+fn interpolate_capturing(
     transaction: &mut Transaction,
-    tolerances: &std::collections::HashMap<Currency, Decimal, S>,
+    tolerances: &impl ToleranceLookup,
 ) -> Result<((Vec<usize>, HashMap<Currency, Decimal>), Rollback), InterpolationError> {
     let mut rollback = Rollback::default();
     match interpolate_inner(transaction, tolerances, &mut rollback) {
@@ -1149,9 +1210,9 @@ pub fn interpolate_with_tolerance_map<S: std::hash::BuildHasher>(
     })
 }
 
-fn interpolate_inner<S: std::hash::BuildHasher>(
+fn interpolate_inner(
     transaction: &mut Transaction,
-    tolerances: &std::collections::HashMap<Currency, Decimal, S>,
+    tolerances: &impl ToleranceLookup,
     rollback: &mut Rollback,
 ) -> Result<(Vec<usize>, HashMap<Currency, Decimal>), InterpolationError> {
     let mut filled_indices = Vec::new();
@@ -1882,8 +1943,11 @@ fn interpolate_inner<S: std::hash::BuildHasher>(
         // posting's weight, so the common path below is the original one: the
         // residual is the number, in the currency it was keyed under.
         let Some((units_currency, multiplier)) = scaled_missing.remove(&idx) else {
-            let interpolated =
-                round_interpolated(residual, tolerances.get(&weight_currency).copied());
+            let interpolated = round_interpolated_bounded(
+                residual,
+                tolerances.grid(&weight_currency),
+                tolerances.bound(&weight_currency),
+            );
             if residual.is_zero() {
                 zero_residual_fills.insert(idx);
             }
@@ -1909,7 +1973,11 @@ fn interpolate_inner<S: std::hash::BuildHasher>(
                 currency: weight_currency,
             });
         };
-        let interpolated = round_interpolated(quotient, tolerances.get(&units_currency).copied());
+        let interpolated = round_interpolated_bounded(
+            quotient,
+            tolerances.grid(&units_currency),
+            tolerances.bound(&units_currency),
+        );
         if quotient.is_zero() {
             zero_residual_fills.insert(idx);
         }
@@ -1953,8 +2021,11 @@ fn interpolate_inner<S: std::hash::BuildHasher>(
 
             // Fill the first currency into the original posting
             let (first_currency, first_residual) = &non_zero_residuals[0];
-            let interpolated =
-                round_interpolated(*first_residual, tolerances.get(first_currency).copied());
+            let interpolated = round_interpolated_bounded(
+                *first_residual,
+                tolerances.grid(first_currency),
+                tolerances.bound(first_currency),
+            );
             if first_residual.is_zero() {
                 zero_residual_fills.insert(idx);
             }
@@ -1969,7 +2040,11 @@ fn interpolate_inner<S: std::hash::BuildHasher>(
             // Add new postings for remaining currencies
             for (currency, residual) in non_zero_residuals.iter().skip(1) {
                 let mut new_posting = original_posting.clone();
-                let interpolated = round_interpolated(*residual, tolerances.get(currency).copied());
+                let interpolated = round_interpolated_bounded(
+                    *residual,
+                    tolerances.grid(currency),
+                    tolerances.bound(currency),
+                );
                 if residual.is_zero() {
                     zero_residual_fills.insert(transaction.postings.len());
                 }
@@ -1999,8 +2074,11 @@ fn interpolate_inner<S: std::hash::BuildHasher>(
             for (i, idx) in unassigned_missing.iter().enumerate() {
                 if i < non_zero_residuals.len() {
                     let (currency, residual) = &non_zero_residuals[i];
-                    let interpolated =
-                        round_interpolated(*residual, tolerances.get(currency).copied());
+                    let interpolated = round_interpolated_bounded(
+                        *residual,
+                        tolerances.grid(currency),
+                        tolerances.bound(currency),
+                    );
                     if residual.is_zero() {
                         zero_residual_fills.insert(*idx);
                     }

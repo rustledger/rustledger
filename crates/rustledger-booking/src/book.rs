@@ -14,7 +14,7 @@ use rustledger_core::{
 };
 use thiserror::Error;
 
-use crate::{InterpolationError, InterpolationResult, interpolate_with_tolerance_map};
+use crate::{InterpolationError, InterpolationResult};
 
 // Note: We no longer quantize calculated values during booking.
 // Python beancount preserves full precision during booking and only
@@ -1715,15 +1715,9 @@ impl BookingEngine {
     fn prepare(
         &self,
         txn: &Transaction,
-    ) -> Result<
-        (
-            FxHashMap<rustledger_core::Currency, Decimal>,
-            Option<Transaction>,
-        ),
-        InterpolationError,
-    > {
-        // The grid interpolation rounds to, so to nearest (#2582 review): the
-        // balance check that rounds DOWN is the validator's.
+    ) -> Result<(crate::InterpolationTolerances, Option<Transaction>), InterpolationError> {
+        // The balance check's tolerances, rounded down, and the grid
+        // interpolation rounds to, rounded to nearest (#2582 review).
         let tolerances = crate::interpolation_tolerances(txn, &self.tolerance.options());
         Ok((tolerances, self.resolve_elided_units_currencies(txn)?))
     }
@@ -1812,12 +1806,12 @@ impl BookingEngine {
     fn book_interpolate_apply_with(
         &mut self,
         txn: &mut Transaction,
-        tolerances: &FxHashMap<rustledger_core::Currency, Decimal>,
+        tolerances: &crate::InterpolationTolerances,
     ) -> Result<Vec<CapitalGain>, BookingError> {
         // Fast path, as in `book_and_interpolate_with_gains`: with no cost
         // specs `book` is an identity, so interpolate the transaction itself.
         if !txn.postings.iter().any(|p| p.cost.is_some()) {
-            let undo = crate::interpolate::interpolate_in_place_undoable(txn, tolerances)?;
+            let undo = crate::interpolate::interpolate_in_place_undoable_with(txn, tolerances)?;
             if let Err(e) = self.apply(txn) {
                 undo.restore(txn);
                 return Err(e);
@@ -1829,7 +1823,7 @@ impl BookingEngine {
         // — `txn` is not touched until the end.
         let booked = self.book(txn)?;
         let mut candidate = booked.transaction;
-        let _ = crate::interpolate::interpolate_in_place_undoable(&mut candidate, tolerances)?;
+        let _ = crate::interpolate::interpolate_in_place_undoable_with(&mut candidate, tolerances)?;
         self.apply(&candidate)?;
         *txn = candidate;
         Ok(booked.gains)
@@ -1862,13 +1856,16 @@ impl BookingEngine {
         // allocate).
         if !txn.postings.iter().any(|p| p.cost.is_some()) {
             return Ok((
-                interpolate_with_tolerance_map(txn, &tolerances)?,
+                crate::interpolate::interpolate_with_interpolation_tolerances(txn, &tolerances)?,
                 Vec::new(),
             ));
         }
         // First book (fill in costs + compute gains), then interpolate amounts.
         let booked = self.book(txn)?;
-        let result = interpolate_with_tolerance_map(&booked.transaction, &tolerances)?;
+        let result = crate::interpolate::interpolate_with_interpolation_tolerances(
+            &booked.transaction,
+            &tolerances,
+        )?;
         Ok((result, booked.gains))
     }
 }

@@ -1223,6 +1223,7 @@ fn test_json_output_validation_errors() {
 // removed Python/WASM execution with no test to catch it.
 // ============================================================================
 
+#[cfg(feature = "python-plugin-wasm")]
 fn wasm_plugins_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/wasm-plugins")
 }

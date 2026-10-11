@@ -163,20 +163,27 @@ one no lot matches is an error, so here the number is a claim about the
 average, checked rather than discarded. The currency was already checked
 (#2589).
 
-The claim holds when it is within the transaction's tolerance for the cost
-currency of the pool's exact average: `|claim - total / units| <= tolerance`,
-compared as `|claim × units - total| <= tolerance × |units|` with the pool's
-exact unit and cost totals (each lot's kept exact total, #2425), so the average
-is never rounded. The tolerance is the balance check's, rounded down, so it is
-never looser than the one the transaction balances to (#2562, #2582). A
-transaction that infers none in that currency holds the claim to the places it
-is written to, half a unit in its last place, which is the rule a `{*}` claim
-follows (#2398); without that, no claim could hold for an average with no
-finite decimal. A total cost states the total divided by the units sold, and a
-compound cost `a + b / units`. The check runs in booking only, as the `{*}`
-check does: the validator and BQL see the booked posting, whose cost is the
-pool's by then, and a filtered BQL replay builds a different pool on purpose
-(#1985).
+The claim holds when it is a correct rounding of the pool's exact average at
+the precision written: `|claim - total / units| <= w(claim)`, where `w` is half
+a unit in the claim's last written digit, inclusive. This is the rule a `{*}`
+claim already follows (#2398), so the two agree. It is compared as
+`|claim × units - total| <= w × |units|` with the pool's exact unit and cost
+totals (each lot's kept exact total, #2425), so the average is never rounded.
+A total cost is compared as a total, `|T - average × units sold| <= w(T)`, not
+divided by the units first. A compound cost states the total
+`a × units + b`, each part rounded to its own places, so it holds within
+`units × w(a) + w(b)`.
+
+The rule reads only the claim and the pool (robcohen's decision on #2603). A
+first version held the claim to the transaction's tolerance for the cost
+currency instead. That made the verdict depend on how the cash leg was written
+(`{106.67 USD}` for 106.666… failed beside cash written `106.667 USD`), let
+`infer_tolerance_from_cost` widen the check by the claim's own value, and gave
+AVERAGE a different rule from `{*}`.
+
+The check runs in booking only, as the `{*}` check does: the validator and BQL
+see the booked posting, whose cost is the pool's by then, and a filtered BQL
+replay builds a different pool on purpose (#1985).
 
 ## Prior art
 

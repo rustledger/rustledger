@@ -216,18 +216,18 @@ other method's sale must match a lot:
   Income:Gains
 ```
 
-The claim holds when it is within the transaction's tolerance for the cost
-currency of the pool's exact average, the tolerance the balance check uses. A
-rounded average such as `{166.67 USD}` for a pool of 500/3 USD holds beside a
-cash posting written to the cent (tolerance 0.005), and does not beside one
-written to the tenth of a cent (tolerance 0.0005). When the transaction infers
-no tolerance in that currency (its amounts there are all integers or elided),
-the claim is held to the places it is written to, half a unit in its last
-place, as a `{*}` claim is. A total (`-3 X` with a total cost of
-`500.00 USD`) states that total divided by the units sold, and a compound
-`{a # b}` states `a + b / units`. A spec that names no cost (`{}` or
-`{EUR}`) books at the pool as before. Beancount has no `AVERAGE` booking
-(it refuses the method), so this rule is rustledger's own.
+The claim holds when it is a correct rounding of the pool's exact average at
+the precision written: no more than half a unit in its last written digit away,
+the half-way case included. That is the rule a `{*}` claim follows. For a pool
+of 106.666… USD, `{106.67 USD}` and `{107 USD}` hold and `{106.66 USD}` does
+not. The verdict depends only on the claim and the pool, never on the
+transaction's other postings or on `infer_tolerance_from_cost`. A total cost is
+compared as a total: it must round what the units sold cost at the average, to
+half a unit in the total's last digit. A compound `{a # b}` states the total
+`a × units + b`, and holds within `units × ` half a unit of `a` plus half a
+unit of `b`, since each part is rounded to its own places. A spec that names no
+cost (`{}` or `{EUR}`) books at the pool as before. Beancount has no `AVERAGE`
+booking (it refuses the method), so this rule is rustledger's own.
 
 ### E4002: Insufficient Units
 

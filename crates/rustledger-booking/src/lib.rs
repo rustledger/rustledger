@@ -155,7 +155,7 @@ pub fn transaction_tolerances(
 /// `grid` is `None` when no tolerance needed rounding, so it IS `bound`, which
 /// is every ordinary transaction: the second computation is paid only by one
 /// with a tolerance past `Decimal`'s digits.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub(crate) struct InterpolationTolerances {
     pub(crate) bound: FxHashMap<rustledger_core::Currency, Decimal>,
     pub(crate) grid: Option<FxHashMap<rustledger_core::Currency, Decimal>>,

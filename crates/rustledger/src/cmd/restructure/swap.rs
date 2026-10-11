@@ -1,8 +1,8 @@
 //! Writing a verified plan: new files alongside the originals, a backup, and
 //! one commit point.
 //!
-//! Every new file is written to a temporary name next to its target first.
-//! Then the originals that will change are copied into a backup directory.
+//! The originals that will change are copied into a backup directory first.
+//! Then every new file is written to a temporary name next to its target.
 //! Then the new files are renamed into place, the file that COMMITS the change
 //! last: for `split` that is the root, which is the only file that names the
 //! new period files, so until it is swapped the old root is still the whole
@@ -11,7 +11,9 @@
 //! removed. At no point is the ledger on disk half old and half new.
 //!
 //! After the swap the ledger is loaded again from disk and compared with the
-//! original once more. If that fails, the backup is restored.
+//! original once more. If that fails, the backup is restored. A failure
+//! before the commit point changes nothing on disk except the backup, which
+//! stays behind (the error says where).
 
 use anyhow::{Context, Result, bail};
 use std::fs;
@@ -157,7 +159,7 @@ fn stage(
             .file_name()
             .with_context(|| format!("{} has no file name", target.display()))?
             .to_string_lossy();
-        let tmp = parent.join(format!(".{name}.rledger-tmp-{}", std::process::id()));
+        let tmp = parent.join(format!(".{name}.rledger-tmp-{}", unique_suffix()));
         let mut f = create_private(&tmp)?;
         temps.push((tmp.clone(), target.clone()));
         f.write_all(content.as_bytes())
@@ -346,4 +348,15 @@ fn create_private_dirs(dir: &Path) -> Result<()> {
     builder
         .create(dir)
         .with_context(|| format!("failed to create {}", dir.display()))
+}
+
+/// A suffix no other run (and no earlier crashed run with a reused pid) is
+/// using: the pid, the time, and a per-process counter.
+fn unique_suffix() -> String {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos());
+    let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    format!("{}-{nanos}-{n}", std::process::id())
 }

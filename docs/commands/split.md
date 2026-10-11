@@ -96,11 +96,13 @@ different files and could change it, so it is not offered.
 
 ## Writing and backups
 
-New files are written next to their targets first. The original is then copied
-to `.rledger-backup/<timestamp>-split/` (with a `manifest.txt` listing every file
-saved and created), and the new files are moved into place, the root last. Until
-the root is replaced the old ledger is intact, and once it is the new one is
-complete. `split` refuses to overwrite a period file that already exists.
+The original is first copied to `.rledger-backup/<timestamp>-split/` (with a
+`manifest.txt` listing every file saved and created, and the original's
+permissions). The new files are then written next to their targets under
+temporary names and moved into place, the root last. Until the root is replaced
+the old ledger is intact, and once it is the new one is complete. If anything
+fails before that point, nothing but the backup is left on disk. `split` refuses
+to overwrite a period file that already exists.
 
 Files that are encrypted, not valid UTF-8, or have parse errors are refused.
 

@@ -837,3 +837,20 @@ fn merged_file_takes_the_strictest_permissions() {
     assert_eq!(code, ExitCode::SUCCESS, "{out}{err}");
     assert_eq!(mode(&root), 0o600);
 }
+
+/// Narrowing read access never takes away write access: merging a read-only
+/// archived year must not make the root read-only.
+#[cfg(unix)]
+#[test]
+fn merging_a_read_only_file_keeps_the_root_writable() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let dir = tmp();
+    let root = write(dir.path(), "main.beancount", "include \"2019.beancount\"\n");
+    let year = write(dir.path(), "2019.beancount", "2019-01-01 open Assets:C\n");
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::set_permissions(&year, fs::Permissions::from_mode(0o444)).unwrap();
+    let (code, out, err) = run_merge(&merge_args(&root));
+    assert_eq!(code, ExitCode::SUCCESS, "{out}{err}");
+    assert_eq!(mode(&root), 0o644);
+}

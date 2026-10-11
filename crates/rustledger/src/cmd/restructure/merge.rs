@@ -305,16 +305,19 @@ fn resolve_include(base: &Path, include: &str) -> Result<Vec<(PathBuf, PathBuf)>
         .collect()
 }
 
-/// The permission bits every one of `files` allows: the merged file holds the
-/// content of all of them, so it must be no more readable than the most
-/// private one.
+/// A mask that takes away group and other READ access that any of `files`
+/// withholds: the merged file holds the content of all of them, so it must be
+/// no more readable than the most private one. Only those read bits are
+/// narrowed; write and execute bits, and the owner's, stay as the merged
+/// file's own (a read-only archived year must not make the root read-only).
 #[cfg(unix)]
 fn strictest_mode<'a>(files: impl Iterator<Item = &'a PathBuf>) -> Option<u32> {
     use std::os::unix::fs::PermissionsExt;
-    files
+    let readable = files
         .filter_map(|f| std::fs::metadata(f).ok())
-        .map(|m| m.permissions().mode() & 0o7777)
-        .reduce(|a, b| a & b)
+        .map(|m| m.permissions().mode() & 0o044)
+        .reduce(|a, b| a & b)?;
+    Some(!(0o044 & !readable) & 0o7777)
 }
 
 #[cfg(not(unix))]

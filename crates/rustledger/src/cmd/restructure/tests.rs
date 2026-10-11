@@ -271,6 +271,15 @@ fn split_refuses_to_overwrite_an_existing_period_file() {
     assert_eq!(snapshot(dir.path()), before);
 }
 
+/// A `verify` for `swap::apply` that passes with only the backup written and
+/// fails once the new layout is in place.
+fn after_swap_fails(phase: swap::Phase) -> anyhow::Result<()> {
+    match phase {
+        swap::Phase::BackedUp => Ok(()),
+        swap::Phase::Swapped => anyhow::bail!("simulated mismatch"),
+    }
+}
+
 /// The swap restores the originals when the post-write verification fails,
 /// and removes what it created.
 #[test]
@@ -291,7 +300,7 @@ fn failed_verification_restores_the_backup() {
         template: file.clone(),
         mode_mask: None,
     };
-    let e = swap::apply(&plan, || anyhow::bail!("simulated mismatch")).unwrap_err();
+    let e = swap::apply(&plan, after_swap_fails).unwrap_err();
     assert!(format!("{e:#}").contains("restored"), "{e:#}");
     assert_eq!(fs::read_to_string(&file).unwrap(), "; original\n");
     assert!(!new.exists());
@@ -956,9 +965,323 @@ fn restore_keeps_the_group() {
         template: file.clone(),
         mode_mask: None,
     };
-    swap::apply(&plan, || anyhow::bail!("simulated mismatch")).unwrap_err();
+    swap::apply(&plan, after_swap_fails).unwrap_err();
     assert_eq!(fs::read_to_string(&file).unwrap(), "; original\n");
     let meta = fs::metadata(&file).unwrap();
     assert_eq!(meta.gid(), other);
     assert_eq!(meta.permissions().mode() & 0o777, 0o640);
+}
+
+// ---------------------------------------------------------------------------
+// File-system safety: what is on disk after each way a write can go wrong.
+// ---------------------------------------------------------------------------
+
+/// Every path under `dir` (files, directories and symlinks, not followed),
+/// relative to it, with a file's bytes.
+fn tree(dir: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            let rel = p.strip_prefix(dir).unwrap().to_path_buf();
+            let meta = fs::symlink_metadata(&p).unwrap();
+            if meta.is_dir() {
+                stack.push(p);
+                out.push((rel, None));
+            } else if meta.is_file() {
+                out.push((rel, Some(fs::read(&p).unwrap())));
+            } else {
+                out.push((rel, None));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// A split plan: `ledger.beancount` becomes a root including two new files
+/// under `ledger/`.
+fn split_plan(dir: &Path) -> (swap::Plan, PathBuf) {
+    let file = write(dir, "ledger.beancount", "; original\n");
+    let plan = swap::Plan {
+        writes: vec![
+            (dir.join("ledger/2023.beancount"), "; 2023\n".to_string()),
+            (dir.join("ledger/2024.beancount"), "; 2024\n".to_string()),
+            (file.clone(), "; root\n".to_string()),
+        ],
+        commit: file.clone(),
+        removes: Vec::new(),
+        backup_base: dir.canonicalize().unwrap(),
+        originals: vec![(file.clone(), b"; original\n".to_vec())],
+        operation: "split",
+        template: file.clone(),
+        mode_mask: None,
+    };
+    (plan, file)
+}
+
+/// The one backup directory under `dir`, checked to be complete: a manifest
+/// and a `.bak` copy of `file` with `original` in it.
+fn complete_backup(dir: &Path, file: &str, original: &str) -> PathBuf {
+    let backups: Vec<PathBuf> = fs::read_dir(dir.join(".rledger-backup"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .collect();
+    assert_eq!(backups.len(), 1, "{backups:?}");
+    let b = backups[0].clone();
+    let manifest = fs::read_to_string(b.join("manifest.txt")).unwrap();
+    assert!(manifest.contains("saved\t"), "{manifest}");
+    assert_eq!(
+        fs::read_to_string(b.join(format!("{file}.bak"))).unwrap(),
+        original
+    );
+    b
+}
+
+fn ok(_: swap::Phase) -> anyhow::Result<()> {
+    Ok(())
+}
+
+/// An include pattern that matches the directory the backup goes in would
+/// make the backup part of the ledger. The run used to go ahead, fail the
+/// reload, "restore the original files", and leave the backup directory
+/// behind, where it kept breaking the restored ledger. It is now refused
+/// while the originals are untouched, and the backup is removed again.
+#[test]
+fn a_backup_an_include_pattern_would_read_is_refused_and_removed() {
+    let dir = tmp();
+    let main = write(
+        dir.path(),
+        "main.beancount",
+        "option \"operating_currency\" \"USD\"\n2020-01-01 open Assets:Cash\n2020-01-01 open Expenses:Food\ninclude \"years/*\"\n",
+    );
+    let a = write(
+        dir.path(),
+        "years/a.beancount",
+        "2023-02-01 * \"x\"\n  Assets:Cash  -1 USD\n  Expenses:Food\n2024-02-01 * \"y\"\n  Assets:Cash  -2 USD\n  Expenses:Food\n",
+    );
+    let before = tree(dir.path());
+    let mut args = split_args(&a, Period::Year);
+    args.ledger = Some(main.clone());
+    args.dir = Some(dir.path().join("split"));
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let e = split::run_with_writer(&args, &mut out, &mut err).unwrap_err();
+    let e = format!("{e:#}");
+    assert!(e.contains("nothing was changed"), "{e}");
+    assert!(e.contains("was removed"), "{e}");
+    assert_eq!(tree(dir.path()), before, "{e}");
+    assert_eq!(fingerprint(&main).error_count(), 0);
+}
+
+/// A dangling symlink where a new file goes is occupied: `rename` would
+/// replace the link, which is neither backed up nor listed in the manifest.
+#[cfg(unix)]
+#[test]
+fn a_dangling_symlink_at_a_target_is_not_replaced() {
+    let dir = tmp();
+    let file = write(dir.path(), "ledger.beancount", LEDGER);
+    fs::create_dir(dir.path().join("ledger")).unwrap();
+    let link = dir.path().join("ledger/2024.beancount");
+    std::os::unix::fs::symlink(dir.path().join("not-there"), &link).unwrap();
+    let before = tree(dir.path());
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let e =
+        split::run_with_writer(&split_args(&file, Period::Year), &mut out, &mut err).unwrap_err();
+    assert!(format!("{e:#}").contains("already exists"), "{e:#}");
+    assert_eq!(tree(dir.path()), before);
+
+    // The same for `merge -o`.
+    let root = write(
+        dir.path(),
+        "m/root.beancount",
+        "include \"inc.beancount\"\n",
+    );
+    write(
+        dir.path(),
+        "m/inc.beancount",
+        "2024-01-01 open Assets:Cash\n",
+    );
+    let out_link = dir.path().join("m/out.beancount");
+    std::os::unix::fs::symlink(dir.path().join("not-there"), &out_link).unwrap();
+    let before = tree(dir.path());
+    let mut args = merge_args(&root);
+    args.output = Some(out_link);
+    let e = merge::run_with_writer(&args, &mut Vec::new(), &mut Vec::new()).unwrap_err();
+    assert!(format!("{e:#}").contains("already exists"), "{e:#}");
+    assert_eq!(tree(dir.path()), before);
+}
+
+/// Two runs started in the same second pick the same backup name. Claiming
+/// the directory by creating it gives the second run its own; checking for it
+/// first let both use one, and the second manifest replaced the first.
+#[test]
+fn runs_started_in_the_same_second_get_separate_backups() {
+    let dir = tmp();
+    let (plan, file) = split_plan(dir.path());
+    let mut first = true;
+    let _hook = swap::inject(move |point| {
+        if let swap::Fault::ClaimBackup(d) = point
+            && std::mem::take(&mut first)
+        {
+            // Another run claims this name between our choice and ours.
+            fs::create_dir_all(d).unwrap();
+            fs::write(d.join("manifest.txt"), "other run\n").unwrap();
+        }
+        Ok(())
+    });
+    let applied = swap::apply(&plan, ok).unwrap();
+    let mine = applied.backup_dir.unwrap();
+    let others: Vec<PathBuf> = fs::read_dir(dir.path().join(".rledger-backup"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p != &mine)
+        .collect();
+    assert_eq!(others.len(), 1, "both runs used {}", mine.display());
+    assert_eq!(
+        fs::read_to_string(others[0].join("manifest.txt")).unwrap(),
+        "other run\n"
+    );
+    assert!(
+        fs::read_to_string(mine.join("manifest.txt"))
+            .unwrap()
+            .contains("saved\t")
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), "; root\n");
+}
+
+/// A run that fails while writing the backup (a full disk, say) leaves no
+/// half-written backup behind, and says nothing was changed.
+#[test]
+fn a_failed_backup_leaves_nothing_behind() {
+    let dir = tmp();
+    let (plan, file) = split_plan(dir.path());
+    let before = tree(dir.path());
+    let _hook = swap::inject(|point| match point {
+        swap::Fault::Backup(copy) => {
+            assert!(copy.to_string_lossy().ends_with(".bak"), "{copy:?}");
+            Err(std::io::Error::from(std::io::ErrorKind::StorageFull).into())
+        }
+        _ => Ok(()),
+    });
+    let e = format!("{:#}", swap::apply(&plan, ok).unwrap_err());
+    assert!(e.contains("nothing was changed"), "{e}");
+    assert_eq!(tree(dir.path()), before, "{e}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "; original\n");
+}
+
+/// A write error halfway through staging (the disk filling up while the
+/// second new file is written) removes every temporary and directory the run
+/// created, leaves the originals as they were, and keeps the backup, which
+/// the error names.
+#[test]
+fn a_write_error_while_staging_changes_nothing() {
+    let dir = tmp();
+    let (plan, file) = split_plan(dir.path());
+    let mut writes = 0;
+    let _hook = swap::inject(move |point| {
+        if let swap::Fault::Write(tmp) = point {
+            assert!(tmp.to_string_lossy().contains(".rledger-tmp-"), "{tmp:?}");
+            writes += 1;
+            if writes == 2 {
+                return Err(std::io::Error::from(std::io::ErrorKind::StorageFull).into());
+            }
+        }
+        Ok(())
+    });
+    let e = format!("{:#}", swap::apply(&plan, ok).unwrap_err());
+    assert!(
+        e.contains("nothing was changed; a backup copy is in"),
+        "{e}"
+    );
+    assert_eq!(fs::read_to_string(&file).unwrap(), "; original\n");
+    assert!(!dir.path().join("ledger").exists());
+    complete_backup(dir.path(), "ledger.beancount", "; original\n");
+    let names: Vec<_> = tree(dir.path())
+        .into_iter()
+        .map(|(p, _)| p)
+        .filter(|p| p.to_string_lossy().contains("rledger-tmp"))
+        .collect();
+    assert!(names.is_empty(), "{names:?}");
+}
+
+/// A run killed while staging, or after staging but before the first rename,
+/// leaves the original files untouched (the ledger loads as before) and a
+/// complete backup with its manifest. The temporaries are dot-files that end
+/// in neither `.beancount` nor `.bak`, and are left for the user to delete.
+#[test]
+fn a_kill_before_the_swap_leaves_the_originals_and_a_complete_backup() {
+    for kill_at in ["second write", "before rename"] {
+        let dir = tmp();
+        let (mut plan, file) = split_plan(dir.path());
+        fs::write(&file, LEDGER).unwrap();
+        plan.originals = vec![(file.clone(), LEDGER.as_bytes().to_vec())];
+        let reference = fingerprint(&file);
+        let mut writes = 0;
+        let _hook = swap::inject(move |point| {
+            match point {
+                swap::Fault::Write(_) => {
+                    writes += 1;
+                    assert!(!(kill_at == "second write" && writes == 2), "killed");
+                }
+                swap::Fault::BeforeRename => assert!(kill_at != "before rename", "killed"),
+                _ => {}
+            }
+            Ok(())
+        });
+        let killed =
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| swap::apply(&plan, ok)));
+        assert!(killed.is_err(), "{kill_at}: the run was not killed");
+        assert_eq!(fs::read_to_string(&file).unwrap(), LEDGER, "{kill_at}");
+        assert!(
+            equivalence::first_difference(&reference, &fingerprint(&file)).is_none(),
+            "{kill_at}"
+        );
+        complete_backup(dir.path(), "ledger.beancount", LEDGER);
+    }
+}
+
+/// An original edited after the check, while the backup and the temporaries
+/// were being written, is not overwritten: the run stops before the first
+/// rename and removes what it staged.
+#[test]
+fn an_edit_during_staging_is_not_overwritten() {
+    let dir = tmp();
+    let (plan, file) = split_plan(dir.path());
+    let edited = file.clone();
+    let _hook = swap::inject(move |point| {
+        if matches!(point, swap::Fault::BeforeRename) {
+            fs::write(&edited, "; edited by the user\n").unwrap();
+        }
+        Ok(())
+    });
+    let e = format!("{:#}", swap::apply(&plan, ok).unwrap_err());
+    assert!(e.contains("changed on disk"), "{e}");
+    assert!(e.contains("nothing was changed"), "{e}");
+    assert_eq!(fs::read_to_string(&file).unwrap(), "; edited by the user\n");
+    assert!(!dir.path().join("ledger").exists());
+}
+
+/// When the reload after the swap fails and restoring fails too (the disk
+/// full by then, say), the error says so and names the backup, which is
+/// complete: every original's bytes and a manifest listing the files the run
+/// created.
+#[test]
+fn a_failed_restore_names_a_complete_backup() {
+    let dir = tmp();
+    let (plan, _file) = split_plan(dir.path());
+    let _hook = swap::inject(|point| match point {
+        swap::Fault::Restore(original) => {
+            assert!(original.ends_with("ledger.beancount"), "{original:?}");
+            Err(std::io::Error::from(std::io::ErrorKind::StorageFull).into())
+        }
+        _ => Ok(()),
+    });
+    let e = format!("{:#}", swap::apply(&plan, after_swap_fails).unwrap_err());
+    assert!(e.contains("restoring failed too"), "{e}");
+    let backup = complete_backup(dir.path(), "ledger.beancount", "; original\n");
+    assert!(e.contains(&backup.display().to_string()), "{e}");
+    let manifest = fs::read_to_string(backup.join("manifest.txt")).unwrap();
+    assert!(manifest.contains("created\t"), "{manifest}");
+    assert!(manifest.contains("ledger/2023.beancount"), "{manifest}");
 }

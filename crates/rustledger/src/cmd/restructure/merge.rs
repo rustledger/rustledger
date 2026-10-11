@@ -118,7 +118,7 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
         template: file.clone(),
         mode_mask: strictest_mode(&file, &flat.order),
     };
-    if args.output.is_some() && target.exists() {
+    if args.output.is_some() && swap::occupied(&target) {
         bail!(
             "{} already exists; refusing to overwrite it",
             target.display()

@@ -59,7 +59,8 @@ That order is the order the loader reads files in, so same-date directives keep
 their booking order.
 
 By default the inlined files are removed after the merged file is in place. They
-are copied to `.rledger-backup/<timestamp>-merge/` first, with a `manifest.txt`.
+are copied to `.rledger-backup/<timestamp>-merge/` first, with a `manifest.txt`,
+and written as described for [split](split.md#writing-and-backups).
 Only plain files inside `FILE`'s directory are removed: an include outside it, or
 one reached through a symlink, may belong to another ledger and is left in place
 (the plan says so), together with everything it includes.

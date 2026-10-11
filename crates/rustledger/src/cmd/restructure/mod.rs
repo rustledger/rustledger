@@ -243,7 +243,7 @@ fn report_check(
 
 /// Write `plan` and verify it on disk against `before`.
 fn write_plan(out: &mut dyn Write, root: &Path, before: &Before, plan: &swap::Plan) -> Result<()> {
-    let applied = swap::apply(plan, || {
+    let applied = swap::apply(plan, |_phase| {
         let (again, _) = equivalence::load(root, overlay::OverlayFs::disk())?;
         match equivalence::first_difference(&before.fingerprint, &again) {
             None => Ok(()),

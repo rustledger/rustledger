@@ -105,7 +105,17 @@ created. The new files are then written next to their targets under
 temporary names and moved into place, the root last. Until the root is replaced
 the old ledger is intact, and once it is the new one is complete. If anything
 fails before that point, nothing but the backup is left on disk. `split` refuses
-to overwrite a period file that already exists.
+to overwrite a period file that already exists (a dangling symlink counts).
+
+The ledger is loaded once more as soon as the backup exists. The backup sits in
+`FILE`'s directory, so an include pattern that matches it (`include "years/*"`
+when `FILE` is in `years/`) would read it as part of the ledger; that is refused
+and the backup removed, before anything else is touched. Right before the first
+file is moved into place, every original is compared with what was checked, so
+an edit made in the meantime is refused rather than overwritten. A run that is
+killed partway leaves the originals and the complete backup; it can also leave
+temporaries named `.<name>.rledger-tmp-...` and new period files, which the
+manifest lists as created and which are safe to delete.
 
 Files that are encrypted, not valid UTF-8, or have parse errors are refused.
 

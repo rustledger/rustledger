@@ -14,6 +14,17 @@
 //! original once more. If that fails, the backup is restored. A failure
 //! before the commit point changes nothing on disk except the backup, which
 //! stays behind (the error says where).
+//!
+//! The ledger is also loaded once right after the backup is written, before
+//! anything else is touched: the backup sits in FILE's directory, and an
+//! include pattern that matches it (`years/*` when FILE is in `years/`) would
+//! make the backup itself part of the ledger. That is refused, and the fresh
+//! backup removed, while the originals are still untouched.
+//!
+//! Every original is compared with the bytes the plan was made from twice:
+//! before the backup is written, and again after the new files are staged,
+//! immediately before the first rename, so an edit made while the backup and
+//! the temporaries were being written and flushed is not overwritten.
 
 use anyhow::{Context, Result, bail};
 use std::fs;
@@ -45,6 +56,22 @@ pub(super) struct Plan {
     pub(super) mode_mask: Option<u32>,
 }
 
+/// When `apply` asks for the ledger to be verified.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Phase {
+    /// The backup exists and nothing else has been touched.
+    BackedUp,
+    /// The new layout is in place.
+    Swapped,
+}
+
+/// Whether anything (a file, a directory, or a symlink, dangling or not)
+/// occupies `path`. `Path::exists` follows symlinks, so a dangling one reads
+/// as free and `rename` would silently replace it.
+pub(super) fn occupied(path: &Path) -> bool {
+    fs::symlink_metadata(path).is_ok()
+}
+
 /// Where the backup went.
 #[derive(Debug)]
 pub(super) struct Applied {
@@ -55,13 +82,18 @@ pub(super) struct Applied {
 /// Refuse a plan whose preconditions no longer hold, before touching anything.
 pub(super) fn preflight(plan: &Plan) -> Result<()> {
     for (path, _) in &plan.writes {
-        if path != &plan.commit && path.exists() {
+        if path != &plan.commit && occupied(path) {
             bail!(
                 "{} already exists; refusing to overwrite it (move it away or choose another --dir)",
                 path.display()
             );
         }
     }
+    unchanged(plan)
+}
+
+/// Refuse if any original no longer has the bytes the plan was made from.
+fn unchanged(plan: &Plan) -> Result<()> {
     for (path, original) in &plan.originals {
         let now = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         if &now != original {
@@ -74,22 +106,45 @@ pub(super) fn preflight(plan: &Plan) -> Result<()> {
     Ok(())
 }
 
-/// Apply `plan`. `verify` reloads the ledger from disk after the swap and
-/// fails if it no longer matches; on failure the backup is restored.
-pub(super) fn apply(plan: &Plan, verify: impl FnOnce() -> Result<()>) -> Result<Applied> {
+/// Apply `plan`. `verify` reloads the ledger from disk and fails if it no
+/// longer matches the original: once with the backup written and nothing else
+/// touched ([`Phase::BackedUp`]; a failure removes the backup and changes
+/// nothing), and once after the swap ([`Phase::Swapped`]; a failure restores
+/// the backup).
+pub(super) fn apply(plan: &Plan, mut verify: impl FnMut(Phase) -> Result<()>) -> Result<Applied> {
     preflight(plan)?;
     let backup_dir = if plan.originals.is_empty() {
         None
     } else {
-        Some(make_backup(plan)?)
+        Some(make_backup(plan).context("nothing was changed")?)
     };
     let backup_note = backup_dir.as_ref().map_or_else(String::new, |d| {
         format!("; a backup copy is in {}", d.display())
     });
+    if let Some(dir) = &backup_dir
+        && let Err(e) = verify(Phase::BackedUp)
+    {
+        let removed = if remove_backup(dir) {
+            "was removed".to_string()
+        } else {
+            format!("could not be removed; delete {} by hand", dir.display())
+        };
+        return Err(e.context(format!(
+            "nothing was changed: with the backup in {} the ledger no longer loads as \
+             before (an include pattern that matches the backup is the usual cause), \
+             so the backup {removed}",
+            dir.display()
+        )));
+    }
 
     let mut created_dirs: Vec<PathBuf> = Vec::new();
     let mut temps: Vec<(PathBuf, PathBuf)> = Vec::new();
-    let staged = stage(plan, &mut created_dirs, &mut temps);
+    let staged = stage(plan, &mut created_dirs, &mut temps).and_then(|()| {
+        // Last look before the first rename: an original edited while the
+        // backup and temporaries were written must not be overwritten.
+        fault(&Fault::BeforeRename)?;
+        unchanged(plan)
+    });
     if let Err(e) = staged {
         cleanup(&temps, &[], &created_dirs);
         return Err(e.context(format!("nothing was changed{backup_note}")));
@@ -124,7 +179,7 @@ pub(super) fn apply(plan: &Plan, verify: impl FnOnce() -> Result<()>) -> Result<
         }
     }
 
-    if let Err(e) = verify() {
+    if let Err(e) = verify(Phase::Swapped) {
         let restored = restore(plan, backup_dir.as_deref(), &placed, &created_dirs);
         let how = match restored {
             Ok(()) => "the original files were restored".to_string(),
@@ -162,6 +217,7 @@ fn stage(
         let tmp = parent.join(format!(".{name}.rledger-tmp-{}", unique_suffix()));
         let mut f = create_private(&tmp)?;
         temps.push((tmp.clone(), target.clone()));
+        fault(&Fault::Write(&tmp))?;
         f.write_all(content.as_bytes())
             .with_context(|| format!("failed to write {}", tmp.display()))?;
         // Keep the permissions of the file being replaced, and give new files
@@ -242,6 +298,7 @@ fn restore(
         let meta = fs::metadata(&saved)
             .with_context(|| format!("failed to restore {}", path.display()))?;
         copy_access(&tmp, &meta, None)?;
+        fault(&Fault::Restore(path))?;
         fs::rename(&tmp, path).with_context(|| format!("failed to restore {}", path.display()))?;
     }
     let originals: Vec<&PathBuf> = plan.originals.iter().map(|(p, _)| p).collect();
@@ -264,13 +321,41 @@ fn make_backup(plan: &Plan) -> Result<PathBuf> {
         .strftime("%Y%m%dT%H%M%SZ")
         .to_string();
     let root = plan.backup_base.join(".rledger-backup");
-    let mut dir = root.join(format!("{stamp}-{}", plan.operation));
-    let mut n = 1;
-    while dir.exists() {
-        dir = root.join(format!("{stamp}-{}-{n}", plan.operation));
+    create_private_dirs(&root)?;
+    // Claim a directory no other run is using. Creating it is the claim: a
+    // check-then-create would let two runs started in the same second share
+    // one directory, and the second's manifest would replace the first's.
+    let mut n = 0;
+    let dir = loop {
+        let dir = root.join(if n == 0 {
+            format!("{stamp}-{}", plan.operation)
+        } else {
+            format!("{stamp}-{}-{n}", plan.operation)
+        });
         n += 1;
+        fault(&Fault::ClaimBackup(&dir))?;
+        match create_private_dir(&dir) {
+            Ok(()) => break dir,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+            Err(e) => {
+                return Err(
+                    anyhow::Error::new(e).context(format!("failed to create {}", dir.display()))
+                );
+            }
+        }
+    };
+    // From here the directory is this run's alone; a failure removes it so a
+    // half-written backup without a manifest is not left behind.
+    match fill_backup(plan, &dir, &stamp) {
+        Ok(()) => Ok(dir),
+        Err(e) => {
+            remove_backup(&dir);
+            Err(e)
+        }
     }
-    create_private_dirs(&dir)?;
+}
+
+fn fill_backup(plan: &Plan, dir: &Path, stamp: &str) -> Result<()> {
     let mut manifest = format!(
         "# rledger {} backup, {stamp}\n# To undo: copy each file below back to its original path,\n# and delete the files listed as created.\n",
         plan.operation
@@ -282,6 +367,7 @@ fn make_backup(plan: &Plan) -> Result<PathBuf> {
             create_private_dirs(parent)?;
         }
         let mut f = create_private(&dest)?;
+        fault(&Fault::Backup(&dest))?;
         f.write_all(original)
             .with_context(|| format!("failed to back up {}", path.display()))?;
         // The copy is as private as the original: a ledger kept at 0600 must
@@ -301,7 +387,17 @@ fn make_backup(plan: &Plan) -> Result<PathBuf> {
     }
     fs::write(dir.join("manifest.txt"), manifest)
         .with_context(|| format!("failed to write the backup manifest in {}", dir.display()))?;
-    Ok(dir)
+    Ok(())
+}
+
+/// Remove a backup directory this run created, and `.rledger-backup` too if
+/// that leaves it empty. Returns whether the backup directory is gone.
+fn remove_backup(dir: &Path) -> bool {
+    let gone = fs::remove_dir_all(dir).is_ok();
+    if let Some(parent) = dir.parent() {
+        let _ = fs::remove_dir(parent);
+    }
+    gone
 }
 
 /// Where `path` is kept inside a backup: its path relative to `base`, or,
@@ -354,6 +450,70 @@ fn create_private_dirs(dir: &Path) -> Result<()> {
     builder
         .create(dir)
         .with_context(|| format!("failed to create {}", dir.display()))
+}
+
+/// Create one directory, owner-only; fails if it exists.
+fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
+}
+
+/// Points where tests inject a failure (an I/O error, or a panic standing in
+/// for the process being killed) or a concurrent change.
+#[derive(Debug)]
+#[cfg_attr(not(test), allow(dead_code))] // read only by the tests' hooks
+pub(super) enum Fault<'a> {
+    /// About to create this backup directory.
+    ClaimBackup(&'a Path),
+    /// About to write this backup copy.
+    Backup(&'a Path),
+    /// About to write the content of this temporary.
+    Write(&'a Path),
+    /// Everything staged; about to rename the first file into place.
+    BeforeRename,
+    /// About to rename this restored original into place.
+    Restore(&'a Path),
+}
+
+#[cfg(test)]
+type FaultHook = Box<dyn FnMut(&Fault<'_>) -> Result<()>>;
+
+#[cfg(test)]
+thread_local! {
+    static FAULT: std::cell::RefCell<Option<FaultHook>> = std::cell::RefCell::new(None);
+}
+
+/// Install `hook` for the swaps run on this thread until the guard drops.
+#[cfg(test)]
+pub(super) fn inject(hook: impl FnMut(&Fault<'_>) -> Result<()> + 'static) -> impl Drop {
+    struct Guard;
+    impl Drop for Guard {
+        fn drop(&mut self) {
+            FAULT.with(|f| f.borrow_mut().take());
+        }
+    }
+    FAULT.with(|f| *f.borrow_mut() = Some(Box::new(hook)));
+    Guard
+}
+
+#[cfg(test)]
+fn fault(point: &Fault<'_>) -> Result<()> {
+    FAULT.with(|f| match f.borrow_mut().as_mut() {
+        Some(hook) => hook(point),
+        None => Ok(()),
+    })
+}
+
+#[cfg(not(test))]
+#[allow(clippy::unnecessary_wraps)]
+#[inline]
+const fn fault(_: &Fault<'_>) -> Result<()> {
+    Ok(())
 }
 
 /// A suffix no other run (and no earlier crashed run with a reused pid) is

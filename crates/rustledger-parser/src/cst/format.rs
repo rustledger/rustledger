@@ -45,8 +45,7 @@
 //!   feed) stay grouped; the formatter does not insert or collapse
 //!   blank lines, matching Python `bean-format`. The same holds for
 //!   blank lines around comments: before, between and after comment
-//!   lines (#2506). Blank lines before the file's first line are
-//!   dropped (see the EOF rule below for the other end).
+//!   lines, and at the very start and end of the file (#2506).
 //! - Blank lines inside a directive: 0.
 //! - Number lexical form: thousands separators dropped; user
 //!   decimal-place count preserved.
@@ -57,7 +56,9 @@
 //! - Cost spec spacing: `{cost CCY}` (no inner padding).
 //! - Tag/link order on a transaction header: source order, after
 //!   the strings.
-//! - Trailing newline at EOF: always exactly one.
+//! - Trailing newline at EOF: a last line without one gets one;
+//!   blank lines after it are kept, as bean-format keeps them, and
+//!   an empty file stays empty (#2506).
 //! - Line endings: LF; CRLF inputs normalized.
 //! - Leading BOM: dropped.
 //!
@@ -157,9 +158,10 @@ const INDENT: &str = "  ";
 /// Reparses internally — callers that already have a CST in hand
 /// and want to avoid the double-parse can use [`format_node`].
 ///
-/// Returns canonical text; output always ends with exactly one
-/// trailing newline (even for an empty file, where the output is
-/// just `"\n"`).
+/// Returns canonical text. A non-empty output ends with a newline;
+/// the file's leading and trailing blank lines are kept, as
+/// bean-format keeps them, and an empty file formats to an empty
+/// string (#2506).
 ///
 /// **Line-ending normalization runs BEFORE parsing.** The lexer
 /// does not treat bare `\r` as a line terminator, so a classic-
@@ -817,8 +819,9 @@ fn format_node_with_style(
     // comment and a directive, or between two comments, is kept, and a
     // comment group written flush against a directive stays flush (so a
     // `; ====\n; HEADER\n; ====` section header keeps its grouping).
-    // Only blank lines at the very start of the file and at its end are
-    // dropped (the output ends with exactly one newline).
+    // Blank lines at the very start and the very end of the file are kept
+    // too, as bean-format keeps them, so a file bean-format leaves alone
+    // keeps every one of its lines (#2506).
     let mut spacing = TopLevelSpacing::default();
     for el in node.children_with_tokens() {
         match el {
@@ -839,15 +842,22 @@ fn format_node_with_style(
                     // directive) are preserved, not flushed.
                     spacing.blank_lines(leading_blank_lines(&n));
                     spacing.flush(&mut out);
-                    emit_error_node(&n, &mut out);
+                    let trailing = emit_error_node(&n, &mut out);
                     spacing.after_node();
+                    // The node's own trailing blank lines were trimmed off
+                    // its text; they still separate it from what follows.
+                    spacing.blank_lines(trailing);
                 }
                 // Any other non-directive node: nothing to emit.
             }
             rowan::NodeOrToken::Token(t) => spacing.top_level_token(&t, &mut out),
         }
     }
-    if !out.ends_with('\n') {
+    // Blank lines after the last item are the file's trailing ones.
+    spacing.flush(&mut out);
+    // A last line without its newline gets one; an empty file stays empty,
+    // as bean-format leaves it.
+    if !out.is_empty() && !out.ends_with('\n') {
         out.push('\n');
     }
     out
@@ -856,11 +866,10 @@ fn format_node_with_style(
 /// Blank-line bookkeeping for the top-level walk, shared by whole-file and
 /// range formatting so the two keep the same lines (#2506).
 ///
-/// The author's blank lines are kept wherever they sit between two emitted
-/// items: directive and directive (#1325), comment and directive, comment and
-/// comment. Blank lines are held in `pending` and written only when another
-/// item follows, so the ones before the first item (`started` false) and the
-/// ones at the end of the file are dropped.
+/// The author's blank lines are kept wherever they sit: between directives
+/// (#1325), around comments, and at the start and end of the file (#2506),
+/// as bean-format keeps them. Blank lines are held in `pending` and written
+/// ahead of the next item, or by a final [`Self::flush`] at the end.
 ///
 /// A blank line is a `NEWLINE` token ending a line that held no comment; the
 /// `NEWLINE` ending a top-level comment's own line is not one.
@@ -870,16 +879,12 @@ struct TopLevelSpacing {
     pending: usize,
     /// Whether the current top-level line holds a comment.
     line_has_comment: bool,
-    /// Whether anything precedes, in the file, the next item to emit.
-    started: bool,
 }
 
 impl TopLevelSpacing {
-    /// Count `n` blank lines (a node's leading gap) if an item precedes it.
+    /// Count `n` blank lines (a node's leading gap).
     const fn blank_lines(&mut self, n: usize) {
-        if self.started {
-            self.pending += n;
-        }
+        self.pending += n;
     }
 
     /// Write the held blank lines ahead of the item about to be emitted.
@@ -888,7 +893,6 @@ impl TopLevelSpacing {
             out.push('\n');
         }
         self.pending = 0;
-        self.started = true;
     }
 
     /// A directive or error node was emitted; it ends with its own newline.
@@ -1162,7 +1166,6 @@ fn format_node_range_with_style(
     // computation and emission are two distinct concerns.)
     let mut out = String::new();
     let mut spacing = TopLevelSpacing::default();
-    let mut first_in_snap = true;
     for el in node.children_with_tokens() {
         let child_range = el.text_range();
         // Use the snap range (not the input `range`) so we emit
@@ -1175,16 +1178,11 @@ fn format_node_range_with_style(
         if child_range.end() <= snap.start() || child_range.start() >= snap.end() {
             continue;
         }
-        // The first child in the snap may have a predecessor OUTSIDE the
-        // selection. The blank lines between them are this child's leading
-        // trivia when it is a directive (the Directive-Terminator Rule), so
-        // they fall INSIDE the snapped range, and dropping them would delete
-        // the blank line above the selection. Keep them whenever anything
-        // precedes the child in the file, as the whole-file walk does.
-        if first_in_snap {
-            first_in_snap = false;
-            spacing.started = has_content_before(&el);
-        }
+        // A directive's leading blank lines are part of its node, so the
+        // first directive in the snap carries the blank lines above it
+        // INSIDE the snapped range, and dropping them would delete them
+        // from the file. They are always re-emitted, as the whole-file walk
+        // does.
         match el {
             rowan::NodeOrToken::Node(n) => {
                 // ERROR_NODEs never reach here: the range path bails out
@@ -1204,6 +1202,7 @@ fn format_node_range_with_style(
             rowan::NodeOrToken::Token(t) => spacing.top_level_token(&t, &mut out),
         }
     }
+    spacing.flush(&mut out);
     if !out.ends_with('\n') {
         out.push('\n');
     }
@@ -1424,16 +1423,23 @@ fn emit_directive(
 /// (the formatter's no-trailing-space policy) and the node's trailing newlines
 /// are collapsed to one; everything else — including blank lines, comments and
 /// the unparsable lines themselves — is preserved exactly as written.
-fn emit_error_node(node: &crate::SyntaxNode, out: &mut String) {
+///
+/// Returns the number of blank lines that ended the node's text, which it
+/// trims; the caller keeps them as the gap before whatever follows (#2506).
+fn emit_error_node(node: &crate::SyntaxNode, out: &mut String) -> usize {
     let text = node.text().to_string();
     // Trim leading AND trailing blank lines: the caller emits the leading
     // blank lines (via `leading_blank_lines`) so emitting them here too would
     // double-count them and break idempotence. Internal blank lines and the
     // content (org headers, grouped comments) are preserved.
-    for line in text.trim_matches(['\n', '\r']).split('\n') {
+    let body = text.trim_matches(['\n', '\r']);
+    for line in body.split('\n') {
         out.push_str(line.trim_end());
         out.push('\n');
     }
+    // The trailing newlines minus the one ending the last line.
+    let tail = &text[text.trim_end_matches(['\n', '\r']).len()..];
+    tail.matches('\n').count().saturating_sub(1)
 }
 
 /// Number of blank lines the author left immediately before this
@@ -1505,30 +1511,6 @@ fn emit_leading_comments(node: &crate::SyntaxNode, out: &mut String) {
     for _ in 0..pending {
         out.push('\n');
     }
-}
-
-/// Whether anything a formatter emits (a directive, an error node, or a
-/// comment) precedes `el` among the file's top-level children.
-fn has_content_before(el: &crate::SyntaxElement) -> bool {
-    let mut cur = el.prev_sibling_or_token();
-    while let Some(prev) = cur {
-        match &prev {
-            rowan::NodeOrToken::Node(_) => return true,
-            rowan::NodeOrToken::Token(t) => {
-                if matches!(
-                    t.kind(),
-                    crate::SyntaxKind::COMMENT
-                        | crate::SyntaxKind::PERCENT_COMMENT
-                        | crate::SyntaxKind::SHEBANG
-                        | crate::SyntaxKind::EMACS_DIRECTIVE
-                ) {
-                    return true;
-                }
-            }
-        }
-        cur = prev.prev_sibling_or_token();
-    }
-    false
 }
 
 /// Return the directive's same-line trailing comment (if any) —
@@ -2759,8 +2741,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn empty_input_yields_single_newline() {
-        assert_eq!(format_source(""), "\n");
+    fn empty_input_yields_empty_output() {
+        // bean-format leaves an empty file empty (#2506); this used to be
+        // a single newline.
+        assert_eq!(format_source(""), "");
     }
 
     #[test]
@@ -3621,17 +3605,27 @@ mod tests {
     }
 
     #[test]
-    fn issue_2506_file_edges_still_normalized() {
-        // Blank lines before the first line and after the last are not
-        // between two items, so they still go: the output starts at the
-        // first item and ends with exactly one newline.
+    fn issue_2506_file_edges_preserved() {
+        // Blank lines at the very start and end of the file are kept, as
+        // bean-format 3.2.3 keeps them (robcohen's decision on #2506): each
+        // of these is a file bean-format leaves byte-identical.
+        for src in [
+            "\n\n;; header\n\n2024-01-01 open Assets:Bank USD\n\n\n",
+            "\n2024-01-01 open Assets:B\n",
+            "2024-01-01 open Assets:B\n; tail\n\n\n",
+            "2024-01-01 * \"x\"\n  Assets:B  1 USD\n  Assets:C\n\n",
+            "\n",
+            "\n\n\n",
+            "",
+        ] {
+            assert_eq!(format_source(src), src, "edges must be kept: {src:?}");
+            let once = format_source(src);
+            assert_eq!(format_source(&once), once, "idempotent: {src:?}");
+        }
+        // A missing final newline is still added (bean-format adds it too).
         assert_eq!(
-            format_source("\n\n; c\n\n2024-01-01 open Assets:B\n\n\n"),
-            "; c\n\n2024-01-01 open Assets:B\n"
-        );
-        assert_eq!(
-            format_source("2024-01-01 open Assets:B\n; tail\n\n\n"),
-            "2024-01-01 open Assets:B\n; tail\n"
+            format_source("2024-01-01 open Assets:B"),
+            "2024-01-01 open Assets:B\n"
         );
     }
 

@@ -329,6 +329,13 @@ pub enum DirectiveJson {
         date: String,
         account: String,
         comment: String,
+        /// Tags attached to the note, its own and a `pushtag` block's
+        /// (issue #2573).
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        tags: Vec<String>,
+        /// Links attached to the note (issue #2573).
+        #[serde(skip_serializing_if = "Vec::is_empty", default)]
+        links: Vec<String>,
         #[serde(skip_serializing_if = "HashMap::is_empty", default)]
         meta: HashMap<String, MetaValueJson>,
     },

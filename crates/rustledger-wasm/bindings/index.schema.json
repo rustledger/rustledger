@@ -577,11 +577,25 @@
             "date": {
               "type": "string"
             },
+            "links": {
+              "description": "Links attached to the note (issue #2573).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
             "meta": {
               "additionalProperties": {
                 "$ref": "#/$defs/MetaValueJson"
               },
               "type": "object"
+            },
+            "tags": {
+              "description": "Tags attached to the note, its own and a `pushtag` block's\n(issue #2573).",
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
             },
             "type": {
               "const": "note",

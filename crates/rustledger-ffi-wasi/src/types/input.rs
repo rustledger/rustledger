@@ -192,6 +192,13 @@ pub enum InputEntry {
         date: String,
         account: String,
         comment: String,
+        /// Tags attached to the note, as on `Document` (issue #2573; the
+        /// engine's `Note` gained them in #2160).
+        #[serde(default)]
+        tags: Vec<String>,
+        /// Links attached to the note (issue #2573).
+        #[serde(default)]
+        links: Vec<String>,
         #[serde(default)]
         meta: HashMap<String, serde_json::Value>,
     },
@@ -518,6 +525,8 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
             date,
             account,
             comment,
+            tags,
+            links,
             meta,
         } => {
             let date = date
@@ -527,13 +536,9 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 date,
                 account: parse_account("note", account)?,
                 comment: comment.clone(),
-                // `InputEntry::Note` carries no tags or links, though
-                // `InputEntry::Document` right below does. The engine's `Note`
-                // gained the fields in #2160; widening this input shape to
-                // match is a separate, versioned decision, so a note built
-                // from the wire has none.
-                tags: Default::default(),
-                links: Default::default(),
+                // Carried since #2573, as `InputEntry::Document` below does.
+                tags: tags.iter().map(|t| t.clone().into()).collect(),
+                links: links.iter().map(|l| l.clone().into()).collect(),
                 meta: json_map_to_metadata(meta),
             }))
         }

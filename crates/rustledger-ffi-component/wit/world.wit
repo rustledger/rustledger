@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.13.0;
+package rustledger:ledger@3.14.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -153,7 +153,16 @@ interface types {
   record commodity-dir { date: string, currency: string, meta: meta }
   record price-dir { date: string, currency: string, amount: amount, meta: meta }
   record event-dir { date: string, event-type: string, value: string, meta: meta }
-  record note-dir { date: string, account: string, comment: string, meta: meta }
+  record note-dir {
+    date: string,
+    account: string,
+    comment: string,
+    // Added in 3.14.0 (#2573): a note's tags (its own and a `pushtag`
+    // block's) and links. Before it they were dropped on the way out.
+    tags: list<string>,
+    links: list<string>,
+    meta: meta,
+  }
   record document-dir {
     date: string,
     account: string,
@@ -350,6 +359,9 @@ interface types {
     date: string,
     account: string,
     comment: string,
+    // Added in 3.14.0 (#2573), as on `input-document`.
+    tags: list<string>,
+    links: list<string>,
     meta: list<meta-entry>,
   }
   record input-document {

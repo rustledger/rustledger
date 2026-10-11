@@ -159,7 +159,14 @@ use serde::{Deserialize, Serialize};
 /// counter rather than the crate's `SemVer`: most `plugin-types` releases
 /// do not touch the ABI, and a guest only needs to agree with the host
 /// on the ABI, not on the exact crate version.
-pub const ABI_VERSION: u32 = 1;
+///
+/// History:
+/// - 1: the handshake's introduction (issue #1234).
+/// - 2: [`NoteData`] carries `tags` and `links` (issue #2573). Every
+///   struct crosses the wire as a `MessagePack` array, so a version-1
+///   guest cannot decode a version-2 note (`rmp_serde` rejects the longer
+///   array), and would trap mid-run on the first note it was given.
+pub const ABI_VERSION: u32 = 2;
 
 /// The WASM export symbol a guest uses to advertise [`ABI_VERSION`].
 /// The `wasm_*_main!` macros emit it; the host looks it up by this
@@ -1030,6 +1037,15 @@ pub struct NoteData {
     pub account: String,
     /// Note comment.
     pub comment: String,
+    /// Tags attached to the note (without `#`), from the note's header or
+    /// a `pushtag` block. Added in ABI version 2 (issue #2573): before it a
+    /// note passing through a plugin lost its tags.
+    #[serde(default)]
+    pub tags: Vec<String>,
+    /// Links attached to the note (without `^`). Added in ABI version 2
+    /// (issue #2573).
+    #[serde(default)]
+    pub links: Vec<String>,
     /// Metadata key-value pairs.
     #[serde(default)]
     pub metadata: Vec<(String, MetaValueData)>,

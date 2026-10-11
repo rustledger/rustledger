@@ -1302,6 +1302,25 @@ fn the_rledger_config_deprecation_is_a_warning_not_stderr() {
     }
 }
 
+/// The deprecation warning still reaches the envelope when the config then
+/// fails to load: no command runs, so it rides on the `CONFIG_ERROR`.
+#[test]
+fn the_rledger_config_deprecation_rides_on_a_config_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let good = write_fixture(dir, "good.beancount", GOOD_LEDGER);
+    std::fs::write(dir.join("config.toml"), "[plugins\n").unwrap();
+    let (code, env, stderr) = run_in_with(
+        dir,
+        &["check", good.to_str().unwrap()],
+        &[("RLEDGER_CONFIG", "/nonexistent/config.toml")],
+    );
+    assert_ne!(code, 0, "{env}");
+    assert!(stderr.is_empty(), "{stderr}");
+    assert_eq!(env["error"]["code"], "CONFIG_ERROR", "{env}");
+    assert_eq!(warning_codes(&env), ["RLEDGER_CONFIG_DEPRECATED"], "{env}");
+}
+
 /// #2566: a WASM importer whose `identify` fails was reported on the
 /// process's stderr by the importer crate. It is a `warnings` record now,
 /// with the module's text escaped (#2525).

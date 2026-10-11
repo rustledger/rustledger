@@ -1646,13 +1646,20 @@ fn load_config(budget: &PluginBudgetArgs) -> Result<Config, CommandError> {
     let config = config_result()
         .as_ref()
         .map_err(|message| {
-            CommandError::new(
+            let error = CommandError::new(
                 message.clone(),
                 "CONFIG_ERROR",
                 "Fix the config file named in the message and retry. `ag-rledger config path` \
                  lists the files read; `ag-rledger config show` still runs.",
             )
-            .exit_code(agcli::ExitCode::USAGE)
+            .exit_code(agcli::ExitCode::USAGE);
+            // What loading the config had to say rides on the error: the
+            // `RLEDGER_CONFIG` deprecation is the likeliest explanation of
+            // which file failed, and no command runs to carry it (#2566).
+            match warnings_json(&library_diagnostics(&[], CollectedDiagnostics::default())) {
+                Some(warnings) => error.data(json!({ "warnings": warnings })),
+                None => error,
+            }
         })?
         .clone();
     // The WASM plugin and importer budget: each flag, else the config file,

@@ -43,7 +43,10 @@
 //! - Blank lines between directives: preserved from the source
 //!   (#1325). Grouped directives (consecutive `open`s, a `price`
 //!   feed) stay grouped; the formatter does not insert or collapse
-//!   blank lines, matching Python `bean-format`.
+//!   blank lines, matching Python `bean-format`. The same holds for
+//!   blank lines around comments: before, between and after comment
+//!   lines (#2506). Blank lines before the file's first line are
+//!   dropped (see the EOF rule below for the other end).
 //! - Blank lines inside a directive: 0.
 //! - Number lexical form: thousands separators dropped; user
 //!   decimal-place count preserved.
@@ -810,22 +813,21 @@ fn format_node_with_style(
     // beancount-language-server, beancount-mode), all of which leave
     // blank-line structure untouched and only realign amounts.
     //
-    // Adjacent file-level comments still stay tight as a group (so a
-    // `; ====\n; HEADER\n; ====` section header keeps its visual
-    // grouping), and a comment group sitting against a directive on
-    // either side stays flush.
-    let mut prev_was_directive = false;
+    // The same holds around comments (#2506): a blank line between a
+    // comment and a directive, or between two comments, is kept, and a
+    // comment group written flush against a directive stays flush (so a
+    // `; ====\n; HEADER\n; ====` section header keeps its grouping).
+    // Only blank lines at the very start of the file and at its end are
+    // dropped (the output ends with exactly one newline).
+    let mut spacing = TopLevelSpacing::default();
     for el in node.children_with_tokens() {
         match el {
             rowan::NodeOrToken::Node(n) => {
                 if let Some(directive) = ast::Directive::cast(n.clone()) {
-                    if prev_was_directive {
-                        for _ in 0..leading_blank_lines(directive.syntax()) {
-                            out.push('\n');
-                        }
-                    }
+                    spacing.blank_lines(leading_blank_lines(directive.syntax()));
+                    spacing.flush(&mut out);
                     emit_directive(&directive, alignment, group, &mut out);
-                    prev_was_directive = true;
+                    spacing.after_node();
                 } else if n.kind() == crate::SyntaxKind::ERROR_NODE {
                     // Preserve unparsable content verbatim (#1335): `format`
                     // must never delete the author's text. Org-mode `*`
@@ -835,35 +837,88 @@ fn format_node_with_style(
                     // ERROR_NODE is a top-level content block, so the author's
                     // blank lines around it (before it, and before the next
                     // directive) are preserved, not flushed.
-                    if prev_was_directive {
-                        for _ in 0..leading_blank_lines(&n) {
-                            out.push('\n');
-                        }
-                    }
+                    spacing.blank_lines(leading_blank_lines(&n));
+                    spacing.flush(&mut out);
                     emit_error_node(&n, &mut out);
-                    prev_was_directive = true;
+                    spacing.after_node();
                 }
                 // Any other non-directive node: nothing to emit.
             }
-            rowan::NodeOrToken::Token(t) => {
-                if matches!(
-                    t.kind(),
-                    crate::SyntaxKind::COMMENT
-                        | crate::SyntaxKind::PERCENT_COMMENT
-                        | crate::SyntaxKind::SHEBANG
-                        | crate::SyntaxKind::EMACS_DIRECTIVE
-                ) {
-                    out.push_str(t.text().trim_end_matches(['\n', '\r']));
-                    out.push('\n');
-                    prev_was_directive = false;
-                }
-            }
+            rowan::NodeOrToken::Token(t) => spacing.top_level_token(&t, &mut out),
         }
     }
     if !out.ends_with('\n') {
         out.push('\n');
     }
     out
+}
+
+/// Blank-line bookkeeping for the top-level walk, shared by whole-file and
+/// range formatting so the two keep the same lines (#2506).
+///
+/// The author's blank lines are kept wherever they sit between two emitted
+/// items: directive and directive (#1325), comment and directive, comment and
+/// comment. Blank lines are held in `pending` and written only when another
+/// item follows, so the ones before the first item (`started` false) and the
+/// ones at the end of the file are dropped.
+///
+/// A blank line is a `NEWLINE` token ending a line that held no comment; the
+/// `NEWLINE` ending a top-level comment's own line is not one.
+#[derive(Default)]
+struct TopLevelSpacing {
+    /// Blank lines seen since the last emitted item.
+    pending: usize,
+    /// Whether the current top-level line holds a comment.
+    line_has_comment: bool,
+    /// Whether anything precedes, in the file, the next item to emit.
+    started: bool,
+}
+
+impl TopLevelSpacing {
+    /// Count `n` blank lines (a node's leading gap) if an item precedes it.
+    const fn blank_lines(&mut self, n: usize) {
+        if self.started {
+            self.pending += n;
+        }
+    }
+
+    /// Write the held blank lines ahead of the item about to be emitted.
+    fn flush(&mut self, out: &mut String) {
+        for _ in 0..self.pending {
+            out.push('\n');
+        }
+        self.pending = 0;
+        self.started = true;
+    }
+
+    /// A directive or error node was emitted; it ends with its own newline.
+    const fn after_node(&mut self) {
+        self.line_has_comment = false;
+    }
+
+    /// A top-level token: a comment is emitted on its own line, a `NEWLINE`
+    /// ends a comment's line or is a blank line, anything else is ignored.
+    fn top_level_token(&mut self, t: &crate::SyntaxToken, out: &mut String) {
+        match t.kind() {
+            crate::SyntaxKind::COMMENT
+            | crate::SyntaxKind::PERCENT_COMMENT
+            | crate::SyntaxKind::SHEBANG
+            | crate::SyntaxKind::EMACS_DIRECTIVE => {
+                self.flush(out);
+                out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                out.push('\n');
+                self.line_has_comment = true;
+            }
+            crate::SyntaxKind::NEWLINE => {
+                if self.line_has_comment {
+                    self.line_has_comment = false;
+                } else {
+                    self.blank_lines(1);
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 /// Format the subset of `node`'s top-level children that intersect
@@ -1106,7 +1161,8 @@ fn format_node_range_with_style(
     // cheap. (Re-walking also keeps the data-flow obvious: snap
     // computation and emission are two distinct concerns.)
     let mut out = String::new();
-    let mut prev_was_directive = false;
+    let mut spacing = TopLevelSpacing::default();
+    let mut first_in_snap = true;
     for el in node.children_with_tokens() {
         let child_range = el.text_range();
         // Use the snap range (not the input `range`) so we emit
@@ -1119,6 +1175,16 @@ fn format_node_range_with_style(
         if child_range.end() <= snap.start() || child_range.start() >= snap.end() {
             continue;
         }
+        // The first child in the snap may have a predecessor OUTSIDE the
+        // selection. The blank lines between them are this child's leading
+        // trivia when it is a directive (the Directive-Terminator Rule), so
+        // they fall INSIDE the snapped range, and dropping them would delete
+        // the blank line above the selection. Keep them whenever anything
+        // precedes the child in the file, as the whole-file walk does.
+        if first_in_snap {
+            first_in_snap = false;
+            spacing.started = has_content_before(&el);
+        }
         match el {
             rowan::NodeOrToken::Node(n) => {
                 // ERROR_NODEs never reach here: the range path bails out
@@ -1128,47 +1194,14 @@ fn format_node_range_with_style(
                 let Some(directive) = ast::Directive::cast(n) else {
                     continue;
                 };
-                // Preserve the author's inter-directive blank lines
-                // (#1325), identically to `format_node_with_alignment`,
-                // so range formatting and whole-file formatting agree.
-                //
-                // The FIRST directive emitted from the snap needs care:
-                // its predecessor may sit OUTSIDE the selection, but the
-                // blank lines between them are this directive's leading
-                // trivia (the Directive-Terminator Rule), so they fall
-                // INSIDE the snapped range. Dropping them would delete
-                // the blank line above the selection. Emit them whenever
-                // a directive precedes this one in the file — the same
-                // condition the whole-file path expresses as
-                // `prev_was_directive`. For the file's first directive
-                // (no predecessor) there is nothing to preserve.
-                let preceded_by_directive = prev_was_directive
-                    || directive
-                        .syntax()
-                        .prev_sibling()
-                        .and_then(ast::Directive::cast)
-                        .is_some();
-                if preceded_by_directive {
-                    for _ in 0..leading_blank_lines(directive.syntax()) {
-                        out.push('\n');
-                    }
-                }
+                // Preserve the author's blank lines (#1325, #2506)
+                // identically to whole-file formatting.
+                spacing.blank_lines(leading_blank_lines(directive.syntax()));
+                spacing.flush(&mut out);
                 emit_directive(&directive, alignment, style, &mut out);
-                prev_was_directive = true;
+                spacing.after_node();
             }
-            rowan::NodeOrToken::Token(t) => {
-                if matches!(
-                    t.kind(),
-                    crate::SyntaxKind::COMMENT
-                        | crate::SyntaxKind::PERCENT_COMMENT
-                        | crate::SyntaxKind::SHEBANG
-                        | crate::SyntaxKind::EMACS_DIRECTIVE
-                ) {
-                    out.push_str(t.text().trim_end_matches(['\n', '\r']));
-                    out.push('\n');
-                    prev_was_directive = false;
-                }
-            }
+            rowan::NodeOrToken::Token(t) => spacing.top_level_token(&t, &mut out),
         }
     }
     if !out.ends_with('\n') {
@@ -1436,19 +1469,66 @@ fn leading_blank_lines(node: &crate::SyntaxNode) -> usize {
 /// are ignored — the canonical form controls inter-directive
 /// blank-line spacing separately.
 fn emit_leading_comments(node: &crate::SyntaxNode, out: &mut String) {
+    // Blank lines AFTER the first comment (between comments, and between the
+    // last comment and the directive) are the author's and are kept (#2506).
+    // Those before the first comment are `leading_blank_lines`, which the
+    // caller writes. A NEWLINE ending a comment's own line is not a blank.
+    let mut seen_comment = false;
+    let mut line_has_comment = false;
+    let mut pending = 0usize;
     for el in node.children_with_tokens() {
         let rowan::NodeOrToken::Token(t) = el else {
             break;
         };
         match t.kind() {
             crate::SyntaxKind::COMMENT | crate::SyntaxKind::PERCENT_COMMENT => {
+                for _ in 0..pending {
+                    out.push('\n');
+                }
+                pending = 0;
                 out.push_str(t.text().trim_end_matches(['\n', '\r']));
                 out.push('\n');
+                seen_comment = true;
+                line_has_comment = true;
             }
-            crate::SyntaxKind::WHITESPACE | crate::SyntaxKind::NEWLINE => {}
+            crate::SyntaxKind::NEWLINE => {
+                if line_has_comment {
+                    line_has_comment = false;
+                } else if seen_comment {
+                    pending += 1;
+                }
+            }
+            crate::SyntaxKind::WHITESPACE => {}
             _ => break,
         }
     }
+    for _ in 0..pending {
+        out.push('\n');
+    }
+}
+
+/// Whether anything a formatter emits (a directive, an error node, or a
+/// comment) precedes `el` among the file's top-level children.
+fn has_content_before(el: &crate::SyntaxElement) -> bool {
+    let mut cur = el.prev_sibling_or_token();
+    while let Some(prev) = cur {
+        match &prev {
+            rowan::NodeOrToken::Node(_) => return true,
+            rowan::NodeOrToken::Token(t) => {
+                if matches!(
+                    t.kind(),
+                    crate::SyntaxKind::COMMENT
+                        | crate::SyntaxKind::PERCENT_COMMENT
+                        | crate::SyntaxKind::SHEBANG
+                        | crate::SyntaxKind::EMACS_DIRECTIVE
+                ) {
+                    return true;
+                }
+            }
+        }
+        cur = prev.prev_sibling_or_token();
+    }
+    false
 }
 
 /// Return the directive's same-line trailing comment (if any) —
@@ -3517,6 +3597,45 @@ mod tests {
     }
 
     #[test]
+    fn issue_2506_blank_lines_around_comments_preserved() {
+        // bean-format (beancount 3.2.3) leaves every one of these files
+        // unchanged; rledger deleted each blank line next to a comment.
+        let cases = [
+            // The issue's file: after a file-leading comment block, before
+            // and after a comment between two directives.
+            ";; leading block\n\n\n2024-01-01 open Assets:Bank USD\n\n; mid comment\n\n2024-01-02 open Assets:Cash USD\n",
+            // A two-line header comment, a blank line, the first directive.
+            "; header one\n; header two\n\n2024-01-01 open Assets:Bank USD\n",
+            // Blank lines between comments, at the top and mid-file.
+            ";; a\n\n;; b\n\n\n2024-01-01 open Assets:B\n; c1\n\n; c2\n2024-01-02 open Assets:C\n",
+            // A comment after the last directive, after a blank line.
+            "2024-01-01 open Assets:B\n\n; closing remarks\n\n; signed\n",
+            // A blank between a comment group and a transaction.
+            "; group\n\n2024-01-01 * \"x\"\n  Assets:B  1 USD\n  Assets:C\n",
+        ];
+        for src in cases {
+            assert_eq!(format_source(src), src, "blank lines must be kept");
+            let once = format_source(src);
+            assert_eq!(format_source(&once), once, "idempotent");
+        }
+    }
+
+    #[test]
+    fn issue_2506_file_edges_still_normalized() {
+        // Blank lines before the first line and after the last are not
+        // between two items, so they still go: the output starts at the
+        // first item and ends with exactly one newline.
+        assert_eq!(
+            format_source("\n\n; c\n\n2024-01-01 open Assets:B\n\n\n"),
+            "; c\n\n2024-01-01 open Assets:B\n"
+        );
+        assert_eq!(
+            format_source("2024-01-01 open Assets:B\n; tail\n\n\n"),
+            "2024-01-01 open Assets:B\n; tail\n"
+        );
+    }
+
+    #[test]
     fn file_level_adjacent_comments_stay_tight() {
         // Bug: format_node's top-level walk inserted a blank `\n`
         // separator before every emitted item including comments,
@@ -5033,6 +5152,28 @@ mod tests {
         // canonical blank between a file-level comment group
         // and a directive (matches format_node's policy).
         assert_eq!(formatted, "; header\n2024-01-01 open Assets:Bank USD\n");
+    }
+
+    /// #2506: range formatting keeps the blank lines around comments that
+    /// whole-file formatting keeps, so the two cannot disagree.
+    #[test]
+    fn format_node_range_keeps_blank_lines_around_comments() {
+        let source = ";; lead\n\n2024-01-01 open Assets:A\n\n; mid\n\n2024-01-02 open Assets:B\n";
+        let (node, src) = parse_for_range(source);
+        let sel = rowan::TextRange::new(ts(0), ts(src.len()));
+        let (_, formatted) = format_node_range(&node, sel).expect("intersects");
+        assert_eq!(formatted, source);
+        // Selecting only the second directive keeps the blank lines of its
+        // leading trivia (above and below the comment).
+        let start = source.find("2024-01-02").unwrap();
+        let sel = rowan::TextRange::new(ts(start), ts(start + 1));
+        let (snap, formatted) = format_node_range(&node, sel).expect("intersects");
+        let mut applied = source.to_string();
+        applied.replace_range(
+            usize::from(snap.start())..usize::from(snap.end()),
+            &formatted,
+        );
+        assert_eq!(applied, source, "range edit must not delete blank lines");
     }
 
     /// A selection that lands entirely inside an `ERROR_NODE`

@@ -3132,10 +3132,16 @@ fn account_set_membership_materializes_no_set() {
         ("SELECT count(*) WHERE 'Nope' NOT IN accounts", 41),
         // A row-level FROM filter.
         ("SELECT count(*) FROM 'Assets:A1' IN other_accounts", 40),
-        // A target.
+        // Under parentheses and another operator.
         (
             "SELECT count(*) WHERE ('Assets:A1' IN other_accounts) = TRUE",
             40,
+        ),
+        // A GROUP BY key, evaluated per posting.
+        (
+            "SELECT count(*) WHERE 'Assets:A1' NOT IN other_accounts \
+             GROUP BY 'Equity:Open' IN other_accounts",
+            1,
         ),
     ] {
         let (n, result) = run(sql);
@@ -3146,6 +3152,11 @@ fn account_set_membership_materializes_no_set() {
         built.iter().all(|&(_, n)| n == 0),
         "membership materialized the sets: {built:?}"
     );
+
+    // A target, one row per posting.
+    let (n, result) = run("SELECT 'Assets:A1' IN other_accounts");
+    assert_eq!(result.rows.len(), 41);
+    assert_eq!(n, 0, "a membership target materialized the sets");
 
     // Not vacuous: selecting the column still builds one set per row.
     let (n, result) = run("SELECT other_accounts");

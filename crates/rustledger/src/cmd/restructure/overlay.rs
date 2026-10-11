@@ -131,7 +131,23 @@ impl FileSystem for OverlayFs {
     }
 
     fn glob(&self, pattern: &str) -> Result<Vec<PathBuf>, String> {
-        let pat = glob::Pattern::new(pattern).map_err(|e| e.to_string())?;
+        // Planned files are keyed by their resolved path, but the loader
+        // passes the pattern as written under the including file's directory
+        // (`/ledger/./sub/*.beancount`, `/ledger/../x/*`). Resolve the part
+        // before the first glob character the same way the keys were, or a
+        // planned file the real glob will find goes unseen.
+        let resolved = match pattern.find(['*', '?', '[']) {
+            Some(at) => match pattern[..at].rfind(['/', std::path::MAIN_SEPARATOR]) {
+                Some(sep) => format!(
+                    "{}/{}",
+                    normalize(Path::new(&pattern[..sep])).to_string_lossy(),
+                    &pattern[sep + 1..]
+                ),
+                None => pattern.to_string(),
+            },
+            None => normalize(Path::new(pattern)).to_string_lossy().into_owned(),
+        };
+        let pat = glob::Pattern::new(&resolved).map_err(|e| e.to_string())?;
         let mut matched: Vec<PathBuf> = DiskFileSystem
             .glob(pattern)?
             .into_iter()

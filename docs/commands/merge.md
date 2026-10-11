@@ -49,16 +49,20 @@ Done; the ledger was reloaded from disk and matches.
 ## How files are combined
 
 The merged file is `FILE`'s own text with its `include` lines removed (comments
-written above them stay), followed by the content of each included file in
-include order. Nested includes and glob patterns are followed the way the loader
-follows them. A file included twice is inlined once. Everything is copied
-verbatim; nothing is reformatted.
+written above them, or on the same line, stay), followed by the content of each
+included file in include order. Nested includes and glob patterns are followed
+the way the loader follows them. Directives and comments are copied verbatim;
+nothing is reformatted. Only a blank line between files is added, and a
+byte-order mark at the top of an included file is dropped.
 
 That order is the order the loader reads files in, so same-date directives keep
 their booking order.
 
 By default the inlined files are removed after the merged file is in place. They
 are copied to `.rledger-backup/<timestamp>-merge/` first, with a `manifest.txt`.
+Only plain files inside `FILE`'s directory are removed: an include outside it, or
+one reached through a symlink, may belong to another ledger and is left in place
+(the plan says so). New files and backups keep the permissions of the originals.
 
 ## The equivalence check
 

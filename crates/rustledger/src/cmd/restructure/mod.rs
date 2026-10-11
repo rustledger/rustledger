@@ -128,6 +128,11 @@ fn include_line(path: &str) -> Result<String> {
             "cannot write an include for {path:?}: the path contains a quote, backslash or newline"
         );
     }
+    if rustledger_loader::is_glob_pattern(path) {
+        bail!(
+            "cannot write an include for {path:?}: the loader would read `*`, `?` or `[` as a glob; choose another --dir"
+        );
+    }
     Ok(format!("include \"{path}\""))
 }
 
@@ -216,11 +221,9 @@ fn write_plan(out: &mut dyn Write, root: &Path, before: &Before, plan: &swap::Pl
             Some(reason) => bail!("{reason}"),
         }
     })?;
-    writeln!(
-        out,
-        "Backup of the original files: {}",
-        show(&applied.backup_dir)
-    )?;
+    if let Some(dir) = &applied.backup_dir {
+        writeln!(out, "Backup of the original files: {}", show(dir))?;
+    }
     writeln!(out, "Done; the ledger was reloaded from disk and matches.")?;
     Ok(())
 }

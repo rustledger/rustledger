@@ -57,6 +57,8 @@ pub(super) struct Item {
     /// Length of the part of `text` before the directive's own line: the
     /// preceding comments and blank lines.
     pub(super) lead_len: usize,
+    /// A comment on the directive's own line, after it (`include "x" ; why`).
+    pub(super) line_comment: String,
 }
 
 #[derive(Debug)]
@@ -156,7 +158,7 @@ pub(super) fn segment(source: &str, path: &std::path::Path) -> Result<Segmented>
                 let mut text = std::mem::take(&mut pending);
                 let prefix = text.len();
                 text.push_str(&node.text().to_string());
-                let (content, content_start) = content_text(&node);
+                let (content, content_start, line_comment) = content_text(&node);
                 // Back up from the directive's first token to its line start.
                 let lead_len = text[..prefix + content_start]
                     .rfind('\n')
@@ -166,6 +168,7 @@ pub(super) fn segment(source: &str, path: &std::path::Path) -> Result<Segmented>
                     text,
                     content,
                     lead_len,
+                    line_comment,
                 });
             }
         }
@@ -212,33 +215,37 @@ fn meta_key(key: Option<rustledger_parser::cst::ast::MetaKey>) -> Result<String>
     }
 }
 
-/// The node's text from its first to its last non-trivia token, and the
-/// offset of that first token within the node's text.
-fn content_text(node: &SyntaxNode) -> (String, usize) {
-    let mut start = None;
-    let mut end = None;
-    for t in node
+/// The node's text from its first to its last non-trivia token, the offset
+/// of that first token within the node's text, and any comment on the same
+/// line after the last one.
+fn content_text(node: &SyntaxNode) -> (String, usize, String) {
+    let tokens: Vec<_> = node
         .descendants_with_tokens()
         .filter_map(NodeOrToken::into_token)
-    {
-        if t.kind().is_trivia() {
-            continue;
+        .collect();
+    let first = tokens.iter().position(|t| !t.kind().is_trivia());
+    let last = tokens.iter().rposition(|t| !t.kind().is_trivia());
+    let (Some(first), Some(last)) = (first, last) else {
+        return (String::new(), 0, String::new());
+    };
+    let base = node.text_range().start();
+    let text = node.text().to_string();
+    let s = usize::from(tokens[first].text_range().start() - base);
+    let e = usize::from(tokens[last].text_range().end() - base);
+    let mut line_comment = String::new();
+    for t in &tokens[last + 1..] {
+        if t.kind() == rustledger_parser::SyntaxKind::NEWLINE {
+            break;
         }
-        let r = t.text_range();
-        if start.is_none() {
-            start = Some(r.start());
+        if !t.text().trim().is_empty() {
+            line_comment.push_str(t.text());
         }
-        end = Some(r.end());
     }
-    match (start, end) {
-        (Some(s), Some(e)) => {
-            let base = node.text_range().start();
-            let text = node.text().to_string();
-            let (s, e) = (usize::from(s - base), usize::from(e - base));
-            (text.get(s..e).unwrap_or_default().to_string(), s)
-        }
-        _ => (String::new(), 0),
-    }
+    (
+        text.get(s..e).unwrap_or_default().to_string(),
+        s,
+        line_comment,
+    )
 }
 
 /// Byte offset where the comment block that directly precedes the end of

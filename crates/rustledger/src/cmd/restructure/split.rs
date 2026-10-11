@@ -165,6 +165,7 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
         backup_base: file_dir,
         originals: vec![(file.clone(), original)],
         operation: "split",
+        template: file.clone(),
     };
     // Targets that already exist are refused before the (slow) check runs.
     swap::preflight(&swap_plan)?;

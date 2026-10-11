@@ -25,7 +25,7 @@ rledger split --by <year|month> [OPTIONS] [FILE]
 | Option | Description |
 |--------|-------------|
 | `--by <year\|month>` | Period each new file covers (required) |
-| `--dir <DIR>` | Directory for the period files (default: a directory named after `FILE`, next to it) |
+| `--dir <DIR>` | Directory for the period files (default: a directory named after `FILE`, next to it; if `FILE` is a symlink, next to the file it points to) |
 | `--ledger <ROOT>` | The ledger root `FILE` belongs to, when `FILE` is itself included by another file. The equivalence check loads this root. |
 | `-n, --dry-run` | Show the plan and run the equivalence check, but write nothing |
 | `-P, --profile <PROFILE>` | Use a profile from config |
@@ -38,8 +38,8 @@ rledger split --by year ledger.beancount
 
 ```text
 Plan: split ledger.beancount by year
-  create   ledger/2023.beancount  (412 directives)
-  create   ledger/2024.beancount  (388 directives)
+  create   ledger/2023.beancount  (412 dated directives)
+  create   ledger/2024.beancount  (388 dated directives)
   rewrite  ledger.beancount  (keeps 4 option/plugin/include lines; adds 2 includes)
 Equivalence check passed: 812 directives, 0 errors and warnings, options and plugins unchanged.
 Backup of the original files: .rledger-backup/20241011T120000Z-split
@@ -58,7 +58,9 @@ include "ledger/2024.beancount"
 - **Dated directives** (transactions, `open`, `balance`, `price`, ...) go to the
   file for their year or month, in their original order.
 - **Comments move with the directive they precede**, copied verbatim. Nothing is
-  reformatted. The file's header (the comments above the first directive, up to
+  reformatted; the only lines `split` writes itself are the new `include` lines
+  and the `pushtag`/`poptag` lines described below, and it drops blank lines at
+  the very top of each new file. The file's header (the comments above the first directive, up to
   the last blank line) and anything after the last directive stay in the root.
 - **`option`, `plugin` and `include`** stay in the root. The new `include` lines
   go in front of any `include` the file already had.

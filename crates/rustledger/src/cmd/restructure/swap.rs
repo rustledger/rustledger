@@ -36,12 +36,15 @@ pub(super) struct Plan {
     pub(super) originals: Vec<(PathBuf, Vec<u8>)>,
     /// `split` or `merge`, used in the backup directory's name.
     pub(super) operation: &'static str,
+    /// Whose permissions new files get (the file being restructured).
+    pub(super) template: PathBuf,
 }
 
 /// Where the backup went.
 #[derive(Debug)]
 pub(super) struct Applied {
-    pub(super) backup_dir: PathBuf,
+    /// `None` when the plan replaced and removed nothing.
+    pub(super) backup_dir: Option<PathBuf>,
 }
 
 /// Refuse a plan whose preconditions no longer hold, before touching anything.
@@ -70,17 +73,21 @@ pub(super) fn preflight(plan: &Plan) -> Result<()> {
 /// fails if it no longer matches; on failure the backup is restored.
 pub(super) fn apply(plan: &Plan, verify: impl FnOnce() -> Result<()>) -> Result<Applied> {
     preflight(plan)?;
-    let backup_dir = make_backup(plan)?;
+    let backup_dir = if plan.originals.is_empty() {
+        None
+    } else {
+        Some(make_backup(plan)?)
+    };
+    let backup_note = backup_dir.as_ref().map_or_else(String::new, |d| {
+        format!("; a backup copy is in {}", d.display())
+    });
 
     let mut created_dirs: Vec<PathBuf> = Vec::new();
     let mut temps: Vec<(PathBuf, PathBuf)> = Vec::new();
     let staged = stage(plan, &mut created_dirs, &mut temps);
     if let Err(e) = staged {
         cleanup(&temps, &[], &created_dirs);
-        return Err(e.context(format!(
-            "nothing was changed; a backup copy is in {}",
-            backup_dir.display()
-        )));
+        return Err(e.context(format!("nothing was changed{backup_note}")));
     }
 
     // Rename: new files first, the commit file last.
@@ -113,13 +120,10 @@ pub(super) fn apply(plan: &Plan, verify: impl FnOnce() -> Result<()>) -> Result<
     }
 
     if let Err(e) = verify() {
-        let restored = restore(plan, &backup_dir, &placed, &created_dirs);
+        let restored = restore(plan, backup_dir.as_deref(), &placed, &created_dirs);
         let how = match restored {
             Ok(()) => "the original files were restored".to_string(),
-            Err(r) => format!(
-                "restoring failed too ({r:#}); the originals are in {}",
-                backup_dir.display()
-            ),
+            Err(r) => format!("restoring failed too ({r:#}){backup_note}"),
         };
         return Err(e.context(format!(
             "the ledger written to disk did not load the same as before; {how}"
@@ -157,12 +161,12 @@ fn stage(
         f.write_all(content.as_bytes())
             .with_context(|| format!("failed to write {}", tmp.display()))?;
         // Keep the permissions of the file being replaced, and give new files
-        // those of the commit file: a ledger kept at 0600 must not reappear as
+        // those of the file being restructured: a ledger kept at 0600 must not reappear as
         // world-readable period files.
         let template = if target.exists() {
             target
         } else {
-            &plan.commit
+            &plan.template
         };
         if let Ok(meta) = fs::metadata(template) {
             fs::set_permissions(&tmp, meta.permissions())
@@ -205,9 +209,17 @@ fn cleanup(temps: &[(PathBuf, PathBuf)], placed: &[PathBuf], created_dirs: &[Pat
     }
 }
 
-fn restore(plan: &Plan, backup_dir: &Path, placed: &[PathBuf], created: &[PathBuf]) -> Result<()> {
+fn restore(
+    plan: &Plan,
+    backup_dir: Option<&Path>,
+    placed: &[PathBuf],
+    created: &[PathBuf],
+) -> Result<()> {
     let base = &plan.backup_base;
     for (path, _) in &plan.originals {
+        let Some(backup_dir) = backup_dir else {
+            break;
+        };
         let saved = backup_dir.join(backup_rel(base, path));
         let tmp = path.with_extension("rledger-restore");
         fs::copy(&saved, &tmp).with_context(|| format!("failed to restore {}", path.display()))?;
@@ -255,6 +267,13 @@ fn make_backup(plan: &Plan) -> Result<PathBuf> {
             .with_context(|| format!("failed to back up {}", path.display()))?;
         f.write_all(original)
             .with_context(|| format!("failed to back up {}", path.display()))?;
+        // The copy is as private as the original: a ledger kept at 0600 must
+        // not sit world-readable in the backup (and `restore` copies these
+        // permissions back).
+        if let Ok(meta) = fs::metadata(path) {
+            fs::set_permissions(&dest, meta.permissions())
+                .with_context(|| format!("failed to back up {}", path.display()))?;
+        }
         f.sync_all()
             .with_context(|| format!("failed to back up {}", path.display()))?;
         manifest.push_str(&format!("saved\t{}\t{}\n", path.display(), rel.display()));

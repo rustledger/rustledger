@@ -69,10 +69,13 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
     let file = super::existing_file(file)?;
     let (source, original) = super::read_source(&file)?;
 
+    let file_dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
     let mut flat = Flattener {
         visited: HashSet::from([file.clone()]),
         order: Vec::new(),
         originals: Vec::new(),
+        removable: Vec::new(),
+        root_dir: file_dir.clone(),
     };
     let merged = flat.flatten(&file, &source)?;
     if flat.order.is_empty() {
@@ -82,7 +85,6 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
         );
     }
 
-    let file_dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
     let (target, root, removes, originals) = if let Some(o) = &args.output {
         let target = super::overlay::normalize(o);
         (target.clone(), target, Vec::new(), Vec::new())
@@ -91,15 +93,18 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
             Some(r) => super::existing_file(r)?,
             None => file.clone(),
         };
-        let removes = if args.keep_included {
+        let removes: Vec<PathBuf> = if args.keep_included {
             Vec::new()
         } else {
-            flat.order.clone()
+            flat.removable.clone()
         };
         let mut originals = vec![(file.clone(), original)];
-        if !args.keep_included {
-            originals.append(&mut flat.originals);
-        }
+        originals.extend(
+            flat.originals
+                .iter()
+                .filter(|(p, _)| removes.contains(p))
+                .cloned(),
+        );
         (file.clone(), root, removes, originals)
     };
 
@@ -110,6 +115,7 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
         backup_base: file_dir,
         originals,
         operation: "merge",
+        template: file.clone(),
     };
     if args.output.is_some() && target.exists() {
         bail!(
@@ -139,8 +145,10 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
     for path in &flat.order {
         let verb = if args.output.is_some() || args.keep_included {
             "inline"
-        } else {
+        } else if flat.removable.contains(path) {
             "inline and remove"
+        } else {
+            "inline (kept: outside FILE's directory or reached through a symlink)"
         };
         writeln!(out, "  {verb}  {}", super::show(path))?;
     }
@@ -170,6 +178,10 @@ struct Flattener {
     order: Vec<PathBuf>,
     /// Their contents as read.
     originals: Vec<(PathBuf, Vec<u8>)>,
+    /// The inlined files that may be removed afterwards.
+    removable: Vec<PathBuf>,
+    /// FILE's directory, canonical.
+    root_dir: PathBuf,
 }
 
 impl Flattener {
@@ -188,8 +200,12 @@ impl Flattener {
         let mut includes: Vec<String> = Vec::new();
         for item in &seg.items {
             if let ItemKind::Include(p) = &item.kind {
-                // Keep the comments written above the include; drop the line.
+                // Keep the comments written above the include and on its
+                // line; drop the include itself.
                 super::push_block(&mut out, &item.text[..item.lead_len], nl);
+                if !item.line_comment.is_empty() {
+                    super::push_block(&mut out, &item.line_comment, nl);
+                }
                 includes.push(p.clone());
             } else {
                 super::push_block(&mut out, &item.text, nl);
@@ -201,9 +217,16 @@ impl Flattener {
 
         let base = path.parent().unwrap_or_else(|| Path::new("."));
         for inc in includes {
-            for target in resolve_include(base, &inc)? {
+            for (named, target) in resolve_include(base, &inc)? {
                 if !self.visited.insert(target.clone()) {
                     continue;
+                }
+                // Only a plain file inside FILE's directory, reached without
+                // a symlink, is ours to remove. A symlinked or out-of-tree
+                // include may be shared with another ledger; deleting it (or
+                // the file a symlink points at) would break that ledger.
+                if target.starts_with(&self.root_dir) && lexical(&named) == target {
+                    self.removable.push(target.clone());
                 }
                 let (text, bytes) = super::read_source(&target)?;
                 self.order.push(target.clone());
@@ -219,9 +242,25 @@ impl Flattener {
     }
 }
 
+/// `path` made absolute and cleaned lexically, symlinks NOT followed.
+fn lexical(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in path.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 /// The files an `include` names, as the loader resolves them: relative to the
-/// including file's directory, glob patterns expanded and sorted.
-fn resolve_include(base: &Path, include: &str) -> Result<Vec<PathBuf>> {
+/// including file's directory, glob patterns expanded and sorted. Each comes
+/// as the path the include names and the file it resolves to.
+fn resolve_include(base: &Path, include: &str) -> Result<Vec<(PathBuf, PathBuf)>> {
     let full = base.join(include);
     let paths = if rustledger_loader::is_glob_pattern(include) {
         let matched = rustledger_loader::FileSystem::glob(
@@ -239,8 +278,10 @@ fn resolve_include(base: &Path, include: &str) -> Result<Vec<PathBuf>> {
     paths
         .into_iter()
         .map(|p| {
-            p.canonicalize()
-                .with_context(|| format!("included file not found: {}", p.display()))
+            let c = p
+                .canonicalize()
+                .with_context(|| format!("included file not found: {}", p.display()))?;
+            Ok((p, c))
         })
         .collect()
 }

@@ -288,6 +288,7 @@ fn failed_verification_restores_the_backup() {
         backup_base: dir.path().canonicalize().unwrap(),
         originals: vec![(file.clone(), b"; original\n".to_vec())],
         operation: "split",
+        template: file.clone(),
     };
     let e = swap::apply(&plan, || anyhow::bail!("simulated mismatch")).unwrap_err();
     assert!(format!("{e:#}").contains("restored"), "{e:#}");
@@ -623,4 +624,123 @@ fn a_period_file_cannot_overwrite_the_split_file() {
         .to_string();
     assert!(e.contains("would overwrite the file being split"), "{e}");
     assert_eq!(snapshot(dir.path()), before);
+}
+
+/// Merge never deletes a file it does not own: an include reached through a
+/// symlink, or one outside FILE's directory, may belong to another ledger.
+#[cfg(unix)]
+#[test]
+fn merge_keeps_symlinked_and_out_of_tree_includes() {
+    let dir = tmp();
+    let shared = write(
+        dir.path(),
+        "shared/accounts.beancount",
+        "2020-01-01 open Assets:Bank\n",
+    );
+    let outside = write(
+        dir.path(),
+        "common.beancount",
+        "2020-01-01 open Assets:Cash\n",
+    );
+    let inside = write(
+        dir.path(),
+        "ledger/own.beancount",
+        "2020-01-01 open Assets:Own\n",
+    );
+    std::os::unix::fs::symlink(&shared, dir.path().join("ledger/accounts.beancount")).unwrap();
+    let root = write(
+        dir.path(),
+        "ledger/main.beancount",
+        "include \"accounts.beancount\"\ninclude \"../common.beancount\"\ninclude \"own.beancount\"\n",
+    );
+    let original = fingerprint(&root);
+    let (code, out, err) = run_merge(&merge_args(&root));
+    assert_eq!(code, ExitCode::SUCCESS, "{out}{err}");
+    assert_eq!(fingerprint(&root), original);
+    assert!(shared.exists(), "the symlink's target was deleted");
+    assert!(dir.path().join("ledger/accounts.beancount").exists());
+    assert!(outside.exists(), "an out-of-tree include was deleted");
+    assert!(
+        !inside.exists(),
+        "the plain in-tree include should be removed"
+    );
+    assert!(out.contains("kept"), "{out}");
+}
+
+/// A comment on an include's own line survives the merge.
+#[test]
+fn merge_keeps_the_comment_on_an_include_line() {
+    let dir = tmp();
+    let root = write(
+        dir.path(),
+        "main.beancount",
+        "include \"a.beancount\" ; NOTE: keep me\n",
+    );
+    write(dir.path(), "a.beancount", "2020-01-01 open Assets:Bank\n");
+    let (code, out, err) = run_merge(&merge_args(&root));
+    assert_eq!(code, ExitCode::SUCCESS, "{out}{err}");
+    let merged = fs::read_to_string(&root).unwrap();
+    assert!(merged.contains("; NOTE: keep me"), "{merged}");
+    assert!(!merged.contains("include"), "{merged}");
+}
+
+/// The in-memory preview sees planned files through an include glob written
+/// with `./` (the loader keeps it as written), so the split is refused before
+/// anything is written rather than after.
+#[test]
+fn the_preview_sees_planned_files_through_a_dotted_glob() {
+    let dir = tmp();
+    write(
+        dir.path(),
+        "sub/other.beancount",
+        "2020-01-01 open Assets:Other\n",
+    );
+    let root = write(
+        dir.path(),
+        "main.beancount",
+        "include \"./sub/*.beancount\"\n2024-01-01 open Assets:Bank\n",
+    );
+    let before = snapshot(dir.path());
+    let mut args = split_args(&root, Period::Year);
+    args.dir = Some(dir.path().join("sub"));
+    let (code, out, err) = run_split(&args);
+    assert_eq!(code, ExitCode::from(1), "{out}{err}");
+    assert_eq!(snapshot(dir.path()), before);
+}
+
+/// New files, backups and `merge -o` output are as private as the ledger.
+#[cfg(unix)]
+#[test]
+fn permissions_carry_over() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let dir = tmp();
+    let file = write(dir.path(), "ledger.beancount", LEDGER);
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o600)).unwrap();
+    let (code, _, err) = run_split(&split_args(&file, Period::Year));
+    assert_eq!(code, ExitCode::SUCCESS, "{err}");
+    assert_eq!(mode(&dir.path().join("ledger/2023.beancount")), 0o600);
+    assert_eq!(mode(&file), 0o600);
+    let backup = fs::read_dir(dir.path().join(".rledger-backup"))
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .path();
+    assert_eq!(mode(&backup.join("ledger.beancount.bak")), 0o600);
+
+    let out_path = dir.path().join("flat.beancount");
+    let mut args = merge_args(&file);
+    args.output = Some(out_path.clone());
+    let (code, out, err) = run_merge(&args);
+    assert_eq!(code, ExitCode::SUCCESS, "{out}{err}");
+    assert_eq!(mode(&out_path), 0o600);
+    // Nothing was replaced, so there is nothing to back up.
+    assert!(!out.contains("Backup"), "{out}");
+    assert_eq!(
+        fs::read_dir(dir.path().join(".rledger-backup"))
+            .unwrap()
+            .count(),
+        1
+    );
 }

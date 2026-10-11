@@ -1,7 +1,7 @@
 # Output baselines
 
-This directory holds the parser-output baseline for the compatibility
-corpus under `tests/compatibility/files/`. It implements phase 0 of
+This directory holds the parser-output baseline and the CST baseline for
+the compatibility corpus under `tests/compatibility/files/`. It implements phase 0 of
 the parser-CST migration tracking issue
 ([#1262](https://github.com/rustledger/rustledger/issues/1262)).
 
@@ -43,6 +43,10 @@ Manifest:
   `fingerprint_covers_every_parse_result_field` plus a compile-time
   exhaustive-destructure sentinel in `rustledger-parser` keep the
   field list and the hash in sync as `ParseResult` evolves.
+- `cst-corpus.manifest` — `parse_structured`'s CST
+  (`crates/rustledger-parser/tests/cst_baseline.rs`). Each line has two
+  output hashes after the source hash: the leaf token sequence and the
+  node shape. The source must also round-trip byte for byte.
 
 The manifest is sorted lexically by path so diffs are localized.
 
@@ -52,7 +56,8 @@ The `Parser Baselines` workflow (`.github/workflows/parser-baselines.yml`)
 runs on every PR and push to main. It:
 
 1. Restores or fetches the compat corpus.
-2. Runs the baseline tests with `STRICT_BASELINE=1`.
+2. Runs both baseline tests (`corpus_baseline` and `cst_baseline`) with
+   `STRICT_BASELINE=1`.
 3. Fails if any committed manifest entry has a different current hash,
    or if the corpus is smaller than the manifest expects.
 
@@ -84,8 +89,9 @@ covers that gap. Weekly, it fetches the corpus **fresh — deliberately not
 from the cache, which is the whole point** — regenerates, and opens an
 issue describing any drift, separating new-file/changed-hash/removed-file
 cases because they need different responses. It reports; it never gates,
-and it closes its own issue when the manifest matches a fresh corpus
-again.
+and it closes its own issue when both manifests match a fresh corpus
+again. It checks both manifests; the CST one was left out until #2511
+and had fallen ~26 entries behind.
 
 It refuses to report at all when the fetch comes up more than 50 files
 short. Fetching into an empty checkout means each tolerated clone failure
@@ -93,9 +99,9 @@ is simply missing files, and regenerating against a partial corpus would
 present them as upstream deletions.
 
 Run it yourself with `python3 scripts/corpus-baseline-drift.py --dry-run`,
-which prints what it would file and leaves the manifest as it found it.
+which prints what it would file and leaves the manifests as it found them.
 
-## Regenerating the manifest
+## Regenerating the manifests
 
 When a parser change shifts output bytes intentionally:
 
@@ -103,7 +109,7 @@ When a parser change shifts output bytes intentionally:
 # Download corpus if needed (one-time, ~3 minutes).
 ./scripts/fetch-compat-test-files.sh
 
-# Regenerate the manifest.
+# Regenerate both manifests.
 ./scripts/regen-corpus-baselines.sh
 
 # Review the diff. Every changed hash must trace back to a code
@@ -113,11 +119,11 @@ git diff tests/baselines/
 
 # Commit when satisfied.
 git add tests/baselines/
-git commit -m 'chore(baselines): regenerate parser manifest'
+git commit -m 'chore(baselines): regenerate corpus manifests'
 ```
 
 The regen script gates on a populated corpus and runs the parser test
-with `BASELINE_UPDATE=1`.
+and the CST test with `BASELINE_UPDATE=1`.
 
 ## Phase-3-of-#1262 staleness
 

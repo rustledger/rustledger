@@ -27,6 +27,7 @@ jobs:
     outputs:
       code: ${{ steps.filter.outputs.code }}
       vscode: ${{ steps.filter.outputs.vscode }}
+      slim: ${{ steps.filter.outputs.slim }}
       vscode_nix: ${{ steps.filter.outputs.vscode_nix }}
       should_build: ${{ steps.decide.outputs.should_build }}
     steps:
@@ -50,6 +51,15 @@ jobs:
               # check.
               - 'scripts/regen-bindings.sh'
               - 'crates/rustledger-wasm/bindings/**'
+            # Files that can break the slim (release) build without being
+            # Rust code; see the `slim-build-no-wasmtime` job.
+            slim:
+              - 'crates/rustledger/**'
+              - 'crates/rustledger-loader/**'
+              - 'crates/rustledger-plugin/**'
+              - 'crates/rustledger-importer/**'
+              - 'scripts/check-slim-no-wasmtime.sh'
+              - '.github/workflows/ci.yml'
             # The VS Code extension is a separate filter, NOT part of `code`:
             # it shares nothing with the workspace crates (it is a thin LSP
             # client), so a Rust change cannot break it and it should not make
@@ -706,26 +716,72 @@ jobs:
   # native binary builds on platforms where cranelift can't (e.g. Termux). Two
   # regressions shipped without this guard; the script fails if `wasmtime`
   # re-enters the no-default dependency tree.
+  #
+  # This is also the RELEASE configuration (#2541): release binaries are built
+  # `--no-default-features` plus `mimalloc` / `ag-rledger`, and every other job
+  # here builds `--all-features`. So this job is the only place that
+  # configuration is linted and unit-tested (#2605). Before it did that, a lost
+  # `python-plugin-wasm` gate broke the release build while `build` stayed
+  # green (#2558), and 9 extract unit tests that could never pass in it went
+  # unnoticed (#2593). It is in the `build` gate for the same reason.
+  #
+  # Its own path filter (`slim`, on top of `should_build`) adds the files that
+  # can break this configuration but are not Rust code: the four tested
+  # crates' fixtures and snapshots, the ratchet script, and this workflow.
   slim-build-no-wasmtime:
     name: Slim Build (no wasmtime)
     needs: [changes]
-    if: needs.changes.outputs.should_build == 'true'
+    if: needs.changes.outputs.should_build == 'true' || needs.changes.outputs.slim == 'true'
     runs-on: ubuntu-latest
+    env:
+      RUST_MIN_STACK: 8388608
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # stable
         with:
           toolchain: 1.98.1 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
+          components: clippy
+      # The workflow sets RUSTC_WRAPPER=sccache, so a job that compiles
+      # anything must install it: without this step the `cargo test` below
+      # died with "could not execute process `sccache ...`" (main, 612e162f).
+      - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
       - name: Forbid wasmtime in --no-default-features build
         run: ./scripts/check-slim-no-wasmtime.sh
-      # The slim build is what release binaries are (#2541): every way of
-      # asking it for a WASM or Python plugin, or a WASM importer, must say
-      # the runtimes are missing and name `cargo install rustledger`, and
-      # the WASM importers `importers.toml` names must be reported as not
-      # tried rather than skipped in silence.
+      # The CLI crate as the release builds it, plus the three crates whose
+      # feature sets differ in that build: rustledger-plugin without its
+      # runtimes, rustledger-importer with only `toml-config`, and
+      # rustledger-loader at its defaults (no `wasm-plugins` /
+      # `python-plugins`). Each runs separately so its features are not
+      # unified with another package's.
+      - name: Clippy (release configuration)
+        run: |
+          cargo clippy -p rustledger --no-default-features --features mimalloc,ag-rledger --all-targets -- -D warnings
+          cargo clippy -p rustledger-plugin --no-default-features --all-targets -- -D warnings
+          cargo clippy -p rustledger-importer --no-default-features --features toml-config --all-targets -- -D warnings
+          cargo clippy -p rustledger-loader --all-targets -- -D warnings
+      - name: Tests (release configuration)
+        run: |
+          cargo test -p rustledger --no-default-features --features mimalloc,ag-rledger
+          cargo test -p rustledger-plugin --no-default-features
+          cargo test -p rustledger-importer --no-default-features --features toml-config
+          cargo test -p rustledger-loader
+      # Named on its own so a regression reads as what it is. Every way of
+      # asking the slim build for a WASM or Python plugin, or a WASM importer,
+      # must say the runtimes are missing and name `cargo install rustledger`,
+      # and the WASM importers `importers.toml` names must be reported as not
+      # tried rather than skipped in silence. Already compiled by the step
+      # above, so this costs seconds; it fails if the tests stop existing.
       - name: Slim build names the build with plugin runtimes
-        run: cargo test -p rustledger --no-default-features --test cli_commands_test release_build_
+        run: |
+          # The default `bash -e` has no pipefail, so without it `tee` would
+          # hide a failing (or uncompilable) test run.
+          set -o pipefail
+          cargo test -p rustledger --no-default-features --features mimalloc,ag-rledger --test cli_commands_test release_build_ 2>&1 | tee slim-release-build.log
+          if ! grep -qE '^test result: ok\. [1-9][0-9]* passed' slim-release-build.log; then
+            echo "::error::no release_build_ test ran"
+            exit 1
+          fi
 
   # WIT/Component-Model parity (#1384/#1402). The `rustledger-ffi-component-tests`
   # tests SKIP unless the wasip2 artifact exists, and the `Test` job above never
@@ -778,13 +834,19 @@ jobs:
           fetch-depth: 0
       - name: WIT interface change requires a package-version bump
         run: ./scripts/check-wit-version-bump.sh "${{ github.event.pull_request.base.sha }}"
+      # Docs cited `@3.0.0` through thirteen minor bumps (#2508). Every
+      # `rustledger:ledger@...` citation must be the current major (`@3.x`)
+      # or the exact current version. Runs here because this job has no path
+      # filter, so a docs-only PR is checked too.
+      - name: Contract version citations match world.wit
+        run: ./scripts/check-wit-version-citations.sh
 
   # Gate job - all core checks must pass (or be skipped on non-code PRs)
   build:
     name: build
     if: always()
     runs-on: ubuntu-latest
-    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, uri-boundary, lsp-platform, mcp-server, vscode-extension, vscode-nix, ci, doctest, regressions, bench-build, bindings-fresh, component-parity, wit-version-gate]
+    needs: [changes, fmt, unsafe-invariant, sync-primitives, hot-path-collections, plugin-test-quality, uri-boundary, lsp-platform, mcp-server, vscode-extension, vscode-nix, ci, doctest, regressions, bench-build, bindings-fresh, component-parity, wit-version-gate, slim-build-no-wasmtime]
     steps:
       - name: Check results
         run: |
@@ -850,6 +912,22 @@ jobs:
           echo "vscode-nix result: $vscode_nix"
           if [[ "$vscode_nix" != "success" && "$vscode_nix" != "skipped" ]]; then
             echo "vscode-nix must pass when packages/vscode or the flake changed"
+            exit 1
+          fi
+
+          # The slim (release-configuration) job runs on `should_build` OR
+          # its own `slim` filter (fixtures, the ratchet script, this
+          # workflow), so like vscode above it is checked ahead of the
+          # `should_build` early exit: a ci.yml-only PR runs it with
+          # `should_build` false. Skipped means neither filter matched.
+          slim="${{ needs.slim-build-no-wasmtime.result }}"
+          echo "slim-build-no-wasmtime result: $slim"
+          if [[ "$slim" != "success" && "$slim" != "skipped" ]]; then
+            echo "slim-build-no-wasmtime (the release configuration) must pass"
+            exit 1
+          fi
+          if [[ "${{ needs.changes.outputs.should_build }}" == "true" && "$slim" != "success" ]]; then
+            echo "slim-build-no-wasmtime must run and pass when code changed"
             exit 1
           fi
 

@@ -15,6 +15,7 @@
 //! | Python module | `plugin "python:module"`: rejected by design (#1432) | check |
 //! | Python built-in | `plugin "python:leafonly"` / `"python:check_commodity"` force the Python implementation | check |
 //! | native + Python together | `with_plugins.beancount` fixture | check |
+//! | Python compat layer | `beancount.core.realization` and `.compare`, as beancount's `leafonly` and `noduplicates` use them | check |
 //! | WASM importer (a `wasm_importer_main!` guest) | `extract --wasm-importer x.wasm` | extract |
 //! | WASM importer + `importers.toml` `[payees]` | `extract --wasm-importer x.wasm` | extract |
 //! | WASM + Python | an entry returned whole keeps its tags and links (notes and documents) | query |
@@ -395,6 +396,99 @@ fn python_prefix_forces_builtin_python_plugins() {
     run(dir.path(), &["check", "ledger.beancount"])
         .has("Missing Commodity directive for 'USD' in 'Assets:Bank'")
         .lacks("used but not declared");
+}
+
+/// `beancount.core.realization` and `beancount.core.compare`, which
+/// beancount's own `leafonly` and `noduplicates` import, are in the compat
+/// layer (#2540; the import failed before). These plugins call them as
+/// beancount's do: `realize(entries, compute_balance=False)` and its tree
+/// walk, and `compare.hash_entries(entries, exclude_meta=True)`.
+#[test]
+fn python_compat_realization_and_compare() {
+    if !python_ready() {
+        return;
+    }
+    // As beancount's `leafonly`: a non-leaf account holding anything but
+    // an open or a balance, reported at its open.
+    let dir = python_plugin(
+        "leaves",
+        "from beancount.core import data, getters, realization\n\
+         __plugins__ = ['leaves']\n\
+         def leaves(entries, options_map):\n    \
+             root = realization.realize(entries, compute_balance=False)\n    \
+             opens = getters.get_account_open_close(entries)\n    \
+             errors = []\n    \
+             for real in realization.iter_children(root):\n        \
+                 if len(real) == 0 or not real.txn_postings:\n            \
+                     continue\n        \
+                 if all(isinstance(p, (data.Open, data.Balance)) for p in real.txn_postings):\n            \
+                     continue\n        \
+                 open_entry = opens[real.account][0]\n        \
+                 errors.append(ValidationError(open_entry.meta,\n            \
+                     f\"Non-leaf account '{real.account}' has postings on it\", open_entry))\n    \
+             assert realization.get(root, 'Assets:Bank:Sub').account == 'Assets:Bank:Sub'\n    \
+             assert realization.contains(root, 'Expenses') and not realization.contains(root, 'Income')\n    \
+             leaves = [r.account for r in realization.iter_children(root, leaf_only=True)]\n    \
+             errors.append(ValidationError(None, f'leaves={leaves}', None))\n    \
+             return entries, errors\n",
+    );
+    run(dir.path(), &["check", "ledger.beancount"])
+        .failed_cleanly()
+        .has("ledger.beancount:3:1: error[PLUGIN]: Non-leaf account 'Assets:Bank' has postings on it")
+        .has("leaves=['Assets:Bank:Sub', 'Expenses:Food']")
+        .lacks("Traceback");
+
+    // As beancount's `noduplicates`, plus `includes_entries`.
+    let dir = python_plugin(
+        "dups",
+        "from beancount.core import compare\n\
+         __plugins__ = ['dups']\n\
+         def dups(entries, options_map):\n    \
+             _, errors = compare.hash_entries(entries, exclude_meta=True)\n    \
+             unique = list({compare.hash_entry(e, exclude_meta=True): e for e in entries}.values())\n    \
+             ok, missing = compare.includes_entries(unique[:2], unique)\n    \
+             assert ok and missing == [], (ok, missing)\n    \
+             ok, missing = compare.includes_entries(unique, unique[:2])\n    \
+             errors.append(ValidationError(None, f'includes={ok} missing={len(missing)}', None))\n    \
+             return entries, errors\n",
+    );
+    let snack = "2024-01-03 * \"Snack\"\n  Assets:Bank  -2 USD\n  Expenses:Food\n";
+    let source = std::fs::read_to_string(dir.path().join("ledger.beancount")).unwrap();
+    std::fs::write(
+        dir.path().join("ledger.beancount"),
+        format!("{source}\n{snack}"),
+    )
+    .unwrap();
+    let out = run(dir.path(), &["check", "ledger.beancount"]);
+    out.failed_cleanly()
+        .has(&format!(
+            "ledger.beancount:{}:1: error[PLUGIN]: Duplicate entry: ",
+            SNACK_LINE + 4
+        ))
+        .has("includes=False missing=3")
+        .lacks("Traceback");
+    assert_eq!(
+        out.text.matches("Duplicate entry").count(),
+        1,
+        "{}",
+        out.text
+    );
+
+    // The balance needs `beancount.core.inventory`, which is not there:
+    // asking for it is an error naming the way around, not a tree without
+    // balances.
+    let dir = python_plugin(
+        "balances",
+        "from beancount.core import realization\n\
+         __plugins__ = ['balances']\n\
+         def balances(entries, options_map):\n    \
+             realization.realize(entries)\n    \
+             return entries, []\n",
+    );
+    run(dir.path(), &["check", "ledger.beancount"])
+        .failed_cleanly()
+        .has("NotImplementedError")
+        .has("pass compute_balance=False");
 }
 
 /// Native and Python plugins in one ledger (the `with_plugins` fixture):

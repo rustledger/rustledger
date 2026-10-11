@@ -18,7 +18,9 @@ use std::hash::{Hash, Hasher};
 use std::str::FromStr;
 
 use rustledger_plugin_types::{
-    AmountData, CostData, PostingData, PriceAnnotationData, TransactionData,
+    AmountData, BalanceData, CloseData, CommodityData, CostData, CustomData, DirectiveData,
+    DirectiveWrapper, DocumentData, EventData, MetaValueData, NoteData, OpenData, PadData,
+    PostingData, PriceAnnotationData, QueryData, TransactionData,
 };
 
 /// Sentinel bytes to discriminate `None` from `Some` in hash streams.
@@ -33,9 +35,234 @@ const PRESENT: u8 = 1;
 /// cost, price, flag). Metadata is deliberately excluded.
 ///
 /// Tags and links are sorted and deduped before hashing to match beancount's
-/// `frozenset` semantics.
+/// `frozenset` semantics, and the postings are hashed as a multiset, as
+/// beancount sorts their hashes (#2599): the same postings in another order
+/// are the same transaction.
 #[must_use]
 pub fn structural_hash(date: &str, txn: &TransactionData) -> u64 {
+    let mut hasher = DefaultHasher::new();
+    date.hash(&mut hasher);
+    hash_transaction(txn, &mut hasher);
+    hasher.finish()
+}
+
+/// The structural identity of a directive, as beancount's `noduplicates`
+/// compares directives (#2599).
+///
+/// beancount's plugin calls `compare.hash_entries(entries,
+/// exclude_meta=True)`. Two directives are duplicates exactly when their keys
+/// are equal.
+///
+/// The key is the exact byte stream the `hash_*` helpers write, not a digest
+/// of it, so distinct directives never compare equal. Every field beancount
+/// hashes is in it, metadata is not, and lists beancount hashes element-wise
+/// and sorted are compared without regard to order:
+///
+/// | Directive | Fields |
+/// |---|---|
+/// | transaction | flag, payee, narration, tags, links, postings (each: account, units, cost, price, flag) |
+/// | open | account, currencies, booking |
+/// | close | account |
+/// | commodity | currency |
+/// | pad | account, source account |
+/// | balance | account, amount, tolerance |
+/// | note | account, comment, tags, links |
+/// | document | account, path, tags, links |
+/// | event | type, description |
+/// | query | name, query string |
+/// | custom | type, values |
+///
+/// plus the date of each. A `price` has no key (`None`): beancount allows
+/// duplicate prices, which a price source commonly repeats for a day the
+/// market was closed.
+///
+/// Deliberate divergences from beancount, which hashes `str()` of each field
+/// and not the directive's type: the type is part of the key (beancount
+/// takes an `event "a" "b"` and a `query "a" "b"` on one date for
+/// duplicates), and an absent value never equals a written one (beancount's
+/// `str(None)` equals a payee written `"None"`).
+#[must_use]
+pub fn structural_key(directive: &DirectiveWrapper) -> Option<Vec<u8>> {
+    let mut key = KeyWriter::default();
+    let k = &mut key;
+    match &directive.data {
+        DirectiveData::Price(_) => return None,
+        DirectiveData::Transaction(txn) => {
+            0u8.hash(k);
+            directive.date.hash(k);
+            hash_transaction(txn, k);
+        }
+        DirectiveData::Open(OpenData {
+            account,
+            currencies,
+            booking,
+            metadata: _,
+        }) => {
+            1u8.hash(k);
+            directive.date.hash(k);
+            account.hash(k);
+            // A list, not a set: sorted, but a repeat counts.
+            let mut sorted: Vec<&String> = currencies.iter().collect();
+            sorted.sort();
+            sorted.len().hash(k);
+            for currency in sorted {
+                currency.hash(k);
+            }
+            booking.hash(k);
+        }
+        DirectiveData::Close(CloseData {
+            account,
+            metadata: _,
+        }) => {
+            2u8.hash(k);
+            directive.date.hash(k);
+            account.hash(k);
+        }
+        DirectiveData::Commodity(CommodityData {
+            currency,
+            metadata: _,
+        }) => {
+            3u8.hash(k);
+            directive.date.hash(k);
+            currency.hash(k);
+        }
+        DirectiveData::Pad(PadData {
+            account,
+            source_account,
+            metadata: _,
+        }) => {
+            4u8.hash(k);
+            directive.date.hash(k);
+            account.hash(k);
+            source_account.hash(k);
+        }
+        DirectiveData::Balance(BalanceData {
+            account,
+            amount,
+            tolerance,
+            metadata: _,
+        }) => {
+            5u8.hash(k);
+            directive.date.hash(k);
+            account.hash(k);
+            hash_amount(amount, k);
+            tolerance.hash(k);
+        }
+        DirectiveData::Note(NoteData {
+            account,
+            comment,
+            tags,
+            links,
+            metadata: _,
+        }) => {
+            6u8.hash(k);
+            directive.date.hash(k);
+            account.hash(k);
+            comment.hash(k);
+            hash_set(tags, k);
+            hash_set(links, k);
+        }
+        DirectiveData::Document(DocumentData {
+            account,
+            path,
+            tags,
+            links,
+            metadata: _,
+        }) => {
+            7u8.hash(k);
+            directive.date.hash(k);
+            account.hash(k);
+            path.hash(k);
+            hash_set(tags, k);
+            hash_set(links, k);
+        }
+        DirectiveData::Event(EventData {
+            event_type,
+            value,
+            metadata: _,
+        }) => {
+            8u8.hash(k);
+            directive.date.hash(k);
+            event_type.hash(k);
+            value.hash(k);
+        }
+        DirectiveData::Query(QueryData {
+            name,
+            query,
+            metadata: _,
+        }) => {
+            9u8.hash(k);
+            directive.date.hash(k);
+            name.hash(k);
+            query.hash(k);
+        }
+        DirectiveData::Custom(CustomData {
+            custom_type,
+            values,
+            metadata: _,
+        }) => {
+            10u8.hash(k);
+            directive.date.hash(k);
+            custom_type.hash(k);
+            // beancount hashes the values element-wise and sorted.
+            hash_multiset(values.iter().map(|v| key_of(|w| hash_meta_value(v, w))), k);
+        }
+    }
+    Some(key.0)
+}
+
+/// A [`Hasher`] that keeps the bytes written to it: an exact, collision-free
+/// key built by the same code that computes [`structural_hash`]. `str`'s
+/// `Hash` ends each string with `0xff`, which UTF-8 never contains, so
+/// adjacent strings cannot run together.
+#[derive(Default)]
+struct KeyWriter(Vec<u8>);
+
+impl Hasher for KeyWriter {
+    /// Unused: the key is the bytes. `Hash` implementations only write.
+    fn finish(&self) -> u64 {
+        0
+    }
+
+    fn write(&mut self, bytes: &[u8]) {
+        self.0.extend_from_slice(bytes);
+    }
+}
+
+/// The bytes `write` puts in a fresh [`KeyWriter`].
+fn key_of(write: impl FnOnce(&mut KeyWriter)) -> Vec<u8> {
+    let mut key = KeyWriter::default();
+    write(&mut key);
+    key.0
+}
+
+/// Hash `items` (each already a key) as a multiset: count-prefixed and
+/// sorted, as beancount sorts the element hashes of a list.
+fn hash_multiset<H: Hasher>(items: impl Iterator<Item = Vec<u8>>, hasher: &mut H) {
+    let mut items: Vec<Vec<u8>> = items.collect();
+    items.sort();
+    items.len().hash(hasher);
+    for item in &items {
+        // Length-prefixed, so no item's bytes can run into the next.
+        item.len().hash(hasher);
+        hasher.write(item);
+    }
+}
+
+/// Hash a tag or link set: sorted, deduped (a `frozenset` in beancount) and
+/// count-prefixed so two sets in a row cannot trade elements.
+fn hash_set<H: Hasher>(items: &[String], hasher: &mut H) {
+    let mut sorted: Vec<&String> = items.iter().collect();
+    sorted.sort();
+    sorted.dedup();
+    sorted.len().hash(hasher);
+    for item in sorted {
+        item.hash(hasher);
+    }
+}
+
+/// Hash a transaction's structural fields (not its date).
+fn hash_transaction<H: Hasher>(txn: &TransactionData, hasher: &mut H) {
     // Destructure so any future field added to TransactionData causes a
     // compile error here.
     let TransactionData {
@@ -48,38 +275,60 @@ pub fn structural_hash(date: &str, txn: &TransactionData) -> u64 {
         postings,
     } = txn;
 
-    let mut hasher = DefaultHasher::new();
-    date.hash(&mut hasher);
-    flag.hash(&mut hasher);
-    payee.hash(&mut hasher);
-    narration.hash(&mut hasher);
+    flag.hash(hasher);
+    payee.hash(hasher);
+    narration.hash(hasher);
+    hash_set(tags, hasher);
+    hash_set(links, hasher);
+    // A multiset: beancount sorts the postings' hashes.
+    hash_multiset(
+        postings.iter().map(|p| key_of(|w| hash_posting(p, w))),
+        hasher,
+    );
+}
 
-    // Tags and links are unordered sets in beancount (frozenset), so:
-    // 1. Sort + dedup for stable hash regardless of parser order.
-    // 2. Prefix with length so the two streams can't be swapped.
-    let mut sorted_tags: Vec<&String> = tags.iter().collect();
-    sorted_tags.sort();
-    sorted_tags.dedup();
-    sorted_tags.len().hash(&mut hasher);
-    for tag in sorted_tags {
-        tag.hash(&mut hasher);
+/// Hash a custom directive's value, with its type: beancount hashes a value
+/// and its `dtype`, so the account `Assets:Bank` and the string
+/// `"Assets:Bank"` differ.
+fn hash_meta_value<H: Hasher>(value: &MetaValueData, hasher: &mut H) {
+    match value {
+        MetaValueData::String(s) => {
+            0u8.hash(hasher);
+            s.hash(hasher);
+        }
+        MetaValueData::Number(s) => {
+            1u8.hash(hasher);
+            s.hash(hasher);
+        }
+        MetaValueData::Date(s) => {
+            2u8.hash(hasher);
+            s.hash(hasher);
+        }
+        MetaValueData::Account(s) => {
+            3u8.hash(hasher);
+            s.hash(hasher);
+        }
+        MetaValueData::Currency(s) => {
+            4u8.hash(hasher);
+            s.hash(hasher);
+        }
+        MetaValueData::Tag(s) => {
+            5u8.hash(hasher);
+            s.hash(hasher);
+        }
+        MetaValueData::Link(s) => {
+            6u8.hash(hasher);
+            s.hash(hasher);
+        }
+        MetaValueData::Amount(a) => {
+            7u8.hash(hasher);
+            hash_amount(a, hasher);
+        }
+        MetaValueData::Bool(b) => {
+            8u8.hash(hasher);
+            b.hash(hasher);
+        }
     }
-
-    let mut sorted_links: Vec<&String> = links.iter().collect();
-    sorted_links.sort();
-    sorted_links.dedup();
-    sorted_links.len().hash(&mut hasher);
-    for link in sorted_links {
-        link.hash(&mut hasher);
-    }
-
-    // Prefix postings with count so the stream can't collide with set streams.
-    postings.len().hash(&mut hasher);
-    for posting in postings {
-        hash_posting(posting, &mut hasher);
-    }
-
-    hasher.finish()
 }
 
 /// Hash a posting's structural fields.
@@ -106,18 +355,62 @@ fn hash_posting<H: Hasher>(posting: &PostingData, hasher: &mut H) {
     match cost {
         Some(c) => {
             PRESENT.hash(hasher);
-            hash_cost(c, hasher);
+            hash_cost(c, total_is_implied(units.as_ref(), c), hasher);
         }
         None => ABSENT.hash(hasher),
     }
     match price {
         Some(p) => {
             PRESENT.hash(hasher);
-            hash_price(p, hasher);
+            match per_unit_price(units.as_ref(), p) {
+                Some(per_unit) => hash_price(&per_unit, hasher),
+                None => hash_price(p, hasher),
+            }
         }
         None => ABSENT.hash(hasher),
     }
     flag.hash(hasher);
+}
+
+/// A total price (`@@`) as the per-unit price (`@`) it stands for, as
+/// beancount's parser rewrites it before plugins run: `2 X @@ 10 USD` is
+/// `2 X @ 5 USD`, and beancount takes the two postings for one (#2599). The
+/// per-unit price has the scale Python's division gives it (`10.00 / 2` is
+/// `5.00`).
+///
+/// `None`, leaving the price as written, when there is nothing to rewrite
+/// (a per-unit or incomplete price, units without a number, zero units), and
+/// when the division is not exact: `3 X @@ 10 USD` is not `3 X @ 3.33…3 USD`
+/// for any number of 3s, whatever beancount's 28-digit quotient says, so
+/// postings whose totals differ never match.
+fn per_unit_price(
+    units: Option<&AmountData>,
+    price: &PriceAnnotationData,
+) -> Option<PriceAnnotationData> {
+    use rust_decimal::Decimal;
+    use rustledger_core::decimal::{checked_div_python_scale, checked_mul_exact};
+    if !price.is_total {
+        return None;
+    }
+    let total_amount = price.amount.as_ref()?;
+    let units = Decimal::from_str(&units?.number).ok()?.abs();
+    if units.is_zero() {
+        return None;
+    }
+    let total = Decimal::from_str(&total_amount.number).ok()?;
+    let per_unit = checked_div_python_scale(total, units)?;
+    if checked_mul_exact(per_unit, units)? != total {
+        return None;
+    }
+    Some(PriceAnnotationData {
+        is_total: false,
+        amount: Some(AmountData {
+            number: per_unit.to_string(),
+            currency: total_amount.currency.clone(),
+        }),
+        number: None,
+        currency: None,
+    })
 }
 
 /// Hash an amount's structural fields.
@@ -127,8 +420,33 @@ fn hash_amount<H: Hasher>(amount: &AmountData, hasher: &mut H) {
     currency.hash(hasher);
 }
 
-/// Hash a cost's structural fields.
-fn hash_cost<H: Hasher>(cost: &CostData, hasher: &mut H) {
+/// Whether a booked `{{ total }}` cost says nothing its per-unit cost does
+/// not: `2 X {{10 USD}}` books `5 USD` a unit, the lot `2 X {5 USD}` is, and
+/// beancount (which keeps only the per-unit cost) takes the two postings
+/// for one (#2599). A total the per-unit cost does not multiply back to
+/// exactly (`3 X {{10 USD}}`) still counts, so postings whose exact totals
+/// differ never match.
+fn total_is_implied(units: Option<&AmountData>, cost: &CostData) -> bool {
+    use rust_decimal::Decimal;
+    use rustledger_plugin_types::CostNumberData;
+    let Some(CostNumberData::PerUnitFromTotal { per_unit, total }) = &cost.number else {
+        return false;
+    };
+    let parse = |s: &str| Decimal::from_str(s).ok();
+    let (Some(units), Some(per_unit), Some(total)) = (
+        units.and_then(|u| parse(&u.number)),
+        parse(per_unit),
+        parse(total),
+    ) else {
+        return false;
+    };
+    // Exact: a product `Decimal` has to round is not the total.
+    rustledger_core::decimal::checked_mul_exact(per_unit, units.abs()) == Some(total)
+}
+
+/// Hash a cost's structural fields. `total_implied`: hash a booked
+/// `{{ total }}` cost as its per-unit cost alone (see [`total_is_implied`]).
+fn hash_cost<H: Hasher>(cost: &CostData, total_implied: bool, hasher: &mut H) {
     use rustledger_plugin_types::CostNumberData;
     let CostData {
         number,
@@ -144,6 +462,11 @@ fn hash_cost<H: Hasher>(cost: &CostData, hasher: &mut H) {
     match number {
         None => 0u8.hash(hasher),
         Some(CostNumberData::PerUnit { value: s }) => {
+            1u8.hash(hasher);
+            s.hash(hasher);
+        }
+        // As the per-unit cost it books, which says it all.
+        Some(CostNumberData::PerUnitFromTotal { per_unit: s, .. }) if total_implied => {
             1u8.hash(hasher);
             s.hash(hasher);
         }
@@ -548,57 +871,6 @@ mod tests {
     }
 
     #[test]
-    fn reordered_postings_produce_different_hashes() {
-        let posting_a = PostingData {
-            account: "Assets:Bank".to_string(),
-            units: Some(AmountData {
-                number: "-50.00".to_string(),
-                currency: "USD".to_string(),
-            }),
-            cost: None,
-            price: None,
-            flag: None,
-            metadata: vec![],
-            span: None,
-        };
-        let posting_b = PostingData {
-            account: "Expenses:Food".to_string(),
-            units: Some(AmountData {
-                number: "50.00".to_string(),
-                currency: "USD".to_string(),
-            }),
-            cost: None,
-            price: None,
-            flag: None,
-            metadata: vec![],
-            span: None,
-        };
-
-        let txn1 = TransactionData {
-            flag: "*".to_string(),
-            payee: None,
-            narration: "Test".to_string(),
-            tags: vec![],
-            links: vec![],
-            metadata: vec![],
-            postings: vec![posting_a.clone(), posting_b.clone()],
-        };
-        let txn2 = TransactionData {
-            flag: "*".to_string(),
-            payee: None,
-            narration: "Test".to_string(),
-            tags: vec![],
-            links: vec![],
-            metadata: vec![],
-            postings: vec![posting_b, posting_a],
-        };
-        assert_ne!(
-            structural_hash("2024-01-15", &txn1),
-            structural_hash("2024-01-15", &txn2)
-        );
-    }
-
-    #[test]
     fn none_vs_empty_payee_differ() {
         let txn_none = make_txn(None, "Test", "100");
         let txn_empty = TransactionData {
@@ -785,5 +1057,210 @@ mod tests {
         assert_eq!(err.to_string(), "fingerprint hex must be 32 chars, got 10");
         let err = FingerprintError::InvalidHex;
         assert_eq!(err.to_string(), "invalid hex in fingerprint");
+    }
+
+    fn posting(account: &str, number: &str, price: Option<(bool, &str)>) -> PostingData {
+        PostingData {
+            account: account.to_string(),
+            units: Some(AmountData {
+                number: number.to_string(),
+                currency: "HOOL".to_string(),
+            }),
+            cost: None,
+            price: price.map(|(is_total, n)| PriceAnnotationData {
+                is_total,
+                amount: Some(AmountData {
+                    number: n.to_string(),
+                    currency: "USD".to_string(),
+                }),
+                number: None,
+                currency: None,
+            }),
+            flag: None,
+            metadata: vec![],
+            span: None,
+        }
+    }
+
+    fn txn_with(postings: Vec<PostingData>) -> TransactionData {
+        TransactionData {
+            postings,
+            ..make_txn(None, "Test", "0")
+        }
+    }
+
+    /// The postings are a multiset, as beancount sorts their hashes: the
+    /// same postings in another order are the same transaction (#2599).
+    #[test]
+    fn posting_order_does_not_affect_hash() {
+        let a = posting("Assets:A", "1", None);
+        let b = posting("Assets:B", "-1", None);
+        assert_eq!(
+            structural_hash("2024-01-15", &txn_with(vec![a.clone(), b.clone()])),
+            structural_hash("2024-01-15", &txn_with(vec![b.clone(), a.clone()]))
+        );
+        // A multiset, not a set: a repeated posting counts.
+        assert_ne!(
+            structural_hash(
+                "2024-01-15",
+                &txn_with(vec![a.clone(), a.clone(), b.clone()])
+            ),
+            structural_hash("2024-01-15", &txn_with(vec![a, b]))
+        );
+    }
+
+    /// A total price is the per-unit price it stands for, as beancount's
+    /// parser rewrites it: `2 HOOL @@ 10 USD` is `2 HOOL @ 5 USD`.
+    #[test]
+    fn total_price_hashes_as_its_per_unit_price() {
+        let hash = |number, price| {
+            structural_hash(
+                "2024-01-15",
+                &txn_with(vec![posting("Assets:A", number, Some(price))]),
+            )
+        };
+        assert_eq!(hash("2", (true, "10")), hash("2", (false, "5")));
+        assert_eq!(hash("-2", (true, "10")), hash("-2", (false, "5")));
+        assert_ne!(hash("2", (true, "10")), hash("2", (false, "10")));
+        // With Python's quotient scale, as beancount divides.
+        assert_eq!(hash("2", (true, "10.00")), hash("2", (false, "5.00")));
+        assert_eq!(hash("2.5", (true, "10")), hash("2.5", (false, "4")));
+        assert_ne!(hash("2", (true, "10.00")), hash("2", (false, "5")));
+        // An inexact quotient is no per-unit price: the totals differ.
+        assert_ne!(
+            hash("3", (true, "10")),
+            hash("3", (false, "3.333333333333333333333333333"))
+        );
+        assert_ne!(
+            hash("3", (true, "10")),
+            hash("3", (false, "3.3333333333333333333333333333"))
+        );
+        // Zero units: left as written.
+        assert_ne!(hash("0", (true, "10")), hash("0", (false, "0")));
+    }
+
+    /// A booked `{{ total }}` cost is its per-unit cost when that says it
+    /// all: `2 HOOL {{10 USD}}` books the lot `2 HOOL {5 USD}`, and beancount
+    /// takes the two for one. Exact totals that differ never match.
+    #[test]
+    fn booked_total_cost_hashes_as_its_per_unit_when_exact() {
+        use rustledger_plugin_types::CostNumberData;
+        let hash = |units: &str, number: CostNumberData| {
+            let mut p = posting("Assets:A", units, None);
+            p.cost = Some(CostData {
+                number: Some(number),
+                currency: Some("USD".to_string()),
+                date: Some("2024-01-15".to_string()),
+                label: None,
+                merge: false,
+            });
+            structural_hash("2024-01-15", &txn_with(vec![p]))
+        };
+        let per_unit = |v: &str| CostNumberData::PerUnit {
+            value: v.to_string(),
+        };
+        let from_total = |p: &str, t: &str| CostNumberData::PerUnitFromTotal {
+            per_unit: p.to_string(),
+            total: t.to_string(),
+        };
+        assert_eq!(hash("2", from_total("5", "10")), hash("2", per_unit("5")));
+        assert_eq!(hash("-2", from_total("5", "10")), hash("-2", per_unit("5")));
+        // The per-unit cost keeps its scale, as everywhere else.
+        assert_ne!(
+            hash("2", from_total("5", "10")),
+            hash("2", per_unit("5.00"))
+        );
+        // 3 HOOL {{10 USD}}: the per-unit cost rounds, so the total counts.
+        let third = "3.3333333333333333333333333333";
+        assert_ne!(
+            hash("3", from_total(third, "10")),
+            hash("3", per_unit(third))
+        );
+        assert_ne!(
+            hash("3", from_total(third, "10")),
+            hash("3", from_total(third, "10.000000000000000000000000001"))
+        );
+    }
+
+    fn key(date: &str, data: rustledger_plugin_types::DirectiveData) -> Option<Vec<u8>> {
+        structural_key(&DirectiveWrapper {
+            directive_type: String::new(),
+            date: date.to_string(),
+            filename: None,
+            lineno: None,
+            data,
+        })
+    }
+
+    /// A custom directive's values are compared without regard to order,
+    /// as beancount sorts their hashes, and with their type: the account
+    /// `Expenses:Food` is not the string `"Expenses:Food"`.
+    #[test]
+    fn custom_values_are_typed_and_unordered() {
+        use rustledger_plugin_types::{CustomData, DirectiveData, MetaValueData};
+        let custom = |values: Vec<MetaValueData>| {
+            key(
+                "2024-01-15",
+                DirectiveData::Custom(CustomData {
+                    custom_type: "budget".to_string(),
+                    values,
+                    metadata: vec![],
+                }),
+            )
+        };
+        let a = MetaValueData::String("a".to_string());
+        let b = MetaValueData::String("b".to_string());
+        assert_eq!(
+            custom(vec![a.clone(), b.clone()]),
+            custom(vec![b, a.clone()])
+        );
+        assert_ne!(custom(vec![a.clone(), a.clone()]), custom(vec![a]));
+        assert_ne!(
+            custom(vec![MetaValueData::Account("Expenses:Food".to_string())]),
+            custom(vec![MetaValueData::String("Expenses:Food".to_string())])
+        );
+        assert_ne!(
+            custom(vec![MetaValueData::Number("1.0".to_string())]),
+            custom(vec![MetaValueData::Number("1.00".to_string())])
+        );
+    }
+
+    /// An `open`'s currencies are a list beancount hashes sorted; its
+    /// booking method counts. A `balance`'s amount keeps its scale, as
+    /// beancount's `str(Decimal)` does, and its tolerance counts.
+    #[test]
+    fn open_and_balance_fields() {
+        use rustledger_plugin_types::{BalanceData, DirectiveData, OpenData};
+        let open = |currencies: &[&str], booking: Option<&str>| {
+            key(
+                "2024-01-15",
+                DirectiveData::Open(OpenData {
+                    account: "Assets:A".to_string(),
+                    currencies: currencies.iter().map(ToString::to_string).collect(),
+                    booking: booking.map(String::from),
+                    metadata: vec![],
+                }),
+            )
+        };
+        assert_eq!(open(&["USD", "EUR"], None), open(&["EUR", "USD"], None));
+        assert_ne!(open(&["USD"], Some("FIFO")), open(&["USD"], Some("LIFO")));
+        assert_ne!(open(&["USD"], Some("FIFO")), open(&["USD"], None));
+        let balance = |number: &str, tolerance: Option<&str>| {
+            key(
+                "2024-01-15",
+                DirectiveData::Balance(BalanceData {
+                    account: "Assets:A".to_string(),
+                    amount: AmountData {
+                        number: number.to_string(),
+                        currency: "USD".to_string(),
+                    },
+                    tolerance: tolerance.map(String::from),
+                    metadata: vec![],
+                }),
+            )
+        };
+        assert_eq!(balance("0", None), balance("0", None));
+        assert_ne!(balance("0", None), balance("0.00", None));
+        assert_ne!(balance("0", Some("0.01")), balance("0", None));
     }
 }

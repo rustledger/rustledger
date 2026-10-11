@@ -286,6 +286,13 @@ fn booking_error_code(err: &rustledger_booking::BookingError) -> rustledger_vali
         // file. `MultipleInterpolation` is the nearest honest neighbor: both
         // say the posting's amount was never resolved.
         B::NotBooked { .. } => ErrorCode::MultipleInterpolation,
+        // Beancount's companion refusal for a `{}` whose categorized cost
+        // currency names no lot is "No position matches" (E4001); a priced
+        // reduction in another currency than its cost matches no lot it can
+        // book either (#2571).
+        B::CostPriceCurrencyMismatch { .. } | B::NoLotInInferredCostCurrency { .. } => {
+            ErrorCode::NoMatchingLot
+        }
     }
 }
 

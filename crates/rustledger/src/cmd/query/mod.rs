@@ -8,7 +8,8 @@
 //! ```bash
 //! rledger query ledger.beancount "SELECT account, SUM(position) GROUP BY account"
 //! rledger query ledger.beancount -F query.bql
-//! rledger query ledger.beancount  # Interactive mode
+//! rledger query ledger.beancount < query.bql  # stdin, read whole as one query
+//! rledger query ledger.beancount  # Interactive mode (stdin is a terminal)
 //! ```
 
 mod interactive;
@@ -22,7 +23,7 @@ use rustledger_core::DisplayContext;
 use rustledger_loader::LoadOptions;
 use rustledger_validate::is_advisory_only_code;
 use std::fs;
-use std::io;
+use std::io::{self, IsTerminal, Read};
 use std::path::PathBuf;
 /// System tables available in BQL queries (prefixed with #).
 const SYSTEM_TABLES: &[&str] = &[
@@ -51,7 +52,8 @@ pub struct Args {
     #[arg(long, value_name = "SHELL", hide = true)]
     pub generate_completions: Option<ShellType>,
 
-    /// BQL query to execute (if not provided, enters interactive mode)
+    /// BQL query to execute (if not provided: read from stdin when stdin is
+    /// not a terminal, otherwise enters interactive mode)
     #[arg(value_name = "QUERY", trailing_var_arg = true, num_args = 0..)]
     pub query: Vec<String>,
 
@@ -322,8 +324,25 @@ pub fn run_with_writer<W: io::Write>(
     } else if let Some(ref query_file) = args.query_file {
         fs::read_to_string(query_file)
             .with_context(|| format!("failed to read query file {}", query_file.display()))?
+    } else if !io::stdin().is_terminal() {
+        // Piped or redirected stdin is ONE query, read whole, as bean-query
+        // reads it (`query = sys.stdin.read()` when stdin is not a TTY). It
+        // went to the interactive shell, which ran it line by line, so a
+        // query spread over lines failed or ran in pieces (#2578).
+        let mut query = String::new();
+        io::stdin()
+            .read_to_string(&mut query)
+            .context("failed to read the query from stdin")?;
+        // Nothing but whitespace and comments is no query: bean-query's
+        // shell does nothing with an empty line, and neither does this.
+        if rustledger_query::parser::strip_comments(&query)
+            .is_ok_and(|stripped| stripped.trim().is_empty())
+        {
+            return Ok(());
+        }
+        query
     } else {
-        // Interactive mode
+        // Interactive mode: a terminal, and no query given.
         return interactive::run_interactive(file, &directives, &source_map, settings);
     };
 

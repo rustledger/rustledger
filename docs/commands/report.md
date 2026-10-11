@@ -57,6 +57,8 @@ rledger report ledger.beancount balances -a Expenses
 rledger report ledger.beancount balances -a Assets:Bank
 ```
 
+A commodity held at cost is listed by lot, with its per-unit cost and date (`2 X { 200.00 USD, 2024-01-03}`), numbers rendered at the ledger's display precision. An account booked `AVERAGE` is listed as its pool, one undated lot per commodity, cost currency and side at the weighted-average cost, as `BALANCES` shows it; see the [BQL reference](../reference/bql.md).
+
 ### Balance Sheet
 
 ```bash
@@ -419,10 +421,11 @@ I closed in this window earn, annualized", not "what did this window earn".
   its exact pro-rata share (`total × units ÷ total_units`), unrounded — so the split
   is faithful (matching Python beancount) and never distorts or goes negative.
   Rounding to a display precision is left to the presentation layer.
-- **Cross-currency disposals are flagged, not dropped silently.** If a sale's price
-  is in a different currency than the lot's cost basis, the realized gain would need
-  an FX rate this tool does not apply, so that disposal is omitted from the rows and
-  a `warning:` with the count is printed to stderr.
+- **Cross-currency disposals are refused by booking.** A sale priced in a different
+  currency than the lot's cost basis has no realized gain without an FX rate, so
+  `rledger check` reports it (`Cost and price currencies must match`) and it never
+  reaches the report. Should a library caller hand the report such a disposal, it is
+  omitted from the rows and a `warning:` with the count is printed to stderr.
 
 Not a tax filing: wash-sale adjustments, separating currency gains from asset
 gains, lots seeded by `pad` (no well-defined cost basis), and jurisdiction rules

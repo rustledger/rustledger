@@ -228,6 +228,9 @@ fn lima_test_expects_parse_error(name: &str) -> bool {
         || name.contains("TagThenLink") // tag ordering edge case (#2008 case 3)
         || name.contains("TooManyStrings") // >2 header strings (#2008 case 7)
         || name.contains("TransactionThreeStrings") // >2 header strings (#2008 case 6)
+        // A tag line after the first posting: beancount reports "Tags or links
+        // not allowed after first Posting" (#2575).
+        || name.contains("TagsAfterFirstPosting")
 }
 
 /// The seven constructs from #2008 that beancount rejects, and whether rledger

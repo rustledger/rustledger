@@ -220,7 +220,10 @@ use crate::types::{Error, LedgerOptions};
 /// unchanged -- parsed directives did not move. `Ledger` archives booked
 /// directives and their errors, so a v37 blob would serve the old amount, or
 /// no E3001 where one is now reported.
-pub const CACHE_VERSION: u32 = 38;
+/// v39: loader v39, a `#tag` / `^link` line after a transaction's first
+/// posting is a parse error and its tags are dropped (#2575). Parsed
+/// directives changed, so a v38 blob would serve the late tags and no error.
+pub const CACHE_VERSION: u32 = 39;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -252,7 +255,7 @@ pub const CACHE_VERSION: u32 = 38;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 38;
+const LOADER_CACHE_VERSION_PIN: u32 = 39;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

@@ -922,7 +922,7 @@ fn a_ledger_that_loads_differently_twice_is_refused() {
     assert!(
         reason
             .as_deref()
-            .is_some_and(|r| r.contains("does not load the same way twice")),
+            .is_some_and(|r| r.starts_with("The ledger does not load the same way twice")),
         "{reason:?}"
     );
 }

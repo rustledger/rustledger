@@ -169,6 +169,10 @@ fn load_before(root: &Path) -> Result<Before> {
     Ok(Before { fingerprint, files })
 }
 
+/// How `unstable` starts its reason, so the refusal names the input, not the
+/// result, as the problem.
+const UNSTABLE: &str = "The ledger does not load the same way twice,";
+
 /// Load `root` a second time and compare with `before`. A ledger that loads
 /// differently from one run to the next (a plugin that emits entries in hash
 /// order, say) cannot be certified by comparing two loads, so it is refused
@@ -181,7 +185,7 @@ fn unstable(root: &Path, before: &Before) -> Result<Option<String>> {
     Ok(
         equivalence::first_difference(&before.fingerprint, &again).map(|d| {
             format!(
-                "the ledger does not load the same way twice, even unchanged, so no \
+                "{UNSTABLE} even unchanged, so no \
                  restructuring of it can be verified (a plugin producing entries in a \
                  varying order is the usual cause): {d}"
             )
@@ -219,7 +223,12 @@ fn report_check(
     if let Some(reason) = difference {
         writeln!(
             err,
-            "error: refusing to {operation}: the result would not load as the same ledger.\n  {reason}\n  Nothing was written."
+            "error: refusing to {operation}: {}\n  {reason}\n  Nothing was written.",
+            if reason.starts_with(UNSTABLE) {
+                "the ledger as it is cannot be verified."
+            } else {
+                "the result would not load as the same ledger."
+            }
         )?;
         return Ok(false);
     }

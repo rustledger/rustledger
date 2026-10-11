@@ -806,6 +806,27 @@ pub fn run_query(
     booking_method: rustledger_core::BookingMethod,
     summary_accounts: rustledger_query::executor::SummaryAccounts,
 ) -> out::QueryResult {
+    run_query_with_tables(
+        directives,
+        query_str,
+        account_types,
+        booking_method,
+        summary_accounts,
+        None,
+    )
+}
+
+/// [`run_query`], with the tables earlier `CREATE TABLE`s made: the query
+/// sees them, and leaves behind any it creates (#2579). A `session` passes
+/// its own, so a table one `query` call makes is there for the next.
+fn run_query_with_tables(
+    directives: &[rustledger_core::Directive],
+    query_str: &str,
+    account_types: rustledger_core::AccountTypes,
+    booking_method: rustledger_core::BookingMethod,
+    summary_accounts: rustledger_query::executor::SummaryAccounts,
+    tables: Option<&std::cell::RefCell<rustledger_query::executor::CreatedTables>>,
+) -> out::QueryResult {
     let parsed = match parse_query(query_str) {
         Ok(q) => q,
         Err(e) => {
@@ -820,7 +841,16 @@ pub fn run_query(
     executor.set_account_types(account_types);
     executor.set_booking_method(booking_method);
     executor.set_summary_accounts(summary_accounts);
-    match executor.execute(&parsed) {
+    if let Some(tables) = tables {
+        executor.set_created_tables(tables.take());
+    }
+    let executed = executor.execute(&parsed);
+    // Back to the session whatever the query did: a failed query leaves
+    // the tables as they were.
+    if let Some(tables) = tables {
+        tables.replace(executor.take_created_tables());
+    }
+    match executed {
         Ok(result) => {
             // Infer each column's datatype from its first NON-NULL value.
             // First-row-only inference declared "null" for columns whose
@@ -1705,6 +1735,10 @@ pub struct SessionState {
     includes: Vec<(String, u32)>,
     /// Pad-expanded directives for querying, computed once on first `query`.
     padded: std::cell::OnceCell<Vec<rustledger_core::Directive>>,
+    /// The tables this session's `CREATE TABLE`s made, there for its later
+    /// queries (#2579). Each `query` builds a fresh executor over the held
+    /// directives and lends it these.
+    created_tables: std::cell::RefCell<rustledger_query::executor::CreatedTables>,
 }
 
 impl SessionState {
@@ -1725,6 +1759,7 @@ impl SessionState {
                 .map(|i| (i.path, i.lineno))
                 .collect(),
             padded: std::cell::OnceCell::new(),
+            created_tables: std::cell::RefCell::default(),
         }
     }
 
@@ -1782,6 +1817,7 @@ impl SessionState {
             plugins: vec![],
             includes: vec![],
             padded: std::cell::OnceCell::new(),
+            created_tables: std::cell::RefCell::default(),
         }
     }
 
@@ -1815,6 +1851,7 @@ impl SessionState {
                     plugins: plugin_dtos,
                     includes: loaded_files.into_iter().map(|p| (p, 0)).collect(),
                     padded: std::cell::OnceCell::new(),
+                    created_tables: std::cell::RefCell::default(),
                 }
             }
             Err(e) => Self {
@@ -1826,6 +1863,7 @@ impl SessionState {
                 plugins: vec![],
                 includes: vec![],
                 padded: std::cell::OnceCell::new(),
+                created_tables: std::cell::RefCell::default(),
             },
         }
     }
@@ -1880,12 +1918,13 @@ impl SessionState {
         let directives = self
             .padded
             .get_or_init(|| rustledger_booking::merge_with_padding(&self.directives));
-        run_query(
+        run_query_with_tables(
             directives,
             query_str,
             self.account_types(),
             booking_method_from(&self.options.booking_method),
             summary_accounts_from(&summary_options!(self.options)),
+            Some(&self.created_tables),
         )
     }
 
@@ -3713,5 +3752,51 @@ option \"booking_method\" \"NONE\"
     fn session_realizes_with_the_global_booking_method() {
         let session = SessionState::from_source(GLOBAL_NONE);
         assert_both_lots(&session.query("BALANCES"), "session");
+    }
+}
+
+/// A session keeps the tables its `CREATE TABLE`s make for its later queries
+/// (#2579). Each `query` built a fresh executor, so a table was gone by the
+/// next call.
+#[cfg(test)]
+mod session_created_tables {
+    use super::SessionState;
+
+    const LEDGER: &str = "2024-01-01 open Assets:Cash\n\
+        2024-01-01 open Expenses:Food\n\
+        2024-01-02 * \"lunch\"\n  Expenses:Food  10 USD\n  Assets:Cash\n";
+
+    fn ok(result: &super::out::QueryResult, query: &str) {
+        assert!(result.errors.is_empty(), "{query}: {:?}", result.errors);
+    }
+
+    #[test]
+    fn a_table_made_by_one_query_is_there_for_the_next() {
+        let session = SessionState::from_source(LEDGER);
+        let create = "CREATE TABLE spent AS SELECT account, number WHERE number > 0";
+        ok(&session.query(create), create);
+        let result = session.query("SELECT account FROM spent");
+        ok(&result, "SELECT account FROM spent");
+        assert_eq!(result.rows.len(), 1);
+
+        // INSERT reaches the same table.
+        let insert = "INSERT INTO spent VALUES ('Expenses:Rent', 5)";
+        ok(&session.query(insert), insert);
+        assert_eq!(session.query("SELECT * FROM spent").rows.len(), 2);
+
+        // A failed query leaves the tables as they were.
+        assert!(!session.query("SELECT nosuch FROM spent").errors.is_empty());
+        assert!(!session.query(create).errors.is_empty(), "already exists");
+        assert_eq!(session.query("SELECT * FROM spent").rows.len(), 2);
+
+        // Each session has its own, and the free functions none.
+        let other = SessionState::from_source(LEDGER);
+        assert!(!other.query("SELECT * FROM spent").errors.is_empty());
+        ok(&super::query(LEDGER, create), create);
+        assert!(
+            !super::query(LEDGER, "SELECT * FROM spent")
+                .errors
+                .is_empty()
+        );
     }
 }

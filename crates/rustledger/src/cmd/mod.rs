@@ -18,3 +18,4 @@ pub mod price;
 pub mod price_cmd;
 pub mod query;
 pub mod report_cmd;
+pub mod restructure;

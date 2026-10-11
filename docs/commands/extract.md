@@ -298,7 +298,8 @@ in the same commodity, are candidates. A new transaction is a duplicate when it
 shares an id link with one (`^ofx-…`, `^csv-…` from
 `transaction_id_column`, or `^wasm-<importer>/…` from a WASM importer; see
 [Importing Data](../guides/importing.md)) and moves the same amount on any date, or when it has
-the same date and amount and the same or a similar payee/narration. Ids of the
+the same date and amount and the same or a similar payee/narration. The
+payee compared is the one [payee rewriting](#payee-rewriting) produced. Ids of the
 same kind that differ mean two different transactions, however alike they
 look; when only one side has an id (a ledger imported before ids existed), the
 text decides. An entry that splits the account's leg over several postings is
@@ -396,6 +397,57 @@ default_expense = "Expenses:Unknown"
 "GAS STATION" = "Expenses:Transport:Gas"
 "PAYROLL" = "Income:Salary"
 ```
+
+### Payee Rewriting
+
+Banks name payees their own way: `Hofer Dankt`, `AMZN Mktp DE*4Z81T`,
+`PAYPAL *SPOTIFY`. A `[payees]` table rewrites them to the names your ledger
+uses:
+
+```toml
+# Shared by every entry.
+[payees]
+"Hofer Dankt" = "Hofer"
+"/^AMZN Mktp/" = "Amazon"
+"PAYPAL *SPOTIFY" = "Spotify"
+
+[[importers]]
+name = "bank"
+# ...
+
+# Only for statements imported through this entry; tried before [payees].
+[importers.payees]
+"SEPA Lastschrift Wien Energie" = "Wien Energie"
+```
+
+- **Patterns match like `[importers.mappings]`**: a key is a case-insensitive
+  substring (`"Hofer Dankt"` matches `HOFER DANKT 0815`), and a key written
+  between slashes is a case-insensitive regular expression (`"/^AMZN Mktp/"`).
+  `*` in a plain key is an ordinary character, not a wildcard.
+- **The first match wins, in file order**: an entry's `[importers.payees]`
+  first, then `[payees]`, each top to bottom. Unlike mappings, a longer
+  pattern does not outrank a shorter one written above it: "most specific" is
+  not defined for a regex, and file order is something you can see.
+- **What is matched** is the payee the statement gives, or the narration when
+  there is none (a file without a payee column puts the counterparty in its
+  description).
+- **Only the payee changes.** The narration keeps the bank's description, so
+  nothing the statement said is lost, and no copy of the original is kept.
+- **Account mappings still see the bank's text.** `[importers.mappings]`
+  matches the raw payee and narration, before the rewrite, so a mapping on
+  `"HOFER DANKT"` keeps working after `Hofer Dankt` becomes `Hofer`.
+- **Every importer**: the rewrite runs on the output of the CSV, OFX and WASM
+  importers alike, before [output ordering](#output-order) and
+  [duplicate detection](#duplicate-detection), so `--existing` compares the
+  canonical names your ledger holds.
+- **Where it applies**: the shared table applies whenever `extract` finds an
+  `importers.toml`, including `--auto` and runs given column flags only; an
+  entry's table applies when that entry is used. A file that cannot be read
+  on a run that would not otherwise read it (`--auto`, say) is skipped with a
+  warning.
+- **Errors**: a key between slashes that is not a valid regular expression, an
+  empty key, or an empty payee is a config error naming the entry and table it
+  is in, and `--list-importers` reports it too.
 
 ### Command-Line Flags and `importers.toml`
 

@@ -111,7 +111,10 @@ Each row in a default `SELECT` is one posting from one transaction. The columns 
 
 ```sql
 SELECT account AS acc, sum(position) AS balance
+SELECT year(date), sum(cost(position)) AS "Total spent" GROUP BY 1
 ```
+
+Keywords, column names, function names and table names are case-insensitive, as in bean-query: `SELECT ACCOUNT` reads the `account` column. An unquoted alias is folded to lower case (`AS Total` heads the column `total`). An alias in double quotes keeps its case and may start with a digit or hold spaces (`AS "2023"`); write `""` for a `"` inside it.
 
 ## WHERE Clause
 
@@ -574,12 +577,12 @@ WHERE account ~ "Assets" OR account ~ "Liabilities"
 
 ```sql
 /* Run separate queries for each year */
-SELECT root(account, 2), sum(cost(position)) AS y2023
+SELECT root(account, 2), sum(cost(position)) AS "2023"
 WHERE account ~ "Expenses" AND year(date) = 2023
 GROUP BY 1
 ORDER BY 1
 
-SELECT root(account, 2), sum(cost(position)) AS y2024
+SELECT root(account, 2), sum(cost(position)) AS "2024"
 WHERE account ~ "Expenses" AND year(date) = 2024
 GROUP BY 1
 ORDER BY 1

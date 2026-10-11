@@ -461,6 +461,67 @@ fn extract_adapter_keeps_entry_values_and_lets_flags_override() {
     );
 }
 
+/// `ag-rledger extract` and `extract --list-importers` read the `[payees]`
+/// and `[importers.payees]` tables (#2550) like `rledger` does: the payee is
+/// rewritten (entry table first), and a bad pattern fails the listing.
+#[test]
+fn extract_adapter_applies_payee_tables() {
+    let tmp = tempfile::tempdir().unwrap();
+    let csv = write_fixture(
+        tmp.path(),
+        "stmt.csv",
+        "date,payee,desc,amount\n2025-01-15,HOFER DANKT,Card,-1.00\n2025-01-16,AMZN Mktp DE,Order,-3.00\n",
+    );
+    let config = write_fixture(
+        tmp.path(),
+        "importers.toml",
+        "[payees]\n\"/^amzn/\" = \"Amazon\"\n\"hofer\" = \"Shared\"\n\
+         [[importers]]\nname = \"bank\"\naccount = \"Assets:Bank\"\n\
+         currency = \"EUR\"\ndate_column = \"date\"\npayee_column = \"payee\"\n\
+         narration_column = \"desc\"\namount_column = \"amount\"\n\
+         [importers.payees]\n\"hofer dankt\" = \"Hofer\"\n",
+    );
+    let (code, env) = run(&[
+        "extract",
+        "--config",
+        config.to_str().unwrap(),
+        "--importer",
+        "bank",
+        csv.to_str().unwrap(),
+    ]);
+    assert_eq!(code, 0, "extract failed: {env}");
+    let stdout = env["result"]["stdout"].as_str().unwrap_or_default();
+    assert!(
+        stdout.contains("2025-01-15 * \"Hofer\" \"Card\""),
+        "{stdout}"
+    );
+    assert!(
+        stdout.contains("2025-01-16 * \"Amazon\" \"Order\""),
+        "{stdout}"
+    );
+
+    let (code, env) = run(&[
+        "extract",
+        "--config",
+        config.to_str().unwrap(),
+        "--list-importers",
+    ]);
+    assert_eq!(code, 0, "list-importers failed: {env}");
+
+    let bad = write_fixture(tmp.path(), "bad.toml", "[payees]\n\"/(/\" = \"X\"\n");
+    let (code, env) = run(&[
+        "extract",
+        "--config",
+        bad.to_str().unwrap(),
+        "--list-importers",
+    ]);
+    assert_ne!(code, 0, "a bad pattern must fail the listing: {env}");
+    assert!(
+        env.to_string().contains("not a valid regular expression"),
+        "{env}"
+    );
+}
+
 /// Run `ag-rledger <args...>` with `dir` as the cwd and the only config
 /// source, and return `(exit_code, envelope, stderr)`.
 fn run_in(dir: &std::path::Path, args: &[&str]) -> (i32, Value, String) {

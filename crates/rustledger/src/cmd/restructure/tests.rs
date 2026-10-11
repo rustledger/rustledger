@@ -907,3 +907,58 @@ fn group_ownership_carries_over() {
         0o600
     );
 }
+
+/// A ledger whose two loads differ is refused: `unstable` reports any
+/// difference between `before` and a fresh load. Simulated by changing the
+/// file between the two loads, which is what a varying plugin looks like.
+#[test]
+fn a_ledger_that_loads_differently_twice_is_refused() {
+    let dir = tmp();
+    let file = write(dir.path(), "ledger.beancount", LEDGER);
+    let before = super::load_before(&file).unwrap();
+    assert_eq!(super::unstable(&file, &before).unwrap(), None);
+    fs::write(&file, LEDGER.replace("\"Lunch\"", "\"Brunch\"")).unwrap();
+    let reason = super::unstable(&file, &before).unwrap();
+    assert!(
+        reason
+            .as_deref()
+            .is_some_and(|r| r.contains("does not load the same way twice")),
+        "{reason:?}"
+    );
+}
+
+/// A restore after a failed verification gives the file back its group.
+#[cfg(unix)]
+#[test]
+fn restore_keeps_the_group() {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let out = std::process::Command::new("id").arg("-G").output().unwrap();
+    let groups: Vec<u32> = String::from_utf8_lossy(&out.stdout)
+        .split_whitespace()
+        .filter_map(|g| g.parse().ok())
+        .collect();
+    let dir = tmp();
+    let file = write(dir.path(), "ledger.beancount", "; original\n");
+    let mine = fs::metadata(&file).unwrap().gid();
+    let Some(&other) = groups.iter().find(|&&g| g != mine) else {
+        eprintln!("Skipping restore_keeps_the_group: only one group");
+        return;
+    };
+    std::os::unix::fs::chown(&file, None, Some(other)).unwrap();
+    fs::set_permissions(&file, fs::Permissions::from_mode(0o640)).unwrap();
+    let plan = swap::Plan {
+        writes: vec![(file.clone(), "; replaced\n".to_string())],
+        commit: file.clone(),
+        removes: Vec::new(),
+        backup_base: dir.path().canonicalize().unwrap(),
+        originals: vec![(file.clone(), b"; original\n".to_vec())],
+        operation: "split",
+        template: file.clone(),
+        mode_mask: None,
+    };
+    swap::apply(&plan, || anyhow::bail!("simulated mismatch")).unwrap_err();
+    assert_eq!(fs::read_to_string(&file).unwrap(), "; original\n");
+    let meta = fs::metadata(&file).unwrap();
+    assert_eq!(meta.gid(), other);
+    assert_eq!(meta.permissions().mode() & 0o777, 0o640);
+}

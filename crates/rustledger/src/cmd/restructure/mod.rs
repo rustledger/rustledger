@@ -169,6 +169,26 @@ fn load_before(root: &Path) -> Result<Before> {
     Ok(Before { fingerprint, files })
 }
 
+/// Load `root` a second time and compare with `before`. A ledger that loads
+/// differently from one run to the next (a plugin that emits entries in hash
+/// order, say) cannot be certified by comparing two loads, so it is refused
+/// when caught. Catching it is probabilistic: two varying loads can agree by
+/// chance, and the reload after writing (which restores the backup on a
+/// difference) is the backstop. The real fix for such a ledger is in the
+/// plugin.
+fn unstable(root: &Path, before: &Before) -> Result<Option<String>> {
+    let (again, _) = equivalence::load(root, overlay::OverlayFs::disk())?;
+    Ok(
+        equivalence::first_difference(&before.fingerprint, &again).map(|d| {
+            format!(
+                "the ledger does not load the same way twice, even unchanged, so no \
+                 restructuring of it can be verified (a plugin producing entries in a \
+                 varying order is the usual cause): {d}"
+            )
+        }),
+    )
+}
+
 /// Compare the planned ledger with `before`. `Ok(None)` when they match,
 /// `Ok(Some(reason))` when they do not.
 fn check_planned(

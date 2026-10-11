@@ -229,8 +229,19 @@ fn restore(
             break;
         };
         let saved = backup_dir.join(backup_rel(base, path));
-        let tmp = path.with_extension("rledger-restore");
-        fs::copy(&saved, &tmp).with_context(|| format!("failed to restore {}", path.display()))?;
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let tmp = path.with_file_name(format!(".{name}.rledger-restore-{}", unique_suffix()));
+        let bytes =
+            fs::read(&saved).with_context(|| format!("failed to restore {}", path.display()))?;
+        let mut f = create_private(&tmp)?;
+        f.write_all(&bytes)
+            .and_then(|()| f.sync_all())
+            .with_context(|| format!("failed to restore {}", path.display()))?;
+        // The backup copy carries the original's group and mode; so must the
+        // restored file (a plain copy would take the process's group).
+        let meta = fs::metadata(&saved)
+            .with_context(|| format!("failed to restore {}", path.display()))?;
+        copy_access(&tmp, &meta, None)?;
         fs::rename(&tmp, path).with_context(|| format!("failed to restore {}", path.display()))?;
     }
     let originals: Vec<&PathBuf> = plan.originals.iter().map(|(p, _)| p).collect();

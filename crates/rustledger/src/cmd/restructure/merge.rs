@@ -160,8 +160,10 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
     };
     writeln!(out, "  {verb}  {}", super::show(&target))?;
 
-    let mut difference =
-        super::check_planned(&root, &before, &swap_plan.writes, &swap_plan.removes)?;
+    let mut difference = match super::unstable(reference, &before)? {
+        Some(reason) => Some(reason),
+        None => super::check_planned(&root, &before, &swap_plan.writes, &swap_plan.removes)?,
+    };
     if args.output.is_some() && difference.is_none() {
         // The new file must not change the ledger it was made from either: a
         // glob in FILE's tree that matches the output path would pick the

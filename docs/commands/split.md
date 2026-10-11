@@ -80,7 +80,10 @@ plugins, booking and validation, and compares:
 - realized capital gains and failing balance assertions.
 
 If anything differs, `split` prints the first difference and exits with status 1
-without writing anything. After writing, it loads the ledger from disk once more
+without writing anything. The current ledger is loaded twice, and if the two loads
+differ (a plugin that emits entries in a varying order, for example) the command
+refuses too, since no comparison could verify such a ledger. Such a ledger can
+still agree with itself by chance; the check after writing is the backstop. After writing, it loads the ledger from disk once more
 and restores the backup if that load disagrees.
 
 A common refusal is a relative `document` path: it resolves against the

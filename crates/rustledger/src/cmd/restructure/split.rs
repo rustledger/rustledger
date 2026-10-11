@@ -201,7 +201,10 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
         layout.periods.len()
     )?;
 
-    let difference = super::check_planned(&root, &before, &swap_plan.writes, &[])?;
+    let difference = match super::unstable(&root, &before)? {
+        Some(reason) => Some(reason),
+        None => super::check_planned(&root, &before, &swap_plan.writes, &[])?,
+    };
     if !super::report_check(out, err, "split", &before, difference.as_deref())? {
         return Ok(ExitCode::from(1));
     }

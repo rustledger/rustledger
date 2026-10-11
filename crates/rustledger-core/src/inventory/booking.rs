@@ -1389,15 +1389,23 @@ impl Inventory {
         })
     }
 
-    /// Collapse the cost-bearing lots on each SIDE of each currency, long and
-    /// short, into a single weighted-average-cost lot. Cost-less (cash)
-    /// positions are left untouched.
+    /// Collapse the cost-bearing lots of each POOL into a single
+    /// weighted-average-cost lot, undated, carrying the pool's exact total
+    /// cost. A pool is a commodity, a cost currency and a side (long or
+    /// short). Cost-less (cash) positions are left untouched.
     ///
     /// This presents the realized balance of an AVERAGE-booked account, where
-    /// the lots on one side of a commodity share one running cost. The journal
-    /// keeps the real per-lot costs; only this view merges them (matching
-    /// hledger's pool model). A side whose lots have mismatched cost
-    /// currencies is left untouched.
+    /// the lots of one pool share one running cost. The journal keeps the
+    /// real per-lot costs; only this view merges them (matching hledger's
+    /// pool model). It is THE presentation of an AVERAGE account, used by
+    /// every surface that shows one (#2543): `BALANCES`, `sum(position)`, the
+    /// running `balance` column and `report balances`, through
+    /// `rustledger_booking::present_inventory`.
+    ///
+    /// The cost currency is part of the pool: X held at a USD cost never pools
+    /// with X at a EUR cost, there being no one average to give them. Such
+    /// lots used to be left unmerged altogether, so the USD lots did not pool
+    /// with one another either (#2543).
     ///
     /// The input must be REALIZED, its sales already taken by booking: the
     /// query executor replays an account's postings through the booking
@@ -1414,19 +1422,24 @@ impl Inventory {
     /// range. The merged view is a realized balance, so a clamped total would
     /// be rendered as an exact position (#1863).
     pub fn merge_average(&mut self) -> Result<(), OverflowError> {
-        // Keyed on the sign of the lot's units: `true` for the short side. A
-        // zero lot holds nothing (#2385) and, alone on its side, sums to zero
-        // and is removed; beside non-zero lots it adds nothing to the average.
-        let side = |p: &Position| (p.units.currency.clone(), p.units.number.is_sign_negative());
-        let sides: std::collections::BTreeSet<(Currency, bool)> = self
-            .positions
-            .iter()
-            .filter(|p| p.cost.is_some())
-            .map(side)
-            .collect();
+        // Keyed on the commodity, the cost currency and the sign of the lot's
+        // units (`true` for the short side). A zero lot holds nothing (#2385)
+        // and, alone in its pool, sums to zero and is removed; beside
+        // non-zero lots it adds nothing to the average.
+        let pool = |p: &Position| {
+            p.cost.as_ref().map(|cost| {
+                (
+                    p.units.currency.clone(),
+                    cost.currency.clone(),
+                    p.units.number.is_sign_negative(),
+                )
+            })
+        };
+        let pools: std::collections::BTreeSet<(Currency, Currency, bool)> =
+            self.positions.iter().filter_map(pool).collect();
 
-        for key in sides {
-            let on_side = |p: &Position| p.cost.is_some() && side(p) == key;
+        for key in pools {
+            let on_side = |p: &Position| pool(p).as_ref() == Some(&key);
             let slots: Vec<usize> = self
                 .positions
                 .iter_slots()
@@ -1451,8 +1464,10 @@ impl Inventory {
                 (total_units, avg)
             };
 
-            // Couldn't average a non-zero position (cost-currency mismatch):
-            // leave its lots untouched rather than corrupt them.
+            // Couldn't average a non-zero position (a cost total past
+            // `Decimal`'s range): leave its lots untouched rather than
+            // corrupt them. One pool holds one cost currency, so a currency
+            // mismatch no longer lands here.
             if !total_units.is_zero() && avg.is_none() {
                 continue;
             }
@@ -3383,6 +3398,44 @@ mod reduction_tests {
             .collect();
         stk.sort();
         assert_eq!(stk, vec![(dec!(-6), dec!(103)), (dec!(20), dec!(160))]);
+    }
+
+    /// The cost currency is part of the pool (#2543): two USD lots pool into
+    /// one, two EUR lots into another, and the two never pool together. A
+    /// side mixing cost currencies was left unmerged altogether, so the USD
+    /// lots stayed two lots as well.
+    #[test]
+    fn merge_average_pools_each_cost_currency_apart() {
+        let at = |units: i64, cost: i64, currency: &str, day: u32| {
+            Position::with_cost(
+                Amount::new(Decimal::from(units), "STK"),
+                Cost::new(Decimal::from(cost), currency)
+                    .with_date(naive_date(2024, 1, day).unwrap()),
+            )
+        };
+        let mut i = Inventory::new();
+        i.add(at(1, 100, "USD", 1)).expect("fits");
+        i.add(at(2, 90, "EUR", 2)).expect("fits");
+        i.add(at(2, 200, "USD", 3)).expect("fits");
+        i.add(at(2, 110, "EUR", 4)).expect("fits");
+        i.merge_average().expect("fits");
+        let mut stk: Vec<(Decimal, Decimal, String, Option<crate::NaiveDate>)> = i
+            .positions()
+            .map(|p| {
+                let c = p.cost.as_ref().unwrap();
+                (p.units.number, c.number, c.currency.to_string(), c.date)
+            })
+            .collect();
+        stk.sort();
+        assert_eq!(stk.len(), 2, "one pool per cost currency: {stk:?}");
+        assert_eq!(
+            (stk[0].0, stk[0].1, stk[0].2.as_str(), stk[0].3),
+            (dec!(3), dec!(500) / dec!(3), "USD", None)
+        );
+        assert_eq!(
+            (stk[1].0, stk[1].1, stk[1].2.as_str(), stk[1].3),
+            (dec!(4), dec!(100), "EUR", None)
+        );
     }
 
     #[test]

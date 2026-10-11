@@ -2693,9 +2693,12 @@ pub fn import_extract(
     if entry.currency.is_none() {
         entry.currency = Some("USD".to_string());
     }
+    // The entry's `[importers.payees]` (#2550), validated before extracting.
+    // One entry is all this surface receives, so there is no shared table.
+    let payee_rules = entry.payee_rules(None).map_err(|e| e.to_string())?;
     let text = String::from_utf8_lossy(content);
 
-    let result = if detect_format(filename, content) == Some(DetectedFormat::Ofx) {
+    let mut result = if detect_format(filename, content) == Some(DetectedFormat::Ofx) {
         // OFX needs only account/currency; column mappings don't apply.
         // `account` is required HERE (not defaulted): the builder would
         // otherwise silently target Expenses:Unknown, which is wrong for
@@ -2717,6 +2720,10 @@ pub fn import_extract(
             .extract_string(&text, &cfg)
             .map_err(|e| e.to_string())?
     };
+
+    // After the importer, whose account mappings matched the raw text, as
+    // the CLI does.
+    payee_rules.apply(&mut result.directives);
 
     Ok(imp::ExtractResult {
         entries: result
@@ -3159,6 +3166,41 @@ mod importer_tests {
         let config = "name = \"pdf\"\naccount = \"Assets:Bank\"\npreprocess = [\"pdftotext\"]";
         let err = import_extract("x.csv", CSV.as_bytes(), config).expect_err("rejects");
         assert!(err.contains("host"), "{err}");
+    }
+
+    /// An entry's `[importers.payees]` (#2550) rewrites the payee over the
+    /// component too, for CSV and OFX, leaving the narration as it was; a
+    /// pattern that cannot compile is an error naming the entry.
+    #[test]
+    fn extract_applies_the_entry_payee_table() {
+        let config = "name = \"x\"\naccount = \"Assets:Bank\"\ndate_column = \"Date\"\n\
+            narration_column = \"Description\"\namount_column = \"Amount\"\n\
+            [payees]\n\"/^coffee/\" = \"Cafe\"\n";
+        let payees = |result: &imp::ExtractResult| -> Vec<(Option<String>, Option<String>)> {
+            result
+                .entries
+                .iter()
+                .filter_map(|d| match d {
+                    wit::Directive::Transaction(t) => Some((t.payee.clone(), t.narration.clone())),
+                    _ => None,
+                })
+                .collect()
+        };
+        let csv = import_extract("bank.csv", CSV.as_bytes(), config).expect("extracts");
+        assert_eq!(
+            payees(&csv)[0],
+            (Some("Cafe".to_string()), Some("Coffee Shop".to_string()))
+        );
+        assert_eq!(payees(&csv)[1].0, None, "no rule matches Salary");
+
+        let ofx_config =
+            "name = \"o\"\naccount = \"Assets:Bank\"\n[payees]\n\"coffee\" = \"Cafe\"\n";
+        let ofx = import_extract("bank.ofx", OFX.as_bytes(), ofx_config).expect("extracts");
+        assert_eq!(payees(&ofx)[0].0.as_deref(), Some("Cafe"));
+
+        let bad = "name = \"o\"\naccount = \"Assets:Bank\"\n[payees]\n\"/(/\" = \"Cafe\"\n";
+        let err = import_extract("bank.ofx", OFX.as_bytes(), bad).expect_err("rejects");
+        assert!(err.contains("importer 'o': [importers.payees]"), "{err}");
     }
 
     #[test]

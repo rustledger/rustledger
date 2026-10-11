@@ -49,7 +49,8 @@ See [Plugins Reference](../reference/plugins.md) for full list.
 
 ### Known Differences
 
-1. **Decimal precision**: rustledger uses 28-digit precision vs Python's arbitrary precision. This only affects extreme edge cases (28+ decimal places).
+1. **Decimal precision**: both keep 28 significant digits. Python beancount's `decimal` context has `prec = 28`, and rustledger's `Decimal` holds 28–29. So an amount, a running balance or a merged lot is exact to 28 significant digits in both, and the last digit rounds the same way. For example, a lot of `1e20` units merged with `1e-15` units on the same date keeps `1e20`, a relative difference below 1e-28.
+   The difference is **magnitude**: Python's context reaches about 1e999999, while `Decimal` tops out near 7.9e28. Where a result can't be represented, rustledger escalates to exact arithmetic or reports an overflow error. It never stores a clamped number.
 
 1. **Error messages**: Format differs but contains same information.
 

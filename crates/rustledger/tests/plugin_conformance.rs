@@ -16,6 +16,7 @@
 //! | Python built-in | `plugin "python:leafonly"` / `"python:check_commodity"` force the Python implementation | check |
 //! | native + Python together | `with_plugins.beancount` fixture | check |
 //! | WASM importer (a `wasm_importer_main!` guest) | `extract --wasm-importer x.wasm` | extract |
+//! | WASM importer + `importers.toml` `[payees]` | `extract --wasm-importer x.wasm` | extract |
 //!
 //! And the LIMITS of each sandboxed kind (WASM plugin, Python plugin,
 //! WASM importer), through the same commands:
@@ -449,6 +450,22 @@ fn wasm_importer_in_extract() {
         .has("conformance: WASM importer ran")
         .has("2024-01-15 * \"conformance import\"")
         .has("Expenses:Conformance   12.34 USD");
+}
+
+/// `importers.toml`'s `[payees]` rewrites a WASM importer's payee like a
+/// built-in's (#2550): the step runs on every importer's output. The guest
+/// writes no payee, so its narration is matched, and is kept.
+#[test]
+fn wasm_importer_output_gets_payee_rewrites() {
+    let Some(guests) = guests() else { return };
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("importers.toml"),
+        "[payees]\n\"/^conformance\\\\b/\" = \"Conformance Bank\"\n",
+    )
+    .unwrap();
+    extract(dir.path(), guests, "statement", &[])
+        .has("2024-01-15 * \"Conformance Bank\" \"conformance import\"");
 }
 
 // ---------------------------------------------------------------------------

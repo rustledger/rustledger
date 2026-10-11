@@ -208,7 +208,19 @@ use crate::types::{Error, LedgerOptions};
 /// v36: loader v38, tags and links are a sorted, deduplicated set (#2545) and
 /// `pushtag` reaches `document` and `note` entries (#2544). Parsed directives
 /// changed, so a v35 blob would serve tags in written order with duplicates.
-pub const CACHE_VERSION: u32 = 36;
+/// v37: a cost spec written without a currency (`{}`) takes the one
+/// beancount's rule gives it before any lot is matched, and a reduction priced
+/// in another currency than its cost is refused (#2571). Loader v38,
+/// unchanged -- parsed directives did not move. A sale that sold a EUR lot
+/// for USD cash now fails, so a v36 blob would serve its old booked lots and
+/// no error.
+/// v38: a tolerance needing more digits than a `Decimal` holds is rounded down
+/// for the balance check, and interpolation keeps a quantized amount only
+/// within it, booking the exact amount otherwise (#2582). Loader v38,
+/// unchanged -- parsed directives did not move. `Ledger` archives booked
+/// directives and their errors, so a v37 blob would serve the old amount, or
+/// no E3001 where one is now reported.
+pub const CACHE_VERSION: u32 = 38;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

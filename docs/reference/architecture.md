@@ -111,7 +111,7 @@ This document describes rustledger's crate structure and data flow.
 | `rustledger` | CLI binary (`rledger`, `bean-*` commands) |
 | `rustledger-wasm` | WebAssembly bindings for JS/TS |
 | `rustledger-ffi-wasi` | Slimmed FFI-support helpers reused by `rustledger-ffi-component` (loader orchestration + WIT-input construction + `compute_directive_hash`). Phase 5 ([#1419](https://github.com/rustledger/rustledger/issues/1419)) is complete: the wasip1 JSON-RPC surface and the Directive→JSON DTO are removed; the crate is deliberately retained (FFI glue kept out of core `rustledger-loader`). |
-| `rustledger-ffi-component` | FFI via WASI Preview 2 / Component Model (typed WIT contract, `rustledger:ledger@3.0.0`) — primary embedding surface, default in the rustfava embedder ([#1384](https://github.com/rustledger/rustledger/issues/1384) Phase 4) |
+| `rustledger-ffi-component` | FFI via WASI Preview 2 / Component Model (typed WIT contract, `rustledger:ledger@3.x`; the exact version is the `package` line of `wit/world.wit`) — primary embedding surface, default in the rustfava embedder ([#1384](https://github.com/rustledger/rustledger/issues/1384) Phase 4) |
 
 ## Data Flow
 

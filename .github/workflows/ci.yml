@@ -766,6 +766,12 @@ jobs:
           fetch-depth: 0
       - name: WIT interface change requires a package-version bump
         run: ./scripts/check-wit-version-bump.sh "${{ github.event.pull_request.base.sha }}"
+      # Docs cited `@3.0.0` through thirteen minor bumps (#2508). Every
+      # `rustledger:ledger@...` citation must be the current major (`@3.x`)
+      # or the exact current version. Runs here because this job has no path
+      # filter, so a docs-only PR is checked too.
+      - name: Contract version citations match world.wit
+        run: ./scripts/check-wit-version-citations.sh
 
   # Gate job - all core checks must pass (or be skipped on non-code PRs)
   build:

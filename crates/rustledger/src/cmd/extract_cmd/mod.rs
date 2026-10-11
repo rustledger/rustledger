@@ -1507,7 +1507,7 @@ fn build_registry(args: &Args) -> Result<ImporterRegistry> {
 ///
 /// Per-dir scan failures (a single malformed `.wasm` among many) are
 /// written to `err_out`, with each importer loaded and each directory
-/// scanned, but don't abort startup — see [`register_wasm_dir`]'s
+/// scanned, but don't abort startup — see `ImporterRegistry::register_wasm_dir`'s
 /// skip-and-collect semantics.
 // Without the WASM importers, `args` and `err_out` are unused: those
 // importers read every flag and write every note.

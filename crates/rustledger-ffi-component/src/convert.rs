@@ -1890,7 +1890,7 @@ impl SessionState {
     }
 
     /// The held options' account-root classifier — the single place the
-    /// session turns its `name-*` roots into an [`AccountTypes`], shared by
+    /// session turns its `name-*` roots into an [`rustledger_core::AccountTypes`], shared by
     /// `query` (BQL classification), `clamp` (summary classification) and
     /// `budget` (income-vs-expense sign normalization and total bucketing).
     fn account_types(&self) -> rustledger_core::AccountTypes {

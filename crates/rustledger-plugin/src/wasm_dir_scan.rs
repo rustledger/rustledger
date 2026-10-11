@@ -1,10 +1,11 @@
 //! Shared `.wasm` directory scanner.
 //!
-//! Both [`crate::PluginManager::register_wasm_dir`] and
+//! Both `PluginManager::register_wasm_dir` and
 //! `rustledger_importer::ImporterRegistry::register_wasm_dir` walk a
-//! directory looking for `.wasm` files to register. (The latter isn't
-//! an intra-doc link because that crate sits downstream of this one
-//! in the dep graph — link from text on the importer side instead.)
+//! directory looking for `.wasm` files to register. (Neither is an
+//! intra-doc link: `PluginManager` exists only with the `wasm-runtime`
+//! feature, while this module is always built, and the importer crate
+//! sits downstream of this one in the dep graph.)
 //! The two used to
 //! be near-copies — same listing, filtering, sorting, and per-entry
 //! error handling logic, only the error wrapping and per-file load fn

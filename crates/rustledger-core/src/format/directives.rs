@@ -212,7 +212,7 @@ pub fn format_custom_lines(custom: &Custom, config: &FormatConfig) -> Vec<Format
 
 /// Thin `String` wrappers used by the unit tests to format one directive
 /// in isolation (self-aligned). Production code formats whole files via
-/// [`super::format_directive_lines`] + [`render_lines`], so these are
+/// [`super::format_directive_lines`] + [`super::render_lines`], so these are
 /// gated to test builds to avoid dead-code warnings.
 macro_rules! string_wrapper {
     ($(#[$m:meta])* $name:ident, $lines:ident, $ty:ty) => {

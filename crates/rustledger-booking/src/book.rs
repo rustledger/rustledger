@@ -1782,7 +1782,7 @@ impl BookingEngine {
     ///
     /// The transaction MUST already be booked — postings filled with complete
     /// units and resolved costs, as produced by [`Self::book_and_interpolate`]
-    /// or the free [`book`](crate::book) function. The loader pipeline
+    /// or the free [`book`](fn@crate::book) function. The loader pipeline
     /// guarantees this ordering. A caller that CANNOT guarantee booked input
     /// must not derive a figure from this lot-matching realization — e.g. the
     /// returns engine values **net units at market** (`rustledger-returns`),

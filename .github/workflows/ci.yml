@@ -576,6 +576,18 @@ jobs:
             cmd: cargo doc --all-features --no-deps
             components: ""
             env: RUSTDOCFLAGS=-Dwarnings
+          # Private items too (#2512): the build above skips them, so a
+          # broken link on a private item was never caught (13 had piled up
+          # across 9 crates). Also the two configurations whose feature gates
+          # move items in and out of existence: rustledger-plugin without
+          # its runtimes, and the CLI as the release builds it.
+          - name: Documentation (private items)
+            cmd: >-
+              cargo doc --workspace --all-features --no-deps --document-private-items &&
+              cargo doc -p rustledger-plugin --no-default-features --no-deps --document-private-items &&
+              cargo doc -p rustledger --no-default-features --features mimalloc,ag-rledger --no-deps --document-private-items
+            components: ""
+            env: RUSTDOCFLAGS=-Dwarnings
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@7e38f4b43b4db5c8dd498af069a4f6196df1d067 # stable

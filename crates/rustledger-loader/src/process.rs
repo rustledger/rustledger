@@ -1704,7 +1704,7 @@ pub fn document_source_dirs(source_map: &SourceMap) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-/// Build a [`ValidationOptions`] from loader-level file options.
+/// Build a [`rustledger_validate::ValidationOptions`] from loader-level file options.
 ///
 /// Layers the path-relative document directories and the *effective* booking
 /// method onto [`validation_options_from_options`] (the shared option-derived

@@ -48,7 +48,7 @@ Alternative: Consider **bincode** for Rust-to-Rust plugins (faster but Rust-spec
 Using the WebAssembly Interface Types (WIT) format:
 
 ```wit
-package beancount:plugin@0.1.0;
+package beancount:plugin@0.2.0;
 
 interface types {
     record amount {

@@ -289,6 +289,7 @@ fn failed_verification_restores_the_backup() {
         originals: vec![(file.clone(), b"; original\n".to_vec())],
         operation: "split",
         template: file.clone(),
+        mode_mask: None,
     };
     let e = swap::apply(&plan, || anyhow::bail!("simulated mismatch")).unwrap_err();
     assert!(format!("{e:#}").contains("restored"), "{e:#}");
@@ -743,4 +744,96 @@ fn permissions_carry_over() {
             .count(),
         1
     );
+}
+
+/// A file kept because it is reached through a symlink keeps its children
+/// too: removing them would leave it with a dangling include.
+#[cfg(unix)]
+#[test]
+fn merge_keeps_the_children_of_a_kept_file() {
+    let dir = tmp();
+    write(
+        dir.path(),
+        "sub/real.beancount",
+        "2020-01-01 open Assets:A\ninclude \"child.beancount\"\n",
+    );
+    let child = write(
+        dir.path(),
+        "sub/child.beancount",
+        "2020-01-01 open Assets:B\n",
+    );
+    std::os::unix::fs::symlink(
+        dir.path().join("sub/real.beancount"),
+        dir.path().join("link.beancount"),
+    )
+    .unwrap();
+    let other = write(
+        dir.path(),
+        "other.beancount",
+        "include \"sub/real.beancount\"\n",
+    );
+    let other_before = fingerprint(&other);
+    let root = write(dir.path(), "main.beancount", "include \"link.beancount\"\n");
+    let (code, out, err) = run_merge(&merge_args(&root));
+    assert_eq!(code, ExitCode::SUCCESS, "{out}{err}");
+    assert!(child.exists(), "the kept file's child was deleted:\n{out}");
+    assert_eq!(fingerprint(&other), other_before);
+}
+
+/// `merge -o` must not change the ledger it was made from: a glob in FILE
+/// that matches the output path would count every directive twice.
+#[test]
+fn merge_output_into_a_globbed_directory_is_refused() {
+    let dir = tmp();
+    let root = write(
+        dir.path(),
+        "main.beancount",
+        "include \"parts/*.beancount\"\n",
+    );
+    write(
+        dir.path(),
+        "parts/a.beancount",
+        "2020-01-01 open Assets:Cash\n2020-01-01 open Income:X\n\
+         2020-02-01 * \"x\"\n  Assets:Cash  1 USD\n  Income:X\n",
+    );
+    let before = snapshot(dir.path());
+    let mut args = merge_args(&root);
+    args.output = Some(dir.path().join("parts/merged.beancount"));
+    let (code, out, err) = run_merge(&args);
+    assert_eq!(code, ExitCode::from(1), "{out}{err}");
+    assert!(
+        err.contains("would change once the output file exists"),
+        "{err}"
+    );
+    assert_eq!(snapshot(dir.path()), before);
+}
+
+/// The merged file is no more readable than the most private file in it.
+#[cfg(unix)]
+#[test]
+fn merged_file_takes_the_strictest_permissions() {
+    use std::os::unix::fs::PermissionsExt;
+    let mode = |p: &Path| fs::metadata(p).unwrap().permissions().mode() & 0o777;
+    let dir = tmp();
+    let root = write(
+        dir.path(),
+        "main.beancount",
+        "include \"secret.beancount\"\n",
+    );
+    let secret = write(
+        dir.path(),
+        "secret.beancount",
+        "2020-01-01 open Assets:Bank\n",
+    );
+    fs::set_permissions(&root, fs::Permissions::from_mode(0o644)).unwrap();
+    fs::set_permissions(&secret, fs::Permissions::from_mode(0o600)).unwrap();
+    let out_path = dir.path().join("o.beancount");
+    let mut args = merge_args(&root);
+    args.output = Some(out_path.clone());
+    let (code, out, err) = run_merge(&args);
+    assert_eq!(code, ExitCode::SUCCESS, "{out}{err}");
+    assert_eq!(mode(&out_path), 0o600);
+    let (code, out, err) = run_merge(&merge_args(&root));
+    assert_eq!(code, ExitCode::SUCCESS, "{out}{err}");
+    assert_eq!(mode(&root), 0o600);
 }

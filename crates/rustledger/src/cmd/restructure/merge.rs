@@ -77,7 +77,7 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
         removable: Vec::new(),
         root_dir: file_dir.clone(),
     };
-    let merged = flat.flatten(&file, &source)?;
+    let merged = flat.flatten(&file, &source, true)?;
     if flat.order.is_empty() {
         bail!(
             "{} includes nothing; there is nothing to merge",
@@ -116,6 +116,7 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
         originals,
         operation: "merge",
         template: file.clone(),
+        mode_mask: strictest_mode(std::iter::once(&file).chain(&flat.order)),
     };
     if args.output.is_some() && target.exists() {
         bail!(
@@ -159,7 +160,19 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
     };
     writeln!(out, "  {verb}  {}", super::show(&target))?;
 
-    let difference = super::check_planned(&root, &before, &swap_plan.writes, &swap_plan.removes)?;
+    let mut difference =
+        super::check_planned(&root, &before, &swap_plan.writes, &swap_plan.removes)?;
+    if args.output.is_some() && difference.is_none() {
+        // The new file must not change the ledger it was made from either: a
+        // glob in FILE's tree that matches the output path would pick the
+        // merged copy up and count every directive twice.
+        difference = super::check_planned(&file, &before, &swap_plan.writes, &[])?.map(|d| {
+            format!(
+                "{} would change once the output file exists: {d}",
+                file.display()
+            )
+        });
+    }
     if !super::report_check(out, err, "merge", &before, difference.as_deref())? {
         return Ok(ExitCode::from(1));
     }
@@ -187,7 +200,7 @@ struct Flattener {
 impl Flattener {
     /// `path`'s own text without its include lines, then each included file
     /// flattened, in include order.
-    fn flatten(&mut self, path: &Path, source: &str) -> Result<String> {
+    fn flatten(&mut self, path: &Path, source: &str, owned: bool) -> Result<String> {
         let seg = segment(source, path)?;
         let nl = super::newline_of(source);
         // Only the file being merged into keeps a byte-order mark; one from
@@ -225,13 +238,19 @@ impl Flattener {
                 // a symlink, is ours to remove. A symlinked or out-of-tree
                 // include may be shared with another ledger; deleting it (or
                 // the file a symlink points at) would break that ledger.
-                if target.starts_with(&self.root_dir) && lexical(&named) == target {
+                //
+                // And only when its includer is ours too: a kept file still
+                // includes its children, so removing them would leave it with
+                // a dangling include.
+                let removable =
+                    owned && target.starts_with(&self.root_dir) && lexical(&named) == target;
+                if removable {
                     self.removable.push(target.clone());
                 }
                 let (text, bytes) = super::read_source(&target)?;
                 self.order.push(target.clone());
                 self.originals.push((target.clone(), bytes));
-                let inner = self.flatten(&target, &text)?;
+                let inner = self.flatten(&target, &text, removable)?;
                 if !out.is_empty() && !out.ends_with("\n\n") {
                     out.push_str(nl);
                 }
@@ -284,4 +303,21 @@ fn resolve_include(base: &Path, include: &str) -> Result<Vec<(PathBuf, PathBuf)>
             Ok((p, c))
         })
         .collect()
+}
+
+/// The permission bits every one of `files` allows: the merged file holds the
+/// content of all of them, so it must be no more readable than the most
+/// private one.
+#[cfg(unix)]
+fn strictest_mode<'a>(files: impl Iterator<Item = &'a PathBuf>) -> Option<u32> {
+    use std::os::unix::fs::PermissionsExt;
+    files
+        .filter_map(|f| std::fs::metadata(f).ok())
+        .map(|m| m.permissions().mode() & 0o7777)
+        .reduce(|a, b| a & b)
+}
+
+#[cfg(not(unix))]
+fn strictest_mode<'a>(_files: impl Iterator<Item = &'a PathBuf>) -> Option<u32> {
+    None
 }

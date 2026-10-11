@@ -38,6 +38,9 @@ pub(super) struct Plan {
     pub(super) operation: &'static str,
     /// Whose permissions new files get (the file being restructured).
     pub(super) template: PathBuf,
+    /// Unix permission bits the commit file may have at most (`merge`: the
+    /// bits every merged file allows).
+    pub(super) mode_mask: Option<u32>,
 }
 
 /// Where the backup went.
@@ -155,8 +158,7 @@ fn stage(
             .with_context(|| format!("{} has no file name", target.display()))?
             .to_string_lossy();
         let tmp = parent.join(format!(".{name}.rledger-tmp-{}", std::process::id()));
-        let mut f = fs::File::create(&tmp)
-            .with_context(|| format!("failed to create {}", tmp.display()))?;
+        let mut f = create_private(&tmp)?;
         temps.push((tmp.clone(), target.clone()));
         f.write_all(content.as_bytes())
             .with_context(|| format!("failed to write {}", tmp.display()))?;
@@ -169,7 +171,15 @@ fn stage(
             &plan.template
         };
         if let Ok(meta) = fs::metadata(template) {
-            fs::set_permissions(&tmp, meta.permissions())
+            let mut perms = meta.permissions();
+            #[cfg(unix)]
+            if target == &plan.commit
+                && let Some(mask) = plan.mode_mask
+            {
+                use std::os::unix::fs::PermissionsExt;
+                perms.set_mode(perms.mode() & mask);
+            }
+            fs::set_permissions(&tmp, perms)
                 .with_context(|| format!("failed to set permissions on {}", tmp.display()))?;
         }
         f.sync_all()
@@ -251,7 +261,7 @@ fn make_backup(plan: &Plan) -> Result<PathBuf> {
         dir = root.join(format!("{stamp}-{}-{n}", plan.operation));
         n += 1;
     }
-    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
+    create_private_dirs(&dir)?;
     let mut manifest = format!(
         "# rledger {} backup, {stamp}\n# To undo: copy each file below back to its original path,\n# and delete the files listed as created.\n",
         plan.operation
@@ -260,11 +270,9 @@ fn make_backup(plan: &Plan) -> Result<PathBuf> {
         let rel = backup_rel(&plan.backup_base, path);
         let dest = dir.join(&rel);
         if let Some(parent) = dest.parent() {
-            fs::create_dir_all(parent)
-                .with_context(|| format!("failed to create {}", parent.display()))?;
+            create_private_dirs(parent)?;
         }
-        let mut f = fs::File::create(&dest)
-            .with_context(|| format!("failed to back up {}", path.display()))?;
+        let mut f = create_private(&dest)?;
         f.write_all(original)
             .with_context(|| format!("failed to back up {}", path.display()))?;
         // The copy is as private as the original: a ledger kept at 0600 must
@@ -309,4 +317,33 @@ fn backup_rel(base: &Path, path: &Path) -> PathBuf {
     name.push(".bak");
     out.set_file_name(name);
     out
+}
+
+/// Create a file only its owner can read; its final permissions are set once
+/// written. A file created with the default umask would expose a private
+/// ledger for as long as it takes to write it.
+fn create_private(path: &Path) -> Result<fs::File> {
+    let mut opts = fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    opts.open(path)
+        .with_context(|| format!("failed to create {}", path.display()))
+}
+
+/// `create_dir_all`, owner-only for the directories it creates.
+fn create_private_dirs(dir: &Path) -> Result<()> {
+    let mut builder = fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder
+        .create(dir)
+        .with_context(|| format!("failed to create {}", dir.display()))
 }

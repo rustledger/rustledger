@@ -166,6 +166,7 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
         originals: vec![(file.clone(), original)],
         operation: "split",
         template: file.clone(),
+        mode_mask: None,
     };
     // Targets that already exist are refused before the (slow) check runs.
     swap::preflight(&swap_plan)?;

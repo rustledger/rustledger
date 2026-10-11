@@ -73,7 +73,7 @@ pub struct WasmDirScan {
 ///
 /// Returns the dir-level `read_dir` error verbatim. Callers wrap it
 /// with whatever context they need ("failed to read importer dir ...",
-/// `WasmImporterError::Io { path, source }`, etc.).
+/// `WasmImporterError::Io { path, error }`, etc.).
 pub fn collect_wasm_paths(dir: &Path) -> std::io::Result<WasmDirScan> {
     let entries = std::fs::read_dir(dir)?;
     let mut scan = WasmDirScan::default();

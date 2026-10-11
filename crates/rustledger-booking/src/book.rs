@@ -43,8 +43,13 @@ pub enum BookingError {
     Inventory(AccountedBookingError),
 
     /// Interpolation failed after booking.
+    ///
+    /// The message names the interpolation error, so it is not also the
+    /// `source()`: a `{:#}` chain would print it twice (#2574). `From` is
+    /// implemented by hand below for the same reason (`#[from]` implies
+    /// `#[source]`).
     #[error("interpolation failed: {0}")]
-    Interpolation(#[from] InterpolationError),
+    Interpolation(InterpolationError),
 
     /// A posting reached application with its units still elided, which means
     /// it never went through booking.
@@ -104,6 +109,12 @@ pub enum BookingError {
         /// The cost currency the spec took.
         cost: rustledger_core::Currency,
     },
+}
+
+impl From<InterpolationError> for BookingError {
+    fn from(e: InterpolationError) -> Self {
+        Self::Interpolation(e)
+    }
 }
 
 impl BookingError {
@@ -2785,6 +2796,35 @@ mod tests {
     use super::*;
     use rust_decimal_macros::dec;
     use rustledger_core::{NaiveDate, Posting, PriceAnnotation};
+
+    /// The `{:#}`-style chain: the message, then each `source()` in turn.
+    fn chain(e: &dyn std::error::Error) -> String {
+        let mut out = e.to_string();
+        let mut cur = e.source();
+        while let Some(s) = cur {
+            out.push_str(": ");
+            out.push_str(&s.to_string());
+            cur = s.source();
+        }
+        out
+    }
+
+    /// #2574: `BookingError::Interpolation` names the interpolation error in
+    /// its message and used to return it from `source()` as well, so a
+    /// `{:#}` chain printed it twice.
+    #[test]
+    fn interpolation_error_names_its_cause_once_2574() {
+        let inner = InterpolationError::MultipleMissing {
+            currency: "USD".into(),
+            count: 2,
+        };
+        let inner_text = inner.to_string();
+        let e = BookingError::from(inner);
+        let chained = chain(&e);
+        assert_eq!(chained, e.to_string(), "the message is the whole chain");
+        assert_eq!(chained.matches(&inner_text).count(), 1, "{chained}");
+        assert!(chained.starts_with("interpolation failed: "), "{chained}");
+    }
 
     #[test]
     fn half_unit_in_last_place_is_half_the_last_digit_written() {

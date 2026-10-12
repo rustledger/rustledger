@@ -23,89 +23,78 @@ impl NativePlugin for CheckDrainedPlugin {
 
     fn process(&self, input: PluginInput) -> PluginOutput {
         use crate::types::{AmountData, BalanceData};
-        use std::collections::{HashMap, HashSet};
+        use std::collections::{BTreeSet, HashMap};
 
-        // Track currencies used per account
-        let mut account_currencies: HashMap<String, HashSet<String>> = HashMap::new();
+        // The currencies each account has used so far, as beancount's plugin
+        // accumulates them walking the entries in order: a posting's, and an
+        // `open`'s declared ones. Not a `balance`'s (beancount's does not
+        // count one), and not a posting after the close (it had not been
+        // seen yet), both of which rledger used to insert a check for
+        // (#2600). Sorted, so the checks come out in one order.
+        let mut account_currencies: HashMap<&str, BTreeSet<&str>> = HashMap::new();
+        let mut ops: Vec<PluginOp> = Vec::new();
 
-        // First pass: collect all currencies used per account
-        for wrapper in &input.directives {
+        for (i, wrapper) in input.directives.iter().enumerate() {
+            ops.push(PluginOp::Keep(i));
             match &wrapper.data {
                 DirectiveData::Transaction(txn) => {
                     for posting in &txn.postings {
                         if let Some(units) = &posting.units {
                             account_currencies
-                                .entry(posting.account.clone())
+                                .entry(posting.account.as_str())
                                 .or_default()
-                                .insert(units.currency.clone());
+                                .insert(units.currency.as_str());
                         }
                     }
                 }
-                DirectiveData::Balance(data) => {
-                    account_currencies
-                        .entry(data.account.clone())
-                        .or_default()
-                        .insert(data.amount.currency.clone());
-                }
                 DirectiveData::Open(data) => {
-                    // If Open has currencies, track them
-                    for currency in &data.currencies {
-                        account_currencies
-                            .entry(data.account.clone())
-                            .or_default()
-                            .insert(currency.clone());
+                    let currencies = account_currencies.entry(data.account.as_str()).or_default();
+                    currencies.extend(data.currencies.iter().map(String::as_str));
+                }
+                DirectiveData::Close(data) => {
+                    // Only balance sheet accounts (Assets, Liabilities,
+                    // Equity), under THIS ledger's configured root names —
+                    // `account_type` hardcodes the English ones, so a renamed
+                    // ledger classified every close as off-balance-sheet and
+                    // silently skipped it (#1964). Root-component match, so
+                    // both `Assets:...` and a bare `Assets` qualify.
+                    if !input.options.account_types.is_balance_sheet(&data.account) {
+                        continue;
+                    }
+                    let (Some(currencies), Some(next_date)) = (
+                        account_currencies.get(data.account.as_str()),
+                        increment_date(&wrapper.date),
+                    ) else {
+                        continue;
+                    };
+                    // A zero balance assertion per currency, the day after
+                    // the close. Deliberately not skipped when an explicit
+                    // `balance` for the currency sits on the close date, as
+                    // beancount's plugin skips it: that assertion runs at the
+                    // start of the day and misses the day's own postings,
+                    // which this one does not.
+                    for currency in currencies {
+                        ops.push(PluginOp::Insert(DirectiveWrapper {
+                            directive_type: "balance".to_string(),
+                            date: next_date.clone(),
+                            // The close's location, as beancount gives the
+                            // balance the close's meta: a failure points at
+                            // the close.
+                            filename: wrapper.filename.clone(),
+                            lineno: wrapper.lineno,
+                            data: DirectiveData::Balance(BalanceData {
+                                account: data.account.clone(),
+                                amount: AmountData {
+                                    number: "0".to_string(),
+                                    currency: (*currency).to_string(),
+                                },
+                                tolerance: None,
+                                metadata: vec![],
+                            }),
+                        }));
                     }
                 }
                 _ => {}
-            }
-        }
-
-        // Second pass: generate balance assertions for closed balance sheet accounts
-        let mut ops: Vec<PluginOp> = Vec::new();
-
-        for (i, wrapper) in input.directives.iter().enumerate() {
-            ops.push(PluginOp::Keep(i));
-
-            if let DirectiveData::Close(data) = &wrapper.data {
-                // Only generate for balance sheet accounts (Assets,
-                // Liabilities, Equity), under THIS ledger's configured root
-                // names — `account_type` hardcodes the English ones, so a
-                // renamed ledger classified every close as off-balance-sheet
-                // and silently skipped it (#1964). Root-component match, so
-                // both `Assets:...` and a bare `Assets` qualify.
-                let is_balance_sheet = input.options.account_types.is_balance_sheet(&data.account);
-
-                if !is_balance_sheet {
-                    continue;
-                }
-
-                // Get currencies for this account
-                if let Some(currencies) = account_currencies.get(&data.account) {
-                    // Calculate the day after close
-                    if let Some(next_date) = increment_date(&wrapper.date) {
-                        // Generate zero balance assertion for each currency
-                        let mut sorted_currencies: Vec<_> = currencies.iter().collect();
-                        sorted_currencies.sort(); // Consistent ordering
-
-                        for currency in sorted_currencies {
-                            ops.push(PluginOp::Insert(DirectiveWrapper {
-                                directive_type: "balance".to_string(),
-                                date: next_date.clone(),
-                                filename: None, // Plugin-generated
-                                lineno: None,
-                                data: DirectiveData::Balance(BalanceData {
-                                    account: data.account.clone(),
-                                    amount: AmountData {
-                                        number: "0".to_string(),
-                                        currency: currency.clone(),
-                                    },
-                                    tolerance: None,
-                                    metadata: vec![],
-                                }),
-                            }));
-                        }
-                    }
-                }
             }
         }
 

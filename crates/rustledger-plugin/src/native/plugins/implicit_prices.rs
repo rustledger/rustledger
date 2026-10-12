@@ -360,11 +360,17 @@ impl NativePlugin for ImplicitPricesPlugin {
                     continue;
                 }
 
+                // At the transaction's location, as beancount's plugin builds
+                // it: it sorts beside the transaction, and a report on it
+                // points there (#2600; it had no location). beancount also
+                // marks it with an internal `__implicit_prices__` key, which
+                // its printer hides; rledger's metadata keys must be valid
+                // beancount keys, so that marker is not reproduced.
                 generated_prices.push(DirectiveWrapper {
                     directive_type: "price".to_string(),
                     date: wrapper.date.clone(),
-                    filename: None, // plugin-generated
-                    lineno: None,
+                    filename: wrapper.filename.clone(),
+                    lineno: wrapper.lineno,
                     data: DirectiveData::Price(PriceData {
                         currency: units.currency.clone(),
                         amount: AmountData {

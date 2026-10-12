@@ -17,6 +17,7 @@
 //! | native + Python together | `with_plugins.beancount` fixture | check |
 //! | Python compat layer | `beancount.core.realization` and `.compare`, as beancount's `leafonly` and `noduplicates` use them | check |
 //! | native vs Python | each plugin with both implementations reports beancount's message, severity and location either way | check |
+//! | native vs beancount | the nine native plugins the compat layer cannot run beancount's module for give bean-check's text or bean-query's rows | check, query |
 //! | WASM importer (a `wasm_importer_main!` guest) | `extract --wasm-importer x.wasm` | extract |
 //! | WASM importer + `importers.toml` `[payees]` | `extract --wasm-importer x.wasm` | extract |
 //! | WASM + Python | an entry returned whole keeps its tags and links (notes and documents) | query |
@@ -573,6 +574,303 @@ fn native_and_python_implementations_agree() {
         );
         out.failed_cleanly();
     }
+}
+
+/// The native plugins whose beancount modules the Python compat layer cannot
+/// run (they need `inventory`, `account_types`, `number` or `loader`), held to
+/// what beancount 3.2 gives for the same ledger (#2600): the validators to
+/// the text bean-check prints, the transformers to the rows bean-query
+/// returns for a query that shows their effect.
+///
+/// Rows are compared with whitespace collapsed and sorted (the two tools
+/// align columns differently, and beancount emits `check_drained`'s balances
+/// in set order); booleans print `True` in bean-query and `TRUE` here.
+#[test]
+fn native_plugins_without_a_python_twin_match_beancount() {
+    // Validators: (plugin and config, ledger body after a header line and a
+    // blank line, what bean-check prints).
+    let validators: [(&str, &str, &[&str]); 5] = [
+        (
+            // An implicit price is at its transaction's location, as
+            // beancount's: `unique_prices` reports the disagreement there.
+            "implicit_prices\"\nplugin \"beancount.plugins.unique_prices",
+            "2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n\
+             2024-01-02 * \"buy\"\n  Assets:Stock  10 AAA {10 USD}\n  Assets:Cash\n\
+             2024-01-02 * \"buy at another price\"\n  Assets:Stock  5 AAA {11 USD}\n  Assets:Cash\n",
+            &["ledger.beancount:6: error[PLUGIN]: Disagreeing price entries"],
+        ),
+        (
+            // The average is of what the account holds, each sale at its own
+            // cost: 16.67 after the first sale, as beancount computes it.
+            "check_average_cost",
+            "2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock \"NONE\"\n\
+             2024-01-02 * \"buy\"\n  Assets:Stock  10 AAA {10 USD}\n  Assets:Cash\n\
+             2024-01-03 * \"buy\"\n  Assets:Stock  10 AAA {20 USD}\n  Assets:Cash\n\
+             2024-01-04 * \"sell off-average\"\n  Assets:Stock  -5 AAA {10 USD}\n  Assets:Cash  50 USD\n\
+             2024-01-05 * \"sell at the average before the last sale\"\n  \
+             Assets:Stock  -5 AAA {15 USD}\n  Assets:Cash  75 USD\n\
+             2024-01-06 * \"sell within one percent\"\n  Assets:Stock  -5 AAA {17.4 USD}\n  \
+             Assets:Cash  87 USD\n",
+            &[
+                "ledger.beancount:11: error[PLUGIN]: Cost basis on reducing posting is too far from the average cost (10 vs. 15)",
+                "ledger.beancount:14: error[PLUGIN]: Cost basis on reducing posting is too far from the average cost (15 vs. 16.66666666666666666666666667)",
+            ],
+        ),
+        (
+            "nounused",
+            "2024-01-01 open Assets:Zeta\n2024-01-01 open Assets:Alpha\n2024-01-01 open Assets:Used\n\
+             2024-01-01 open Assets:Closed\n2024-01-01 open Assets:Noted\n2024-01-01 open Assets:Cash\n\
+             2024-01-02 * \"x\"\n  Assets:Used  1 USD\n  Assets:Cash\n\
+             2024-01-03 close Assets:Closed\n2024-01-03 note Assets:Noted \"hi\"\n",
+            &[
+                "ledger.beancount:3: error[PLUGIN]: Unused account 'Assets:Zeta'",
+                "ledger.beancount:4: error[PLUGIN]: Unused account 'Assets:Alpha'",
+            ],
+        ),
+        (
+            // Fees count toward the proceeds, a sale within twice the
+            // tolerance passes, a typo and proceeds in another currency fail.
+            "sellgains",
+            "2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n\
+             2024-01-01 open Income:Gains\n2024-01-01 open Expenses:Fees\n\
+             2024-01-02 * \"buy\"\n  Assets:Stock  10 AAA {10 USD}\n  Assets:Cash\n\
+             2024-01-03 * \"sell, fees counted\"\n  Assets:Stock  -2 AAA {10 USD} @ 13 USD\n  \
+             Assets:Cash  25.92 USD\n  Expenses:Fees  0.08 USD\n  Income:Gains\n\
+             2024-01-04 * \"sell with a typo in the proceeds\"\n  \
+             Assets:Stock  -2 AAA {10 USD} @ 13 USD\n  Assets:Cash  27.00 USD\n  Income:Gains\n\
+             2024-01-05 * \"within the tolerance\"\n  Assets:Stock  -3 AAA {10 USD} @ 13.333 USD\n  \
+             Assets:Cash  40.00 USD\n  Income:Gains\n\
+             2024-01-06 * \"proceeds in another currency\"\n  \
+             Assets:Stock  -1 AAA {10 USD} @ 13 USD\n  Assets:Cash  13 USD\n  Assets:Cash  1 EUR\n  \
+             Income:Gains  -1 EUR\n  Income:Gains\n",
+            &[
+                "ledger.beancount:15: error[PLUGIN]: Invalid price vs. proceeds/gains: (26 USD) vs. (27.00 USD); difference: (-1.00 USD)",
+                "ledger.beancount:23: error[PLUGIN]: Invalid price vs. proceeds/gains: (13 USD) vs. (13 USD, 1 EUR); difference: (-1 EUR)",
+            ],
+        ),
+        (
+            // All nine of beancount's pedantic plugins: check_commodity,
+            // coherent_cost, leafonly, nounused, sellgains, unique_prices
+            // here, and check_drained's balance below.
+            "pedantic",
+            "2024-01-01 commodity USD\n2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Cash:Sub\n\
+             2024-01-01 open Assets:Stock\n2024-01-01 open Assets:Unused\n2024-01-01 open Income:Gains\n\
+             2024-01-02 * \"buy\"\n  Assets:Stock  10 AAA {10 USD}\n  Assets:Cash\n\
+             2024-01-03 * \"gift\"\n  Assets:Stock  1 AAA\n  Assets:Cash:Sub  -1 AAA\n\
+             2024-01-04 * \"sell typo\"\n  Assets:Stock  -2 AAA {10 USD} @ 13 USD\n  \
+             Assets:Cash  27.00 USD\n  Income:Gains\n\
+             2024-01-05 price AAA 12 USD\n2024-01-05 price AAA 13 USD\n\
+             2024-01-07 close Assets:Cash:Sub\n",
+            &[
+                "<unknown>: error[PLUGIN]: Missing Commodity directive for 'AAA' in 'Assets:Cash:Sub'",
+                "ledger.beancount:12: error[PLUGIN]: Currency 'AAA' is used both with and without cost",
+                "ledger.beancount:15: error[PLUGIN]: Invalid price vs. proceeds/gains: (26 USD) vs. (27.00 USD); difference: (-1.00 USD)",
+                "ledger.beancount:19: error[PLUGIN]: Disagreeing price entries",
+                "ledger.beancount:4: error[PLUGIN]: Non-leaf account 'Assets:Cash' has postings on it",
+                "ledger.beancount:7: error[PLUGIN]: Unused account 'Assets:Unused'",
+            ],
+        ),
+    ];
+    // Every case runs, and every mismatch is reported together.
+    let mut mismatches: Vec<String> = Vec::new();
+    for (plugin, body, expected) in validators {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("ledger.beancount"),
+            format!("plugin \"beancount.plugins.{plugin}\"\n\n{body}"),
+        )
+        .unwrap();
+        let out = run(dir.path(), &["check", "ledger.beancount"]);
+        // Every case reports an error, so `check` fails, as bean-check does.
+        if plugin_diagnostics(&out) != expected || out.code != Some(1) {
+            mismatches.push(format!("{plugin}: expected {expected:#?}\n{}", out.text));
+        }
+        // check_drained's balance the day after the close, failing:
+        // bean-check reports `expected 0 AAA != accumulated -1 AAA`.
+        if plugin == "pedantic"
+            && !out
+                .text
+                .contains("Balance failed for Assets:Cash:Sub: expected 0 AAA, got -1 AAA")
+        {
+            mismatches.push(format!("pedantic: no check_drained balance\n{}", out.text));
+        }
+    }
+
+    let closing = "2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-01 open Assets:C\n\
+                   2024-01-01 open Assets:Cash\n\
+                   2024-01-02 * \"fund\"\n  Assets:A  2 AAA\n  Assets:B  2 BBB\n  Assets:C  2 CCC\n  \
+                   Assets:Cash  -2 AAA\n  Assets:Cash  -2 BBB\n  Assets:Cash  -2 CCC\n\
+                   2024-01-03 * \"close\"\n  Assets:A  -2 AAA\n    closing: TRUE\n  \
+                   Assets:B  -1 BBB\n    closing: \"yes\"\n  Assets:C  -2 CCC\n    closing: FALSE\n  \
+                   Assets:Cash  2 AAA\n  Assets:Cash  1 BBB\n  Assets:Cash  2 CCC\n";
+    let auto = "2024-01-05 * \"x\"\n  Expenses:Food  1 USD\n  Assets:Cash\n\
+                2024-01-03 note Assets:Noted \"a note\"\n2024-01-04 balance Assets:Bal 0 USD\n\
+                2024-01-06 close Assets:Closed\n\
+                2024-01-07 custom \"budget\" Expenses:Custom \"monthly\" 10 USD\n";
+    // Transformers: (plugin and config, ledger body, query, the rows
+    // bean-query returns, sorted).
+    let transformers: [(&str, &str, &str, &[&str]); 9] = [
+        (
+            // A base account that is not an account name falls back to the
+            // default, as beancount's does.
+            "currency_accounts\" \"not an account",
+            "2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Euro\n\
+             2024-01-02 * \"x\"\n  Assets:Euro  10 EUR @ 1.1 USD\n  Assets:Cash  -11 USD\n",
+            "SELECT account, position",
+            &[
+                "Assets:Cash -11.0 USD",
+                "Assets:Euro 10 EUR",
+                "Equity:CurrencyAccounts:EUR -10 EUR",
+                "Equity:CurrencyAccounts:USD 11.0 USD",
+            ],
+        ),
+        (
+            // A currency first posted after the close gets no check.
+            "check_drained",
+            "2024-01-01 open Assets:A\n2024-01-01 open Assets:Cash\n\
+             2024-01-02 * \"fund\"\n  Assets:A  2 AAA\n  Assets:Cash  -2 AAA\n\
+             2024-01-04 * \"drain\"\n  Assets:A  -2 AAA\n  Assets:Cash  2 AAA\n\
+             2024-01-05 close Assets:A\n\
+             2024-01-07 * \"late\"\n  Assets:A  1 BBB\n  Assets:Cash  -1 BBB\n",
+            "SELECT date, account, amount FROM #balances",
+            &["2024-01-06 Assets:A 0 AAA"],
+        ),
+        (
+            // An account a note, balance or close names gets its open, at its
+            // first use; one only a `custom` names does not.
+            "auto_accounts",
+            auto,
+            "SELECT account FROM #accounts",
+            &[
+                "Assets:Bal",
+                "Assets:Cash",
+                "Assets:Closed",
+                "Assets:Noted",
+                "Expenses:Food",
+            ],
+        ),
+        (
+            "auto_accounts",
+            auto,
+            "SELECT date, type FROM #entries",
+            &[
+                "2024-01-03 note",
+                "2024-01-03 open",
+                "2024-01-04 balance",
+                "2024-01-04 open",
+                "2024-01-05 open",
+                "2024-01-05 open",
+                "2024-01-05 transaction",
+                "2024-01-06 close",
+                "2024-01-06 open",
+                "2024-01-07 custom",
+            ],
+        ),
+        (
+            // Any truthy `closing` value, and the marker is removed.
+            "check_closing",
+            closing,
+            "SELECT date, account, amount FROM #balances",
+            &["2024-01-04 Assets:A 0 AAA", "2024-01-04 Assets:B 0 BBB"],
+        ),
+        (
+            "check_closing",
+            closing,
+            "SELECT account, meta('closing') WHERE number < 0",
+            &[
+                "Assets:A",
+                "Assets:B",
+                "Assets:C FALSE",
+                "Assets:Cash",
+                "Assets:Cash",
+                "Assets:Cash",
+            ],
+        ),
+        (
+            // A currency only a `balance` names gets no check.
+            "check_drained",
+            "2024-01-01 open Assets:A AAA,ZZZ\n2024-01-01 open Assets:Cash\n2024-01-01 open Expenses:X\n\
+             2024-01-02 * \"fund\"\n  Assets:A  2 AAA\n  Assets:Cash  -2 AAA\n\
+             2024-01-03 balance Assets:A 0 CCC\n\
+             2024-01-04 * \"drain\"\n  Assets:A  -2 AAA\n  Assets:Cash  2 AAA\n\
+             2024-01-05 close Assets:A\n2024-01-05 close Expenses:X\n",
+            "SELECT date, account, amount FROM #balances",
+            &[
+                "2024-01-03 Assets:A 0 CCC",
+                "2024-01-06 Assets:A 0 AAA",
+                "2024-01-06 Assets:A 0 ZZZ",
+            ],
+        ),
+        (
+            "currency_accounts\" \"Equity:Trading",
+            "2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Euro\n2024-01-01 open Assets:Pound\n\
+             2024-01-02 * \"x\"\n  Assets:Pound  10 GBP @ 1.3 USD\n  Assets:Cash  -24 USD\n  \
+             Assets:Euro  10 EUR @ 1.1 USD\n",
+            "SELECT account, position, entry_meta('currency_accounts_processed')",
+            &[
+                "Assets:Cash -24.0 USD TRUE",
+                "Assets:Euro 10 EUR TRUE",
+                "Assets:Pound 10 GBP TRUE",
+                "Equity:Trading:EUR -10 EUR TRUE",
+                "Equity:Trading:GBP -10 GBP TRUE",
+                "Equity:Trading:USD 24.0 USD TRUE",
+            ],
+        ),
+        (
+            "implicit_prices",
+            "2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n2024-01-01 open Assets:Euro\n\
+             2024-01-02 * \"buy\"\n  Assets:Stock  10 AAA {10 USD}\n  Assets:Cash\n\
+             2024-01-02 * \"buy again, same price\"\n  Assets:Stock  5 AAA {10 USD}\n  Assets:Cash\n\
+             2024-01-03 * \"buy with a price\"\n  Assets:Stock  5 AAA {11 USD} @ 12 USD\n  Assets:Cash\n\
+             2024-01-04 * \"sell at a price\"\n  Assets:Stock  -5 AAA {10 USD} @ 13 USD\n  \
+             Assets:Cash  65 USD\n  Assets:Cash  -15 USD\n\
+             2024-01-05 * \"sell, no price\"\n  Assets:Stock  -5 AAA {10 USD}\n  Assets:Cash  50 USD\n\
+             2024-01-06 * \"convert\"\n  Assets:Euro  10 EUR @ 1.1 USD\n  Assets:Cash\n",
+            "SELECT date, currency, amount FROM #prices",
+            &[
+                "2024-01-02 AAA 10 USD",
+                "2024-01-03 AAA 12 USD",
+                "2024-01-04 AAA 13 USD",
+                "2024-01-06 EUR 1 USD",
+            ],
+        ),
+    ];
+    for (plugin, body, query, expected) in transformers {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("ledger.beancount"),
+            format!("plugin \"beancount.plugins.{plugin}\"\n\n{body}"),
+        )
+        .unwrap();
+        let output = Command::new(bin())
+            .args(["query", "ledger.beancount", query])
+            .current_dir(dir.path())
+            .env("RLEDGER_CONFIG_DIR", dir.path())
+            .env("PROGRAMDATA", dir.path())
+            .output()
+            .expect("run rledger");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        // Drop the header, the rule under it, blank lines and the count.
+        let mut rows: Vec<String> = stdout
+            .lines()
+            .skip(2)
+            .filter(|l| !l.trim().is_empty() && !l.ends_with("row(s)"))
+            .map(|l| l.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect();
+        rows.sort();
+        if rows != expected {
+            mismatches.push(format!(
+                "{plugin}: {query}: expected {expected:#?}\n{stdout}{}",
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "{} mismatches with beancount across the 14 cases:\n{}",
+        mismatches.len(),
+        mismatches.join("\n")
+    );
 }
 
 /// `beancount.core.realization` and `beancount.core.compare`, which

@@ -1,15 +1,18 @@
-//! Warn about unused accounts.
+//! Report unused accounts.
 
 use crate::types::{
-    DirectiveData, MetaValueData, PluginError, PluginInput, PluginOp, PluginOutput,
+    DirectiveData, DirectiveWrapper, MetaValueData, PluginError, PluginInput, PluginOp,
+    PluginOutput,
 };
 
 use super::super::{NativePlugin, RegularPlugin};
+use super::utils::at_entry;
 
 /// Plugin that identifies accounts that are opened but never used.
 ///
-/// Reports a warning for each account that has an Open directive but is never
-/// referenced in any transaction, balance, pad, or other directive.
+/// Reports an error, at its `open`, for each account that has an Open
+/// directive but is never referenced in any transaction, balance, pad, or
+/// other directive.
 pub struct NoUnusedPlugin;
 
 impl NativePlugin for NoUnusedPlugin {
@@ -24,42 +27,52 @@ impl NativePlugin for NoUnusedPlugin {
     fn process(&self, input: PluginInput) -> PluginOutput {
         use std::collections::HashSet;
 
-        let mut opened_accounts: HashSet<String> = HashSet::new();
-        let mut used_accounts: HashSet<String> = HashSet::new();
+        // Each opened account with its `open`, in the order accounts are first
+        // opened; a repeated `open` replaces the entry and keeps the position,
+        // as beancount's `open_map` dict does.
+        let mut opens: Vec<(&str, &DirectiveWrapper)> = Vec::new();
+        let mut used_accounts: HashSet<&str> = HashSet::new();
 
         // Collect all opened accounts and used accounts in one pass
         for wrapper in &input.directives {
             match &wrapper.data {
                 DirectiveData::Open(data) => {
-                    opened_accounts.insert(data.account.clone());
+                    if let Some(entry) = opens.iter_mut().find(|(a, _)| *a == data.account) {
+                        entry.1 = wrapper;
+                    } else {
+                        opens.push((&data.account, wrapper));
+                    }
                 }
                 DirectiveData::Close(data) => {
                     // Closing an account counts as using it
-                    used_accounts.insert(data.account.clone());
+                    used_accounts.insert(&data.account);
                 }
                 DirectiveData::Transaction(txn) => {
                     for posting in &txn.postings {
-                        used_accounts.insert(posting.account.clone());
+                        used_accounts.insert(&posting.account);
                     }
                 }
                 DirectiveData::Balance(data) => {
-                    used_accounts.insert(data.account.clone());
+                    used_accounts.insert(&data.account);
                 }
                 DirectiveData::Pad(data) => {
-                    used_accounts.insert(data.account.clone());
-                    used_accounts.insert(data.source_account.clone());
+                    used_accounts.insert(&data.account);
+                    used_accounts.insert(&data.source_account);
                 }
                 DirectiveData::Note(data) => {
-                    used_accounts.insert(data.account.clone());
+                    used_accounts.insert(&data.account);
                 }
                 DirectiveData::Document(data) => {
-                    used_accounts.insert(data.account.clone());
+                    used_accounts.insert(&data.account);
                 }
+                // Deliberate divergence: beancount's `getters` reads no
+                // account from a `custom` directive, so an account only a
+                // `custom` names (a budget, say) is reported unused there.
+                // It is used, so it is not reported here.
                 DirectiveData::Custom(data) => {
-                    // Check custom directive values for account references
                     for value in &data.values {
                         if let MetaValueData::Account(account) = value {
-                            used_accounts.insert(account.clone());
+                            used_accounts.insert(account);
                         }
                     }
                 }
@@ -67,19 +80,19 @@ impl NativePlugin for NoUnusedPlugin {
             }
         }
 
-        // Find unused accounts (opened but never used)
-        let mut errors = Vec::new();
-        let mut unused: Vec<_> = opened_accounts
-            .difference(&used_accounts)
-            .cloned()
+        // As beancount reports it (#2600): its message, an error, at the
+        // account's `open`. It was a warning of rledger's own words with no
+        // location.
+        let errors = opens
+            .into_iter()
+            .filter(|(account, _)| !used_accounts.contains(account))
+            .map(|(account, open)| {
+                at_entry(
+                    PluginError::error(format!("Unused account '{account}'")),
+                    open,
+                )
+            })
             .collect();
-        unused.sort(); // Consistent ordering for output
-
-        for account in unused {
-            errors.push(PluginError::warning(format!(
-                "Account '{account}' is opened but never used"
-            )));
-        }
 
         PluginOutput {
             ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
@@ -162,8 +175,12 @@ mod nounused_tests {
 
         let output = plugin.process(input);
         assert_eq!(output.errors.len(), 1);
-        assert!(output.errors[0].message.contains("Assets:Unused"));
-        assert!(output.errors[0].message.contains("never used"));
+        // beancount's message, as an error (#2600).
+        assert_eq!(output.errors[0].message, "Unused account 'Assets:Unused'");
+        assert_eq!(
+            output.errors[0].severity,
+            crate::types::PluginErrorSeverity::Error
+        );
     }
 
     #[test]

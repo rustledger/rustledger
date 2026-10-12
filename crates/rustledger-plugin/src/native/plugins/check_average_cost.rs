@@ -4,6 +4,8 @@
 use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutput};
 
 use super::super::{NativePlugin, RegularPlugin};
+use super::py_literal::{self, PyValue};
+use super::utils::at_entry;
 
 /// Plugin that validates reducing postings against the running average cost
 /// for accounts opened with the `NONE` booking method.
@@ -56,12 +58,25 @@ impl NativePlugin for CheckAverageCostPlugin {
         use std::collections::{HashMap, HashSet};
         use std::str::FromStr;
 
-        // Parse optional tolerance from config
-        let tolerance = if let Some(config) = &input.config {
-            Decimal::from_str(config.trim()).unwrap_or(self.tolerance)
-        } else {
-            self.tolerance
+        let keep = || (0..input.directives.len()).map(PluginOp::Keep).collect();
+        // The tolerance, a Python float, as beancount's `eval`s it; anything
+        // else is an error there too.
+        let tolerance = match input.config.as_deref().map(str::trim) {
+            None | Some("") => self.tolerance,
+            Some(config) => match parse_float(config) {
+                Some(t) => t,
+                None => {
+                    return PluginOutput {
+                        ops: keep(),
+                        errors: vec![PluginError::error(
+                            "Invalid configuration for check_average_cost: must be a float",
+                        )],
+                    };
+                }
+            },
         };
+        let min_tolerance = Decimal::ONE - tolerance;
+        let max_tolerance = Decimal::ONE + tolerance;
 
         // First pass: collect accounts opened with the NONE booking method.
         // Only these accounts are subject to the average-cost check — see the
@@ -79,109 +94,125 @@ impl NativePlugin for CheckAverageCostPlugin {
             })
             .collect();
 
-        // Track average cost per account per commodity
-        // Key: (account, commodity) -> (total_units, total_cost)
-        let mut inventory: HashMap<(String, String), (Decimal, Decimal)> = HashMap::new();
+        // The account's inventory, as beancount keeps it: per (account,
+        // currency, cost currency), every posting added at the cost it was
+        // booked at, a reduction included. Under NONE booking a sale is a
+        // negative lot at its own cost, so the average after it is the
+        // average of what the account actually holds (#2600: rledger removed
+        // a sale at the average cost instead, and its average drifted from
+        // the ledger's from the first off-average sale on).
+        // Key -> (total units, total cost).
+        let mut inventory: HashMap<(&str, &str, &str), (Decimal, Decimal)> = HashMap::new();
 
         let mut errors = Vec::new();
 
         for wrapper in &input.directives {
-            if let DirectiveData::Transaction(txn) = &wrapper.data {
-                for posting in &txn.postings {
-                    // Only process accounts opened with NONE booking (issue #907).
-                    if !none_booking_accounts.contains(posting.account.as_str()) {
-                        continue;
-                    }
+            let DirectiveData::Transaction(txn) = &wrapper.data else {
+                continue;
+            };
+            for posting in &txn.postings {
+                // Only process accounts opened with NONE booking (issue #907).
+                if !none_booking_accounts.contains(posting.account.as_str()) {
+                    continue;
+                }
+                // Only postings held at cost. (beancount's own plugin fails
+                // outright on a reduction without one.)
+                let (Some(units), Some(cost)) = (&posting.units, &posting.cost) else {
+                    continue;
+                };
+                let Some(cost_currency) = &cost.currency else {
+                    continue;
+                };
+                let Ok(units_num) = Decimal::from_str(&units.number) else {
+                    continue;
+                };
+                // `per_unit()` covers both PerUnit and PerUnitFromTotal.
+                let Some(cost_text) = cost.number.as_ref().and_then(|cn| cn.per_unit()) else {
+                    continue;
+                };
+                let Ok(cost_number) = Decimal::from_str(cost_text) else {
+                    continue;
+                };
 
-                    // Only process postings with units and cost
-                    let Some(units) = &posting.units else {
-                        continue;
-                    };
-                    let Some(cost) = &posting.cost else {
-                        continue;
-                    };
+                let key = (
+                    posting.account.as_str(),
+                    units.currency.as_str(),
+                    cost_currency.as_str(),
+                );
+                let (total_units, total_cost) = inventory
+                    .entry(key)
+                    .or_insert((Decimal::ZERO, Decimal::ZERO));
 
-                    let units_num = Decimal::from_str(&units.number).unwrap_or_default();
-                    let Some(cost_currency) = &cost.currency else {
-                        continue;
-                    };
-
-                    let key = (posting.account.clone(), units.currency.clone());
-
-                    if units_num > Decimal::ZERO {
-                        // Acquisition: add to inventory. `per_unit()`
-                        // covers both PerUnit and PerUnitFromTotal;
-                        // raw Total (pre-booking) has no per-unit yet
-                        // and yields zero (gate is permissive there).
-                        let cost_per = cost
-                            .number
-                            .as_ref()
-                            .and_then(|cn| cn.per_unit())
-                            .map(|s| Decimal::from_str(s).unwrap_or_default())
-                            .unwrap_or_default();
-
-                        let entry = inventory
-                            .entry(key)
-                            .or_insert((Decimal::ZERO, Decimal::ZERO));
-                        entry.0 += units_num; // total units
-                        entry.1 += units_num * cost_per; // total cost
-                    } else if units_num < Decimal::ZERO {
-                        // Reduction: check against average cost
-                        let entry = inventory.get(&key);
-
-                        if let Some((total_units, total_cost)) = entry
-                            && *total_units > Decimal::ZERO
-                        {
-                            let avg_cost = *total_cost / *total_units;
-
-                            // Get the cost used in this posting.
-                            // Same per-unit-only read as above.
-                            let used_cost = cost
-                                .number
-                                .as_ref()
-                                .and_then(|cn| cn.per_unit())
-                                .map(|s| Decimal::from_str(s).unwrap_or_default())
-                                .unwrap_or_default();
-
-                            // Calculate relative difference
-                            let diff = (used_cost - avg_cost).abs();
-                            let relative_diff = if avg_cost == Decimal::ZERO {
-                                diff
-                            } else {
-                                diff / avg_cost
-                            };
-
-                            if relative_diff > tolerance {
-                                errors.push(PluginError::warning(format!(
-                                        "Sale of {} {} in {} uses cost {} {} but average cost is {} {} (difference: {:.2}%)",
-                                        units_num.abs(),
-                                        units.currency,
-                                        posting.account,
-                                        used_cost,
-                                        cost_currency,
-                                        avg_cost.round_dp(4),
-                                        cost_currency,
-                                        relative_diff * Decimal::from(100)
-                                    )));
-                            }
-
-                            // Update inventory
-                            let entry = inventory.get_mut(&key).unwrap();
-                            let units_sold = units_num.abs();
-                            let cost_removed = units_sold * avg_cost;
-                            entry.0 -= units_sold;
-                            entry.1 -= cost_removed;
-                        }
+                // A reduction is checked against the average before it, when
+                // the account holds any (beancount skips a zero total).
+                if units_num < Decimal::ZERO
+                    && !total_units.is_zero()
+                    && let Some(average) = total_cost.checked_div(*total_units)
+                {
+                    let min_valid = average * min_tolerance;
+                    let max_valid = average * max_tolerance;
+                    if !(min_valid <= cost_number && cost_number <= max_valid) {
+                        errors.push(at_entry(
+                            PluginError::error(format!(
+                                "Cost basis on reducing posting is too far from the average cost ({} vs. {})",
+                                cost_text,
+                                python_quotient(*total_cost, *total_units)
+                            )),
+                            wrapper,
+                        ));
                     }
                 }
+
+                *total_units += units_num;
+                *total_cost += units_num * cost_number;
             }
         }
 
         PluginOutput {
-            ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
+            ops: keep(),
             errors,
         }
     }
+}
+
+/// `config` as a Python float literal (`0.01`, `1e-2`), as beancount's
+/// `eval` must find one; `None` for anything else, an integer included.
+fn parse_float(config: &str) -> Option<rust_decimal::Decimal> {
+    use std::str::FromStr;
+    let Ok(PyValue::Number { text, .. }) = py_literal::parse(config) else {
+        return None;
+    };
+    let text = text.replace('_', "");
+    if !text.contains(['.', 'e', 'E']) {
+        return None;
+    }
+    rust_decimal::Decimal::from_str(&text)
+        .or_else(|_| rust_decimal::Decimal::from_scientific(&text))
+        .ok()
+}
+
+/// `a / b` printed as Python's `decimal` prints it in its default context: an
+/// exact quotient at its ideal scale, an inexact one rounded half-even to 28
+/// significant digits (`rust_decimal` keeps one more).
+fn python_quotient(a: rust_decimal::Decimal, b: rust_decimal::Decimal) -> String {
+    use bigdecimal::{BigDecimal, RoundingMode};
+    use rustledger_core::decimal::{checked_div_python_scale, to_bigdecimal};
+    let Some(quotient) = checked_div_python_scale(a, b) else {
+        return String::new();
+    };
+    let (a, b_big) = (to_bigdecimal(a), to_bigdecimal(b));
+    // Exact only if it multiplies back exactly: `Decimal`'s own product
+    // rounds, and would call 16.666...667 × 15 exactly 250.
+    if to_bigdecimal(quotient) * &b_big == a {
+        return quotient.to_string();
+    }
+    let exact: BigDecimal = a / b_big;
+    exact
+        .with_precision_round(
+            std::num::NonZeroU64::new(28).expect("28"),
+            RoundingMode::HalfEven,
+        )
+        .to_plain_string()
 }
 
 impl RegularPlugin for CheckAverageCostPlugin {}

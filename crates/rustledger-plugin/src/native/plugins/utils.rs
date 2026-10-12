@@ -1,5 +1,20 @@
 //! Shared utility functions for native plugins.
 
+/// Whether a metadata value is falsy in Python (`FALSE`, `0`, `""`); every
+/// other value, an amount or a date included, is truthy.
+#[must_use]
+pub fn falsy(value: &crate::types::MetaValueData) -> bool {
+    use crate::types::MetaValueData;
+    match value {
+        MetaValueData::Bool(b) => !b,
+        MetaValueData::String(s) => s.is_empty(),
+        MetaValueData::Number(n) => n
+            .parse::<rust_decimal::Decimal>()
+            .is_ok_and(|d| d.is_zero()),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 use crate::types::{DirectiveWrapper, PluginOp, PluginOutput};
 

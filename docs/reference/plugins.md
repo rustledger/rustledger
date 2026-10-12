@@ -214,7 +214,7 @@ rustledger includes 31 native plugins. Here are the most commonly used:
 
 ### auto_accounts
 
-Automatically generates `Open` directives for any accounts used in transactions.
+Automatically generates `Open` directives for any account a transaction, balance, pad, note, document or close names without one, dated at its first use.
 
 ```beancount
 plugin "beancount.plugins.auto_accounts"
@@ -320,11 +320,7 @@ Options: optionally a regular expression: only accounts whose `open` it matches 
 
 ### pedantic
 
-Enables strict validation:
-
-- Requires explicit tags on all transactions
-- Requires payees on all transactions
-- Other strict checks
+Runs every pedantic plugin, as beancount's does, in its order: `check_commodity`, `coherent_cost`, `leafonly`, `noduplicates`, `nounused`, `onecommodity`, `sellgains`, `unique_prices`, then `check_drained`, each without a config.
 
 ```beancount
 plugin "beancount.plugins.pedantic"
@@ -334,16 +330,16 @@ Options: None
 
 ### sellgains
 
-Automatically generates capital gains postings for sales.
+Cross-checks a sale's proceeds against its price. For a transaction whose postings at cost all have a price, the priced value of those postings must match the weight of the transaction's Assets, Liabilities, Equity and Expenses postings (Income, the gain, is left out), within twice the transaction's tolerance. This catches a typo in the proceeds when the gain is elided. The tolerance uses beancount's default tolerance options; `inferred_tolerance_default` and the other tolerance options are not passed to plugins.
 
 ```beancount
 plugin "beancount.plugins.sellgains"
 
 2024-01-15 * "Sell AAPL"
-  Assets:Brokerage  -10 AAPL {} @ 175.00 USD
-  Assets:Cash       1750.00 USD
-  ; Auto-generates:
-  ; Income:CapitalGains   -250.00 USD
+  Assets:Brokerage  -10 AAPL {150.00 USD} @ 175.00 USD
+  Assets:Cash       1760.00 USD
+  Income:CapitalGains
+; Error: Invalid price vs. proceeds/gains: (1750.00 USD) vs. (1760.00 USD); difference: (-10.00 USD)
 ```
 
 Options: None
@@ -409,16 +405,17 @@ Options: None
 
 ### check_average_cost
 
-Validates that sales of positions use the correct average cost basis. Reports a warning if the cost used differs from the calculated average by more than the tolerance.
+For accounts opened with the `NONE` booking method, checks that each reducing posting's cost is within the tolerance of the account's average cost before it. The average is of what the account holds, each sale included at the cost it was booked at, as beancount keeps it. Reports beancount's error at the transaction.
 
 ```beancount
 plugin "beancount.plugins.check_average_cost" "0.01"
 
 ; Buy 10 @ $100, then 10 @ $120 -> average = $110
-; Selling at $100 cost would trigger a warning
+; Selling at $100 cost:
+; Error: Cost basis on reducing posting is too far from the average cost (100 vs. 110)
 ```
 
-Options: Tolerance as decimal (default: `0.01` = 1%)
+Options: Tolerance as a Python float (default: `0.01` = 1%); anything else is an error.
 
 ### close_tree
 
@@ -441,7 +438,7 @@ Options: None
 
 ### check_closing
 
-Inserts zero balance assertions when a posting has `closing: TRUE` metadata. The assertion is dated one day after the transaction.
+Inserts zero balance assertions when a posting has a truthy `closing` metadata value (`TRUE`, a non-empty string, a non-zero number), and removes the `closing` key from the posting. The assertion is dated one day after the transaction.
 
 ```beancount
 plugin "beancount.plugins.check_closing"
@@ -499,10 +496,10 @@ plugin "beancount.plugins.currency_accounts"
 2024-01-15 * "Buy EUR"
   Assets:Bank:EUR    100 EUR @ 1.10 USD
   Assets:Bank:USD   -110 USD
-; Generates postings through Equity:Conversions:EUR and Equity:Conversions:USD
+; Generates postings through Equity:CurrencyAccounts:EUR and Equity:CurrencyAccounts:USD
 ```
 
-Options: None
+Options: The base account (default `Equity:CurrencyAccounts`; a value that is not a valid account name falls back to it). A processed transaction is marked `currency_accounts_processed: TRUE`.
 
 ### document_discovery
 
@@ -610,13 +607,13 @@ Options: None
 
 ### nounused
 
-Reports warnings for accounts that are opened but never used in any transaction, balance, or other directive.
+Reports an error, at its `open`, for each account that is opened but never named by any other directive (a transaction, balance, pad, note, document or close). Unlike beancount's, an account named only by a `custom` directive counts as used.
 
 ```beancount
 plugin "beancount.plugins.nounused"
 
 2024-01-01 open Assets:OldAccount
-; Warning: Account 'Assets:OldAccount' is opened but never used
+; Error: Unused account 'Assets:OldAccount'
 ```
 
 Options: None

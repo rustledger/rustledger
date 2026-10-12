@@ -11,6 +11,7 @@ use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use smallvec::SmallVec;
 use std::cmp::Reverse;
+use std::collections::VecDeque;
 use std::fmt;
 use std::str::FromStr;
 
@@ -1263,7 +1264,17 @@ pub(super) struct OrderedIndex {
     /// No tiebreak beyond the slot is needed: `add` stores interchangeable
     /// lots as ONE position (#2118), so a group has one slot rather than
     /// several needing to be kept adjacent.
-    by_currency: FxHashMap<crate::Currency, Vec<usize>>,
+    ///
+    /// A deque because the ends are where the work is. Every ordered method
+    /// walks forward and consumes the FRONT (a descending method reverses its
+    /// key, never the walk), and a new lot lands at the back (FIFO) or the
+    /// front (LIFO, whose newest lot sorts first). A `Vec` shifted every
+    /// other entry on each front removal or insertion, so a FIFO account that
+    /// drained its oldest lot once per sale paid O(lots) per sale: 4,000 to
+    /// 16,000 transactions grew 15.7x in `cost_index_remove` alone (#2604).
+    /// A removal from the middle (a sale naming one lot's cost) shifts the
+    /// shorter side.
+    by_currency: FxHashMap<crate::Currency, VecDeque<usize>>,
 }
 
 /// What [`Inventory::cost_index`] groups lots by: the units they are held in,
@@ -1288,8 +1299,27 @@ type CostSlots = SmallVec<[usize; 2]>;
 /// An incomplete index is not an option for the shared store: `add` finds its
 /// merge target through this map, so leaving lots out of it stops them
 /// merging, and the reductions that trust it miss them.
+#[derive(Debug, Clone, Default)]
+struct CostIndex {
+    map: CostMap,
+    /// How many slots `map` holds per COST currency, for
+    /// [`Inventory::sole_cost_currency`] (#2604).
+    ///
+    /// Kept here, beside the map, so it moves in step by construction: it is
+    /// changed only where `map` gains or loses a slot. It inherits the map's
+    /// asymmetry: a slot whose lot has since become empty may still be
+    /// counted (a superset, which the reader allows for), while every lot the
+    /// map holds is counted. One inline entry: an account holds its lots in
+    /// one cost currency almost always, so a shared snapshot's per-row clone
+    /// stays allocation-free, and every inventory grows by as little as it
+    /// can (it is a field of each account's inventory, cloned per BQL row).
+    by_cost_currency: SmallVec<[(crate::Currency, u32); 1]>,
+}
+
+/// The map half of [`CostIndex`], in the representation the position store
+/// wants.
 #[derive(Debug, Clone)]
-enum CostIndex {
+enum CostMap {
     /// For the `Owned` store.
     Owned(FxHashMap<CostKey, CostSlots>),
     /// For the `Shared` store.
@@ -1303,7 +1333,7 @@ enum CostIndex {
     ),
 }
 
-impl Default for CostIndex {
+impl Default for CostMap {
     fn default() -> Self {
         Self::Owned(FxHashMap::default())
     }
@@ -1312,56 +1342,98 @@ impl Default for CostIndex {
 impl CostIndex {
     /// An empty index in the representation `store` wants.
     fn for_store(store: &PositionStore) -> Self {
-        if store.is_owned() {
-            Self::default()
-        } else {
-            Self::Shared(imbl::GenericHashMap::default())
+        Self {
+            map: if store.is_owned() {
+                CostMap::default()
+            } else {
+                CostMap::Shared(imbl::GenericHashMap::default())
+            },
+            by_cost_currency: SmallVec::new(),
         }
     }
 
     fn get(&self, key: &CostKey) -> Option<&CostSlots> {
-        match self {
-            Self::Owned(m) => m.get(key),
-            Self::Shared(m) => m.get(key),
+        match &self.map {
+            CostMap::Owned(m) => m.get(key),
+            CostMap::Shared(m) => m.get(key),
         }
     }
 
     /// Record `slot` under `key`, after the slots already there.
     fn push(&mut self, key: CostKey, slot: usize) {
-        match self {
-            Self::Owned(m) => m.entry(key).or_default().push(slot),
-            Self::Shared(m) => m.entry(key).or_default().push(slot),
+        self.count_cost_currency(&key.2, 1);
+        match &mut self.map {
+            CostMap::Owned(m) => m.entry(key).or_default().push(slot),
+            CostMap::Shared(m) => m.entry(key).or_default().push(slot),
         }
     }
 
     /// Drop `slot` from `key`'s bucket, and the bucket once it is empty.
     fn remove_slot(&mut self, key: &CostKey, slot: usize) {
-        let emptied = match self {
-            Self::Owned(m) => m.get_mut(key).map(|slots| {
+        let removed_and_emptied = match &mut self.map {
+            CostMap::Owned(m) => m.get_mut(key).map(|slots| {
+                let before = slots.len();
                 slots.retain(|s| *s != slot);
-                slots.is_empty()
+                (before - slots.len(), slots.is_empty())
             }),
-            Self::Shared(m) => m.get_mut(key).map(|slots| {
+            CostMap::Shared(m) => m.get_mut(key).map(|slots| {
+                let before = slots.len();
                 slots.retain(|s| *s != slot);
-                slots.is_empty()
+                (before - slots.len(), slots.is_empty())
             }),
         };
-        if emptied == Some(true) {
-            match self {
-                Self::Owned(m) => {
+        let Some((removed, emptied)) = removed_and_emptied else {
+            return;
+        };
+        if removed > 0 {
+            self.count_cost_currency(&key.2, -(removed as i64));
+        }
+        if emptied {
+            match &mut self.map {
+                CostMap::Owned(m) => {
                     m.remove(key);
                 }
-                Self::Shared(m) => {
+                CostMap::Shared(m) => {
                     m.remove(key);
                 }
             }
         }
     }
 
+    /// Adjust the slot count of cost currency `currency` by `delta`, dropping
+    /// the entry at zero so the list names only currencies the map holds.
+    fn count_cost_currency(&mut self, currency: &crate::Currency, delta: i64) {
+        match self
+            .by_cost_currency
+            .iter()
+            .position(|(held, _)| held == currency)
+        {
+            Some(at) => {
+                let count = &mut self.by_cost_currency[at].1;
+                *count = u32::try_from(i64::from(*count) + delta).unwrap_or(0);
+                if *count == 0 {
+                    self.by_cost_currency.remove(at);
+                }
+            }
+            None => {
+                if let Ok(count) = u32::try_from(delta)
+                    && count > 0
+                {
+                    self.by_cost_currency.push((currency.clone(), count));
+                }
+            }
+        }
+    }
+
+    /// Every cost currency at least one indexed slot is held in.
+    fn cost_currencies(&self) -> impl ExactSizeIterator<Item = &crate::Currency> {
+        self.by_cost_currency.iter().map(|(currency, _)| currency)
+    }
+
     fn len(&self) -> usize {
-        match self {
-            Self::Owned(m) => m.len(),
-            Self::Shared(m) => m.len(),
+        match &self.map {
+            CostMap::Owned(m) => m.len(),
+            CostMap::Shared(m) => m.len(),
         }
     }
 
@@ -1372,10 +1444,10 @@ impl CostIndex {
     /// The same entries as a plain hash map, for a store that has just become
     /// `Owned`. O(entries), which the store's own conversion already pays.
     fn make_owned(&mut self) {
-        if let Self::Shared(m) = self {
+        if let CostMap::Shared(m) = &self.map {
             let owned: FxHashMap<CostKey, CostSlots> =
                 m.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
-            *self = Self::Owned(owned);
+            self.map = CostMap::Owned(owned);
         }
     }
 }
@@ -1943,9 +2015,40 @@ impl Inventory {
             .is_none_or(|lot| fits(lot.units.number))
     }
 
-    /// Get all currencies in this inventory.
+    /// Get all currencies in this inventory: those of its non-empty
+    /// positions, sorted.
+    ///
+    /// Answered from the per-currency sign counts the units cache keeps,
+    /// which leave a zero lot out exactly as this leaves out an empty
+    /// position. Booking asks this for every posting whose units name no
+    /// currency (`-5 {}`, #2490), and walking every lot made such sales from
+    /// a many-lot account O(lots) each: 1,000 / 2,000 / 4,000 lots grew 2.5x
+    /// then 2.9x per doubling (#2604).
     #[must_use]
     pub fn currencies(&self) -> Vec<&str> {
+        // An unbuilt cache over non-empty positions cannot answer; see
+        // `is_reduced_by`.
+        if self.units_cache.is_empty() && !self.positions.is_empty() {
+            return self.currencies_scan();
+        }
+        let mut currencies: Vec<&str> = self
+            .units_cache
+            .iter()
+            .filter(|(_, stats)| stats.counts.by_sign() != (0, 0))
+            .map(|(currency, _)| currency.as_str())
+            .collect();
+        currencies.sort_unstable();
+        debug_assert_eq!(
+            currencies,
+            self.currencies_scan(),
+            "the cached sign counts disagree with a scan of positions",
+        );
+        currencies
+    }
+
+    /// The walk [`Self::currencies`] replaced: its definition, and its
+    /// fallback.
+    fn currencies_scan(&self) -> Vec<&str> {
         let mut currencies: Vec<&str> = self
             .positions
             .iter()
@@ -1955,6 +2058,62 @@ impl Inventory {
         currencies.sort_unstable();
         currencies.dedup();
         currencies
+    }
+
+    /// The one currency this inventory's lots are held at cost in, across
+    /// every commodity it holds, or `None` for none or several.
+    ///
+    /// Beancount's `Inventory.cost_currencies()` when it has exactly one
+    /// element; like it, an empty lot counts for nothing. Booking asks this
+    /// for every `{}` sale that takes the account's cost currency (#2589), so
+    /// it answers from the cost index's per-cost-currency counts instead of
+    /// walking every lot. That walk, once per sale, was O(lots x sales):
+    /// 1,000 lots and 333 sales grew 16x for 4x the input (#2604).
+    ///
+    /// The counts can include a slot whose lot has since become empty, never
+    /// miss one. So one counted currency is the answer whenever any
+    /// cost-bearing lot is non-empty (the sign counts say so in O(currencies)),
+    /// and several counted currencies fall back to the walk, which decides.
+    #[must_use]
+    pub fn sole_cost_currency(&self) -> Option<crate::Currency> {
+        // Same gates as the other index readers: `indexless` has no counts,
+        // an unbuilt cache over non-empty positions cannot be trusted, and an
+        // empty map scans as the harmless direction.
+        if self.indexless || self.cost_index.is_empty() || self.units_cache.is_empty() {
+            return self.sole_cost_currency_scan();
+        }
+        let mut counted = self.cost_index.cost_currencies();
+        let answer = match (counted.next(), counted.next()) {
+            (Some(only), None) => self
+                .units_cache
+                .values()
+                .any(|stats| stats.counts.cost_positive > 0 || stats.counts.cost_negative > 0)
+                .then(|| only.clone()),
+            (None, _) => None,
+            (Some(_), Some(_)) => return self.sole_cost_currency_scan(),
+        };
+        debug_assert_eq!(
+            answer,
+            self.sole_cost_currency_scan(),
+            "the cost-currency counts disagree with a scan of positions; some \
+             mutation path changed the cost index without counting it",
+        );
+        answer
+    }
+
+    /// The walk [`Self::sole_cost_currency`] replaced: its definition, and its
+    /// fallback.
+    fn sole_cost_currency_scan(&self) -> Option<crate::Currency> {
+        let mut found: Option<&crate::Currency> = None;
+        for position in self.positions.iter().filter(|p| !p.is_empty()) {
+            let Some(cost) = &position.cost else { continue };
+            match found {
+                None => found = Some(&cost.currency),
+                Some(c) if *c != cost.currency => return None,
+                Some(_) => {}
+            }
+        }
+        found.cloned()
     }
 
     /// Check if the given units would reduce (not augment) this inventory.
@@ -2541,15 +2700,28 @@ impl Inventory {
         let Some(currency) = ordered else {
             return;
         };
-        let Some(index) = self.ordered_index.as_mut() else {
+        // Out of `self` for the search, as in `ordered_index_insert`, so each
+        // probe can read `self.positions`; put back below on every path.
+        let Some(mut index) = self.ordered_index.take() else {
             return;
         };
+        let order = index.order;
+        let key = (self.order_key(order, idx), idx);
         if let Some(slots) = index.by_currency.get_mut(&currency) {
-            // Linear here rather than a binary search: `order_key` needs
-            // `&self.positions`, which is already borrowed through `index`.
-            // Removal is off the hot path — the walk is what this index exists
-            // to speed up — and it keeps the ordering rule in one place.
-            let at = slots.iter().position(|&existing| existing == idx);
+            // Found by binary search on the same (key, slot) order
+            // `ordered_index_insert` placed it by: the lot is still live here
+            // (callers remove it from the index before tombstoning it), and its
+            // key reads only its cost, which no reduction changes. A linear
+            // scan cost O(lots) for a lot away from the front, such as one a
+            // sale names by its cost. Verified, with the scan as the fallback,
+            // so a key that did move costs time, never correctness.
+            let at = slots
+                .partition_point(|&existing| (self.order_key(order, existing), existing) < key);
+            let at = if slots.get(at) == Some(&idx) {
+                Some(at)
+            } else {
+                slots.iter().position(|&existing| existing == idx)
+            };
             if let Some(at) = at {
                 slots.remove(at);
             }
@@ -2557,6 +2729,7 @@ impl Inventory {
                 index.by_currency.remove(&currency);
             }
         }
+        self.ordered_index = Some(index);
     }
 
     /// Place `slot` under `currency`, keeping the list in (date, slot) order.
@@ -2626,24 +2799,31 @@ impl Inventory {
         if !matches!(self.positions, PositionStore::Owned(_)) {
             return;
         }
-        let mut by_currency: FxHashMap<crate::Currency, Vec<usize>> = FxHashMap::default();
+        let mut by_currency: FxHashMap<crate::Currency, VecDeque<usize>> = FxHashMap::default();
         for (idx, pos) in self.positions.iter_slots() {
             by_currency
                 .entry(pos.units.currency.clone())
                 .or_default()
-                .push(idx);
+                .push_back(idx);
         }
         for slots in by_currency.values_mut() {
-            slots.sort_by_key(|&idx| (self.order_key(order, idx), idx));
+            slots
+                .make_contiguous()
+                .sort_by_key(|&idx| (self.order_key(order, idx), idx));
         }
         self.ordered_index = Some(Box::new(OrderedIndex { order, by_currency }));
     }
 
-    /// Every slot of `currency` in FIFO order, or `None` when the index cannot
-    /// answer and the caller must scan.
+    /// Every slot of `currency` in the index's order, as the deque's two
+    /// halves (walk the first, then the second), or `None` when the index
+    /// cannot answer and the caller must scan.
     ///
     /// Cost-less slots included — see the field's own note on why.
-    fn ordered_candidates(&self, currency: &crate::Currency, order: LotOrder) -> Option<&[usize]> {
+    fn ordered_candidates(
+        &self,
+        currency: &crate::Currency,
+        order: LotOrder,
+    ) -> Option<(&[usize], &[usize])> {
         let index = self.ordered_index.as_ref()?;
         // A different ordering answers a different question; scanning is the
         // only correct fallback until something rebuilds it.
@@ -2654,7 +2834,7 @@ impl Inventory {
             index
                 .by_currency
                 .get(currency)
-                .map_or(&[][..], Vec::as_slice),
+                .map_or((&[][..], &[][..]), VecDeque::as_slices),
         )
     }
 
@@ -2912,7 +3092,7 @@ impl Inventory {
                     .by_currency
                     .entry(pos.units.currency.clone())
                     .or_default()
-                    .push(idx);
+                    .push_back(idx);
             }
             // Update units cache for all positions. Checked, not `+=`:
             // `Decimal`'s `+` panics on overflow, and this runs over payloads.
@@ -2992,7 +3172,7 @@ impl Inventory {
         // slot order already there survives — the same two-level order
         // `plan_ordered` produced when it sorted per call.
         if let Some(order) = ordered_was_built {
-            let keys: Vec<(crate::Currency, Vec<usize>)> = self
+            let keys: Vec<(crate::Currency, VecDeque<usize>)> = self
                 .ordered_index
                 .as_ref()
                 .map(|i| {
@@ -3003,7 +3183,9 @@ impl Inventory {
                 })
                 .unwrap_or_default();
             for (currency, mut slots) in keys {
-                slots.sort_by_key(|&idx| (self.order_key(order, idx), idx));
+                slots
+                    .make_contiguous()
+                    .sort_by_key(|&idx| (self.order_key(order, idx), idx));
                 if let Some(index) = self.ordered_index.as_mut() {
                     index.by_currency.insert(currency, slots);
                 }
@@ -6576,6 +6758,248 @@ mod tests {
     /// otherwise the lists grow without bound as lots close, and the whole
     /// point of the index erodes. Asserted directly, because the tolerant
     /// lookup means no behavioral test can see the difference.
+    /// `currencies` answers from the sign counts (#2604), and `units_cache`
+    /// never forgets a currency, so a currency whose lots were all sold, or
+    /// whose only lot nets to zero on the shared store, must not be listed.
+    #[test]
+    fn currencies_leaves_out_a_currency_with_only_empty_lots() {
+        let lot = |units: Decimal, commodity: &str| {
+            Position::with_cost(Amount::new(units, commodity), Cost::new(dec!(10), "USD"))
+        };
+        let mut inv = Inventory::new();
+        inv.add(lot(dec!(5), "AAPL")).expect("fits");
+        inv.add(lot(dec!(3), "MSFT")).expect("fits");
+        inv.add(Position::simple(Amount::new(dec!(7), "EUR")))
+            .expect("fits");
+        assert_eq!(inv.currencies(), ["AAPL", "EUR", "MSFT"]);
+
+        inv.reduce(
+            &Amount::new(dec!(-3), "MSFT"),
+            Some(&CostSpec::empty()),
+            BookingMethod::Fifo,
+        )
+        .expect("sells every MSFT");
+        assert!(
+            inv.units_cache.contains_key("MSFT"),
+            "the cache keeps the currency"
+        );
+        assert_eq!(inv.currencies(), ["AAPL", "EUR"], "MSFT was sold out");
+
+        inv.add(Position::simple(Amount::new(dec!(-7), "EUR")))
+            .expect("fits");
+        assert_eq!(inv.currencies(), ["AAPL"], "the cost-less EUR nets to zero");
+
+        let mut shared = Inventory::new_shared();
+        shared.add(lot(dec!(2), "AAPL")).expect("fits");
+        shared.add(lot(dec!(-2), "AAPL")).expect("fits");
+        assert_eq!(shared.len(), 1, "the shared store keeps the zero lot");
+        assert!(
+            shared.currencies().is_empty(),
+            "an empty lot holds no currency"
+        );
+        shared.add(lot(dec!(1), "MSFT")).expect("fits");
+        assert_eq!(shared.currencies(), ["MSFT"]);
+    }
+
+    /// Draining lots removes exactly their entries from the ordered index
+    /// (#2604): the removal finds the entry by binary search on the deque,
+    /// whether it sits at the front (where every ordered method drains) or in
+    /// the middle (a lot a sale names by its cost). After every sale
+    /// the maintained index must equal one built from scratch, so a removal at
+    /// the wrong position, or a stale entry left behind, fails here.
+    #[test]
+    fn draining_keeps_the_ordered_index_equal_to_a_fresh_build() {
+        for method in [
+            BookingMethod::Fifo,
+            BookingMethod::Lifo,
+            BookingMethod::Hifo,
+        ] {
+            let mut inv = Inventory::new();
+            // Repeated dates and repeated costs, out of order, so the keys tie
+            // and only the slot tiebreak separates entries.
+            for (i, (day, cost)) in [
+                (5, 7),
+                (1, 9),
+                (5, 3),
+                (3, 9),
+                (1, 7),
+                (9, 1),
+                (3, 5),
+                (5, 9),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                inv.add(Position::with_cost(
+                    Amount::new(Decimal::from(2 + i as i64 % 3), "AAPL"),
+                    Cost::new(Decimal::from(cost), "USD").with_date(date(2024, 1, day)),
+                ))
+                .expect("fits");
+            }
+            // First a sale naming one lot by cost and date: its entry sits in
+            // the middle of every ordering, which the drains below never reach.
+            inv.reduce(
+                &Amount::new(dec!(-2), "AAPL"),
+                Some(
+                    &CostSpec::empty()
+                        .with_number(crate::CostNumber::PerUnit { value: dec!(9) })
+                        .with_currency("USD")
+                        .with_date(date(2024, 1, 3)),
+                ),
+                method,
+            )
+            .expect("sells the one lot at 9 USD on the 3rd");
+            let mut sold = 1;
+            let fresh_matches = |inv: &Inventory, sold: usize| {
+                let maintained = inv.ordered_index.clone().expect("built by the reduction");
+                let mut fresh = inv.clone();
+                fresh.build_ordered_index(maintained.order);
+                let fresh = fresh.ordered_index.expect("built");
+                let as_vecs = |i: &OrderedIndex| {
+                    let mut v: Vec<(String, Vec<usize>)> = i
+                        .by_currency
+                        .iter()
+                        .map(|(c, slots)| (c.to_string(), slots.iter().copied().collect()))
+                        .collect();
+                    v.sort();
+                    v
+                };
+                assert_eq!(
+                    as_vecs(&maintained),
+                    as_vecs(&fresh),
+                    "{method:?}: the maintained ordered index drifted after sale {sold}",
+                );
+            };
+            fresh_matches(&inv, sold);
+            while !inv.is_empty() {
+                inv.reduce(
+                    &Amount::new(dec!(-3), "AAPL"),
+                    Some(&CostSpec::empty()),
+                    method,
+                )
+                .or_else(|_| {
+                    // The last sale may be short; sell what is left.
+                    let left = -inv.units("AAPL");
+                    inv.reduce(&Amount::new(left, "AAPL"), Some(&CostSpec::empty()), method)
+                })
+                .expect("sells");
+                sold += 1;
+                fresh_matches(&inv, sold);
+            }
+            assert!(sold >= 6, "{method:?}: drained in {sold} sales");
+        }
+    }
+
+    /// `sole_cost_currency` answers from the cost index's per-currency
+    /// counts (#2604). Each step mutates the index a different way and checks
+    /// the answer against the walk it replaced, so a mutation path that
+    /// forgot to count is a wrong answer here (and trips the reader's own
+    /// `debug_assert_eq!` against the walk).
+    #[test]
+    fn the_sole_cost_currency_follows_every_index_mutation() {
+        let lot = |units: Decimal, cost: Decimal, currency: &str| {
+            Position::with_cost(Amount::new(units, "AAPL"), Cost::new(cost, currency))
+        };
+        let spec = |cost: Decimal, currency: &str| {
+            CostSpec::empty()
+                .with_number(crate::CostNumber::PerUnit { value: cost })
+                .with_currency(currency)
+        };
+        let check = |inv: &Inventory, want: Option<&str>, why: &str| {
+            assert_eq!(
+                inv.sole_cost_currency().as_deref(),
+                want,
+                "{why}: counts {:?}",
+                inv.cost_index.by_cost_currency,
+            );
+            assert_eq!(
+                inv.sole_cost_currency_scan().as_deref(),
+                want,
+                "{why} (walk)"
+            );
+        };
+        // The counts themselves, exact on the owned store: an over-count
+        // still answers correctly (it falls back to the walk), so only this
+        // catches a removal that forgot to count, which would quietly put the
+        // O(lots) walk back on every sale.
+        let counted = |inv: &Inventory, want: &[(&str, u32)], why: &str| {
+            let got: Vec<(String, u32)> = inv
+                .cost_index
+                .by_cost_currency
+                .iter()
+                .map(|(c, n)| (c.to_string(), *n))
+                .collect();
+            let want: Vec<(String, u32)> =
+                want.iter().map(|(c, n)| ((*c).to_string(), *n)).collect();
+            assert_eq!(got, want, "{why}: cost-currency counts");
+        };
+
+        let mut inv = Inventory::new();
+        check(&inv, None, "empty");
+        inv.add(Position::simple(Amount::new(dec!(5), "USD")))
+            .expect("fits");
+        check(&inv, None, "cost-less lots have no cost currency");
+        inv.add(lot(dec!(10), dec!(1), "USD")).expect("fits");
+        check(&inv, Some("USD"), "one USD lot");
+        inv.add(lot(dec!(10), dec!(2), "USD")).expect("fits");
+        inv.add(lot(dec!(5), dec!(3), "EUR")).expect("fits");
+        check(&inv, None, "USD and EUR lots");
+        counted(&inv, &[("USD", 2), ("EUR", 1)], "USD and EUR lots");
+
+        // A drained lot is tombstoned and leaves the index.
+        inv.reduce(
+            &Amount::new(dec!(-5), "AAPL"),
+            Some(&spec(dec!(3), "EUR")),
+            BookingMethod::Strict,
+        )
+        .expect("drains the EUR lot");
+        check(&inv, Some("USD"), "the EUR lot was sold");
+        counted(&inv, &[("USD", 2)], "the EUR lot was sold");
+
+        // A rolled-back add rebuilds the index from the restored lots.
+        inv.begin_undo();
+        inv.add(lot(dec!(1), dec!(4), "EUR")).expect("fits");
+        check(&inv, None, "an EUR lot inside the undo log");
+        inv.rollback_undo();
+        check(&inv, Some("USD"), "rolled back");
+        counted(&inv, &[("USD", 2)], "rolled back");
+
+        // FIFO drains through the multi-lot commit; compaction rebuilds.
+        inv.reduce(
+            &Amount::new(dec!(-15), "AAPL"),
+            Some(&CostSpec::empty()),
+            BookingMethod::Fifo,
+        )
+        .expect("drains one lot and part of the next");
+        inv.compact_if_sparse();
+        check(&inv, Some("USD"), "after a FIFO drain and compaction");
+        counted(&inv, &[("USD", 1)], "after a FIFO drain and compaction");
+        inv.reduce(
+            &Amount::new(dec!(-5), "AAPL"),
+            Some(&CostSpec::empty()),
+            BookingMethod::Fifo,
+        )
+        .expect("drains the rest");
+        check(&inv, None, "every cost lot sold");
+        counted(&inv, &[], "every cost lot sold");
+
+        // A round trip rebuilds the caches.
+        inv.add(lot(dec!(2), dec!(7), "CHF")).expect("fits");
+        let back: Inventory =
+            serde_json::from_str(&serde_json::to_string(&inv).expect("serializes"))
+                .expect("deserializes");
+        check(&back, Some("CHF"), "after a round trip");
+
+        // The shared store keeps a lot netted to zero, and its index slot:
+        // the counts then name a currency only an EMPTY lot is held in.
+        let mut shared = Inventory::new_shared();
+        shared.add(lot(dec!(1), dec!(5), "EUR")).expect("fits");
+        shared.add(lot(dec!(-1), dec!(5), "EUR")).expect("fits");
+        check(&shared, None, "only an empty EUR lot");
+        shared.add(lot(dec!(3), dec!(6), "USD")).expect("fits");
+        check(&shared, Some("USD"), "a USD lot beside an empty EUR lot");
+    }
+
     #[test]
     fn draining_a_lot_removes_it_from_the_cost_index() {
         let spec = || {
@@ -6777,10 +7201,11 @@ mod tests {
                 Cost::new(units * dec!(10), "USD"),
             )
         };
-        let shares_its_index = |a: &Inventory, b: &Inventory| match (&a.cost_index, &b.cost_index) {
-            (CostIndex::Shared(x), CostIndex::Shared(y)) => x.ptr_eq(y),
-            _ => false,
-        };
+        let shares_its_index =
+            |a: &Inventory, b: &Inventory| match (&a.cost_index.map, &b.cost_index.map) {
+                (CostMap::Shared(x), CostMap::Shared(y)) => x.ptr_eq(y),
+                _ => false,
+            };
 
         let mut shared = Inventory::new_shared();
         for units in [dec!(10), dec!(20), dec!(30)] {
@@ -6818,7 +7243,7 @@ mod tests {
         for units in [dec!(10), dec!(20), dec!(30)] {
             owned.add(lot(units)).expect("fits");
         }
-        assert!(matches!(owned.cost_index, CostIndex::Owned(_)));
+        assert!(matches!(owned.cost_index.map, CostMap::Owned(_)));
         assert_eq!(owned.cost_index.len(), 3);
 
         // And a snapshot still books CORRECTLY: a reduction converts it to
@@ -6835,7 +7260,7 @@ mod tests {
             )
             .expect("a shared snapshot finds the lot it holds");
         assert_eq!(result.matched.len(), 1);
-        assert!(matches!(shared.cost_index, CostIndex::Owned(_)));
+        assert!(matches!(shared.cost_index.map, CostMap::Owned(_)));
         assert_eq!(row.units("AAPL"), dec!(60), "the earlier row is untouched");
     }
 

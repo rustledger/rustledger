@@ -50,10 +50,22 @@ async fn main() {
 ///
 /// The drift guard in `tests/ag_rledger_test.rs` fails when `rledger` has a
 /// command that is neither offered here nor listed in this table (#2567).
-const UNSUPPORTED_COMMANDS: &[(&str, &str)] = &[(
-    "completions",
-    "it writes a shell completion script, which is for an interactive shell, not an agent",
-)];
+const UNSUPPORTED_COMMANDS: &[(&str, &str)] = &[
+    (
+        "completions",
+        "it writes a shell completion script, which is for an interactive shell, not an agent",
+    ),
+    (
+        "split",
+        "it rewrites ledger files, and is not wired for agents yet (no confirmation gate, \
+         and part of its output still goes to the process's stderr)",
+    ),
+    (
+        "merge",
+        "it rewrites ledger files, and is not wired for agents yet (no confirmation gate, \
+         and part of its output still goes to the process's stderr)",
+    ),
+];
 
 fn build_cli() -> AgentCli {
     let mut cli = AgentCli::new("ag-rledger", "Agent-native plain-text accounting CLI")

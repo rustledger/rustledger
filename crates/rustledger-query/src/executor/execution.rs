@@ -504,7 +504,7 @@ impl Executor<'_> {
         let from_subquery = from.is_some_and(|f| f.subquery.is_some());
         let from_table = from
             .and_then(|f| f.table_name.as_ref())
-            .and_then(|name| self.tables.get(&name.to_uppercase()));
+            .and_then(|name| self.tables.get(name));
         let mut reads: Vec<Target> = Vec::new();
         let mut read = |column: String| {
             for function in ["WEIGHT", "COST", "SUM"] {
@@ -685,13 +685,11 @@ impl Executor<'_> {
         query: &SelectQuery,
         table_name: &str,
     ) -> Result<QueryResult, QueryError> {
-        let table_name_upper = table_name.to_uppercase();
-
         // Check for user-created tables first (exact match takes precedence),
         // then fall back to built-in system tables (which support aliases like
         // "transactions" for "#transactions" for beancount compatibility).
         let builtin_table;
-        let table = if let Some(user_table) = self.tables.get(&table_name_upper) {
+        let table = if let Some(user_table) = self.tables.get(table_name) {
             user_table
         } else if let Some(builtin) = self.get_builtin_table(table_name, query)? {
             builtin_table = builtin;
@@ -1853,7 +1851,7 @@ impl Executor<'_> {
         let table_name = create.table_name.to_uppercase();
 
         // Check if table already exists
-        if self.tables.contains_key(&table_name) {
+        if self.tables.contains(&table_name) {
             return Err(QueryError::Evaluation(format!(
                 "table '{}' already exists",
                 create.table_name
@@ -1877,8 +1875,14 @@ impl Executor<'_> {
             let columns = create.columns.iter().map(|c| c.name.clone()).collect();
             Table::new(columns)
         };
+        // The types `.describe` shows for the columns declared with one.
+        let declared = create
+            .columns
+            .iter()
+            .filter_map(|c| Some((c.name.clone(), c.type_hint.as_ref()?.to_lowercase())))
+            .collect();
 
-        self.tables.insert(table_name, table);
+        self.tables.insert(&create.table_name, table, declared);
 
         // Return empty result with a message
         let mut result = QueryResult::new(vec!["result".to_string()]);

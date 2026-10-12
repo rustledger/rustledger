@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.14.0;
+package rustledger:ledger@3.15.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -632,6 +632,11 @@ interface ledger {
     /// two are drop-in interchangeable.
     account-type: func(account: string) -> string;
     /// Run a BQL query against the held ledger.
+    ///
+    /// A table a `CREATE TABLE` makes stays for this session's later
+    /// queries, and `INSERT INTO` adds to it (3.15.0, #2579); before, each
+    /// call started without the tables earlier calls made. The free
+    /// `query` / `batch` functions keep none.
     query: func(query: string) -> query-result;
     /// Keep only directives within `[begin, end)`.
     filter: func(begin-date: string, end-date: string) -> list<directive>;

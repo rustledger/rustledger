@@ -1295,12 +1295,22 @@ fn convert_transaction(
         .links()
         .map(|l| Link::new(l.text().trim_start_matches('^')))
         .collect();
+    // Only body lines BEFORE the first posting count (#2575): see
+    // `body_tag_joins_transaction`. Mirrors green `convert_transaction_header`.
+    let mut posting_seen = false;
     for el in node.syntax().children_with_tokens() {
-        let rowan::NodeOrToken::Token(t) = el else {
+        let t = match el {
+            rowan::NodeOrToken::Token(t) => t,
             // Nodes (POSTING / META_ENTRY) own their own internal
             // tokens; we don't recurse into them.
-            continue;
+            rowan::NodeOrToken::Node(n) => {
+                posting_seen |= n.kind() == crate::SyntaxKind::POSTING;
+                continue;
+            }
         };
+        if !body_tag_joins_transaction(posting_seen) {
+            continue;
+        }
         match t.kind() {
             crate::SyntaxKind::TAG => {
                 let stripped = t.text().trim_start_matches('#');
@@ -3185,6 +3195,49 @@ fn unexpected_body_input(line_start: u32, end: u32, bom_offset: u32) -> crate::P
     )
 }
 
+/// The error for a transaction body line of `#tag` / `^link` tokens that
+/// comes after the transaction's first posting (#2575). `tags` is the line's
+/// tag and link tokens as written, space-separated.
+///
+/// Beancount's grammar accepts such a line anywhere in the posting list, but
+/// its builder refuses one after the first posting ("Tags or links not allowed
+/// after first Posting") and keeps the transaction WITHOUT those tags. rledger
+/// does the same: the line draws this error, and the conversion leaves its
+/// tags out of the transaction's set (`body_tag_joins_transaction`). Before
+/// #2575 rledger silently added them to the transaction, so a file beancount
+/// refuses loaded clean, with a tag beancount would not report.
+///
+/// Shared by the red ([`transaction_body_check`]) and green
+/// (`green::tl_transaction_body_check`) body checks, so the two report the
+/// same words over the same span.
+pub(super) fn tags_after_posting_error(
+    tags: &str,
+    line_start: usize,
+    end: usize,
+    bom_offset: u32,
+) -> crate::ParseError {
+    crate::ParseError::new(
+        crate::ParseErrorKind::SyntaxError(format!(
+            "tags and links are not allowed after a transaction's first posting \
+             (`{tags}`); write them on the header line or on a line before the first posting"
+        )),
+        Span::new(line_start + bom_offset as usize, end + bom_offset as usize),
+    )
+}
+
+/// Whether a `#tag` / `^link` token on a transaction BODY line (outside any
+/// posting or metadata node) joins the transaction's tag/link set: only before
+/// the first posting (#2575). After it, the line is an error
+/// ([`tags_after_posting_error`]) and its tags are dropped, as beancount drops
+/// them.
+///
+/// THE rule, for both conversions (red `convert_transaction`, green
+/// `convert_transaction_header`) and both body checks; each walk tracks
+/// `posting_seen` and asks here.
+pub(super) const fn body_tag_joins_transaction(posting_seen: bool) -> bool {
+    !posting_seen
+}
+
 /// Reject transaction headers beancount's grammar refuses (#2008 cases 3, 4,
 /// 6, 7). The rule itself lives in [`super::txn_header`] so this and its green
 /// mirror (`green::tl_transaction_header_check`) cannot drift; here we only
@@ -3260,6 +3313,10 @@ fn transaction_body_check(
         let mut saw_header_content = false;
         let mut line_start: Option<u32> = None;
         let mut line_has_content = false;
+        // #2575: a tag/link line after the first posting is an error. The
+        // line's tag and link tokens, as written, for the message.
+        let mut posting_seen = false;
+        let mut line_tags = String::new();
         for el in child.children_with_tokens() {
             match el {
                 rowan::NodeOrToken::Token(t) => {
@@ -3280,27 +3337,43 @@ fn transaction_body_check(
                         line_start = Some(start);
                     }
                     if t.kind() == crate::SyntaxKind::NEWLINE {
-                        if line_has_content && let Some(ls) = line_start {
-                            out.push(unexpected_body_input(ls, end, bom_offset));
+                        if let Some(ls) = line_start {
+                            if line_has_content {
+                                out.push(unexpected_body_input(ls, end, bom_offset));
+                            } else if !line_tags.is_empty() {
+                                out.push(tags_after_posting_error(
+                                    &line_tags,
+                                    ls as usize,
+                                    end as usize,
+                                    bom_offset,
+                                ));
+                            }
                         }
                         line_start = None;
                         line_has_content = false;
-                    } else if !is_trivia_kind(t.kind())
-                        && !is_comment_kind(t.kind())
-                        && !matches!(t.kind(), crate::SyntaxKind::TAG | crate::SyntaxKind::LINK)
-                    {
-                        // TAG / LINK on body lines is valid
-                        // Beancount syntax (tags/links after the
-                        // first line continue the transaction's
-                        // tag/link list). Don't flag as
-                        // unexpected-input.
+                        line_tags.clear();
+                    } else if matches!(t.kind(), crate::SyntaxKind::TAG | crate::SyntaxKind::LINK) {
+                        // TAG / LINK on body lines is valid Beancount
+                        // syntax BEFORE the first posting (they continue
+                        // the transaction's tag/link list), so not
+                        // unexpected input; after it, the line is the
+                        // tags-after-posting error (#2575).
+                        if !body_tag_joins_transaction(posting_seen) {
+                            if !line_tags.is_empty() {
+                                line_tags.push(' ');
+                            }
+                            line_tags.push_str(t.text());
+                        }
+                    } else if !is_trivia_kind(t.kind()) && !is_comment_kind(t.kind()) {
                         line_has_content = true;
                     }
                 }
-                rowan::NodeOrToken::Node(_) => {
+                rowan::NodeOrToken::Node(n) => {
                     // POSTING / META_ENTRY: not catch-all. Reset.
+                    posting_seen |= n.kind() == crate::SyntaxKind::POSTING;
                     line_start = None;
                     line_has_content = false;
+                    line_tags.clear();
                     if !past_header {
                         past_header = true;
                     }
@@ -3309,12 +3382,18 @@ fn transaction_body_check(
         }
         // EOF terminates the final body line, same as a NEWLINE. Mirrors
         // `green::tl_transaction_body_check` (#1884).
-        if past_header
-            && line_has_content
-            && let Some(ls) = line_start
-        {
+        if past_header && let Some(ls) = line_start {
             let end: u32 = child.text_range().end().into();
-            out.push(unexpected_body_input(ls, end, bom_offset));
+            if line_has_content {
+                out.push(unexpected_body_input(ls, end, bom_offset));
+            } else if !line_tags.is_empty() {
+                out.push(tags_after_posting_error(
+                    &line_tags,
+                    ls as usize,
+                    end as usize,
+                    bom_offset,
+                ));
+            }
         }
     }
 }
@@ -5034,26 +5113,37 @@ mod tests {
 
     #[test]
     fn body_line_tag_does_not_drop_following_postings_comment() {
-        // F2-bis: trailing TAG / LINK tokens on transaction body
-        // lines are valid Beancount (extend the transaction's
-        // tag/link set). Before the exemption was added, the
-        // `pending.clear()` over-fired on the TAG and silently
-        // dropped the preceding comment that semantically
+        // F2-bis: a TAG / LINK line in a transaction body must not
+        // make the comment before it vanish. Before the exemption
+        // was added, the `pending.clear()` over-fired on the TAG and
+        // silently dropped the preceding comment that semantically
         // belonged to the next posting.
+        //
+        // This test also asserted that the late tag joined the
+        // transaction's tag set. Beancount refuses a tag line after
+        // the first posting and drops its tags (#2575), so it is now
+        // an error and the tag is not kept; the comment still must
+        // survive.
         let src = "2024-01-01 * \"x\"\n  \
                    Assets:A   100 USD\n  \
                    ; comment-for-B\n  \
                    #late-tag\n  \
                    Assets:B   -100 USD\n";
         let result = parse_via_cst(src);
-        assert!(result.errors.is_empty(), "errors: {:?}", result.errors);
+        assert_eq!(result.errors.len(), 1, "errors: {:?}", result.errors);
+        assert!(
+            result.errors[0]
+                .message()
+                .contains("not allowed after a transaction's first posting"),
+            "errors: {:?}",
+            result.errors
+        );
         let Directive::Transaction(t) = &result.directives[0].value else {
             panic!("expected Transaction");
         };
-        // The trailing tag joins the transaction's tag set.
         assert!(
-            t.tags.iter().any(|tag| tag.as_str() == "late-tag"),
-            "expected #late-tag in tags: {:?}",
+            !t.tags.iter().any(|tag| tag.as_str() == "late-tag"),
+            "a tag after the first posting is dropped: {:?}",
             t.tags,
         );
         // And the comment survives - attached to the next posting.

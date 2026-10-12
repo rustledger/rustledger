@@ -21,7 +21,7 @@
 use regex::Regex;
 use rust_decimal::Decimal;
 use rustledger_core::NaiveDate;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::str::FromStr;
 use std::sync::LazyLock;
 
@@ -112,7 +112,10 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
         }
     };
 
-    let mut new_accounts: HashSet<String> = HashSet::new();
+    // Sorted, as beancount_reds_plugins opens them (`create_open_directives`
+    // walks `sorted(new_accounts)`); a `HashSet` emitted them in a different
+    // order on every run (#2625).
+    let mut new_accounts: BTreeSet<String> = BTreeSet::new();
     let mut ops: Vec<PluginOp> = Vec::with_capacity(input.directives.len());
     // Track earliest date from input directives for synthesized Open directives.
     let earliest_date = input
@@ -389,7 +392,10 @@ fn process_gain_loss(input: PluginInput) -> PluginOutput {
         }
     };
 
-    let mut new_accounts: HashSet<String> = HashSet::new();
+    // Sorted, as beancount_reds_plugins opens them (`create_open_directives`
+    // walks `sorted(new_accounts)`); a `HashSet` emitted them in a different
+    // order on every run (#2625).
+    let mut new_accounts: BTreeSet<String> = BTreeSet::new();
     let mut ops: Vec<PluginOp> = Vec::with_capacity(input.directives.len());
     // Earliest date from input for synthesized Open directives.
     let earliest_date = input

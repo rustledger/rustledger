@@ -2,8 +2,9 @@
 //!
 //! Provides three deduplication strategies:
 //!
-//! - **Structural** — exact hash match using [`crate::fingerprint::structural_hash`].
-//!   Finds transactions that are byte-for-byte identical (excluding metadata).
+//! - **Structural** — exact match on [`crate::fingerprint::structural_key`].
+//!   Finds directives of any type but `price` that are identical (excluding
+//!   metadata), as beancount's `noduplicates` does.
 //!
 //! - **Import** — [`find_import_duplicates`] matches imported transactions
 //!   against an existing ledger: shared id links (`^ofx-…`, `^csv-…`,
@@ -24,59 +25,85 @@ use rust_decimal::Decimal;
 use rustledger_core::{Directive, Transaction};
 use rustledger_plugin_types::{DirectiveData, DirectiveWrapper, PluginError};
 
-use crate::fingerprint::structural_hash;
+use crate::fingerprint::structural_key;
 
 /// Result of finding a structural duplicate.
 #[derive(Debug)]
 pub struct StructuralDuplicate {
     /// Index of the duplicate directive in the input slice.
     pub index: usize,
-    /// Date of the duplicate transaction.
+    /// Date of the duplicate directive.
     pub date: String,
-    /// Narration of the duplicate transaction.
-    pub narration: String,
+    /// What the duplicate is, after its date: a transaction's narration in
+    /// quotes (`"Lunch"`), or the directive's keyword and its main fields
+    /// (`note Assets:Bank "hello"`).
+    pub summary: String,
 }
 
 impl StructuralDuplicate {
     /// Convert to a [`PluginError`] for use in plugin wrappers.
-    #[must_use]
     ///
     /// "Duplicate entry: ", as beancount's `noduplicates` begins its
     /// message (#2539). Deliberate divergence: beancount goes on with the
     /// Python `repr` of both entries; this names the duplicate's date and
-    /// narration.
+    /// [`summary`](Self::summary).
+    #[must_use]
     pub fn to_plugin_error(&self) -> PluginError {
-        PluginError::error(format!(
-            "Duplicate entry: {} \"{}\"",
-            self.date, self.narration
-        ))
+        PluginError::error(format!("Duplicate entry: {} {}", self.date, self.summary))
     }
 }
 
-/// Find structurally duplicate transactions in a directive list.
+/// Find structurally duplicate directives in a directive list, as
+/// beancount's `noduplicates` does: every directive type but `price`,
+/// compared by [`structural_key`] (#2599; before, only transactions).
 ///
-/// Returns the indices and details of transactions whose structural hash
-/// matches an earlier transaction. The first occurrence is kept; subsequent
-/// duplicates are reported.
+/// Returns the indices and details of directives whose key matches an
+/// earlier directive's. The first occurrence is kept; subsequent duplicates
+/// are reported.
 #[must_use]
 pub fn find_structural_duplicates(directives: &[DirectiveWrapper]) -> Vec<StructuralDuplicate> {
-    let mut seen: HashSet<u64> = HashSet::new();
+    let mut seen: HashSet<Vec<u8>> = HashSet::new();
     let mut duplicates = Vec::new();
 
     for (i, wrapper) in directives.iter().enumerate() {
-        if let DirectiveData::Transaction(txn) = &wrapper.data {
-            let hash = structural_hash(&wrapper.date, txn);
-            if !seen.insert(hash) {
-                duplicates.push(StructuralDuplicate {
-                    index: i,
-                    date: wrapper.date.clone(),
-                    narration: txn.narration.clone(),
-                });
-            }
+        let Some(key) = structural_key(wrapper) else {
+            continue;
+        };
+        if !seen.insert(key) {
+            duplicates.push(StructuralDuplicate {
+                index: i,
+                date: wrapper.date.clone(),
+                summary: summary(&wrapper.data),
+            });
         }
     }
 
     duplicates
+}
+
+/// A short description of a directive for a duplicate's message: its
+/// keyword and the fields that name it.
+fn summary(data: &DirectiveData) -> String {
+    match data {
+        DirectiveData::Transaction(txn) => format!("\"{}\"", txn.narration),
+        DirectiveData::Open(d) => format!("open {}", d.account),
+        DirectiveData::Close(d) => format!("close {}", d.account),
+        DirectiveData::Commodity(d) => format!("commodity {}", d.currency),
+        DirectiveData::Pad(d) => format!("pad {} {}", d.account, d.source_account),
+        DirectiveData::Balance(d) => format!(
+            "balance {} {} {}",
+            d.account, d.amount.number, d.amount.currency
+        ),
+        DirectiveData::Note(d) => format!("note {} \"{}\"", d.account, d.comment),
+        DirectiveData::Document(d) => format!("document {} \"{}\"", d.account, d.path),
+        DirectiveData::Event(d) => format!("event \"{}\" \"{}\"", d.event_type, d.value),
+        DirectiveData::Query(d) => format!("query \"{}\"", d.name),
+        DirectiveData::Custom(d) => format!("custom \"{}\"", d.custom_type),
+        DirectiveData::Price(d) => format!(
+            "price {} {} {}",
+            d.currency, d.amount.number, d.amount.currency
+        ),
+    }
 }
 
 // ============================================================================
@@ -775,7 +802,7 @@ mod tests {
         let dup = StructuralDuplicate {
             index: 1,
             date: "2024-01-15".to_string(),
-            narration: "Test".to_string(),
+            summary: "\"Test\"".to_string(),
         };
         let err = dup.to_plugin_error();
         assert!(err.message.contains("Duplicate entry"));
@@ -991,24 +1018,174 @@ mod tests {
         assert!(dups.is_empty());
     }
 
-    #[test]
-    fn structural_non_transaction_not_duplicated() {
-        let note1 = DirectiveWrapper {
-            directive_type: "note".to_string(),
-            date: "2024-01-15".to_string(),
+    fn wrapper(date: &str, data: DirectiveData) -> DirectiveWrapper {
+        DirectiveWrapper {
+            directive_type: String::new(),
+            date: date.to_string(),
             filename: None,
             lineno: None,
-            data: DirectiveData::Note(rustledger_plugin_types::NoteData {
-                account: "Assets:Bank".to_string(),
-                comment: "Same note".to_string(),
+            data,
+        }
+    }
+
+    fn note(comment: &str, tags: &[&str]) -> DirectiveData {
+        DirectiveData::Note(rustledger_plugin_types::NoteData {
+            account: "Assets:Bank".to_string(),
+            comment: comment.to_string(),
+            tags: tags.iter().map(ToString::to_string).collect(),
+            links: vec![],
+            metadata: vec![],
+        })
+    }
+
+    /// Every directive type but `price` is compared, as beancount's
+    /// `noduplicates` compares them (#2599; before, only transactions).
+    #[test]
+    fn structural_compares_every_directive_type_but_price() {
+        use rustledger_plugin_types::{
+            BalanceData, CloseData, CommodityData, CustomData, DocumentData, EventData,
+            MetaValueData, OpenData, PadData, PriceData, QueryData,
+        };
+        let s = ToString::to_string;
+        let usd = |n: &str| AmountData {
+            number: n.to_string(),
+            currency: s("USD"),
+        };
+        let all = [
+            DirectiveData::Open(OpenData {
+                account: s("Assets:New"),
+                currencies: vec![s("USD"), s("EUR")],
+                booking: Some(s("FIFO")),
+                metadata: vec![],
+            }),
+            DirectiveData::Close(CloseData {
+                account: s("Assets:Old"),
+                metadata: vec![],
+            }),
+            DirectiveData::Commodity(CommodityData {
+                currency: s("EUR"),
+                metadata: vec![],
+            }),
+            DirectiveData::Pad(PadData {
+                account: s("Assets:Bank"),
+                source_account: s("Equity:Opening"),
+                metadata: vec![],
+            }),
+            DirectiveData::Balance(BalanceData {
+                account: s("Assets:Bank"),
+                amount: usd("0"),
+                tolerance: None,
+                metadata: vec![],
+            }),
+            note("hello", &[]),
+            DirectiveData::Document(DocumentData {
+                account: s("Assets:Bank"),
+                path: s("/x.pdf"),
                 tags: vec![],
                 links: vec![],
                 metadata: vec![],
             }),
-        };
-        let note2 = note1.clone();
-        let dups = find_structural_duplicates(&[note1, note2]);
-        assert!(dups.is_empty());
+            DirectiveData::Event(EventData {
+                event_type: s("location"),
+                value: s("Paris"),
+                metadata: vec![],
+            }),
+            DirectiveData::Query(QueryData {
+                name: s("q"),
+                query: s("SELECT 1"),
+                metadata: vec![],
+            }),
+            DirectiveData::Custom(CustomData {
+                custom_type: s("budget"),
+                values: vec![
+                    MetaValueData::Account(s("Expenses:Food")),
+                    MetaValueData::Amount(usd("10")),
+                ],
+                metadata: vec![],
+            }),
+        ];
+        for data in all {
+            let first = wrapper("2024-01-15", data.clone());
+            let mut second = wrapper("2024-01-15", data.clone());
+            // Metadata is not compared.
+            match &mut second.data {
+                DirectiveData::Open(d) => d.metadata.push((s("k"), MetaValueData::Bool(true))),
+                DirectiveData::Note(d) => d.metadata.push((s("k"), MetaValueData::Bool(true))),
+                _ => {}
+            }
+            let dups = find_structural_duplicates(&[first, second]);
+            assert_eq!(dups.len(), 1, "{data:?}");
+            assert_eq!(dups[0].index, 1);
+            // ... and the date is.
+            let other_day = [
+                wrapper("2024-01-15", data.clone()),
+                wrapper("2024-01-16", data),
+            ];
+            assert!(find_structural_duplicates(&other_day).is_empty());
+        }
+
+        // A repeated price is legal, as in beancount.
+        let price = DirectiveData::Price(PriceData {
+            currency: s("HOOL"),
+            amount: usd("10"),
+            metadata: vec![],
+        });
+        let prices = [
+            wrapper("2024-01-15", price.clone()),
+            wrapper("2024-01-15", price),
+        ];
+        assert!(find_structural_duplicates(&prices).is_empty());
+    }
+
+    /// The message names the duplicate: its keyword and main fields.
+    #[test]
+    fn structural_duplicate_message_names_the_directive() {
+        let dups = find_structural_duplicates(&[
+            wrapper("2024-01-15", note("hello", &[])),
+            wrapper("2024-01-15", note("hello", &[])),
+        ]);
+        assert_eq!(
+            dups[0].to_plugin_error().message,
+            "Duplicate entry: 2024-01-15 note Assets:Bank \"hello\""
+        );
+    }
+
+    /// Tags are a set, as beancount's `frozenset`: their order does not
+    /// count, but a missing one does; a field that differs is no duplicate.
+    #[test]
+    fn structural_note_tags_are_a_set() {
+        let d = |comment, tags: &[&str]| wrapper("2024-01-15", note(comment, tags));
+        assert_eq!(
+            find_structural_duplicates(&[d("hello", &["a", "b"]), d("hello", &["b", "a"])]).len(),
+            1
+        );
+        assert!(find_structural_duplicates(&[d("hello", &["a"]), d("hello", &[])]).is_empty());
+        assert!(find_structural_duplicates(&[d("hello", &[]), d("hello2", &[])]).is_empty());
+    }
+
+    /// Deliberate divergence: the type is part of the identity. beancount
+    /// hashes only the fields, so an `event` and a `query` with the same
+    /// two strings on one date are "duplicates" there.
+    #[test]
+    fn structural_directives_of_different_types_never_match() {
+        use rustledger_plugin_types::{EventData, QueryData};
+        let event = DirectiveData::Event(EventData {
+            event_type: "a".to_string(),
+            value: "b".to_string(),
+            metadata: vec![],
+        });
+        let query = DirectiveData::Query(QueryData {
+            name: "a".to_string(),
+            query: "b".to_string(),
+            metadata: vec![],
+        });
+        assert!(
+            find_structural_duplicates(&[
+                wrapper("2024-01-15", event),
+                wrapper("2024-01-15", query)
+            ])
+            .is_empty()
+        );
     }
 
     #[test]

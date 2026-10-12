@@ -46,7 +46,7 @@ impl NativePlugin for UnrealizedPlugin {
 
     fn process(&self, input: PluginInput) -> PluginOutput {
         use rust_decimal::Decimal;
-        use std::collections::HashMap;
+        use std::collections::{BTreeMap, HashMap};
         use std::str::FromStr;
 
         // Build price database from Price directives
@@ -69,7 +69,10 @@ impl NativePlugin for UnrealizedPlugin {
         }
 
         // Track positions by account
-        let mut positions: HashMap<String, HashMap<String, (Decimal, Decimal)>> = HashMap::new(); // account -> currency -> (units, cost_basis)
+        // account -> currency -> (units, cost_basis). Sorted, so the warnings
+        // come out by account, then currency, on every run; over `HashMap`s
+        // they came out in hash order (#2625).
+        let mut positions: BTreeMap<String, BTreeMap<String, (Decimal, Decimal)>> = BTreeMap::new();
 
         let mut errors = Vec::new();
 

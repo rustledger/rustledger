@@ -65,12 +65,17 @@ pub enum PythonError {
     Serialization(String),
 
     /// IO error.
+    ///
+    /// This and [`Self::Wasm`] name their cause in the message, so it is not
+    /// also the `source()`: a `{:#}` chain would print it twice (#2574).
+    /// `From` is implemented by hand below (`#[from]` implies `#[source]`).
     #[error("IO error: {0}")]
-    Io(#[from] std::io::Error),
+    Io(std::io::Error),
 
-    /// WASM runtime error.
-    #[error("WASM runtime error: {0}")]
-    Wasm(#[from] wasmtime::Error),
+    /// WASM runtime error. `{0:#}` prints the whole `wasmtime::Error` chain,
+    /// which the `source()` used to carry.
+    #[error("WASM runtime error: {0:#}")]
+    Wasm(wasmtime::Error),
 
     /// Plugin module not found on the system.
     #[error("Python plugin module not found: {0}")]
@@ -83,4 +88,49 @@ pub enum PythonError {
     /// Python runtime not available (Python interpreter not found).
     #[error("Python runtime unavailable: {0}")]
     RuntimeUnavailable(String),
+}
+
+impl From<std::io::Error> for PythonError {
+    fn from(e: std::io::Error) -> Self {
+        Self::Io(e)
+    }
+}
+
+impl From<wasmtime::Error> for PythonError {
+    fn from(e: wasmtime::Error) -> Self {
+        Self::Wasm(e)
+    }
+}
+
+#[cfg(test)]
+mod error_chain_tests {
+    use super::PythonError;
+
+    /// The `{:#}`-style chain: the message, then each `source()` in turn.
+    fn chain(e: &dyn std::error::Error) -> String {
+        let mut out = e.to_string();
+        let mut cur = e.source();
+        while let Some(s) = cur {
+            out.push_str(": ");
+            out.push_str(&s.to_string());
+            cur = s.source();
+        }
+        out
+    }
+
+    /// #2574: `PythonError::Io` and `::Wasm` name their cause in the message
+    /// and used to return it from `source()` as well, so a `{:#}` chain
+    /// printed it twice. `Wasm` prints the whole `wasmtime::Error` chain in
+    /// its message, so the inner cause the `source()` carried is kept.
+    #[test]
+    fn io_and_wasm_errors_name_their_cause_once_2574() {
+        let io = PythonError::from(std::io::Error::other("INNER-IO"));
+        assert_eq!(chain(&io), io.to_string());
+        assert_eq!(chain(&io), "IO error: INNER-IO");
+
+        let wasm = PythonError::from(wasmtime::Error::msg("INNER-CAUSE").context("OUTER-CONTEXT"));
+        let chained = chain(&wasm);
+        assert_eq!(chained, wasm.to_string(), "the message is the whole chain");
+        assert_eq!(chained, "WASM runtime error: OUTER-CONTEXT: INNER-CAUSE");
+    }
 }

@@ -413,7 +413,7 @@ fn round_interpolated(residual: Decimal, tolerance: Option<Decimal>) -> Decimal 
     round_interpolated_bounded(residual, tolerance, tolerance)
 }
 
-/// [`round_interpolated`] on the grid of `tolerance`, keeping the quantized
+/// `round_interpolated` (test-only) on the grid of `tolerance`, keeping the quantized
 /// amount only while it stays within `bound`, the tolerance the validator
 /// checks (see the guard at the end).
 fn round_interpolated_bounded(

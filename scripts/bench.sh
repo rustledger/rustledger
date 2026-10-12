@@ -117,6 +117,23 @@ echo "=== Summary ==="
 python3 <<EOF
 import json
 
+# This heredoc is unquoted, so the shell expands it: no backticks or dollar
+# signs below except the TMPDIR paths.
+def wall_clock(r):
+    """(mean, stddev) of one result's wall-clock time, in seconds.
+
+    hyperfine 1.x puts them at the top level ('mean', 'stddev'); 2.x moved
+    them to summary.time_wall_clock (#2509). This script runs on the nix
+    devshell's hyperfine, which a flake.lock update can move across that
+    boundary, so it reads both. The CI workflows pin their own (#2499).
+    """
+    if "mean" in r:
+        return r["mean"], r["stddev"]
+    t = r["summary"]["time_wall_clock"]
+    if t.get("unit", "second") != "second":
+        raise SystemExit("unexpected hyperfine time unit %r for %r" % (t["unit"], r["command"]))
+    return t["mean"], t["stddev"]
+
 with open("$TMPDIR/validation.json") as f:
     val = json.load(f)
 
@@ -124,11 +141,13 @@ with open("$TMPDIR/balance.json") as f:
     bal = json.load(f)
 
 print("Validation (parse + check):")
-for r in sorted(val['results'], key=lambda x: x['mean']):
-    print(f"  {r['command']:12s} {r['mean']*1000:7.1f}ms ± {r['stddev']*1000:.1f}ms")
+for r in sorted(val['results'], key=lambda x: wall_clock(x)[0]):
+    mean, stddev = wall_clock(r)
+    print(f"  {r['command']:12s} {mean*1000:7.1f}ms ± {stddev*1000:.1f}ms")
 
 print("")
 print("Balance report (parse + compute):")
-for r in sorted(bal['results'], key=lambda x: x['mean']):
-    print(f"  {r['command']:12s} {r['mean']*1000:7.1f}ms ± {r['stddev']*1000:.1f}ms")
+for r in sorted(bal['results'], key=lambda x: wall_clock(x)[0]):
+    mean, stddev = wall_clock(r)
+    print(f"  {r['command']:12s} {mean*1000:7.1f}ms ± {stddev*1000:.1f}ms")
 EOF

@@ -277,7 +277,7 @@ struct MergePlan {
     /// The pool's per-unit cost, or `None` when the lots carry no cost.
     pool: Option<Amount>,
     /// What the pool's lots cost in total, for a sale that takes all of it
-    /// (see [`pool_total_cost`]).
+    /// (see [`Inventory::pool_total`]).
     total_cost: Option<Decimal>,
 }
 
@@ -1889,7 +1889,7 @@ impl Inventory {
         ))
     }
 
-    /// The mutating half of [`Self::reduce_from_lot`], applying a
+    /// The mutating half of a reduction from one lot, applying a
     /// [`Self::plan_from_lot`] result.
     ///
     /// Keeps the incremental cache maintenance the single-lot path always

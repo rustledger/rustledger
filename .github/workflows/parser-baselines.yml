@@ -2,8 +2,8 @@
 #
 # Phase 0 of the parser-CST migration (#1262). Runs on every PR and
 # push to main; fails if `cargo test -p rustledger-parser --test
-# corpus_baseline` reports drift against the committed manifest under
-# `tests/baselines/`.
+# corpus_baseline` or `--test cst_baseline` reports drift against the
+# committed manifests under `tests/baselines/`.
 #
 # Formatter baselines moved to in-module tests in `cst::format` once
 # phase 4.1 landed the opinionated CST-backed formatter; that path
@@ -117,6 +117,17 @@ jobs:
         run: |
           cargo test -p rustledger-parser --test corpus_baseline \
             parser_output_matches_baseline -- --nocapture
+      # The CST baseline (`cst-corpus.manifest`) had no CI step at all: the
+      # Test job has no corpus, so the test skipped everywhere, and the
+      # manifest fell ~26 entries behind (#2511). Same strict contract as the
+      # parser step: drift on an unchanged source fails, and so does an
+      # in-tree fixture with no entry or an edited one not regenerated.
+      - name: CST baseline (strict)
+        env:
+          STRICT_BASELINE: "1"
+        run: |
+          cargo test -p rustledger-parser --test cst_baseline \
+            cst_output_matches_baseline -- --nocapture
       - name: Help text on failure
         if: failure()
         run: |

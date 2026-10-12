@@ -3,9 +3,11 @@
 //! Fetches current prices for commodities from configurable online sources.
 
 use crate::cmd::completions::ShellType;
+use crate::cmd::messages::Messages;
 use crate::cmd::price::discovery::{DiscoveredCommodity, discover_symbols_with_warnings};
 use crate::cmd::price::sources::PriceSource;
 use crate::cmd::price::{PriceRequest, PriceSourceRegistry};
+use crate::cmd::report_cmd::{Diagnostic, Diagnostics};
 use crate::config::{CommodityMapping, PriceConfig};
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -132,7 +134,23 @@ pub struct PriceArgs {
 /// emitted `price` directives can be captured into an envelope.
 pub fn run(args: &PriceArgs, price_config: &PriceConfig) -> Result<()> {
     let mut stdout = io::stdout().lock();
-    run_with_writer(args, price_config, &mut stdout, &mut io::stderr())
+    run_with_writer(args, price_config, &mut stdout, None, &mut io::stderr())
+}
+
+/// The codes `price`'s warnings carry when the caller collects them as
+/// records (`ag-rledger`'s `warnings`; see [`run_with_writer`]). `rledger`
+/// prints the same warnings as lines, without the code.
+pub mod warning_codes {
+    /// A price could not be fetched; the message names the symbol and why.
+    pub const PRICE_FETCH_FAILED: &str = "PRICE_FETCH_FAILED";
+    /// A commodity's `price:` metadata could not be read, so it is skipped.
+    pub const PRICE_METADATA_MALFORMED: &str = "PRICE_METADATA_MALFORMED";
+    /// Nothing to fetch: no symbols were given and the ledger opts none in.
+    pub const NO_SYMBOLS: &str = "NO_SYMBOLS";
+    /// Why the ledger offered nothing to fetch, and the flag that would.
+    pub const NO_SYMBOLS_HINT: &str = "NO_SYMBOLS_HINT";
+    /// A deprecated flag was used.
+    pub const FLAG_DEPRECATED: &str = "FLAG_DEPRECATED";
 }
 
 /// Dedup key for a `(symbol, quote-currency, date)` price identity:
@@ -151,18 +169,24 @@ fn dedup_key(symbol: &str, currency: &str, date: NaiveDate) -> (String, String, 
 /// to `out`.
 ///
 /// The stdout-bound output (the `price` directives, `--dry-run` plan, and
-/// `--list-sources` listing) goes to `out`. Progress, warnings and fetch
-/// errors go to `err_out`, which `rledger` points at stderr. `ag-rledger`
-/// passes a buffer for its envelope: on the process's stderr, a symbol that
-/// failed to fetch left an `ok` envelope with that price silently missing
-/// (#2546).
+/// `--list-sources` listing) goes to `out`. Progress goes to `err_out`,
+/// which `rledger` points at stderr. Warnings (a failed fetch, malformed
+/// `price:` metadata, nothing to fetch) go to `warnings` when one is given,
+/// as records with a code from [`warning_codes`], and otherwise to `err_out`
+/// as the lines `rledger` prints. `ag-rledger` passes both: on the process's
+/// stderr, a symbol that failed to fetch left an `ok` envelope with that
+/// price silently missing (#2546), and as prose in the envelope it had to be
+/// parsed back out (#2566).
 pub fn run_with_writer<W: Write>(
     args: &PriceArgs,
     price_config: &PriceConfig,
     out: &mut W,
+    warnings: Option<&mut dyn Diagnostics>,
     err_out: &mut dyn Write,
 ) -> Result<()> {
     use crate::cmd::price::cache::{PriceCache, cache_key};
+
+    let err_out = &mut Messages::new(err_out, warnings);
 
     // Create the registry with config
     let registry = PriceSourceRegistry::new(price_config);
@@ -203,10 +227,10 @@ pub fn run_with_writer<W: Write>(
     // the active-commodity filter, matching `bean-price` semantics
     // (issues #948, #962).
     if args.all_commodities {
-        let _ = writeln!(
-            err_out,
-            "warning: `--all-commodities` is deprecated; use `--inactive --undeclared` instead. \
-             It will be removed in a future release."
+        err_out.warn(
+            warning_codes::FLAG_DEPRECATED,
+            "`--all-commodities` is deprecated; use `--inactive --undeclared` instead. \
+             It will be removed in a future release.",
         );
     }
     let effective_inactive = args.inactive || args.all_commodities;
@@ -291,23 +315,37 @@ pub fn run_with_writer<W: Write>(
     symbols_to_fetch.dedup();
 
     if symbols_to_fetch.is_empty() {
-        let _ = writeln!(
+        // Not prefixed `warning:` on the terminal, as before; still a
+        // warning to an agent, whose `ok` envelope is otherwise empty.
+        let unprefixed = |err_out: &mut Messages<'_>, code: &str, text: &str| {
+            err_out.emit_as(
+                Diagnostic {
+                    code: Some(code.to_string()),
+                    ..Diagnostic::message(text)
+                },
+                text,
+            );
+        };
+        unprefixed(
             err_out,
-            "No symbols to fetch. Provide symbols as arguments or use -f with a beancount file."
+            warning_codes::NO_SYMBOLS,
+            "No symbols to fetch. Provide symbols as arguments or use -f with a beancount file.",
         );
         if args.file.is_some() {
             if !effective_undeclared {
-                let _ = writeln!(
+                unprefixed(
                     err_out,
+                    warning_codes::NO_SYMBOLS_HINT,
                     "Hint: only commodities with `price:` or `quote_currency:` metadata are \
-                     fetched by default. Pass --undeclared to also include ticker-shaped names."
+                     fetched by default. Pass --undeclared to also include ticker-shaped names.",
                 );
             }
             if !effective_inactive {
-                let _ = writeln!(
+                unprefixed(
                     err_out,
+                    warning_codes::NO_SYMBOLS_HINT,
                     "Hint: only commodities currently held are fetched by default. \
-                     Pass --inactive to include those with zero balance."
+                     Pass --inactive to include those with zero balance.",
                 );
             }
         }
@@ -520,13 +558,7 @@ pub fn run_with_writer<W: Write>(
                     }
                     write_price(out, symbol, &response, args.beancount, args.source_meta)?;
                 }
-                Err(e) => {
-                    if args.verbose {
-                        let _ = writeln!(err_out, "Error fetching {symbol}: {e}");
-                    } else {
-                        let _ = writeln!(err_out, "; Failed to fetch {symbol}: {e}");
-                    }
-                }
+                Err(e) => fetch_failed(err_out, args.verbose, symbol, &e),
             }
         }
     }
@@ -819,6 +851,26 @@ fn write_price(
     Ok(())
 }
 
+/// Report a price that could not be fetched: `Error fetching ...` with
+/// `--verbose`, else a `; Failed to fetch ...` comment line, as `rledger`
+/// has always printed it; a coded record for a caller collecting warnings.
+fn fetch_failed(
+    err_out: &mut Messages<'_>,
+    verbose: bool,
+    symbol: &str,
+    e: &dyn std::fmt::Display,
+) {
+    let diagnostic = Diagnostic {
+        code: Some(warning_codes::PRICE_FETCH_FAILED.to_string()),
+        ..Diagnostic::message(format!("Failed to fetch {symbol}: {e}"))
+    };
+    if verbose {
+        err_out.emit_as(diagnostic, format_args!("Error fetching {symbol}: {e}"));
+    } else {
+        err_out.emit_as(diagnostic, format_args!("; Failed to fetch {symbol}: {e}"));
+    }
+}
+
 /// Run with an ad-hoc external command.
 // Nine: the eighth and ninth are the two output sinks (`handle` for prices,
 // `err_out` for fetch errors), which a struct would only rename.
@@ -832,7 +884,7 @@ fn run_with_external_command<W: Write>(
     discovered: &HashMap<String, DiscoveredCommodity>,
     existing_prices: &HashSet<(String, String, NaiveDate)>,
     handle: &mut W,
-    err_out: &mut dyn Write,
+    err_out: &mut Messages<'_>,
 ) -> Result<()> {
     use crate::cmd::price::external::ExternalCommandSource;
 
@@ -928,13 +980,7 @@ fn run_with_external_command<W: Write>(
                     }
                     write_price(handle, symbol, &response, args.beancount, args.source_meta)?;
                 }
-                Err(e) => {
-                    if args.verbose {
-                        let _ = writeln!(err_out, "Error fetching {symbol}: {e}");
-                    } else {
-                        let _ = writeln!(err_out, "; Failed to fetch {symbol}: {e}");
-                    }
-                }
+                Err(e) => fetch_failed(err_out, args.verbose, symbol, &e),
             }
         }
     }

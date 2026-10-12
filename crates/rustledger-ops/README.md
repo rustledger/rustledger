@@ -27,7 +27,7 @@ Analogous to Python beancount's `ops/` module.
 use rustledger_ops::dedup::find_structural_duplicates;
 use rustledger_ops::fingerprint::structural_hash;
 
-// Find duplicate transactions in a directive list
+// Find duplicate directives (every type but `price`) in a directive list
 let duplicates = find_structural_duplicates(&directives);
 
 // Compute a structural hash of a single transaction

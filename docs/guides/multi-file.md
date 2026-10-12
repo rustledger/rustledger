@@ -231,6 +231,18 @@ for f in *.beancount 2024/*.beancount; do
 done
 ```
 
+### Split and Merge
+
+To move an existing ledger between one file and one file per period, use
+[split](../commands/split.md) and [merge](../commands/merge.md). Both load the
+ledger before and after and refuse to write anything unless it loads the same:
+
+```bash
+rledger split --by year --dry-run main.beancount   # show the plan
+rledger split --by year main.beancount             # one file per year
+rledger merge main.beancount                       # back into one file
+```
+
 ### LSP Support
 
 Point your editor to `main.beancount`. The LSP follows includes automatically.

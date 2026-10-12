@@ -19,6 +19,8 @@ rustledger provides several commands for working with beancount ledgers.
 | [doctor](doctor.md) | Debugging and diagnostic tools |
 | [config](config.md) | Manage configuration |
 | [add](add.md) | Add transactions to beancount files |
+| [split](split.md) | Split a file into one file per year or month |
+| [merge](merge.md) | Inline a ledger's includes back into one file |
 | compat | Install or uninstall bean-* compatibility wrapper scripts |
 | lint | Non-fatal advisory passes (e.g. detect inter-account transfer pairs) |
 | completions | Generate shell completions |

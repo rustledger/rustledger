@@ -142,10 +142,10 @@ impl ImporterRegistry {
         // Caller-side: dir-level error wrapping + per-file load fn +
         // per-entry error wrapping (importer uses the typed `DirEntry`
         // variant, plugin uses `anyhow::Error::new`).
-        let scan = rustledger_plugin::wasm_dir_scan::collect_wasm_paths(dir).map_err(|source| {
+        let scan = rustledger_plugin::wasm_dir_scan::collect_wasm_paths(dir).map_err(|error| {
             WasmImporterError::Io {
                 path: dir.to_path_buf(),
-                source,
+                error,
             }
         })?;
         let mut report = WasmDirScanReport::default();
@@ -154,12 +154,12 @@ impl ImporterRegistry {
         // file-read errors. The path on the report entry is the dir
         // itself because the per-entry error doesn't expose the
         // offending inode's name.
-        for (entry_path, source) in scan.entry_failures {
+        for (entry_path, error) in scan.entry_failures {
             report.failures.push((
                 entry_path,
                 WasmImporterError::DirEntry {
                     dir: dir.to_path_buf(),
-                    source,
+                    error,
                 },
             ));
         }

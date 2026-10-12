@@ -413,7 +413,7 @@ fn round_interpolated(residual: Decimal, tolerance: Option<Decimal>) -> Decimal 
     round_interpolated_bounded(residual, tolerance, tolerance)
 }
 
-/// [`round_interpolated`] on the grid of `tolerance`, keeping the quantized
+/// `round_interpolated` (test-only) on the grid of `tolerance`, keeping the quantized
 /// amount only while it stays within `bound`, the tolerance the validator
 /// checks (see the guard at the end).
 fn round_interpolated_bounded(
@@ -1016,18 +1016,11 @@ pub fn resolve_elided_currencies<'a>(
 
 /// The one currency `inventory`'s lots are held at cost in, across every
 /// commodity it holds, or `None` for none or several. Beancount's
-/// `Inventory.cost_currencies`, which never sees an empty position.
+/// `Inventory.cost_currencies`, which never sees an empty position. Answered
+/// from the inventory's index rather than a walk of every lot, which made
+/// `{}` sales O(lots) each (#2604).
 fn held_cost_currency(inventory: &rustledger_core::Inventory) -> Option<Currency> {
-    let mut found: Option<&Currency> = None;
-    for position in inventory.positions().filter(|p| !p.is_empty()) {
-        let Some(cost) = &position.cost else { continue };
-        match found {
-            None => found = Some(&cost.currency),
-            Some(c) if *c != cost.currency => return None,
-            Some(_) => {}
-        }
-    }
-    found.cloned()
+    inventory.sole_cost_currency()
 }
 
 /// Which residual an elided posting's unknown will be solved from.

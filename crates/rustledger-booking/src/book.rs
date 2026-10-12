@@ -43,8 +43,13 @@ pub enum BookingError {
     Inventory(AccountedBookingError),
 
     /// Interpolation failed after booking.
+    ///
+    /// The message names the interpolation error, so it is not also the
+    /// `source()`: a `{:#}` chain would print it twice (#2574). `From` is
+    /// implemented by hand below for the same reason (`#[from]` implies
+    /// `#[source]`).
     #[error("interpolation failed: {0}")]
-    Interpolation(#[from] InterpolationError),
+    Interpolation(InterpolationError),
 
     /// A posting reached application with its units still elided, which means
     /// it never went through booking.
@@ -106,6 +111,12 @@ pub enum BookingError {
     },
 }
 
+impl From<InterpolationError> for BookingError {
+    fn from(e: InterpolationError) -> Self {
+        Self::Interpolation(e)
+    }
+}
+
 impl BookingError {
     /// The account this failure is about, when it names one.
     ///
@@ -123,7 +134,45 @@ impl BookingError {
             Self::Interpolation(e) => e.account(),
         }
     }
+
+    /// Where a diagnostic about this failure belongs in `txn`: the posting
+    /// the failure names, or `None` when it names none (the caller then
+    /// falls back to the whole directive).
+    ///
+    /// Shared by `rledger check` (the loader's booking pass) and the LSP, so
+    /// the editor squiggle and the CLI's line number point at the same
+    /// posting (#2330, #2510).
+    #[must_use]
+    pub fn posting_span(&self, txn: &Transaction) -> Option<rustledger_core::Span> {
+        let account = self.account()?;
+        txn.postings
+            .iter()
+            .find(|p| &p.value.account == account)
+            .map(|p| p.span)
+    }
+
+    /// The message a diagnostic for this failure carries: the failure,
+    /// then the transaction's date and narration so the reader can find it.
+    ///
+    /// Shared by `rledger check` and the LSP, so both say the same thing
+    /// about the same transaction (#2510).
+    #[must_use]
+    pub fn diagnostic_message(&self, txn: &Transaction) -> String {
+        format!("{} ({}, \"{}\")", self, txn.date, txn.narration)
+    }
 }
+
+/// The diagnostic code of a booking failure that no validation code
+/// describes.
+///
+/// `rledger check` (and every consumer of the loader's error stream: the
+/// WASM and FFI bindings, the report commands' refusal to run over an
+/// unbooked ledger) labels EVERY booking failure with it. The LSP gives a
+/// failure a validation code instead when one says exactly what went wrong
+/// (`rustledger_validate::ErrorCode::for_booking_failure`), and this label
+/// otherwise, so a failure no code describes reads the same in the editor
+/// as on the command line (#2510).
+pub const BOOKING_FAILURE_CODE: &str = "BOOK";
 
 /// Result of booking a single transaction.
 #[derive(Debug, Clone)]
@@ -889,6 +938,19 @@ impl BookingEngine {
                                 cost: currency.clone(),
                             }
                         };
+                        // The pool an AVERAGE sale stating a cost draws from,
+                        // summed exactly before the sale changes it (#2603).
+                        // `{*}` states its claim in `check_merge_spec` below.
+                        let average_claim = written_number
+                            .filter(|_| method == BookingMethod::Average && !cost_spec.merge);
+                        let average_pool = average_claim.and_then(|_| {
+                            working_inventories
+                                .get(&posting.account)
+                                .or_else(|| {
+                                    self.inventories.get(&posting.account).map(AsRef::as_ref)
+                                })
+                                .and_then(|inv| inv.reduction_pool_exact(units))
+                        });
                         let booking_result = match working_inventories.get_mut(&posting.account) {
                             Some(working) => working.reduce(units, Some(match_spec), method),
                             // Indexing cannot panic here: reaching this arm
@@ -961,7 +1023,16 @@ impl BookingEngine {
                         // Only here: `apply`, the validator and the query
                         // replay see the BOOKED posting, whose cost is the
                         // pool's own by then, and a filtered replay builds a
-                        // different pool on purpose (#1985).
+                        // different pool on purpose (#1985). The same holds
+                        // for an AVERAGE sale's stated cost (#2603).
+                        if let (Some(written), Some(pool), Some(cost)) = (
+                            average_claim,
+                            average_pool.as_ref(),
+                            booking_result.matched.first().and_then(|m| m.cost.as_ref()),
+                        ) {
+                            check_average_spec(written, units, pool, &cost.currency)
+                                .map_err(|e| convert_core_booking_error(e, &posting.account))?;
+                        }
                         if cost_spec.merge {
                             check_merge_spec(cost_spec, written_number, units, &booking_result)
                                 .map_err(|e| convert_core_booking_error(e, &posting.account))?;
@@ -982,6 +1053,23 @@ impl BookingEngine {
                                         -matched_pos.units.number, // Negate: inventory→reduction
                                         matched_pos.units.currency.clone(),
                                     );
+                                    // A total price (`@@`) is what the WHOLE sale
+                                    // fetched, so a split posting must not keep it:
+                                    // each would claim the whole total, and dividing
+                                    // it by the split's own units later (in
+                                    // `normalize_prices`) gives `total / lot units`,
+                                    // twice the price for a sale split in two
+                                    // (#2569). Beancount turns `@@` into a per-unit
+                                    // price in its parser, before booking splits the
+                                    // posting, so every split carries `total /
+                                    // |units sold|`.
+                                    if let Some(price) = split_posting_price(
+                                        posting.price.as_deref(),
+                                        units.number,
+                                        matched_pos.units.number,
+                                    ) {
+                                        new_posting.price = Some(Box::new(price));
+                                    }
                                     new_posting.units =
                                         Some(IncompleteAmount::Complete(expanded_units));
                                     // Set cost from the matched lot
@@ -1782,7 +1870,7 @@ impl BookingEngine {
     ///
     /// The transaction MUST already be booked — postings filled with complete
     /// units and resolved costs, as produced by [`Self::book_and_interpolate`]
-    /// or the free [`book`](crate::book) function. The loader pipeline
+    /// or the free [`book`](fn@crate::book) function. The loader pipeline
     /// guarantees this ordering. A caller that CANNOT guarantee booked input
     /// must not derive a figure from this lot-matching realization — e.g. the
     /// returns engine values **net units at market** (`rustledger-returns`),
@@ -2231,6 +2319,41 @@ struct Prepared {
     cost_currencies: crate::interpolate::ElidedCosts,
 }
 
+/// The price a split posting carries when a reduction priced `price` sells
+/// `units_sold` (the written posting's units) across several lots, and this
+/// split takes `lot_units` of them (#2569). `None` keeps the price as written.
+///
+/// A per-unit price (`@`) already is the whole sale's, and an incomplete one
+/// has no number to divide, so both are kept. A complete total (`@@ T`)
+/// becomes `@ T / |units_sold|` through [`rustledger_core::per_unit_price`], the rule
+/// `normalize_prices` applies to an unsplit posting, so a sale shows one price
+/// whether or not booking split it, rounded once. When that quotient is not
+/// representable (it leaves `Decimal`'s range, or underflows to zero), each
+/// split keeps a total of its own instead: its exact pro-rata share
+/// `T × lot_units / |units_sold|`, so the splits' totals still add up to
+/// what the sale fetched. `normalize_prices` then leaves a share it cannot
+/// divide as written, the way it leaves an unsplit `@@` it cannot divide.
+fn split_posting_price(
+    price: Option<&rustledger_core::PriceAnnotation>,
+    units_sold: Decimal,
+    lot_units: Decimal,
+) -> Option<rustledger_core::PriceAnnotation> {
+    use rustledger_core::{PriceAnnotation, PriceKind};
+    let price = price?;
+    if price.kind != PriceKind::Total {
+        return None;
+    }
+    let total = price.amount.as_ref()?.as_amount()?;
+    if let Some(per_unit) = rustledger_core::per_unit_price(total.number, units_sold) {
+        return Some(PriceAnnotation::unit(Amount::new(
+            per_unit,
+            &total.currency,
+        )));
+    }
+    let share = crate::prorate(total.number, lot_units.abs(), units_sold.abs())?;
+    Some(PriceAnnotation::total(Amount::new(share, &total.currency)))
+}
+
 /// The cost number to book for taking `units` (the posting's, signed) from a
 /// lot at `per_unit` whose share cost `basis` (#2417, #2425).
 ///
@@ -2414,6 +2537,127 @@ fn check_merge_spec(
         }));
     }
     Ok(())
+}
+
+/// Check the cost an AVERAGE sale states against the pool it sells from
+/// (#2603).
+///
+/// An AVERAGE sale books at the pool's average, so a cost written on it is a
+/// claim about that average. Under every other method a written cost is a
+/// filter, and one no lot matches is an error; dropping it here booked
+/// `-1 X {99.00 EUR}` at a pool of 11.00 EUR without a word. Beancount has no
+/// AVERAGE booking (it refuses the method), so this is rledger's definition,
+/// and it is the one a `{*}` claim follows ([`check_merge_spec`], #2398): a
+/// claim holds when it is a correct rounding of the pool's exact value at the
+/// precision written, inclusive of the half-way case.
+///
+/// * A per-unit cost `{v}`: `|v - average| <= w(v)`, where `w` is half a unit
+///   in `v`'s last written place ([`written_allowance`]). `{106.67 USD}` and
+///   `{107 USD}` both hold for 106.666…; `{106.66 USD}` does not.
+/// * A total `{{T}}` is compared as a total, not divided first:
+///   `|T - average × units sold| <= w(T)`.
+/// * A compound `{a # b}` states a total, `a × units + b`, written in two
+///   parts each rounded to its own places, so the allowance is each part's:
+///   `|a × units + b - average × units| <= units × w(a) + w(b)`, as for
+///   `{*, a # b}`.
+///
+/// The rule depends only on the claim and the pool, never on the
+/// transaction's other postings or its tolerance options (robcohen's
+/// decision on #2603): a correct rounding is correct beside cash written to
+/// any number of places.
+///
+/// The average is never rounded: `pool` is the exact `(units, total)`
+/// [`rustledger_core::Inventory::reduction_pool_exact`] sums, and the claim is
+/// compared as `|claim × units − total × denominator| <= allowance × |units|`
+/// in `BigDecimal`. A total's exact pool total is what #2427 keeps on the
+/// lots, so `{{500.00 USD}}` for 3 X bought at 100, 200 and 200 holds exactly.
+fn check_average_spec(
+    written: rustledger_core::CostNumber,
+    units: &rustledger_core::Amount,
+    pool: &(bigdecimal::BigDecimal, bigdecimal::BigDecimal),
+    currency: &rustledger_core::Currency,
+) -> Result<(), rustledger_core::BookingError> {
+    use bigdecimal::BigDecimal;
+    use rustledger_core::{CostNumber, to_bigdecimal as big};
+    let reduction = units.number.abs();
+    let (pool_units, pool_total) = pool;
+    if reduction.is_zero() || pool_units == &BigDecimal::from(0) {
+        return Ok(());
+    }
+    let r = big(reduction);
+    // The claim is `numerator / denominator` per unit; `allowance` is the one
+    // its written precision gives it, on the numerator (per unit, or on the
+    // total for a total or compound claim), and `stated` what the message
+    // quotes.
+    let (numerator, denominator, allowance, stated) = match written {
+        CostNumber::PerUnit { value } => (big(value), None, big(written_allowance(value)), value),
+        CostNumber::Total { value } => (big(value), Some(r), big(written_allowance(value)), value),
+        // Not something a ledger writes; booking's own output.
+        CostNumber::PerUnitFromTotal(booked) => (
+            big(booked.total),
+            Some(r),
+            big(written_allowance(booked.total)),
+            booked.total,
+        ),
+        CostNumber::Compound { per_unit, total } => {
+            let combined = big(per_unit) * &r + big(total);
+            let allowance = &r * big(written_allowance(per_unit)) + big(written_allowance(total));
+            // Booking already refused a compound whose combined total leaves
+            // `Decimal`'s range (`cost_overflow`), so this is the value it
+            // booked; the fallback only keeps the message total-shaped.
+            let stated = reduction
+                .checked_mul(per_unit)
+                .and_then(|v| v.checked_add(total))
+                .unwrap_or(total);
+            (combined, Some(r), allowance, stated)
+        }
+    };
+    let scale = denominator.clone().unwrap_or_else(|| BigDecimal::from(1));
+    let off = (&numerator * pool_units - pool_total * &scale).abs();
+    if off <= allowance * pool_units.abs() {
+        return Ok(());
+    }
+    // The pool in the claim's form: its average, or what the reduced units
+    // cost at it.
+    let exact = match &denominator {
+        None => pool_total / pool_units,
+        Some(r) => pool_total * r / pool_units,
+    };
+    Err(rustledger_core::BookingError::AverageSpecMismatch {
+        currency: units.currency.clone(),
+        stated: Amount::new(stated, currency.clone()),
+        pool: Amount::new(distinguishing_round(&exact, stated), currency.clone()),
+        total: denominator.is_some(),
+    })
+}
+
+/// `exact` rounded to the places `stated` is written to, which reads as the
+/// number the author should have written. A refused claim is more than half a
+/// unit away there, so it cannot round to the stated number; the loop to more
+/// places is a guard that the message never reads "costs 166.67, not the
+/// 166.67 stated" whatever the allowance. At most 28 places, and fewer when
+/// the integer part leaves no room for them.
+fn distinguishing_round(exact: &bigdecimal::BigDecimal, stated: Decimal) -> Decimal {
+    let parse = |places: u32| {
+        exact
+            .with_scale_round(i64::from(places), bigdecimal::RoundingMode::HalfEven)
+            .to_string()
+            .parse::<Decimal>()
+            .ok()
+    };
+    let mut best = None;
+    for places in stated.scale()..=28 {
+        match parse(places) {
+            Some(rounded) => {
+                best = Some(rounded);
+                if rounded != stated {
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+    best.unwrap_or(stated)
 }
 
 /// Whether `a` and `b` are more than `allowance` apart. Checked, since a
@@ -2785,6 +3029,35 @@ mod tests {
     use super::*;
     use rust_decimal_macros::dec;
     use rustledger_core::{NaiveDate, Posting, PriceAnnotation};
+
+    /// The `{:#}`-style chain: the message, then each `source()` in turn.
+    fn chain(e: &dyn std::error::Error) -> String {
+        let mut out = e.to_string();
+        let mut cur = e.source();
+        while let Some(s) = cur {
+            out.push_str(": ");
+            out.push_str(&s.to_string());
+            cur = s.source();
+        }
+        out
+    }
+
+    /// #2574: `BookingError::Interpolation` names the interpolation error in
+    /// its message and used to return it from `source()` as well, so a
+    /// `{:#}` chain printed it twice.
+    #[test]
+    fn interpolation_error_names_its_cause_once_2574() {
+        let inner = InterpolationError::MultipleMissing {
+            currency: "USD".into(),
+            count: 2,
+        };
+        let inner_text = inner.to_string();
+        let e = BookingError::from(inner);
+        let chained = chain(&e);
+        assert_eq!(chained, e.to_string(), "the message is the whole chain");
+        assert_eq!(chained.matches(&inner_text).count(), 1, "{chained}");
+        assert!(chained.starts_with("interpolation failed: "), "{chained}");
+    }
 
     #[test]
     fn half_unit_in_last_place_is_half_the_last_digit_written() {

@@ -202,7 +202,8 @@ pub fn classify_external_plugin(name: &str, force_python: bool) -> ExternalPlugi
 ///
 /// Native plugins resolve through the typed registry keyed on `pass`; everything
 /// else is classified by extension/shape. The Python file-vs-module test is the
-/// single-sourced [`crate::python::is_python_plugin_file_ref`] criterion.
+/// single-sourced `python::is_python_plugin_file_ref` criterion (the
+/// `python` module exists only with the `python-plugins` feature).
 ///
 /// # Errors
 ///

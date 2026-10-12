@@ -3069,8 +3069,172 @@ fn txn_accounts_others_matches_excluding_by_index() {
             expected.dedup();
             assert_eq!(set.others(a), expected, "{accounts:?} posting {i}");
             assert_eq!(owned.others(a), expected, "{accounts:?} posting {i}");
+            // Membership answered without building the set (#2597) agrees
+            // with searching the built one, for every name in the
+            // transaction and one that is not.
+            for name in accounts.iter().copied().chain(["Z", ""]) {
+                let in_all = all.iter().any(|x| x == name);
+                let in_others = expected.iter().any(|x| x == name);
+                assert_eq!(set.contains(name), in_all, "{accounts:?} {name}");
+                assert_eq!(owned.contains(name), in_all, "{accounts:?} {name}");
+                assert_eq!(
+                    set.others_contain(a, name),
+                    in_others,
+                    "{accounts:?} posting {i} {name}"
+                );
+                assert_eq!(
+                    owned.others_contain(a, name),
+                    in_others,
+                    "{accounts:?} posting {i} {name}"
+                );
+            }
         }
     }
+}
+
+/// `x IN other_accounts` / `x IN accounts` read the transaction's account set
+/// without materializing the row's (#2597). Building it made the test
+/// quadratic in a transaction's postings when each has its own account: n
+/// names per row, for n rows.
+#[test]
+fn account_set_membership_materializes_no_set() {
+    use super::system_tables::TXN_ACCOUNT_SETS_MATERIALIZED;
+    let mut big = Transaction::new(rustledger_core::naive_date(2024, 1, 1).unwrap(), "big");
+    for i in 0..40 {
+        big = big.with_synthesized_posting(Posting::new(
+            format!("Assets:A{i}"),
+            Amount::new(dec!(1), "USD"),
+        ));
+    }
+    big = big.with_synthesized_posting(Posting::new("Equity:Open", Amount::new(dec!(-40), "USD")));
+    let directives = vec![Directive::Transaction(big)];
+    let run = |sql: &str| {
+        let mut executor = Executor::new(&directives);
+        TXN_ACCOUNT_SETS_MATERIALIZED.with(|n| n.set(0));
+        let result = executor
+            .execute(&parse(sql).expect("parses"))
+            .unwrap_or_else(|e| panic!("{sql}: {e}"));
+        (
+            TXN_ACCOUNT_SETS_MATERIALIZED.with(std::cell::Cell::get),
+            result,
+        )
+    };
+
+    // Each path checked before any is asserted, so a regression names every
+    // path it reaches.
+    let mut built = Vec::new();
+    for (sql, count) in [
+        // WHERE, with the scan's shared set.
+        ("SELECT count(*) WHERE 'Assets:A1' IN other_accounts", 40),
+        ("SELECT count(*) WHERE 'Assets:A1' NOT IN other_accounts", 1),
+        ("SELECT count(*) WHERE account IN other_accounts", 0),
+        ("SELECT count(*) WHERE 'Assets:A1' IN accounts", 41),
+        ("SELECT count(*) WHERE 'Nope' NOT IN accounts", 41),
+        // A row-level FROM filter.
+        ("SELECT count(*) FROM 'Assets:A1' IN other_accounts", 40),
+        // Under parentheses and another operator.
+        (
+            "SELECT count(*) WHERE ('Assets:A1' IN other_accounts) = TRUE",
+            40,
+        ),
+        // A GROUP BY key, evaluated per posting.
+        (
+            "SELECT count(*) WHERE 'Assets:A1' NOT IN other_accounts \
+             GROUP BY 'Equity:Open' IN other_accounts",
+            1,
+        ),
+    ] {
+        let (n, result) = run(sql);
+        assert_eq!(result.rows, vec![vec![Value::Integer(count)]], "{sql}");
+        built.push((sql, n));
+    }
+    assert!(
+        built.iter().all(|&(_, n)| n == 0),
+        "membership materialized the sets: {built:?}"
+    );
+
+    // A target, one row per posting.
+    let (n, result) = run("SELECT 'Assets:A1' IN other_accounts");
+    assert_eq!(result.rows.len(), 41);
+    assert_eq!(n, 0, "a membership target materialized the sets");
+
+    // Not vacuous: selecting the column still builds one set per row.
+    let (n, result) = run("SELECT other_accounts");
+    assert_eq!(result.rows.len(), 41);
+    assert_eq!(n, 41);
+}
+
+/// The membership shortcut answers exactly what `IN` over the materialized
+/// set answers (#2597): a posting's own account counts in `other_accounts`
+/// only when another posting shares it, `accounts` always has it, and a NULL
+/// left operand is still NULL.
+#[test]
+fn account_set_membership_matches_the_materialized_set() {
+    let mut txn = Transaction::new(rustledger_core::naive_date(2024, 1, 1).unwrap(), "t");
+    for a in ["B", "A", "B", "C"] {
+        txn = txn.with_synthesized_posting(Posting::new(a, Amount::new(dec!(1), "USD")));
+    }
+    let directives = vec![Directive::Transaction(txn)];
+    let mut executor = Executor::new(&directives);
+    let result = executor
+        .execute(
+            &parse(
+                "SELECT account IN other_accounts, account NOT IN other_accounts, \
+                 'A' IN other_accounts, 'B' IN other_accounts, 'Z' IN other_accounts, \
+                 account IN accounts, 'Z' NOT IN accounts, payee IN other_accounts",
+            )
+            .expect("parses"),
+        )
+        .expect("executes");
+    let b = Value::Boolean;
+    assert_eq!(
+        result.rows,
+        vec![
+            // B: the other B posting keeps it.
+            vec![
+                b(true),
+                b(false),
+                b(true),
+                b(true),
+                b(false),
+                b(true),
+                b(true),
+                Value::Null
+            ],
+            // A: its only posting.
+            vec![
+                b(false),
+                b(true),
+                b(false),
+                b(true),
+                b(false),
+                b(true),
+                b(true),
+                Value::Null
+            ],
+            vec![
+                b(true),
+                b(false),
+                b(true),
+                b(true),
+                b(false),
+                b(true),
+                b(true),
+                Value::Null
+            ],
+            // C.
+            vec![
+                b(false),
+                b(true),
+                b(true),
+                b(true),
+                b(false),
+                b(true),
+                b(true),
+                Value::Null
+            ],
+        ]
+    );
 }
 
 /// The names `evaluate_column`'s `match` accepts, read from its source.

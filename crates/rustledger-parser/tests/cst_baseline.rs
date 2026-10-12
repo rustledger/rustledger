@@ -36,7 +36,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use baseline_common::is_in_tree_fixture;
+use baseline_common::{in_tree_fixture_dirs, is_in_tree_fixture};
 use rustledger_parser::parse_structured;
 
 const CORPUS_ROOT: &str = "tests/compatibility/files";
@@ -457,4 +457,24 @@ fn cst_output_matches_baseline() {
          --test cst_baseline\n\nReview the diff against `{MANIFEST_PATH}` \
          and commit.",
     );
+}
+
+/// Every committed corpus directory counts as in-tree for strict mode
+/// (#2511). Only `plugins/` did, so a missing CST entry for a committed
+/// `costs/`, `interpolation/` or `bql/` fixture passed the strict gate.
+#[test]
+fn every_committed_corpus_dir_is_in_tree() {
+    let dirs = in_tree_fixture_dirs();
+    for dir in ["plugins", "costs", "interpolation", "bql"] {
+        assert!(dirs.iter().any(|d| d == dir), "{dir} missing from {dirs:?}");
+        let fixture = Path::new(CORPUS_ROOT).join(dir).join("x.beancount");
+        assert!(is_in_tree_fixture(&fixture), "{}", fixture.display());
+    }
+    assert!(!is_in_tree_fixture(Path::new(
+        "tests/compatibility/files/fava/example.beancount"
+    )));
+    // Not a prefix match on the name: `bql-extra/` is not `bql/`.
+    assert!(!is_in_tree_fixture(Path::new(
+        "tests/compatibility/files/bql-extra/x.beancount"
+    )));
 }

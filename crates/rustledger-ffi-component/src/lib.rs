@@ -45,7 +45,9 @@ use exports::rustledger::ledger::ledger::{
 };
 use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 
-/// The Component-Model api-version this build implements. 3.11 adds
+/// The Component-Model api-version this build implements. 3.15: a
+/// `session.query` keeps the tables a `CREATE TABLE` makes for the session's
+/// later queries (#2579); 3.11 adds
 /// `session.account-type` (the account-type root honoring THIS ledger's
 /// `name_*` renames — the free `util.get-account-type` hardcodes the
 /// English roots and so disagrees with every report surface on a renamed
@@ -67,7 +69,7 @@ use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 /// encrypted (`.gpg`/`.asc`) ledgers can be decrypted by the host (#1667);
 /// 3.1 added the `diff` field on `balance-dir` (#1663); 3.0 was the breaking
 /// `expand-pads` parameter on `load`/`load-file` (#1628).
-const API_VERSION: &str = "3.14";
+const API_VERSION: &str = "3.15";
 
 struct Component;
 

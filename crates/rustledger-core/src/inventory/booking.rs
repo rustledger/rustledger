@@ -277,7 +277,7 @@ struct MergePlan {
     /// The pool's per-unit cost, or `None` when the lots carry no cost.
     pool: Option<Amount>,
     /// What the pool's lots cost in total, for a sale that takes all of it
-    /// (see [`pool_total_cost`]).
+    /// (see [`Inventory::pool_total`]).
     total_cost: Option<Decimal>,
 }
 
@@ -937,8 +937,8 @@ impl Inventory {
                 all.sort_by_key(|&i| (self.order_key(order, i), i));
                 Some(all)
             };
-        let candidates: &[usize] = match &scanned {
-            Some(all) => all,
+        let (front, back): (&[usize], &[usize]) = match &scanned {
+            Some(all) => (all, &[]),
             None => self
                 .ordered_candidates(&units.currency, order)
                 .expect("the branch above proved it is Some"),
@@ -971,7 +971,7 @@ impl Inventory {
         // never here: reversing the WALK reverses the slot tiebreak along with
         // the sort key, which is how LIFO came to take the last of two
         // same-date lots while FIFO and HIFO take the first (#2115).
-        for idx in candidates.iter().copied() {
+        for idx in front.iter().chain(back).copied() {
             if !keeps(idx) {
                 continue;
             }
@@ -1571,6 +1571,47 @@ impl Inventory {
         Ok(self.plan_merge(units)?.pool)
     }
 
+    /// The pool an AVERAGE or `{*}` reduction of `units` draws from, summed
+    /// exactly: `(units, total cost)`, each signed like the pool's lots
+    /// (#2603).
+    ///
+    /// The pool is the one both reductions take: the lots of `units.currency`
+    /// held at cost on the side the reduction faces, as AVERAGE's reduction
+    /// and `{*}`'s merge select them. A lot's cost is its kept exact total where
+    /// there is one (#2425), else `units × per-unit`, and the sums are taken in
+    /// `BigDecimal`, so neither rounds. The average cost is `total / units`, a
+    /// quotient the caller compares against without dividing.
+    ///
+    /// `None` when that side holds no lot at cost: nothing to compare against.
+    #[must_use]
+    pub fn reduction_pool_exact(
+        &self,
+        units: &Amount,
+    ) -> Option<(bigdecimal::BigDecimal, bigdecimal::BigDecimal)> {
+        use crate::decimal::to_bigdecimal;
+        let mut pool_units = bigdecimal::BigDecimal::from(0);
+        let mut pool_total = bigdecimal::BigDecimal::from(0);
+        let mut any = false;
+        for (idx, p) in self.positions.iter_slots() {
+            let Some(cost) = p.cost.as_ref() else {
+                continue;
+            };
+            if p.units.currency != units.currency
+                || p.is_empty()
+                || p.units.number.is_sign_positive() == units.number.is_sign_positive()
+            {
+                continue;
+            }
+            any = true;
+            pool_units += to_bigdecimal(p.units.number);
+            pool_total += match self.positions.total(idx) {
+                Some(total) => to_bigdecimal(total),
+                None => to_bigdecimal(p.units.number) * to_bigdecimal(cost.number),
+            };
+        }
+        any.then_some((pool_units, pool_total))
+    }
+
     /// Cost merge `{*}`: merge all lots of the currency into a single
     /// weighted-average-cost lot, then reduce from it.
     ///
@@ -1848,7 +1889,7 @@ impl Inventory {
         ))
     }
 
-    /// The mutating half of [`Self::reduce_from_lot`], applying a
+    /// The mutating half of a reduction from one lot, applying a
     /// [`Self::plan_from_lot`] result.
     ///
     /// Keeps the incremental cache maintenance the single-lot path always
@@ -3202,6 +3243,59 @@ mod reduction_tests {
             )
             .unwrap();
         assert_eq!(r.cost_basis.unwrap().number, dec!(500)); // only the STK lot
+    }
+
+    /// A date or label on an AVERAGE sale names no lot in the undated,
+    /// unlabeled pool (#2627), in `reduce` and `try_reduce` alike, and the
+    /// inventory is left untouched.
+    #[test]
+    fn reduce_average_refuses_a_date_or_label() {
+        let mut i = Inventory::new();
+        i.add(lot(10, 100, 2)).expect("fixture fits in Decimal");
+        let before = i.clone();
+        for (spec, stated) in [
+            (
+                CostSpec::default().with_date(naive_date(2024, 1, 2).unwrap()),
+                "2024-01-02",
+            ),
+            (CostSpec::default().with_label("lot-a"), "\"lot-a\""),
+            (
+                CostSpec::default()
+                    .with_label("lot-a")
+                    .with_date(naive_date(2024, 1, 9).unwrap()),
+                "2024-01-09",
+            ),
+        ] {
+            let expected = crate::BookingError::AverageSpecDateOrLabel {
+                currency: "STK".into(),
+                stated: stated.into(),
+            };
+            assert_eq!(
+                i.try_reduce(&sell_stk(5), Some(&spec), BookingMethod::Average)
+                    .unwrap_err(),
+                expected
+            );
+            assert_eq!(
+                i.reduce(&sell_stk(5), Some(&spec), BookingMethod::Average)
+                    .unwrap_err(),
+                expected
+            );
+            assert_eq!(i, before, "a refused sale leaves the pool alone");
+            // Every other method reads a date or label as a filter.
+            assert!(!matches!(
+                i.try_reduce(&sell_stk(5), Some(&spec), BookingMethod::Fifo),
+                Err(crate::BookingError::AverageSpecDateOrLabel { .. })
+            ));
+        }
+        // Without one, the sale books from the pool.
+        assert!(
+            i.reduce(
+                &sell_stk(5),
+                Some(&CostSpec::default()),
+                BookingMethod::Average
+            )
+            .is_ok()
+        );
     }
 
     #[test]

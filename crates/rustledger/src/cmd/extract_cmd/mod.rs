@@ -61,7 +61,50 @@ mod ledger_profile;
 mod ledgers;
 mod suggest;
 
+/// The codes `extract`'s warnings carry when the caller collects them as
+/// records (`ag-rledger`'s `warnings`; see [`run_with_writer`]). `rledger`
+/// prints the same warnings as lines, without the code.
+pub mod warning_codes {
+    /// A row or record the importer could not read, or a warning a WASM
+    /// importer reported. The message is the importer's own (escaped).
+    pub const IMPORTER_WARNING: &str = "IMPORTER_WARNING";
+    /// The summary of the transactions `--existing` dedup skipped.
+    pub const DUPLICATES_SKIPPED: &str = "DUPLICATES_SKIPPED";
+    /// One transaction `--existing` dedup skipped, and why.
+    pub const DUPLICATE_SKIPPED: &str = "DUPLICATE_SKIPPED";
+    /// More skipped transactions than are listed one by one.
+    pub const DUPLICATES_NOT_LISTED: &str = "DUPLICATES_NOT_LISTED";
+    /// The `--existing` ledger has errors, so part of it is not compared.
+    pub const EXISTING_LEDGER_INCOMPLETE: &str = "EXISTING_LEDGER_INCOMPLETE";
+    /// The configured currency is one the account's `open` does not allow.
+    pub const CURRENCY_NOT_ALLOWED: &str = "CURRENCY_NOT_ALLOWED";
+    /// A `--ledger` profile's `open` currency outranks `--currency`.
+    pub const CURRENCY_FLAG_OVERRIDDEN: &str = "CURRENCY_FLAG_OVERRIDDEN";
+    /// `--importer` was given, so the matching `--ledger` profile is not used.
+    pub const PROFILE_NOT_APPLIED: &str = "PROFILE_NOT_APPLIED";
+    /// `importers.toml` could not be applied; the flags are used instead.
+    pub const IMPORTERS_CONFIG_NOT_APPLIED: &str = "IMPORTERS_CONFIG_NOT_APPLIED";
+    /// An `importers.toml` found by discovery failed to parse, so its
+    /// `wasm_importer_dir` is not used.
+    pub const IMPORTERS_CONFIG_UNREADABLE: &str = "IMPORTERS_CONFIG_UNREADABLE";
+    /// `importers.toml` failed to load, so its payee rewrites (`[payees]`)
+    /// are not applied.
+    pub const PAYEES_NOT_APPLIED: &str = "PAYEES_NOT_APPLIED";
+    /// A `preprocess` command in a config found in the current directory is
+    /// not run.
+    pub const PREPROCESS_IGNORED: &str = "PREPROCESS_IGNORED";
+    /// A `.wasm` file in a scanned importer directory failed to load.
+    pub const WASM_IMPORTER_LOAD_FAILED: &str = "WASM_IMPORTER_LOAD_FAILED";
+    /// A build without the WASM runtime read the file with another importer,
+    /// where a full build would have offered it to the WASM importers first.
+    pub const WASM_IMPORTERS_NOT_TRIED: &str = "WASM_IMPORTERS_NOT_TRIED";
+    /// `--suggest-categories` had too little training data and did nothing.
+    pub const SUGGESTIONS_SKIPPED: &str = "SUGGESTIONS_SKIPPED";
+}
+
 use crate::cmd::completions::ShellType;
+use crate::cmd::messages::Messages;
+use crate::cmd::report_cmd::{Diagnostic, Diagnostics};
 use anyhow::{Context, Result, anyhow};
 use clap::Parser;
 use config::expand_tilde;
@@ -280,7 +323,7 @@ fn filter_existing_duplicates(
     directives: Vec<Directive>,
     existing: &[rustledger_core::Transaction],
     account: &str,
-    report: &mut (impl Write + ?Sized),
+    report: &mut Messages<'_>,
 ) -> Result<Vec<Directive>> {
     use rustledger_ops::dedup::DuplicateReason;
 
@@ -310,8 +353,7 @@ fn filter_existing_duplicates(
             _ => {}
         }
     }
-    writeln!(
-        report,
+    let summary = format!(
         "Filtered {} duplicate transaction(s) already in the existing ledger \
          ({by_id} by id link, {} by date, amount and text{}):",
         matches.len(),
@@ -321,7 +363,15 @@ fn filter_existing_duplicates(
         } else {
             String::new()
         },
-    )?;
+    );
+    report.emit_as(
+        Diagnostic {
+            code: Some(warning_codes::DUPLICATES_SKIPPED.to_string()),
+            account: Some(account.to_string()),
+            ..Diagnostic::message(summary.trim_end_matches(':'))
+        },
+        &summary,
+    );
     let describe = |t: &rustledger_core::Transaction| {
         let amount = t
             .postings
@@ -366,20 +416,35 @@ fn filter_existing_duplicates(
         } else {
             ""
         };
-        writeln!(
-            report,
-            "  skipped {} ({}; existing: {}){check}",
+        let skipped = format!(
+            "skipped {} ({}; existing: {}){check}",
             describe(new[m.new_index]),
             m.reason,
             describe(&existing[m.existing_index]),
-        )?;
+        );
+        report.emit_as(
+            Diagnostic {
+                code: Some(warning_codes::DUPLICATE_SKIPPED.to_string()),
+                date: Some(new[m.new_index].date),
+                account: Some(account.to_string()),
+                message: skipped.clone(),
+            },
+            format_args!("  {skipped}"),
+        );
     }
     if unlisted > 0 {
-        writeln!(
-            report,
-            "  ... and {unlisted} more skipped transaction(s) not listed \
+        let more = format!(
+            "... and {unlisted} more skipped transaction(s) not listed \
              (at most {MAX_LISTED_SKIPS} of each kind are shown)"
-        )?;
+        );
+        report.emit_as(
+            Diagnostic {
+                code: Some(warning_codes::DUPLICATES_NOT_LISTED.to_string()),
+                account: Some(account.to_string()),
+                ..Diagnostic::message(more.clone())
+            },
+            format_args!("  {more}"),
+        );
     }
 
     let mut txn_index = 0;
@@ -405,19 +470,24 @@ fn filter_existing_duplicates(
 /// trait implementation that consumes a config.
 pub fn list_importers(args: &Args) -> Result<()> {
     let mut stdout = io::stdout().lock();
-    list_importers_with_writer(args, &mut stdout, &mut io::stderr())
+    list_importers_with_writer(args, &mut stdout, None, &mut io::stderr())
 }
 
 /// List available importers, writing the listing to `out` and the WASM
 /// registry's notes to `err_out`.
 ///
 /// Writer-injectable variant of [`list_importers`] used by `ag-rledger`.
-/// Behavior is otherwise identical.
+/// Behavior is otherwise identical. Warnings (a WASM importer that failed to
+/// load, an unreadable `importers.toml`) go to `warnings` when one is given,
+/// as records with a code from [`warning_codes`], and otherwise to `err_out`
+/// as the lines `rledger` prints.
 pub fn list_importers_with_writer<W: Write>(
     args: &Args,
     out: &mut W,
+    warnings: Option<&mut dyn Diagnostics>,
     err_out: &mut dyn Write,
 ) -> Result<()> {
+    let err_out = &mut Messages::new(err_out, warnings);
     // ===== TOML profiles =====
     //
     // Optional: if no config file is present we still want to list
@@ -738,7 +808,7 @@ fn reject_shell_splice(program: &str, argv: &[String]) -> Result<()> {
 fn resolve_preprocess_argv(
     args: &Args,
     file: &Path,
-    err_out: &mut dyn Write,
+    err_out: &mut Messages<'_>,
 ) -> Result<Option<Vec<String>>> {
     let Some((config_path, source)) = find_importers_config_with_source(args.config.as_deref())?
     else {
@@ -779,12 +849,14 @@ fn resolve_preprocess_argv(
     };
 
     if source == ConfigSource::CurrentDirectory {
-        let _ = writeln!(
-            err_out,
-            "warning: ignoring `preprocess` in {} — a config found in the \
-             current directory is not run. Pass it with --config if it is \
-             yours.",
-            config_path.display()
+        err_out.warn(
+            warning_codes::PREPROCESS_IGNORED,
+            format!(
+                "ignoring `preprocess` in {} — a config found in the \
+                 current directory is not run. Pass it with --config if it is \
+                 yours.",
+                config_path.display()
+            ),
         );
         return Ok(None);
     }
@@ -822,7 +894,7 @@ fn resolve_preprocess_argv(
 fn maybe_preprocess(
     args: &Args,
     file: &Path,
-    err_out: &mut dyn Write,
+    err_out: &mut Messages<'_>,
 ) -> Result<Option<tempfile::NamedTempFile>> {
     // A config problem discovered HERE is never reported here.
     //
@@ -1092,7 +1164,7 @@ fn resolve_entry_currency(
     entry_name: Option<&str>,
     args: &Args,
     loaded: &mut ledgers::Ledgers,
-    report: &mut (impl Write + ?Sized),
+    report: &mut Messages<'_>,
 ) -> Result<ImporterConfig> {
     let mut ledgers: Vec<&Path> = Vec::new();
     for path in [args.ledger.as_deref(), args.existing.as_deref()]
@@ -1119,14 +1191,21 @@ fn resolve_entry_currency(
             let lookup = ledger_profile::open_currencies(loaded, path, &config.account)?;
             if let Some(allowed) = lookup.currencies {
                 if !allowed.is_empty() && !allowed.contains(currency) {
-                    writeln!(
-                        report,
-                        "warning: {source} books {currency}, but `open {}` in {} allows \
+                    let message = format!(
+                        "{source} books {currency}, but `open {}` in {} allows \
                          only {}; `rledger check` will reject these postings",
                         config.account,
                         path.display(),
                         allowed.join(", ")
-                    )?;
+                    );
+                    report.emit_as(
+                        Diagnostic {
+                            code: Some(warning_codes::CURRENCY_NOT_ALLOWED.to_string()),
+                            account: Some(config.account.clone()),
+                            ..Diagnostic::message(message.clone())
+                        },
+                        format_args!("warning: {message}"),
+                    );
                 }
                 break;
             }
@@ -1313,7 +1392,7 @@ fn entry_for_minimal_config(
     file: &Path,
     importer_name: Option<&str>,
     warn_on_failure: bool,
-    err_out: &mut dyn Write,
+    err_out: &mut Messages<'_>,
 ) -> Option<MinimalEntry> {
     match load_minimal_entry(args, file, importer_name) {
         Ok(entry) => entry,
@@ -1321,10 +1400,12 @@ fn entry_for_minimal_config(
             // Silent when a `--ledger` profile already supplied the account:
             // saying we fell back to `--account` would simply be untrue.
             if warn_on_failure {
-                let _ = writeln!(
-                    err_out,
-                    "warning: could not apply importers.toml ({e}); \
-                     using --account/--currency instead"
+                err_out.warn(
+                    warning_codes::IMPORTERS_CONFIG_NOT_APPLIED,
+                    format!(
+                        "could not apply importers.toml ({e}); \
+                         using --account/--currency instead"
+                    ),
                 );
             }
             None
@@ -1348,7 +1429,7 @@ fn entry_for_minimal_config(
 fn resolve_payee_rules(
     args: &Args,
     entry_name: Option<&str>,
-    err_out: &mut dyn Write,
+    err_out: &mut Messages<'_>,
 ) -> Result<rustledger_importer::payees::PayeeRules> {
     let strict = args.config.is_some() || entry_name.is_some();
     let path = match find_importers_config(args.config.as_deref()) {
@@ -1361,9 +1442,9 @@ fn resolve_payee_rules(
         Ok(file) => file.payee_rules(entry_name),
         Err(e) if strict => Err(e),
         Err(e) => {
-            let _ = writeln!(
-                err_out,
-                "warning: {e:#}; its payee rewrites ([payees]) are not applied"
+            err_out.warn(
+                warning_codes::PAYEES_NOT_APPLIED,
+                format!("{e:#}; its payee rewrites ([payees]) are not applied"),
             );
             Ok(rustledger_importer::payees::PayeeRules::new())
         }
@@ -1421,7 +1502,7 @@ fn importers_config_not_found_message() -> anyhow::Error {
 /// [`resolve_scan_dirs_to`], warning on stderr. For tests.
 #[cfg(all(test, feature = "python-plugin-wasm"))]
 fn resolve_scan_dirs(args: &Args) -> Result<Vec<PathBuf>> {
-    resolve_scan_dirs_to(args, &mut io::stderr())
+    resolve_scan_dirs_to(args, &mut Messages::new(&mut io::stderr(), None))
 }
 
 /// Resolve the list of directories to scan for WASM importers.
@@ -1432,7 +1513,7 @@ fn resolve_scan_dirs(args: &Args) -> Result<Vec<PathBuf>> {
 /// (no flag, soft-discover from default locations, errors warn-and-
 /// degrade, the warning going to `err_out`). CLI `--wasm-importer-dir`
 /// flags override both and short-circuit the toml lookup entirely.
-fn resolve_scan_dirs_to(args: &Args, err_out: &mut dyn Write) -> Result<Vec<PathBuf>> {
+fn resolve_scan_dirs_to(args: &Args, err_out: &mut Messages<'_>) -> Result<Vec<PathBuf>> {
     if !args.wasm_importer_dir.is_empty() {
         return Ok(args.wasm_importer_dir.clone());
     }
@@ -1462,7 +1543,7 @@ fn resolve_scan_dirs_explicit(path: &Path) -> Result<Vec<PathBuf>> {
 /// A missing file is expected; a malformed file is unusual but not
 /// fatal (the user didn't explicitly point at it). Print a warning
 /// for the malformed case so the user can find their mistake.
-fn resolve_scan_dirs_implicit(err_out: &mut dyn Write) -> Vec<PathBuf> {
+fn resolve_scan_dirs_implicit(err_out: &mut Messages<'_>) -> Vec<PathBuf> {
     let cfg_path = match find_importers_config(None) {
         Ok(Some(p)) => p,
         Ok(None) | Err(_) => return Vec::new(),
@@ -1478,10 +1559,12 @@ fn resolve_scan_dirs_implicit(err_out: &mut dyn Write) -> Vec<PathBuf> {
             // Visible warning instead of silent loss — the user's
             // wasm_importer_dir setting would otherwise vanish with
             // no signal that the file even exists.
-            let _ = writeln!(
-                err_out,
-                "warning: implicit importers.toml at {} failed to parse: {e:#}; ignoring wasm_importer_dir",
-                cfg_path.display()
+            err_out.warn(
+                warning_codes::IMPORTERS_CONFIG_UNREADABLE,
+                format!(
+                    "implicit importers.toml at {} failed to parse: {e:#}; ignoring wasm_importer_dir",
+                    cfg_path.display()
+                ),
             );
             Vec::new()
         }
@@ -1491,7 +1574,7 @@ fn resolve_scan_dirs_implicit(err_out: &mut dyn Write) -> Vec<PathBuf> {
 /// [`build_registry_to`], with its notes on stderr. For tests.
 #[cfg(test)]
 fn build_registry(args: &Args) -> Result<ImporterRegistry> {
-    build_registry_to(args, &mut io::stderr())
+    build_registry_to(args, &mut Messages::new(&mut io::stderr(), None))
 }
 
 /// Build an [`ImporterRegistry`] with WASM importers registered ahead
@@ -1507,7 +1590,7 @@ fn build_registry(args: &Args) -> Result<ImporterRegistry> {
 ///
 /// Per-dir scan failures (a single malformed `.wasm` among many) are
 /// written to `err_out`, with each importer loaded and each directory
-/// scanned, but don't abort startup — see [`register_wasm_dir`]'s
+/// scanned, but don't abort startup — see `ImporterRegistry::register_wasm_dir`'s
 /// skip-and-collect semantics.
 // Without the WASM importers, `args` and `err_out` are unused: those
 // importers read every flag and write every note.
@@ -1515,7 +1598,7 @@ fn build_registry(args: &Args) -> Result<ImporterRegistry> {
     not(feature = "python-plugin-wasm"),
     allow(unused_variables, clippy::needless_pass_by_ref_mut)
 )]
-fn build_registry_to(args: &Args, err_out: &mut dyn Write) -> Result<ImporterRegistry> {
+fn build_registry_to(args: &Args, err_out: &mut Messages<'_>) -> Result<ImporterRegistry> {
     let mut registry = ImporterRegistry::new();
 
     // 1 + 2. WASM importer loading (sandboxed `.wasm` importers). Gated behind
@@ -1583,10 +1666,13 @@ fn build_registry_to(args: &Args, err_out: &mut dyn Write) -> Result<ImporterReg
                 );
             }
             for (failed_path, err) in &report.failures {
-                let _ = writeln!(
-                    err_out,
-                    "  warning: failed to load {}: {err}",
-                    failed_path.display()
+                let message = format!("failed to load {}: {err}", failed_path.display());
+                err_out.emit_as(
+                    Diagnostic {
+                        code: Some(warning_codes::WASM_IMPORTER_LOAD_FAILED.to_string()),
+                        ..Diagnostic::message(message.clone())
+                    },
+                    format_args!("  warning: {message}"),
                 );
             }
         }
@@ -1678,24 +1764,34 @@ fn validate_output_target(args: &Args) -> Result<()> {
 /// binary; `ag-rledger` calls `run_with_writer` with a buffer.
 pub fn run(args: &Args, file: &Path) -> Result<()> {
     let mut stdout = io::stdout().lock();
-    run_with_writer(args, file, &mut stdout, &mut io::stderr())
+    run_with_writer(args, file, &mut stdout, None, &mut io::stderr())
 }
 
 /// Run the extract command, writing extracted directives to `out`.
 ///
-/// A `--output <file>` flag still writes to disk. Progress and warning
-/// lines (and the "Wrote output to ..." note) go to `err_out`, which
-/// `rledger` points at stderr. `ag-rledger` passes a buffer for its
-/// envelope: on the process's stderr, warnings such as "--importer was
-/// given, so the --ledger profile is not applied" never reached an agent
-/// (#2546).
+/// A `--output <file>` flag still writes to disk. Progress lines (and the
+/// "Wrote output to ..." note) go to `err_out`, which `rledger` points at
+/// stderr. Warnings (a skipped duplicate, an importer's row error, a
+/// currency the account's `open` does not allow, ...) go to `warnings` when
+/// one is given, as records with a code from [`warning_codes`], and
+/// otherwise to `err_out` as the lines `rledger` prints. `ag-rledger` passes
+/// both: on the process's stderr its messages never reached an agent
+/// (#2546), and as prose in its envelope they had to be parsed back apart
+/// (#2566).
 pub fn run_with_writer<W: Write>(
     args: &Args,
     file: &Path,
     out: &mut W,
+    warnings: Option<&mut dyn Diagnostics>,
     err_out: &mut dyn Write,
 ) -> Result<()> {
-    run_with_ledgers(args, file, out, err_out, &mut ledgers::Ledgers::default())
+    run_with_ledgers(
+        args,
+        file,
+        out,
+        &mut Messages::new(err_out, warnings),
+        &mut ledgers::Ledgers::default(),
+    )
 }
 
 /// In a build without the WASM runtime, a note naming the `.wasm` importers
@@ -1711,7 +1807,7 @@ pub fn run_with_writer<W: Write>(
 fn untried_wasm_importers(args: &Args) -> Option<String> {
     // Its errors (an explicit config that is missing or malformed) are the
     // CSV path's to report.
-    let dirs = resolve_scan_dirs_to(args, &mut io::sink()).ok()?;
+    let dirs = resolve_scan_dirs_to(args, &mut Messages::new(&mut io::sink(), None)).ok()?;
     let mut names = Vec::new();
     let mut shown = Vec::new();
     for dir in &dirs {
@@ -1767,7 +1863,7 @@ fn run_with_ledgers<W: Write>(
     args: &Args,
     file: &Path,
     out: &mut W,
-    err_out: &mut dyn Write,
+    err_out: &mut Messages<'_>,
     ledgers: &mut ledgers::Ledgers,
 ) -> Result<()> {
     // Validate the output target BEFORE any extraction work, so a run that
@@ -1834,11 +1930,13 @@ fn run_with_ledgers<W: Write>(
             // silently ignored `--ledger` is the failure this feature keeps
             // reproducing.
             if matched.is_some() && args.importer.is_some() {
-                let _ = writeln!(
-                    err_out,
-                    "warning: --importer was given, so the --ledger profile for \
-                     {} is not applied",
-                    matched.as_ref().map_or("", |p| p.account.as_str())
+                err_out.warn(
+                    warning_codes::PROFILE_NOT_APPLIED,
+                    format!(
+                        "--importer was given, so the --ledger profile for \
+                         {} is not applied",
+                        matched.as_ref().map_or("", |p| p.account.as_str())
+                    ),
                 );
                 None
             } else {
@@ -2211,7 +2309,7 @@ fn run_with_ledgers<W: Write>(
                 // The profile's `open` outranks `--currency` too; a flag that
                 // loses must not be dropped silently.
                 if let Some(warning) = profile_overrides_currency_flag(p, args) {
-                    let _ = writeln!(err_out, "warning: {warning}");
+                    err_out.warn(warning_codes::CURRENCY_FLAG_OVERRIDDEN, warning);
                 }
                 ImporterConfig {
                     account: p.account.clone(),
@@ -2249,9 +2347,10 @@ fn run_with_ledgers<W: Write>(
     // `--balance` assertion is appended after both and so stays last.
     result.directives = rustledger_importer::order::chronological(result.directives);
 
-    // Print warnings
+    // The importer's own warnings: rows it could not read, and whatever a
+    // WASM importer reports (already escaped by the importer crate).
     for warning in &result.warnings {
-        let _ = writeln!(err_out, "warning: {warning}");
+        err_out.warn(warning_codes::IMPORTER_WARNING, warning.as_str());
     }
 
     // Fail loudly when the importer produced no transactions — before
@@ -2285,10 +2384,9 @@ fn run_with_ledgers<W: Write>(
             || format!("the {} importer", importer.name()),
             |entry| format!("importers.toml entry '{entry}'"),
         );
-        let _ = writeln!(
-            err_out,
-            "warning: {} was read by {reader}, but {note}",
-            source_file.display()
+        err_out.warn(
+            warning_codes::WASM_IMPORTERS_NOT_TRIED,
+            format!("{} was read by {reader}, but {note}", source_file.display()),
         );
     }
 
@@ -2298,7 +2396,7 @@ fn run_with_ledgers<W: Write>(
     let directives = if let Some(ref existing_path) = args.existing {
         let existing = duplicate::load_existing(ledgers, existing_path)?;
         if let Some(warning) = &existing.warning {
-            let _ = writeln!(err_out, "warning: {warning}");
+            err_out.warn(warning_codes::EXISTING_LEDGER_INCOMPLETE, warning.as_str());
         }
         let existing_txns = existing.transactions;
         let filtered = filter_existing_duplicates(
@@ -2651,7 +2749,7 @@ preprocess = ["cat", "{input}"]
             pdf.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        run_with_writer(&args, &pdf, &mut out, &mut std::io::sink())
+        run_with_writer(&args, &pdf, &mut out, None, &mut std::io::sink())
             .expect("auto-identifies the pdf profile");
         let text = String::from_utf8(out).unwrap();
         assert!(
@@ -2700,7 +2798,7 @@ preprocess = ["touch", "{}"]
         let args = Args::parse_from(["extract", csv.to_str().unwrap()]);
         let mut out = Vec::new();
         let _ = with_cwd(dir.path(), || {
-            run_with_writer(&args, &csv, &mut out, &mut std::io::sink())
+            run_with_writer(&args, &csv, &mut out, None, &mut std::io::sink())
         });
 
         assert!(
@@ -2747,7 +2845,7 @@ preprocess = ["cat", "{input}"]
             pdf.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        run_with_writer(&args, &pdf, &mut out, &mut std::io::sink()).unwrap();
+        run_with_writer(&args, &pdf, &mut out, None, &mut std::io::sink()).unwrap();
         let text = String::from_utf8(out).unwrap();
         assert!(text.contains("Coffee"), "row not imported: {text}");
         assert!(text.contains("Assets:Bank"), "account missing: {text}");
@@ -2798,7 +2896,7 @@ preprocess = ["cat", "{input}"]
         ]);
         let mut out = Vec::new();
         let result = with_cwd(dir.path(), || {
-            run_with_writer(&args, &hostile, &mut out, &mut std::io::sink())
+            run_with_writer(&args, &hostile, &mut out, None, &mut std::io::sink())
         });
 
         let err = result.unwrap_err();
@@ -2844,7 +2942,7 @@ preprocess = ["cat", "{input}"]
         ]);
         let mut out = Vec::new();
         let result = with_cwd(dir.path(), || {
-            run_with_writer(&args, &hostile, &mut out, &mut std::io::sink())
+            run_with_writer(&args, &hostile, &mut out, None, &mut std::io::sink())
         });
 
         result.expect("the positional form is allowed");
@@ -2891,7 +2989,7 @@ preprocess = ["cat", "{input}"]
         let args = Args::parse_from(["extract", "--auto", csv.to_str().unwrap()]);
         let mut out = Vec::new();
         let result = with_cwd(dir.path(), || {
-            run_with_writer(&args, &csv, &mut out, &mut std::io::sink())
+            run_with_writer(&args, &csv, &mut out, None, &mut std::io::sink())
         });
 
         result.expect("--auto must not read the ambiguous config at all");
@@ -2917,7 +3015,7 @@ preprocess = ["cat", "{input}"]
         let args = Args::parse_from(["extract", "--auto", csv.to_str().unwrap()]);
         let mut out = Vec::new();
         let result = with_cwd(dir.path(), || {
-            run_with_writer(&args, &csv, &mut out, &mut std::io::sink())
+            run_with_writer(&args, &csv, &mut out, None, &mut std::io::sink())
         });
 
         result.expect("--auto must not be failed by an unparsable config");
@@ -2948,7 +3046,7 @@ preprocess = ["cat", "{input}"]
             csv.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        let err = run_with_writer(&args, &csv, &mut out, &mut std::io::sink()).unwrap_err();
+        let err = run_with_writer(&args, &csv, &mut out, None, &mut std::io::sink()).unwrap_err();
         assert!(
             err.to_string().contains("parse importers config"),
             "a named config must report its own parse error, got: {err}"
@@ -2979,7 +3077,7 @@ preprocess = ["cat", "{input}"]
             pdf.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        let err = run_with_writer(&args, &pdf, &mut out, &mut std::io::sink()).unwrap_err();
+        let err = run_with_writer(&args, &pdf, &mut out, None, &mut std::io::sink()).unwrap_err();
         assert!(err.to_string().contains("preprocess command"), "{err}");
     }
 
@@ -3006,7 +3104,7 @@ preprocess = ["cat", "{input}"]
             path.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        run_with_writer(&args, &path, &mut out, &mut std::io::sink()).unwrap();
+        run_with_writer(&args, &path, &mut out, None, &mut std::io::sink()).unwrap();
         let text = String::from_utf8(out).unwrap();
 
         assert!(text.contains("Coffee"), "first row not imported: {text}");
@@ -3589,7 +3687,7 @@ default_expense = "Expenses:Uncategorized"
         let run_err = |argv: &[&str], file: &Path| {
             let args = Args::parse_from(argv);
             let mut out = Vec::new();
-            run_with_writer(&args, file, &mut out, &mut std::io::sink())
+            run_with_writer(&args, file, &mut out, None, &mut std::io::sink())
                 .map(|()| String::from_utf8(out).unwrap())
                 .unwrap_err()
                 .to_string()
@@ -3948,7 +4046,7 @@ default_expense = "Expenses:Uncategorized"
         ]);
         let mut out = Vec::new();
         with_cwd(dir.path(), || {
-            run_with_writer(&args, &qfx, &mut out, &mut std::io::sink())
+            run_with_writer(&args, &qfx, &mut out, None, &mut std::io::sink())
         })
         .expect("the ofx entry must be parsed as OFX, not CSV");
         let text = String::from_utf8(out).unwrap();
@@ -3998,7 +4096,7 @@ default_expense = "Expenses:Uncategorized"
             csv.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        run_with_writer(&args, &csv, &mut out, &mut std::io::sink()).expect("extract runs");
+        run_with_writer(&args, &csv, &mut out, None, &mut std::io::sink()).expect("extract runs");
         let text = String::from_utf8(out).unwrap();
 
         assert!(
@@ -4056,7 +4154,7 @@ default_expense = "Expenses:Uncategorized"
             csv.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        run_with_writer(&args, &csv, &mut out, &mut std::io::sink()).expect("extract runs");
+        run_with_writer(&args, &csv, &mut out, None, &mut std::io::sink()).expect("extract runs");
         let text = String::from_utf8(out).unwrap();
 
         assert!(
@@ -4195,7 +4293,8 @@ default_expense = "Expenses:Uncategorized"
             argv.push(qfx.to_str().unwrap());
             let args = Args::parse_from(argv);
             let mut out = Vec::new();
-            run_with_writer(&args, &qfx, &mut out, &mut std::io::sink()).expect("ofx extract runs");
+            run_with_writer(&args, &qfx, &mut out, None, &mut std::io::sink())
+                .expect("ofx extract runs");
             String::from_utf8(out).unwrap()
         };
 
@@ -4248,7 +4347,8 @@ default_expense = "Expenses:Uncategorized"
             argv.push(csv.to_str().unwrap());
             let args = Args::parse_from(argv);
             let mut out = Vec::new();
-            run_with_writer(&args, &csv, &mut out, &mut std::io::sink()).expect("extract runs");
+            run_with_writer(&args, &csv, &mut out, None, &mut std::io::sink())
+                .expect("extract runs");
             String::from_utf8(out).unwrap()
         };
 
@@ -4305,7 +4405,7 @@ default_expense = "Expenses:Uncategorized"
             csv.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        run_with_writer(&args, &csv, &mut out, &mut std::io::sink()).expect("extract runs");
+        run_with_writer(&args, &csv, &mut out, None, &mut std::io::sink()).expect("extract runs");
         let text = String::from_utf8(out).unwrap();
 
         assert!(
@@ -4353,7 +4453,8 @@ default_expense = "Expenses:Uncategorized"
             argv.push(qfx.to_str().unwrap());
             let args = Args::parse_from(argv);
             let mut out = Vec::new();
-            run_with_writer(&args, &qfx, &mut out, &mut std::io::sink()).expect("ofx extract runs");
+            run_with_writer(&args, &qfx, &mut out, None, &mut std::io::sink())
+                .expect("ofx extract runs");
             String::from_utf8(out).unwrap()
         };
 
@@ -4405,7 +4506,7 @@ default_expense = "Expenses:Uncategorized"
             csv.to_str().unwrap(),
         ]);
         let mut out = Vec::new();
-        run_with_writer(&args, &csv, &mut out, &mut std::io::sink()).expect("extract runs");
+        run_with_writer(&args, &csv, &mut out, None, &mut std::io::sink()).expect("extract runs");
         let text = String::from_utf8(out).unwrap();
 
         assert!(
@@ -4437,7 +4538,7 @@ default_expense = "Expenses:Uncategorized"
         let args = Args::parse_from(["extract", qfx.to_str().unwrap()]);
         let mut out = Vec::new();
         let err = with_cwd(dir.path(), || {
-            run_with_writer(&args, &qfx, &mut out, &mut std::io::sink())
+            run_with_writer(&args, &qfx, &mut out, None, &mut std::io::sink())
         })
         .expect_err("an unnamed account must not silently become the default");
         let msg = err.to_string();
@@ -4459,7 +4560,7 @@ default_expense = "Expenses:Uncategorized"
             let args = Args::parse_from(["extract", qfx.to_str().unwrap(), "--account", account]);
             let mut out = Vec::new();
             with_cwd(dir.path(), || {
-                run_with_writer(&args, &qfx, &mut out, &mut std::io::sink())
+                run_with_writer(&args, &qfx, &mut out, None, &mut std::io::sink())
             })
             .unwrap_or_else(|e| panic!("--account {account} must be honored, got: {e}"));
             assert!(String::from_utf8(out).unwrap().contains(account));
@@ -4488,7 +4589,7 @@ default_expense = "Expenses:Uncategorized"
         let args = Args::parse_from(["extract", qfx.to_str().unwrap()]);
         let mut out = Vec::new();
         with_cwd(dir.path(), || {
-            run_with_writer(&args, &qfx, &mut out, &mut std::io::sink())
+            run_with_writer(&args, &qfx, &mut out, None, &mut std::io::sink())
         })
         .expect("an account named by config is named, even if it is the default");
         assert!(String::from_utf8(out).unwrap().contains(DEFAULT_ACCOUNT));
@@ -4512,7 +4613,7 @@ default_expense = "Expenses:Uncategorized"
         let args = Args::parse_from(["extract", qfx.to_str().unwrap()]);
         let mut out = Vec::new();
         with_cwd(dir.path(), || {
-            run_with_writer(&args, &qfx, &mut out, &mut std::io::sink())
+            run_with_writer(&args, &qfx, &mut out, None, &mut std::io::sink())
         })
         .unwrap();
         assert!(String::from_utf8(out).unwrap().contains(DEFAULT_ACCOUNT));
@@ -4567,7 +4668,7 @@ default_expense = "Expenses:Uncategorized"
         ]);
         let mut out = Vec::new();
         with_cwd(dir.path(), || {
-            run_with_writer(&args, &csv, &mut out, &mut std::io::sink())
+            run_with_writer(&args, &csv, &mut out, None, &mut std::io::sink())
         })
         .unwrap();
         let text = String::from_utf8(out).unwrap();
@@ -4614,7 +4715,7 @@ default_expense = "Expenses:Uncategorized"
         ]);
         let mut out = Vec::new();
         with_cwd(dir.path(), || {
-            run_with_writer(&args, &csv, &mut out, &mut std::io::sink())
+            run_with_writer(&args, &csv, &mut out, None, &mut std::io::sink())
         })
         .unwrap();
         let text = String::from_utf8(out).unwrap();
@@ -4788,7 +4889,13 @@ default_expense = "Expenses:Uncategorized"
         };
         let new = vec![Directive::Transaction(t()), Directive::Transaction(t())];
         let mut report = Vec::new();
-        let kept = filter_existing_duplicates(new, &[t()], "Assets:Bank", &mut report).unwrap();
+        let kept = filter_existing_duplicates(
+            new,
+            &[t()],
+            "Assets:Bank",
+            &mut Messages::new(&mut report, None),
+        )
+        .unwrap();
         assert_eq!(kept.len(), 1);
         let report = String::from_utf8(report).unwrap();
         assert!(
@@ -4825,7 +4932,13 @@ default_expense = "Expenses:Uncategorized"
         rows.extend((0..5).map(|i| t("", -900 - i)));
         let new: Vec<Directive> = rows.iter().cloned().map(Directive::Transaction).collect();
         let mut report = Vec::new();
-        let kept = filter_existing_duplicates(new, &rows, "Assets:Bank", &mut report).unwrap();
+        let kept = filter_existing_duplicates(
+            new,
+            &rows,
+            "Assets:Bank",
+            &mut Messages::new(&mut report, None),
+        )
+        .unwrap();
         assert!(kept.is_empty());
         let report = String::from_utf8(report).unwrap();
         assert!(
@@ -4900,8 +5013,13 @@ default_expense = "Expenses:Uncategorized"
             Directive::Transaction(t("Croissant")),
         ];
         let mut report = Vec::new();
-        let kept =
-            filter_existing_duplicates(new, &[t("Croissant")], "Assets:Bank", &mut report).unwrap();
+        let kept = filter_existing_duplicates(
+            new,
+            &[t("Croissant")],
+            "Assets:Bank",
+            &mut Messages::new(&mut report, None),
+        )
+        .unwrap();
         assert_eq!(kept.len(), 1);
         let report = String::from_utf8(report).unwrap();
         assert!(
@@ -5090,7 +5208,7 @@ default_expense = "Expenses:Uncategorized"
                 &args,
                 &csv_path,
                 &mut out,
-                &mut std::io::sink(),
+                &mut Messages::new(&mut std::io::sink(), None),
                 &mut loaded,
             )
             .unwrap();
@@ -5155,7 +5273,7 @@ default_expense = "Expenses:Uncategorized"
             Some("bank"),
             &args,
             &mut ledgers::Ledgers::default(),
-            &mut report,
+            &mut Messages::new(&mut report, None),
         )
         .map(|c| c.currency)
         .map_err(|e| format!("{e:#}"));
@@ -5867,7 +5985,7 @@ filename_pattern = "statement*"
                 config_path.to_str().unwrap(),
             ]);
             let mut out = Vec::new();
-            run_with_writer(&args, &file, &mut out, &mut std::io::sink()).unwrap();
+            run_with_writer(&args, &file, &mut out, None, &mut std::io::sink()).unwrap();
             let out = String::from_utf8(out).unwrap();
             assert!(out.contains(want), "{want}: {out}");
         }
@@ -6314,7 +6432,7 @@ filename_pattern = "statement*"
         argv.push(file.to_str().unwrap().to_string());
         let args = Args::parse_from(argv);
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        run_with_writer(&args, &file, &mut out, &mut err)?;
+        run_with_writer(&args, &file, &mut out, None, &mut err)?;
         Ok((
             String::from_utf8(out).unwrap(),
             String::from_utf8(err).unwrap(),
@@ -6510,8 +6628,8 @@ amount_column = "Amount"
         // Config validation: listing the importers reads the file and says so.
         let (dir, path) = write_temp_config(&config);
         let args = Args::parse_from(["extract", "--config", path.to_str().unwrap()]);
-        let err =
-            list_importers_with_writer(&args, &mut Vec::new(), &mut std::io::sink()).unwrap_err();
+        let err = list_importers_with_writer(&args, &mut Vec::new(), None, &mut std::io::sink())
+            .unwrap_err();
         assert!(
             format!("{err:#}").contains("the top-level [payees] table"),
             "{err:#}"
@@ -6528,7 +6646,7 @@ amount_column = "Amount"
         ));
         let args = Args::parse_from(["extract", "--config", path.to_str().unwrap()]);
         let mut out = Vec::new();
-        list_importers_with_writer(&args, &mut out, &mut std::io::sink()).unwrap();
+        list_importers_with_writer(&args, &mut out, None, &mut std::io::sink()).unwrap();
         assert!(
             String::from_utf8(out)
                 .unwrap()
@@ -6557,7 +6675,7 @@ amount_column = "Amount"
         let args = Args::parse_from(["extract", "--auto", csv.to_str().unwrap()]);
         let mut out = Vec::new();
         with_cwd(dir.path(), || {
-            run_with_writer(&args, &csv, &mut out, &mut std::io::sink())
+            run_with_writer(&args, &csv, &mut out, None, &mut std::io::sink())
         })
         .unwrap();
         let out = String::from_utf8(out).unwrap();

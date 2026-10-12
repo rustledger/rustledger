@@ -1291,6 +1291,21 @@ fn the_rledger_config_deprecation_is_a_warning_not_stderr() {
         vec!["check", good.to_str().unwrap()],
         vec!["config", "path"],
         vec!["report", good.to_str().unwrap(), "accounts"],
+        // The commands #2567 added run inside the same capture (#2566).
+        vec!["explain", "E2001"],
+        vec!["lint", "closed-nonempty", good.to_str().unwrap()],
+        vec![
+            "report",
+            good.to_str().unwrap(),
+            "returns",
+            "--investments",
+            "Assets:Cash",
+            "--currency",
+            "USD",
+            "--end",
+            "2024-12-31",
+        ],
+        vec!["report", good.to_str().unwrap(), "capgains"],
     ] {
         let envelope = assert_warnings(dir, &args, &env, &["RLEDGER_CONFIG_DEPRECATED"]);
         assert!(
@@ -1370,6 +1385,205 @@ fn a_failing_wasm_identify_is_a_warning_not_stderr() {
         env["result"]["stdout"]
             .as_str()
             .is_some_and(|s| s.contains("Coffee")),
+        "{env}"
+    );
+}
+
+/// The subcommand names `rledger --help` lists (clap's `Commands:` section),
+/// without `help`.
+fn rledger_commands() -> Vec<String> {
+    let output = Command::new(env!("CARGO_BIN_EXE_rledger"))
+        .arg("--help")
+        .output()
+        .expect("spawn rledger --help");
+    let help = String::from_utf8_lossy(&output.stdout).into_owned();
+    let names: Vec<String> = help
+        .lines()
+        .skip_while(|line| line.trim() != "Commands:")
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty())
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|name| *name != "help")
+        .map(str::to_string)
+        .collect();
+    // The parse is shown able to find commands, or an empty list would pass
+    // the guard below vacuously.
+    for known in ["check", "query", "report", "explain", "lint"] {
+        assert!(
+            names.iter().any(|n| n == known),
+            "could not read `{known}` out of `rledger --help`:\n{help}"
+        );
+    }
+    names
+}
+
+/// The drift guard for #2567: every `rledger` command is an `ag-rledger`
+/// command, or is listed in the root envelope's `unsupported_commands` and
+/// refused by name. A command added to `rledger` fails here until it is one
+/// or the other. Before, `explain` was simply missing.
+#[test]
+fn every_rledger_command_is_offered_or_listed_as_unsupported() {
+    let (_, root) = run(&[]);
+    let commands: Vec<String> = root["result"]["commands"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no command tree: {root}"))
+        .iter()
+        .filter_map(|c| c["name"].as_str().map(str::to_string))
+        .collect();
+    let unsupported: Vec<String> = root["result"]["unsupported_commands"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no unsupported_commands: {root}"))
+        .iter()
+        .map(|c| {
+            assert!(
+                c["reason"].as_str().is_some_and(|r| !r.is_empty()),
+                "an unsupported command says why: {c}"
+            );
+            c["command"].as_str().expect("command name").to_string()
+        })
+        .collect();
+
+    let rledger = rledger_commands();
+    for name in &rledger {
+        assert!(
+            commands.contains(name),
+            "`rledger {name}` has no `ag-rledger` counterpart and is not listed as \
+             unsupported: offer it, or add it to UNSUPPORTED_COMMANDS"
+        );
+    }
+    for name in &unsupported {
+        assert!(
+            rledger.contains(name),
+            "`{name}` is listed as unsupported but rledger has no such command"
+        );
+        let (code, env) = run(&[name.as_str(), "bash"]);
+        assert_ne!(code, 0, "{env}");
+        assert_eq!(env["error"]["code"], "UNSUPPORTED", "{env}");
+    }
+}
+
+/// What `rledger <args>` prints on stdout, and its exit code, run in `dir`
+/// as [`run_in`] runs `ag-rledger`.
+fn rledger_stdout(dir: &std::path::Path, args: &[&str]) -> (i32, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_rledger"))
+        .args(args)
+        .current_dir(dir)
+        .env("RLEDGER_CONFIG_DIR", dir)
+        .env("PROGRAMDATA", dir)
+        .env("BEANCOUNT_DISABLE_LOAD_CACHE", "1")
+        .output()
+        .expect("spawn rledger");
+    (
+        output.status.code().expect("exit code"),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    )
+}
+
+/// #2567: `report returns`, `report capgains`, `lint closed-nonempty` and
+/// `explain` are offered, with `rledger`'s flags; the answer in `result` is
+/// what `rledger` prints, and the exit code is `rledger`'s.
+#[test]
+fn the_commands_from_2567_answer_as_rledger_does() {
+    let tmp = tempfile::tempdir().unwrap();
+    let returns = write_fixture(
+        tmp.path(),
+        "returns.beancount",
+        "option \"operating_currency\" \"USD\"\n\n\
+         2020-01-01 open Assets:Bank\n2020-01-01 open Assets:Broker:Stock\n\
+         2020-01-01 open Income:Dividends\n\n\
+         2020-01-01 * \"Buy AAPL\"\n  Assets:Broker:Stock  10 AAPL {100 USD}\n  Assets:Bank  -1000 USD\n\n\
+         2020-06-01 * \"Dividend\"\n  Assets:Bank  20 USD\n  Income:Dividends  -20 USD\n\n\
+         2020-12-31 price AAPL 130 USD\n",
+    );
+    let returns = returns.to_str().unwrap();
+    let gains = write_fixture(
+        tmp.path(),
+        "gains.beancount",
+        "option \"booking_method\" \"FIFO\"\n\n\
+         2020-01-01 open Assets:Broker:Stock\n2020-01-01 open Assets:Bank\n\
+         2020-01-01 open Income:Gains\n\n\
+         2020-01-01 * \"Buy\"\n  Assets:Broker:Stock  10 AAPL {100 USD}\n  Assets:Bank  -1000 USD\n\n\
+         2024-03-01 * \"Sell\"\n  Assets:Broker:Stock  -8 AAPL {} @ 150 USD\n  Assets:Bank  1200 USD\n  Income:Gains\n\n\
+         2024-06-01 close Assets:Bank\n",
+    );
+    let gains = gains.to_str().unwrap();
+
+    for (ag, rledger) in [
+        (
+            vec![
+                "report",
+                returns,
+                "returns",
+                "-i",
+                "Assets:Broker",
+                "--income",
+                "Income:Dividends",
+                "--end",
+                "2020-12-31",
+                "--format",
+                "json",
+            ],
+            vec![
+                "report",
+                returns,
+                "returns",
+                "-i",
+                "Assets:Broker",
+                "--income",
+                "Income:Dividends",
+                "--end",
+                "2020-12-31",
+                "--format",
+                "json",
+                "--no-pager",
+            ],
+        ),
+        (
+            vec!["report", gains, "capgains", "--year", "2024", "--irr"],
+            vec![
+                "report",
+                gains,
+                "capgains",
+                "--year",
+                "2024",
+                "--irr",
+                "--no-pager",
+            ],
+        ),
+        (
+            vec!["lint", "closed-nonempty", gains, "--format", "json"],
+            vec!["lint", "closed-nonempty", gains, "--format", "json"],
+        ),
+        (vec!["explain", "E2001"], vec!["explain", "E2001"]),
+        (vec!["explain"], vec!["explain"]),
+        // An unknown code: exit 1 with the pointer, as in rledger.
+        (vec!["explain", "E9999"], vec!["explain", "E9999"]),
+    ] {
+        let (code, env, stderr) = run_in(tmp.path(), &ag);
+        assert!(stderr.is_empty(), "{ag:?} wrote to stderr: {stderr}");
+        let (rledger_code, printed) = rledger_stdout(tmp.path(), &rledger);
+        assert!(
+            !printed.is_empty(),
+            "{rledger:?} printed nothing to compare"
+        );
+        assert_eq!(code, rledger_code, "{ag:?}: exit code differs: {env}");
+        assert_eq!(
+            env["result"]["stdout"].as_str(),
+            Some(printed.as_str()),
+            "{ag:?}: result differs from rledger's: {env}"
+        );
+    }
+
+    // The closed-with-a-balance finding is really there, so the comparison
+    // above compared a finding and not two empty reports.
+    let (_, env, _) = run_in(
+        tmp.path(),
+        &["lint", "closed-nonempty", gains, "--format", "json"],
+    );
+    assert!(
+        env["result"]["data"]["findings"]
+            .as_array()
+            .is_some_and(|f| f.len() == 1),
         "{env}"
     );
 }

@@ -24,16 +24,18 @@ When dates are equal, directives are ordered by type priority:
 |----------|---------------|-----------|
 | 0 | `open` | Accounts must exist before use |
 | 1 | `commodity` | Commodities declared before use |
-| 2 | `pad` | Padding before balance assertions |
-| 3 | `balance` | Assertions checked at start of day |
-| 4 | `transaction` | Main entries |
+| 2 | `balance` | Assertions checked at start of day |
+| 3 | `pad` | Padding after the same-date balance it cannot satisfy |
+| 4 | `transaction`, `event`, `custom` | Main entries, in file order |
 | 5 | `note` | Annotations after transactions |
 | 6 | `document` | Attachments after transactions |
-| 7 | `event` | State changes |
-| 8 | `query` | Queries defined after data |
-| 9 | `price` | Prices at end of day |
-| 10 | `close` | Accounts closed after all activity |
-| 11 | `custom` | User extensions last |
+| 7 | `query` | Queries defined after data |
+| 8 | `price` | Prices at end of day |
+| 9 | `close` | Accounts closed after all activity |
+
+`event` and `custom` share the transaction priority, so they keep their file
+position among same-date transactions, as in beancount, whose `SORT_ORDER`
+ranks every type except `open`, `balance`, `document` and `close` the same.
 
 ## Tertiary Sort: File Order
 
@@ -109,16 +111,14 @@ The pad is processed first (priority 2), then the balance assertion (priority 3)
 pub enum DirectivePriority {
     Open = 0,
     Commodity = 1,
-    Pad = 2,
-    Balance = 3,
-    Transaction = 4,
+    Balance = 2,
+    Pad = 3,
+    Transaction = 4, // also event and custom
     Note = 5,
     Document = 6,
-    Event = 7,
-    Query = 8,
-    Price = 9,
-    Close = 10,
-    Custom = 11,
+    Query = 7,
+    Price = 8,
+    Close = 9,
 }
 
 impl Directive {
@@ -128,14 +128,14 @@ impl Directive {
             Directive::Commodity(_) => DirectivePriority::Commodity,
             Directive::Pad(_) => DirectivePriority::Pad,
             Directive::Balance(_) => DirectivePriority::Balance,
-            Directive::Transaction(_) => DirectivePriority::Transaction,
+            Directive::Transaction(_) | Directive::Event(_) | Directive::Custom(_) => {
+                DirectivePriority::Transaction
+            }
             Directive::Note(_) => DirectivePriority::Note,
             Directive::Document(_) => DirectivePriority::Document,
-            Directive::Event(_) => DirectivePriority::Event,
             Directive::Query(_) => DirectivePriority::Query,
             Directive::Price(_) => DirectivePriority::Price,
             Directive::Close(_) => DirectivePriority::Close,
-            Directive::Custom(_) => DirectivePriority::Custom,
         }
     }
 }

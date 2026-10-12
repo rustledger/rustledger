@@ -208,15 +208,70 @@ def _parse_cost_spec(d):
     )
 
 
+class _PriceAmount(Amount):
+    """A posting's price as beancount presents it, a per-unit `Amount`,
+    remembering the host's form of it (`_wire`: a `@@` total, or the parts
+    of an incomplete price) and the units it was read with, so a price the
+    plugin leaves alone goes back exactly as written. `_replace` makes a
+    plain copy without them, which goes back as the per-unit price it
+    holds."""
+
+    def __repr__(self):
+        return 'Amount(number=%r, currency=%r)' % tuple(self)
+
+
+def _parse_price(d, units):
+    """Parse a price annotation (`{is_total, amount, number, currency}` on
+    the wire) to the per-unit `Amount` beancount's parser makes of it: a
+    `@@` total is divided by the units, and zero units give a zero price.
+
+    Before #2599 the annotation was read as an amount, so every price was
+    `Amount(None, None)`, and writing that back failed the whole plugin."""
+    if d is None:
+        return None
+    amount = d.get('amount')
+    if amount is not None:
+        number = _parse_decimal(amount.get('number'))
+        currency = amount.get('currency')
+    else:
+        number = _parse_decimal(d.get('number'))
+        currency = d.get('currency')
+    if d.get('is_total') and number is not None and units is not None \
+            and units.number is not None:
+        number = Decimal(0) if units.number == 0 else number / abs(units.number)
+    price = _PriceAmount(number, currency)
+    price._wire = d
+    price._units = units
+    return price
+
+
+def _serialize_price(p, units):
+    """A price annotation for the host: as it came, when the plugin kept the
+    price and the units it was read with; otherwise the per-unit price the
+    `Amount` holds."""
+    if p is None:
+        return None
+    wire = getattr(p, '_wire', None)
+    if wire is not None and getattr(p, '_units', None) == units:
+        return wire
+    if p.number is not None and p.currency:
+        return {'is_total': False,
+                'amount': {'number': _serialize_decimal(p.number), 'currency': p.currency},
+                'number': None, 'currency': None}
+    return {'is_total': False, 'amount': None,
+            'number': _serialize_decimal(p.number), 'currency': p.currency or None}
+
+
 def _parse_posting(d):
     """Parse a posting dict to Posting namedtuple."""
     if d is None:
         return None
+    units = _parse_amount(d.get('units'))
     return Posting(
         account=d.get('account', ''),
-        units=_parse_amount(d.get('units')),
+        units=units,
         cost=_parse_cost_spec(d.get('cost')),
-        price=_parse_amount(d.get('price')),
+        price=_parse_price(d.get('price'), units),
         flag=d.get('flag'),
         meta=_parse_meta(d.get('metadata'))
     )
@@ -373,7 +428,9 @@ def _dict_to_directive(d):
             meta=meta,
             date=date_val,
             type=d.get('event_type', ''),
-            description=d.get('description', '')
+            # The wire calls it `value` (#2599: read as `description`, which
+            # is not there, every event's description was empty).
+            description=d.get('value', '')
         )
     elif dtype == 'note':
         return Note(
@@ -405,7 +462,7 @@ def _dict_to_directive(d):
             meta=meta,
             date=date_val,
             name=d.get('name', ''),
-            query_string=d.get('query_string', '')
+            query_string=d.get('query', '')
         )
     elif dtype == 'custom':
         return Custom(
@@ -521,7 +578,7 @@ def _serialize_posting(p):
         'account': p.account,
         'units': _serialize_amount(p.units),
         'cost': _serialize_cost_spec(p.cost),
-        'price': _serialize_amount(p.price),
+        'price': _serialize_price(p.price, p.units),
         'flag': p.flag,
         'metadata': _serialize_meta(p.meta)
     }
@@ -588,7 +645,7 @@ def _directive_to_dict(entry):
             'metadata': _serialize_meta(entry.meta),
             'date': _serialize_date(entry.date),
             'event_type': entry.type,
-            'description': entry.description
+            'value': entry.description
         }
     elif isinstance(entry, Note):
         return {
@@ -624,7 +681,7 @@ def _directive_to_dict(entry):
             'metadata': _serialize_meta(entry.meta),
             'date': _serialize_date(entry.date),
             'name': entry.name,
-            'query_string': entry.query_string
+            'query': entry.query_string
         }
     elif isinstance(entry, Custom):
         return {

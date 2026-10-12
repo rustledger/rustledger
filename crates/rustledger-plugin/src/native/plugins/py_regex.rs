@@ -84,12 +84,15 @@ const WORD: &str = r"\p{L}\p{N}_";
 /// regex engine cannot express, [`PyRegexError::Invalid`] when Python's `re`
 /// would reject it too.
 pub fn translate(pattern: &str) -> Result<String, PyRegexError> {
+    Ok(parse(pattern)?.out)
+}
+
+fn parse(pattern: &str) -> Result<Parser, PyRegexError> {
     let mut parser = Parser {
         chars: pattern.chars().collect(),
         pos: 0,
         out: String::new(),
-        groups: 0,
-        names: Vec::new(),
+        groups: Vec::new(),
     };
     parser.global_flags()?;
     parser.alternation(0, false)?;
@@ -97,7 +100,53 @@ pub fn translate(pattern: &str) -> Result<String, PyRegexError> {
         // `alternation` at depth 0 stops only at an unmatched `)`.
         return invalid(format!("unbalanced parenthesis at position {}", parser.pos));
     }
-    Ok(parser.out)
+    Ok(parser)
+}
+
+/// A pattern compiled for Python's `re.sub`, with what a replacement
+/// template needs to know about its groups.
+#[derive(Debug)]
+pub struct SubPattern {
+    /// The compiled pattern.
+    pub regex: regex::Regex,
+    /// Capturing groups, by number (1-based), as Python numbers them: a
+    /// group inside a `{0}` repetition still counts.
+    groups: Vec<GroupInfo>,
+}
+
+/// Compile `pattern` for Python's `re.sub`.
+///
+/// Refuses, as [`PyRegexError::Unsupported`], a pattern that can match the
+/// empty string: `re.sub` replaces empty matches differently from
+/// `regex::Regex::replace_all` (it also takes an empty match right after a
+/// non-empty one, so `re.sub('x*', '-', 'abxd')` is `-a-b--d-`, where
+/// `replace_all` gives `-a-b-d-`).
+///
+/// # Errors
+///
+/// As [`compile_match`], and the empty-match case above.
+pub fn compile_sub(pattern: &str) -> Result<SubPattern, PyRegexError> {
+    let parser = parse(pattern)?;
+    let regex = compile(&parser.out)?;
+    // With lookaround and word boundaries refused, every assertion left
+    // (`^`, `$`, `\A`, `\z`) holds in the empty string, so a pattern that
+    // can match empty anywhere matches the empty string itself.
+    if regex.is_match("") {
+        return unsupported(
+            "a pattern that can match an empty string (Python's `re.sub` replaces empty matches differently)",
+        );
+    }
+    let mut groups = parser.groups;
+    // A group repeated more than once whose body can match empty: Python
+    // keeps the empty last iteration as the group's value, `regex` the last
+    // non-empty one (`(a*)+` on `a`), so a template must not read it.
+    for group in &mut groups {
+        if group.repeated {
+            let text = &parser.out[group.text.0..group.text.1];
+            group.unstable = compile(&format!("^(?:{text})$"))?.is_match("");
+        }
+    }
+    Ok(SubPattern { regex, groups })
 }
 
 /// Compile `pattern` for Python's `re.match`: anchored at the start, need not
@@ -139,14 +188,20 @@ fn compile(translated: &str) -> Result<regex::Regex, PyRegexError> {
 /// [`PyRegexError::Invalid`] when Python would reject the template: a
 /// reference to a group `regex` does not have, or an unknown escape of an
 /// ASCII letter.
-pub fn translate_replacement(template: &str, regex: &regex::Regex) -> Result<String, PyRegexError> {
+pub fn translate_replacement(template: &str, pattern: &SubPattern) -> Result<String, PyRegexError> {
     let chars: Vec<char> = template.chars().collect();
-    let groups = regex.captures_len();
     let mut out = String::new();
     let mut i = 0;
+    // A group `regex` dropped (inside `{0}`) has no value there, so its
+    // `${n}` is empty, as Python substitutes ''.
     let push_group = |out: &mut String, index: usize| -> Result<(), PyRegexError> {
-        if index >= groups {
+        if index > pattern.groups.len() {
             return invalid(format!("invalid group reference {index}"));
+        }
+        if index > 0 && pattern.groups[index - 1].unstable {
+            return unsupported(&format!(
+                "a reference to group {index}, a repeated group that can match empty (Python keeps its empty last repetition)"
+            ));
         }
         write!(out, "${{{index}}}").expect("writing to a String cannot fail");
         Ok(())
@@ -175,12 +230,21 @@ pub fn translate_replacement(template: &str, regex: &regex::Regex) -> Result<Str
                         if name.is_empty() {
                             return invalid("missing group name");
                         }
-                        if let Ok(index) = name.parse::<usize>() {
+                        if name.chars().all(|c| c.is_ascii_digit()) {
+                            let index = name.parse::<usize>().map_err(|_| {
+                                PyRegexError::Invalid("invalid group reference".into())
+                            })?;
                             push_group(&mut out, index)?;
-                        } else if regex.capture_names().flatten().any(|n| n == name) {
-                            write!(out, "${{{name}}}").expect("writing to a String cannot fail");
-                        } else {
+                        } else if let Some(index) = pattern
+                            .groups
+                            .iter()
+                            .position(|g| g.name.as_deref() == Some(name.as_str()))
+                        {
+                            push_group(&mut out, index + 1)?;
+                        } else if is_identifier(&name) {
                             return invalid(format!("unknown group name '{name}'"));
+                        } else {
+                            return invalid(format!("bad character in group name '{name}'"));
                         }
                     }
                     '0' => {
@@ -221,6 +285,7 @@ pub fn translate_replacement(template: &str, regex: &regex::Regex) -> Result<Str
                         }
                     }
                     'a' => out.push('\x07'),
+                    'b' => out.push('\x08'),
                     'f' => out.push('\x0c'),
                     'n' => out.push('\n'),
                     'r' => out.push('\r'),
@@ -247,6 +312,14 @@ pub fn translate_replacement(template: &str, regex: &regex::Regex) -> Result<Str
     Ok(out)
 }
 
+/// Whether `name` is a Python identifier, roughly (`str.isidentifier`):
+/// a letter or `_`, then letters, digits or `_`.
+fn is_identifier(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars.next().is_some_and(|c| c == '_' || c.is_alphabetic())
+        && chars.all(|c| c == '_' || c.is_alphanumeric())
+}
+
 fn push_literal_replacement(out: &mut String, code: u32) -> Result<(), PyRegexError> {
     match char::from_u32(code) {
         Some('$') => out.push_str("$$"),
@@ -260,9 +333,20 @@ struct Parser {
     chars: Vec<char>,
     pos: usize,
     out: String,
-    /// Capturing groups opened so far.
-    groups: usize,
-    names: Vec<String>,
+    /// Capturing groups opened so far, by number.
+    groups: Vec<GroupInfo>,
+}
+
+/// What the parser learned about one capturing group.
+#[derive(Debug, Clone, Default)]
+struct GroupInfo {
+    name: Option<String>,
+    /// The group's translated text, `(` to `)`, as a range of `out`.
+    text: (usize, usize),
+    /// Inside (or itself) a repetition that can run more than once.
+    repeated: bool,
+    /// Repeated and able to match empty: its value differs between engines.
+    unstable: bool,
 }
 
 /// What the last item written can take: a quantifier needs something to
@@ -273,6 +357,9 @@ enum Last {
     Nothing,
     /// A repeatable item.
     Item,
+    /// A group, holding the capturing groups numbered in `start..end`
+    /// (0-based): a repetition of it repeats them.
+    Group(usize, usize),
     /// A quantifier (repeating it again is "multiple repeat").
     Repeat,
 }
@@ -328,6 +415,8 @@ impl Parser {
         let mut rust = String::new();
         for c in letters.chars() {
             match c {
+                // A repeated letter is accepted, as Python accepts `(?ii)`.
+                'i' | 'm' | 's' if rust.contains(c) => {}
                 'i' | 'm' | 's' => rust.push(c),
                 // Unicode matching is already the default for `str` patterns.
                 'u' => {}
@@ -359,12 +448,12 @@ impl Parser {
                 }
                 '*' | '+' | '?' => {
                     self.pos += 1;
-                    self.repeat(last, &c.to_string())?;
+                    self.repeat(last, &c.to_string(), c != '?')?;
                     last = Last::Repeat;
                 }
                 '{' => {
-                    if let Some(quantifier) = self.braces()? {
-                        self.repeat(last, &quantifier)?;
+                    if let Some((quantifier, many)) = self.braces()? {
+                        self.repeat(last, &quantifier, many)?;
                         last = Last::Repeat;
                     } else {
                         self.pos += 1;
@@ -378,8 +467,9 @@ impl Parser {
                     self.comment()?;
                 }
                 '(' => {
+                    let first = self.groups.len();
                     self.group(depth)?;
-                    last = Last::Item;
+                    last = Last::Group(first, self.groups.len());
                 }
                 '[' => {
                     self.class()?;
@@ -412,11 +502,19 @@ impl Parser {
     }
 
     /// A quantifier `quantifier` after `last`, with its lazy `?` if present.
-    fn repeat(&mut self, last: Last, quantifier: &str) -> Result<(), PyRegexError> {
+    /// `many` says whether the repetition can run more than once.
+    fn repeat(&mut self, last: Last, quantifier: &str, many: bool) -> Result<(), PyRegexError> {
         match last {
             Last::Nothing => return invalid("nothing to repeat"),
             Last::Repeat => return invalid("multiple repeat"),
             Last::Item => {}
+            Last::Group(start, end) => {
+                if many {
+                    for group in &mut self.groups[start..end] {
+                        group.repeated = true;
+                    }
+                }
+            }
         }
         self.out.push_str(quantifier);
         match self.peek() {
@@ -435,7 +533,8 @@ impl Parser {
     /// `{m}`, `{m,}`, `{,n}`, `{m,n}` as a `regex` quantifier, consumed; or
     /// `None`, nothing consumed, when the brace is a literal `{`, as Python
     /// reads one that does not form a quantifier.
-    fn braces(&mut self) -> Result<Option<String>, PyRegexError> {
+    /// The `bool` says whether the repetition can run more than once.
+    fn braces(&mut self) -> Result<Option<(String, bool)>, PyRegexError> {
         let start = self.pos;
         let mut i = start + 1;
         let digits = |i: &mut usize, chars: &[char]| -> String {
@@ -462,25 +561,23 @@ impl Parser {
         };
         let lo_n = if lo.is_empty() { 0 } else { parse(&lo)? };
         if !comma {
-            return Ok(Some(format!("{{{lo_n}}}")));
+            return Ok(Some((format!("{{{lo_n}}}"), lo_n > 1)));
         }
         if hi.is_empty() {
-            return Ok(Some(format!("{{{lo_n},}}")));
+            return Ok(Some((format!("{{{lo_n},}}"), true)));
         }
         let hi_n = parse(&hi)?;
         if hi_n < lo_n {
             return invalid("min repeat greater than max repeat");
         }
-        Ok(Some(format!("{{{lo_n},{hi_n}}}")))
+        Ok(Some((format!("{{{lo_n},{hi_n}}}"), hi_n > 1)))
     }
 
     /// A group, `(` through its `)`.
     fn group(&mut self, depth: usize) -> Result<(), PyRegexError> {
         self.pos += 1; // `(`
         if self.peek() != Some('?') {
-            self.groups += 1;
-            self.out.push('(');
-            return self.group_body(depth);
+            return self.capturing(None, "(", depth);
         }
         self.pos += 1; // `?`
         match self.peek() {
@@ -493,13 +590,15 @@ impl Parser {
                 Some('<') => {
                     self.pos += 2;
                     let name = self.name('>')?;
-                    if self.names.contains(&name) {
+                    if self
+                        .groups
+                        .iter()
+                        .any(|g| g.name.as_deref() == Some(name.as_str()))
+                    {
                         return invalid(format!("redefinition of group name '{name}'"));
                     }
-                    self.names.push(name.clone());
-                    self.groups += 1;
-                    write!(self.out, "(?P<{name}>").expect("writing to a String cannot fail");
-                    self.group_body(depth)
+                    let open = format!("(?P<{name}>");
+                    self.capturing(Some(name), &open, depth)
                 }
                 Some('=') => unsupported("a named backreference `(?P=name)`"),
                 _ => invalid("unknown extension ?P"),
@@ -516,6 +615,26 @@ impl Parser {
             Some(c) if c.is_ascii_alphabetic() || c == '-' => self.scoped_flags(depth),
             _ => invalid("unknown extension"),
         }
+    }
+
+    /// A capturing group, its opening `open` already consumed from the
+    /// pattern: numbered, written out, and its translated text recorded.
+    fn capturing(
+        &mut self,
+        name: Option<String>,
+        open: &str,
+        depth: usize,
+    ) -> Result<(), PyRegexError> {
+        let index = self.groups.len();
+        let start = self.out.len();
+        self.groups.push(GroupInfo {
+            name,
+            ..GroupInfo::default()
+        });
+        self.out.push_str(open);
+        self.group_body(depth)?;
+        self.groups[index].text = (start, self.out.len());
+        Ok(())
     }
 
     /// A comment `(?#...)`, which Python drops.
@@ -553,6 +672,12 @@ impl Parser {
             Some(':') => self.pos += 1,
             Some(')') => return invalid("global flags not at the start of the expression"),
             _ => return invalid("missing :"),
+        }
+        if off.chars().any(|c| matches!(c, 'a' | 'u' | 'L')) {
+            return invalid("bad inline flags: cannot turn off flags 'a', 'u' and 'L'");
+        }
+        if on.chars().any(|c| off.contains(c)) {
+            return invalid("bad inline flags: flag turned on and off");
         }
         let on = Self::flags(&on)?;
         let off = Self::flags(&off)?;
@@ -1029,17 +1154,23 @@ mod tests {
             ("(a)", r"\\1", "a", r"\1"),
             ("(a)", r"\&", "a", r"\&"),
             ("(a)", r"\101", "a", "A"),
+            ("(a)", r"\b", "a", "\x08"),
+            // A group inside `{0}` still counts, and is empty.
+            ("(a){0}b", r"[\1]", "xb", "x[]"),
+            ("(?P<x>a){0}(?P<y>b)", r"[\g<x>\g<y>]", "xb", "x[b]"),
+            // A repeated group that cannot match empty is fine.
+            ("(a)+b", r"[\1]", "aab", "[a]"),
         ] {
-            let re = compile_search(pattern).unwrap();
+            let re = compile_sub(pattern).unwrap();
             let rust = translate_replacement(template, &re).unwrap();
             assert_eq!(
-                re.replace_all(text, rust.as_str()),
+                re.regex.replace_all(text, rust.as_str()),
                 want,
                 "{pattern:?} {template:?}"
             );
         }
-        let re = compile_search("(a)").unwrap();
-        for template in [r"\2", r"\g<x>", r"\g<5>", r"\q", "\\"] {
+        let re = compile_sub("(a)").unwrap();
+        for template in [r"\2", r"\g<x>", r"\g<5>", r"\q", "\\", r"\g<+1>", r"\g< 1>"] {
             assert!(
                 matches!(
                     translate_replacement(template, &re),
@@ -1048,5 +1179,42 @@ mod tests {
                 "{template:?}"
             );
         }
+    }
+
+    /// Inline flags as Python reads them: a repeated letter is fine, a flag
+    /// both on and off, or `u` turned off, is refused.
+    #[test]
+    fn inline_flags_follow_python() {
+        assert!(py_match("(?ii)a", "A"));
+        assert!(py_match("(?ii:a)", "A"));
+        for pattern in ["(?i-i:a)", "(?im-m:a)", "(?-u:a)", "(?u-u:a)", "(?-a:a)"] {
+            assert!(
+                matches!(translate(pattern), Err(PyRegexError::Invalid(_))),
+                "{pattern:?}: {:?}",
+                translate(pattern)
+            );
+        }
+    }
+
+    /// What `re.sub` and `replace_all` do differently is refused, never
+    /// substituted differently: a pattern that can match empty (Python's
+    /// `re.sub('x*', '-', 'abxd')` is `-a-b--d-`, `replace_all` gives
+    /// `-a-b-d-`), and a reference to a repeated group that can match empty
+    /// (Python's `re.sub('(a*)+b', r'[\1]', 'aab')` is `[]`).
+    #[test]
+    fn substitutions_python_makes_differently_are_refused() {
+        for pattern in ["x*", "(:Cash)?$", "|a", "^", "(a*)"] {
+            assert!(
+                matches!(compile_sub(pattern), Err(PyRegexError::Unsupported(ref w)) if w.contains("empty string")),
+                "{pattern:?}"
+            );
+        }
+        let re = compile_sub("(a*)+b").unwrap();
+        assert!(matches!(
+            translate_replacement(r"[\1]", &re),
+            Err(PyRegexError::Unsupported(ref w)) if w.contains("group 1")
+        ));
+        // The whole match is fine.
+        assert_eq!(translate_replacement(r"[\g<0>]", &re).unwrap(), "[${0}]");
     }
 }

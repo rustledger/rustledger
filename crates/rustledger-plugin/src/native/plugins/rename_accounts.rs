@@ -38,7 +38,7 @@ impl NativePlugin for RenameAccountsPlugin {
 
     fn process(&self, input: PluginInput) -> PluginOutput {
         // Parse configuration to get renames
-        let renames = match &input.config {
+        let (renames, warnings) = match &input.config {
             Some(config) => match parse_config(config) {
                 Ok(r) => r,
                 Err(message) => {
@@ -74,7 +74,7 @@ impl NativePlugin for RenameAccountsPlugin {
 
         PluginOutput {
             ops,
-            errors: Vec::new(),
+            errors: warnings.into_iter().map(PluginError::warning).collect(),
         }
     }
 }
@@ -187,7 +187,7 @@ fn rename_in_directive(
 /// its last replacement), `re.compile` on each pattern, and `re.subn` with
 /// each replacement.
 /// Format: "{'pattern1': 'replacement1', 'pattern2': 'replacement2'}"
-fn parse_config(config: &str) -> Result<Vec<RenameRule>, String> {
+fn parse_config(config: &str) -> Result<(Vec<RenameRule>, Vec<String>), String> {
     let invalid = |why: &str| format!("Invalid configuration for rename_accounts: {why}");
     let Ok(PyValue::Dict(entries)) = py_literal::parse(config) else {
         return Err(invalid("expected a dict of pattern to replacement"));
@@ -205,22 +205,35 @@ fn parse_config(config: &str) -> Result<Vec<RenameRule>, String> {
     }
 
     let mut rules = Vec::with_capacity(merged.len());
+    let mut warnings = Vec::new();
     for (pattern_str, replacement) in merged {
-        let pattern = py_regex::compile_search(&pattern_str).map_err(|e| {
+        let pattern = py_regex::compile_sub(&pattern_str).map_err(|e| {
             format!("rename_accounts: the pattern '{pattern_str}' cannot be used: {e}")
         })?;
-        let replacement = py_regex::translate_replacement(&replacement, &pattern).map_err(|e| {
+        // A `$1` is literal text to Python's `re.sub`, as here; rledger read
+        // it as a group before #2601, so a config written for that is
+        // pointed at `\1`.
+        let chars: Vec<char> = replacement.chars().collect();
+        if chars
+            .windows(2)
+            .any(|w| w[0] == '$' && (w[1].is_ascii_digit() || w[1] == '{'))
+        {
+            warnings.push(format!(
+                "rename_accounts: the replacement '{replacement}' contains `$`, which Python's `re.sub` takes as literal text; a group is written `\\1` or `\\g<name>`"
+            ));
+        }
+        let translated = py_regex::translate_replacement(&replacement, &pattern).map_err(|e| {
             format!(
                 "rename_accounts: the replacement '{replacement}' for '{pattern_str}' cannot be used: {e}"
             )
         })?;
         rules.push(RenameRule {
-            pattern,
-            replacement,
+            pattern: pattern.regex,
+            replacement: translated,
         });
     }
 
-    Ok(rules)
+    Ok((rules, warnings))
 }
 
 #[cfg(test)]

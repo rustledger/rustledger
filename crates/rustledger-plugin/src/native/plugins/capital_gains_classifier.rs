@@ -100,7 +100,10 @@ struct Rule {
 /// The config's rules in dict order (a repeated key keeps its first position
 /// and takes its last value, as in a Python dict), read as the upstream
 /// plugins read it: `literal_eval`, then `re.compile` on each key.
-fn parse_rules(config: &str, plugin: &str) -> Result<Vec<Rule>, PluginError> {
+///
+/// `first_only` reads only the first entry, as `long_short` reads
+/// `next(iter(config_obj))`: the others are not checked either.
+fn parse_rules(config: &str, plugin: &str, first_only: bool) -> Result<Vec<Rule>, PluginError> {
     let invalid =
         |why: &str| PluginError::error(format!("Invalid configuration for {plugin}: {why}"));
     let Ok(PyValue::Dict(entries)) = py_literal::parse(config) else {
@@ -117,6 +120,9 @@ fn parse_rules(config: &str, plugin: &str) -> Result<Vec<Rule>, PluginError> {
             merged.push((key, value));
         }
     }
+    if first_only {
+        merged.truncate(1);
+    }
     let mut rules = Vec::with_capacity(merged.len());
     for (key, value) in merged {
         let PyValue::Seq(items) = value else {
@@ -124,10 +130,12 @@ fn parse_rules(config: &str, plugin: &str) -> Result<Vec<Rule>, PluginError> {
                 "the value for '{key}' must be a list of three strings"
             )));
         };
+        // Upstream reads `[0]`, `[1]` and `[2]`; any more are ignored.
         let [
             PyValue::Str(to_replace),
             PyValue::Str(first),
             PyValue::Str(second),
+            ..,
         ] = items.as_slice()
         else {
             return Err(invalid(&format!(
@@ -434,6 +442,45 @@ fn process_gain_loss(input: PluginInput) -> PluginOutput {
         },
         None => return unchanged(&input, None),
     };
+    // beancount's plugin fails outright when a second rule matches a posting
+    // the first already rewrote (it removes the posting twice), so nothing
+    // is rewritten and the error is reported, rather than chaining rules.
+    for wrapper in &input.directives {
+        let DirectiveData::Transaction(txn) = &wrapper.data else {
+            continue;
+        };
+        for posting in &txn.postings {
+            let Some(number) = posting
+                .units
+                .as_ref()
+                .and_then(|units| Decimal::from_str(&units.number).ok())
+            else {
+                continue;
+            };
+            let mut account = posting.account.clone();
+            let mut matched = 0;
+            for rule in &rules {
+                if python_match(&rule.pattern, &account) {
+                    matched += 1;
+                    let replacement = if number < Decimal::ZERO {
+                        &rule.gains_replacement
+                    } else {
+                        &rule.losses_replacement
+                    };
+                    account = account.replace(&rule.account_to_replace, replacement);
+                }
+            }
+            if matched > 1 {
+                return unchanged(
+                    &input,
+                    Some(PluginError::error(format!(
+                        "gain_loss: more than one rule matches the posting to {} (beancount's plugin fails on this)",
+                        posting.account
+                    ))),
+                );
+            }
+        }
+    }
 
     let mut new_accounts: HashSet<String> = HashSet::new();
     let mut ops: Vec<PluginOp> = Vec::with_capacity(input.directives.len());
@@ -466,8 +513,8 @@ fn process_gain_loss(input: PluginInput) -> PluginOutput {
             let mut new_postings: Vec<PostingData> = Vec::new();
 
             for posting in &txn.postings {
-                // Every rule in config order, each matched against the account
-                // as the rules before it left it, as upstream's loop does.
+                // Every rule in config order; at most one matches (more is
+                // refused above).
                 let number = posting
                     .units
                     .as_ref()
@@ -564,7 +611,7 @@ fn process_gain_loss(input: PluginInput) -> PluginOutput {
 /// `next(iter(config_obj))`.
 /// Format: `{'pattern': ['to_replace', 'short_repl', 'long_repl']}`
 fn parse_long_short_config(config: &str) -> Result<LongShortConfig, PluginError> {
-    let rule = parse_rules(config, "long_short")?
+    let rule = parse_rules(config, "long_short", true)?
         .into_iter()
         .next()
         .expect("parse_rules returns at least one rule");
@@ -579,7 +626,7 @@ fn parse_long_short_config(config: &str) -> Result<LongShortConfig, PluginError>
 /// Parse `gain_loss` configuration: every entry, in order.
 /// Format: `{'pattern': ['to_replace', 'gains_repl', 'losses_repl'], ...}`
 fn parse_gain_loss_config(config: &str) -> Result<Vec<GainLossConfig>, PluginError> {
-    Ok(parse_rules(config, "gain_loss")?
+    Ok(parse_rules(config, "gain_loss", false)?
         .into_iter()
         .map(|rule| GainLossConfig {
             pattern: rule.pattern,

@@ -128,3 +128,87 @@ fn onecommodity_reports_a_lookahead_it_cannot_express() {
         "{errors:?}"
     );
 }
+
+/// beancount renames `Assets:Cash` to `Assets:Bank:Bank` with
+/// `'(:Cash)?$': ':Bank'`: `re.sub` also replaces the empty match at the end
+/// after the non-empty one, which rledger's engine does not. A pattern that
+/// can match empty is refused, by name, rather than renamed differently.
+#[test]
+fn rename_accounts_refuses_a_pattern_that_can_match_empty() {
+    let ledger = load_source(
+        "plugin \"beancount_reds_plugins.rename_accounts.rename_accounts\" \
+         \"{'(:Cash)?$': ':Bank'}\"\n\
+         2024-01-01 open Assets:Cash\n2024-01-01 open Expenses:Food\n\
+         2024-01-02 * \"x\"\n  Expenses:Food  1 USD\n  Assets:Cash\n",
+    );
+    let errors = messages(&ledger);
+    assert!(
+        errors
+            .iter()
+            .any(|m| m.contains("rename_accounts") && m.contains("empty string")),
+        "{errors:?}"
+    );
+    assert_eq!(posting_accounts(&ledger), ["Expenses:Food", "Assets:Cash"]);
+}
+
+/// A `$1` is literal text to `re.sub`, as to beancount; a config written for
+/// rledger's old reading gets a warning pointing at `\1`.
+#[test]
+fn rename_accounts_warns_about_a_dollar_group_reference() {
+    let ledger = load_source(
+        "plugin \"beancount_reds_plugins.rename_accounts.rename_accounts\" \
+         \"{'Expenses:Food:(.*)': 'Expenses:Dining:$1'}\"\n\
+         2024-01-01 open Assets:Cash\n2024-01-01 open Expenses:Food:Lunch\n\
+         2024-01-02 * \"x\"\n  Expenses:Food:Lunch  1 USD\n  Assets:Cash\n",
+    );
+    let errors = messages(&ledger);
+    assert!(
+        errors
+            .iter()
+            .any(|m| m.contains("rename_accounts") && m.contains("literal text")),
+        "{errors:?}"
+    );
+}
+
+/// beancount's `gain_loss` fails (it removes the posting twice) when a
+/// second rule matches what the first rewrote; rledger reports it and
+/// rewrites nothing, rather than chaining the rules.
+#[test]
+fn gain_loss_reports_two_rules_matching_one_posting() {
+    let ledger = load_source(
+        "plugin \"beancount_reds_plugins.capital_gains_classifier.gain_loss\" \
+         \"{'Income:.*': [':CG', ':CG:Gains', ':CG:Losses'], 'Income:CG:.*': [':Gains', ':G', ':L']}\"\n\
+         2024-01-01 open Assets:Cash\n2024-01-01 open Income:CG\n\
+         2024-01-02 * \"x\"\n  Income:CG  -10 USD\n  Assets:Cash\n",
+    );
+    let errors = messages(&ledger);
+    assert!(
+        errors.iter().any(|m| m.contains("more than one rule")),
+        "{errors:?}"
+    );
+    assert_eq!(posting_accounts(&ledger), ["Income:CG", "Assets:Cash"]);
+}
+
+/// beancount's `long_short` reads only its config's first entry, so a second
+/// one it cannot use (a lookahead here) is ignored, not an error.
+#[test]
+fn long_short_reads_only_the_first_entry() {
+    let ledger = load_source(
+        "plugin \"beancount_reds_plugins.capital_gains_classifier.long_short\" \
+         \"{'Income:Capital-Gains': [':Capital-Gains', ':Capital-Gains:Short', ':Capital-Gains:Long'], \
+         'Income(?=x)': [':a', ':b', ':c']}\"\n\
+         2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n\
+         2024-01-01 open Income:Capital-Gains\n\
+         2024-01-02 * \"buy\"\n  Assets:Stock  10 AAA {10 USD}\n  Assets:Cash\n\
+         2024-02-01 * \"sell\"\n  Assets:Stock  -10 AAA {10 USD} @ 20 USD\n  \
+         Assets:Cash  200 USD\n  Income:Capital-Gains  -100 USD\n",
+    );
+    assert!(ledger.errors.is_empty(), "{:?}", messages(&ledger));
+    assert!(
+        posting_accounts(&ledger)
+            .iter()
+            .any(|a| a == "Income:Capital-Gains:Short"),
+        "{:?}",
+        posting_accounts(&ledger)
+    );
+}

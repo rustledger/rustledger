@@ -589,7 +589,18 @@ fn native_and_python_implementations_agree() {
 fn native_plugins_without_a_python_twin_match_beancount() {
     // Validators: (plugin and config, ledger body after a header line and a
     // blank line, what bean-check prints).
-    let validators: [(&str, &str, &[&str]); 9] = [
+    let validators: [(&str, &str, &[&str]); 10] = [
+        (
+            // A `{{total}}` on fractional units: beancount books it as
+            // `(T + 0 × N) / N`, so it prints `100`, not `1E+2`.
+            "check_average_cost",
+            "2020-01-01 open Assets:S \"NONE\"\n2020-01-01 open Assets:C\n\
+             2020-01-02 * \"buy\"\n  Assets:S  0.5 X {{100 USD}}\n  Assets:C\n\
+             2020-01-03 * \"sell\"\n  Assets:S  -0.25 X {{25 USD}}\n  Assets:C\n",
+            &[
+                "ledger.beancount:8: error[PLUGIN]: Cost basis on reducing posting is too far from the average cost (100 vs. 200)",
+            ],
+        ),
         (
             // The average in Python's decimal arithmetic: a `{{total}}` lot's
             // 28-digit cost, each product and sum rounded to 28 digits.
@@ -913,7 +924,7 @@ fn native_plugins_without_a_python_twin_match_beancount() {
     }
     assert!(
         mismatches.is_empty(),
-        "{} mismatches with beancount across the 18 cases:\n{}",
+        "{} mismatches with beancount across the 19 cases:\n{}",
         mismatches.len(),
         mismatches.join("\n")
     );

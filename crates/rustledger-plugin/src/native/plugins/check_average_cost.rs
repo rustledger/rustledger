@@ -143,7 +143,19 @@ impl NativePlugin for CheckAverageCostPlugin {
                     Some(rustledger_plugin_types::CostNumberData::PerUnitFromTotal {
                         total,
                         ..
-                    }) => py_decimal::parse(total).map(|t| py_decimal::div(&t, &units_num.abs())),
+                    }) => py_decimal::parse(total).map(|t| {
+                        // Deliberate limit: a compound `{P # L}` cost arrives
+                        // as its exact total `P × N + L`, where beancount
+                        // rounds `P × N` to 28 digits before adding `L`, so
+                        // with very long numbers the last digit can differ.
+                        //
+                        // beancount books `{{T}}` as `(T + 0 × |N|) / |N|`, so
+                        // the dividend takes the units' exponent (and is
+                        // rounded to 28 digits) before the division.
+                        let n = units_num.abs();
+                        let t = py_decimal::add(&t, &py_decimal::mul(&BigDecimal::zero(), &n));
+                        py_decimal::div(&t, &n)
+                    }),
                     other => other
                         .as_ref()
                         .and_then(|cn| cn.per_unit())
@@ -258,6 +270,7 @@ fn average_cost(lots: &[Lot]) -> Option<BigDecimal> {
 /// Python `decimal` arithmetic in its default context (28 significant
 /// digits, half-even), and its `str`, on `BigDecimal`.
 mod py_decimal {
+    use bigdecimal::num_bigint::BigInt;
     use bigdecimal::{BigDecimal, RoundingMode, Signed, Zero};
     use std::num::NonZeroU64;
 
@@ -274,14 +287,15 @@ mod py_decimal {
 
     /// A result rounded to the context's precision when it has more digits.
     fn round(x: BigDecimal) -> BigDecimal {
-        if digits(&x) > PRECISION {
-            x.with_precision_round(
+        // A half-even carry (999… to 1000…) can leave one digit too many.
+        let mut x = x;
+        while digits(&x) > PRECISION {
+            x = x.with_precision_round(
                 NonZeroU64::new(PRECISION).expect("28"),
                 RoundingMode::HalfEven,
-            )
-        } else {
-            x
+            );
         }
+        x
     }
 
     /// A decimal literal, as `Decimal("...")` reads it.
@@ -326,10 +340,26 @@ mod py_decimal {
                 return exact;
             }
         }
-        round(quotient.with_precision_round(
-            NonZeroU64::new(PRECISION + 10).expect("38"),
-            RoundingMode::HalfEven,
-        ))
+        // Rounded once: a truncated quotient with enough digits and a sticky
+        // digit for a non-zero remainder, so a tail like `…4999|7` cannot
+        // become a tie and round twice.
+        let (a_int, a_scale) = a.as_bigint_and_exponent();
+        let (b_int, b_scale) = b.as_bigint_and_exponent();
+        let extra = (31 + digits(b) as i64 - digits(a) as i64).max(0);
+        let num = a_int * BigInt::from(10).pow(u32::try_from(extra).expect("small"));
+        let mut q = &num / &b_int;
+        let r = &num % &b_int;
+        let mut places = a_scale - b_scale + extra;
+        if !r.is_zero() {
+            let sticky = if num.is_negative() == b_int.is_negative() {
+                1
+            } else {
+                -1
+            };
+            q = q * BigInt::from(10) + BigInt::from(sticky);
+            places += 1;
+        }
+        round(BigDecimal::new(q, places))
     }
 
     /// `str(Decimal)`: plain, or scientific when the exponent is positive

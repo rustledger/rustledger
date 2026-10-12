@@ -152,7 +152,7 @@ impl NativePlugin for CheckAverageCostPlugin {
                         // beancount books `{{T}}` as `(T + 0 × |N|) / |N|`, so
                         // the dividend takes the units' exponent (and is
                         // rounded to 28 digits) before the division.
-                        let n = units_num.abs();
+                        let n = py_decimal::abs(&units_num);
                         let t = py_decimal::add(&t, &py_decimal::mul(&BigDecimal::zero(), &n));
                         py_decimal::div(&t, &n)
                     }),
@@ -310,6 +310,11 @@ mod py_decimal {
     /// `a + b` at Python's exponent, the smaller of the two (`BigDecimal`
     /// drops it when an operand is zero: `0E-25 + -10.0` must stay at 25
     /// places).
+    /// `abs(x)`, which Python rounds to the context's precision.
+    pub(super) fn abs(x: &BigDecimal) -> BigDecimal {
+        round(x.abs())
+    }
+
     pub(super) fn add(a: &BigDecimal, b: &BigDecimal) -> BigDecimal {
         let places = scale(a).max(scale(b));
         round((a + b).with_scale(places))

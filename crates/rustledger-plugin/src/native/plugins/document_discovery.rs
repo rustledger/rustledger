@@ -323,20 +323,34 @@ fn scan_documents(
         return Ok(());
     }
 
+    let mut entries: Vec<(std::path::PathBuf, fs::Metadata)> = Vec::new();
     for entry in fs::read_dir(path)? {
-        let entry = entry?;
-        let entry_path = entry.path();
+        let entry_path = entry?.path();
 
         // `metadata`, not `symlink_metadata`: this FOLLOWS the link, so a
         // linked subtree is classified by what it points at rather than being
         // seen as an opaque "symlink" and dropped. A broken link fails to stat
         // and is skipped here, which is also what a walk that cannot enter it
         // would do.
-        let metadata = match fs::metadata(&entry_path) {
-            Ok(m) => m,
-            Err(_) => continue, // Skip entries we can't stat (incl. dangling links)
+        let Ok(metadata) = fs::metadata(&entry_path) else {
+            continue; // Skip entries we can't stat (incl. dangling links)
         };
+        entries.push((entry_path, metadata));
+    }
+    // Files first, then subdirectories, each sorted by name: the order
+    // beancount's `account.walk` (an `os.walk` that sorts `dirs` and `files`)
+    // visits them. `read_dir` yields entries in whatever order the filesystem
+    // keeps them, so the documents found, and the paths an unknown-account
+    // warning lists, came out in a different order on another machine or
+    // after the directory was rewritten (#2625).
+    entries.sort_by(|(a, a_meta), (b, b_meta)| {
+        a_meta
+            .is_dir()
+            .cmp(&b_meta.is_dir())
+            .then_with(|| a.file_name().cmp(&b.file_name()))
+    });
 
+    for (entry_path, metadata) in entries {
         if metadata.is_dir() {
             // Cycle guard: canonicalize so a link collapses to its target,
             // then refuse to descend into a directory that is already on the

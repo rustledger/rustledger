@@ -689,7 +689,10 @@ impl Parser {
                         .map(|i| i + 1)
                 };
                 let Some(index) = index else {
-                    return invalid(format!("invalid group reference {id}"));
+                    if id.chars().all(|c| c.is_ascii_digit()) {
+                        return invalid(format!("invalid group reference {id}"));
+                    }
+                    return invalid(format!("unknown group name '{id}'"));
                 };
                 self.check_ref(index)?;
                 if self.deferred_group(0, "a conditional group `(?(...)...)`", depth)? > 2 {

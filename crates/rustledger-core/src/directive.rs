@@ -500,22 +500,28 @@ pub enum DirectivePriority {
     Balance = 2,
     /// Padding, after the same-date balance that would have consumed it.
     Pad = 3,
-    /// Main entries
+    /// Main entries: transactions, and the `event` and `custom` entries
+    /// written among them, which keep the order they were written in.
+    ///
+    /// `event` and `custom` had ranks of their own, after notes and
+    /// documents (and `custom` after `close`), so a same-date `custom` moved
+    /// below the transactions written after it. Beancount ranks both with
+    /// transactions (`SORT_ORDER` gives every type but open, balance,
+    /// document and close the default `0`, and `lineno` breaks the tie).
+    /// Neither books, so nothing but the order they are shown in follows
+    /// from the rank, and the author's order is the one fact there is about
+    /// which comes first (#2576).
     Transaction = 4,
     /// Annotations after transactions
     Note = 5,
     /// Attachments after transactions
     Document = 6,
-    /// State changes
-    Event = 7,
     /// Queries defined after data
-    Query = 8,
+    Query = 7,
     /// Prices at end of day
-    Price = 9,
+    Price = 8,
     /// Accounts closed after all activity
-    Close = 10,
-    /// User extensions last
-    Custom = 11,
+    Close = 9,
 }
 
 /// All directive types in beancount.
@@ -634,14 +640,16 @@ impl Directive {
             Self::Commodity(_) => DirectivePriority::Commodity,
             Self::Pad(_) => DirectivePriority::Pad,
             Self::Balance(_) => DirectivePriority::Balance,
-            Self::Transaction(_) => DirectivePriority::Transaction,
+            // `event` and `custom` share the transaction rank, so they keep
+            // the order they were written in among transactions (#2576).
+            Self::Transaction(_) | Self::Event(_) | Self::Custom(_) => {
+                DirectivePriority::Transaction
+            }
             Self::Note(_) => DirectivePriority::Note,
             Self::Document(_) => DirectivePriority::Document,
-            Self::Event(_) => DirectivePriority::Event,
             Self::Query(_) => DirectivePriority::Query,
             Self::Price(_) => DirectivePriority::Price,
             Self::Close(_) => DirectivePriority::Close,
-            Self::Custom(_) => DirectivePriority::Custom,
         }
     }
 }
@@ -1841,6 +1849,41 @@ mod tests {
         assert_eq!(directives[1].type_name(), "balance");
         assert_eq!(directives[2].type_name(), "transaction");
         assert_eq!(directives[3].type_name(), "close");
+    }
+
+    #[test]
+    fn same_date_event_and_custom_keep_file_order_among_transactions() {
+        // #2576: beancount ranks `event` and `custom` with transactions
+        // (`SORT_ORDER` default 0), so `lineno` decides. They used to rank
+        // after notes and documents, and `custom` after `close`.
+        let d = date(2024, 1, 1);
+        let mut directives = vec![
+            Directive::Custom(Custom::new(d, "fava-option")),
+            Directive::Transaction(Transaction::new(d, "first")),
+            Directive::Event(Event::new(d, "location", "Paris")),
+            Directive::Close(Close::new(d, "Assets:Bank")),
+            Directive::Transaction(Transaction::new(d, "second")),
+            Directive::Document(Document::new(d, "Assets:Bank", "/x.pdf")),
+            Directive::Custom(Custom::new(d, "budget")),
+        ];
+
+        sort_directives(&mut directives);
+
+        let order: Vec<&str> = directives.iter().map(Directive::type_name).collect();
+        assert_eq!(
+            order,
+            [
+                "custom",
+                "transaction",
+                "event",
+                "transaction",
+                "custom",
+                "document",
+                "close"
+            ],
+            "event and custom keep their file position among same-date \
+             transactions, ahead of document and close, as in beancount"
+        );
     }
 
     #[test]

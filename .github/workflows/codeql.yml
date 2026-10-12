@@ -16,6 +16,15 @@ permissions:
   security-events: write
   # Required for uploading SARIF results on PRs
   pull-requests: read
+# A new push to a pull request cancels that PR's previous run of this
+# workflow: its result is for a commit that can no longer merge, and long jobs
+# (mutation shards run up to 4 hours) otherwise hold runners while the new
+# commit's required checks queue. Pushes to branches, schedules and manual runs
+# are keyed by run id, so they are never cancelled.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
   analyze:
     name: Analyze (${{ matrix.language }})

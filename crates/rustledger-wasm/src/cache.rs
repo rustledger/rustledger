@@ -230,7 +230,24 @@ use crate::types::{Error, LedgerOptions};
 /// split's own units (#2569). Loader v38, unchanged -- parsed directives did
 /// not move. `Ledger` archives booked directives, so a v39 blob would serve
 /// the old, multiplied price.
-pub const CACHE_VERSION: u32 = 40;
+/// v41: a date or label written on an AVERAGE sale's cost spec is refused
+/// instead of dropped (#2627). Loader v38, unchanged -- parsed directives did
+/// not move. A restored `Ledger` skips booking and serves its cached errors,
+/// so a v40 blob of such a ledger would go on reporting none.
+/// v42: `noduplicates` compares every directive type but `price`, not only
+/// transactions (#2599). Loader v38, unchanged -- parsed directives did not
+/// move. `Ledger` runs the regular plugins and archives their errors, so a
+/// v41 blob of a ledger with a repeated `note` (or `open`, `balance`, ...)
+/// would serve no error where `noduplicates` now reports one.
+/// v43: loader v39, a `#tag` / `^link` line after a transaction's first
+/// posting is a parse error and its tags are dropped (#2575). Parsed
+/// directives changed, so a v42 blob would serve the late tags and no error.
+/// v44: `event` and `custom` share the transaction `DirectivePriority`, so a
+/// same-date `event` or `custom` keeps its file position among transactions
+/// (#2576). Loader v39, unchanged -- parsed directives did not move. `Ledger`
+/// archives the processed, sorted directives, so a v43 blob would serve the
+/// old order (a same-date `custom` after the date's transactions and `close`).
+pub const CACHE_VERSION: u32 = 44;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -262,7 +279,7 @@ pub const CACHE_VERSION: u32 = 40;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 38;
+const LOADER_CACHE_VERSION_PIN: u32 = 39;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";
@@ -541,14 +558,21 @@ mod tests {
     /// The fixture puts a `pad` and a `balance` on the SAME DATE, because
     /// that pair is the one whose relative order the priorities decide. With
     /// them on different dates the date component of the sort key settles it
-    /// and a priority swap changes nothing here.
+    /// and a priority swap changes nothing here. For the same reason it puts
+    /// a `custom`, an `event` and a `note` on a transaction's date (#2576).
     #[test]
     fn processed_ledger_archived_form_is_pinned() {
         // Moved once so far: swapping `Pad` and `Balance` in
         // `DirectivePriority` (#2179) reorders the same-date pair in the
         // fixture. That is the change this test was written to catch, and it
         // caught it on the rebase rather than in review.
-        const PROCESSED_LAYOUT_HASH: u64 = 0xa8a8_b0cf_5355_f95d;
+        //
+        // Moved again for #2576, which ranks `event` and `custom` with
+        // transactions: the fixture gained a same-date `custom` written
+        // before the transaction and an `event` and `note` after it, whose
+        // order the ranks decide (custom, transaction, event, note now;
+        // transaction, note, event, custom before).
+        const PROCESSED_LAYOUT_HASH: u64 = 0x1dd9_f6a2_4d28_0afa;
 
         let src = "\
 2024-01-01 open Assets:Bank USD\n\
@@ -557,9 +581,12 @@ mod tests {
 2024-01-04 pad Assets:Bank Equity:Opening-Balances\n\
 2024-01-04 balance Assets:Bank  10.00 USD\n\
 \n\
+2024-01-05 custom \"fava-option\" \"locale\" \"en\"\n\
 2024-01-05 * \"payee\" \"narration\"\n\
 \x20\x20Assets:Bank  5.00 USD\n\
 \x20\x20Equity:Opening-Balances\n\
+2024-01-05 event \"location\" \"Paris\"\n\
+2024-01-05 note Assets:Bank \"after the event\"\n\
 \n\
 2024-01-06 balance Assets:Bank  15.00 USD\n";
 

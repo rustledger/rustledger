@@ -1610,8 +1610,8 @@ pub fn clamp(entries: Vec<wit::Directive>, begin: &str, end: &str) -> Vec<wit::D
     // the synthesized-summary account names fall back to beancount defaults
     // (#1806). The session's `clamp` uses the held options instead.
     // On overflow the opening-balance summary cannot be computed. The WIT
-    // signature has no error channel (`rustledger:ledger@3.0.0` returns a bare
-    // list), so we hand back the input UNCLAMPED rather than emit a summary
+    // signature has no error channel (`clamp` returns a bare
+    // `list<directive>`), so we hand back the input UNCLAMPED rather than emit a summary
     // built from a clamped total — the caller then sees real directives, never
     // a fabricated opening balance (#1863). Surfacing this as a typed error
     // needs a WIT contract change; tracked as follow-up.
@@ -1890,7 +1890,7 @@ impl SessionState {
     }
 
     /// The held options' account-root classifier — the single place the
-    /// session turns its `name-*` roots into an [`AccountTypes`], shared by
+    /// session turns its `name-*` roots into an [`rustledger_core::AccountTypes`], shared by
     /// `query` (BQL classification), `clamp` (summary classification) and
     /// `budget` (income-vs-expense sign normalization and total bucketing).
     fn account_types(&self) -> rustledger_core::AccountTypes {

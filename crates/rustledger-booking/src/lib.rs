@@ -27,8 +27,9 @@ mod interpolate;
 mod pad;
 
 pub use book::{
-    BookedTransaction, BookingEngine, BookingError, CapitalGain, LedgerBookResult,
-    TransactionReplay, book, book_transactions, posting_lot_total, present_inventory,
+    BOOKING_FAILURE_CODE, BookedTransaction, BookingEngine, BookingError, CapitalGain,
+    LedgerBookResult, TransactionReplay, book, book_transactions, posting_lot_total,
+    present_inventory,
 };
 pub use interpolate::{
     InterpolationError, InterpolationResult, Rollback, UnknownGroup, elided_unknown_groups,

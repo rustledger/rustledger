@@ -229,6 +229,9 @@ plus half a unit of `b`, since each part is rounded to its own places. A spec th
 cost (`{}` or `{EUR}`) books at the pool as before. Beancount has no `AVERAGE`
 booking (it refuses the method), so this rule is rustledger's own.
 
+The same check applies to a sale written with its units elided
+(`Assets:Brokerage  X {99.00 EUR}`), once interpolation has solved them.
+
 ### E4002: Insufficient Units
 
 **Cause**: Trying to reduce more units than available in the lot.

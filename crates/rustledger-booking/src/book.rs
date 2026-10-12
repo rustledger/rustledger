@@ -1511,6 +1511,68 @@ impl BookingEngine {
         ))
     }
 
+    /// Check the cost an AVERAGE sale states against the live pool, as `book`
+    /// does (#2603), for a sale `book` never matched (#2645).
+    ///
+    /// A sale written with its units elided (`Assets:B  X {99.00 EUR}`) skips
+    /// booking's lot matching: interpolation solves its units, and this walk
+    /// is the first to reduce the pool. Without this its written cost and
+    /// currency were never compared with the pool, so the posting weighed 99
+    /// while the pool gave up a unit at 10, and the 89 EUR gain vanished.
+    ///
+    /// The rule is [`check_average_spec`]'s, the one `book` applies, plus the
+    /// currency check `book` makes (#2589): one rule, so the two paths cannot
+    /// disagree. A posting `book` did match carries the pool's own cost by
+    /// now, which is a correct rounding of that pool by construction, so this
+    /// re-check passes for it.
+    ///
+    /// Here, beside [`Self::verify_merge_precondition`], and not in
+    /// [`Self::realize_posting`] or the core reduction, for the reason given
+    /// there: the query executor replays through those, and a filtered replay
+    /// builds a different pool on purpose (#1985), which a booked cost need not
+    /// match.
+    fn verify_average_claim(&self, posting: &Posting) -> Result<(), BookingError> {
+        let Some(spec) = posting.cost.as_deref() else {
+            return Ok(());
+        };
+        if spec.merge || self.method_for(&posting.account) != BookingMethod::Average {
+            return Ok(());
+        }
+        let (Some(units), Some(inv)) = (posting.amount(), self.inventories.get(&posting.account))
+        else {
+            return Ok(());
+        };
+        // The pool's cost currency: that of the lots on the side the sale
+        // takes from (the ones `reduction_pool_exact` sums).
+        let Some(pool_currency) = inv
+            .positions()
+            .filter(|p| {
+                p.units.currency == units.currency
+                    && !p.is_empty()
+                    && p.units.number.is_sign_positive() != units.number.is_sign_positive()
+            })
+            .find_map(|p| p.cost.as_ref().map(|c| c.currency.clone()))
+        else {
+            return Ok(());
+        };
+        if let Some(stated) = &spec.currency
+            && *stated != pool_currency
+        {
+            return Err(convert_core_booking_error(
+                rustledger_core::BookingError::NoMatchingLot {
+                    currency: units.currency.clone(),
+                    cost_spec: spec.clone(),
+                },
+                &posting.account,
+            ));
+        }
+        let (Some(written), Some(pool)) = (spec.number, inv.reduction_pool_exact(units)) else {
+            return Ok(());
+        };
+        check_average_spec(written, units, &pool, &pool_currency)
+            .map_err(|e| convert_core_booking_error(e, &posting.account))
+    }
+
     /// Replay one booked posting against this engine's inventories,
     /// **re-deriving** what it does rather than being told.
     ///
@@ -1871,6 +1933,12 @@ impl BookingEngine {
     /// release silently over-stated the holding. Reporting it is what lets a
     /// caller decide, which is the whole point of the precondition.
     pub fn apply(&mut self, txn: &Transaction) -> Result<(), BookingError> {
+        self.apply_walk(txn, &[])
+    }
+
+    /// [`Self::apply`], also checking the cost each posting at an index in
+    /// `claims` states against the live pool ([`Self::verify_average_claim`]).
+    fn apply_walk(&mut self, txn: &Transaction, claims: &[usize]) -> Result<(), BookingError> {
         // Snapshot every account this transaction touches, so an overflow
         // partway through cannot leave the earlier postings applied.
         //
@@ -2022,7 +2090,19 @@ impl BookingEngine {
                         self.verify_merge_precondition(posting)
                     };
                     touched.insert(&posting.account);
-                    checked.and_then(|()| self.realize_posting(posting, txn.date))
+                    // Only the postings `book` never matched (#2645): one
+                    // `book` did match carries the cost booking wrote, which
+                    // is the pool's as `Decimal` rounds it, not necessarily a
+                    // correct rounding of the exact pool at its own 28
+                    // digits, so re-checking it would refuse valid sales.
+                    let claim = if claims.contains(&i) {
+                        self.verify_average_claim(posting)
+                    } else {
+                        Ok(())
+                    };
+                    checked
+                        .and(claim)
+                        .and_then(|()| self.realize_posting(posting, txn.date))
                 }
             };
             if let Err(e) = result {
@@ -2176,6 +2256,76 @@ impl BookingEngine {
         Ok(self.book_and_interpolate_with_gains(txn)?.0)
     }
 
+    /// The postings of a booked, not yet interpolated transaction whose cost
+    /// `book` could not match because their units are elided (#2645).
+    /// Interpolation fills them in place and only ever appends postings, so
+    /// the indices still name them afterwards.
+    fn unmatched_cost_postings(booked: &Transaction) -> smallvec::SmallVec<[usize; 2]> {
+        booked
+            .postings
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                p.cost.is_some() && !matches!(p.units, Some(IncompleteAmount::Complete(_)))
+            })
+            .map(|(i, _)| i)
+            .collect()
+    }
+
+    /// Check what each posting at an index in `claims` states against the pool
+    /// it sells from, once interpolation has solved its units (#2645).
+    ///
+    /// The pool is the one [`Self::apply`] will reduce: this runs `apply`'s own
+    /// walk ([`Self::apply_walk`]) over the transaction's postings on those
+    /// accounts, on a scratch engine holding only their inventories (shared,
+    /// so nothing is copied until the walk writes). `book_and_interpolate`
+    /// does not apply, and its callers apply with the public [`Self::apply`],
+    /// so the check has to happen here for them to see it; both booking entry
+    /// points call this, so they agree.
+    fn check_unmatched_claims(
+        &self,
+        txn: &Transaction,
+        claims: &[usize],
+    ) -> Result<(), BookingError> {
+        if claims.is_empty() {
+            return Ok(());
+        }
+        let accounts: FxHashSet<&rustledger_core::Account> = claims
+            .iter()
+            .filter_map(|&i| txn.postings.get(i))
+            .filter(|p| self.method_for(&p.account) == BookingMethod::Average)
+            .map(|p| &p.account)
+            .collect();
+        if accounts.is_empty() {
+            return Ok(());
+        }
+        let mut scratch = Self {
+            inventories: FxHashMap::default(),
+            booking_method: self.booking_method,
+            account_methods: FxHashMap::default(),
+            tolerance: self.tolerance.clone(),
+        };
+        for account in &accounts {
+            if let Some(inv) = self.inventories.get(*account) {
+                scratch.inventories.insert((*account).clone(), inv.clone());
+            }
+            scratch
+                .account_methods
+                .insert((*account).clone(), self.method_for(account));
+        }
+        let mut sub = Transaction::new(txn.date, txn.narration.clone());
+        let mut sub_claims: smallvec::SmallVec<[usize; 2]> = smallvec::SmallVec::new();
+        for (i, posting) in txn.postings.iter().enumerate() {
+            if accounts.contains(&posting.account) {
+                if claims.contains(&i) {
+                    sub_claims.push(sub.postings.len());
+                }
+                sub.postings.push(posting.clone());
+            }
+        }
+        scratch.apply_walk(&sub, &sub_claims)
+    }
+
     /// Book, interpolate and apply `txn` in one step, mutating it in place.
     ///
     /// The three are one step because they share a failure rule: a transaction
@@ -2238,8 +2388,10 @@ impl BookingEngine {
         // that and commit only once apply has succeeded. Nothing needs undoing
         // — `txn` is not touched until the end.
         let booked = self.book_with(txn, cost_currencies)?;
+        let claims = Self::unmatched_cost_postings(&booked.transaction);
         let mut candidate = booked.transaction;
         let _ = crate::interpolate::interpolate_in_place_undoable_with(&mut candidate, tolerances)?;
+        self.check_unmatched_claims(&candidate, &claims)?;
         self.apply(&candidate)?;
         *txn = candidate;
         Ok(booked.gains)
@@ -2285,6 +2437,10 @@ impl BookingEngine {
         let result = crate::interpolate::interpolate_with_interpolation_tolerances(
             &booked.transaction,
             &tolerances,
+        )?;
+        self.check_unmatched_claims(
+            &result.transaction,
+            &Self::unmatched_cost_postings(&booked.transaction),
         )?;
         Ok((result, booked.gains))
     }

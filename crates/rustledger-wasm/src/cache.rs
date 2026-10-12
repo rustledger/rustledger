@@ -224,7 +224,12 @@ use crate::types::{Error, LedgerOptions};
 /// average (#2603). Loader v38, unchanged -- parsed directives did not move.
 /// A sale stating a cost its pool is not now fails, so a v38 blob would serve
 /// its old booked lots and no error.
-pub const CACHE_VERSION: u32 = 39;
+/// v40: an AVERAGE sale written with its units elided has its stated cost and
+/// currency checked against the pool, as one with written units already did
+/// (#2645). Loader v38, unchanged -- parsed directives did not move. A
+/// restored `Ledger` serves its cached errors, so a v39 blob of such a ledger
+/// would go on reporting none.
+pub const CACHE_VERSION: u32 = 40;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

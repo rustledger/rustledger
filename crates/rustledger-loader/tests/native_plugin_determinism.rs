@@ -55,8 +55,8 @@ fn fixture(name: &str, docs: &Path) -> Option<String> {
             .to_string(),
         "leafonly" => "plugin \"beancount.plugins.leafonly\"\n\
              2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Cash:Sub\n\
-             2024-01-01 open Expenses\n2024-01-01 open Expenses:Food\n\
-             2024-01-02 * \"x\"\n  Expenses  1 USD\n  Expenses:Food  1 USD\n  Assets:Cash\n"
+             2024-01-01 open Expenses:Food\n2024-01-01 open Expenses:Food:Sub\n\
+             2024-01-02 * \"x\"\n  Expenses:Food  1 USD\n  Expenses:Food:Sub  1 USD\n  Assets:Cash\n"
             .to_string(),
         "noduplicates" => "plugin \"beancount.plugins.noduplicates\"\n\
              2024-01-01 open Assets:Cash\n2024-01-01 open Expenses:Food\n\
@@ -106,7 +106,7 @@ fn fixture(name: &str, docs: &Path) -> Option<String> {
              2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Cash:Sub\n\
              2024-01-01 open Assets:A\n\
              2024-01-02 * \"x\"\n  Assets:Cash  1 USD\n  Assets:Cash:Sub  1 USD\n  \
-             Assets:A  -1 USD\n  Assets:A  -1 EUR\n  Assets:Cash  1 EUR\n"
+             Assets:A  -2 USD\n  Assets:A  -1 EUR\n  Assets:Cash  1 EUR\n"
             .to_string(),
         "rx_txn_plugin" => "plugin \"beancount.plugins.rx_txn_plugin\"\n\
              2024-01-01 open Assets:Cash\n2024-01-01 open Expenses:Rent\n\
@@ -240,8 +240,12 @@ fn render(ledger: &Ledger) -> String {
     out
 }
 
+/// The rendering with the ledger's own path taken out: the two ledgers
+/// compared differ in name, and an error naming its file would otherwise
+/// tell them apart whatever the plugin did.
 fn load_rendered(path: &Path) -> String {
     render(&load(path, &LoadOptions::default()).expect("the fixture loads"))
+        .replace(&path.display().to_string(), "<ledger>")
 }
 
 #[test]

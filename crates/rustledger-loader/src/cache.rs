@@ -515,12 +515,17 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     but a v37 blob holds tags in written order, duplicates included, and
 ///     untagged documents and notes, which the new code would serve as is.
 ///
+/// v39: a `#tag` / `^link` line after a transaction's first posting is a
+///     parse error and its tags are dropped, as beancount drops them (#2575).
+///     A v38 blob of such a file holds the late tags on the transaction and
+///     no error, because the file used to parse clean and was cacheable.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 38;
+pub const CACHE_VERSION: u32 = 39;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1276,7 +1281,9 @@ mod tests {
         // the byte arrays below still hold.
         // v35 (#2193) is the same shape for balance tolerances: new errors,
         // same archived `CostNumber` encoding.
-        const FIXTURE_VERSION: u32 = 38;
+        // v39 (#2575) drops tags written after a transaction's first posting
+        // and adds an error; no `CostNumber` is involved.
+        const FIXTURE_VERSION: u32 = 39;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1392,7 +1399,9 @@ mod tests {
         // is unchanged.
         // v35 (#2193) likewise adds errors on a balance tolerance and touches
         // no `MetaValue`; the hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 38;
+        // v39 (#2575) drops late transaction tags, which are not `MetaValue`s;
+        // the hash below is unchanged.
+        const FIXTURE_VERSION: u32 = 39;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

@@ -185,6 +185,23 @@ The check runs in booking only, as the `{*}` check does: the validator and BQL
 see the booked posting, whose cost is the pool's by then, and a filtered BQL
 replay builds a different pool on purpose (#1985).
 
+## Amendment: a sale's date or label is refused (#2627)
+
+An AVERAGE sale takes from the pool, which is undated and unlabeled (above).
+A date or label written on the sale's cost spec therefore describes no lot.
+It used to be dropped without a word. Booking now refuses it with E4001, as it
+refuses one on a `{*}` sale (#2398) and as the ordered methods refuse a date no
+lot carries. The rule does not look at the lots underneath: a pool that is a
+single lot bought on the written date still refuses it, because the sale books
+the pool's undated lot. A buy keeps its date and label, since they describe the
+lot it adds.
+
+The check is in the inventory's reduction rather than in booking alone, so a
+sale written with its units elided, which booking's lot matching never sees
+(interpolation solves the units and `apply` reduces the pool), is refused
+too. A booked AVERAGE sale carries the pool's undated cost, so the validator
+and BQL replays never trip it.
+
 ## Prior art
 
 - hledger `SPEC-lots` — single running pool; pool cost rewritten on acquisition.

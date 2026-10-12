@@ -112,11 +112,14 @@ impl ErrorCode {
             // states a cost the pool does not have (#2398): it is what
             // `{100.00 USD}` reports when no lot costs 100. And so is an
             // AVERAGE sale stating a cost its pool does not have (#2603).
+            // So is a date or label on an AVERAGE sale (#2627): the pool
+            // carries neither.
             B::NoMatchingLot { .. }
             | B::CurrencyMismatch { .. }
             | B::MergeMismatch { .. }
             | B::MergeSpecMismatch { .. }
-            | B::AverageSpecMismatch { .. } => Self::NoMatchingLot,
+            | B::AverageSpecMismatch { .. }
+            | B::AverageSpecDateOrLabel { .. } => Self::NoMatchingLot,
         }
     }
 }

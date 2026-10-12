@@ -1,4 +1,4 @@
-//! Hash-based duplicate transaction detection.
+//! Duplicate directive detection: every directive type but `price` (#2599).
 //!
 //! Thin wrapper around [`rustledger_ops::dedup::find_structural_duplicates`].
 //! The core hashing and dedup logic lives in `rustledger-ops`; this plugin
@@ -11,7 +11,8 @@ use crate::types::{PluginInput, PluginOp, PluginOutput};
 use super::super::{NativePlugin, RegularPlugin};
 use super::utils::at_entry;
 
-/// Plugin that detects duplicate transactions based on structural hash.
+/// Plugin that detects duplicate directives by their structure, as
+/// beancount's `noduplicates` does.
 pub struct NoDuplicatesPlugin;
 
 impl NativePlugin for NoDuplicatesPlugin {
@@ -20,7 +21,7 @@ impl NativePlugin for NoDuplicatesPlugin {
     }
 
     fn description(&self) -> &'static str {
-        "Hash-based duplicate transaction detection"
+        "Duplicate directive detection"
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {

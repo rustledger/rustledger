@@ -24,7 +24,7 @@ Beancount plugin system with 30 native plugins and WASM support.
 | `generate_base_ccy_prices` | Create base currency price entries |
 | `implicit_prices` | Generate prices from costs |
 | `leafonly` | Error on non-leaf account postings |
-| `noduplicates` | Detect duplicate transactions |
+| `noduplicates` | Detect duplicate directives (every type but `price`) |
 | `nounused` | Warn on unused accounts |
 | `onecommodity` | Single commodity per account |
 | `pedantic` | Enable all strict validations |

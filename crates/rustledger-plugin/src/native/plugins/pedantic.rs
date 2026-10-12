@@ -14,7 +14,7 @@ use super::one_commodity::OneCommodityPlugin;
 /// - leafonly: No postings to parent accounts
 /// - onecommodity: Single currency per account
 /// - `check_commodity`: All currencies must be declared
-/// - noduplicates: No duplicate transactions
+/// - noduplicates: No duplicate directives (any type but `price`)
 pub struct PedanticPlugin;
 
 impl NativePlugin for PedanticPlugin {

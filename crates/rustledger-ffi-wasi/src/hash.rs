@@ -357,6 +357,19 @@ pub fn compute_directive_hash(directive: &Directive) -> String {
             field(&mut hasher, n.date.to_string().as_bytes());
             field(&mut hasher, n.account.as_bytes());
             field(&mut hasher, n.comment.as_bytes());
+            // Notes carry tags and links since #2588 (#2573), and they hash
+            // exactly as a Document's do (#2598): the counts always, then each
+            // element length-prefixed. The counts make every note's hash
+            // change, untagged ones included; that was the decided trade over
+            // a special-case suffix emitted only when non-empty.
+            count(&mut hasher, n.tags.len());
+            for tag in &n.tags {
+                field(&mut hasher, tag.as_bytes());
+            }
+            count(&mut hasher, n.links.len());
+            for link in &n.links {
+                field(&mut hasher, link.as_bytes());
+            }
             metadata(&mut hasher, &n.meta);
         }
         Directive::Document(d) => {

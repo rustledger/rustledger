@@ -304,9 +304,8 @@ fn format_file<W: Write>(
         // Byte-exact comparison: --check must report the same diff
         // --in-place would actually write. A trim-based comparison
         // masks trailing-blank-line / leading-blank-line differences
-        // that the canonical form rewrites — exactly the kind of
-        // change the new formatter introduces (one trailing newline,
-        // exactly one blank between directives).
+        // that the canonical form rewrites (an added final newline,
+        // stripped trailing whitespace, a dropped BOM).
         // Invalid UTF-8 always counts as "needs formatting": `--in-place`
         // would rewrite the offending bytes to U+FFFD, so reporting "already
         // formatted" here would let CI miss a real rewrite.

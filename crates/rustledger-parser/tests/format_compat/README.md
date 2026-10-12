@@ -53,7 +53,7 @@ Roughly half of the file-pair fixtures (`balance_leading_unary_minus_preserves_s
 `cost_spec_with_negative_amount`, `metadata_arithmetic_value`, etc.)
 are reviewable mirrors of an `IDEMPOTENCE_MATRIX` entry. The other
 half (`issue_1252_destructive_repro`, `bom_dropped`,
-`missing_final_newline_added`, `multiple_trailing_blank_lines_collapsed`,
+`missing_final_newline_added`, `multiple_trailing_blank_lines_preserved`,
 `pushtag_poptag_pair_preserved`, `pushmeta_popmeta_pair_preserved`,
 `section_header_comments_tight`, `commas_stripped_per_canonical_form`,
 `unary_plus_stripped_per_canonical_form`,

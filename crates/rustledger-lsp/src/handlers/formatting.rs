@@ -545,24 +545,22 @@ mod tests {
     }
 
     #[test]
-    fn blank_only_file_is_canonical() {
-        // Canonical form for a no-directive file is a single newline,
-        // not a run of blanks. handle_formatting returns edits to
-        // collapse the trailing blanks into one '\n'.
+    fn blank_only_file_is_left_alone() {
+        // A file of blank lines is already formatted: bean-format leaves it
+        // byte-identical, and so does `rledger format` since #2506 (it used
+        // to collapse the run to a single newline). The LSP must agree with
+        // `format_source` and offer no edit.
         let source = "\n\n\n\n";
         let result = parse(source);
-        assert_eq!(format_source(source), "\n");
+        assert_eq!(format_source(source), source);
         let edits = handle_formatting(
             &params(),
             source,
             &result,
             PositionEncoding::Utf16,
             GroupingStyle::default(),
-        )
-        .expect("blanks-only file should reflow to a single newline");
-        assert_well_formed(&edits);
-        let after = apply(source, &edits);
-        assert_eq!(after, "\n");
+        );
+        assert!(edits.is_none(), "no edit for a blank-only file: {edits:?}");
     }
 
     #[test]

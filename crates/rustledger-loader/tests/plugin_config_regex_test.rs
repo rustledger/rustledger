@@ -278,3 +278,20 @@ fn rename_accounts_refuses_a_loop_whose_body_can_match_empty() {
         ["Expenses:Food", "Assets:Checking"]
     );
 }
+
+/// A repeated key is merged before its value is read, as Python builds the
+/// dict first: the `1` the second entry replaces is never checked
+/// (bean-check runs the plugin normally).
+#[test]
+fn check_commodity_repeated_key_replaces_a_value_of_the_wrong_type() {
+    let ledger = load_source(
+        "plugin \"beancount.plugins.check_commodity\" \"{'Assets:.*': 1, 'Assets:.*': 'FOO'}\"\n\
+         2024-01-01 commodity USD\n\
+         2024-01-01 open Assets:Cash\n2024-01-01 open Equity:Opening\n\
+         2024-01-02 * \"x\"\n  Assets:Cash  1 FOO\n  Equity:Opening  -1 FOO\n",
+    );
+    assert_eq!(
+        messages(&ledger),
+        ["Missing Commodity directive for 'FOO' in 'Equity:Opening'"]
+    );
+}

@@ -37,11 +37,10 @@ fn ignore_patterns(
     };
     // A repeated key keeps its first position and takes its last value, as
     // in the Python dict beancount's plugin reads.
-    let mut merged: Vec<(String, String)> = Vec::with_capacity(entries.len());
+    // Merged before the values are checked: a value a later repeat replaces
+    // is never read.
+    let mut merged: Vec<(PyValue, PyValue)> = Vec::with_capacity(entries.len());
     for (key, value) in entries {
-        let (PyValue::Str(key), PyValue::Str(value)) = (key, value) else {
-            return Err(invalid());
-        };
         if let Some(entry) = merged.iter_mut().find(|(k, _)| *k == key) {
             entry.1 = value;
         } else {
@@ -51,6 +50,9 @@ fn ignore_patterns(
     let mut patterns = Vec::new();
     let mut errors = Vec::new();
     for (key, value) in merged {
+        let (PyValue::Str(key), PyValue::Str(value)) = (key, value) else {
+            return Err(invalid());
+        };
         let compiled = (python_match_regex(&key), python_match_regex(&value));
         // beancount reports each pattern that does not compile, naming the
         // value either way. A pattern Python compiles and rledger cannot

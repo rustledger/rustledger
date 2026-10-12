@@ -229,6 +229,14 @@ plus half a unit of `b`, since each part is rounded to its own places. A spec th
 cost (`{}` or `{EUR}`) books at the pool as before. Beancount has no `AVERAGE`
 booking (it refuses the method), so this rule is rustledger's own.
 
+A sale from an account booked `AVERAGE` reports it when its spec writes a date
+or label (`-1 X {2024-01-02}`, `-1 X {"lot-a"}`): the sale takes from the
+account's pool, one lot with neither, so the date or label describes no lot,
+as on a `{*}` sale. This holds even when the pool is a single lot bought on
+that date, since a pool is undated on purpose. A buy keeps its date and label.
+Beancount has no `AVERAGE` booking to compare with
+(`AVERAGE method is not supported`).
+
 ### E4002: Insufficient Units
 
 **Cause**: Trying to reduce more units than available in the lot.

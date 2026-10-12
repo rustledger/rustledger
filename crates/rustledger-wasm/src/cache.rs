@@ -230,12 +230,16 @@ use crate::types::{Error, LedgerOptions};
 /// split's own units (#2569). Loader v38, unchanged -- parsed directives did
 /// not move. `Ledger` archives booked directives, so a v39 blob would serve
 /// the old, multiplied price.
-/// v41: `noduplicates` compares every directive type but `price`, not only
+/// v41: a date or label written on an AVERAGE sale's cost spec is refused
+/// instead of dropped (#2627). Loader v38, unchanged -- parsed directives did
+/// not move. A restored `Ledger` skips booking and serves its cached errors,
+/// so a v40 blob of such a ledger would go on reporting none.
+/// v42: `noduplicates` compares every directive type but `price`, not only
 /// transactions (#2599). Loader v38, unchanged -- parsed directives did not
 /// move. `Ledger` runs the regular plugins and archives their errors, so a
-/// v40 blob of a ledger with a repeated `note` (or `open`, `balance`, ...)
+/// v41 blob of a ledger with a repeated `note` (or `open`, `balance`, ...)
 /// would serve no error where `noduplicates` now reports one.
-pub const CACHE_VERSION: u32 = 41;
+pub const CACHE_VERSION: u32 = 42;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

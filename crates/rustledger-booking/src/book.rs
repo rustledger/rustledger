@@ -1053,6 +1053,23 @@ impl BookingEngine {
                                         -matched_pos.units.number, // Negate: inventory→reduction
                                         matched_pos.units.currency.clone(),
                                     );
+                                    // A total price (`@@`) is what the WHOLE sale
+                                    // fetched, so a split posting must not keep it:
+                                    // each would claim the whole total, and dividing
+                                    // it by the split's own units later (in
+                                    // `normalize_prices`) gives `total / lot units`,
+                                    // twice the price for a sale split in two
+                                    // (#2569). Beancount turns `@@` into a per-unit
+                                    // price in its parser, before booking splits the
+                                    // posting, so every split carries `total /
+                                    // |units sold|`.
+                                    if let Some(price) = split_posting_price(
+                                        posting.price.as_deref(),
+                                        units.number,
+                                        matched_pos.units.number,
+                                    ) {
+                                        new_posting.price = Some(Box::new(price));
+                                    }
                                     new_posting.units =
                                         Some(IncompleteAmount::Complete(expanded_units));
                                     // Set cost from the matched lot
@@ -2458,6 +2475,41 @@ struct Prepared {
     /// The currency of each cost spec written without one, where beancount's
     /// rule resolves it (#2571).
     cost_currencies: crate::interpolate::ElidedCosts,
+}
+
+/// The price a split posting carries when a reduction priced `price` sells
+/// `units_sold` (the written posting's units) across several lots, and this
+/// split takes `lot_units` of them (#2569). `None` keeps the price as written.
+///
+/// A per-unit price (`@`) already is the whole sale's, and an incomplete one
+/// has no number to divide, so both are kept. A complete total (`@@ T`)
+/// becomes `@ T / |units_sold|` through [`rustledger_core::per_unit_price`], the rule
+/// `normalize_prices` applies to an unsplit posting, so a sale shows one price
+/// whether or not booking split it, rounded once. When that quotient is not
+/// representable (it leaves `Decimal`'s range, or underflows to zero), each
+/// split keeps a total of its own instead: its exact pro-rata share
+/// `T × lot_units / |units_sold|`, so the splits' totals still add up to
+/// what the sale fetched. `normalize_prices` then leaves a share it cannot
+/// divide as written, the way it leaves an unsplit `@@` it cannot divide.
+fn split_posting_price(
+    price: Option<&rustledger_core::PriceAnnotation>,
+    units_sold: Decimal,
+    lot_units: Decimal,
+) -> Option<rustledger_core::PriceAnnotation> {
+    use rustledger_core::{PriceAnnotation, PriceKind};
+    let price = price?;
+    if price.kind != PriceKind::Total {
+        return None;
+    }
+    let total = price.amount.as_ref()?.as_amount()?;
+    if let Some(per_unit) = rustledger_core::per_unit_price(total.number, units_sold) {
+        return Some(PriceAnnotation::unit(Amount::new(
+            per_unit,
+            &total.currency,
+        )));
+    }
+    let share = crate::prorate(total.number, lot_units.abs(), units_sold.abs())?;
+    Some(PriceAnnotation::total(Amount::new(share, &total.currency)))
 }
 
 /// The cost number to book for taking `units` (the posting's, signed) from a

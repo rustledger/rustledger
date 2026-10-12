@@ -224,12 +224,18 @@ use crate::types::{Error, LedgerOptions};
 /// average (#2603). Loader v38, unchanged -- parsed directives did not move.
 /// A sale stating a cost its pool is not now fails, so a v38 blob would serve
 /// its old booked lots and no error.
-/// v40: an AVERAGE sale written with its units elided has its stated cost and
+/// v40: a total price (`@@`) on a sale booked across several lots gives each
+/// split posting the whole sale's per-unit price, `total / units sold`,
+/// instead of keeping the total for `normalize_prices` to divide by the
+/// split's own units (#2569). Loader v38, unchanged -- parsed directives did
+/// not move. `Ledger` archives booked directives, so a v39 blob would serve
+/// the old, multiplied price.
+/// v41: an AVERAGE sale written with its units elided has its stated cost and
 /// currency checked against the pool, as one with written units already did
 /// (#2645). Loader v38, unchanged -- parsed directives did not move. A
-/// restored `Ledger` serves its cached errors, so a v39 blob of such a ledger
+/// restored `Ledger` serves its cached errors, so a v40 blob of such a ledger
 /// would go on reporting none.
-pub const CACHE_VERSION: u32 = 40;
+pub const CACHE_VERSION: u32 = 41;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

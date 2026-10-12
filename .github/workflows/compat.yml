@@ -201,6 +201,14 @@ jobs:
         # scripts/format-bean-format-roundtrip.sh (#1324).
         run: |
           RLEDGER=./target/release/rledger ./scripts/format-bean-format-roundtrip.sh tests/compatibility/files
+      - name: bean-format blank lines over the corpus
+        # Input-anchored: formats each file with rledger AND bean-format and
+        # requires the blank lines to fall in the same places, file edges
+        # included. The roundtrip step above cannot see a deleted blank line
+        # (it is gone from both of its sides). See
+        # scripts/format-bean-format-blank-lines.sh (#2506).
+        run: |
+          RLEDGER=./target/release/rledger ./scripts/format-bean-format-blank-lines.sh tests/compatibility/files
       - name: Comment preservation over the corpus
         # `rledger format` must never DELETE the author's comments. The
         # idempotence and bean-format-roundtrip gates both miss this class
@@ -1614,18 +1622,71 @@ jobs:
           # bean-price has no --version flag (it errors demanding sources);
           # --help is the probe bean_price_compat.rs itself uses.
           bean-price --help > /dev/null
+      # The CPython WASI runtime that python_plugin_wasi and
+      # plugin_conformance run Python plugins with. Without this every run
+      # downloaded it (~14 MB) for those suites, and once more for the test
+      # that downloads into a fresh XDG_CACHE_HOME on purpose (#2566); with
+      # it, that test is the run's only download. Keyed on the runtime the
+      # download code names (version, URL, checksum in
+      # `rustledger-plugin/src/python/download.rs`), so a version bump
+      # misses and downloads the new one. Only `python.wasm` and `lib` are
+      # kept: the compiled `.cwasm` beside them is keyed to the wasmtime
+      # build and is rebuilt (not downloaded) when it does not match.
+      # A miss leaves RLEDGER_REQUIRE_PYTHON_WASI's rule unchanged: the
+      # runtime is downloaded, and if it cannot be, the suites fail.
+      - name: CPython WASI runtime cache key
+        id: cpython-key
+        run: |
+          src=crates/rustledger-plugin/src/python/download.rs
+          ident=$(grep -E '^const (PYTHON_VERSION|DOWNLOAD_URL|EXPECTED_SHA256):' "$src" | sha256sum | cut -c1-16)
+          test -n "$(grep -E '^const PYTHON_VERSION:' "$src")" || { echo "::error::PYTHON_VERSION not found in $src"; exit 1; }
+          echo "key=cpython-wasi-$ident" >> "$GITHUB_OUTPUT"
+      - name: Restore the CPython WASI runtime
+        id: cpython-cache
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          # `dirs::cache_dir()` is $XDG_CACHE_HOME (set below for the tests),
+          # and the runtime lives in `rustledger/python-wasi` under it.
+          path: |
+            ${{ runner.temp }}/xdg-cache/rustledger/python-wasi/python.wasm
+            ${{ runner.temp }}/xdg-cache/rustledger/python-wasi/lib
+          key: ${{ steps.cpython-key.outputs.key }}
+      - name: Record the cached CPython runtime
+        if: steps.cpython-cache.outputs.cache-hit == 'true'
+        run: |
+          wasm="${{ runner.temp }}/xdg-cache/rustledger/python-wasi/python.wasm"
+          ls -l "$wasm"
+          sha256sum "$wasm" | tee /tmp/cpython-before.sha256
       - name: Run python-gated test suites
         env:
           CARGO_TERM_COLOR: always
           RLEDGER_REQUIRE_PYTHON_WASI: '1'
           RLEDGER_REQUIRE_WASM32: '1'
+          XDG_CACHE_HOME: ${{ runner.temp }}/xdg-cache
         run: |
           # tee the output so the skip-marker check below inspects THIS
           # run (a rerun inside an `if` would mask test failures and
           # cover only one suite — review catch).
           set -o pipefail
-          cargo test -p rustledger --test integration_test --test bean_price_compat --test python_plugin_wasi --test plugin_conformance -- --nocapture 2>&1 | tee /tmp/gated-tests.log
+          # `ag-rledger`: python_plugin_wasi also checks that ag-rledger
+          # carries the Python runtime's notices in its envelope (#2566).
+          cargo test -p rustledger --features ag-rledger --test integration_test --test bean_price_compat --test python_plugin_wasi --test plugin_conformance -- --nocapture 2>&1 | tee /tmp/gated-tests.log
           cargo test -p rustledger-core --test synthetic_generation -- --nocapture 2>&1 | tee -a /tmp/gated-tests.log
+      - name: The cached CPython runtime was used, not downloaded again
+        if: steps.cpython-cache.outputs.cache-hit == 'true'
+        run: |
+          # A download replaces python.wasm by an atomic rename, so an
+          # unchanged file (and no leftover download temp) means the suites
+          # ran on the cached runtime. The fresh-XDG_CACHE_HOME test
+          # downloads into its own temp dir, not here.
+          dir="${{ runner.temp }}/xdg-cache/rustledger/python-wasi"
+          ls -la "$dir"
+          sha256sum -c /tmp/cpython-before.sha256
+          if ls "$dir" | grep -q '^download\.zip\.tmp\.'; then
+            echo "::error::the CPython runtime was downloaded despite the cache hit"
+            exit 1
+          fi
+          echo "cache hit: the suites used the cached CPython runtime"
       - name: Fail on silent skips
         run: |
           # Every gated suite prints a recognizable marker when it skips;

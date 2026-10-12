@@ -93,12 +93,17 @@ fn parse(pattern: &str) -> Result<Parser, PyRegexError> {
         pos: 0,
         out: String::new(),
         groups: Vec::new(),
+        deferred: None,
+        loops: Vec::new(),
     };
     parser.global_flags()?;
     parser.alternation(0, false)?;
     if parser.pos < parser.chars.len() {
         // `alternation` at depth 0 stops only at an unmatched `)`.
         return invalid(format!("unbalanced parenthesis at position {}", parser.pos));
+    }
+    if let Some(what) = parser.deferred {
+        return Err(PyRegexError::Unsupported(what));
     }
     Ok(parser)
 }
@@ -136,17 +141,23 @@ pub fn compile_sub(pattern: &str) -> Result<SubPattern, PyRegexError> {
             "a pattern that can match an empty string (Python's `re.sub` replaces empty matches differently)",
         );
     }
-    let mut groups = parser.groups;
-    // A group repeated more than once whose body can match empty: Python
-    // keeps the empty last iteration as the group's value, `regex` the last
-    // non-empty one (`(a*)+` on `a`), so a template must not read it.
-    for group in &mut groups {
-        if group.repeated {
-            let text = &parser.out[group.text.0..group.text.1];
-            group.unstable = compile(&format!("^(?:{text})$"))?.is_match("");
+    // A repetition whose body can match empty: when an iteration's
+    // preferred path is empty, Python's engine ends the loop there, where
+    // `regex` drops the empty iteration and takes a branch that consumes
+    // text (`b(?:a?|c)*` on `bac` stops after `a` in Python and runs to the end here), and a
+    // group in it keeps a different last value.
+    for &(start, end) in &parser.loops {
+        let body = &parser.out[start..end];
+        if compile(&format!("^(?:{body})$"))?.is_match("") {
+            return unsupported(
+                "a repetition whose body can match an empty string (Python's engine ends such a loop where rledger's goes on)",
+            );
         }
     }
-    Ok(SubPattern { regex, groups })
+    Ok(SubPattern {
+        regex,
+        groups: parser.groups,
+    })
 }
 
 /// Compile `pattern` for Python's `re.match`: anchored at the start, need not
@@ -197,11 +208,6 @@ pub fn translate_replacement(template: &str, pattern: &SubPattern) -> Result<Str
     let push_group = |out: &mut String, index: usize| -> Result<(), PyRegexError> {
         if index > pattern.groups.len() {
             return invalid(format!("invalid group reference {index}"));
-        }
-        if index > 0 && pattern.groups[index - 1].unstable {
-            return unsupported(&format!(
-                "a reference to group {index}, a repeated group that can match empty (Python keeps its empty last repetition)"
-            ));
         }
         write!(out, "${{{index}}}").expect("writing to a String cannot fail");
         Ok(())
@@ -335,18 +341,19 @@ struct Parser {
     out: String,
     /// Capturing groups opened so far, by number.
     groups: Vec<GroupInfo>,
+    /// The first construct Python has and rledger cannot express. Parsing
+    /// goes on past it, so a pattern Python rejects anyway is reported as
+    /// invalid rather than as unsupported.
+    deferred: Option<String>,
+    /// The translated text of every group a repetition can run more than
+    /// once, as ranges of `out`.
+    loops: Vec<(usize, usize)>,
 }
 
 /// What the parser learned about one capturing group.
 #[derive(Debug, Clone, Default)]
 struct GroupInfo {
     name: Option<String>,
-    /// The group's translated text, `(` to `)`, as a range of `out`.
-    text: (usize, usize),
-    /// Inside (or itself) a repetition that can run more than once.
-    repeated: bool,
-    /// Repeated and able to match empty: its value differs between engines.
-    unstable: bool,
 }
 
 /// What the last item written can take: a quantifier needs something to
@@ -357,8 +364,7 @@ enum Last {
     Nothing,
     /// A repeatable item.
     Item,
-    /// A group, holding the capturing groups numbered in `start..end`
-    /// (0-based): a repetition of it repeats them.
+    /// A group, written as `out[.0...1]`: a repetition of it repeats it.
     Group(usize, usize),
     /// A quantifier (repeating it again is "multiple repeat").
     Repeat,
@@ -401,7 +407,7 @@ impl Parser {
                 return Ok(());
             }
             let flags: String = self.chars[self.pos + 2..end].iter().collect();
-            let rust = Self::flags(&flags)?;
+            let rust = self.flags(&flags)?;
             if !rust.is_empty() {
                 write!(self.out, "(?{rust})").expect("writing to a String cannot fail");
             }
@@ -411,7 +417,7 @@ impl Parser {
     }
 
     /// Python flag letters as `regex` flags, or why they cannot be.
-    fn flags(letters: &str) -> Result<String, PyRegexError> {
+    fn flags(&mut self, letters: &str) -> Result<String, PyRegexError> {
         let mut rust = String::new();
         for c in letters.chars() {
             match c {
@@ -420,7 +426,7 @@ impl Parser {
                 'i' | 'm' | 's' => rust.push(c),
                 // Unicode matching is already the default for `str` patterns.
                 'u' => {}
-                'a' => return unsupported("the ASCII flag `(?a)`"),
+                'a' => self.defer("the ASCII flag `(?a)`"),
                 'x' => return unsupported("the verbose flag `(?x)`"),
                 'L' => return invalid("bad inline flags: cannot use 'L' flag with a str pattern"),
                 c => return invalid(format!("unknown flag '{c}'")),
@@ -467,9 +473,11 @@ impl Parser {
                     self.comment()?;
                 }
                 '(' => {
-                    let first = self.groups.len();
-                    self.group(depth)?;
-                    last = Last::Group(first, self.groups.len());
+                    let text = self.out.len();
+                    last = self.group(depth)?;
+                    if last == Last::Item {
+                        last = Last::Group(text, self.out.len());
+                    }
                 }
                 '[' => {
                     self.class()?;
@@ -508,11 +516,9 @@ impl Parser {
             Last::Nothing => return invalid("nothing to repeat"),
             Last::Repeat => return invalid("multiple repeat"),
             Last::Item => {}
-            Last::Group(start, end) => {
+            Last::Group(text_start, text_end) => {
                 if many {
-                    for group in &mut self.groups[start..end] {
-                        group.repeated = true;
-                    }
+                    self.loops.push((text_start, text_end));
                 }
             }
         }
@@ -523,7 +529,8 @@ impl Parser {
                 self.out.push('?');
             }
             Some('+') => {
-                return unsupported("a possessive quantifier (`*+`, `++`, `?+`, `{m,n}+`)");
+                self.pos += 1;
+                self.defer("a possessive quantifier (`*+`, `++`, `?+`, `{m,n}+`)");
             }
             _ => {}
         }
@@ -573,8 +580,13 @@ impl Parser {
         Ok(Some((format!("{{{lo_n},{hi_n}}}"), hi_n > 1)))
     }
 
-    /// A group, `(` through its `)`.
-    fn group(&mut self, depth: usize) -> Result<(), PyRegexError> {
+    /// A group, `(` through its `)`, and what it leaves for a quantifier.
+    fn group(&mut self, depth: usize) -> Result<Last, PyRegexError> {
+        self.group_inner(depth)?;
+        Ok(Last::Item)
+    }
+
+    fn group_inner(&mut self, depth: usize) -> Result<(), PyRegexError> {
         self.pos += 1; // `(`
         if self.peek() != Some('?') {
             return self.capturing(None, "(", depth);
@@ -600,21 +612,73 @@ impl Parser {
                     let open = format!("(?P<{name}>");
                     self.capturing(Some(name), &open, depth)
                 }
-                Some('=') => unsupported("a named backreference `(?P=name)`"),
+                Some('=') => {
+                    self.pos += 2;
+                    let name = self.name(')')?;
+                    if !self
+                        .groups
+                        .iter()
+                        .any(|g| g.name.as_deref() == Some(name.as_str()))
+                    {
+                        return invalid(format!("unknown group name '{name}'"));
+                    }
+                    self.defer("a named backreference `(?P=name)`");
+                    Ok(())
+                }
                 _ => invalid("unknown extension ?P"),
             },
-            Some('=') => unsupported("a lookahead `(?=...)`"),
-            Some('!') => unsupported("a negative lookahead `(?!...)`"),
+            // Lookaround and atomic groups: parsed as groups, so the rest of
+            // the pattern is still checked.
+            Some('=') => self.deferred_group(1, "a lookahead `(?=...)`", depth),
+            Some('!') => self.deferred_group(1, "a negative lookahead `(?!...)`", depth),
             Some('<') => match self.peek_at(1) {
-                Some('=') => unsupported("a lookbehind `(?<=...)`"),
-                Some('!') => unsupported("a negative lookbehind `(?<!...)`"),
+                Some('=') => self.deferred_group(2, "a lookbehind `(?<=...)`", depth),
+                Some('!') => self.deferred_group(2, "a negative lookbehind `(?<!...)`", depth),
                 _ => invalid("unknown extension ?<"),
             },
-            Some('(') => unsupported("a conditional group `(?(...)...)`"),
-            Some('>') => unsupported("an atomic group `(?>...)`"),
+            Some('(') => {
+                self.pos += 1;
+                let id = self.name(')').or_else(|_| invalid("bad group name"))?;
+                let known = if id.chars().all(|c| c.is_ascii_digit()) {
+                    id.parse::<usize>()
+                        .is_ok_and(|n| n >= 1 && n <= self.groups.len())
+                } else {
+                    self.groups
+                        .iter()
+                        .any(|g| g.name.as_deref() == Some(id.as_str()))
+                };
+                if !known {
+                    return invalid(format!("invalid group reference {id}"));
+                }
+                self.deferred_group(0, "a conditional group `(?(...)...)`", depth)
+            }
+            Some('>') => self.deferred_group(1, "an atomic group `(?>...)`", depth),
             Some(c) if c.is_ascii_alphabetic() || c == '-' => self.scoped_flags(depth),
             _ => invalid("unknown extension"),
         }
+    }
+
+    /// Record `what` as the first construct rledger cannot express, if none
+    /// is recorded yet, and go on parsing.
+    fn defer(&mut self, what: &str) {
+        if self.deferred.is_none() {
+            self.deferred = Some(what.to_string());
+        }
+    }
+
+    /// A group rledger cannot express, after `skip` more characters of its
+    /// opening: parsed (and written) as a non-capturing group, so the rest of
+    /// the pattern is checked, and recorded with [`Self::defer`].
+    fn deferred_group(
+        &mut self,
+        skip: usize,
+        what: &str,
+        depth: usize,
+    ) -> Result<(), PyRegexError> {
+        self.pos += skip;
+        self.defer(what);
+        self.out.push_str("(?:");
+        self.group_body(depth)
     }
 
     /// A capturing group, its opening `open` already consumed from the
@@ -625,16 +689,9 @@ impl Parser {
         open: &str,
         depth: usize,
     ) -> Result<(), PyRegexError> {
-        let index = self.groups.len();
-        let start = self.out.len();
-        self.groups.push(GroupInfo {
-            name,
-            ..GroupInfo::default()
-        });
+        self.groups.push(GroupInfo { name });
         self.out.push_str(open);
-        self.group_body(depth)?;
-        self.groups[index].text = (start, self.out.len());
-        Ok(())
+        self.group_body(depth)
     }
 
     /// A comment `(?#...)`, which Python drops.
@@ -679,8 +736,10 @@ impl Parser {
         if on.chars().any(|c| off.contains(c)) {
             return invalid("bad inline flags: flag turned on and off");
         }
-        let on = Self::flags(&on)?;
-        let off = Self::flags(&off)?;
+        // Turning verbose mode off is a no-op here.
+        let off: String = off.chars().filter(|&c| c != 'x').collect();
+        let on = self.flags(&on)?;
+        let off = self.flags(&off)?;
         if off.is_empty() {
             write!(self.out, "(?{on}:").expect("writing to a String cannot fail");
         } else {
@@ -715,6 +774,10 @@ impl Parser {
                 None => return invalid("missing >, unterminated name"),
             }
         }
+        if close == ')' && name.chars().all(|c| c.is_ascii_digit()) && !name.is_empty() {
+            // A conditional's group number.
+            return Ok(name);
+        }
         let mut chars = name.chars();
         let valid = chars
             .next()
@@ -726,7 +789,7 @@ impl Parser {
         if !valid {
             // Python also takes non-ASCII identifiers; `regex` group names
             // differ, so only ASCII ones are taken here.
-            return unsupported(&format!("the group name '{name}'"));
+            self.defer(&format!("the group name '{name}'"));
         }
         Ok(name)
     }
@@ -748,9 +811,10 @@ impl Parser {
                 return Ok(Last::Nothing);
             }
             'b' | 'B' => {
-                return unsupported(&format!(
+                self.defer(&format!(
                     "a word boundary `\\{c}` (Python defines words by its `\\w`, which rledger's engine cannot use for boundaries)"
                 ));
+                return Ok(Last::Nothing);
             }
             'd' => write!(self.out, "[{DIGIT}]"),
             'D' => write!(self.out, "[^{DIGIT}]"),
@@ -774,7 +838,18 @@ impl Parser {
                     self.push_code(code)?;
                     return Ok(Last::Item);
                 }
-                return unsupported("a backreference (`\\1` and the like)");
+                // A group reference of one or two digits, to a group already
+                // closed, as Python requires.
+                let mut index = c.to_digit(10).expect("a digit") as usize;
+                if let Some(d) = self.peek().and_then(|d| d.to_digit(10)) {
+                    index = index * 10 + d as usize;
+                    self.pos += 1;
+                }
+                if index > self.groups.len() {
+                    return invalid(format!("invalid group reference {index}"));
+                }
+                self.defer("a backreference (`\\1` and the like)");
+                return Ok(Last::Item);
             }
             c => {
                 let code = self.char_escape(c, false)?;
@@ -813,7 +888,19 @@ impl Parser {
                 }
                 code
             }
-            'N' => return unsupported("a named character escape `\\N{...}`"),
+            'N' => {
+                if self.peek() != Some('{') {
+                    return invalid("missing {");
+                }
+                while let Some(c) = self.peek() {
+                    self.pos += 1;
+                    if c == '}' {
+                        self.defer("a named character escape `\\N{...}`");
+                        return Ok(u32::from('?'));
+                    }
+                }
+                return invalid("missing }, unterminated name");
+            }
             '0' => {
                 let mut code = 0;
                 for _ in 0..2 {
@@ -1107,6 +1194,15 @@ mod tests {
             "(?P<a>x)(?P<a>y)",
             r"\",
             r"\A(?#c){,2}",
+            // Python rejects these for reasons of their own, which win over
+            // the unsupported construct in them.
+            "(?=A",
+            r"\b(",
+            r"\1",
+            "(?P=x)",
+            "(?(1)a|b)",
+            r"\b{2}",
+            r"\N{DIGIT ONE",
         ] {
             assert!(
                 matches!(translate(pattern), Err(PyRegexError::Invalid(_))),
@@ -1187,6 +1283,8 @@ mod tests {
     fn inline_flags_follow_python() {
         assert!(py_match("(?ii)a", "A"));
         assert!(py_match("(?ii:a)", "A"));
+        // Turning verbose mode off is a no-op.
+        assert!(py_match("(?-x:a)", "a"));
         for pattern in ["(?i-i:a)", "(?im-m:a)", "(?-u:a)", "(?u-u:a)", "(?-a:a)"] {
             assert!(
                 matches!(translate(pattern), Err(PyRegexError::Invalid(_))),
@@ -1209,12 +1307,23 @@ mod tests {
                 "{pattern:?}"
             );
         }
-        let re = compile_sub("(a*)+b").unwrap();
-        assert!(matches!(
-            translate_replacement(r"[\1]", &re),
-            Err(PyRegexError::Unsupported(ref w)) if w.contains("group 1")
-        ));
-        // The whole match is fine.
-        assert_eq!(translate_replacement(r"[\g<0>]", &re).unwrap(), "[${0}]");
+        for pattern in [
+            "(a*)+b",
+            "b(?:a?|c)*",
+            "b(?:a*|c)+",
+            "Assets:(?:\\w*|:)+",
+            "x(a|)+",
+        ] {
+            assert!(
+                matches!(compile_sub(pattern), Err(PyRegexError::Unsupported(ref w)) if w.contains("repetition")),
+                "{pattern:?}: {:?}",
+                compile_sub(pattern).map(|_| ())
+            );
+        }
+        // A repetition whose body cannot match empty is fine, and so is a
+        // repeated group inside one that can (every iteration sets it).
+        for pattern in ["(a)+b", "(?:(a*)b)+", "x(?:ab|a)*", "(\\w+):(\\w+)"] {
+            assert!(compile_sub(pattern).is_ok(), "{pattern:?}");
+        }
     }
 }

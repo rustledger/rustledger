@@ -183,7 +183,7 @@ fn gain_loss_reports_two_rules_matching_one_posting() {
     );
     let errors = messages(&ledger);
     assert!(
-        errors.iter().any(|m| m.contains("more than one rule")),
+        errors.iter().any(|m| m.contains("a second rule matches")),
         "{errors:?}"
     );
     assert_eq!(posting_accounts(&ledger), ["Income:CG", "Assets:Cash"]);
@@ -210,5 +210,71 @@ fn long_short_reads_only_the_first_entry() {
             .any(|a| a == "Income:Capital-Gains:Short"),
         "{:?}",
         posting_accounts(&ledger)
+    );
+}
+
+/// A rule that matches without changing the account leaves the posting to
+/// the next rule, in beancount as here: `:NOPE` is not in the account, so the
+/// second rule rewrites it (bean-query: `Income:Brokerage:CG:Gains`).
+#[test]
+fn gain_loss_applies_a_later_rule_after_a_match_that_changed_nothing() {
+    let ledger = load_source(
+        "plugin \"beancount_reds_plugins.capital_gains_classifier.gain_loss\" \
+         \"{'Income:.*:CG': [':NOPE', ':X', ':Y'], 'Income:B.*': [':CG', ':CG:Gains', ':CG:Losses']}\"\n\
+         2024-01-01 open Assets:Cash\n2024-01-01 open Income:Brokerage:CG\n\
+         2024-01-02 * \"x\"\n  Income:Brokerage:CG  -10 USD\n  Assets:Cash\n",
+    );
+    assert!(ledger.errors.is_empty(), "{:?}", messages(&ledger));
+    assert_eq!(
+        posting_accounts(&ledger),
+        ["Income:Brokerage:CG:Gains", "Assets:Cash"]
+    );
+}
+
+/// A repeated key in `check_commodity`'s config takes its last value, as in
+/// the Python dict: the second `'Assets:.*'` entry is an invalid pattern, so
+/// nothing exempts FOO and it is reported (bean-check: `Invalid regexp` and
+/// `Missing Commodity directive for 'FOO' in 'Assets:Cash'`).
+#[test]
+fn check_commodity_repeated_key_takes_its_last_value() {
+    let ledger = load_source(
+        "plugin \"beancount.plugins.check_commodity\" \"{'Assets:.*': 'FOO', 'Assets:.*': '('}\"\n\
+         2024-01-01 commodity USD\n\
+         2024-01-01 open Assets:Cash\n2024-01-01 open Equity:Opening\n\
+         2024-01-02 * \"x\"\n  Assets:Cash  1 FOO\n  Equity:Opening  -1 FOO\n",
+    );
+    let errors = messages(&ledger);
+    assert!(
+        errors.iter().any(|m| m.starts_with("Invalid regexp: '('")),
+        "{errors:?}"
+    );
+    assert!(
+        errors.contains(&"Missing Commodity directive for 'FOO' in 'Assets:Cash'"),
+        "{errors:?}"
+    );
+}
+
+/// beancount renames `Assets:Checking` to `Assets:New:Checking` with
+/// `'Assets:(?:\\w*|:)+'`: an iteration of the loop that matches empty ends
+/// it in Python's engine, where rledger's goes on to `Assets:New`. A
+/// repetition whose body can match empty is refused, by name.
+#[test]
+fn rename_accounts_refuses_a_loop_whose_body_can_match_empty() {
+    let ledger = load_source(
+        "plugin \"beancount_reds_plugins.rename_accounts.rename_accounts\" \
+         \"{'Assets:(?:\\\\w*|:)+': 'Assets:New'}\"\n\
+         2024-01-01 open Assets:Checking\n2024-01-01 open Expenses:Food\n\
+         2024-01-02 * \"x\"\n  Expenses:Food  1 USD\n  Assets:Checking\n",
+    );
+    let errors = messages(&ledger);
+    assert!(
+        errors
+            .iter()
+            .any(|m| m.contains("rename_accounts") && m.contains("repetition")),
+        "{errors:?}"
+    );
+    assert_eq!(
+        posting_accounts(&ledger),
+        ["Expenses:Food", "Assets:Checking"]
     );
 }

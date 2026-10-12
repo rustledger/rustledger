@@ -442,9 +442,11 @@ fn process_gain_loss(input: PluginInput) -> PluginOutput {
         },
         None => return unchanged(&input, None),
     };
-    // beancount's plugin fails outright when a second rule matches a posting
-    // the first already rewrote (it removes the posting twice), so nothing
-    // is rewritten and the error is reported, rather than chaining rules.
+    // beancount's plugin fails outright when a rule matches a posting an
+    // earlier rule already changed (it removes the posting twice); a rule
+    // that matched without changing the account leaves the posting equal to
+    // itself, and the next rule applies normally. So that one case is
+    // reported and nothing is rewritten, rather than chaining the rules.
     for wrapper in &input.directives {
         let DirectiveData::Transaction(txn) = &wrapper.data else {
             continue;
@@ -458,26 +460,27 @@ fn process_gain_loss(input: PluginInput) -> PluginOutput {
                 continue;
             };
             let mut account = posting.account.clone();
-            let mut matched = 0;
+            let mut changed = false;
             for rule in &rules {
                 if python_match(&rule.pattern, &account) {
-                    matched += 1;
+                    if changed {
+                        return unchanged(
+                            &input,
+                            Some(PluginError::error(format!(
+                                "gain_loss: a second rule matches the posting to {} after an earlier one rewrote it (beancount's plugin fails on this)",
+                                posting.account
+                            ))),
+                        );
+                    }
                     let replacement = if number < Decimal::ZERO {
                         &rule.gains_replacement
                     } else {
                         &rule.losses_replacement
                     };
-                    account = account.replace(&rule.account_to_replace, replacement);
+                    let rewritten = account.replace(&rule.account_to_replace, replacement);
+                    changed = rewritten != account;
+                    account = rewritten;
                 }
-            }
-            if matched > 1 {
-                return unchanged(
-                    &input,
-                    Some(PluginError::error(format!(
-                        "gain_loss: more than one rule matches the posting to {} (beancount's plugin fails on this)",
-                        posting.account
-                    ))),
-                );
             }
         }
     }
@@ -513,8 +516,9 @@ fn process_gain_loss(input: PluginInput) -> PluginOutput {
             let mut new_postings: Vec<PostingData> = Vec::new();
 
             for posting in &txn.postings {
-                // Every rule in config order; at most one matches (more is
-                // refused above).
+                // Every rule in config order, each matched against the account
+                // as the rules before it left it, as upstream's loop does (a
+                // match after a rewrite is refused above).
                 let number = posting
                     .units
                     .as_ref()

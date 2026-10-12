@@ -35,12 +35,22 @@ fn ignore_patterns(
     let Ok(PyValue::Dict(entries)) = py_literal::parse(config) else {
         return Err(invalid());
     };
-    let mut patterns = Vec::new();
-    let mut errors = Vec::new();
+    // A repeated key keeps its first position and takes its last value, as
+    // in the Python dict beancount's plugin reads.
+    let mut merged: Vec<(String, String)> = Vec::with_capacity(entries.len());
     for (key, value) in entries {
         let (PyValue::Str(key), PyValue::Str(value)) = (key, value) else {
             return Err(invalid());
         };
+        if let Some(entry) = merged.iter_mut().find(|(k, _)| *k == key) {
+            entry.1 = value;
+        } else {
+            merged.push((key, value));
+        }
+    }
+    let mut patterns = Vec::new();
+    let mut errors = Vec::new();
+    for (key, value) in merged {
         let compiled = (python_match_regex(&key), python_match_regex(&value));
         // beancount reports each pattern that does not compile, naming the
         // value either way. A pattern Python compiles and rledger cannot

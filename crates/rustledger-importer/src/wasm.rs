@@ -92,27 +92,34 @@ impl Default for WasmRuntimeConfig {
 }
 
 /// Errors that can occur loading or invoking a WASM importer.
+///
+/// Every variant that wraps an underlying error names it in its own message
+/// and does NOT also return it from `source()`, so a `{:#}` chain prints the
+/// cause once (#2574). Struct variants call the field `error`, not `source`,
+/// because thiserror makes a field named `source` the source; tuple variants
+/// carry no `#[source]`. An `anyhow` cause is printed with `{:#}` so its own
+/// chain (a trap's reason sits below the backtrace) is still in the message.
 #[derive(Debug, thiserror::Error)]
 pub enum WasmImporterError {
     /// Failed to read the `.wasm` file from disk.
-    #[error("failed to read WASM file {path}: {source}")]
+    #[error("failed to read WASM file {path}: {error}")]
     Io {
         /// Path the host tried to read.
         path: PathBuf,
         /// Underlying I/O error.
-        source: std::io::Error,
+        error: std::io::Error,
     },
     /// Failed to enumerate an entry while scanning a directory for
     /// `.wasm` files. Distinct from [`Self::Io`] because the entry's
     /// name is unknown when read fails — only the dir is named.
     /// Typically permission-denied on a single inode or a broken
     /// symlink.
-    #[error("failed to enumerate entry in WASM importer directory {dir}: {source}")]
+    #[error("failed to enumerate entry in WASM importer directory {dir}: {error}")]
     DirEntry {
         /// Directory being scanned.
         dir: PathBuf,
         /// Underlying I/O error from `read_dir().next()`.
-        source: std::io::Error,
+        error: std::io::Error,
     },
     /// The WASM module is malformed or uses unsupported features.
     // The module's own text (names in its name section, its import
@@ -120,13 +127,13 @@ pub enum WasmImporterError {
     // escaped like any importer text (see `rustledger_plugin::untrusted`).
     #[error(
         "failed to compile WASM module {path}: {}",
-        rustledger_plugin::escape_untrusted_text(&format!("{source:#}"))
+        rustledger_plugin::escape_untrusted_text(&format!("{error:#}"))
     )]
     Compile {
         /// Path of the module that failed to compile.
         path: PathBuf,
         /// Underlying wasmtime compile error.
-        source: anyhow::Error,
+        error: anyhow::Error,
     },
     /// The WASM module has imports — they're forbidden in the importer
     /// sandbox. Importers must be self-contained.
@@ -152,18 +159,18 @@ pub enum WasmImporterError {
         "WASM importer runtime error: {}",
         rustledger_plugin::escape_untrusted_text(&format!("{:#}", .0))
     )]
-    Runtime(#[source] anyhow::Error),
+    Runtime(anyhow::Error),
     /// `MessagePack` decode error on the WASM-returned bytes.
     #[error(
         "WASM importer returned malformed MessagePack: {}",
         rustledger_plugin::escape_untrusted_text(&.0.to_string())
     )]
-    Decode(#[source] rmp_serde::decode::Error),
+    Decode(rmp_serde::decode::Error),
     /// `MessagePack` encode error on the input being sent to the WASM
     /// importer. Practically only happens if `ImporterConfig` carries
     /// non-serializable state, which shouldn't.
     #[error("failed to encode input for WASM importer: {0}")]
-    Encode(#[source] rmp_serde::encode::Error),
+    Encode(rmp_serde::encode::Error),
     /// The WASM importer returned an `out_len` larger than the host's
     /// allocation cap (`MAX_OUTPUT_BYTES`, currently 64 MiB). Either
     /// the module is buggy/malicious or the cap needs raising for a
@@ -190,12 +197,12 @@ pub enum WasmImporterError {
     /// from [`Self::MissingExport`] because `validate_module` already
     /// proved presence at load time — a `get_typed_func` failure
     /// thereafter is always a type mismatch, not absence.
-    #[error("WASM importer export `{name}` has wrong signature: {source}")]
+    #[error("WASM importer export `{name}` has wrong signature: {error:#}")]
     ExportSignatureMismatch {
         /// Name of the export.
         name: &'static str,
         /// Underlying wasmtime type-mismatch error.
-        source: anyhow::Error,
+        error: anyhow::Error,
     },
     /// The importer does not advertise an ABI version (no
     /// `__rustledger_abi_version` export). It was built without the
@@ -297,9 +304,9 @@ impl WasmImporter {
         config: WasmRuntimeConfig,
     ) -> Result<Self, WasmImporterError> {
         let path = path.into();
-        let bytes = std::fs::read(&path).map_err(|source| WasmImporterError::Io {
+        let bytes = std::fs::read(&path).map_err(|error| WasmImporterError::Io {
             path: path.clone(),
-            source,
+            error,
         })?;
         Self::load_from_bytes(path, &bytes, config)
     }
@@ -339,7 +346,7 @@ impl WasmImporter {
 
         let module = Module::new(&engine, bytes).map_err(|e| WasmImporterError::Compile {
             path: path.clone(),
-            source: anyhow::Error::from(e),
+            error: anyhow::Error::from(e),
         })?;
 
         Self::validate_module(&module)?;
@@ -498,7 +505,7 @@ fn call_msgpack_with<I: Serialize, O: DeserializeOwned>(
         .get_typed_func::<u32, u32>(&mut store, "alloc")
         .map_err(|e| WasmImporterError::ExportSignatureMismatch {
             name: "alloc",
-            source: anyhow::Error::from(e),
+            error: anyhow::Error::from(e),
         })?;
 
     let limited = |e: wasmtime::Error, store: &wasmtime::Store<sandbox::StoreState>| {
@@ -519,7 +526,7 @@ fn call_msgpack_with<I: Serialize, O: DeserializeOwned>(
         .get_typed_func::<(u32, u32), u64>(&mut store, entry)
         .map_err(|e| WasmImporterError::ExportSignatureMismatch {
             name: entry,
-            source: anyhow::Error::from(e),
+            error: anyhow::Error::from(e),
         })?;
 
     let packed = func
@@ -580,7 +587,7 @@ fn call_metadata(
         .get_typed_func::<(), u64>(&mut store, "metadata")
         .map_err(|e| WasmImporterError::ExportSignatureMismatch {
             name: "metadata",
-            source: anyhow::Error::from(e),
+            error: anyhow::Error::from(e),
         })?;
 
     let packed = metadata.call(&mut store, ()).map_err(runtime_err)?;
@@ -766,9 +773,9 @@ impl Importer for WasmImporter {
         // trait boundary — keeps load and extract symmetric on file-
         // read failures, even though only the typed-error name is
         // observable to crate-internal callers.
-        let content = std::fs::read(path).map_err(|source| WasmImporterError::Io {
+        let content = std::fs::read(path).map_err(|error| WasmImporterError::Io {
             path: path.to_path_buf(),
-            source,
+            error,
         })?;
         let input = build_wasm_input(path, content, config);
         let output: ImporterOutput = self.call_msgpack("extract", &input)?;
@@ -780,9 +787,9 @@ impl Importer for WasmImporter {
         path: &Path,
         config: &ImporterConfig,
     ) -> anyhow::Result<EnrichedImportResult> {
-        let content = std::fs::read(path).map_err(|source| WasmImporterError::Io {
+        let content = std::fs::read(path).map_err(|error| WasmImporterError::Io {
             path: path.to_path_buf(),
-            source,
+            error,
         })?;
         let input = build_wasm_input(path, content, config);
         let output: EnrichedImporterOutput = self.call_msgpack("extract_enriched", &input)?;
@@ -897,6 +904,125 @@ fn parse_method(s: &str) -> Result<rustledger_ops::enrichment::CategorizationMet
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `{:#}`-style chain: the message, then each `source()` in turn.
+    fn chain(e: &dyn std::error::Error) -> String {
+        let mut out = e.to_string();
+        let mut cur = e.source();
+        while let Some(s) = cur {
+            out.push_str(": ");
+            out.push_str(&s.to_string());
+            cur = s.source();
+        }
+        out
+    }
+
+    /// One of every `WasmImporterError` variant. The match below is
+    /// exhaustive, so a variant added later without a case here fails to
+    /// compile.
+    fn every_wasm_importer_error() -> Vec<WasmImporterError> {
+        let all = vec![
+            WasmImporterError::Io {
+                path: "/x/a.wasm".into(),
+                error: std::io::Error::other("INNER-IO"),
+            },
+            WasmImporterError::DirEntry {
+                dir: "/x".into(),
+                error: std::io::Error::other("INNER-DIRENTRY"),
+            },
+            WasmImporterError::Compile {
+                path: "/x/a.wasm".into(),
+                error: anyhow::anyhow!("INNER-COMPILE").context("OUTER-COMPILE"),
+            },
+            WasmImporterError::ForbiddenImport {
+                module: "env".into(),
+                name: "f".into(),
+            },
+            WasmImporterError::MissingExport("extract"),
+            WasmImporterError::Runtime(anyhow::anyhow!("INNER-TRAP").context("OUTER-BACKTRACE")),
+            WasmImporterError::Decode(rmp_serde::decode::Error::Uncategorized(
+                "INNER-DECODE".into(),
+            )),
+            WasmImporterError::Encode(rmp_serde::encode::Error::Syntax("INNER-ENCODE".into())),
+            WasmImporterError::OutputTooLarge { len: 2, max: 1 },
+            WasmImporterError::InputTooLarge { len: 2, max: 1 },
+            WasmImporterError::ExportSignatureMismatch {
+                name: "metadata",
+                error: anyhow::anyhow!("INNER-SIG").context("OUTER-SIG"),
+            },
+            WasmImporterError::AbiVersionMissing {
+                export: "__rustledger_abi_version",
+                expected: 1,
+            },
+            WasmImporterError::AbiVersionMismatch {
+                found: 2,
+                expected: 1,
+            },
+        ];
+        for e in &all {
+            match e {
+                WasmImporterError::Io { .. }
+                | WasmImporterError::DirEntry { .. }
+                | WasmImporterError::Compile { .. }
+                | WasmImporterError::ForbiddenImport { .. }
+                | WasmImporterError::MissingExport(_)
+                | WasmImporterError::Runtime(_)
+                | WasmImporterError::Decode(_)
+                | WasmImporterError::Encode(_)
+                | WasmImporterError::OutputTooLarge { .. }
+                | WasmImporterError::InputTooLarge { .. }
+                | WasmImporterError::ExportSignatureMismatch { .. }
+                | WasmImporterError::AbiVersionMissing { .. }
+                | WasmImporterError::AbiVersionMismatch { .. } => {}
+            }
+        }
+        all
+    }
+
+    /// #2574: a variant that names its underlying error in its message must
+    /// not also return it from `source()`, or a `{:#}` chain prints it twice
+    /// (seven variants did). The message must still carry the cause, and for
+    /// an `anyhow` cause its whole chain, which `source()` used to.
+    #[test]
+    fn wasm_importer_errors_name_each_cause_once_2574() {
+        for e in every_wasm_importer_error() {
+            let chained = chain(&e);
+            assert_eq!(chained, e.to_string(), "the message is the whole chain");
+            for needle in [
+                "INNER-IO",
+                "INNER-DIRENTRY",
+                "INNER-COMPILE",
+                "OUTER-COMPILE",
+                "INNER-TRAP",
+                "OUTER-BACKTRACE",
+                "INNER-DECODE",
+                "INNER-ENCODE",
+                "INNER-SIG",
+                "OUTER-SIG",
+            ] {
+                assert!(
+                    chained.matches(needle).count() <= 1,
+                    "{needle} printed twice: {chained}"
+                );
+            }
+        }
+        let messages: Vec<String> = every_wasm_importer_error()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let all = messages.join("\n");
+        for needle in [
+            "INNER-IO",
+            "INNER-DIRENTRY",
+            "OUTER-COMPILE: INNER-COMPILE",
+            "OUTER-BACKTRACE: INNER-TRAP",
+            "INNER-DECODE",
+            "INNER-ENCODE",
+            "OUTER-SIG: INNER-SIG",
+        ] {
+            assert!(all.contains(needle), "{needle} missing from:\n{all}");
+        }
+    }
 
     #[test]
     fn wasm_runtime_config_default_is_sensible() {
@@ -1458,7 +1584,7 @@ mod tests {
         // Previously: silently surfaced as MissingExport("metadata"),
         // which is misleading because the export DOES exist. Now:
         // ExportSignatureMismatch names the export and includes the
-        // wasmtime type-mismatch error in the source chain.
+        // wasmtime type-mismatch error in its message.
         assert!(
             matches!(
                 err,

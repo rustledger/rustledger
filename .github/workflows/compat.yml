@@ -201,6 +201,14 @@ jobs:
         # scripts/format-bean-format-roundtrip.sh (#1324).
         run: |
           RLEDGER=./target/release/rledger ./scripts/format-bean-format-roundtrip.sh tests/compatibility/files
+      - name: bean-format blank lines over the corpus
+        # Input-anchored: formats each file with rledger AND bean-format and
+        # requires the blank lines to fall in the same places, file edges
+        # included. The roundtrip step above cannot see a deleted blank line
+        # (it is gone from both of its sides). See
+        # scripts/format-bean-format-blank-lines.sh (#2506).
+        run: |
+          RLEDGER=./target/release/rledger ./scripts/format-bean-format-blank-lines.sh tests/compatibility/files
       - name: Comment preservation over the corpus
         # `rledger format` must never DELETE the author's comments. The
         # idempotence and bean-format-roundtrip gates both miss this class

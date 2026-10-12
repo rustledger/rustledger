@@ -43,8 +43,13 @@ pub enum BookingError {
     Inventory(AccountedBookingError),
 
     /// Interpolation failed after booking.
+    ///
+    /// The message names the interpolation error, so it is not also the
+    /// `source()`: a `{:#}` chain would print it twice (#2574). `From` is
+    /// implemented by hand below for the same reason (`#[from]` implies
+    /// `#[source]`).
     #[error("interpolation failed: {0}")]
-    Interpolation(#[from] InterpolationError),
+    Interpolation(InterpolationError),
 
     /// A posting reached application with its units still elided, which means
     /// it never went through booking.
@@ -106,6 +111,12 @@ pub enum BookingError {
     },
 }
 
+impl From<InterpolationError> for BookingError {
+    fn from(e: InterpolationError) -> Self {
+        Self::Interpolation(e)
+    }
+}
+
 impl BookingError {
     /// The account this failure is about, when it names one.
     ///
@@ -123,7 +134,45 @@ impl BookingError {
             Self::Interpolation(e) => e.account(),
         }
     }
+
+    /// Where a diagnostic about this failure belongs in `txn`: the posting
+    /// the failure names, or `None` when it names none (the caller then
+    /// falls back to the whole directive).
+    ///
+    /// Shared by `rledger check` (the loader's booking pass) and the LSP, so
+    /// the editor squiggle and the CLI's line number point at the same
+    /// posting (#2330, #2510).
+    #[must_use]
+    pub fn posting_span(&self, txn: &Transaction) -> Option<rustledger_core::Span> {
+        let account = self.account()?;
+        txn.postings
+            .iter()
+            .find(|p| &p.value.account == account)
+            .map(|p| p.span)
+    }
+
+    /// The message a diagnostic for this failure carries: the failure,
+    /// then the transaction's date and narration so the reader can find it.
+    ///
+    /// Shared by `rledger check` and the LSP, so both say the same thing
+    /// about the same transaction (#2510).
+    #[must_use]
+    pub fn diagnostic_message(&self, txn: &Transaction) -> String {
+        format!("{} ({}, \"{}\")", self, txn.date, txn.narration)
+    }
 }
+
+/// The diagnostic code of a booking failure that no validation code
+/// describes.
+///
+/// `rledger check` (and every consumer of the loader's error stream: the
+/// WASM and FFI bindings, the report commands' refusal to run over an
+/// unbooked ledger) labels EVERY booking failure with it. The LSP gives a
+/// failure a validation code instead when one says exactly what went wrong
+/// (`rustledger_validate::ErrorCode::for_booking_failure`), and this label
+/// otherwise, so a failure no code describes reads the same in the editor
+/// as on the command line (#2510).
+pub const BOOKING_FAILURE_CODE: &str = "BOOK";
 
 /// Result of booking a single transaction.
 #[derive(Debug, Clone)]
@@ -1782,7 +1831,7 @@ impl BookingEngine {
     ///
     /// The transaction MUST already be booked — postings filled with complete
     /// units and resolved costs, as produced by [`Self::book_and_interpolate`]
-    /// or the free [`book`](crate::book) function. The loader pipeline
+    /// or the free [`book`](fn@crate::book) function. The loader pipeline
     /// guarantees this ordering. A caller that CANNOT guarantee booked input
     /// must not derive a figure from this lot-matching realization — e.g. the
     /// returns engine values **net units at market** (`rustledger-returns`),
@@ -2785,6 +2834,35 @@ mod tests {
     use super::*;
     use rust_decimal_macros::dec;
     use rustledger_core::{NaiveDate, Posting, PriceAnnotation};
+
+    /// The `{:#}`-style chain: the message, then each `source()` in turn.
+    fn chain(e: &dyn std::error::Error) -> String {
+        let mut out = e.to_string();
+        let mut cur = e.source();
+        while let Some(s) = cur {
+            out.push_str(": ");
+            out.push_str(&s.to_string());
+            cur = s.source();
+        }
+        out
+    }
+
+    /// #2574: `BookingError::Interpolation` names the interpolation error in
+    /// its message and used to return it from `source()` as well, so a
+    /// `{:#}` chain printed it twice.
+    #[test]
+    fn interpolation_error_names_its_cause_once_2574() {
+        let inner = InterpolationError::MultipleMissing {
+            currency: "USD".into(),
+            count: 2,
+        };
+        let inner_text = inner.to_string();
+        let e = BookingError::from(inner);
+        let chained = chain(&e);
+        assert_eq!(chained, e.to_string(), "the message is the whole chain");
+        assert_eq!(chained.matches(&inner_text).count(), 1, "{chained}");
+        assert!(chained.starts_with("interpolation failed: "), "{chained}");
+    }
 
     #[test]
     fn half_unit_in_last_place_is_half_the_last_digit_written() {

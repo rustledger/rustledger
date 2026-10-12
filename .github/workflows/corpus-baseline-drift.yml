@@ -1,4 +1,6 @@
-# Report parser-baseline drift that no pull request would otherwise carry.
+# Report corpus-baseline drift that no pull request would otherwise carry, for
+# both manifests under tests/baselines/ (parser output and CST shape; the CST
+# one was not checked until #2511).
 #
 # The baseline gate in `parser-baselines.yml` runs on every PR, but it cannot
 # catch this class, for two reasons that are both deliberate:

@@ -1088,7 +1088,7 @@ impl MainLoopState {
     ///
     /// A URI that does not resolve to a path yields the no-grouping default,
     /// as does a buffer outside the loaded ledger — see
-    /// [`LedgerState::grouping_style_for`].
+    /// [`LedgerState::grouping_style_for`](crate::ledger_state::LedgerState::grouping_style_for).
     fn with_grouping_style<T>(
         &self,
         uri: &Uri,

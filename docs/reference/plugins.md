@@ -499,7 +499,7 @@ plugin "beancount.plugins.currency_accounts"
 ; Generates postings through Equity:CurrencyAccounts:EUR and Equity:CurrencyAccounts:USD
 ```
 
-Options: The base account (default `Equity:CurrencyAccounts`; a value that is not a valid account name falls back to it). A processed transaction is marked `currency_accounts_processed: TRUE`.
+Options: The base account (default `Equity:CurrencyAccounts`; a value that is not a valid account name falls back to it; beancount 3's plugin fails without a config, rledger's uses the default). A processed transaction is marked `currency_accounts_processed: TRUE`.
 
 ### document_discovery
 

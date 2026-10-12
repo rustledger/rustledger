@@ -589,7 +589,28 @@ fn native_and_python_implementations_agree() {
 fn native_plugins_without_a_python_twin_match_beancount() {
     // Validators: (plugin and config, ledger body after a header line and a
     // blank line, what bean-check prints).
-    let validators: [(&str, &str, &[&str]); 7] = [
+    let validators: [(&str, &str, &[&str]); 9] = [
+        (
+            // The average in Python's decimal arithmetic: a `{{total}}` lot's
+            // 28-digit cost, each product and sum rounded to 28 digits.
+            "check_average_cost",
+            "2020-01-01 open Assets:S \"NONE\"\n2020-01-01 open Assets:C\n\
+             2020-01-02 * \"buy\"\n  Assets:S  3 STK {{100 USD}}\n  Assets:S  1 STK {50 USD}\n  Assets:C\n\
+             2020-01-03 * \"sell off\"\n  Assets:S  -1 STK {10 USD}\n  Assets:C\n",
+            &[
+                "ledger.beancount:9: error[PLUGIN]: Cost basis on reducing posting is too far from the average cost (10 vs. 37.5000000000000000000000000)",
+            ],
+        ),
+        (
+            // Numbers print as Python's `str(Decimal)`: `1E-7`.
+            "check_average_cost",
+            "2020-01-01 open Assets:S \"NONE\"\n2020-01-01 open Assets:C\n\
+             2020-01-02 * \"buy\"\n  Assets:S  10 STK {0.00000100 USD}\n  Assets:C\n\
+             2020-01-03 * \"sell\"\n  Assets:S  -1 STK {0.0000001 USD}\n  Assets:C\n",
+            &[
+                "ledger.beancount:8: error[PLUGIN]: Cost basis on reducing posting is too far from the average cost (1E-7 vs. 0.00000100)",
+            ],
+        ),
         (
             // A `{{total}}` cost prints at Python's 28 digits.
             "check_average_cost\" \"0.1",
@@ -892,7 +913,7 @@ fn native_plugins_without_a_python_twin_match_beancount() {
     }
     assert!(
         mismatches.is_empty(),
-        "{} mismatches with beancount across the 16 cases:\n{}",
+        "{} mismatches with beancount across the 18 cases:\n{}",
         mismatches.len(),
         mismatches.join("\n")
     );

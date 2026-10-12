@@ -71,7 +71,9 @@ impl NativePlugin for CurrencyAccountsPlugin {
         use std::str::FromStr;
 
         // The base account from the config, when it is a valid account
-        // name; the default otherwise, as beancount's plugin falls back. Any
+        // name; the default otherwise, as beancount's plugin falls back.
+        // With no config at all beancount 3's plugin fails (its `config`
+        // argument is required); the default is used here. Any
         // non-empty text was used before, so `"not an account"` made accounts
         // named `not an account:EUR` that no printer could write (#2600).
         let base_account = input
@@ -281,10 +283,12 @@ impl NativePlugin for CurrencyAccountsPlugin {
             }
 
             // Append neutralizing postings, in the order the groups first
-            // appear. Deliberate divergence: beancount's plugin also moves
-            // each group's postings together ahead of its neutralizer; the
-            // written postings keep their order here, as `zerosum` keeps
-            // its (see the note there).
+            // appear in the transaction as rledger books it. Deliberate
+            // divergence: beancount's plugin also moves each group's postings
+            // together ahead of its neutralizer, and beancount's booking has
+            // already regrouped the postings by weight currency, so its order
+            // can differ; the written postings keep their order here, as
+            // `zerosum` keeps its (see the note there).
             for group_key in &group_order {
                 let Some(inv) = group_inv.get(group_key) else {
                     continue;

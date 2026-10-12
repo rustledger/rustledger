@@ -35,6 +35,12 @@ use super::utils::at_entry;
 /// counts here and can widen the tolerance (a cash leg booking computed as
 /// `40.00` allows 0.01 where beancount allows none).
 ///
+/// Amounts tied in beancount's print order (same-length currencies outside
+/// its list, equal numbers) print in the order the postings come in, which
+/// can differ from beancount's: its booking regroups a transaction's
+/// postings by weight currency before plugins run, rledger's keeps them as
+/// written.
+///
 /// Deliberate divergence: a `@@` total price is used exactly. beancount
 /// turns it into a 28-digit per-unit price and multiplies back, so `-3 AAA
 /// @@ 40 USD` against 40 USD of proceeds fails there by 1e-26.

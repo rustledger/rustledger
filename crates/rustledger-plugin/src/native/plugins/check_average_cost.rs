@@ -6,6 +6,8 @@ use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutp
 use super::super::{NativePlugin, RegularPlugin};
 use super::py_literal::{self, PyValue};
 use super::utils::at_entry;
+use bigdecimal::{BigDecimal, Signed, Zero};
+use rustledger_core::decimal::to_bigdecimal;
 
 /// Plugin that validates reducing postings against the running average cost
 /// for accounts opened with the `NONE` booking method.
@@ -56,7 +58,6 @@ impl NativePlugin for CheckAverageCostPlugin {
     fn process(&self, input: PluginInput) -> PluginOutput {
         use rust_decimal::Decimal;
         use std::collections::{HashMap, HashSet};
-        use std::str::FromStr;
 
         let keep = || (0..input.directives.len()).map(PluginOp::Keep).collect();
         // The tolerance, a Python float, as beancount's `eval`s it; anything
@@ -79,8 +80,8 @@ impl NativePlugin for CheckAverageCostPlugin {
         // the binary float, so with `0.1` its lower bound is 0.9000000000000000222
         // and a cost of exactly 90% of the average fails there. The bounds
         // here are exact decimals, so a cost exactly at a bound passes.
-        let min_tolerance = Decimal::ONE - tolerance;
-        let max_tolerance = Decimal::ONE + tolerance;
+        let min_tolerance = to_bigdecimal(Decimal::ONE - tolerance);
+        let max_tolerance = to_bigdecimal(Decimal::ONE + tolerance);
 
         // First pass: collect accounts opened with the NONE booking method.
         // Only these accounts are subject to the average-cost check — see the
@@ -99,14 +100,15 @@ impl NativePlugin for CheckAverageCostPlugin {
             .collect();
 
         // The account's inventory, as beancount keeps it: per (account,
-        // currency, cost currency), every posting added at the cost it was
-        // booked at, a reduction included. Under NONE booking a sale is a
-        // negative lot at its own cost, so the average after it is the
+        // currency, cost currency), its lots, every posting added at the cost
+        // it was booked at, a reduction included. Under NONE booking a sale
+        // is a negative lot at its own cost, so the average after it is the
         // average of what the account actually holds (#2600: rledger removed
         // a sale at the average cost instead, and its average drifted from
-        // the ledger's from the first off-average sale on).
-        // Key -> (total units, total cost).
-        let mut inventory: HashMap<(&str, &str, &str), (Decimal, Decimal)> = HashMap::new();
+        // the ledger's from the first off-average sale on). The arithmetic is
+        // Python `decimal`'s (28 significant digits), so the average prints
+        // as beancount prints it.
+        let mut inventory: HashMap<(&str, &str, &str), Vec<Lot>> = HashMap::new();
 
         let mut errors = Vec::new();
 
@@ -127,28 +129,28 @@ impl NativePlugin for CheckAverageCostPlugin {
                 let Some(cost_currency) = &cost.currency else {
                     continue;
                 };
-                let Ok(units_num) = Decimal::from_str(&units.number) else {
+                let Some(units_num) = py_decimal::parse(&units.number) else {
                     continue;
                 };
-                // `per_unit()` covers both PerUnit and PerUnitFromTotal.
-                let Some(cost_text) = cost.number.as_ref().and_then(|cn| cn.per_unit()) else {
+                // A posting of no units changes nothing (and has no per-unit
+                // cost to derive from a total).
+                if units_num.is_zero() {
                     continue;
-                };
-                let Ok(cost_number) = Decimal::from_str(cost_text) else {
-                    continue;
-                };
-                // The cost as beancount prints it: a `{{total}}` cost is
-                // booked as `total / units` at Python's 28 digits, where
-                // `rust_decimal` keeps 29.
-                let shown_cost = match &cost.number {
+                }
+                // The cost number as beancount books it: as written, or for a
+                // `{{total}}` cost `total / units` at Python's 28 digits.
+                let cost_number = match &cost.number {
                     Some(rustledger_plugin_types::CostNumberData::PerUnitFromTotal {
                         total,
                         ..
-                    }) => Decimal::from_str(total).map_or_else(
-                        |_| cost_text.to_string(),
-                        |t| python_quotient(t, units_num.abs()),
-                    ),
-                    _ => cost_text.to_string(),
+                    }) => py_decimal::parse(total).map(|t| py_decimal::div(&t, &units_num.abs())),
+                    other => other
+                        .as_ref()
+                        .and_then(|cn| cn.per_unit())
+                        .and_then(py_decimal::parse),
+                };
+                let Some(cost_number) = cost_number else {
+                    continue;
                 };
 
                 let key = (
@@ -156,32 +158,36 @@ impl NativePlugin for CheckAverageCostPlugin {
                     units.currency.as_str(),
                     cost_currency.as_str(),
                 );
-                let (total_units, total_cost) = inventory
-                    .entry(key)
-                    .or_insert((Decimal::ZERO, Decimal::ZERO));
+                let lots = inventory.entry(key).or_default();
 
                 // A reduction is checked against the average before it, when
                 // the account holds any (beancount skips a zero total).
-                if units_num < Decimal::ZERO
-                    && !total_units.is_zero()
-                    && let Some(average) = total_cost.checked_div(*total_units)
+                if units_num.is_negative()
+                    && let Some(average) = average_cost(lots)
                 {
-                    let min_valid = average * min_tolerance;
-                    let max_valid = average * max_tolerance;
+                    let min_valid = py_decimal::mul(&average, &min_tolerance);
+                    let max_valid = py_decimal::mul(&average, &max_tolerance);
                     if !(min_valid <= cost_number && cost_number <= max_valid) {
                         errors.push(at_entry(
                             PluginError::error(format!(
                                 "Cost basis on reducing posting is too far from the average cost ({} vs. {})",
-                                shown_cost,
-                                python_quotient(*total_cost, *total_units)
+                                py_decimal::to_str(&cost_number),
+                                py_decimal::to_str(&average)
                             )),
                             wrapper,
                         ));
                     }
                 }
 
-                *total_units += units_num;
-                *total_cost += units_num * cost_number;
+                add_position(
+                    lots,
+                    Lot {
+                        cost: cost_number,
+                        date: cost.date.clone(),
+                        label: cost.label.clone(),
+                        units: units_num,
+                    },
+                );
             }
         }
 
@@ -210,28 +216,188 @@ fn parse_float(config: &str) -> Option<rust_decimal::Decimal> {
         .ok()
 }
 
-/// `a / b` printed as Python's `decimal` prints it in its default context: an
-/// exact quotient at its ideal scale, an inexact one rounded half-even to 28
-/// significant digits (`rust_decimal` keeps one more).
-fn python_quotient(a: rust_decimal::Decimal, b: rust_decimal::Decimal) -> String {
-    use bigdecimal::{BigDecimal, RoundingMode};
-    use rustledger_core::decimal::{checked_div_python_scale, to_bigdecimal};
-    let Some(quotient) = checked_div_python_scale(a, b) else {
-        return String::new();
-    };
-    let (a, b_big) = (to_bigdecimal(a), to_bigdecimal(b));
-    // Exact only if it multiplies back exactly: `Decimal`'s own product
-    // rounds, and would call 16.666...667 × 15 exactly 250.
-    if to_bigdecimal(quotient) * &b_big == a {
-        return quotient.to_string();
+/// One lot of a beancount inventory.
+struct Lot {
+    cost: BigDecimal,
+    date: Option<String>,
+    label: Option<String>,
+    units: BigDecimal,
+}
+
+/// `Inventory.add_position`: the units join the lot of the same cost, date
+/// and label, which goes when it reaches zero; else they are a new lot.
+fn add_position(lots: &mut Vec<Lot>, lot: Lot) {
+    if let Some(i) = lots
+        .iter()
+        .position(|l| l.cost == lot.cost && l.date == lot.date && l.label == lot.label)
+    {
+        let units = py_decimal::add(&lots[i].units, &lot.units);
+        if units.is_zero() {
+            lots.remove(i);
+        } else {
+            lots[i].units = units;
+        }
+    } else if !lot.units.is_zero() {
+        lots.push(lot);
     }
-    let exact: BigDecimal = a / b_big;
-    exact
-        .with_precision_round(
-            std::num::NonZeroU64::new(28).expect("28"),
+}
+
+/// `Inventory.average()`'s cost: the lots' total cost over their total
+/// units, `None` when the units sum to zero.
+fn average_cost(lots: &[Lot]) -> Option<BigDecimal> {
+    let zero = BigDecimal::from(0);
+    let mut total_units = zero.clone();
+    let mut total_cost = zero.clone();
+    for lot in lots {
+        total_units = py_decimal::add(&total_units, &lot.units);
+        total_cost = py_decimal::add(&total_cost, &py_decimal::mul(&lot.units, &lot.cost));
+    }
+    (total_units != zero).then(|| py_decimal::div(&total_cost, &total_units))
+}
+
+/// Python `decimal` arithmetic in its default context (28 significant
+/// digits, half-even), and its `str`, on `BigDecimal`.
+mod py_decimal {
+    use bigdecimal::{BigDecimal, RoundingMode, Signed, Zero};
+    use std::num::NonZeroU64;
+
+    const PRECISION: u64 = 28;
+
+    fn digits(x: &BigDecimal) -> u64 {
+        let (int, _) = x.as_bigint_and_exponent();
+        if int.is_zero() {
+            1
+        } else {
+            int.abs().to_string().len() as u64
+        }
+    }
+
+    /// A result rounded to the context's precision when it has more digits.
+    fn round(x: BigDecimal) -> BigDecimal {
+        if digits(&x) > PRECISION {
+            x.with_precision_round(
+                NonZeroU64::new(PRECISION).expect("28"),
+                RoundingMode::HalfEven,
+            )
+        } else {
+            x
+        }
+    }
+
+    /// A decimal literal, as `Decimal("...")` reads it.
+    pub(super) fn parse(text: &str) -> Option<BigDecimal> {
+        text.parse().ok()
+    }
+
+    fn scale(x: &BigDecimal) -> i64 {
+        x.as_bigint_and_exponent().1
+    }
+
+    /// `a + b` at Python's exponent, the smaller of the two (`BigDecimal`
+    /// drops it when an operand is zero: `0E-25 + -10.0` must stay at 25
+    /// places).
+    pub(super) fn add(a: &BigDecimal, b: &BigDecimal) -> BigDecimal {
+        let places = scale(a).max(scale(b));
+        round((a + b).with_scale(places))
+    }
+
+    /// `a * b` at Python's exponent, the sum of the two.
+    pub(super) fn mul(a: &BigDecimal, b: &BigDecimal) -> BigDecimal {
+        let places = scale(a) + scale(b);
+        round((a * b).with_scale(places))
+    }
+
+    /// `a / b`: an exact quotient at the ideal exponent `exp(a) - exp(b)`
+    /// where that is exact, else rounded to 28 digits.
+    pub(super) fn div(a: &BigDecimal, b: &BigDecimal) -> BigDecimal {
+        let (_, scale_a) = a.as_bigint_and_exponent();
+        let (_, scale_b) = b.as_bigint_and_exponent();
+        let ideal = scale_a - scale_b;
+        let quotient = a / b;
+        if &(&quotient * b) == a {
+            let reduced = quotient.normalized();
+            let (_, scale) = reduced.as_bigint_and_exponent();
+            let exact = if scale < ideal {
+                reduced.with_scale(ideal)
+            } else {
+                reduced
+            };
+            if digits(&exact) <= PRECISION {
+                return exact;
+            }
+        }
+        round(quotient.with_precision_round(
+            NonZeroU64::new(PRECISION + 10).expect("38"),
             RoundingMode::HalfEven,
-        )
-        .to_plain_string()
+        ))
+    }
+
+    /// `str(Decimal)`: plain, or scientific when the exponent is positive
+    /// or the number is smaller than 1E-6 (`1E-7`, `0E-25`).
+    pub(super) fn to_str(x: &BigDecimal) -> String {
+        let (int, scale) = x.as_bigint_and_exponent();
+        let negative = int.is_negative();
+        let coefficient = int.abs().to_string();
+        let exponent = -scale;
+        let adjusted = exponent + coefficient.len() as i64 - 1;
+        let sign = if negative { "-" } else { "" };
+        if exponent <= 0 && adjusted >= -6 {
+            let point = coefficient.len() as i64 + exponent;
+            if exponent == 0 {
+                format!("{sign}{coefficient}")
+            } else if point > 0 {
+                let (head, tail) = coefficient.split_at(point as usize);
+                format!("{sign}{head}.{tail}")
+            } else {
+                format!("{sign}0.{}{coefficient}", "0".repeat((-point) as usize))
+            }
+        } else {
+            let (head, tail) = coefficient.split_at(1);
+            let tail = if tail.is_empty() {
+                String::new()
+            } else {
+                format!(".{tail}")
+            };
+            let exp_sign = if adjusted >= 0 { "+" } else { "" };
+            format!("{sign}{head}{tail}E{exp_sign}{adjusted}")
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// Each against Python's `decimal` in its default context.
+        #[test]
+        fn arithmetic_and_str_follow_python_decimal() {
+            let d = |s: &str| parse(s).unwrap();
+            assert_eq!(
+                to_str(&div(&d("250"), &d("15"))),
+                "16.66666666666666666666666667"
+            );
+            assert_eq!(to_str(&div(&d("7"), &d("2"))), "3.5");
+            assert_eq!(to_str(&div(&d("1.00"), &d("2"))), "0.50");
+            assert_eq!(to_str(&div(&d("10"), &d("4"))), "2.5");
+            assert_eq!(to_str(&d("0.0000001")), "1E-7");
+            assert_eq!(to_str(&d("0.00000100")), "0.00000100");
+            assert_eq!(to_str(&d("-6.50")), "-6.50");
+            let third = div(&d("100"), &d("3"));
+            assert_eq!(
+                to_str(&mul(&d("3"), &third)),
+                "99.99999999999999999999999999"
+            );
+            let zero = add(
+                &d("-100.0000000000000000000000000"),
+                &d("100.0000000000000000000000000"),
+            );
+            assert_eq!(to_str(&zero), "0E-25");
+            assert_eq!(
+                to_str(&add(&zero, &d("-10.0"))),
+                "-10.0000000000000000000000000"
+            );
+            assert_eq!(to_str(&add(&d("0E-25"), &d("0"))), "0E-25");
+        }
+    }
 }
 
 impl RegularPlugin for CheckAverageCostPlugin {}

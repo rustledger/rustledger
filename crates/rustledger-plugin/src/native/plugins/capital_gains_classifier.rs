@@ -295,8 +295,9 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
 
                         // Long-term means held more than one calendar year:
                         // the sale falls after the lot's one-year anniversary.
-                        // jiff anniversaries a Feb-29 acquisition to Feb-28.
-                        // Same rule as the `capgains` report's `is_long_term`.
+                        // A Feb-29 acquisition's anniversary is Feb 28 (jiff
+                        // clamps), as in reds' relativedelta. Same rule as the
+                        // `capgains` report's `is_long_term`.
                         let is_long_term = cost_date
                             .checked_add(jiff::Span::new().years(1))
                             .is_ok_and(|one_year| entry_date > one_year);

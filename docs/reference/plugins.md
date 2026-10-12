@@ -593,19 +593,36 @@ Options: Base currency code (e.g., `"USD"`)
 
 ### long_short
 
-Classifies capital gains transactions as short-term or long-term based on holding period. Adds metadata `holding_period: "short"` or `holding_period: "long"`.
+Rebooks capital gains into short-term and long-term accounts, lot by lot, by holding period, as `beancount_reds_plugins.capital_gains_classifier.long_short` does. A lot is long-term when the sale falls after its one-year anniversary (a Feb 29 acquisition's anniversary is Feb 28), the rule `rledger report capgains` uses. Accounts it books to that the ledger doesn't open are opened for you.
 
 ```beancount
-plugin "beancount.plugins.long_short"
+plugin "beancount_reds_plugins.capital_gains_classifier.long_short" "{
+  'Income.*:Capital-Gains': [':Capital-Gains', ':Capital-Gains:Short', ':Capital-Gains:Long']
+}"
 
-2024-01-15 * "Sell AAPL"
-  Assets:Brokerage  -10 AAPL {100 USD, 2023-01-01} @ 150 USD
-  Assets:Cash        1500 USD
-  Income:CapitalGains
-; Gets holding_period: "long" (held > 1 year)
+2023-01-01 open Assets:Brokerage
+2023-01-01 open Assets:Cash
+2023-01-01 open Income:Capital-Gains
+
+2023-01-10 * "Buy AAPL"
+  Assets:Brokerage   10 AAPL {100 USD}
+  Assets:Cash     -1000 USD
+
+2024-03-01 * "Buy AAPL"
+  Assets:Brokerage   10 AAPL {120 USD}
+  Assets:Cash     -1200 USD
+
+2024-06-03 * "Sell AAPL"
+  Assets:Brokerage  -10 AAPL {100 USD, 2023-01-10} @ 150 USD
+  Assets:Brokerage  -10 AAPL {120 USD, 2024-03-01} @ 150 USD
+  Assets:Cash        3000 USD
+  Income:Capital-Gains
+; Income:Capital-Gains becomes:
+;   Income:Capital-Gains:Short  -300 USD   (2024 lot, held under a year)
+;   Income:Capital-Gains:Long   -500 USD   (2023 lot)
 ```
 
-Options: None
+Options: required, a dict `{'account_regex': ['to_replace', 'short_replacement', 'long_replacement']}`. Postings to accounts matching `account_regex` are replaced, with `to_replace` in the account name swapped for `short_replacement` or `long_replacement`. Without a config the plugin changes nothing.
 
 ### nounused
 

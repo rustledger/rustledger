@@ -8201,14 +8201,22 @@ fn test_capital_gains_long_short_one_year_boundary() {
         ("2025-12-31", "2024-01-15", "long"),  // 716 days, later month-day
         ("2025-02-28", "2024-02-29", "short"), // leap day: anniversary is Feb 28
         ("2025-03-01", "2024-02-29", "long"),
+        ("2024-02-29", "2023-02-28", "long"), // sold on a leap day: 366 days, past Feb 28
+        ("2025-01-31", "2024-01-31", "short"), // 31-day month end: anniversary
+        ("2025-02-01", "2024-01-31", "long"), // 31-day month end: day after
+        ("2024-09-03", "2024-09-03", "short"), // same-day sale
     ];
-    for (sold, acquired, expected) in cases {
-        assert_eq!(
-            long_short_bucket(sold, acquired),
-            expected,
-            "acquired {acquired}, sold {sold}"
-        );
-    }
+    // Collect every mismatch so one run reports all of them.
+    let mismatches: Vec<String> = cases
+        .iter()
+        .filter_map(|&(sold, acquired, expected)| {
+            let got = long_short_bucket(sold, acquired);
+            (got != expected).then(|| {
+                format!("acquired {acquired}, sold {sold}: expected {expected}, got {got}")
+            })
+        })
+        .collect();
+    assert!(mismatches.is_empty(), "{}", mismatches.join("\n"));
 }
 
 /// Reduction posting with NO cost date, generic `Income:Capital-Gains`

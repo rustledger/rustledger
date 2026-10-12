@@ -232,6 +232,19 @@ pub enum BookingError {
         /// Whether `stated` and `pool` are totals rather than per-unit costs.
         total: bool,
     },
+    /// An AVERAGE sale's cost spec writes a date or label (#2627).
+    ///
+    /// An AVERAGE sale sells from the account's pool, one lot with no date or
+    /// label, so a date or label written on its spec describes a lot that does
+    /// not exist, as on a `{*}` sale ([`MergeSpecMismatch::DateOrLabel`]). It
+    /// used to be dropped without a word.
+    AverageSpecDateOrLabel {
+        /// The commodity being reduced (e.g. `AAPL`).
+        currency: crate::Currency,
+        /// The date or label as the spec writes it (`2024-01-02`,
+        /// `"lot-a"`).
+        stated: String,
+    },
     /// The arithmetic left `rust_decimal`'s ~±7.9e28 range (#1863).
     ///
     /// Reported rather than clamped: `Decimal::MIN == -Decimal::MAX`, so
@@ -289,6 +302,16 @@ pub enum MergeSpecMismatch {
     /// merge and checks the spec against its pool before interpolation solves
     /// the units, so there is nothing to merge yet (#2418).
     UnitsElided,
+}
+
+/// A cost spec's date or label as written (`2024-01-02`, `"lot-a"`), the date
+/// first when it has both, or `None` when it has neither.
+fn spec_date_or_label(spec: &CostSpec) -> Option<String> {
+    match (&spec.date, &spec.label) {
+        (Some(date), _) => Some(date.to_string()),
+        (None, Some(label)) => Some(format!("\"{label}\"")),
+        (None, None) => None,
+    }
 }
 
 impl fmt::Display for MergeSpecMismatch {
@@ -436,6 +459,11 @@ impl fmt::Display for BookingError {
                  average, not the total {stated} the cost spec states; write the pool's cost \
                  or leave the spec empty"
             ),
+            Self::AverageSpecDateOrLabel { currency, stated } => write!(
+                f,
+                "AVERAGE pool of {currency} is one lot with no date or label, so the cost \
+                 spec's {stated} describes no lot; remove it"
+            ),
             Self::Overflow(e) => write!(f, "{e}"),
         }
     }
@@ -490,7 +518,8 @@ impl fmt::Display for AccountedBookingError {
             BookingError::Overflow(e) => write!(f, "{}: {e}", self.account),
             BookingError::MergeMismatch { .. }
             | BookingError::MergeSpecMismatch { .. }
-            | BookingError::AverageSpecMismatch { .. } => {
+            | BookingError::AverageSpecMismatch { .. }
+            | BookingError::AverageSpecDateOrLabel { .. } => {
                 write!(f, "{}: {}", self.account, self.error)
             }
             BookingError::InsufficientUnits {
@@ -2967,6 +2996,24 @@ impl Inventory {
         method: BookingMethod,
     ) -> Result<BookingResult, BookingError> {
         let spec = cost_spec.cloned().unwrap_or_default();
+
+        // An AVERAGE sale takes from the account's pool, one undated,
+        // unlabeled lot, so a date or label on its spec describes no lot and is
+        // refused rather than dropped (#2627), as on a `{*}` sale (#2398,
+        // where booking reports it in the merge's own words). Here rather than
+        // in booking alone so every walk agrees: a sale written with its units
+        // elided never reaches booking's lot matching, and is reduced first
+        // by `apply`. A booked AVERAGE sale carries the pool's undated cost,
+        // so replaying one never trips this.
+        if method == BookingMethod::Average
+            && !spec.merge
+            && let Some(stated) = spec_date_or_label(&spec)
+        {
+            return Err(BookingError::AverageSpecDateOrLabel {
+                currency: units.currency.clone(),
+                stated,
+            });
+        }
 
         // Force a uniquely-owned positions Vector before any reduction mutates
         // it. `self.positions` MAY be structurally shared — BQL snapshots build

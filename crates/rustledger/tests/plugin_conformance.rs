@@ -18,9 +18,11 @@
 //! | Python compat layer | `beancount.core.realization` and `.compare`, as beancount's `leafonly` and `noduplicates` use them | check |
 //! | native vs Python | each plugin with both implementations reports beancount's message, severity and location either way | check |
 //! | native vs beancount | the nine native plugins the compat layer cannot run beancount's module for give bean-check's text or bean-query's rows | check, query |
+//! | native vs Python | `noduplicates` reports a copy of every directive type but `price` at bean-check's lines, natively and as beancount's plugin in the compat layer | check |
 //! | WASM importer (a `wasm_importer_main!` guest) | `extract --wasm-importer x.wasm` | extract |
 //! | WASM importer + `importers.toml` `[payees]` | `extract --wasm-importer x.wasm` | extract |
 //! | WASM + Python | an entry returned whole keeps its tags and links (notes and documents) | query |
+//! | Python compat layer | events, queries and prices (`@@` as per-unit) read as beancount presents them, and return unchanged | check, query |
 //!
 //! And the LIMITS of each sandboxed kind (WASM plugin, Python plugin,
 //! WASM importer), through the same commands:
@@ -939,6 +941,229 @@ fn native_plugins_without_a_python_twin_match_beancount() {
         mismatches.len(),
         mismatches.join("\n")
     );
+}
+
+/// A ledger with a copy of every directive type `noduplicates` compares,
+/// and near-copies it must not report, after a header line and a blank line
+/// (#2599). Each `dup` line repeats the directive before it, differing at
+/// most in metadata, the order of tags, custom values or postings, or `@@`
+/// for `@`; each `distinct` line differs in a field that counts.
+const NODUPLICATES_LEDGER: &str = "\
+2024-01-01 open Assets:Bank USD
+2024-01-01 open Assets:Bank USD
+2024-01-01 open Assets:Old
+2024-01-01 open Equity:Opening
+2024-01-01 open Expenses:Food
+2024-01-01 commodity USD
+2024-01-01 commodity USD
+  name: \"US Dollar\"
+2024-01-02 pad Assets:Bank Equity:Opening
+2024-01-02 pad Assets:Bank Equity:Opening
+2024-01-03 balance Assets:Bank 10 USD
+2024-01-03 balance Assets:Bank 10 USD
+2024-01-03 balance Assets:Bank 10.00 USD
+2024-01-04 note Assets:Bank \"hello\" #a #b
+2024-01-04 note Assets:Bank \"hello\" #b #a
+2024-01-04 note Assets:Bank \"hello2\"
+2024-01-04 document Assets:Bank \"doc.pdf\"
+2024-01-04 document Assets:Bank \"doc.pdf\"
+2024-01-04 event \"location\" \"Paris\"
+2024-01-04 event \"location\" \"Paris\"
+2024-01-04 event \"location\" \"Rome\"
+2024-01-04 query \"q\" \"SELECT 1\"
+2024-01-04 query \"q\" \"SELECT 1\"
+2024-01-04 price USD 1 EUR
+2024-01-04 price USD 1 EUR
+2024-01-04 custom \"budget\" \"a\" Expenses:Food
+2024-01-04 custom \"budget\" Expenses:Food \"a\"
+2024-01-04 custom \"budget\" \"a\" \"Expenses:Food\"
+2024-01-05 * \"Shop\" \"Lunch\"
+  Assets:Bank  -10 USD
+  Expenses:Food  10 USD
+2024-01-05 * \"Shop\" \"Lunch\"
+  src: \"import\"
+  Expenses:Food  10 USD
+  Assets:Bank  -10 USD
+2024-01-05 ! \"Shop\" \"Lunch\"
+  Assets:Bank  -10 USD
+  Expenses:Food  10 USD
+2024-01-06 * \"Buy\"
+  Expenses:Food  2 HOOL @@ 10 USD
+  Assets:Bank
+2024-01-06 * \"Buy\"
+  Expenses:Food  2 HOOL @ 5 USD
+  Assets:Bank
+2024-06-01 close Assets:Old
+2024-06-01 close Assets:Old
+";
+
+/// `noduplicates` compares every directive type but `price`, as beancount's
+/// does (#2599; before, only transactions): on [`NODUPLICATES_LEDGER`] it
+/// reports the lines bean-check reports, natively and as beancount's own
+/// plugin (`compare.hash_entries(entries, exclude_meta=True)`) running in
+/// the Python compat layer.
+#[test]
+fn noduplicates_compares_every_directive_type() {
+    let write = |header: &str| {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("ledger.beancount"),
+            format!("{header}\n\n{NODUPLICATES_LEDGER}"),
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("doc.pdf"), "").unwrap();
+        dir
+    };
+    // What bean-check 3 reports for this ledger: "Duplicate entry" at each
+    // of these lines (open, commodity, pad, balance, note, document, event,
+    // query, custom, transaction, transaction, close).
+    let lines = [4, 9, 12, 14, 17, 20, 22, 25, 29, 34, 44, 48];
+
+    let dir = write("plugin \"beancount.plugins.noduplicates\"");
+    let native = run(dir.path(), &["check", "ledger.beancount"]);
+    native.failed_cleanly().lacks(PYTHON_RAN);
+    let native = plugin_diagnostics(&native);
+    let mut reported: Vec<usize> = native
+        .iter()
+        .map(|l| {
+            assert!(l.contains(" error[PLUGIN]: Duplicate entry: "), "{l}");
+            let line = l.strip_prefix("ledger.beancount:").expect(l);
+            line[..line.find(':').unwrap()].parse().unwrap()
+        })
+        .collect();
+    reported.sort_unstable();
+    assert_eq!(reported, lines, "{native:#?}");
+    // Each names the duplicate.
+    for message in [
+        "ledger.beancount:4: error[PLUGIN]: Duplicate entry: 2024-01-01 open Assets:Bank",
+        "ledger.beancount:9: error[PLUGIN]: Duplicate entry: 2024-01-01 commodity USD",
+        "ledger.beancount:12: error[PLUGIN]: Duplicate entry: 2024-01-02 pad Assets:Bank Equity:Opening",
+        "ledger.beancount:14: error[PLUGIN]: Duplicate entry: 2024-01-03 balance Assets:Bank 10 USD",
+        "ledger.beancount:17: error[PLUGIN]: Duplicate entry: 2024-01-04 note Assets:Bank \"hello\"",
+        "ledger.beancount:22: error[PLUGIN]: Duplicate entry: 2024-01-04 event \"location\" \"Paris\"",
+        "ledger.beancount:25: error[PLUGIN]: Duplicate entry: 2024-01-04 query \"q\"",
+        "ledger.beancount:29: error[PLUGIN]: Duplicate entry: 2024-01-04 custom \"budget\"",
+        "ledger.beancount:34: error[PLUGIN]: Duplicate entry: 2024-01-05 \"Lunch\"",
+        "ledger.beancount:44: error[PLUGIN]: Duplicate entry: 2024-01-06 \"Buy\"",
+        "ledger.beancount:48: error[PLUGIN]: Duplicate entry: 2024-06-01 close Assets:Old",
+    ] {
+        assert!(
+            native.iter().any(|l| l == message),
+            "{message}\n{native:#?}"
+        );
+    }
+
+    if python_ready() {
+        // beancount's `noduplicates`, whose code is not vendored here: the
+        // one call it makes.
+        let dir = write("plugin \"noduplicates.py\"");
+        std::fs::write(
+            dir.path().join("noduplicates.py"),
+            "from beancount.core import compare\n\
+             __plugins__ = ('validate_no_duplicates',)\n\
+             def validate_no_duplicates(entries, unused_options_map):\n    \
+                 unused_hashes, errors = compare.hash_entries(entries, exclude_meta=True)\n    \
+                 return entries, errors\n",
+        )
+        .unwrap();
+        let python = run(dir.path(), &["check", "ledger.beancount"]);
+        python.failed_cleanly().has(PYTHON_RAN).lacks("Traceback");
+        // Python's message goes on with both entries' reprs; the locations
+        // are what is compared.
+        let at = |diagnostics: Vec<String>| -> Vec<String> {
+            diagnostics
+                .into_iter()
+                .map(|l| l[..l.find(" error[PLUGIN]: Duplicate entry: ").expect(&l)].to_string())
+                .collect()
+        };
+        assert_eq!(
+            at(plugin_diagnostics(&python)),
+            at(native),
+            "{}",
+            python.text
+        );
+    }
+}
+
+/// A Python plugin sees an event's description, a query's string and a
+/// posting's price as beancount presents them (a `@@` total as the per-unit
+/// price), and entries it returns unchanged come back as written (#2599).
+/// Before, the compat layer read the wrong wire fields, so the description,
+/// the query and every price were empty, and returning any of those entries
+/// failed the whole plugin with a serialization error.
+#[test]
+fn python_compat_reads_events_queries_and_prices() {
+    if !python_ready() {
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("ledger.beancount"),
+        "plugin \"show.py\"\n\n\
+         2024-01-01 open Assets:Bank\n2024-01-01 open Assets:Stock\n\
+         2024-01-02 event \"location\" \"Paris\"\n\
+         2024-01-02 query \"cash\" \"SELECT account\"\n\
+         2024-01-03 * \"Buy\"\n  Assets:Stock  2 HOOL @@ 10.00 USD\n  Assets:Bank\n\
+         2024-01-04 * \"Buy\"\n  Assets:Stock  3 HOOL @ 4 USD\n  Assets:Bank\n\
+         2024-01-05 * \"Buy\"\n  Assets:Stock  3 HOOL @@ 10 USD\n  Assets:Bank\n",
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("show.py"),
+        "from beancount.core import data\n\
+         __plugins__ = ['show']\n\
+         def show(entries, options_map):\n    \
+             seen = []\n    \
+             for e in entries:\n        \
+                 if isinstance(e, data.Event):\n            \
+                     seen.append(f'event {e.type}={e.description}')\n        \
+                 elif isinstance(e, data.Query):\n            \
+                     seen.append(f'query {e.name}={e.query_string}')\n        \
+                 elif isinstance(e, data.Transaction):\n            \
+                     seen.append(f'price {e.postings[0].price.number} {e.postings[0].price.currency}')\n    \
+             return entries, [ValidationError(None, '; '.join(seen), None)]\n",
+    )
+    .unwrap();
+    run(dir.path(), &["check", "ledger.beancount"])
+        .has(PYTHON_RAN)
+        .has(
+            "event location=Paris; query cash=SELECT account; price 5.00 USD; price 4 USD; \
+             price 3.333333333333333333333333333 USD",
+        )
+        .lacks("serialization error");
+    // Returned unchanged, the entries are the ledger as written: the same
+    // postings, `@@` totals and weights, to the digit, as without the plugin.
+    let query = |dir: &Path| {
+        run(
+            dir,
+            &[
+                "query",
+                "-f",
+                "json",
+                "ledger.beancount",
+                "SELECT date, account, position, price, weight",
+            ],
+        )
+        .text
+        .lines()
+        // The JSON document, without the runtime's notice or the plugin's
+        // report.
+        .skip_while(|l| *l != "{")
+        .take_while(|l| *l != "}")
+        .collect::<Vec<_>>()
+        .join("\n")
+    };
+    let with_plugin = query(dir.path());
+    let source = std::fs::read_to_string(dir.path().join("ledger.beancount")).unwrap();
+    let bare = tempfile::tempdir().unwrap();
+    std::fs::write(
+        bare.path().join("ledger.beancount"),
+        source.replacen("plugin \"show.py\"", "", 1),
+    )
+    .unwrap();
+    let without = query(bare.path());
+    assert!(without.contains("\"10.00\""), "{without}");
+    assert_eq!(with_plugin, without);
 }
 
 /// `beancount.core.realization` and `beancount.core.compare`, which

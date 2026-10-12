@@ -644,3 +644,65 @@ fn every_directive_field_reaches_the_digest() {
         pairs.len(),
     );
 }
+
+/// A note's tags and links are part of its identity (#2598).
+///
+/// Notes carry tags and links since #2185 (#2160); until #2598 the Note arm
+/// left both out, so two notes differing only in tags shared a `meta.hash`.
+/// They now hash exactly as a Document's do: the counts always, then each
+/// element length-prefixed, so the tag/link partition cannot collide either.
+#[test]
+fn note_tags_and_links_are_part_of_the_identity() {
+    use rustledger_core::directive::Note;
+
+    fn note(tags: &[&str], links: &[&str]) -> Directive {
+        let mut n = Note::new(
+            naive_date(2024, 1, 1).unwrap(),
+            "Assets:A",
+            "called the bank",
+        );
+        n.tags = tags.iter().copied().map(Tag::new).collect();
+        n.links = links.iter().copied().map(Link::new).collect();
+        Directive::Note(n)
+    }
+
+    let pairs: Vec<(Directive, Directive, &str)> = vec![
+        (note(&[], &[]), note(&["t"], &[]), "a tag vs none"),
+        (note(&[], &[]), note(&[], &["t"]), "a link vs none"),
+        (note(&["a"], &[]), note(&["b"], &[]), "a different tag"),
+        (note(&[], &["a"]), note(&[], &["b"]), "a different link"),
+        (
+            note(&["t"], &[]),
+            note(&[], &["t"]),
+            "the same name as a tag vs as a link",
+        ),
+        (
+            note(&["a", "b"], &[]),
+            note(&["a"], &["b"]),
+            "tags [a, b] vs tags [a] links [b]",
+        ),
+        (
+            note(&[], &["a", "b"]),
+            note(&["a"], &["b"]),
+            "links [a, b] vs tags [a] links [b]",
+        ),
+        (
+            note(&["ab"], &[]),
+            note(&["a", "b"], &[]),
+            "tag \"ab\" vs tags [a, b]",
+        ),
+    ];
+    let collisions: Vec<&str> = pairs
+        .iter()
+        .filter(|(left, right, _)| hash(left) == hash(right))
+        .map(|(_, _, what)| *what)
+        .collect();
+    assert!(
+        collisions.is_empty(),
+        "{} of {} note tag/link cases collided: {collisions:#?}",
+        collisions.len(),
+        pairs.len(),
+    );
+    // The same tagged note hashes the same every time.
+    assert_eq!(hash(&note(&["a"], &["b"])), hash(&note(&["a"], &["b"])));
+}

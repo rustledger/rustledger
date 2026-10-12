@@ -104,14 +104,18 @@ pub fn python_match(regex: &regex::Regex, text: &str) -> bool {
     regex.find(text).is_some_and(|m| m.start() == 0)
 }
 
-/// Compile `pattern` for [`python_match`]: anchored at the start, so the
-/// first match found is the one at the start if there is one.
+/// Compile `pattern`, a Python regular expression, for [`python_match`].
+///
+/// It is read as Python's `re` reads it (see [`super::py_regex`]) and
+/// anchored at the start, so the first match found is the one at the start
+/// if there is one.
 ///
 /// # Errors
 ///
-/// The pattern is not a valid regular expression.
-pub fn python_match_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
-    regex::Regex::new(&format!("^(?:{pattern})"))
+/// The pattern is not a valid Python regular expression, or uses a construct
+/// rledger cannot express.
+pub fn python_match_regex(pattern: &str) -> Result<regex::Regex, super::py_regex::PyRegexError> {
+    super::py_regex::compile_match(pattern)
 }
 
 #[cfg(test)]

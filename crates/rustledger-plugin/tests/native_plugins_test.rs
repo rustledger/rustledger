@@ -1169,12 +1169,13 @@ fn test_noduplicates_distinct_posting_count_are_not_duplicates() {
     );
 }
 
-/// Posting order IS part of structural identity per beancount — two
-/// transactions with the same postings in different orders hash
-/// differently. This matches the Python `Posting` tuple being ordered
-/// inside `Transaction.postings: List[Posting]`.
+/// Posting order is NOT part of structural identity: beancount's
+/// `stable_hash_namedtuple` hashes a list element-wise and sorts the
+/// hashes, so bean-check reports the same postings in another order as a
+/// duplicate (#2599; this test asserted the opposite before, which the
+/// oracle contradicts).
 #[test]
-fn test_noduplicates_reordered_postings_are_not_duplicates() {
+fn test_noduplicates_reordered_postings_are_duplicates() {
     let plugin = NoDuplicatesPlugin;
     let input = make_input(vec![
         make_open("2024-01-01", "Assets:Bank"),
@@ -1197,10 +1198,10 @@ fn test_noduplicates_reordered_postings_are_not_duplicates() {
         ),
     ]);
     let output = process_and_materialize(&plugin, input);
-    assert!(
-        output.errors.is_empty(),
-        "reordered postings must not collide (postings are an ordered list in \
-         beancount), got: {:?}",
+    assert_eq!(
+        output.errors.len(),
+        1,
+        "reordered postings are a duplicate, as bean-check reports, got: {:?}",
         output.errors
     );
 }
@@ -1368,10 +1369,13 @@ fn test_noduplicates_total_vs_per_unit_cost_differ() {
     );
 }
 
-/// `@` (per-unit price) and `@@` (total price) are structurally
-/// different annotations.
+/// `@@` is compared as the per-unit price it stands for, as beancount's
+/// parser rewrites it before plugins run: `-5 AAPL @@ 875.00 USD` is
+/// `-5 AAPL @ 175.00 USD`, a duplicate in bean-check (#2599; this test
+/// asserted the opposite before). `@@ 875 USD` is `@ 175 USD`, not
+/// `@ 175.00 USD`: numbers keep their scale.
 #[test]
-fn test_noduplicates_unit_vs_total_price_differ() {
+fn test_noduplicates_total_price_is_its_per_unit_price() {
     let plugin = NoDuplicatesPlugin;
     let mut txn_a = make_transaction(
         "2024-01-15",
@@ -1411,16 +1415,29 @@ fn test_noduplicates_unit_vs_total_price_differ() {
             currency: None,
         });
     }
+    let mut txn_c = txn_b.clone();
+    if let DirectiveData::Transaction(t) = &mut txn_c.data {
+        t.postings[0]
+            .price
+            .as_mut()
+            .unwrap()
+            .amount
+            .as_mut()
+            .unwrap()
+            .number = "875".to_string();
+    }
     let input = make_input(vec![
         make_open("2024-01-01", "Assets:Stock"),
         make_open("2024-01-01", "Assets:Cash"),
         txn_a,
         txn_b,
+        txn_c,
     ]);
     let output = process_and_materialize(&plugin, input);
-    assert!(
-        output.errors.is_empty(),
-        "`@` and `@@` prices must not collide, got: {:?}",
+    assert_eq!(
+        output.errors.len(),
+        1,
+        "`@@ 875.00` is `@ 175.00`; `@@ 875` is neither, got: {:?}",
         output.errors
     );
 }
@@ -1588,19 +1605,19 @@ fn test_noduplicates_three_identical_reports_two_duplicates() {
     );
 }
 
-/// Non-transaction directives (Open, Close, etc.) are ignored by the
-/// plugin — they should never be flagged as duplicates, and their
-/// presence between transactions should not affect duplicate detection.
+/// Non-transaction directives are compared too, as bean-check compares
+/// them (#2599; this test asserted they were ignored before): two
+/// identical opens are a duplicate, and an open between two transactions
+/// does not collide with either.
 #[test]
-fn test_noduplicates_ignores_non_transaction_directives() {
+fn test_noduplicates_compares_non_transaction_directives() {
     let plugin = NoDuplicatesPlugin;
     let postings = vec![
         ("Expenses:Food", "5.00", "USD"),
         ("Assets:Bank", "-5.00", "USD"),
     ];
     let input = make_input(vec![
-        // Two identical opens — not a transaction, must be ignored by
-        // the plugin (validators handle duplicate opens separately).
+        // Two identical opens: a duplicate, as in bean-check.
         make_open("2024-01-01", "Assets:Bank"),
         make_open("2024-01-01", "Assets:Bank"),
         make_open("2024-01-01", "Expenses:Food"),
@@ -1613,9 +1630,8 @@ fn test_noduplicates_ignores_non_transaction_directives() {
     let output = process_and_materialize(&plugin, input);
     assert_eq!(
         output.errors.len(),
-        1,
-        "only the two real transaction duplicates should be flagged \
-         (non-transaction directives ignored), got: {:?}",
+        2,
+        "the second open and the second transaction, got: {:?}",
         output.errors
     );
 }
@@ -7922,9 +7938,9 @@ fn test_capital_gains_long_short_no_config_passthrough() {
     assert_eq!(output.directives.len(), 2);
 }
 
-/// Malformed config → plugin treats as no-op (the inner regex parse
-/// fails, plugin returns input unchanged). Pins the `parse_*_config
-/// → None → passthrough` branch.
+/// Malformed config → the plugin changes nothing and says why, as
+/// beancount's raises on a config `literal_eval` cannot read (#2601;
+/// before, it passed the input through silently).
 #[test]
 fn test_capital_gains_long_short_invalid_config_passthrough() {
     let plugin = CapitalGainsLongShortPlugin;
@@ -7936,7 +7952,14 @@ fn test_capital_gains_long_short_invalid_config_passthrough() {
         "this is not valid plugin config",
     );
     let output = process_and_materialize(&plugin, input);
-    assert!(output.errors.is_empty());
+    assert_eq!(output.errors.len(), 1, "{:?}", output.errors);
+    assert!(
+        output.errors[0]
+            .message
+            .starts_with("Invalid configuration for long_short"),
+        "{}",
+        output.errors[0].message
+    );
     assert_eq!(output.directives.len(), 2);
 }
 
@@ -8286,8 +8309,7 @@ fn test_capital_gains_gain_loss_no_config_passthrough() {
     assert_eq!(output.directives.len(), 2);
 }
 
-/// Malformed config → no-op (regex parse fails). Pins the
-/// `parse_gain_loss_config → None → passthrough` branch.
+/// Malformed config → the plugin changes nothing and says why (#2601).
 #[test]
 fn test_capital_gains_gain_loss_invalid_config_passthrough() {
     let plugin = CapitalGainsGainLossPlugin;
@@ -8299,7 +8321,14 @@ fn test_capital_gains_gain_loss_invalid_config_passthrough() {
         "{ malformed",
     );
     let output = process_and_materialize(&plugin, input);
-    assert!(output.errors.is_empty());
+    assert_eq!(output.errors.len(), 1, "{:?}", output.errors);
+    assert!(
+        output.errors[0]
+            .message
+            .starts_with("Invalid configuration for gain_loss"),
+        "{}",
+        output.errors[0].message
+    );
     assert_eq!(output.directives.len(), 2);
 }
 

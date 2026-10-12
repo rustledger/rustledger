@@ -139,7 +139,7 @@ rustledger includes 31 native plugins. Here are the most commonly used:
 | `coherent_cost` | A currency is held at cost everywhere or nowhere |
 | `commodity_attr` | Validate commodity metadata attributes |
 | `leafonly` | Restrict postings to leaf accounts |
-| `noduplicates` | Detect duplicate transactions |
+| `noduplicates` | Detect duplicate directives |
 | `nounused` | Warn about unused accounts |
 | `onecommodity` | One commodity per account |
 | `pedantic` | Strict validation rules |
@@ -195,7 +195,7 @@ rustledger includes 31 native plugins. Here are the most commonly used:
 | `generate_base_ccy_prices` | Create base currency price entries |
 | `implicit_prices` | Generate prices from costs |
 | `leafonly` | Error on non-leaf account postings |
-| `noduplicates` | Detect duplicate transactions |
+| `noduplicates` | Detect duplicate directives |
 | `nounused` | Warn on unused accounts |
 | `onecommodity` | Single commodity per account |
 | `pedantic` | Enable all strict validations |
@@ -297,7 +297,9 @@ Options: None
 
 ### noduplicates
 
-Detects duplicate transactions based on date, payee, narration, and amounts. Each later copy is an error, `Duplicate entry: 2024-01-02 "Lunch"`, at the copy. (Beancount follows `Duplicate entry:` with both entries' Python representations, and also compares directives other than transactions.)
+Detects duplicate directives of every type but `price`, as beancount's does. Two directives are duplicates when every field but their metadata is equal: a transaction's flag, payee, narration, tags, links and postings; an `open`'s account, currencies and booking method; a `balance`'s account, amount and tolerance; a `note`'s or `document`'s account, text or path, tags and links; and so on. Tags, links, an `open`'s currencies, a `custom` directive's values and a transaction's postings are compared without regard to order, and a total price is compared as the per-unit price it stands for (`2 HOOL @@ 10 USD` is `2 HOOL @ 5 USD`). Numbers keep their scale (`10 USD` is not `10.00 USD`), as in beancount. A repeated `price` is allowed: a price source commonly repeats one for a day the market was closed. Each later copy is an error at the copy, naming it: `Duplicate entry: 2024-01-02 "Lunch"` for a transaction, `Duplicate entry: 2024-01-04 note Assets:Bank "hello"` for another directive.
+
+Deliberate differences from beancount, which hashes the text of each field: beancount follows `Duplicate entry:` with both entries' Python representations; it does not compare the directive's type, so an `event "a" "b"` and a `query "a" "b"` on one date are duplicates there and not here; and it rounds the division of a total price or total cost to 28 digits, so `3 HOOL @@ 10 USD` is a duplicate of `3 HOOL @ 3.333333333333333333333333333 USD` there, while here a total that the per-unit number does not multiply back to exactly is compared as written.
 
 ```beancount
 plugin "beancount.plugins.noduplicates"
@@ -623,13 +625,15 @@ Options: None
 Renames accounts using regex patterns. Useful for bulk account reorganization.
 
 ```beancount
-plugin "beancount.plugins.rename_accounts" "{'Expenses:Food:(.*)': 'Expenses:Dining:$1'}"
+plugin "beancount.plugins.rename_accounts" "{'Expenses:Food:(.*)': 'Expenses:Dining:\\\\1'}"
 
 2024-01-01 open Expenses:Food:Groceries
 ; Becomes: 2024-01-01 open Expenses:Dining:Groceries
 ```
 
-Options: Python dict mapping regex patterns to replacement strings. Use `$1`, `$2` for capture groups.
+Options: Python dict mapping regex patterns to replacement strings, applied as Python's `re.sub` applies them: every match anywhere in the account name is replaced, and the replacement refers to a group as `\1` or `\g<name>` (`$1` is literal text). The beancount string and the Python string literal each consume one level of backslashes, so `\1` is written `\\\\1` in the file (or `r'...\\1'` with a raw Python string).
+
+Regular expressions in plugin configs (`rename_accounts`, `check_commodity`, `onecommodity`, `long_short`, `gain_loss`) are read as Python's `re` reads them. A construct Python supports and rledger cannot express (lookahead and lookbehind, backreferences, conditional and atomic groups, possessive quantifiers, `\N{...}`, the `(?a)` and `(?x)` flags, and the word boundaries `\b` and `\B`) is reported as an error naming the plugin and the construct, never matched differently. So is a `rename_accounts` pattern that can match the empty string, or that repeats something able to match empty: Python's `re.sub` substitutes those differently. With `(?i)`, case-insensitive matching of non-ASCII characters follows Unicode simple case folding, which differs from Python's for a few characters (Python matches `i` with the dotless `ı`).
 
 ### rx_txn_plugin
 

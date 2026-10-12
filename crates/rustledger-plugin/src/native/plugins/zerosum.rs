@@ -121,7 +121,7 @@ impl NativePlugin for ZerosumPlugin {
                 }
 
                 if let DirectiveData::Transaction(ref txn) = directive.data {
-                    for zs_account in zerosum_accounts.keys() {
+                    for (zs_account, _) in &zerosum_accounts {
                         if txn.postings.iter().any(|p| &p.account == zs_account) {
                             txn_indices.entry(zs_account.clone()).or_default().push(i);
                         }
@@ -136,7 +136,12 @@ impl NativePlugin for ZerosumPlugin {
         // ops for them and Keep ops for everything else.
         let mut modified_indices: HashSet<usize> = HashSet::new();
 
-        // For each zerosum account, find matching pairs
+        // For each zerosum account, find matching pairs, in the order the
+        // config lists them, as beancount_reds_plugins walks its
+        // `zerosum_accounts` dict. The order matters when one account's
+        // target is another zerosum account: the earlier one's matches are
+        // renamed before the later one is matched. Over a `HashMap` that
+        // order, and so the result, changed from run to run (#2625).
         for (zs_account, (target_account_opt, date_range)) in &zerosum_accounts {
             // Determine target account
             let target_account = target_account_opt.clone().unwrap_or_else(|| {
@@ -361,18 +366,15 @@ impl NativePlugin for ZerosumPlugin {
 
 impl RegularPlugin for ZerosumPlugin {}
 
+/// The configured zerosum accounts and their `(target, days)`, in config
+/// order.
+type ZerosumAccounts = Vec<(String, (Option<String>, i64))>;
+
 /// Parse the Python-style config dict.
 fn parse_config(
     config: &str,
-) -> Result<
-    (
-        HashMap<String, (Option<String>, i64)>,
-        Option<(String, String)>,
-        Decimal,
-    ),
-    String,
-> {
-    let mut zerosum_accounts = HashMap::new();
+) -> Result<(ZerosumAccounts, Option<(String, String)>, Decimal), String> {
+    let mut zerosum_accounts: ZerosumAccounts = Vec::new();
     let mut account_replace: Option<(String, String)> = None;
     let mut tolerance = Decimal::from_str(DEFAULT_TOLERANCE).unwrap();
 
@@ -413,7 +415,13 @@ fn parse_config(
                 Some(cap[2].to_string())
             };
             let days: i64 = cap[3].parse().unwrap_or(30);
-            zerosum_accounts.insert(account, (target, days));
+            // As in a Python dict: a repeated account keeps its first
+            // position and takes its last value.
+            if let Some(entry) = zerosum_accounts.iter_mut().find(|(a, _)| *a == account) {
+                entry.1 = (target, days);
+            } else {
+                zerosum_accounts.push((account, (target, days)));
+            }
         }
     }
 
@@ -790,15 +798,18 @@ mod tests {
 
         let (accounts, replace, tolerance) = parse_config(config).unwrap();
 
-        assert_eq!(accounts.len(), 2);
-        assert!(accounts.contains_key("Assets:ZeroSum:Transfers"));
-        assert!(accounts.contains_key("Assets:ZeroSum:CreditCard"));
+        // In config order.
+        let names: Vec<&str> = accounts.iter().map(|(a, _)| a.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Assets:ZeroSum:Transfers", "Assets:ZeroSum:CreditCard"]
+        );
 
-        let (target, days) = accounts.get("Assets:ZeroSum:Transfers").unwrap();
+        let (target, days) = &accounts[0].1;
         assert_eq!(target.as_ref().unwrap(), "Assets:ZeroSum-Matched:Transfers");
         assert_eq!(*days, 30);
 
-        let (target2, days2) = accounts.get("Assets:ZeroSum:CreditCard").unwrap();
+        let (target2, days2) = &accounts[1].1;
         assert!(target2.is_none()); // Empty target means use account_name_replace
         assert_eq!(*days2, 6);
 

@@ -18,9 +18,9 @@
 
 use super::ast::AstNode as _; // brings `Directive::can_cast` into scope
 use super::convert::{
-    DescendantsWalkResult, TopLevelWalkResult, classify_recovery_error, cost_spec_from_tokens,
-    decode_string_token, is_comment_kind, is_trivia_kind, meta_value_from_tokens, parse_date_token,
-    parse_decimal_token,
+    DescendantsWalkResult, TopLevelWalkResult, body_tag_joins_transaction, classify_recovery_error,
+    cost_spec_from_tokens, decode_string_token, is_comment_kind, is_trivia_kind,
+    meta_value_from_tokens, parse_date_token, parse_decimal_token, tags_after_posting_error,
 };
 use rowan::{Language, NodeOrToken};
 use rustledger_core::cost::CostSpec;
@@ -100,17 +100,27 @@ pub(super) fn convert_transaction_header(
     let mut tags = rustledger_core::TagSet::new();
     let mut links = rustledger_core::LinkSet::new();
     let mut past_header = false;
+    // Body tags join only before the first posting (#2575); mirrors red
+    // `convert_transaction` via the shared `body_tag_joins_transaction`.
+    let mut posting_seen = false;
 
     for child in node.children() {
-        let NodeOrToken::Token(t) = child else {
+        let t = match child {
+            NodeOrToken::Token(t) => t,
             // POSTING / META_ENTRY child nodes — handled in the next increment.
-            continue;
+            NodeOrToken::Node(n) => {
+                posting_seen |= crate::BeancountLanguage::kind_from_raw(n.kind()) == K::POSTING;
+                continue;
+            }
         };
         let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
         let text = t.text();
         if past_header {
-            // Body-level flat TAG/LINK tokens (between postings) join the set,
-            // deduped against what the header already contributed.
+            if !body_tag_joins_transaction(posting_seen) {
+                continue;
+            }
+            // Body-level flat TAG/LINK tokens (before the first posting) join
+            // the set, deduped against what the header already contributed.
             match kind {
                 K::TAG => {
                     tags.insert(Tag::new(text.trim_start_matches('#')));
@@ -1076,6 +1086,9 @@ fn tl_transaction_body_check(
     let mut saw_header_content = false;
     let mut line_start: Option<usize> = None;
     let mut line_has_content = false;
+    // #2575, mirroring red `transaction_body_check`.
+    let mut posting_seen = false;
+    let mut line_tags = String::new();
     let mut offset = base;
     for child in node.children() {
         let len = child_len(child);
@@ -1088,15 +1101,24 @@ fn tl_transaction_body_check(
                         line_start = Some(start);
                     }
                     if kind == K::NEWLINE {
-                        if line_has_content && let Some(ls) = line_start {
-                            out.push(unexpected_body_input(ls, end, bom_offset));
+                        if let Some(ls) = line_start {
+                            if line_has_content {
+                                out.push(unexpected_body_input(ls, end, bom_offset));
+                            } else if !line_tags.is_empty() {
+                                out.push(tags_after_posting_error(&line_tags, ls, end, bom_offset));
+                            }
                         }
                         line_start = None;
                         line_has_content = false;
-                    } else if !is_trivia_kind(kind)
-                        && !is_comment_kind(kind)
-                        && !matches!(kind, K::TAG | K::LINK)
-                    {
+                        line_tags.clear();
+                    } else if matches!(kind, K::TAG | K::LINK) {
+                        if !body_tag_joins_transaction(posting_seen) {
+                            if !line_tags.is_empty() {
+                                line_tags.push(' ');
+                            }
+                            line_tags.push_str(t.text());
+                        }
+                    } else if !is_trivia_kind(kind) && !is_comment_kind(kind) {
                         line_has_content = true;
                     }
                 } else if kind == K::NEWLINE {
@@ -1107,10 +1129,12 @@ fn tl_transaction_body_check(
                     saw_header_content = true;
                 }
             }
-            NodeOrToken::Node(_) => {
+            NodeOrToken::Node(n) => {
                 // POSTING / META_ENTRY: not catch-all. Reset line state.
+                posting_seen |= crate::BeancountLanguage::kind_from_raw(n.kind()) == K::POSTING;
                 line_start = None;
                 line_has_content = false;
+                line_tags.clear();
                 past_header = true;
             }
         }
@@ -1119,11 +1143,12 @@ fn tl_transaction_body_check(
     // EOF terminates the final body line just as a newline would. Without this,
     // a transaction whose last body line is junk AND whose file has no trailing
     // newline reported one fewer error than the same file with one (#1884).
-    if past_header
-        && line_has_content
-        && let Some(ls) = line_start
-    {
-        out.push(unexpected_body_input(ls, offset, bom_offset));
+    if past_header && let Some(ls) = line_start {
+        if line_has_content {
+            out.push(unexpected_body_input(ls, offset, bom_offset));
+        } else if !line_tags.is_empty() {
+            out.push(tags_after_posting_error(&line_tags, ls, offset, bom_offset));
+        }
     }
 }
 
@@ -1317,6 +1342,8 @@ mod tests {
             "2020-01-01 * \"p\" \"n\" #tag1 #tag2 ^link-a\n  A 1 USD\n  B\n",
             "2020-01-01 * \"esc \\\"q\\\" tab\\there\"\n  A 1 USD\n  B\n",
             "2020-01-01 * \"é payee\" \"münts\"\n  A 1 EUR\n  B\n",
+            // #2575: body tags join before the first posting, not after it.
+            "2020-01-01 * \"p\" #h\n  #pre ^lpre\n  A 1 USD\n  #post ^lpost\n  B\n",
         ];
         for src in cases {
             // green: find the first TRANSACTION node + its offset, convert header.
@@ -1488,7 +1515,14 @@ mod tests {
             "2020-01-01 custom \"budget\" USD\n", // bare currency in custom -> error
             "2020-01-01 custom \"b\" 10 USD \"ok\" NZD\n", // amount ok, trailing bare cur -> error
             "2020-01-01 * \"p\"\n  unexpected junk here\n  A 1 USD\n  B\n", // txn body catch-all
-            "2020-01-01 * \"p\" #tag1\n  A 1 USD\n  #bodytag\n  B\n", // body tag/link is valid (no error)
+            "2020-01-01 * \"p\" #tag1\n  #pretag ^prelink\n  A 1 USD\n  B\n", // body tags before the first posting are valid (no error)
+            // #2575: a tag/link line after the first posting is an error and
+            // its tags are dropped; at any indent, one error per line, and at
+            // EOF with no trailing newline.
+            "2020-01-01 * \"p\" #tag1\n  A 1 USD\n  #bodytag\n  B\n",
+            "2020-01-01 * \"p\"\n  #pre\n  A 1 USD\n    #deep ^lnk\n    key: \"v\"\n  B\n  ^last #t2\n",
+            "2020-01-01 * \"p\"\n  A 1 USD\n  B\n  #eof",
+            "2020-01-01 * \"p\"\n  A 1 USD\n  #t junk\n  B\n", // junk on the line: unexpected input wins
             "@@@ totally invalid line @@@\n2020-01-01 open A\n", // error-node classified recovery error
             "* Section\n**  Indented Sub\n; c0 comment\n2020-01-01 open A\n", // section markers + comment
             // transaction-header check (#2008). Both walkers must agree on

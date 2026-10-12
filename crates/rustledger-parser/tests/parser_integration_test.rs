@@ -1919,3 +1919,66 @@ fn note_preserves_tags_and_links() {
     // And a note without them is empty, not defaulted to the previous note's.
     assert!(notes[1].tags.is_empty() && notes[1].links.is_empty());
 }
+
+/// #2575: a `#tag` / `^link` line after a transaction's first posting.
+///
+/// Beancount 3.2.3 reports "Tags or links not allowed after first Posting"
+/// for each such line (at any indent) and keeps the transaction WITHOUT those
+/// tags, while body tags written before the first posting still join it.
+/// rledger used to add the late tags to the transaction silently. Checked on
+/// both conversion paths: `parse` (green, red fallback) and `parse_red_only`.
+#[test]
+fn tags_after_first_posting_are_an_error_and_dropped() {
+    let src = "2020-01-01 * \"p\" #head\n  #pre ^lpre\n  Assets:A  1 USD\n    #deep ^ldeep\n  Assets:B  -1 USD\n  #last";
+    for (path, result) in [
+        ("parse", rustledger_parser::parse(src)),
+        (
+            "parse_red_only",
+            rustledger_parser::cst::parse_red_only(src),
+        ),
+    ] {
+        let messages: Vec<String> = result.errors.iter().map(ParseError::message).collect();
+        assert_eq!(
+            messages.len(),
+            2,
+            "{path}: one error per late tag line (the indented one and the one at EOF), got {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|m| m.contains("not allowed after a transaction's first posting")),
+            "{path}: {messages:?}"
+        );
+        assert!(
+            messages[0].contains("`#deep ^ldeep`"),
+            "{path}: {messages:?}"
+        );
+        assert!(messages[1].contains("`#last`"), "{path}: {messages:?}");
+        // The error spans sit on the late lines, not the header.
+        let line_of = |offset: usize| src[..offset].matches('\n').count() + 1;
+        let lines: Vec<usize> = result
+            .errors
+            .iter()
+            .map(|e| line_of(e.span.start))
+            .collect();
+        assert_eq!(lines, [4, 6], "{path}");
+
+        assert_eq!(
+            result.directives.len(),
+            1,
+            "{path}: the transaction is kept"
+        );
+        let Directive::Transaction(txn) = &result.directives[0].value else {
+            panic!("{path}: expected a transaction");
+        };
+        let tags: Vec<&str> = txn.tags.iter().map(rustledger_core::Tag::as_str).collect();
+        let links: Vec<&str> = txn
+            .links
+            .iter()
+            .map(rustledger_core::Link::as_str)
+            .collect();
+        assert_eq!(tags, ["head", "pre"], "{path}: late tags dropped");
+        assert_eq!(links, ["lpre"], "{path}: late links dropped");
+        assert_eq!(txn.postings.len(), 2, "{path}");
+    }
+}

@@ -1522,9 +1522,11 @@ impl BookingEngine {
     ///
     /// The rule is [`check_average_spec`]'s, the one `book` applies, plus the
     /// currency check `book` makes (#2589): one rule, so the two paths cannot
-    /// disagree. A posting `book` did match carries the pool's own cost by
-    /// now, which is a correct rounding of that pool by construction, so this
-    /// re-check passes for it.
+    /// disagree. Only for postings `book` did not match: one it did match
+    /// carries the cost booking wrote, the pool as `Decimal` rounds it, which
+    /// is not always a correct rounding of the exact pool at its own 28 digits
+    /// (16 units off in the last place in a generated sweep), so re-checking
+    /// it would refuse a valid sale.
     ///
     /// Here, beside [`Self::verify_merge_precondition`], and not in
     /// [`Self::realize_posting`] or the core reduction, for the reason given

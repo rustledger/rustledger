@@ -2193,6 +2193,71 @@ impl BookingEngine {
         Ok(self.book_and_interpolate_with_gains(txn)?.0)
     }
 
+    /// Whether a posting has a cost spec but no units for `book` to match it
+    /// by: its units are elided (`Assets:B  X {10.00 EUR}`), to be solved by
+    /// interpolation (#2647).
+    const fn is_unmatched_cost_posting(posting: &Posting) -> bool {
+        posting.cost.is_some() && !matches!(posting.units, Some(IncompleteAmount::Complete(_)))
+    }
+
+    /// The transaction as if its author had written the units interpolation
+    /// solves for its elided-units cost postings, or `None` when it has none
+    /// (#2647).
+    ///
+    /// `book` matches lots only for postings whose units are written, so such
+    /// a posting used to be booked by nobody: interpolation solved its units
+    /// and `apply` reduced the inventory, which recorded no disposal (no
+    /// capital gain at all), kept the written cost on an AVERAGE sale instead
+    /// of the pool's exact one, and skipped the checks a written-units sale
+    /// gets (#2603, #2589). Instead, the units are solved first, from `booked`
+    /// (the transaction booked as written), and the caller books the result
+    /// from scratch. A sale written either way then takes the one path, and
+    /// books, reports and checks the same.
+    ///
+    /// Deliberately not beancount's answer (3.2): it books an elided-units
+    /// sale as a new, undated lot of negative units beside the lots it should
+    /// have reduced (`-1.5 X {12.50 USD}` next to `2.5 X {12.50 USD, …}`),
+    /// while the same sale with its units written reduces them. The written
+    /// form is the correct one, and this books the elided form as it.
+    ///
+    /// `book` neither drops nor expands an unmatched posting, so the k-th one
+    /// in `booked` is the k-th one in `txn`; interpolation fills postings in
+    /// place and only appends.
+    fn with_solved_units(
+        txn: &Transaction,
+        booked: &Transaction,
+        tolerances: &crate::InterpolationTolerances,
+    ) -> Result<Option<Transaction>, BookingError> {
+        let in_booked: smallvec::SmallVec<[usize; 2]> = booked
+            .postings
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| Self::is_unmatched_cost_posting(p))
+            .map(|(i, _)| i)
+            .collect();
+        if in_booked.is_empty() {
+            return Ok(None);
+        }
+        let solved =
+            crate::interpolate::interpolate_with_interpolation_tolerances(booked, tolerances)?;
+        let mut written = txn.clone();
+        let targets = written
+            .postings
+            .iter_mut()
+            .filter(|p| Self::is_unmatched_cost_posting(p));
+        for (posting, &i) in targets.zip(&in_booked) {
+            if let Some(units @ IncompleteAmount::Complete(_)) = solved
+                .transaction
+                .postings
+                .get(i)
+                .and_then(|p| p.units.clone())
+            {
+                posting.units = Some(units);
+            }
+        }
+        Ok(Some(written))
+    }
+
     /// Book, interpolate and apply `txn` in one step, mutating it in place.
     ///
     /// The three are one step because they share a failure rule: a transaction
@@ -2254,7 +2319,10 @@ impl BookingEngine {
         // Slow path: `book` already produces an owned transaction, so work on
         // that and commit only once apply has succeeded. Nothing needs undoing
         // — `txn` is not touched until the end.
-        let booked = self.book_with(txn, cost_currencies)?;
+        let mut booked = self.book_with(txn, cost_currencies)?;
+        if let Some(written) = Self::with_solved_units(txn, &booked.transaction, tolerances)? {
+            booked = self.book_with(&written, cost_currencies)?;
+        }
         let mut candidate = booked.transaction;
         let _ = crate::interpolate::interpolate_in_place_undoable_with(&mut candidate, tolerances)?;
         self.apply(&candidate)?;
@@ -2298,7 +2366,10 @@ impl BookingEngine {
             ));
         }
         // First book (fill in costs + compute gains), then interpolate amounts.
-        let booked = self.book_with(txn, &cost_currencies)?;
+        let mut booked = self.book_with(txn, &cost_currencies)?;
+        if let Some(written) = Self::with_solved_units(txn, &booked.transaction, &tolerances)? {
+            booked = self.book_with(&written, &cost_currencies)?;
+        }
         let result = crate::interpolate::interpolate_with_interpolation_tolerances(
             &booked.transaction,
             &tolerances,

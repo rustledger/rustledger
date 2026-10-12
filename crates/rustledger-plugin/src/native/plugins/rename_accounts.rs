@@ -216,15 +216,19 @@ fn parse_config(config: &str) -> Result<(Vec<RenameRule>, Vec<String>), String> 
         let chars: Vec<char> = replacement.chars().collect();
         if chars
             .windows(2)
-            .any(|w| w[0] == '$' && (w[1].is_ascii_digit() || w[1] == '{'))
+            .any(|w| w[0] == '$' && (w[1].is_ascii_alphanumeric() || w[1] == '_' || w[1] == '{'))
         {
             warnings.push(format!(
                 "rename_accounts: the replacement '{replacement}' contains `$`, which Python's `re.sub` takes as literal text; a group is written `\\1` or `\\g<name>`"
             ));
         }
         let translated = py_regex::translate_replacement(&replacement, &pattern).map_err(|e| {
+            let why = match e {
+                py_regex::PyRegexError::Invalid(why) => format!("it is not a valid replacement: {why}"),
+                other => other.to_string(),
+            };
             format!(
-                "rename_accounts: the replacement '{replacement}' for '{pattern_str}' cannot be used: {e}"
+                "rename_accounts: the replacement '{replacement}' for '{pattern_str}' cannot be used: {why}"
             )
         })?;
         rules.push(RenameRule {

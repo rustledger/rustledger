@@ -21,9 +21,10 @@
 //!   `\N{...}`, the ASCII flag, `\b`/`\B`);
 //! - a pattern Python itself rejects is [`PyRegexError::Invalid`].
 //!
-//! One exception: a lookbehind Python rejects for not being fixed-width
-//! (`(?<=a+)b`) is reported as unsupported rather than invalid, since its
-//! width is not computed here. Either way the pattern is refused.
+//! Two exceptions, reported as unsupported rather than invalid: a lookbehind
+//! Python rejects for not being fixed-width (`(?<=a+)b`), since its width is
+//! not computed here, and a `\N{...}` escape naming no character, since
+//! character names are not looked up. Either way the pattern is refused.
 //!
 //! `\d`, `\s` and `\w` are written as the classes Python means by them
 //! (`\w` is `str.isalnum()` or `_`, `\s` is `str.isspace()`), not `regex`'s,
@@ -100,6 +101,7 @@ fn parse(pattern: &str) -> Result<Parser, PyRegexError> {
         deferred: None,
         loops: Vec::new(),
         max_condition_ref: 0,
+        lookbehind: None,
     };
     parser.global_flags()?;
     parser.alternation(0, false)?;
@@ -361,6 +363,8 @@ struct Parser {
     loops: Vec<(usize, usize)>,
     /// The highest group number a conditional names.
     max_condition_ref: usize,
+    /// Inside a lookbehind: the number of groups opened before it.
+    lookbehind: Option<usize>,
 }
 
 /// What the parser learned about one capturing group.
@@ -639,11 +643,13 @@ impl Parser {
                     match self
                         .groups
                         .iter()
-                        .find(|g| g.name.as_deref() == Some(name.as_str()))
+                        .position(|g| g.name.as_deref() == Some(name.as_str()))
                     {
                         None => return invalid(format!("unknown group name '{name}'")),
-                        Some(g) if !g.closed => return invalid("cannot refer to an open group"),
-                        Some(_) => {}
+                        Some(i) if !self.groups[i].closed => {
+                            return invalid("cannot refer to an open group");
+                        }
+                        Some(i) => self.check_ref(i + 1)?,
                     }
                     self.defer("a named backreference `(?P=name)`");
                     Ok(())
@@ -659,12 +665,8 @@ impl Parser {
                 .deferred_group(1, "a negative lookahead `(?!...)`", depth)
                 .map(|_| ()),
             Some('<') => match self.peek_at(1) {
-                Some('=') => self
-                    .deferred_group(2, "a lookbehind `(?<=...)`", depth)
-                    .map(|_| ()),
-                Some('!') => self
-                    .deferred_group(2, "a negative lookbehind `(?<!...)`", depth)
-                    .map(|_| ()),
+                Some('=') => self.lookbehind_group("a lookbehind `(?<=...)`", depth),
+                Some('!') => self.lookbehind_group("a negative lookbehind `(?<!...)`", depth),
                 _ => invalid("unknown extension ?<"),
             },
             Some('(') => {
@@ -672,22 +674,24 @@ impl Parser {
                 let id = self.name(')').or_else(|_| invalid("bad group name"))?;
                 // A number may name a group defined later: Python checks it
                 // once the whole pattern is read. A name must exist already.
-                let known = if id.chars().all(|c| c.is_ascii_digit()) {
+                let index = if id.chars().all(|c| c.is_ascii_digit()) {
                     match id.parse::<usize>() {
                         Ok(n) if n >= 1 => {
                             self.max_condition_ref = self.max_condition_ref.max(n);
-                            true
+                            Some(n)
                         }
-                        _ => false,
+                        _ => None,
                     }
                 } else {
                     self.groups
                         .iter()
-                        .any(|g| g.name.as_deref() == Some(id.as_str()))
+                        .position(|g| g.name.as_deref() == Some(id.as_str()))
+                        .map(|i| i + 1)
                 };
-                if !known {
+                let Some(index) = index else {
                     return invalid(format!("invalid group reference {id}"));
-                }
+                };
+                self.check_ref(index)?;
                 if self.deferred_group(0, "a conditional group `(?(...)...)`", depth)? > 2 {
                     return invalid("conditional backref with more than two branches");
                 }
@@ -699,6 +703,33 @@ impl Parser {
             Some(c) if c.is_ascii_alphabetic() || c == '-' => self.scoped_flags(depth),
             _ => invalid("unknown extension"),
         }
+    }
+
+    /// A lookbehind: deferred like the others, and while inside it a group
+    /// reference follows Python's lookbehind rule (see [`Self::check_ref`]).
+    fn lookbehind_group(&mut self, what: &str, depth: usize) -> Result<(), PyRegexError> {
+        let outer = self.lookbehind;
+        if outer.is_none() {
+            self.lookbehind = Some(self.groups.len());
+        }
+        let result = self.deferred_group(2, what, depth).map(|_| ());
+        self.lookbehind = outer;
+        result
+    }
+
+    /// Inside a lookbehind, a reference to group `index` (1-based) must be
+    /// to a closed group defined before the lookbehind, as Python's
+    /// `checklookbehindgroup` requires.
+    fn check_ref(&self, index: usize) -> Result<(), PyRegexError> {
+        if let Some(before) = self.lookbehind {
+            if !self.groups.get(index - 1).is_some_and(|g| g.closed) {
+                return invalid("cannot refer to an open group");
+            }
+            if index > before {
+                return invalid("cannot refer to group defined in the same lookbehind subpattern");
+            }
+        }
+        Ok(())
     }
 
     /// Record `what` as the first construct rledger cannot express, if none
@@ -904,6 +935,7 @@ impl Parser {
                 if !self.groups[index - 1].closed {
                     return invalid("cannot refer to an open group");
                 }
+                self.check_ref(index)?;
                 self.defer("a backreference (`\\1` and the like)");
                 return Ok(Last::Item);
             }
@@ -1211,6 +1243,8 @@ mod tests {
             ("(?(1)a|b)(c)", "conditional"),
             ("(c)(?(2)a|b)(d)", "conditional"),
             ("(?(1)(a)|b)", "conditional"),
+            // Inside a lookbehind, a group closed before it may be used.
+            (r"(a)(?<=\1)b", "lookbehind"),
             ("(?>a)", "atomic group"),
             ("a*+", "possessive"),
             ("a{1,2}+", "possessive"),
@@ -1268,6 +1302,10 @@ mod tests {
             "(?au:a)",
             r"\N{}",
             "(?(3)a|b)(c)",
+            r"(?<=(a)\1)",
+            "(?<=(?P<n>a)(?P=n))",
+            "(?<=(c)(?(1)b))",
+            "(?<=a(?(1)b))(c)",
             r"\b(",
             r"\1",
             "(?P=x)",

@@ -239,12 +239,15 @@ use crate::types::{Error, LedgerOptions};
 /// move. `Ledger` runs the regular plugins and archives their errors, so a
 /// v41 blob of a ledger with a repeated `note` (or `open`, `balance`, ...)
 /// would serve no error where `noduplicates` now reports one.
-/// v43: a sale written with its units elided is booked as the same sale
+/// v43: loader v39, a `#tag` / `^link` line after a transaction's first
+/// posting is a parse error and its tags are dropped (#2575). Parsed
+/// directives changed, so a v42 blob would serve the late tags and no error.
+/// v44: a sale written with its units elided is booked as the same sale
 /// with its units written: its lots are matched and its disposal recorded,
-/// and an AVERAGE one carries the pool's exact cost (#2647). Loader v38,
+/// and an AVERAGE one carries the pool's exact cost (#2647). Loader v39,
 /// unchanged -- parsed directives did not move. `Ledger` archives booked
-/// directives, so a v42 blob would serve the old, unmatched posting.
-pub const CACHE_VERSION: u32 = 43;
+/// directives, so a v43 blob would serve the old, unmatched posting.
+pub const CACHE_VERSION: u32 = 44;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -276,7 +279,7 @@ pub const CACHE_VERSION: u32 = 43;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 38;
+const LOADER_CACHE_VERSION_PIN: u32 = 39;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

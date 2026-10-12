@@ -29,6 +29,7 @@ fn execute_query(
     account_types: rustledger_core::AccountTypes,
     booking_method: rustledger_core::BookingMethod,
     summary_accounts: rustledger_query::executor::SummaryAccounts,
+    created_tables: &std::cell::RefCell<rustledger_query::executor::CreatedTables>,
 ) -> Result<JsValue, JsError> {
     use crate::convert::value_to_cell;
     use rustledger_query::{Executor, parse as parse_query};
@@ -60,7 +61,12 @@ fn execute_query(
     executor.set_account_types(account_types);
     executor.set_booking_method(booking_method);
     executor.set_summary_accounts(summary_accounts);
-    match executor.execute(&query) {
+    // The tables earlier queries made, handed back whatever this one does:
+    // a failed query leaves them as they were (#2579).
+    executor.set_created_tables(created_tables.take());
+    let executed = executor.execute(&query);
+    created_tables.replace(executor.take_created_tables());
+    match executed {
         Ok(result) => {
             let rows: Vec<Vec<_>> = result
                 .rows
@@ -214,6 +220,10 @@ pub struct ParsedLedger {
     validation_errors: Vec<Error>,
     /// Cached editor data (accounts, currencies, payees, line index).
     editor_cache: editor::EditorCache,
+    /// The tables this ledger's `CREATE TABLE` queries made, there for its
+    /// later queries (#2579). Each `query` builds a fresh executor over the
+    /// directives and lends it these.
+    created_tables: std::cell::RefCell<rustledger_query::executor::CreatedTables>,
 }
 
 #[wasm_bindgen]
@@ -239,6 +249,7 @@ impl ParsedLedger {
             option_errors: load.option_errors,
             validation_errors,
             editor_cache,
+            created_tables: std::cell::RefCell::default(),
         }
     }
 
@@ -300,6 +311,9 @@ impl ParsedLedger {
     }
 
     /// Run a BQL query on this ledger.
+    ///
+    /// A table a `CREATE TABLE` makes stays for this ledger's later queries
+    /// (#2579).
     #[wasm_bindgen]
     pub fn query(&self, query_str: &str) -> Result<JsValue, JsError> {
         if !self.parse_errors.is_empty() {
@@ -316,6 +330,7 @@ impl ParsedLedger {
             crate::helpers::account_types_from_raw(&self.parse_result.options),
             crate::helpers::booking_method_from_raw(&self.parse_result.options),
             crate::helpers::summary_accounts_from_raw(&self.parse_result.options),
+            &self.created_tables,
         )
     }
 
@@ -495,6 +510,7 @@ impl ParsedLedger {
             option_errors: payload.option_errors,
             validation_errors: payload.validation_errors,
             editor_cache,
+            created_tables: std::cell::RefCell::default(),
         })
     }
 }
@@ -545,6 +561,10 @@ pub struct Ledger {
     errors: Vec<Error>,
     /// Editor cache for cross-file completions.
     editor_cache: editor::EditorCache,
+    /// The tables this ledger's `CREATE TABLE` queries made, there for its
+    /// later queries (#2579). Each `query` builds a fresh executor over the
+    /// directives and lends it these.
+    created_tables: std::cell::RefCell<rustledger_query::executor::CreatedTables>,
 }
 
 #[wasm_bindgen]
@@ -591,6 +611,7 @@ impl Ledger {
                     summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
                     errors: vec![Error::new(format!("Load error: {e}"))],
                     editor_cache: editor::EditorCache::from_directives(&[]),
+                    created_tables: std::cell::RefCell::default(),
                 });
             }
         };
@@ -629,6 +650,7 @@ impl Ledger {
                     summary_accounts,
                     errors,
                     editor_cache,
+                    created_tables: std::cell::RefCell::default(),
                 })
             }
             Err(e) => Ok(Self {
@@ -639,6 +661,7 @@ impl Ledger {
                 summary_accounts,
                 errors: vec![Error::new(format!("Processing error: {e}"))],
                 editor_cache: editor::EditorCache::from_directives(&[]),
+                created_tables: std::cell::RefCell::default(),
             }),
         }
     }
@@ -680,6 +703,9 @@ impl Ledger {
     }
 
     /// Run a BQL query on this ledger.
+    ///
+    /// A table a `CREATE TABLE` makes stays for this ledger's later queries
+    /// (#2579).
     #[wasm_bindgen]
     pub fn query(&self, query_str: &str) -> Result<JsValue, JsError> {
         execute_query(
@@ -688,6 +714,7 @@ impl Ledger {
             self.account_types.clone(),
             self.booking_method,
             self.summary_accounts.clone(),
+            &self.created_tables,
         )
     }
 
@@ -825,6 +852,7 @@ impl Ledger {
             summary_accounts,
             errors: payload.errors,
             editor_cache,
+            created_tables: std::cell::RefCell::default(),
         })
     }
 }
@@ -914,6 +942,7 @@ mod option_warning_severity_tests {
             summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
             errors: option_warnings_to_errors(&[warn("E7009")]),
             editor_cache: editor::EditorCache::from_directives(&[]),
+            created_tables: std::cell::RefCell::default(),
         };
         assert_eq!(
             ledger.errors.len(),
@@ -933,6 +962,7 @@ mod option_warning_severity_tests {
             summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
             errors: option_warnings_to_errors(&[warn("E7001")]),
             editor_cache: editor::EditorCache::from_directives(&[]),
+            created_tables: std::cell::RefCell::default(),
         };
         assert!(
             !broken.is_valid(),
@@ -968,6 +998,7 @@ mod option_warning_severity_tests {
                 summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
                 errors,
                 editor_cache: editor::EditorCache::from_directives(&[]),
+                created_tables: std::cell::RefCell::default(),
             };
             let restored =
                 Ledger::from_cache(&ledger.serialize().expect("serialize")).expect("restore");

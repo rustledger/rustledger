@@ -748,10 +748,20 @@ impl Importer for WasmImporter {
         match self.call_msgpack::<_, IdentifyOutput>("identify", &input) {
             Ok(out) => out.matches,
             Err(e) => {
-                eprintln!(
-                    "warning: WASM importer `{}` identify({}) failed: {e}",
-                    self.name,
-                    path.display()
+                // The error can quote the module's own text, so it is
+                // escaped like every other string an importer hands the user
+                // (`rustledger_plugin::untrusted`); the name was escaped when
+                // the module was loaded. Through the notice sink so a caller
+                // reporting another way (ag-rledger's envelope) receives it
+                // instead of the process's stderr (#2566).
+                rustledger_plugin::notice::emit_warning(
+                    rustledger_plugin::notice::IMPORTER_IDENTIFY_FAILED,
+                    &format!(
+                        "WASM importer `{}` identify({}) failed: {}",
+                        self.name,
+                        path.display(),
+                        rustledger_plugin::escape_untrusted_text(&format!("{e}"))
+                    ),
                 );
                 false
             }
@@ -1388,6 +1398,43 @@ mod tests {
     // itself was hoisted there. The integration test below
     // (`initial_memory_above_cap_is_rejected_via_limiter_wiring`)
     // still proves the importer's load path wires it correctly.
+
+    /// A WASM importer whose `identify` fails reports it as a notice, so a
+    /// caller that captures notices (ag-rledger) receives it rather than the
+    /// process's stderr (#2566).
+    #[test]
+    fn a_failing_identify_is_a_notice_not_stderr() {
+        let original = r#"(func (export "identify") (param i32 i32) (result i64)
+                i64.const 0x10_0000_0002)"#;
+        assert!(roundtrip_wat().contains(original), "fixture changed shape");
+        let wat = roundtrip_wat().replace(
+            original,
+            r#"(func (export "identify") (param i32 i32) (result i64)
+                unreachable)"#,
+        );
+        let bytes = wat::parse_str(&wat).expect("WAT parses");
+        let importer = WasmImporter::load_from_bytes(
+            PathBuf::from("trap.wasm"),
+            &bytes,
+            WasmRuntimeConfig::default(),
+        )
+        .expect("module loads");
+
+        let (matched, notices) =
+            rustledger_plugin::notice::capture(|| importer.identify(Path::new("bank.csv")));
+        assert!(!matched, "a failed identify is not a match");
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(
+            notices[0].code,
+            rustledger_plugin::notice::IMPORTER_IDENTIFY_FAILED
+        );
+        assert!(
+            notices[0]
+                .message
+                .starts_with("WASM importer `tst` identify(bank.csv) failed: "),
+            "{notices:?}"
+        );
+    }
 
     /// `roundtrip_wat` with a `metadata` export that first burns about three
     /// seconds of fuel (`3 * FUEL_PER_SECOND`, at ~6 per loop iteration).

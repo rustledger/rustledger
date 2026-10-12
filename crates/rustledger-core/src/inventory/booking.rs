@@ -937,8 +937,8 @@ impl Inventory {
                 all.sort_by_key(|&i| (self.order_key(order, i), i));
                 Some(all)
             };
-        let candidates: &[usize] = match &scanned {
-            Some(all) => all,
+        let (front, back): (&[usize], &[usize]) = match &scanned {
+            Some(all) => (all, &[]),
             None => self
                 .ordered_candidates(&units.currency, order)
                 .expect("the branch above proved it is Some"),
@@ -971,7 +971,7 @@ impl Inventory {
         // never here: reversing the WALK reverses the slot tiebreak along with
         // the sort key, which is how LIFO came to take the last of two
         // same-date lots while FIFO and HIFO take the first (#2115).
-        for idx in candidates.iter().copied() {
+        for idx in front.iter().chain(back).copied() {
             if !keeps(idx) {
                 continue;
             }

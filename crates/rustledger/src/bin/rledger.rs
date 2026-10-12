@@ -98,6 +98,18 @@ enum Commands {
         args: rustledger::cmd::format::Args,
     },
 
+    /// Split a file into one file per year or month, plus a root of includes
+    Split {
+        #[command(flatten)]
+        args: rustledger::cmd::restructure::split::Args,
+    },
+
+    /// Merge a file and everything it includes back into one file
+    Merge {
+        #[command(flatten)]
+        args: rustledger::cmd::restructure::merge::Args,
+    },
+
     /// Generate financial reports
     #[command(alias = "r")]
     Report {
@@ -420,6 +432,30 @@ fn main() -> ExitCode {
                 // A downstream reader (e.g. `| head`) closing the pipe is not an
                 // error — exit cleanly, matching the Report arm and git.
                 Err(e) if rustledger::pager::is_broken_pipe(&e) => ExitCode::SUCCESS,
+                Err(e) => {
+                    eprintln!("error: {}", render_error(&e));
+                    ExitCode::from(2)
+                }
+            }
+        }
+        Commands::Split { mut args } => {
+            if args.file.is_none() {
+                args.file = config.effective_file_path(profile_ref);
+            }
+            match rustledger::cmd::restructure::split::run(&args) {
+                Ok(code) => code,
+                Err(e) => {
+                    eprintln!("error: {}", render_error(&e));
+                    ExitCode::from(2)
+                }
+            }
+        }
+        Commands::Merge { mut args } => {
+            if args.file.is_none() {
+                args.file = config.effective_file_path(profile_ref);
+            }
+            match rustledger::cmd::restructure::merge::run(&args) {
+                Ok(code) => code,
                 Err(e) => {
                     eprintln!("error: {}", render_error(&e));
                     ExitCode::from(2)

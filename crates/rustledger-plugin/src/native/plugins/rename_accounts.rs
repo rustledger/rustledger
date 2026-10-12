@@ -225,7 +225,7 @@ fn parse_config(config: &str) -> Result<(Vec<RenameRule>, Vec<String>), String> 
         let translated = py_regex::translate_replacement(&replacement, &pattern).map_err(|e| {
             let why = match e {
                 py_regex::PyRegexError::Invalid(why) => format!("it is not a valid replacement: {why}"),
-                other => other.to_string(),
+                other @ py_regex::PyRegexError::Unsupported(_) => other.to_string(),
             };
             format!(
                 "rename_accounts: the replacement '{replacement}' for '{pattern_str}' cannot be used: {why}"

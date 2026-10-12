@@ -99,8 +99,8 @@ fn fixture(name: &str, docs: &Path) -> Option<String> {
              2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n\
              2024-01-01 open Income:Gains\n\
              2024-01-02 * \"buy\"\n  Assets:Stock  10 AAA {10 USD}\n  Assets:Cash\n\
-             2024-01-03 * \"sell\"\n  Assets:Stock  -10 AAA {10 USD} @ 12 USD\n  \
-             Assets:Cash  110 USD\n  Income:Gains  -10 USD\n"
+             2024-01-03 * \"sell, no gain posted\"\n  Assets:Stock  -10 AAA {10 USD} @ 12 USD\n  \
+             Assets:Cash  100 USD\n"
             .to_string(),
         "pedantic" => "plugin \"beancount.plugins.pedantic\"\n\
              2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Cash:Sub\n\
@@ -276,12 +276,20 @@ fn every_native_plugin_gives_identical_output_on_every_run() {
         };
         let with = dir.path().join(format!("{name}.beancount"));
         std::fs::write(&with, &source).unwrap();
-        // The same ledger without its `plugin` line: the fixture must make
-        // the plugin change something, or this test proves nothing about it.
+        // The same ledger without what runs the plugin (its `plugin` line,
+        // and for `document_discovery` the `documents` option): the fixture
+        // must make the plugin change something, or this test proves nothing
+        // about it. Each such line becomes a comment of the same length, so
+        // every other directive keeps its span and only the plugin's effect
+        // can tell the two loads apart.
         let without = dir.path().join(format!("{name}-without.beancount"));
         let mut stripped = String::new();
-        for line in source.lines().filter(|l| !l.starts_with("plugin ")) {
-            writeln!(stripped, "{line}").unwrap();
+        for line in source.lines() {
+            if line.starts_with("plugin ") || line.starts_with("option \"documents\"") {
+                writeln!(stripped, ";{}", " ".repeat(line.len() - 1)).unwrap();
+            } else {
+                writeln!(stripped, "{line}").unwrap();
+            }
         }
         std::fs::write(&without, stripped).unwrap();
 
@@ -331,8 +339,10 @@ fn document_discovery_walks_files_then_subdirectories_by_name() {
         std::fs::create_dir_all(p.parent().unwrap()).unwrap();
         std::fs::write(&p, b"").unwrap();
     }
-    // A subaccount whose name sorts before the files: it still comes after them.
-    let sub = docs.path().join("Assets/Cash/G/2024-01-01.sub.pdf");
+    // A subaccount whose name (`0Sub`, '0' < '2') sorts before the dated
+    // files: it still comes after them, as `os.walk` visits a directory's
+    // files before descending.
+    let sub = docs.path().join("Assets/Cash/0Sub/2024-01-01.sub.pdf");
     std::fs::create_dir_all(sub.parent().unwrap()).unwrap();
     std::fs::write(&sub, b"").unwrap();
 
@@ -343,7 +353,7 @@ fn document_discovery_walks_files_then_subdirectories_by_name() {
         format!(
             "option \"documents\" \"{}\"\n\
              plugin \"beancount.plugins.document_discovery\"\n\
-             2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Cash:G\n",
+             2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Cash:0Sub\n",
             docs.path().display()
         ),
     )

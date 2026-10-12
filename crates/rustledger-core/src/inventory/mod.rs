@@ -210,6 +210,28 @@ pub enum BookingError {
         /// Which part of the spec disagrees, and with what.
         detail: MergeSpecMismatch,
     },
+    /// An AVERAGE sale's cost spec states a cost the pool is not (#2603).
+    ///
+    /// An AVERAGE reduction sells at the pool's average cost, so a cost
+    /// written on it can only be a claim about that average, the way a cost
+    /// on any other method's sale is a filter no lot may fail. It is checked
+    /// rather than dropped: it must be a correct rounding of the pool's exact
+    /// average at the precision written, as a `{*}` claim must
+    /// ([`Self::MergeSpecMismatch`]). `-1 X {99.00 EUR}` from a pool held at
+    /// 11.00 EUR used to book at 11.00 without a word.
+    AverageSpecMismatch {
+        /// The commodity being reduced (e.g. `AAPL`).
+        currency: crate::Currency,
+        /// The cost the spec states: per unit, or the total for a `{{T}}`
+        /// or compound spec (both parts combined).
+        stated: crate::Amount,
+        /// The pool's cost in the same form: its average per unit, or what the
+        /// reduced units cost at that average, rounded to the places that
+        /// tell it apart from `stated`.
+        pool: crate::Amount,
+        /// Whether `stated` and `pool` are totals rather than per-unit costs.
+        total: bool,
+    },
     /// The arithmetic left `rust_decimal`'s ~±7.9e28 range (#1863).
     ///
     /// Reported rather than clamped: `Decimal::MIN == -Decimal::MAX`, so
@@ -393,6 +415,27 @@ impl fmt::Display for BookingError {
             Self::MergeSpecMismatch { currency, detail } => {
                 write!(f, "{{*}} merge of {currency}: {detail}")
             }
+            Self::AverageSpecMismatch {
+                currency,
+                stated,
+                pool,
+                total: false,
+            } => write!(
+                f,
+                "AVERAGE pool of {currency} costs {pool} per unit, not the {stated} the cost \
+                 spec states; write the pool's cost or leave the spec empty"
+            ),
+            Self::AverageSpecMismatch {
+                currency,
+                stated,
+                pool,
+                total: true,
+            } => write!(
+                f,
+                "AVERAGE pool of {currency}: the reduced units cost {pool} at the pool's \
+                 average, not the total {stated} the cost spec states; write the pool's cost \
+                 or leave the spec empty"
+            ),
             Self::Overflow(e) => write!(f, "{e}"),
         }
     }
@@ -445,7 +488,9 @@ impl fmt::Display for AccountedBookingError {
             // The currency is already named in the inner message; the account
             // is the context this wrapper exists to add.
             BookingError::Overflow(e) => write!(f, "{}: {e}", self.account),
-            BookingError::MergeMismatch { .. } | BookingError::MergeSpecMismatch { .. } => {
+            BookingError::MergeMismatch { .. }
+            | BookingError::MergeSpecMismatch { .. }
+            | BookingError::AverageSpecMismatch { .. } => {
                 write!(f, "{}: {}", self.account, self.error)
             }
             BookingError::InsufficientUnits {

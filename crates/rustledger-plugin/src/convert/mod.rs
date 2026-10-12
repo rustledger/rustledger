@@ -40,9 +40,11 @@ pub enum ConversionError {
     /// inconsistent values — e.g. mutates `per_unit` without updating
     /// `total`. The inner [`rustledger_core::BookedCostInvariantError`]
     /// carries the supplied values, the derived total, and the
-    /// tolerance for plugin-author diagnostics.
+    /// tolerance for plugin-author diagnostics. The message names it, so it
+    /// is not also the `source()`: a `{:#}` chain would print it twice
+    /// (#2574). `From` is implemented by hand below.
     #[error("cost spec invariant violated: {0}")]
-    BookedCostInvariantViolated(#[from] rustledger_core::BookedCostInvariantError),
+    BookedCostInvariantViolated(rustledger_core::BookedCostInvariantError),
     /// A plugin emitted a `PerUnitFromTotal` cost spec without
     /// supplying the posting's units. The post-booking shape is
     /// undefined without units (`per_unit = total / |units|` requires
@@ -70,6 +72,12 @@ pub enum ConversionError {
     /// report; the offset is almost certainly corrupt.
     #[error("source span overflow: {0}")]
     SpanOverflow(String),
+}
+
+impl From<rustledger_core::BookedCostInvariantError> for ConversionError {
+    fn from(e: rustledger_core::BookedCostInvariantError) -> Self {
+        Self::BookedCostInvariantViolated(e)
+    }
 }
 
 /// Convert a directive to its serializable wrapper with source location.
@@ -225,6 +233,39 @@ mod tests {
         MetaValue, Metadata, Note, Open, Pad, Posting, Price, Query, Transaction,
     };
     use std::str::FromStr;
+
+    /// The `{:#}`-style chain: the message, then each `source()` in turn.
+    fn chain(e: &dyn std::error::Error) -> String {
+        let mut out = e.to_string();
+        let mut cur = e.source();
+        while let Some(s) = cur {
+            out.push_str(": ");
+            out.push_str(&s.to_string());
+            cur = s.source();
+        }
+        out
+    }
+
+    /// #2574: `ConversionError::BookedCostInvariantViolated` names the
+    /// invariant error in its message and used to return it from `source()`
+    /// as well, so a `{:#}` chain printed it twice.
+    #[test]
+    fn booked_cost_invariant_error_names_its_cause_once_2574() {
+        let inner = rustledger_core::BookedCostInvariantError {
+            per_unit: Decimal::from(50),
+            total: Decimal::from(999),
+            units: Decimal::from(10),
+            derived_total: Decimal::from(500),
+            abs_diff: Decimal::from(499),
+            tolerance: Some(Decimal::new(1, 20)),
+            overflow: false,
+        };
+        let inner_text = inner.to_string();
+        let e = ConversionError::from(inner);
+        let chained = chain(&e);
+        assert_eq!(chained, e.to_string(), "the message is the whole chain");
+        assert_eq!(chained.matches(&inner_text).count(), 1, "{chained}");
+    }
 
     fn dec(s: &str) -> Decimal {
         Decimal::from_str(s).unwrap()

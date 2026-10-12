@@ -100,7 +100,7 @@ pub fn discover_symbols(
         undeclared,
         as_of,
         config_mapping,
-        &mut std::io::stderr(),
+        &mut crate::cmd::messages::Messages::new(&mut std::io::stderr(), None),
     )
 }
 
@@ -144,8 +144,9 @@ pub fn discover_symbols(
 // over `BuildHasher` would just bloat the signature without unblocking
 // any real consumer.
 ///
-/// Warnings (a malformed `price:` value) go to `err_out`: the process's
-/// stderr for `rledger`, the envelope for `ag-rledger`.
+/// Warnings (a malformed `price:` value) go to `err_out`: a line on the
+/// process's stderr for `rledger`, a coded record in its `warnings` for
+/// `ag-rledger`.
 #[allow(clippy::implicit_hasher)]
 pub fn discover_symbols_with_warnings(
     directives: &[Spanned<Directive>],
@@ -154,7 +155,7 @@ pub fn discover_symbols_with_warnings(
     undeclared: bool,
     as_of: Option<NaiveDate>,
     config_mapping: &HashMap<String, CommodityMapping>,
-    err_out: &mut dyn std::io::Write,
+    err_out: &mut crate::cmd::messages::Messages<'_>,
 ) -> HashMap<String, DiscoveredCommodity> {
     let active = if inactive {
         None
@@ -198,10 +199,12 @@ pub fn discover_symbols_with_warnings(
         // case. We still skip the commodity (no source to fetch from);
         // the warning surfaces the misconfiguration.
         if classification.malformed_price {
-            let _ = writeln!(
-                err_out,
-                "warning: commodity {symbol} has malformed `price:` metadata; \
-                 expected `<quote>:<source>/<ticker>` (e.g. `USD:yahoo/AAPL`). Skipping."
+            err_out.warn(
+                crate::cmd::price_cmd::warning_codes::PRICE_METADATA_MALFORMED,
+                format!(
+                    "commodity {symbol} has malformed `price:` metadata; \
+                     expected `<quote>:<source>/<ticker>` (e.g. `USD:yahoo/AAPL`). Skipping."
+                ),
             );
         }
 

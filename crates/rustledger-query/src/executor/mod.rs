@@ -334,6 +334,7 @@ mod aggregation;
 mod evaluation;
 mod execution;
 mod operators;
+mod quoted_columns;
 mod running_balance;
 mod sort;
 mod system_tables;

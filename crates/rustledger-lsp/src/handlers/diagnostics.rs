@@ -239,9 +239,33 @@ pub fn validation_errors_to_diagnostics(
 pub(crate) struct LedgerValidation {
     /// Validation errors across ALL files (unfiltered; each carries `file_id`).
     errors: Vec<ValidationError>,
+    /// Booking failures across ALL files, labeled and worded as
+    /// `rledger check` words them (#2510).
+    booking_errors: Vec<BookingDiagnostic>,
     /// Loader plugin errors (they carry no `file_id`), pre-converted to
     /// `(severity, code, message)`. Shown only in the main file (file 0).
     plugin_errors: Vec<(DiagnosticSeverity, String, String)>,
+}
+
+/// A booking failure, ready to show.
+///
+/// Not a [`ValidationError`]: that type's code is an [`ErrorCode`], and a
+/// failure no validation code describes is labeled `BOOK`, as `rledger check`
+/// labels it (#2510).
+///
+/// [`ErrorCode`]: rustledger_validate::ErrorCode
+struct BookingDiagnostic {
+    /// [`ErrorCode::booking_failure_code_str`]: a validation code or `BOOK`.
+    ///
+    /// [`ErrorCode::booking_failure_code_str`]: rustledger_validate::ErrorCode::booking_failure_code_str
+    code: &'static str,
+    /// [`BookingError::diagnostic_message`], the words `check` uses.
+    ///
+    /// [`BookingError::diagnostic_message`]: rustledger_booking::BookingError::diagnostic_message
+    message: String,
+    /// The posting the failure names, else the transaction.
+    span: Span,
+    file_id: u16,
 }
 
 // Per-thread count of `run_ledger_validation` invocations, for the #1799
@@ -253,47 +277,6 @@ pub(crate) struct LedgerValidation {
 thread_local! {
     pub(crate) static LEDGER_VALIDATION_RUNS: std::cell::Cell<usize> =
         const { std::cell::Cell::new(0) };
-}
-
-/// Map a booking failure to the validation code that best describes it.
-///
-/// `rledger check` prints these under a single `BOOK` label, but LSP
-/// diagnostics carry a machine-readable code, so the classes are separated
-/// here.
-///
-/// The match is EXHAUSTIVE over `BookingError`, deliberately. An earlier
-/// version of this comment claimed a catch-all kept a new variant compiling;
-/// there was none — only `B::Interpolation(_)`, which catches new
-/// *interpolation* kinds — and adding `NotBooked` duly failed the build. That
-/// is the better outcome: a new booking failure should be classified on
-/// purpose, not silently mapped to whatever arm happens to be last.
-fn booking_error_code(err: &rustledger_booking::BookingError) -> rustledger_validate::ErrorCode {
-    use rustledger_booking::BookingError as B;
-    use rustledger_booking::InterpolationError as I;
-    use rustledger_validate::ErrorCode;
-    match err {
-        // Inventory failures share their classification with the Late
-        // validator, which provokes the same errors by replaying reductions.
-        B::Inventory(inner) => ErrorCode::for_booking_error(&inner.error),
-        // Interpolation failures have no validator counterpart: `check`
-        // reports them from booking, so the mapping lives here alone.
-        B::Interpolation(I::Unrepresentable { .. }) => ErrorCode::ArithmeticOverflow,
-        B::Interpolation(_) => ErrorCode::TransactionUnbalanced,
-        // A posting that never went through booking is a caller fault, not a
-        // fault in the user's ledger — no directive of theirs is wrong. The
-        // LSP has no code for "we were handed an unbooked ledger", and
-        // inventing a ledger-shaped one would point the user at their own
-        // file. `MultipleInterpolation` is the nearest honest neighbor: both
-        // say the posting's amount was never resolved.
-        B::NotBooked { .. } => ErrorCode::MultipleInterpolation,
-        // Beancount's companion refusal for a `{}` whose categorized cost
-        // currency names no lot is "No position matches" (E4001); a priced
-        // reduction in another currency than its cost matches no lot it can
-        // book either (#2571).
-        B::CostPriceCurrencyMismatch { .. } | B::NoLotInInferredCostCurrency { .. } => {
-            ErrorCode::NoMatchingLot
-        }
-    }
 }
 
 pub(crate) fn run_ledger_validation(
@@ -344,31 +327,40 @@ pub(crate) fn run_ledger_validation(
     // `check` said the posting amount could not be computed (#1863). The
     // balance validator now declines to judge a transaction with unfilled
     // postings, so without this the transaction would go silent instead.
-    let mut booking_errors: Vec<ValidationError> = Vec::new();
+    //
+    // Code, message and position come from the same helpers the loader's
+    // booking pass uses, so a failure reads the same here as in `check`
+    // (#2510). Each entry keeps the bare failure text beside it for the
+    // de-duplication against validator restatements below.
+    let mut booking_errors: Vec<(BookingDiagnostic, String)> = Vec::new();
+    // The transactions whose booking failed, by position, so Late validation
+    // can leave them out below.
+    let mut failed: std::collections::HashSet<(u16, Span)> = std::collections::HashSet::new();
     for spanned in &mut booked_directives {
         let (span, file_id) = (spanned.span, spanned.file_id);
         let Directive::Transaction(txn) = &mut spanned.value else {
             continue;
         };
-        let date = txn.date;
         let outcome = booking_engine.book_and_interpolate(txn).and_then(|result| {
             booking_engine.apply(&result.transaction)?;
             Ok(result)
         });
         match outcome {
             Ok(result) => *txn = result.transaction,
-            // Leave the transaction as-is: the remaining validators still
-            // check what they can (account lifecycle, currency constraints).
-            Err(e) => booking_errors.push(ValidationError::with_location(
-                booking_error_code(&e),
-                e.to_string(),
-                date,
-                &Spanned {
-                    value: (),
-                    span,
-                    file_id,
-                },
-            )),
+            // Leave the transaction as written: Early validation still checks
+            // it (account lifecycle), Late validation does not (see below).
+            Err(e) => {
+                failed.insert((file_id, span));
+                booking_errors.push((
+                    BookingDiagnostic {
+                        code: rustledger_validate::ErrorCode::booking_failure_code_str(&e),
+                        message: e.diagnostic_message(txn),
+                        span: e.posting_span(txn).unwrap_or(span),
+                        file_id,
+                    },
+                    e.to_string(),
+                ));
+            }
         }
     }
 
@@ -429,31 +421,45 @@ pub(crate) fn run_ledger_validation(
     let today = jiff::Zoned::now().date();
     let session = ValidationSession::new(validation_options);
     let (session, mut errors) = session.run_early_spanned(&booked_directives, today);
+    // Late validation (currency constraints, balance residuals, inventories,
+    // balance assertions) skips the transactions booking refused, as
+    // `rledger check` does: its pipeline runs Early before booking and drops
+    // a failed transaction before Late. Validating one here judged amounts
+    // booking never resolved: a bare-price posting whose price could not be
+    // computed drew three E3001 "does not balance" diagnostics beside its
+    // `BOOK` (#2510), and its units still moved the balance an assertion
+    // checks.
+    if !failed.is_empty() {
+        booked_directives.retain(|d| {
+            !(matches!(d.value, Directive::Transaction(_)) && failed.contains(&(d.file_id, d.span)))
+        });
+    }
     let (session, late_errs) = session.run_late_spanned(&booked_directives, today);
     errors.extend(late_errs);
     errors.extend(session.finalize());
-    // The transaction stays in the validation input (so account-lifecycle and
-    // currency checks still run on it), which means a validator can re-derive
-    // the same failure from the same inventories — an inventory overflow is
-    // reported both by `apply` here and by `update_inventories` there, word
-    // for word. Keep one. Booking failures the validators cannot restate,
-    // such as an unrepresentable interpolation, are unaffected.
+    // A validator could re-derive a booking failure word for word (an
+    // inventory overflow is reported both by `apply` here and by
+    // `update_inventories`); with failed transactions out of Late that no
+    // longer happens, but keep one if it ever does.
     //
     // Matching on the rendered message is deliberate: it is the only signal
     // precise enough to tell a restatement from a genuinely different finding
     // (the two carry different spans, and several postings of one transaction
     // legitimately share a code and date). If the wordings ever diverge the
     // duplicate simply reappears — noise, never a lost diagnostic.
-    let seen: std::collections::HashSet<(rustledger_validate::ErrorCode, String)> =
-        errors.iter().map(|e| (e.code, e.message.clone())).collect();
-    errors.extend(
-        booking_errors
-            .into_iter()
-            .filter(|e| !seen.contains(&(e.code, e.message.clone()))),
-    );
+    let seen: std::collections::HashSet<(&'static str, &str)> = errors
+        .iter()
+        .map(|e| (e.code.code(), e.message.as_str()))
+        .collect();
+    let booking_errors = booking_errors
+        .into_iter()
+        .filter(|(d, bare)| !seen.contains(&(d.code, bare.as_str())))
+        .map(|(d, _)| d)
+        .collect();
 
     LedgerValidation {
         errors,
+        booking_errors,
         plugin_errors: plugin_errors_out,
     }
 }
@@ -592,7 +598,44 @@ pub(crate) fn map_validation_to_diagnostics(
             })
             .map(|e| validation_error_to_diagnostic(e, source, &line_index)),
     );
+    result.extend(
+        validation
+            .booking_errors
+            .iter()
+            .filter(|e| current_file_id.is_none_or(|fid| e.file_id == fid))
+            .map(|e| {
+                let (start, end) = span_to_range(e.span, source, &line_index);
+                Diagnostic {
+                    range: Range { start, end },
+                    severity: Some(DiagnosticSeverity::ERROR),
+                    code: Some(lsp_types::NumberOrString::String(e.code.to_string())),
+                    source: Some("rustledger".to_string()),
+                    message: e.message.clone(),
+                    related_information: None,
+                    tags: None,
+                    code_description: None,
+                    data: None,
+                }
+            }),
+    );
     result
+}
+
+/// The LSP range of a source span, trimmed of trailing whitespace.
+///
+/// A directive's span runs up to the start of the *next* directive, so it
+/// swallows any trailing blank lines and would draw the squiggle across
+/// unrelated lines (e.g. an unbalanced-transaction diagnostic bleeding into
+/// the following directive). Trimming ends the range at the directive's last
+/// non-blank character.
+fn span_to_range(span: Span, source: &str, line_index: &LineIndex) -> (Position, Position) {
+    let (sl, sc) = line_index.offset_to_position(span.start);
+    let clamped_end = span.end.min(source.len());
+    let end = source
+        .get(span.start..clamped_end)
+        .map_or(clamped_end, |s| span.start + s.trim_end().len());
+    let (el, ec) = line_index.offset_to_position(end);
+    (Position::new(sl, sc), Position::new(el, ec))
 }
 
 /// Convert a single validation error to an LSP diagnostic.
@@ -606,23 +649,11 @@ pub(crate) fn validation_error_to_diagnostic(
     line_index: &LineIndex,
 ) -> Diagnostic {
     // Get position from span if available, otherwise use start of file
-    let (start_line, start_col, end_line, end_col, has_location) = if let Some(span) = &error.span {
-        let (sl, sc) = line_index.offset_to_position(span.start);
-        // A directive's span runs up to the start of the *next* directive, so
-        // it swallows any trailing blank lines and would draw the squiggle
-        // across unrelated lines (e.g. an unbalanced-transaction diagnostic
-        // bleeding into the following directive). Trim trailing whitespace so
-        // the range ends at the directive's last non-blank character.
-        let clamped_end = span.end.min(source.len());
-        let end = source
-            .get(span.start..clamped_end)
-            .map_or(clamped_end, |s| span.start + s.trim_end().len());
-        let (el, ec) = line_index.offset_to_position(end);
-        (sl, sc, el, ec, true)
-    } else {
+    let ((start, end), has_location) = error.span.map_or_else(
         // No span available - put at start of file and note in message
-        (0, 0, 0, 0, false)
-    };
+        || ((Position::new(0, 0), Position::new(0, 0)), false),
+        |span| (span_to_range(span, source, line_index), true),
+    );
 
     // Map severity to LSP severity
     let severity = match error.code.severity() {
@@ -644,10 +675,7 @@ pub(crate) fn validation_error_to_diagnostic(
     }
 
     Diagnostic {
-        range: Range {
-            start: Position::new(start_line, start_col),
-            end: Position::new(end_line, end_col),
-        },
+        range: Range { start, end },
         severity: Some(severity),
         code: Some(lsp_types::NumberOrString::String(
             error.code.code().to_string(),
@@ -1161,6 +1189,7 @@ pub(crate) fn ledger_diagnostics_multi(
     } else {
         LedgerValidation {
             errors: Vec::new(),
+            booking_errors: Vec::new(),
             plugin_errors: Vec::new(),
         }
     };
@@ -3094,6 +3123,103 @@ plugin "auto_accounts"
                     "expected {needle:?} in {diags:?}"
                 ),
             }
+        }
+    }
+
+    /// #2510: an interpolation failure gets the code, message and position
+    /// `rledger check` gives it (`BOOK`), not E3001 ("transaction does not
+    /// balance"), for every interpolation failure a ledger can reach. Each
+    /// file is loaded through the loader, which is what `check` reports, and
+    /// the LSP diagnostic is compared against that error field by field.
+    #[test]
+    fn interpolation_failures_match_check_code_message_and_line() {
+        let head = "2024-01-01 open Assets:Cash\n2024-01-01 open Expenses:Food\n\
+                    2024-01-01 open Assets:Stock\n2024-01-01 open Assets:Eur\n";
+        let cases = [
+            // CannotInferCurrency: the issue's case.
+            (
+                "cannot infer currency",
+                "2024-01-15 * \"Lunch\"\n  Expenses:Food   12.50\n  Assets:Cash\n",
+            ),
+            // MultipleMissing (`check` adds a validator E3002 beside it).
+            (
+                "multiple postings missing",
+                "2024-01-15 * \"x\"\n  Expenses:Food  12.50 USD\n  Assets:Cash\n  Assets:Eur\n",
+            ),
+            // UnsolvableUnits
+            (
+                "cannot interpolate the units",
+                "2024-01-15 * \"x\"\n  Assets:Stock  AAPL {{100 USD}}\n  Assets:Cash  -100 USD\n",
+            ),
+            // AmbiguousBarePriceCurrency
+            (
+                "cannot tell which currency",
+                "2024-01-15 * \"x\"\n  Assets:Stock  10 AAPL @\n  Assets:Cash  -100 USD\n  Assets:Eur  -10 EUR\n",
+            ),
+            // NegativeInferredPrice
+            (
+                "negative price",
+                "2024-01-15 * \"x\"\n  Assets:Stock  10 AAPL @\n  Assets:Cash  100 USD\n",
+            ),
+            // NegativeInferredCost
+            (
+                "negative cost",
+                "2024-01-15 * \"x\"\n  Assets:Stock  10 AAPL {}\n  Assets:Cash  100 USD\n",
+            ),
+            // AmbiguousInferredCostCurrency
+            (
+                "cannot infer the cost currency",
+                "2024-01-15 * \"x\"\n  Assets:Stock  10 AAPL {}\n  Assets:Cash  -100 USD\n  Assets:Eur  -10 EUR\n",
+            ),
+        ];
+        for (needle, body) in cases {
+            let source = format!("{head}{body}");
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("main.beancount");
+            std::fs::write(&path, &source).unwrap();
+            let ledger = rustledger_loader::load(&path, &rustledger_loader::LoadOptions::default())
+                .expect("load");
+            let check: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+            assert_eq!(
+                check.len(),
+                1,
+                "{needle}: check must give one BOOK error: {:?}",
+                ledger.errors
+            );
+            let check = check[0];
+            assert!(
+                check.message.contains(needle),
+                "{needle}: {}",
+                check.message
+            );
+
+            let parsed = parse(&source);
+            let diags = all_diagnostics(
+                &parsed,
+                &source,
+                None,
+                None,
+                None,
+                &[],
+                PositionEncoding::Utf16,
+            );
+            let codes: Vec<_> = diags.iter().map(get_code).collect();
+            assert!(
+                !codes.iter().any(|c| c == "E3001"),
+                "{needle}: no E3001: {diags:?}"
+            );
+            let book: Vec<_> = diags.iter().filter(|d| get_code(d) == "BOOK").collect();
+            assert_eq!(book.len(), 1, "{needle}: one BOOK diagnostic: {diags:?}");
+            assert_eq!(
+                book[0].message, check.message,
+                "{needle}: same message as check"
+            );
+            let line = check.location.as_ref().expect("check locates it").line;
+            assert_eq!(
+                book[0].range.start.line as usize + 1,
+                line,
+                "{needle}: same line as check"
+            );
         }
     }
 }

@@ -38,8 +38,12 @@ impl ParseError {
 #[non_exhaustive]
 pub enum QueryError {
     /// Parse error.
+    ///
+    /// The message names the parse error, so it is not also the `source()`:
+    /// a `{:#}` chain would print it twice (#2574). `From` is implemented by
+    /// hand below for the same reason (`#[from]` implies `#[source]`).
     #[error("parse error: {0}")]
-    Parse(#[from] ParseError),
+    Parse(ParseError),
     /// Type error (incompatible types in operation).
     #[error("type error: {0}")]
     Type(String),
@@ -89,4 +93,43 @@ pub enum QueryError {
     /// key column isn't in it").
     #[error("PIVOT BY requires an explicit GROUP BY clause")]
     PivotWithoutGroupBy,
+}
+
+impl From<ParseError> for QueryError {
+    fn from(e: ParseError) -> Self {
+        Self::Parse(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The `{:#}`-style chain: the message, then each `source()` in turn.
+    fn chain(e: &dyn std::error::Error) -> String {
+        let mut out = e.to_string();
+        let mut cur = e.source();
+        while let Some(s) = cur {
+            out.push_str(": ");
+            out.push_str(&s.to_string());
+            cur = s.source();
+        }
+        out
+    }
+
+    /// #2574: `QueryError::Parse` names the parse error in its message and
+    /// used to return it from `source()` as well, so a `{:#}` chain printed
+    /// it twice.
+    #[test]
+    fn parse_error_names_its_cause_once_2574() {
+        let inner = ParseError::new(ParseErrorKind::SyntaxError("INNER-TEXT".into()), 7);
+        let e = QueryError::from(inner);
+        let chained = chain(&e);
+        assert_eq!(chained, e.to_string(), "the message is the whole chain");
+        assert_eq!(chained.matches("INNER-TEXT").count(), 1, "{chained}");
+        assert_eq!(
+            chained,
+            "parse error: syntax error at position 7: INNER-TEXT"
+        );
+    }
 }

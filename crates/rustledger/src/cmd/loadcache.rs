@@ -217,7 +217,7 @@ pub fn bail_on_booking_errors(ledger: &rustledger_loader::Ledger, file: &Path) -
     let failures: Vec<&str> = ledger
         .errors
         .iter()
-        .filter(|e| e.code == "BOOK")
+        .filter(|e| e.code == rustledger_booking::BOOKING_FAILURE_CODE)
         .map(|e| e.message.as_str())
         .collect();
     if failures.is_empty() {

@@ -147,8 +147,44 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 /// new file between the regen and CI's fetch" (which we DON'T want
 /// to gate on, because the corpus race is outside the PR author's
 /// control).
+///
+/// The in-tree directories are read from the corpus `.gitignore`, whose
+/// `!<dir>/` exceptions are what commit them, so the two cannot disagree.
+/// This used to be `plugins/` alone, while `costs/`, `interpolation/` and
+/// `bql/` were committed too: strict mode never noticed that the CST
+/// manifest had no entry for 18 of them (#2511).
 pub fn is_in_tree_fixture(rel: &Path) -> bool {
-    rel.starts_with(IN_TREE_FIXTURE_PREFIX)
+    in_tree_fixture_dirs()
+        .iter()
+        .any(|dir| rel.starts_with(Path::new(CORPUS_ROOT).join(dir)))
+}
+
+/// The corpus directories committed to the repository: each `!<dir>/` line
+/// of `tests/compatibility/files/.gitignore`.
+///
+/// # Panics
+///
+/// If the `.gitignore` cannot be read, or names no directory at all (then
+/// every in-tree fixture would silently be treated as downloaded).
+pub fn in_tree_fixture_dirs() -> &'static [String] {
+    static DIRS: OnceLock<Vec<String>> = OnceLock::new();
+    DIRS.get_or_init(|| {
+        let path = repo_root().join(CORPUS_ROOT).join(".gitignore");
+        let text = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+        let dirs: Vec<String> = text
+            .lines()
+            .filter_map(|l| l.trim().strip_prefix('!')?.strip_suffix('/'))
+            .filter(|d| !d.is_empty() && !d.contains(['*', '/']))
+            .map(str::to_string)
+            .collect();
+        assert!(
+            !dirs.is_empty(),
+            "{} names no in-tree fixture directory (`!<dir>/`)",
+            path.display()
+        );
+        dirs
+    })
 }
 
 /// Reject corpus paths the manifest serializer cannot represent.

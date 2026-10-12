@@ -1006,18 +1006,10 @@ fn run_booking(
                     // the squiggle on the first line of the file (#2330). The
                     // text renderer papered over it by appending the date and
                     // narration to the message, which is why it went unnoticed.
-                    let span = e
-                        .account()
-                        .and_then(|account| {
-                            txn.postings
-                                .iter()
-                                .find(|p| &p.value.account == account)
-                                .map(|p| p.span)
-                        })
-                        .unwrap_or(directive_span);
+                    let span = e.posting_span(txn).unwrap_or(directive_span);
                     let mut err = LedgerError::error(
-                        "BOOK",
-                        format!("{} ({}, \"{}\")", e, txn.date, txn.narration),
+                        rustledger_booking::BOOKING_FAILURE_CODE,
+                        e.diagnostic_message(txn),
                     )
                     .with_source_span((span.start, span.end), file_id);
                     // Resolve to file/line/column the same way the validator
@@ -1704,7 +1696,7 @@ pub fn document_source_dirs(source_map: &SourceMap) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-/// Build a [`ValidationOptions`] from loader-level file options.
+/// Build a [`rustledger_validate::ValidationOptions`] from loader-level file options.
 ///
 /// Layers the path-relative document directories and the *effective* booking
 /// method onto [`validation_options_from_options`] (the shared option-derived

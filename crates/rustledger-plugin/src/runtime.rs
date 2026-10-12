@@ -547,7 +547,7 @@ pub struct WatchingPluginManager {
 /// `crate::untrusted`).
 fn reload_failure_warning(path: &Path, e: &anyhow::Error) -> String {
     format!(
-        "warning: failed to reload plugin {}: {}",
+        "failed to reload plugin {}: {}",
         path.display(),
         crate::escape_untrusted_text(&format!("{e:#}"))
     )
@@ -639,7 +639,10 @@ impl WatchingPluginManager {
                     }
                     Err(e) => {
                         // Log error but don't fail - keep using old plugin
-                        eprintln!("{}", reload_failure_warning(&tracked.path, &e));
+                        crate::notice::emit_warning(
+                            crate::notice::PLUGIN_RELOAD_FAILED,
+                            &reload_failure_warning(&tracked.path, &e),
+                        );
                     }
                 }
             }
@@ -757,7 +760,7 @@ mod tests {
         let w = reload_failure_warning(Path::new("p.wasm"), &e);
         assert_eq!(
             w,
-            "warning: failed to reload plugin p.wasm: invalid plugin: \
+            "failed to reload plugin p.wasm: invalid plugin: \
              plugin has forbidden import: m\\u{1b}[2J::f"
         );
     }
@@ -1011,6 +1014,49 @@ mod tests {
         let manager = WatchingPluginManager::default();
         assert!(manager.is_empty());
         assert_eq!(manager.len(), 0);
+    }
+
+    /// A watched plugin that changes on disk and fails to load is reported
+    /// as a notice, so a caller that captures notices receives it instead of
+    /// the process's stderr (#2566). The old plugin is kept.
+    #[test]
+    fn a_failed_hot_reload_is_a_notice_not_stderr() {
+        let valid = wat::parse_str(
+            r#"
+            (module
+                (memory (export "memory") 1)
+                (func (export "alloc") (param i32) (result i32) i32.const 0)
+                (func (export "process") (param i32 i32) (result i64) i64.const 0)
+            )
+            "#,
+        )
+        .expect("valid wat");
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("watched.wasm");
+        std::fs::write(&path, &valid).expect("write plugin");
+
+        let mut manager = WatchingPluginManager::new();
+        manager.load(&path).expect("valid plugin loads");
+
+        // Not a WASM module, and dated later than the loaded one, so
+        // `check_and_reload` tries it and fails.
+        std::fs::write(&path, b"not wasm \x1b[2J").expect("overwrite plugin");
+        let later = std::time::SystemTime::now() + std::time::Duration::from_secs(60);
+        std::fs::File::options()
+            .write(true)
+            .open(&path)
+            .and_then(|f| f.set_modified(later))
+            .expect("set mtime");
+
+        let (reloaded, notices) = crate::notice::capture(|| manager.check_and_reload());
+        assert!(!reloaded.expect("a failed reload is not an error"));
+        assert_eq!(notices.len(), 1, "{notices:?}");
+        assert_eq!(notices[0].code, crate::notice::PLUGIN_RELOAD_FAILED);
+        assert!(
+            notices[0].message.starts_with("failed to reload plugin "),
+            "{notices:?}"
+        );
+        assert_eq!(manager.len(), 1, "the old plugin is kept");
     }
 
     #[test]

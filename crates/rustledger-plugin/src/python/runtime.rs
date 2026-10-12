@@ -116,24 +116,22 @@ const fn output_cap(input_bytes: usize) -> usize {
 /// Cap on a Python plugin's stderr (tracebacks, its prints).
 const STDERR_CAP: usize = 4 << 20;
 
-/// Show the guest's stderr on the host's.
+/// Show the guest's stderr on the host's, or hand it to the caller's
+/// [`crate::notice::capture`].
 fn forward_guest_stderr(bytes: &[u8]) {
-    use std::io::Write;
     if !bytes.is_empty() {
         // What the plugin printed, with its control characters escaped
         // (see `crate::untrusted`): it is the plugin's text on the
         // user's terminal.
         let text = String::from_utf8_lossy(bytes);
-        let mut err = std::io::stderr().lock();
-        let _ = err.write_all(crate::escape_untrusted_text(&text).as_bytes());
+        let mut shown = crate::escape_untrusted_text(&text).into_owned();
         if bytes.len() >= STDERR_CAP {
-            let _ = writeln!(
-                err,
-                "\n(the Python plugin's stderr was cut off at {} MiB)",
+            shown.push_str(&format!(
+                "\n(the Python plugin's stderr was cut off at {} MiB)\n",
                 STDERR_CAP >> 20
-            );
+            ));
         }
-        let _ = err.flush();
+        crate::notice::emit(crate::notice::PLUGIN_STDERR, &shown);
     }
 }
 
@@ -283,10 +281,12 @@ impl PythonRuntime {
     /// * `quiet_warning` - If true, suppress the performance warning message.
     pub fn with_options(quiet_warning: bool) -> Result<Self, PythonError> {
         if !quiet_warning {
-            eprintln!("⚠️  Loading Python plugin runtime...");
-            eprintln!("⚠️  Python plugins are 10-100x slower than native Rust plugins.");
-            eprintln!("⚠️  Consider migrating to native Rust plugins for better performance.");
-            eprintln!();
+            crate::notice::emit(
+                crate::notice::PYTHON_RUNTIME_LOADING,
+                "⚠️  Loading Python plugin runtime...\n\
+                 ⚠️  Python plugins are 10-100x slower than native Rust plugins.\n\
+                 ⚠️  Consider migrating to native Rust plugins for better performance.\n\n",
+            );
         }
 
         // Ensure the Python runtime is downloaded
@@ -842,19 +842,26 @@ fn load_or_compile_cached_module(
         // the safe precompiled-module header check above.
         match unsafe { Module::deserialize_file(engine, cache_path) } {
             Ok(module) => return Ok(module),
-            Err(e) => eprintln!(
-                "⚠️  Ignoring unreadable Python WASM cache at {} ({e}); recompiling.",
-                cache_path.display()
+            Err(e) => crate::notice::emit(
+                crate::notice::PYTHON_RUNTIME_COMPILE,
+                &format!(
+                    "⚠️  Ignoring unreadable Python WASM cache at {} ({e}); recompiling.\n",
+                    cache_path.display()
+                ),
             ),
         }
     } else if cache_path.exists() {
-        eprintln!(
-            "⚠️  Ignoring foreign/corrupt Python WASM cache at {}; recompiling.",
-            cache_path.display()
+        crate::notice::emit(
+            crate::notice::PYTHON_RUNTIME_COMPILE,
+            &format!(
+                "⚠️  Ignoring foreign/corrupt Python WASM cache at {}; recompiling.\n",
+                cache_path.display()
+            ),
         );
     } else {
-        eprintln!(
-            "⚠️  Compiling Python WASM module (~30 seconds; on first use and after a wasmtime upgrade)..."
+        crate::notice::emit(
+            crate::notice::PYTHON_RUNTIME_COMPILE,
+            "⚠️  Compiling Python WASM module (~30 seconds; on first use and after a wasmtime upgrade)...\n",
         );
     }
 
@@ -872,10 +879,13 @@ fn load_or_compile_cached_module(
 /// otherwise make every load pay the ~30s recompile with no explanation).
 fn write_cache_atomically(cache_path: &std::path::Path, module: &Module) {
     let warn_unwritable = || {
-        eprintln!(
-            "⚠️  Could not write the Python WASM cache at {} — python-plugin loading will \
-             recompile (~30s) every run until this is resolved.",
-            cache_path.display()
+        crate::notice::emit(
+            crate::notice::PYTHON_RUNTIME_COMPILE,
+            &format!(
+                "⚠️  Could not write the Python WASM cache at {} — python-plugin loading will \
+                 recompile (~30s) every run until this is resolved.\n",
+                cache_path.display()
+            ),
         );
     };
     let (Ok(bytes), Some(dir)) = (module.serialize(), cache_path.parent()) else {

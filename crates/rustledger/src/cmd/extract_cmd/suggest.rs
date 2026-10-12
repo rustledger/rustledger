@@ -13,6 +13,7 @@
 use anyhow::{Context, Result, anyhow};
 use rustledger_core::{Directive, InternedStr, Transaction};
 use rustledger_ops::ml::CategorizationModel;
+use std::io::Write as _;
 
 /// Outcome of running ML suggestion over a batch of imported directives.
 #[derive(Debug, Default)]
@@ -40,7 +41,7 @@ pub(super) fn apply_ml_suggestions(
     directives: &mut [Directive],
     existing_txns: &[Transaction],
     fallback_accounts: &[String],
-    err_out: &mut dyn std::io::Write,
+    err_out: &mut crate::cmd::messages::Messages<'_>,
 ) -> Result<SuggestStats> {
     // Wrap existing transactions as core `Directive`s for the ML API (clone is
     // unavoidable — `existing_txns` is also used for duplicate detection in the
@@ -55,9 +56,11 @@ pub(super) fn apply_ml_suggestions(
     let model = match CategorizationModel::train(&training_directives) {
         Ok(m) => m,
         Err(rustledger_ops::ml::MlError::InsufficientData(reason)) => {
-            let _ = writeln!(
-                err_out,
-                "warning: --suggest-categories: insufficient training data ({reason}); skipping ML suggestions"
+            err_out.warn(
+                super::warning_codes::SUGGESTIONS_SKIPPED,
+                format!(
+                    "--suggest-categories: insufficient training data ({reason}); skipping ML suggestions"
+                ),
             );
             return Ok(SuggestStats::default());
         }
@@ -108,7 +111,7 @@ pub(super) fn apply_ml_suggestions_with_summary(
     directives: &mut [Directive],
     existing_txns: &[Transaction],
     fallback_accounts: &[String],
-    err_out: &mut dyn std::io::Write,
+    err_out: &mut crate::cmd::messages::Messages<'_>,
 ) -> Result<()> {
     let stats = apply_ml_suggestions(directives, existing_txns, fallback_accounts, err_out)
         .context("applying ML category suggestions")?;
@@ -170,7 +173,7 @@ mod tests {
             &mut new_directives,
             &existing,
             &default_fallbacks(),
-            &mut std::io::sink(),
+            &mut crate::cmd::messages::Messages::new(&mut std::io::sink(), None),
         )
         .unwrap();
         assert_eq!(stats.inspected, 1);
@@ -194,7 +197,7 @@ mod tests {
             &mut new_directives,
             &existing,
             &default_fallbacks(),
-            &mut std::io::sink(),
+            &mut crate::cmd::messages::Messages::new(&mut std::io::sink(), None),
         )
         .unwrap();
         assert_eq!(stats.inspected, 0);
@@ -219,7 +222,7 @@ mod tests {
             &mut new_directives,
             &existing,
             &default_fallbacks(),
-            &mut std::io::sink(),
+            &mut crate::cmd::messages::Messages::new(&mut std::io::sink(), None),
         )
         .unwrap();
         assert_eq!(stats.modified, 0);
@@ -246,7 +249,7 @@ mod tests {
             &mut new_directives,
             &existing,
             &custom,
-            &mut std::io::sink(),
+            &mut crate::cmd::messages::Messages::new(&mut std::io::sink(), None),
         )
         .unwrap();
         assert_eq!(stats.inspected, 1);

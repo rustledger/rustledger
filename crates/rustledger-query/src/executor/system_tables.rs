@@ -1222,6 +1222,14 @@ thread_local! {
     pub(super) static TXN_ACCOUNTS_BUILT: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
+#[cfg(test)]
+thread_local! {
+    /// How many `accounts` / `other_accounts` values this thread has
+    /// materialized: the tests count them to pin that `x IN other_accounts`
+    /// builds none (#2597).
+    pub(super) static TXN_ACCOUNT_SETS_MATERIALIZED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
 impl<'t> TxnAccounts<&'t str> {
     /// Sort `txn`'s posting accounts once, then read off the distinct ones
     /// and the repeated ones.
@@ -1252,13 +1260,38 @@ impl<'t> TxnAccounts<&'t str> {
 impl<S: AsRef<str>> TxnAccounts<S> {
     /// The `accounts` column: every posting's account, sorted and deduped.
     pub(super) fn accounts(&self) -> Vec<String> {
+        #[cfg(test)]
+        TXN_ACCOUNT_SETS_MATERIALIZED.with(|n| n.set(n.get() + 1));
         self.all.iter().map(|a| a.as_ref().to_string()).collect()
+    }
+
+    /// Whether `name` is in the `accounts` column, answered without building
+    /// it (#2597).
+    pub(super) fn contains(&self, name: &str) -> bool {
+        self.all.binary_search_by(|a| a.as_ref().cmp(name)).is_ok()
+    }
+
+    /// Whether `name` is in what [`Self::others`] gives for `account`,
+    /// answered without building it (#2597): `x IN other_accounts` built
+    /// every row's set, n names per posting, which made it quadratic in a
+    /// transaction's size. The same rule as `others`: `account` itself counts
+    /// only when another posting also uses it.
+    pub(super) fn others_contain(&self, account: &str, name: &str) -> bool {
+        if name == account {
+            self.repeated
+                .binary_search_by(|a| a.as_ref().cmp(name))
+                .is_ok()
+        } else {
+            self.contains(name)
+        }
     }
 
     /// `other_accounts` for a posting to `account` in this transaction: every
     /// OTHER posting's account. `account` drops out unless another posting
     /// also uses it.
     pub(super) fn others(&self, account: &str) -> Vec<String> {
+        #[cfg(test)]
+        TXN_ACCOUNT_SETS_MATERIALIZED.with(|n| n.set(n.get() + 1));
         let shared = self
             .repeated
             .binary_search_by(|a| a.as_ref().cmp(account))

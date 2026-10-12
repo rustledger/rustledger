@@ -647,7 +647,7 @@ fn every_directive_field_reaches_the_digest() {
 
 /// A note's tags and links are part of its identity (#2598).
 ///
-/// Notes carry tags and links since #2588 (#2573); until #2598 the Note arm
+/// Notes carry tags and links since #2185 (#2160); until #2598 the Note arm
 /// left both out, so two notes differing only in tags shared a `meta.hash`.
 /// They now hash exactly as a Document's do: the counts always, then each
 /// element length-prefixed, so the tag/link partition cannot collide either.

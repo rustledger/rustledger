@@ -357,7 +357,7 @@ pub fn compute_directive_hash(directive: &Directive) -> String {
             field(&mut hasher, n.date.to_string().as_bytes());
             field(&mut hasher, n.account.as_bytes());
             field(&mut hasher, n.comment.as_bytes());
-            // Notes carry tags and links since #2588 (#2573), and they hash
+            // Notes carry tags and links since #2185 (#2160), and they hash
             // exactly as a Document's do (#2598): the counts always, then each
             // element length-prefixed. The counts make every note's hash
             // change, untagged ones included; that was the decided trade over

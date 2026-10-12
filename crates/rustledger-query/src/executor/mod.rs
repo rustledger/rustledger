@@ -10,7 +10,7 @@ pub use summarize::SummaryAccounts;
 use types::AccountInfo;
 use types::EntryRef;
 pub use types::{
-    Interval, IntervalUnit, PostingContext, QueryResult, Row, SourceLocation, Table,
+    CreatedTables, Interval, IntervalUnit, PostingContext, QueryResult, Row, SourceLocation, Table,
     TransactionRef, Value, WindowContext,
 };
 
@@ -302,7 +302,7 @@ pub struct Executor<'a> {
     /// each posting's own span, not just the enclosing directive's.
     source_map: Option<&'a SourceMap>,
     /// In-memory tables created by CREATE TABLE.
-    tables: FxHashMap<String, Table>,
+    tables: CreatedTables,
     /// The difference the balance checker computed for each FAILING assertion,
     /// keyed by `(date, account, currency, asserted)`. Backs
     /// `#balances.discrepancy`.
@@ -629,9 +629,29 @@ impl<'a> Executor<'a> {
             commodity_meta,
             source_locations: None,
             source_map: None,
-            tables: FxHashMap::default(),
+            tables: CreatedTables::default(),
             balance_discrepancies: FxHashMap::default(),
         }
+    }
+
+    /// The tables `CREATE TABLE` has made in this executor (#2579).
+    #[must_use]
+    pub const fn created_tables(&self) -> &CreatedTables {
+        &self.tables
+    }
+
+    /// Take the tables `CREATE TABLE` made, leaving none, to hand them to
+    /// the next executor over the same ledger with
+    /// [`Self::set_created_tables`]. A session that builds an executor per
+    /// query keeps them this way (#2579).
+    pub fn take_created_tables(&mut self) -> CreatedTables {
+        std::mem::take(&mut self.tables)
+    }
+
+    /// Give this executor the tables an earlier one made (see
+    /// [`Self::take_created_tables`]), replacing any it has.
+    pub fn set_created_tables(&mut self, tables: CreatedTables) {
+        self.tables = tables;
     }
 
     /// Set the config-aware account types (from the loaded ledger's
@@ -774,7 +794,7 @@ impl<'a> Executor<'a> {
             commodity_meta,
             source_locations: Some(source_locations),
             source_map: Some(source_map),
-            tables: FxHashMap::default(),
+            tables: CreatedTables::default(),
             balance_discrepancies: FxHashMap::default(),
         }
     }

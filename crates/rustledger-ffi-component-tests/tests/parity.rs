@@ -650,6 +650,36 @@ fn session_from_entries_with_options_carries_renamed_roots() -> Result<()> {
     Ok(())
 }
 
+/// `session.query` (WIT 3.15.0, #2579): a table one call's `CREATE TABLE`
+/// makes is there for the same session's next call, through the component
+/// boundary; another session, and the free `query`, see none. Each call
+/// built a fresh executor, so the table was gone by the next.
+#[test]
+fn session_query_keeps_created_tables() -> Result<()> {
+    if !component_path().exists() {
+        eprintln!("skip: component wasm not built");
+        return Ok(());
+    }
+    let (mut store, inst) = instantiate()?;
+    let ledger = inst.rustledger_ledger_ledger();
+    let session = ledger.session();
+
+    let held = session.call_constructor(&mut store, LEDGER)?;
+    let create = "CREATE TABLE spent AS SELECT account WHERE number > 0";
+    let r = session.call_query(&mut store, held, create)?;
+    assert!(r.errors.is_empty(), "{create}: {:?}", r.errors);
+    let r = session.call_query(&mut store, held, "SELECT account FROM spent")?;
+    assert!(r.errors.is_empty(), "the table is gone: {:?}", r.errors);
+    assert_eq!(r.rows.len(), 1);
+
+    let other = session.call_constructor(&mut store, LEDGER)?;
+    let r = session.call_query(&mut store, other, "SELECT account FROM spent")?;
+    assert!(!r.errors.is_empty(), "another session sees the table");
+    let r = ledger.call_query(&mut store, LEDGER, "SELECT account FROM spent")?;
+    assert!(!r.errors.is_empty(), "the free query sees the table");
+    Ok(())
+}
+
 /// `session.format` (WIT 3.8.0, #1766): render the held entries honoring
 /// the ledger's display precision, over the real component boundary. The
 /// distinguishing observable: an option precision WIDER than every written

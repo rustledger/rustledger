@@ -3204,6 +3204,59 @@ mod reduction_tests {
         assert_eq!(r.cost_basis.unwrap().number, dec!(500)); // only the STK lot
     }
 
+    /// A date or label on an AVERAGE sale names no lot in the undated,
+    /// unlabeled pool (#2627), in `reduce` and `try_reduce` alike, and the
+    /// inventory is left untouched.
+    #[test]
+    fn reduce_average_refuses_a_date_or_label() {
+        let mut i = Inventory::new();
+        i.add(lot(10, 100, 2)).expect("fixture fits in Decimal");
+        let before = i.clone();
+        for (spec, stated) in [
+            (
+                CostSpec::default().with_date(naive_date(2024, 1, 2).unwrap()),
+                "2024-01-02",
+            ),
+            (CostSpec::default().with_label("lot-a"), "\"lot-a\""),
+            (
+                CostSpec::default()
+                    .with_label("lot-a")
+                    .with_date(naive_date(2024, 1, 9).unwrap()),
+                "2024-01-09",
+            ),
+        ] {
+            let expected = crate::BookingError::AverageSpecDateOrLabel {
+                currency: "STK".into(),
+                stated: stated.into(),
+            };
+            assert_eq!(
+                i.try_reduce(&sell_stk(5), Some(&spec), BookingMethod::Average)
+                    .unwrap_err(),
+                expected
+            );
+            assert_eq!(
+                i.reduce(&sell_stk(5), Some(&spec), BookingMethod::Average)
+                    .unwrap_err(),
+                expected
+            );
+            assert_eq!(i, before, "a refused sale leaves the pool alone");
+            // Every other method reads a date or label as a filter.
+            assert!(!matches!(
+                i.try_reduce(&sell_stk(5), Some(&spec), BookingMethod::Fifo),
+                Err(crate::BookingError::AverageSpecDateOrLabel { .. })
+            ));
+        }
+        // Without one, the sale books from the pool.
+        assert!(
+            i.reduce(
+                &sell_stk(5),
+                Some(&CostSpec::default()),
+                BookingMethod::Average
+            )
+            .is_ok()
+        );
+    }
+
     #[test]
     fn reduce_average_partial_multi_lot_matches_single_synthetic_lot() {
         // Regression: a partial AVERAGE sale across multiple lots matches a

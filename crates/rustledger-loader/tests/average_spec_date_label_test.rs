@@ -127,3 +127,37 @@ fn buys_keep_their_date_and_label_and_every_reduction_refuses_one() {
         "{errors:?}"
     );
 }
+
+/// A sale written with its units elided never reaches booking's lot matching:
+/// interpolation solves the units and `apply` reduces the pool. It used to
+/// drop the date there too.
+#[test]
+fn an_elided_units_sale_refuses_a_date_too() {
+    let source = r#"2024-01-01 open Assets:B X "AVERAGE"
+2024-01-01 open Assets:C
+
+2024-01-02 * "buy"
+  Assets:B  10 X {10.00 EUR, 2024-01-02}
+  Assets:C
+
+2024-03-01 * "sell, units elided"
+  Assets:B  X {10.00 EUR, 2024-01-02}
+  Assets:C  10.00 EUR
+"#;
+    let reported = errors(source);
+    assert_eq!(reported.len(), 1, "{reported:?}");
+    assert!(
+        reported[0].starts_with(
+            "Assets:B: AVERAGE pool of X is one lot with no date or label, so the cost \
+             spec's 2024-01-02 describes no lot"
+        ),
+        "{reported:?}"
+    );
+    // Without the date it books, as before.
+    let undated = source.replace(
+        "X {10.00 EUR, 2024-01-02}\n  Assets:C  10",
+        "X {10.00 EUR}\n  Assets:C  10",
+    );
+    assert_ne!(undated, source);
+    assert_eq!(errors(&undated), Vec::<String>::new());
+}

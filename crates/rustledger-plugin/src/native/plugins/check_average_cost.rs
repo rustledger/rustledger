@@ -144,9 +144,10 @@ impl NativePlugin for CheckAverageCostPlugin {
                     Some(rustledger_plugin_types::CostNumberData::PerUnitFromTotal {
                         total,
                         ..
-                    }) => Decimal::from_str(total)
-                        .map(|t| python_quotient(t, units_num.abs()))
-                        .unwrap_or_else(|_| cost_text.to_string()),
+                    }) => Decimal::from_str(total).map_or_else(
+                        |_| cost_text.to_string(),
+                        |t| python_quotient(t, units_num.abs()),
+                    ),
                     _ => cost_text.to_string(),
                 };
 

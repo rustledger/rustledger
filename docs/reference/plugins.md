@@ -139,7 +139,7 @@ rustledger includes 31 native plugins. Here are the most commonly used:
 | `coherent_cost` | A currency is held at cost everywhere or nowhere |
 | `commodity_attr` | Validate commodity metadata attributes |
 | `leafonly` | Restrict postings to leaf accounts |
-| `noduplicates` | Detect duplicate transactions |
+| `noduplicates` | Detect duplicate directives |
 | `nounused` | Warn about unused accounts |
 | `onecommodity` | One commodity per account |
 | `pedantic` | Strict validation rules |
@@ -195,7 +195,7 @@ rustledger includes 31 native plugins. Here are the most commonly used:
 | `generate_base_ccy_prices` | Create base currency price entries |
 | `implicit_prices` | Generate prices from costs |
 | `leafonly` | Error on non-leaf account postings |
-| `noduplicates` | Detect duplicate transactions |
+| `noduplicates` | Detect duplicate directives |
 | `nounused` | Warn on unused accounts |
 | `onecommodity` | Single commodity per account |
 | `pedantic` | Enable all strict validations |
@@ -297,7 +297,9 @@ Options: None
 
 ### noduplicates
 
-Detects duplicate transactions based on date, payee, narration, and amounts. Each later copy is an error, `Duplicate entry: 2024-01-02 "Lunch"`, at the copy. (Beancount follows `Duplicate entry:` with both entries' Python representations, and also compares directives other than transactions.)
+Detects duplicate directives of every type but `price`, as beancount's does. Two directives are duplicates when every field but their metadata is equal: a transaction's flag, payee, narration, tags, links and postings; an `open`'s account, currencies and booking method; a `balance`'s account, amount and tolerance; a `note`'s or `document`'s account, text or path, tags and links; and so on. Tags, links, an `open`'s currencies, a `custom` directive's values and a transaction's postings are compared without regard to order, and a total price is compared as the per-unit price it stands for (`2 HOOL @@ 10 USD` is `2 HOOL @ 5 USD`). Numbers keep their scale (`10 USD` is not `10.00 USD`), as in beancount. A repeated `price` is allowed: a price source commonly repeats one for a day the market was closed. Each later copy is an error at the copy, naming it: `Duplicate entry: 2024-01-02 "Lunch"` for a transaction, `Duplicate entry: 2024-01-04 note Assets:Bank "hello"` for another directive.
+
+Deliberate differences from beancount, which hashes the text of each field: beancount follows `Duplicate entry:` with both entries' Python representations; it does not compare the directive's type, so an `event "a" "b"` and a `query "a" "b"` on one date are duplicates there and not here; and it rounds the division of a total price or total cost to 28 digits, so `3 HOOL @@ 10 USD` is a duplicate of `3 HOOL @ 3.333333333333333333333333333 USD` there, while here a total that the per-unit number does not multiply back to exactly is compared as written.
 
 ```beancount
 plugin "beancount.plugins.noduplicates"

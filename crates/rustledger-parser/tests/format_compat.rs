@@ -79,7 +79,9 @@ const REQUIRED_FIXTURES: &[&str] = &[
     "unary_plus_stripped_per_canonical_form",
     "bom_dropped",
     "missing_final_newline_added",
-    "multiple_trailing_blank_lines_collapsed",
+    // Renamed from `multiple_trailing_blank_lines_collapsed`: trailing
+    // blank lines are kept, as bean-format keeps them (#2506).
+    "multiple_trailing_blank_lines_preserved",
     // Line-ending handling.
     "crlf_outside_strings_folded",
     "crlf_inside_strings_preserved",

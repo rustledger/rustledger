@@ -1,9 +1,11 @@
 #!/usr/bin/env python3
-"""Report parser-baseline drift that no PR would otherwise carry.
+"""Report corpus-baseline drift that no PR would otherwise carry.
 
-`tests/baselines/parser-corpus.manifest` pins the parser's output for every
-file in the downloaded compatibility corpus. Two things keep it from staying
-current on its own:
+`tests/baselines/parser-corpus.manifest` pins the parser's output, and
+`tests/baselines/cst-corpus.manifest` the CST's token and node shape, for
+every file in the downloaded compatibility corpus. Both are checked here: the
+CST one used to be left out, and fell ~26 entries behind with nothing
+reporting it (#2511). Two things keep them from staying current on their own:
 
   * The baseline gate treats a downloaded corpus file with no manifest entry
     as a WARNING, not a failure, and deliberately so -- upstream can add a
@@ -40,12 +42,21 @@ import sys
 REPO = "rustledger/rustledger"
 ISSUE_TITLE = "Parser corpus baseline has drifted"
 MARKER = "<!-- corpus-baseline-drift -->"
-MANIFEST = "tests/baselines/parser-corpus.manifest"
-
-REGEN = [
-    "cargo", "test", "-p", "rustledger-parser",
-    "--test", "corpus_baseline", "parser_output_matches_baseline",
-]
+# label -> (manifest path, regeneration command). Each command is the
+# manifest's own test under BASELINE_UPDATE=1, the same thing
+# `scripts/regen-corpus-baselines.sh` runs.
+MANIFESTS: dict[str, tuple[str, list[str]]] = {
+    "parser": (
+        "tests/baselines/parser-corpus.manifest",
+        ["cargo", "test", "-p", "rustledger-parser",
+         "--test", "corpus_baseline", "parser_output_matches_baseline"],
+    ),
+    "CST": (
+        "tests/baselines/cst-corpus.manifest",
+        ["cargo", "test", "-p", "rustledger-parser",
+         "--test", "cst_baseline", "cst_output_matches_baseline"],
+    ),
+}
 
 
 CORPUS_ROOT = "tests/compatibility/files"
@@ -79,8 +90,8 @@ def corpus_size() -> int:
     return n
 
 
-def manifest_entries() -> int:
-    with open(MANIFEST, encoding="utf-8") as fh:
+def manifest_entries(path: str) -> int:
+    with open(path, encoding="utf-8") as fh:
         return sum(1 for line in fh if line.strip() and not line.startswith("#"))
 
 
@@ -128,15 +139,15 @@ def gh(*args: str) -> str:
     return proc.stdout
 
 
-def regenerate() -> None:
-    """Rewrite the manifest from the corpus currently on disk."""
-    subprocess.run(REGEN, env={**os.environ, "BASELINE_UPDATE": "1"}, check=True)
+def regenerate(cmd: list[str]) -> None:
+    """Rewrite one manifest from the corpus currently on disk."""
+    subprocess.run(cmd, env={**os.environ, "BASELINE_UPDATE": "1"}, check=True)
 
 
-def manifest_diff() -> str:
-    """Unified diff of the manifest after regeneration, empty if unchanged."""
+def manifest_diff(path: str) -> str:
+    """Unified diff of one manifest after regeneration, empty if unchanged."""
     return subprocess.run(
-        ["git", "diff", "--unified=0", "--", MANIFEST],
+        ["git", "diff", "--unified=0", "--", path],
         capture_output=True, text=True, check=True,
     ).stdout
 
@@ -144,9 +155,11 @@ def manifest_diff() -> str:
 def classify(diff: str) -> dict[str, list[str]]:
     """Split a manifest diff into added / removed / rehashed paths.
 
-    A manifest line is `path<TAB>source_hash<TAB>output_hash`. A path on both
-    sides of the diff had a hash change; a path on one side only was added or
-    removed from the corpus.
+    A manifest line is `path<TAB>source_hash<TAB>output_hash...` (the CST
+    manifest has two output hashes, tokens and nodes; only the source hash in
+    the second column matters here). A path on both sides of the diff had a
+    hash change; a path on one side only was added or removed from the
+    corpus.
     """
     added, removed = {}, {}
     for line in diff.splitlines():
@@ -200,8 +213,9 @@ def _summary(n: int) -> str:
     )
 
 
-def render(groups: dict[str, list[str]]) -> str:
-    n = sum(len(v) for v in groups.values())
+def render(report: dict[str, dict[str, list[str]]]) -> str:
+    """Issue body for a `{manifest label: classify() groups}` report."""
+    n = sum(len(v) for groups in report.values() for v in groups.values())
     body = [
         MARKER,
         "",
@@ -209,7 +223,7 @@ def render(groups: dict[str, list[str]]) -> str:
         "",
     ]
 
-    def section(key: str, title: str, why: str) -> None:
+    def section(groups: dict[str, list[str]], key: str, title: str, why: str) -> None:
         paths = groups[key]
         if not paths:
             return
@@ -219,27 +233,32 @@ def render(groups: dict[str, list[str]]) -> str:
             body.append(f"- _...and {len(paths) - 40} more_")
         body.append("")
 
-    section(
-        "added", "New corpus files with no baseline",
-        "These have had **no parser-output coverage at all** since they "
-        + "appeared upstream.",
-    )
-    section(
-        "unregenerated", "Parser output changed on UNCHANGED input",
-        "The source hash is identical and the output hash is not: this "
-        + "repository now produces different output for the same bytes than "
-        + "the committed baseline records. A parser change reached main without "
-        + "regenerating. **This is the group to look at first.**",
-    )
-    section(
-        "upstream", "Upstream source changed",
-        "The file's own contents moved upstream, so a different output hash "
-        + "is expected. Routine churn; regenerate when convenient.",
-    )
-    section(
-        "removed", "Manifest entries whose file is gone",
-        "Upstream deleted or renamed these; the entries are dead weight.",
-    )
+    for label, groups in report.items():
+        if not any(groups.values()):
+            continue
+        path = MANIFESTS[label][0] if label in MANIFESTS else label
+        body.extend([f"## {label} manifest (`{path}`)", ""])
+        section(
+            groups, "added", "New corpus files with no baseline",
+            f"These have had **no {label} baseline coverage at all** since they "
+            + "appeared upstream.",
+        )
+        section(
+            groups, "unregenerated", f"{label} output changed on UNCHANGED input",
+            "The source hash is identical and the output hash is not: this "
+            + "repository now produces different output for the same bytes than "
+            + "the committed baseline records. A parser change reached main without "
+            + "regenerating. **This is the group to look at first.**",
+        )
+        section(
+            groups, "upstream", "Upstream source changed",
+            "The file's own contents moved upstream, so a different output hash "
+            + "is expected. Routine churn; regenerate when convenient.",
+        )
+        section(
+            groups, "removed", "Manifest entries whose file is gone",
+            "Upstream deleted or renamed these; the entries are dead weight.",
+        )
 
     body += [
         "---",
@@ -254,7 +273,7 @@ def render(groups: dict[str, list[str]]) -> str:
         "",
         (
             "Maintained by `.github/workflows/corpus-baseline-drift.yml`."
-            + " Closes itself when the manifest matches a fresh corpus again."
+            + " Closes itself when both manifests match a fresh corpus again."
         ),
     ]
     return "\n".join(body)
@@ -262,6 +281,10 @@ def render(groups: dict[str, list[str]]) -> str:
 
 def _empty() -> dict[str, list[str]]:
     return {"unregenerated": [], "added": [], "upstream": [], "removed": []}
+
+
+def has_drift(report: dict[str, dict[str, list[str]]]) -> bool:
+    return any(any(groups.values()) for groups in report.values())
 
 
 def self_test() -> int:
@@ -296,12 +319,44 @@ def self_test() -> int:
     if got != want:
         failures.append(f"classify mismatch:\n  got  {got}\n  want {want}")
 
-    text = render(got)
+    text = render({"parser": got, "CST": _empty()})
     for needle in ("new.beancount", "x.beancount", "gone.beancount", MARKER):
         if needle not in text:
             failures.append(f"rendered body omits {needle}")
     if "**3**" not in text:
         failures.append("rendered body does not count all three entries")
+    if "CST manifest" in text:
+        failures.append("a manifest with no drift must not get a heading")
+
+    # The CST manifest (#2511): four columns, the source hash still second.
+    # Drift in it alone must be reported, under its own heading, and counted.
+    cst = classify(
+        "-tests/compatibility/files/a/x.beancount\tAAA\tTOK\tNOD\n"
+        + "+tests/compatibility/files/a/x.beancount\tAAA\tTOK\tNOD2\n"
+        + "+tests/compatibility/files/a/new.beancount\tDDD\tTOK\tNOD\n"
+    )
+    want_cst = {
+        "unregenerated": ["tests/compatibility/files/a/x.beancount"],
+        "added": ["tests/compatibility/files/a/new.beancount"],
+        "upstream": [],
+        "removed": [],
+    }
+    if cst != want_cst:
+        failures.append(f"CST classify mismatch:\n  got  {cst}\n  want {want_cst}")
+    cst_only = {"parser": _empty(), "CST": cst}
+    if not has_drift(cst_only):
+        failures.append("drift in the CST manifest alone must count as drift")
+    if has_drift({"parser": _empty(), "CST": _empty()}):
+        failures.append("two clean manifests must not count as drift")
+    cst_text = render(cst_only)
+    if "## CST manifest (`tests/baselines/cst-corpus.manifest`)" not in cst_text:
+        failures.append("CST drift must be reported under the CST manifest heading")
+    if "parser manifest" in cst_text:
+        failures.append("a clean parser manifest must not get a heading")
+    if "**2**" not in cst_text:
+        failures.append("CST-only body does not count both entries")
+    if set(MANIFESTS) != {"parser", "CST"}:
+        failures.append(f"both manifests must be checked, got {sorted(MANIFESTS)}")
 
     # The split is the point of the section: an upstream content change and a
     # parser change that skipped regeneration look identical in a path list
@@ -418,7 +473,11 @@ def self_test() -> int:
         return "https://github.com/x/y/issues/1\n"
 
     real_gh = globals()["gh"]
-    drift = {"unregenerated": ["a"], "added": [], "upstream": [], "removed": []}
+    drift = {
+        "parser": {"unregenerated": ["a"], "added": [], "upstream": [], "removed": []},
+        "CST": _empty(),
+    }
+    clean = {"parser": _empty(), "CST": _empty()}
     # `_report` narrates to stdout. Left alone it prints "opened
     # https://github.com/x/y/issues/1" into a self-test log, which is exactly
     # the sort of line someone skims and believes.
@@ -445,13 +504,13 @@ def self_test() -> int:
             failures.append("edit must target the existing issue number")
 
         calls.clear()
-        _report(False, _empty(), [{"number": 7}])
+        _report(False, clean, [{"number": 7}])
         verbs = [c[1] for c in calls]
         if verbs != ["comment", "close"]:
             failures.append(f"clean with an open issue must comment then close, got {verbs}")
 
         calls.clear()
-        _report(False, _empty(), [])
+        _report(False, clean, [])
         if calls:
             failures.append(f"clean with no issue must touch nothing, got {calls}")
     finally:
@@ -472,25 +531,31 @@ def main() -> int:
     # Every path here is repo-relative, and so is the `git checkout --` that
     # --dry-run uses to put the manifest back. Run from anywhere else and that
     # either fails confusingly or, worse, resolves somewhere unintended.
-    if not os.path.isfile(MANIFEST):
-        print(
-            f"{MANIFEST} not found: run this from the repository root.",
-            file=sys.stderr,
-        )
-        return 2
+    for path, _ in MANIFESTS.values():
+        if not os.path.isfile(path):
+            print(
+                f"{path} not found: run this from the repository root.",
+                file=sys.stderr,
+            )
+            return 2
 
     # Whether the manifest was already modified before we touched it. If it
     # was, --dry-run must NOT restore it: `git checkout --` would throw away
     # edits the caller made, and a reporting script has no business deleting
     # someone's work to keep its own promise about not leaving a diff.
-    dirty_before = bool(
-        subprocess.run(
-            ["git", "diff", "--name-only", "--", MANIFEST],
-            capture_output=True, text=True, check=True,
-        ).stdout.strip()
-    )
+    dirty_before = {
+        path: bool(
+            subprocess.run(
+                ["git", "diff", "--name-only", "--", path],
+                capture_output=True, text=True, check=True,
+            ).stdout.strip()
+        )
+        for path, _ in MANIFESTS.values()
+    }
 
-    expected = manifest_entries()
+    # The parser manifest is the floor: the CST one was the stale one
+    # (#2511), and a manifest that is behind must not lower the bar.
+    expected = max(manifest_entries(path) for path, _ in MANIFESTS.values())
     count = corpus_size()
     if not fetch_is_complete(count, expected):
         print(
@@ -502,8 +567,10 @@ def main() -> int:
         )
         return 0
 
-    regenerate()
-    groups = classify(manifest_diff())
+    report: dict[str, dict[str, list[str]]] = {}
+    for label, (path, cmd) in MANIFESTS.items():
+        regenerate(cmd)
+        report[label] = classify(manifest_diff(path))
 
     # A failed clone leaves files missing that still exist upstream, and they
     # are indistinguishable here from files upstream actually deleted. It can
@@ -524,8 +591,9 @@ def main() -> int:
     # read here.
     failures = fetch_failures()
     if failures:
-        dropped = len(groups["removed"])
-        groups["removed"] = []
+        dropped = sum(len(groups["removed"]) for groups in report.values())
+        for groups in report.values():
+            groups["removed"] = []
         if dropped:
             print(
                 f"{failures} clone(s) failed during the fetch; suppressing "
@@ -534,7 +602,7 @@ def main() -> int:
                 file=sys.stderr,
             )
 
-    drifted = any(groups.values())
+    drifted = has_drift(report)
 
     if args.dry_run:
         # Regenerating rewrote the manifest in the working tree. On CI that is
@@ -542,15 +610,16 @@ def main() -> int:
         # dry-run must not leave a modified file behind for someone to commit
         # by accident. Unless it was already modified when we arrived, in
         # which case restoring it would delete their edits instead.
-        if dirty_before:
-            print(
-                f"note: {MANIFEST} had uncommitted changes before this ran, "
-                + "so it was regenerated in place and NOT restored.",
-                file=sys.stderr,
-            )
-        else:
-            subprocess.run(["git", "checkout", "--", MANIFEST], check=True)
-        print(render(groups) if drifted else "no drift")
+        for path, dirty in dirty_before.items():
+            if dirty:
+                print(
+                    f"note: {path} had uncommitted changes before this ran, "
+                    + "so it was regenerated in place and NOT restored.",
+                    file=sys.stderr,
+                )
+            else:
+                subprocess.run(["git", "checkout", "--", path], check=True)
+        print(render(report) if drifted else "no drift")
         return 0
 
     try:
@@ -569,15 +638,15 @@ def main() -> int:
         issues = []
 
     try:
-        return _report(drifted, groups, issues)
+        return _report(drifted, report, issues)
     except GhError as e:
         print(e, file=sys.stderr)
         return 1
 
 
-def _report(drifted: bool, groups: dict[str, list[str]], issues: list) -> int:
+def _report(drifted: bool, report: dict[str, dict[str, list[str]]], issues: list) -> int:
     if drifted:
-        text = render(groups)
+        text = render(report)
         if issues:
             num = str(issues[0]["number"])
             gh("issue", "edit", num, "--repo", REPO, "--body", text)
@@ -589,7 +658,7 @@ def _report(drifted: bool, groups: dict[str, list[str]], issues: list) -> int:
     elif issues:
         num = str(issues[0]["number"])
         gh("issue", "comment", num, "--repo", REPO, "--body",
-           "The manifest matches a freshly fetched corpus again. Closing automatically.")
+           "Both manifests match a freshly fetched corpus again. Closing automatically.")
         gh("issue", "close", num, "--repo", REPO)
         print(f"no drift; closed issue #{num}")
     else:

@@ -27,8 +27,9 @@ mod interpolate;
 mod pad;
 
 pub use book::{
-    BookedTransaction, BookingEngine, BookingError, CapitalGain, LedgerBookResult,
-    TransactionReplay, book, book_transactions, posting_lot_total, present_inventory,
+    BOOKING_FAILURE_CODE, BookedTransaction, BookingEngine, BookingError, CapitalGain,
+    LedgerBookResult, TransactionReplay, book, book_transactions, posting_lot_total,
+    present_inventory,
 };
 pub use interpolate::{
     InterpolationError, InterpolationResult, Rollback, UnknownGroup, elided_unknown_groups,
@@ -1164,12 +1165,12 @@ pub fn normalize_prices(txn: &mut Transaction) {
                     // quotient leave `Decimal`'s range, where a bare `/` PANICS.
                     // `None` leaves the `@@` price as written, which is what the
                     // zero-units arm below already does when it cannot convert.
-                    total_amount
-                        .number
-                        .checked_div(units.number.abs())
-                        .map(|per_unit| {
+                    // So does a quotient that underflowed to zero.
+                    rustledger_core::per_unit_price(total_amount.number, units.number).map(
+                        |per_unit| {
                             PriceAnnotation::unit(Amount::new(per_unit, &total_amount.currency))
-                        })
+                        },
+                    )
                 }
                 Some(_) => None, // units.number is zero — leave alone
                 None => {

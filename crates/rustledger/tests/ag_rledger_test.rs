@@ -525,8 +525,14 @@ fn extract_adapter_applies_payee_tables() {
 /// Run `ag-rledger <args...>` with `dir` as the cwd and the only config
 /// source, and return `(exit_code, envelope, stderr)`.
 fn run_in(dir: &std::path::Path, args: &[&str]) -> (i32, Value, String) {
+    run_in_with(dir, args, &[])
+}
+
+/// [`run_in`], with `env` set as well.
+fn run_in_with(dir: &std::path::Path, args: &[&str], env: &[(&str, &str)]) -> (i32, Value, String) {
     let output = Command::new(ag_rledger())
         .args(args)
+        .envs(env.iter().copied())
         // `dir` is the user config dir and the cwd, so no stray project
         // config is found above it; PROGRAMDATA covers the Windows system
         // config path. The parse cache is off so `--verbose` reports a
@@ -689,12 +695,6 @@ fn no_command_writes_to_the_process_stderr() {
         "Date,Description,Amount\n2024-01-02,Coffee,-4.50\n2024-01-03,Lunch,not-a-number\n",
     );
     let csv = csv.to_str().unwrap();
-    let priced = write_fixture(
-        tmp.path(),
-        "priced.beancount",
-        "2024-01-01 commodity AAPL\n  price: \"garbage\"\n",
-    );
-    let priced = priced.to_str().unwrap();
     let prefix = tmp.path().join("bin");
     std::fs::create_dir(&prefix).unwrap();
     let wrapper = if cfg!(windows) {
@@ -714,15 +714,12 @@ fn no_command_writes_to_the_process_stderr() {
             vec!["format", unformatted, "--check", "--diff"],
             "@@ line 1 @@",
         ),
-        // A row the importer skipped.
+        // `extract`'s progress. Its warnings, and `price`'s, are
+        // `warnings` records now (#2566), covered by
+        // `extract_and_price_warnings_are_coded_records`.
         (
             vec!["extract", csv, "--account", "Assets:Bank"],
-            "warning: Row 2",
-        ),
-        // A malformed `price:` value, found without touching the network.
-        (
-            vec!["price", "--file", priced, "--dry-run"],
-            "malformed `price:` metadata",
+            "Extracted 1 transactions",
         ),
         // A file in the way that is not a wrapper.
         (vec!["compat", "uninstall", "--prefix", prefix], "skip:"),
@@ -1062,4 +1059,531 @@ mod plugin_budget {
             "flag over config: {env}"
         );
     }
+}
+
+/// The envelope's `warnings`: `result.warnings`, or `data.warnings` on a
+/// failed command.
+fn envelope_warnings(env: &Value) -> Vec<Value> {
+    env["result"]["warnings"]
+        .as_array()
+        .or_else(|| env["data"]["warnings"].as_array())
+        .cloned()
+        .unwrap_or_default()
+}
+
+/// The codes of the envelope's `warnings`, in order.
+fn warning_codes(env: &Value) -> Vec<String> {
+    envelope_warnings(env)
+        .iter()
+        .map(|w| {
+            w["code"]
+                .as_str()
+                .unwrap_or_else(|| panic!("a warning without a code: {w}"))
+                .to_string()
+        })
+        .collect()
+}
+
+/// What `rledger <args...>` writes to stderr, run as [`run_in_with`] runs
+/// `ag-rledger`.
+fn rledger_stderr(dir: &std::path::Path, args: &[&str], env: &[(&str, &str)]) -> String {
+    let output = Command::new(env!("CARGO_BIN_EXE_rledger"))
+        .args(args)
+        .envs(env.iter().copied())
+        .current_dir(dir)
+        .env("RLEDGER_CONFIG_DIR", dir)
+        .env("PROGRAMDATA", dir)
+        .env("BEANCOUNT_DISABLE_LOAD_CACHE", "1")
+        .env_remove("RLEDGER_PROFILE")
+        .output()
+        .expect("spawn rledger");
+    String::from_utf8_lossy(&output.stderr).into_owned()
+}
+
+/// Run `ag-rledger <args...>` in `dir` and assert: nothing on the process's
+/// stderr, the warnings carry exactly `expected` codes in order, no warning
+/// line is left in `result.stderr`, and each warning's message is what
+/// `rledger` prints for the same invocation. Returns the envelope.
+#[track_caller]
+fn assert_warnings(
+    dir: &std::path::Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+    expected: &[&str],
+) -> Value {
+    let (_, envelope, stderr) = run_in_with(dir, args, env);
+    assert!(stderr.is_empty(), "{args:?} wrote to stderr: {stderr}");
+    assert_eq!(warning_codes(&envelope), expected, "{args:?}: {envelope}");
+    let carried = envelope["result"]["stderr"]
+        .as_str()
+        .or_else(|| envelope["data"]["stderr"].as_str())
+        .unwrap_or_default();
+    assert!(
+        !carried.contains("warning"),
+        "{args:?}: a warning is still prose in result.stderr: {carried}"
+    );
+    let printed = rledger_stderr(dir, args, env);
+    for w in envelope_warnings(&envelope) {
+        let message = w["message"].as_str().expect("a warning has a message");
+        assert!(
+            printed.contains(message),
+            "{args:?}: rledger does not print {message:?}:\n{printed}"
+        );
+    }
+    envelope
+}
+
+/// #2566: `extract` and `price` warnings were prose in `result.stderr`. They
+/// are `warnings` records with codes, in the shape `query` and `report` use,
+/// and `rledger` still prints each one.
+#[test]
+fn extract_and_price_warnings_are_coded_records() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let csv = write_fixture(
+        dir,
+        "bank.csv",
+        "Date,Description,Amount\n2024-01-02,Coffee,-4.50\n\
+         2024-01-03,Lunch,not-a-number\n2024-01-04,Tea,-2.00\n",
+    );
+    let csv = csv.to_str().unwrap();
+    let existing = write_fixture(
+        dir,
+        "existing.beancount",
+        "2024-01-01 open Assets:Bank USD\n2024-01-01 open Expenses:Unknown\n\n\
+         2024-01-02 * \"Coffee\"\n  Assets:Bank  -4.50 USD\n  Expenses:Unknown\n",
+    );
+    let existing = existing.to_str().unwrap();
+
+    // A row the importer could not read, and a duplicate `--existing` skipped.
+    let env = assert_warnings(
+        dir,
+        &[
+            "extract",
+            csv,
+            "--account",
+            "Assets:Bank",
+            "--existing",
+            existing,
+        ],
+        &[],
+        &[
+            "IMPORTER_WARNING",
+            "DUPLICATES_SKIPPED",
+            "DUPLICATE_SKIPPED",
+        ],
+    );
+    let warnings = envelope_warnings(&env);
+    assert!(
+        warnings[0]["message"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("Row 2")),
+        "{env}"
+    );
+    // A skipped row says which, by date and account.
+    assert_eq!(warnings[2]["date"], "2024-01-02", "{env}");
+    assert_eq!(warnings[2]["account"], "Assets:Bank", "{env}");
+    // The rest of the answer is untouched.
+    let stdout = env["result"]["stdout"].as_str().unwrap_or_default();
+    assert!(
+        stdout.contains("Tea") && !stdout.contains("Coffee"),
+        "{env}"
+    );
+
+    // A currency the account's `open` does not allow.
+    let env = assert_warnings(
+        dir,
+        &[
+            "extract",
+            csv,
+            "--account",
+            "Assets:Bank",
+            "--currency",
+            "EUR",
+            "--existing",
+            existing,
+        ],
+        &[],
+        &["CURRENCY_NOT_ALLOWED", "IMPORTER_WARNING"],
+    );
+    assert_eq!(
+        envelope_warnings(&env)[0]["account"],
+        "Assets:Bank",
+        "{env}"
+    );
+
+    // A malformed `price:` value, and nothing left to fetch: found without
+    // touching the network.
+    let priced = write_fixture(
+        dir,
+        "priced.beancount",
+        "2024-01-01 commodity AAPL\n  price: \"garbage\"\n",
+    );
+    assert_warnings(
+        dir,
+        &["price", "--file", priced.to_str().unwrap(), "--dry-run"],
+        &[],
+        &[
+            "PRICE_METADATA_MALFORMED",
+            "NO_SYMBOLS",
+            "NO_SYMBOLS_HINT",
+            "NO_SYMBOLS_HINT",
+        ],
+    );
+
+    // A price that failed to fetch (a source command that cannot run).
+    let env = assert_warnings(
+        dir,
+        &[
+            "price",
+            "AAPL",
+            "--source-cmd",
+            "rledger-test-no-such-command-2566",
+        ],
+        &[],
+        &["PRICE_FETCH_FAILED"],
+    );
+    assert!(
+        envelope_warnings(&env)[0]["message"]
+            .as_str()
+            .is_some_and(|m| m.starts_with("Failed to fetch AAPL: ")),
+        "{env}"
+    );
+}
+
+/// #2566: an `importers.toml` that does not parse costs the run its payee
+/// rewrites and its WASM importer directory, and both are said in
+/// `warnings`.
+#[test]
+fn an_unreadable_importers_config_is_a_coded_warning() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    write_fixture(dir, "importers.toml", "[payees\n");
+    let csv = write_fixture(
+        dir,
+        "bank.csv",
+        "Date,Description,Amount\n2024-01-02,Coffee,-4.50\n",
+    );
+    let mut expected = Vec::new();
+    // Only a build with the WASM runtime reads `wasm_importer_dir`.
+    if cfg!(feature = "python-plugin-wasm") {
+        expected.push("IMPORTERS_CONFIG_UNREADABLE");
+    }
+    expected.push("PAYEES_NOT_APPLIED");
+    assert_warnings(
+        dir,
+        &["extract", csv.to_str().unwrap(), "--account", "Assets:Bank"],
+        &[],
+        &expected,
+    );
+}
+
+/// #2566: the `RLEDGER_CONFIG` deprecation warning was written by the config
+/// loader straight to the process's stderr. It leads every command's
+/// `warnings` now, once even for `config`, which loads the file again.
+#[test]
+fn the_rledger_config_deprecation_is_a_warning_not_stderr() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let good = write_fixture(dir, "good.beancount", GOOD_LEDGER);
+    let env = [("RLEDGER_CONFIG", "/nonexistent/config.toml")];
+    for args in [
+        vec!["check", good.to_str().unwrap()],
+        vec!["config", "path"],
+        vec!["report", good.to_str().unwrap(), "accounts"],
+        // The commands #2567 added run inside the same capture (#2566).
+        vec!["explain", "E2001"],
+        vec!["lint", "closed-nonempty", good.to_str().unwrap()],
+        vec![
+            "report",
+            good.to_str().unwrap(),
+            "returns",
+            "--investments",
+            "Assets:Cash",
+            "--currency",
+            "USD",
+            "--end",
+            "2024-12-31",
+        ],
+        vec!["report", good.to_str().unwrap(), "capgains"],
+    ] {
+        let envelope = assert_warnings(dir, &args, &env, &["RLEDGER_CONFIG_DEPRECATED"]);
+        assert!(
+            envelope_warnings(&envelope)[0]["message"]
+                .as_str()
+                .is_some_and(|m| m.starts_with("RLEDGER_CONFIG is no longer supported")),
+            "{envelope}"
+        );
+    }
+}
+
+/// The deprecation warning still reaches the envelope when the config then
+/// fails to load: no command runs, so it rides on the `CONFIG_ERROR`.
+#[test]
+fn the_rledger_config_deprecation_rides_on_a_config_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let good = write_fixture(dir, "good.beancount", GOOD_LEDGER);
+    std::fs::write(dir.join("config.toml"), "[plugins\n").unwrap();
+    let (code, env, stderr) = run_in_with(
+        dir,
+        &["check", good.to_str().unwrap()],
+        &[("RLEDGER_CONFIG", "/nonexistent/config.toml")],
+    );
+    assert_ne!(code, 0, "{env}");
+    assert!(stderr.is_empty(), "{stderr}");
+    assert_eq!(env["error"]["code"], "CONFIG_ERROR", "{env}");
+    assert_eq!(warning_codes(&env), ["RLEDGER_CONFIG_DEPRECATED"], "{env}");
+}
+
+/// #2566: a WASM importer whose `identify` fails was reported on the
+/// process's stderr by the importer crate. It is a `warnings` record now,
+/// with the module's text escaped (#2525).
+#[cfg(feature = "python-plugin-wasm")]
+#[test]
+fn a_failing_wasm_identify_is_a_warning_not_stderr() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let original = r#"(func (export "identify") (param i32 i32) (result i64) i64.const 0)"#;
+    let wat = rustledger_importer::test_fixtures::metadata_wat("trp");
+    assert!(wat.contains(original), "fixture changed shape");
+    let wat = wat.replace(
+        original,
+        r#"(func (export "identify") (param i32 i32) (result i64) unreachable)"#,
+    );
+    let wasm = dir.join("trap.wasm");
+    std::fs::write(&wasm, wat::parse_str(&wat).expect("WAT parses")).unwrap();
+    let csv = write_fixture(
+        dir,
+        "bank.csv",
+        "Date,Description,Amount\n2024-01-02,Coffee,-4.50\n",
+    );
+
+    let env = assert_warnings(
+        dir,
+        &[
+            "extract",
+            csv.to_str().unwrap(),
+            "--account",
+            "Assets:Bank",
+            "--wasm-importer",
+            wasm.to_str().unwrap(),
+        ],
+        &[],
+        &["IMPORTER_IDENTIFY_FAILED"],
+    );
+    let message = envelope_warnings(&env)[0]["message"]
+        .as_str()
+        .unwrap_or_default()
+        .to_string();
+    assert!(
+        message.starts_with("WASM importer `trp` identify("),
+        "{env}"
+    );
+    // The CSV importer still read the file.
+    assert!(
+        env["result"]["stdout"]
+            .as_str()
+            .is_some_and(|s| s.contains("Coffee")),
+        "{env}"
+    );
+}
+
+/// The subcommand names `rledger --help` lists (clap's `Commands:` section),
+/// without `help`.
+fn rledger_commands() -> Vec<String> {
+    let output = Command::new(env!("CARGO_BIN_EXE_rledger"))
+        .arg("--help")
+        .output()
+        .expect("spawn rledger --help");
+    let help = String::from_utf8_lossy(&output.stdout).into_owned();
+    let names: Vec<String> = help
+        .lines()
+        .skip_while(|line| line.trim() != "Commands:")
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty())
+        .filter_map(|line| line.split_whitespace().next())
+        .filter(|name| *name != "help")
+        .map(str::to_string)
+        .collect();
+    // The parse is shown able to find commands, or an empty list would pass
+    // the guard below vacuously.
+    for known in ["check", "query", "report", "explain", "lint"] {
+        assert!(
+            names.iter().any(|n| n == known),
+            "could not read `{known}` out of `rledger --help`:\n{help}"
+        );
+    }
+    names
+}
+
+/// The drift guard for #2567: every `rledger` command is an `ag-rledger`
+/// command, or is listed in the root envelope's `unsupported_commands` and
+/// refused by name. A command added to `rledger` fails here until it is one
+/// or the other. Before, `explain` was simply missing.
+#[test]
+fn every_rledger_command_is_offered_or_listed_as_unsupported() {
+    let (_, root) = run(&[]);
+    let commands: Vec<String> = root["result"]["commands"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no command tree: {root}"))
+        .iter()
+        .filter_map(|c| c["name"].as_str().map(str::to_string))
+        .collect();
+    let unsupported: Vec<String> = root["result"]["unsupported_commands"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no unsupported_commands: {root}"))
+        .iter()
+        .map(|c| {
+            assert!(
+                c["reason"].as_str().is_some_and(|r| !r.is_empty()),
+                "an unsupported command says why: {c}"
+            );
+            c["command"].as_str().expect("command name").to_string()
+        })
+        .collect();
+
+    let rledger = rledger_commands();
+    for name in &rledger {
+        assert!(
+            commands.contains(name),
+            "`rledger {name}` has no `ag-rledger` counterpart and is not listed as \
+             unsupported: offer it, or add it to UNSUPPORTED_COMMANDS"
+        );
+    }
+    for name in &unsupported {
+        assert!(
+            rledger.contains(name),
+            "`{name}` is listed as unsupported but rledger has no such command"
+        );
+        let (code, env) = run(&[name.as_str(), "bash"]);
+        assert_ne!(code, 0, "{env}");
+        assert_eq!(env["error"]["code"], "UNSUPPORTED", "{env}");
+    }
+}
+
+/// What `rledger <args>` prints on stdout, and its exit code, run in `dir`
+/// as [`run_in`] runs `ag-rledger`.
+fn rledger_stdout(dir: &std::path::Path, args: &[&str]) -> (i32, String) {
+    let output = Command::new(env!("CARGO_BIN_EXE_rledger"))
+        .args(args)
+        .current_dir(dir)
+        .env("RLEDGER_CONFIG_DIR", dir)
+        .env("PROGRAMDATA", dir)
+        .env("BEANCOUNT_DISABLE_LOAD_CACHE", "1")
+        .output()
+        .expect("spawn rledger");
+    (
+        output.status.code().expect("exit code"),
+        String::from_utf8_lossy(&output.stdout).into_owned(),
+    )
+}
+
+/// #2567: `report returns`, `report capgains`, `lint closed-nonempty` and
+/// `explain` are offered, with `rledger`'s flags; the answer in `result` is
+/// what `rledger` prints, and the exit code is `rledger`'s.
+#[test]
+fn the_commands_from_2567_answer_as_rledger_does() {
+    let tmp = tempfile::tempdir().unwrap();
+    let returns = write_fixture(
+        tmp.path(),
+        "returns.beancount",
+        "option \"operating_currency\" \"USD\"\n\n\
+         2020-01-01 open Assets:Bank\n2020-01-01 open Assets:Broker:Stock\n\
+         2020-01-01 open Income:Dividends\n\n\
+         2020-01-01 * \"Buy AAPL\"\n  Assets:Broker:Stock  10 AAPL {100 USD}\n  Assets:Bank  -1000 USD\n\n\
+         2020-06-01 * \"Dividend\"\n  Assets:Bank  20 USD\n  Income:Dividends  -20 USD\n\n\
+         2020-12-31 price AAPL 130 USD\n",
+    );
+    let returns = returns.to_str().unwrap();
+    let gains = write_fixture(
+        tmp.path(),
+        "gains.beancount",
+        "option \"booking_method\" \"FIFO\"\n\n\
+         2020-01-01 open Assets:Broker:Stock\n2020-01-01 open Assets:Bank\n\
+         2020-01-01 open Income:Gains\n\n\
+         2020-01-01 * \"Buy\"\n  Assets:Broker:Stock  10 AAPL {100 USD}\n  Assets:Bank  -1000 USD\n\n\
+         2024-03-01 * \"Sell\"\n  Assets:Broker:Stock  -8 AAPL {} @ 150 USD\n  Assets:Bank  1200 USD\n  Income:Gains\n\n\
+         2024-06-01 close Assets:Bank\n",
+    );
+    let gains = gains.to_str().unwrap();
+
+    for (ag, rledger) in [
+        (
+            vec![
+                "report",
+                returns,
+                "returns",
+                "-i",
+                "Assets:Broker",
+                "--income",
+                "Income:Dividends",
+                "--end",
+                "2020-12-31",
+                "--format",
+                "json",
+            ],
+            vec![
+                "report",
+                returns,
+                "returns",
+                "-i",
+                "Assets:Broker",
+                "--income",
+                "Income:Dividends",
+                "--end",
+                "2020-12-31",
+                "--format",
+                "json",
+                "--no-pager",
+            ],
+        ),
+        (
+            vec!["report", gains, "capgains", "--year", "2024", "--irr"],
+            vec![
+                "report",
+                gains,
+                "capgains",
+                "--year",
+                "2024",
+                "--irr",
+                "--no-pager",
+            ],
+        ),
+        (
+            vec!["lint", "closed-nonempty", gains, "--format", "json"],
+            vec!["lint", "closed-nonempty", gains, "--format", "json"],
+        ),
+        (vec!["explain", "E2001"], vec!["explain", "E2001"]),
+        (vec!["explain"], vec!["explain"]),
+        // An unknown code: exit 1 with the pointer, as in rledger.
+        (vec!["explain", "E9999"], vec!["explain", "E9999"]),
+    ] {
+        let (code, env, stderr) = run_in(tmp.path(), &ag);
+        assert!(stderr.is_empty(), "{ag:?} wrote to stderr: {stderr}");
+        let (rledger_code, printed) = rledger_stdout(tmp.path(), &rledger);
+        assert!(
+            !printed.is_empty(),
+            "{rledger:?} printed nothing to compare"
+        );
+        assert_eq!(code, rledger_code, "{ag:?}: exit code differs: {env}");
+        assert_eq!(
+            env["result"]["stdout"].as_str(),
+            Some(printed.as_str()),
+            "{ag:?}: result differs from rledger's: {env}"
+        );
+    }
+
+    // The closed-with-a-balance finding is really there, so the comparison
+    // above compared a finding and not two empty reports.
+    let (_, env, _) = run_in(
+        tmp.path(),
+        &["lint", "closed-nonempty", gains, "--format", "json"],
+    );
+    assert!(
+        env["result"]["data"]["findings"]
+            .as_array()
+            .is_some_and(|f| f.len() == 1),
+        "{env}"
+    );
 }

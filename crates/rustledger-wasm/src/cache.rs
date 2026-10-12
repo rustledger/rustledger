@@ -220,12 +220,34 @@ use crate::types::{Error, LedgerOptions};
 /// unchanged -- parsed directives did not move. `Ledger` archives booked
 /// directives and their errors, so a v37 blob would serve the old amount, or
 /// no E3001 where one is now reported.
-/// v39: `event` and `custom` share the transaction `DirectivePriority`, so a
+/// v39: a cost written on an AVERAGE sale is checked against the pool's
+/// average (#2603). Loader v38, unchanged -- parsed directives did not move.
+/// A sale stating a cost its pool is not now fails, so a v38 blob would serve
+/// its old booked lots and no error.
+/// v40: a total price (`@@`) on a sale booked across several lots gives each
+/// split posting the whole sale's per-unit price, `total / units sold`,
+/// instead of keeping the total for `normalize_prices` to divide by the
+/// split's own units (#2569). Loader v38, unchanged -- parsed directives did
+/// not move. `Ledger` archives booked directives, so a v39 blob would serve
+/// the old, multiplied price.
+/// v41: a date or label written on an AVERAGE sale's cost spec is refused
+/// instead of dropped (#2627). Loader v38, unchanged -- parsed directives did
+/// not move. A restored `Ledger` skips booking and serves its cached errors,
+/// so a v40 blob of such a ledger would go on reporting none.
+/// v42: `noduplicates` compares every directive type but `price`, not only
+/// transactions (#2599). Loader v38, unchanged -- parsed directives did not
+/// move. `Ledger` runs the regular plugins and archives their errors, so a
+/// v41 blob of a ledger with a repeated `note` (or `open`, `balance`, ...)
+/// would serve no error where `noduplicates` now reports one.
+/// v43: loader v39, a `#tag` / `^link` line after a transaction's first
+/// posting is a parse error and its tags are dropped (#2575). Parsed
+/// directives changed, so a v42 blob would serve the late tags and no error.
+/// v44: `event` and `custom` share the transaction `DirectivePriority`, so a
 /// same-date `event` or `custom` keeps its file position among transactions
-/// (#2576). Loader v38, unchanged -- parsed directives did not move. `Ledger`
-/// archives the processed, sorted directives, so a v38 blob would serve the
+/// (#2576). Loader v39, unchanged -- parsed directives did not move. `Ledger`
+/// archives the processed, sorted directives, so a v43 blob would serve the
 /// old order (a same-date `custom` after the date's transactions and `close`).
-pub const CACHE_VERSION: u32 = 39;
+pub const CACHE_VERSION: u32 = 44;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -257,7 +279,7 @@ pub const CACHE_VERSION: u32 = 39;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 38;
+const LOADER_CACHE_VERSION_PIN: u32 = 39;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

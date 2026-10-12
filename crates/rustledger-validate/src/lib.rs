@@ -766,7 +766,7 @@ fn check_unused_pads(state: &LedgerState) -> Vec<ValidationError> {
 /// back to the path as-is. Two `Document` directives with the same
 /// `path` resolve identically, so the map dedupes naturally.
 ///
-/// The per-document resolutions run via [`rayon::par_iter`] above
+/// The per-document resolutions run via `rayon`'s `par_iter` above
 /// [`PARALLEL_DOC_EXISTS_THRESHOLD`]; below that, the dispatch
 /// overhead outweighs the I/O parallelism. Crucially the unit of
 /// parallel work is **one Document**, not one candidate path — this

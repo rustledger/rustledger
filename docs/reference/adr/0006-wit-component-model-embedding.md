@@ -7,7 +7,8 @@ exports wired; builds as a real `wasm32-wasip2` component; parity harness)
 landed in #1384. Phase 3 (release artifact — the built wasip2 component ships as
 a prebuilt `.wasm` on GitHub releases) and Phase 4 (rustfava default) have since
 **landed**: the Component-Model path (`rustledger-ffi-component`, WASI Preview 2,
-package `rustledger:ledger@3.0.0`) is now the **primary, default embedding
+package `rustledger:ledger`, major version 3; it was 3.0.0 when this status was
+written, and the `package` line of `wit/world.wit` gives the current version) is now the **primary, default embedding
 surface** — the default backend in rustfava (rustfava
 [#183](https://github.com/rustledger/rustfava/pull/183) / rustfava #173). The
 JSON-RPC embedding surface (`rustledger-ffi-wasi`, WASI Preview 1) is now

@@ -154,6 +154,37 @@ It keeps the plain sum, unmerged, for rows booking cannot realize, as
 bean-query sums them. The property test now holds `sum(position)` to `BALANCES`
 exactly, and the running balance's last row to `sum(position)`.
 
+## Amendment: a stated cost is a claim about the pool (#2603)
+
+A sale is booked at the pool's average, so the cost number in its spec had no
+role, and it was dropped: `-1 X {99.00 EUR}` from a pool at 11.00 EUR booked at
+11.00 without a word. Under every other method a written cost is a filter and
+one no lot matches is an error, so here the number is a claim about the
+average, checked rather than discarded. The currency was already checked
+(#2589).
+
+The claim holds when it is a correct rounding of the pool's exact average at
+the precision written: `|claim - total / units| <= w(claim)`, where `w` is half
+a unit in the claim's last written digit, inclusive. This is the rule a `{*}`
+claim already follows (#2398), so the two agree. It is compared as
+`|claim × units - total| <= w × |units|` with the pool's exact unit and cost
+totals (each lot's kept exact total, #2425), so the average is never rounded.
+A total cost is compared as a total, `|T - average × units sold| <= w(T)`, not
+divided by the units first. A compound cost states the total
+`a × units + b`, each part rounded to its own places, so it holds within
+`units × w(a) + w(b)`.
+
+The rule reads only the claim and the pool (robcohen's decision on #2603). A
+first version held the claim to the transaction's tolerance for the cost
+currency instead. That made the verdict depend on how the cash leg was written
+(`{106.67 USD}` for 106.666… failed beside cash written `106.667 USD`), let
+`infer_tolerance_from_cost` widen the check by the claim's own value, and gave
+AVERAGE a different rule from `{*}`.
+
+The check runs in booking only, as the `{*}` check does: the validator and BQL
+see the booked posting, whose cost is the pool's by then, and a filtered BQL
+replay builds a different pool on purpose (#1985).
+
 ## Prior art
 
 - hledger `SPEC-lots` — single running pool; pool cost rewritten on acquisition.

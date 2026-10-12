@@ -2,7 +2,7 @@
 
 use rust_decimal::Decimal;
 
-use crate::ast::{BinaryOp, BinaryOperator, UnaryOp, UnaryOperator};
+use crate::ast::{BinaryOp, BinaryOperator, Expr, UnaryOp, UnaryOperator};
 use crate::error::QueryError;
 use rustledger_core::{Amount, NaiveDate, Position};
 
@@ -88,11 +88,52 @@ impl Executor<'_> {
         ctx: &PostingContext,
     ) -> Result<Value, QueryError> {
         let left = self.evaluate_expr(&op.left, ctx)?;
+        // `'x' IN other_accounts` asks the transaction's account set directly
+        // rather than building the row's set to search it (#2597).
+        if let (
+            BinaryOperator::In | BinaryOperator::NotIn,
+            Expr::Column(column),
+            Value::String(name),
+        ) = (op.op, &op.right, &left)
+            && let Some(found) = Self::txn_accounts_contain(column, name, ctx)
+        {
+            return Ok(Value::Boolean(found == (op.op == BinaryOperator::In)));
+        }
         let right = self.evaluate_expr(&op.right, ctx)?;
         // `binary_op_on_values` owns the operator semantics — including the
         // NULL-comparison rule (a comparison involving NULL yields NULL, which
         // is falsy, so WHERE still drops rows with a missing optional field).
         self.binary_op_on_values(op.op, &left, &right)
+    }
+
+    /// Whether `name` is in this row's `accounts` / `other_accounts` column,
+    /// read off the transaction's account set without materializing the
+    /// row's [`Value::StringSet`] (#2597); `None` for any other column.
+    ///
+    /// The answer [`Self::evaluate_column`] followed by `IN` gives: the same
+    /// set, the same posting (a context with no posting reads an empty
+    /// account, as there), and a string is never NULL, so no NULL rule
+    /// applies. A context without the shared set (a FROM filter's) borrows
+    /// the names from the transaction instead.
+    fn txn_accounts_contain(column: &str, name: &str, ctx: &PostingContext) -> Option<bool> {
+        use super::system_tables::TxnAccounts;
+        let account = || {
+            ctx.transaction
+                .postings
+                .get(ctx.posting_index)
+                .map_or("", |p| p.account.as_ref())
+        };
+        match column {
+            "accounts" => Some(ctx.txn_accounts.as_ref().map_or_else(
+                || TxnAccounts::of(&ctx.transaction).contains(name),
+                |set| set.contains(name),
+            )),
+            "other_accounts" => Some(ctx.txn_accounts.as_ref().map_or_else(
+                || TxnAccounts::of(&ctx.transaction).others_contain(account(), name),
+                |set| set.others_contain(account(), name),
+            )),
+            _ => None,
+        }
     }
 
     /// Evaluate a unary operation.

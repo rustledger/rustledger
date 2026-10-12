@@ -49,10 +49,14 @@ pub fn ensure_runtime() -> Result<PathBuf, PythonError> {
         return Ok(wasm_path);
     }
 
-    eprintln!("⚠️  Python plugin runtime not found.");
-    eprintln!("⚠️  Downloading CPython {PYTHON_VERSION} for WASI (~{DOWNLOAD_SIZE_MB:.0}MB)...");
-    eprintln!("⚠️  This is a one-time download.");
-    eprintln!();
+    crate::notice::emit(
+        crate::notice::PYTHON_RUNTIME_DOWNLOAD,
+        &format!(
+            "⚠️  Python plugin runtime not found.\n\
+             ⚠️  Downloading CPython {PYTHON_VERSION} for WASI (~{DOWNLOAD_SIZE_MB:.0}MB)...\n\
+             ⚠️  This is a one-time download.\n\n"
+        ),
+    );
 
     download_and_extract()?;
 
@@ -62,8 +66,10 @@ pub fn ensure_runtime() -> Result<PathBuf, PythonError> {
         ));
     }
 
-    eprintln!("✓ Python WASI runtime installed.");
-    eprintln!();
+    crate::notice::emit(
+        crate::notice::PYTHON_RUNTIME_DOWNLOAD,
+        "✓ Python WASI runtime installed.\n\n",
+    );
 
     Ok(wasm_path)
 }
@@ -119,7 +125,10 @@ fn download_and_extract() -> Result<(), PythonError> {
         });
     }
 
-    eprintln!("  ✓ Checksum verified");
+    crate::notice::emit(
+        crate::notice::PYTHON_RUNTIME_DOWNLOAD,
+        "  ✓ Checksum verified\n",
+    );
 
     // Extract the zip file
     let zip_file = File::open(&zip_path)
@@ -159,7 +168,10 @@ fn download_and_extract() -> Result<(), PythonError> {
     let _ = fs::remove_dir_all(&staging);
     installed?;
 
-    eprintln!("  ✓ Extracted to {}", cache.display());
+    crate::notice::emit(
+        crate::notice::PYTHON_RUNTIME_DOWNLOAD,
+        &format!("  ✓ Extracted to {}\n", cache.display()),
+    );
     Ok(())
 }
 

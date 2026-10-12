@@ -831,15 +831,24 @@ fn non_empty_os_var(name: &str) -> Option<OsString> {
     env::var_os(name).filter(|value| !value.is_empty())
 }
 
+/// The notice code for the `RLEDGER_CONFIG` deprecation warning
+/// ([`rustledger_plugin::notice`]).
+pub const RLEDGER_CONFIG_DEPRECATED: &str = "RLEDGER_CONFIG_DEPRECATED";
+
 /// `RLEDGER_CONFIG` (a single-file override) was replaced by `RLEDGER_CONFIG_DIR`
 /// (a directory override covering both `config.toml` and `importers.toml`).
 /// It is now inert; warn so users relying on it notice instead of silently
 /// losing their override.
+///
+/// Through [`rustledger_plugin::notice`]: `rledger` prints it on stderr as
+/// before, and `ag-rledger` captures it into its envelope, where an agent
+/// sees it (#2566).
 fn warn_if_rledger_config_set() {
     if non_empty_os_var("RLEDGER_CONFIG").is_some() {
-        eprintln!(
-            "warning: RLEDGER_CONFIG is no longer supported and has no effect; \
-             set RLEDGER_CONFIG_DIR to the directory containing config.toml instead"
+        rustledger_plugin::notice::emit_warning(
+            RLEDGER_CONFIG_DEPRECATED,
+            "RLEDGER_CONFIG is no longer supported and has no effect; \
+             set RLEDGER_CONFIG_DIR to the directory containing config.toml instead",
         );
     }
 }

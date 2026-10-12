@@ -244,7 +244,11 @@ fn render(ledger: &Ledger) -> String {
 /// compared differ in name, and an error naming its file would otherwise
 /// tell them apart whatever the plugin did.
 fn load_rendered(path: &Path) -> String {
+    // The loader canonicalizes paths (a temp dir behind a symlink, as on
+    // macOS, resolves elsewhere), so take out both spellings.
+    let canonical = path.canonicalize().expect("the fixture exists");
     render(&load(path, &LoadOptions::default()).expect("the fixture loads"))
+        .replace(&canonical.display().to_string(), "<ledger>")
         .replace(&path.display().to_string(), "<ledger>")
 }
 

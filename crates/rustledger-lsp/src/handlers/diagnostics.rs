@@ -177,7 +177,8 @@ fn option_warning_severity(warning: &rustledger_loader::OptionWarning) -> Diagno
 /// Two inputs differ from `check`'s. In multi-file mode the directives of
 /// files without an open buffer come from the loader's processed output,
 /// already booked and plugin-processed, so for them the LSP's phases run a
-/// second time (that predates #2626). And `finalize` does not run here:
+/// second time (that predates #2626). And `finalize` does not run here, as
+/// the next paragraph explains.
 ///
 /// Reviewed 2026-07 (duplication sweep, "finalize consumers" family):
 /// keeping this separate pipeline is deliberate — the overlay model swaps
@@ -280,6 +281,31 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
+/// The order `rledger check` books in: `booking_sort_key`, then, between
+/// directives it ties, the loader's canonical order (no location first, then
+/// file, then position), which the loader sorts by before booking. The
+/// overlay appends open buffers last, so sorting on `booking_sort_key` alone
+/// booked a same-date buy in an included file before a sale in the main
+/// file that `check` books first.
+fn booking_order(
+    d: &Spanned<Directive>,
+) -> (
+    (
+        rustledger_core::NaiveDate,
+        rustledger_core::DirectivePriority,
+    ),
+    bool,
+    u16,
+    usize,
+) {
+    (
+        rustledger_core::booking_sort_key(&d.value),
+        d.file_id != rustledger_parser::SYNTHESIZED_FILE_ID,
+        d.file_id,
+        d.span.start,
+    )
+}
+
 pub(crate) fn run_ledger_validation(
     mut booked_directives: Vec<Spanned<Directive>>,
     validation_options: ValidationOptions,
@@ -290,9 +316,10 @@ pub(crate) fn run_ledger_validation(
 
     // Booking order via the canonical comparator — the SINGLE source for
     // (date, priority), shared with the loader and booking engine so the LSP
-    // cannot drift from `rledger check`'s order. The sort is stable, so
-    // same-date directives keep file order, which is the order they book in.
-    booked_directives.sort_by_cached_key(|d| rustledger_core::booking_sort_key(&d.value));
+    // cannot drift from `rledger check`'s order; ties broken by file and
+    // position, as the loader orders directives before booking (see
+    // [`booking_order`]).
+    booked_directives.sort_by_cached_key(booking_order);
 
     // The phases run in `rledger check`'s order, on the entry set `check`
     // gives each one: synth plugins and Early validation before booking, on
@@ -317,7 +344,7 @@ pub(crate) fn run_ledger_validation(
         None => true,
     };
     // What the synth pass inserted (opens, documents) back in booking order.
-    booked_directives.sort_by_cached_key(|d| rustledger_core::booking_sort_key(&d.value));
+    booked_directives.sort_by_cached_key(booking_order);
 
     // Early validation (account lifecycle, structure) on the directives as
     // written. See `rustledger_validate::Phase` for the architecture
@@ -816,6 +843,15 @@ fn build_live_directive_overlay(
             );
             let mut d = d.clone();
             d.file_id = *fid;
+            // Its postings too, as the loader tags them: validation keys a
+            // posting by `(posting.file_id, posting.span)`, so a posting left
+            // at file 0 could stand for the main file's posting at the same
+            // byte span and hide that one's E1001.
+            if let Directive::Transaction(txn) = &mut d.value {
+                for posting in &mut txn.postings {
+                    posting.file_id = *fid;
+                }
+            }
             merged.push(d);
         }
     }
@@ -3330,5 +3366,135 @@ plugin "auto_accounts"
         let lsp: Vec<String> = diags.iter().map(get_code).collect();
         assert_eq!(lsp, ["E1001"], "{diags:?}");
         assert!(diags[0].message.contains("Expenses:Unopened"), "{diags:?}");
+    }
+
+    /// A diagnostic's `(code, file, line)`.
+    type Located = (String, String, u32);
+
+    /// `(code, file, line)` of every diagnostic the multi-file path gives
+    /// for the journal `files[0]` includes, with the files at `open` open
+    /// and the one at `primary` the current buffer; and the same of what
+    /// the loader (`rledger check`) reports.
+    fn multi_file_vs_check(
+        files: &[(&str, &str)],
+        primary: usize,
+        open: &[usize],
+    ) -> (Vec<Located>, Vec<Located>) {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, text) in files {
+            std::fs::write(dir.path().join(name), text).unwrap();
+        }
+        let main = dir.path().join(files[0].0);
+        let ledger = rustledger_loader::load(&main, &rustledger_loader::LoadOptions::default())
+            .expect("load");
+        let name_of =
+            |path: &std::path::Path| path.file_name().unwrap().to_string_lossy().into_owned();
+        let mut check: Vec<Located> = ledger
+            .errors
+            .iter()
+            .map(|e| {
+                let loc = e.location.as_ref().expect("located");
+                (e.code.clone(), name_of(&loc.file), loc.line as u32)
+            })
+            .collect();
+        check.sort();
+
+        let mut state = LedgerState::new();
+        state.load(&main).expect("load");
+        let sources: Vec<(u16, String, Arc<str>)> = state
+            .ledger()
+            .unwrap()
+            .source_map
+            .files()
+            .iter()
+            .map(|f| (f.id as u16, name_of(&f.path), f.source.clone()))
+            .collect();
+        let parses: Vec<ParseResult> = sources.iter().map(|(_, _, src)| parse(src)).collect();
+        let targets: Vec<FileDiagTarget<'_>> = sources
+            .iter()
+            .zip(&parses)
+            .map(|((file_id, _, source), parse)| FileDiagTarget {
+                file_id: *file_id,
+                source,
+                parse,
+            })
+            .collect();
+        let overlay: Vec<(u16, &[Spanned<Directive>])> = open
+            .iter()
+            .map(|&i| (sources[i].0, parses[i].directives.as_slice()))
+            .collect();
+        let per_file = ledger_diagnostics_multi(
+            &state,
+            Some(sources[primary].0),
+            &parses[primary],
+            &overlay,
+            &targets,
+            PositionEncoding::Utf16,
+        );
+        let mut lsp: Vec<Located> = per_file
+            .iter()
+            .enumerate()
+            .flat_map(|(i, diags)| {
+                let name = sources[i].1.clone();
+                // An inventory failure keeps its E4xxx code in the LSP where
+                // `check` labels it `BOOK` (the #2510 mapping).
+                diags.iter().map(move |d| {
+                    let code = get_code(d);
+                    let code = if code.starts_with("E4") {
+                        "BOOK".to_string()
+                    } else {
+                        code
+                    };
+                    (code, name.clone(), d.range.start.line + 1)
+                })
+            })
+            .collect();
+        lsp.sort();
+        (lsp, check)
+    }
+
+    /// An open buffer's postings carry its file id, as the loader tags them.
+    /// Left at file 0, an unopened posting in an included buffer stood for
+    /// the main file's posting at the same byte span, and that one's E1001
+    /// disappeared (#2626 review).
+    #[test]
+    fn an_open_buffer_posting_does_not_hide_a_main_file_e1001() {
+        let files = [
+            (
+                "main.beancount",
+                "include \"other.beancount\"\n2024-01-02 * \"x\"\n  Assets:Cash  10 USD\n  \
+                 Expenses:Zzzz -10 USD\n2024-01-01 open Assets:Cash\n",
+            ),
+            (
+                "other.beancount",
+                "; ccccccccccccccccccccccc\n2024-01-02 * \"y\"\n  Assets:Cash  10 USD\n  \
+                 Expenses:Yyyyyyyyyyyy\n",
+            ),
+        ];
+        let (lsp, check) = multi_file_vs_check(&files, 0, &[0, 1]);
+        assert_eq!(lsp, check);
+    }
+
+    /// Same-date directives from different files book in `check`'s order:
+    /// the main file's sale before the included file's buy, so the sale is
+    /// refused, as `check` refuses it. The overlay appends open buffers
+    /// last, and sorting by date and type alone booked the buy first.
+    #[test]
+    fn same_date_transactions_across_files_book_in_checks_order() {
+        let files = [
+            (
+                "main.beancount",
+                "2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n\
+                 include \"other.beancount\"\n\
+                 2024-01-02 * \"sell\"\n  Assets:Stock  -5 HOOL {}\n  Assets:Cash  500 USD\n",
+            ),
+            (
+                "other.beancount",
+                "2024-01-02 * \"buy\"\n  Assets:Stock  10 HOOL {100 USD}\n  Assets:Cash\n",
+            ),
+        ];
+        let (lsp, check) = multi_file_vs_check(&files, 0, &[0]);
+        assert!(!check.is_empty(), "check refuses the sale");
+        assert_eq!(lsp, check);
     }
 }

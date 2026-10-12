@@ -130,7 +130,7 @@ pub fn posting_format_line(posting: &Posting, config: &FormatConfig) -> FormatLi
 }
 
 /// Build a posting line, optionally including the first same-line trailing
-/// comment. `include_trailing_comment` is `false` for [`format_posting`],
+/// comment. `include_trailing_comment` is `false` for `format_posting` (test-only),
 /// which historically emits only the account + amount.
 fn build_posting_line(
     posting: &Posting,

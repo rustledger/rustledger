@@ -149,6 +149,26 @@ pub enum Value {
 }
 
 impl Value {
+    /// The value's type in the names bean-query's `.describe` gives column
+    /// types (`POSTING_COLUMNS` uses the same ones). `Null` has no type of
+    /// its own and answers `object`, bean-query's name for an untyped column.
+    pub(super) const fn type_name(&self) -> &'static str {
+        match self {
+            Self::String(_) => "str",
+            Self::Number(_) => "decimal",
+            Self::Integer(_) => "int",
+            Self::Date(_) => "date",
+            Self::Boolean(_) => "bool",
+            Self::Amount(_) => "amount",
+            Self::Position(_) => "position",
+            Self::Inventory(_) => "inventory",
+            Self::StringSet(_) | Self::Set(_) => "set",
+            Self::Metadata(_) => "dict",
+            Self::Interval(_) => "interval",
+            Self::Object(_) | Self::Null => "object",
+        }
+    }
+
     /// Read this value as a count of days.
     ///
     /// bean-query accepts only its `int` type on either side of a date:
@@ -629,6 +649,120 @@ impl Table {
     /// Add a row to the table.
     pub fn add_row(&mut self, row: Vec<Value>) {
         self.rows.push(row);
+    }
+}
+
+/// The tables `CREATE TABLE` made, by name.
+///
+/// An [`Executor`](super::Executor) holds them for the queries it runs.
+/// [`Executor::take_created_tables`](super::Executor::take_created_tables)
+/// and [`Executor::set_created_tables`](super::Executor::set_created_tables)
+/// carry them from one executor to the next over the same ledger, so a
+/// session that builds an executor per query (the WASM `ParsedLedger`, the
+/// component's `session`) keeps a table one query made for the next (#2579).
+/// A table holds values, not references into the ledger, so it outlives the
+/// executor that made it.
+#[derive(Debug, Clone, Default)]
+pub struct CreatedTables {
+    /// By upper-cased name: table names are case-insensitive.
+    tables: rustc_hash::FxHashMap<String, CreatedTable>,
+}
+
+/// One table `CREATE TABLE` made.
+#[derive(Debug, Clone)]
+pub(super) struct CreatedTable {
+    /// The name, as the statement gave it (an unquoted one is already folded
+    /// to lower case by the parser).
+    name: String,
+    /// Its columns and rows.
+    pub(super) table: Table,
+    /// The type each column was declared with, by lower-cased column name:
+    /// `CREATE TABLE t (x int)`. Empty for `CREATE TABLE ... AS SELECT`.
+    declared: rustc_hash::FxHashMap<String, String>,
+}
+
+impl CreatedTables {
+    /// Whether no table has been created.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.tables.is_empty()
+    }
+
+    /// The tables' names, sorted, as `CREATE TABLE` gave them.
+    #[must_use]
+    pub fn names(&self) -> Vec<&str> {
+        let mut names: Vec<&str> = self.tables.values().map(|t| t.name.as_str()).collect();
+        names.sort_unstable();
+        names
+    }
+
+    /// The table named `name`, in any case.
+    #[must_use]
+    pub fn get(&self, name: &str) -> Option<&Table> {
+        self.tables.get(&name.to_uppercase()).map(|t| &t.table)
+    }
+
+    /// The columns of the table named `name` (in any case), each with its
+    /// type, for `.describe`: the type it was declared with, else the type
+    /// of its first non-NULL value, in the names bean-query's `.describe`
+    /// uses (`str`, `decimal`, `amount`, ...), `object` when every value is
+    /// NULL. The NUL-named columns a table keeps for posting-derived values
+    /// are left out; no query names them.
+    #[must_use]
+    pub fn describe(&self, name: &str) -> Option<Vec<(&str, String)>> {
+        let created = self.tables.get(&name.to_uppercase())?;
+        let table = &created.table;
+        Some(
+            table
+                .columns
+                .iter()
+                .enumerate()
+                .filter(|(_, column)| !column.starts_with('\u{0}'))
+                .map(|(i, column)| {
+                    let type_name = created
+                        .declared
+                        .get(&column.to_lowercase())
+                        .cloned()
+                        .unwrap_or_else(|| {
+                            table
+                                .rows
+                                .iter()
+                                .filter_map(|row| row.get(i))
+                                .find(|v| !matches!(v, Value::Null))
+                                .map_or("object", Value::type_name)
+                                .to_string()
+                        });
+                    (column.as_str(), type_name)
+                })
+                .collect(),
+        )
+    }
+
+    /// Whether a table named `name` (any case) exists.
+    pub(super) fn contains(&self, name: &str) -> bool {
+        self.tables.contains_key(&name.to_uppercase())
+    }
+
+    /// The table named `name` (any case), to insert into.
+    pub(super) fn get_mut(&mut self, name: &str) -> Option<&mut Table> {
+        self.tables
+            .get_mut(&name.to_uppercase())
+            .map(|t| &mut t.table)
+    }
+
+    /// Add `table` as `name`, with the types its columns were declared with.
+    pub(super) fn insert(&mut self, name: &str, table: Table, declared: Vec<(String, String)>) {
+        self.tables.insert(
+            name.to_uppercase(),
+            CreatedTable {
+                name: name.to_string(),
+                table,
+                declared: declared
+                    .into_iter()
+                    .map(|(column, ty)| (column.to_lowercase(), ty))
+                    .collect(),
+            },
+        );
     }
 }
 

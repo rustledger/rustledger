@@ -409,7 +409,7 @@ pub fn extract_options(options: &[(String, String, rustledger_parser::Span)]) ->
     ledger_options
 }
 
-/// Extract [`LedgerOptions`] from loader's [`Options`] struct.
+/// Extract [`LedgerOptions`] from loader's [`rustledger_loader::Options`] struct.
 fn extract_loader_options(options: &rustledger_loader::Options) -> LedgerOptions {
     LedgerOptions {
         title: options.title.clone(),

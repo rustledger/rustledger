@@ -63,6 +63,14 @@ impl Executor<'_> {
             }
         }
 
+        // A double-quoted string naming a posting column is that column, as
+        // in bean-query (#2596).
+        if let Some(resolved) =
+            self.resolve_double_quoted_columns(query, super::quoted_columns::is_posting_column)
+        {
+            return self.execute_select(&resolved);
+        }
+
         // Find ORDER BY expressions not in SELECT and add as hidden columns.
         let hidden_targets = self.find_hidden_order_by_targets(query);
         let num_hidden = hidden_targets.len();
@@ -285,7 +293,29 @@ impl Executor<'_> {
             // For aggregate queries, only allow ORDER BY on expressions that are
             // in GROUP BY or are themselves aggregates.
             if let Some(group_by) = &query.group_by {
-                let in_group_by = group_by.contains(&spec.expr);
+                // A GROUP BY entry names the expression directly, or a target
+                // holding it by position (`GROUP BY 1`) or by alias. Only the
+                // first was recognized, so `SELECT account AS a, count(*)
+                // GROUP BY 1 ORDER BY account` sorted by a column named
+                // `account` that the output did not have, and failed (#2596,
+                // where `SELECT "account"` heads its column `"account"`).
+                let target_holds = |t: Option<&Target>| t.is_some_and(|t| t.expr == spec.expr);
+                let in_group_by = group_by.iter().any(|g| match g {
+                    _ if *g == spec.expr => true,
+                    Expr::Literal(crate::ast::Literal::Integer(n)) => target_holds(
+                        usize::try_from(*n)
+                            .ok()
+                            .and_then(|n| n.checked_sub(1))
+                            .and_then(|i| query.targets.get(i)),
+                    ),
+                    Expr::Column(name) => target_holds(
+                        query
+                            .targets
+                            .iter()
+                            .find(|t| t.alias.as_deref() == Some(name.as_str())),
+                    ),
+                    _ => false,
+                });
                 let is_aggregate = Self::is_aggregate_expr(&spec.expr);
                 if !in_group_by && !is_aggregate {
                     continue;
@@ -474,7 +504,7 @@ impl Executor<'_> {
         let from_subquery = from.is_some_and(|f| f.subquery.is_some());
         let from_table = from
             .and_then(|f| f.table_name.as_ref())
-            .and_then(|name| self.tables.get(&name.to_uppercase()));
+            .and_then(|name| self.tables.get(name));
         let mut reads: Vec<Target> = Vec::new();
         let mut read = |column: String| {
             for function in ["WEIGHT", "COST", "SUM"] {
@@ -523,6 +553,16 @@ impl Executor<'_> {
         // outer query needs carried beside its posting columns (#2432).
         let with_hidden = self.with_hidden_posting_columns(outer_query, inner_query);
         let inner_result = self.execute_select(with_hidden.as_ref().unwrap_or(inner_query))?;
+
+        // A double-quoted string naming one of the subquery's columns is that
+        // column, as in bean-query (#2596). Known only now that the inner
+        // query has run; the rewritten query starts over, since the
+        // posting-derived values it needs carried may differ.
+        if let Some(resolved) = self.resolve_double_quoted_columns(outer_query, |name| {
+            !name.starts_with('\u{0}') && inner_result.columns.iter().any(|c| c == name)
+        }) {
+            return self.execute_select_from_subquery(&resolved, inner_query);
+        }
 
         // Build a column name -> index mapping for the inner result
         let inner_column_map: FxHashMap<String, usize> = inner_result
@@ -645,13 +685,11 @@ impl Executor<'_> {
         query: &SelectQuery,
         table_name: &str,
     ) -> Result<QueryResult, QueryError> {
-        let table_name_upper = table_name.to_uppercase();
-
         // Check for user-created tables first (exact match takes precedence),
         // then fall back to built-in system tables (which support aliases like
         // "transactions" for "#transactions" for beancount compatibility).
         let builtin_table;
-        let table = if let Some(user_table) = self.tables.get(&table_name_upper) {
+        let table = if let Some(user_table) = self.tables.get(table_name) {
             user_table
         } else if let Some(builtin) = self.get_builtin_table(table_name, query)? {
             builtin_table = builtin;
@@ -689,6 +727,15 @@ impl Executor<'_> {
             }
             return Err(missing());
         };
+
+        // A double-quoted string naming one of the table's columns is that
+        // column, as in bean-query (#2596). The rewritten query starts over:
+        // a built-in table is built for the columns the query reads.
+        if let Some(resolved) = self.resolve_double_quoted_columns(query, |name| {
+            !name.starts_with('\u{0}') && table.columns.iter().any(|c| c == name)
+        }) {
+            return self.execute_select_from_table(&resolved, table_name);
+        }
 
         // Build a column name -> index mapping for the table
         let column_map: FxHashMap<String, usize> = table
@@ -1320,7 +1367,32 @@ impl Executor<'_> {
         &self,
         query: &crate::ast::JournalQuery,
     ) -> Result<QueryResult, QueryError> {
+        // A double-quoted string naming a posting column in the FROM filter
+        // is that column, as in bean-query (#2596).
+        if let Some(from) = &query.from
+            && let Some(filter) = from.filter.as_ref().and_then(|f| {
+                super::quoted_columns::resolve_double_quoted_expr(
+                    f,
+                    super::quoted_columns::is_posting_column,
+                )
+            })
+        {
+            let mut resolved = query.clone();
+            if let Some(from) = &mut resolved.from {
+                from.filter = Some(filter);
+            }
+            return self.execute_journal(&resolved);
+        }
+
         // JOURNAL is a shorthand for SELECT with specific columns
+        //
+        // The account pattern is a pattern even when double-quoted and named
+        // like a column. Deliberately unlike bean-query, whose
+        // `transform_journal` turns it into `account ~ "<pattern>"` and so
+        // hands it to the double-quote rule (#2596, `quoted_columns.rs`):
+        // `JOURNAL "account"` there reads `account ~ account` and lists every
+        // posting, an artifact of the rewrite rather than a meaning anyone
+        // writes. Here it matches accounts containing `account`.
         let account_pattern = &query.account_pattern;
 
         // Try to compile as regex (using cache)
@@ -1555,6 +1627,32 @@ impl Executor<'_> {
         &self,
         query: &crate::ast::BalancesQuery,
     ) -> Result<QueryResult, QueryError> {
+        // A double-quoted string naming a posting column, in the FROM filter
+        // or the WHERE, is that column, as in bean-query, whose BALANCES is a
+        // SELECT over the postings (#2596).
+        let resolve = |e: &Expr| {
+            super::quoted_columns::resolve_double_quoted_expr(
+                e,
+                super::quoted_columns::is_posting_column,
+            )
+        };
+        let filter = query
+            .from
+            .as_ref()
+            .and_then(|f| f.filter.as_ref())
+            .and_then(resolve);
+        let where_clause = query.where_clause.as_ref().and_then(resolve);
+        if filter.is_some() || where_clause.is_some() {
+            let mut resolved = query.clone();
+            if let (Some(from), Some(filter)) = (&mut resolved.from, filter) {
+                from.filter = Some(filter);
+            }
+            if where_clause.is_some() {
+                resolved.where_clause = where_clause;
+            }
+            return self.execute_balances(&resolved);
+        }
+
         // Build up balances by processing all transactions (with FROM filtering).
         // Local map rather than struct state — see issue #958.
         let balances = self.build_balances_with_filter(query.from.as_ref())?;
@@ -1643,6 +1741,25 @@ impl Executor<'_> {
         &self,
         query: &crate::ast::PrintQuery,
     ) -> Result<QueryResult, QueryError> {
+        // A double-quoted string naming an entry column in the FROM filter is
+        // that column, as in bean-query, which compiles it against its
+        // `entries` table (#2596): the posting columns but the posting-only
+        // ones.
+        if let Some(from) = &query.from
+            && let Some(filter) = from.filter.as_ref().and_then(|f| {
+                super::quoted_columns::resolve_double_quoted_expr(f, |name| {
+                    super::quoted_columns::is_posting_column(name)
+                        && !super::evaluation::POSTING_ONLY_COLUMNS.contains(&name)
+                })
+            })
+        {
+            let mut resolved = query.clone();
+            if let Some(from) = &mut resolved.from {
+                from.filter = Some(filter);
+            }
+            return self.execute_print(&resolved);
+        }
+
         let mut result = QueryResult::new(vec!["directive".to_string()]);
 
         // PRINT prints entries, so its FROM filter is entry-level, and a
@@ -1734,7 +1851,7 @@ impl Executor<'_> {
         let table_name = create.table_name.to_uppercase();
 
         // Check if table already exists
-        if self.tables.contains_key(&table_name) {
+        if self.tables.contains(&table_name) {
             return Err(QueryError::Evaluation(format!(
                 "table '{}' already exists",
                 create.table_name
@@ -1758,8 +1875,14 @@ impl Executor<'_> {
             let columns = create.columns.iter().map(|c| c.name.clone()).collect();
             Table::new(columns)
         };
+        // The types `.describe` shows for the columns declared with one.
+        let declared = create
+            .columns
+            .iter()
+            .filter_map(|c| Some((c.name.clone(), c.type_hint.as_ref()?.to_lowercase())))
+            .collect();
 
-        self.tables.insert(table_name, table);
+        self.tables.insert(&create.table_name, table, declared);
 
         // Return empty result with a message
         let mut result = QueryResult::new(vec!["result".to_string()]);

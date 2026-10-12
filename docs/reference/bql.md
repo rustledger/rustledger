@@ -118,6 +118,8 @@ SELECT year(date), sum(cost(position)) AS "Total spent" GROUP BY 1
 
 Keywords, column names, function names and table names are case-insensitive, as in bean-query: `SELECT ACCOUNT` reads the `account` column. An unquoted alias is folded to lower case (`AS Total` heads the column `total`). An alias in double quotes keeps its case and may start with a digit or hold spaces (`AS "2023"`); write `""` for a `"` inside it.
 
+A string in double quotes that is exactly the name of a column of the table being read is that column, in any clause, as in bean-query: `SELECT "account"` reads the `account` column (headed `"account"`), and `SELECT "x" FROM (SELECT account AS x)` reads the subquery's `x`. Any other double-quoted string is a string (`WHERE account ~ "Cash"`, `SELECT "ACCOUNT"`), and a single-quoted one always is. Write single quotes for a string that must stay one, such as a metadata key: `meta('account')`. In `PIVOT BY`, a double-quoted name always names a target (`PIVOT BY "2023", account`).
+
 ## WHERE Clause
 
 ### Comparison Operators

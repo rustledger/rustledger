@@ -110,11 +110,68 @@ impl ErrorCode {
             // the pool application produced, which is a lot-matching failure
             // from the ledger author's point of view. So is a merge spec that
             // states a cost the pool does not have (#2398): it is what
-            // `{100.00 USD}` reports when no lot costs 100.
+            // `{100.00 USD}` reports when no lot costs 100. And so is an
+            // AVERAGE sale stating a cost its pool does not have (#2603).
             B::NoMatchingLot { .. }
             | B::CurrencyMismatch { .. }
             | B::MergeMismatch { .. }
-            | B::MergeSpecMismatch { .. } => Self::NoMatchingLot,
+            | B::MergeSpecMismatch { .. }
+            | B::AverageSpecMismatch { .. } => Self::NoMatchingLot,
+        }
+    }
+}
+
+impl ErrorCode {
+    /// The validation code the LSP gives a booking failure, or `None` for
+    /// [`rustledger_booking::BOOKING_FAILURE_CODE`] (`BOOK`), the code
+    /// `rledger check` gives every booking failure.
+    ///
+    /// CANONICAL for every surface that labels booking failures with
+    /// validation codes (the LSP), so the classification lives in one place.
+    ///
+    /// Interpolation failures are `BOOK`, as on the command line (#2510).
+    /// The LSP used to file every one of them but the overflow under E3001,
+    /// so a posting with no currency read "transaction does not balance" in
+    /// the editor while `check` said the currency could not be inferred. No
+    /// validation code means "the balance does not determine this posting",
+    /// and borrowing a neighbor's code is how E3001 came to say something
+    /// false: `check` also reports a validator E3002 beside a booking `BOOK`
+    /// for two elided postings, so a booking E3002 would show the same code
+    /// twice with two different explanations.
+    ///
+    /// The match is exhaustive on purpose, so a new failure is classified
+    /// deliberately rather than falling into whatever arm is last.
+    #[must_use]
+    pub const fn for_booking_failure(err: &rustledger_booking::BookingError) -> Option<Self> {
+        use rustledger_booking::BookingError as B;
+        match err {
+            // Shared with the Late validator, which provokes the same
+            // inventory failures by replaying reductions.
+            B::Inventory(inner) => Some(Self::for_booking_error(&inner.error)),
+            B::Interpolation(_) => None,
+            // A posting that never went through booking is a fault of the
+            // caller that handed over an unbooked ledger, not of any directive
+            // in the user's file, so no ledger-shaped code fits. (It was
+            // E3002 as the nearest neighbor before `BOOK` was available.)
+            B::NotBooked { .. } => None,
+            // Beancount's refusal for a `{}` whose categorized cost currency
+            // names no lot is "No position matches"; a priced reduction in
+            // another currency than its cost matches no lot it can book
+            // either (#2571).
+            B::CostPriceCurrencyMismatch { .. } | B::NoLotInInferredCostCurrency { .. } => {
+                Some(Self::NoMatchingLot)
+            }
+        }
+    }
+
+    /// The diagnostic code string for a booking failure: its validation code
+    /// when [`Self::for_booking_failure`] gives one, else
+    /// [`rustledger_booking::BOOKING_FAILURE_CODE`].
+    #[must_use]
+    pub const fn booking_failure_code_str(err: &rustledger_booking::BookingError) -> &'static str {
+        match Self::for_booking_failure(err) {
+            Some(code) => code.code(),
+            None => rustledger_booking::BOOKING_FAILURE_CODE,
         }
     }
 }
@@ -613,6 +670,81 @@ impl ValidationError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2510: every booking failure's code, variant by variant. Interpolation
+    /// failures are `BOOK`, the code `rledger check` gives them; they used to
+    /// be E3001 ("transaction does not balance") in the LSP.
+    #[test]
+    fn booking_failure_codes_cover_every_variant() {
+        use rustledger_booking::{BookingError as B, InterpolationError as I};
+        use rustledger_core::{Account, BookingError as Inv, Currency};
+        let acct = || Account::from("Assets:A");
+        let usd = || Currency::from("USD");
+        let interpolation = [
+            I::MultipleMissing {
+                currency: usd(),
+                count: 2,
+            },
+            I::NegativeInferredCost {
+                currency: usd(),
+                per_unit: rust_decimal::Decimal::NEGATIVE_ONE,
+            },
+            I::AmbiguousInferredCostCurrency {
+                candidates: "EUR, USD".into(),
+            },
+            I::UnsolvableUnits {
+                account: acct(),
+                reason: "r",
+            },
+            I::AmbiguousBarePriceCurrency { account: acct() },
+            I::UnsolvablePrice {
+                account: acct(),
+                reason: "r",
+            },
+            I::NegativeInferredPrice {
+                account: acct(),
+                currency: usd(),
+                price: rust_decimal::Decimal::NEGATIVE_ONE,
+            },
+            I::CannotInferCurrency { account: acct() },
+            I::DoesNotBalance {
+                currency: usd(),
+                residual: rust_decimal::Decimal::ONE,
+            },
+            I::Unrepresentable { currency: usd() },
+        ];
+        for e in interpolation {
+            let err = B::Interpolation(e);
+            assert_eq!(ErrorCode::for_booking_failure(&err), None, "{err}");
+            assert_eq!(ErrorCode::booking_failure_code_str(&err), "BOOK", "{err}");
+        }
+        let not_booked = B::NotBooked { account: acct() };
+        assert_eq!(ErrorCode::booking_failure_code_str(&not_booked), "BOOK");
+        for err in [
+            B::CostPriceCurrencyMismatch {
+                account: acct(),
+                cost: usd(),
+                price: Currency::from("EUR"),
+            },
+            B::NoLotInInferredCostCurrency {
+                account: acct(),
+                commodity: Currency::from("X"),
+                cost: usd(),
+            },
+        ] {
+            assert_eq!(ErrorCode::booking_failure_code_str(&err), "E4001", "{err}");
+        }
+        // Inventory failures keep the classification the Late validator uses.
+        let inventory = B::Inventory(rustledger_core::AccountedBookingError {
+            error: Inv::InsufficientUnits {
+                currency: Currency::from("X"),
+                requested: rust_decimal::Decimal::TWO,
+                available: rust_decimal::Decimal::ONE,
+            },
+            account: acct(),
+        });
+        assert_eq!(ErrorCode::booking_failure_code_str(&inventory), "E4002");
+    }
 
     #[test]
     fn error_codes_documented_in_spec() {

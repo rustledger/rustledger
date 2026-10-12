@@ -176,6 +176,66 @@ pub(super) fn run_interactive(
     Ok(())
 }
 
+/// What `.tables` prints: the default tables, the system tables, and the
+/// tables `CREATE TABLE` made this session (#2579), sorted.
+fn tables_listing(executor: &rustledger_query::Executor<'_>) -> String {
+    let mut out = String::from("entries\npostings\n\nSystem tables (prefix with #):\n");
+    for table in SYSTEM_TABLES {
+        out.push_str(&format!("  {table}\n"));
+    }
+    let created = executor.created_tables().names();
+    if !created.is_empty() {
+        out.push_str("\nCreated tables:\n");
+        for table in created {
+            out.push_str(&format!("  {table}\n"));
+        }
+    }
+    out
+}
+
+/// What `.describe NAME` prints: `table NAME:` and a `  column (type)` line
+/// per column, as bean-query prints it, or why there is nothing to describe.
+///
+/// A table `CREATE TABLE` made is looked up first, in any case, as a query's
+/// `FROM` looks it up, so one named `entries` is the one described (#2579).
+fn describe_table(executor: &rustledger_query::Executor<'_>, name: &str) -> Result<String, String> {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    if let Some(columns) = executor.created_tables().describe(name) {
+        let _ = writeln!(out, "table {name}:");
+        for (column, type_name) in columns {
+            let _ = writeln!(out, "  {column} ({type_name})");
+        }
+        return Ok(out);
+    }
+    match name {
+        "entries" => {
+            out.push_str("table entries:\n");
+            for (column, type_name) in [
+                ("date", "date"),
+                ("flag", "str"),
+                ("payee", "str"),
+                ("narration", "str"),
+                ("tags", "set"),
+                ("links", "set"),
+                ("meta", "object"),
+            ] {
+                let _ = writeln!(out, "  {column} ({type_name})");
+            }
+        }
+        "postings" => {
+            // The executor's own column list, so this cannot drift from what
+            // a query accepts (#2505).
+            out.push_str("table postings:\n");
+            for column in rustledger_query::executor::POSTING_COLUMNS {
+                let _ = writeln!(out, "  {} ({})", column.name, column.type_name);
+            }
+        }
+        _ => return Err(format!("unknown table \"{name}\"")),
+    }
+    Ok(out)
+}
+
 /// Returns `true` if the REPL should exit.
 fn handle_dot_command(
     cmd: &str,
@@ -283,39 +343,14 @@ fn handle_dot_command(
                 eprintln!("error: invalid number of arguments");
             }
         }
-        "tables" => {
-            println!("entries");
-            println!("postings");
-            println!();
-            println!("System tables (prefix with #):");
-            for table in SYSTEM_TABLES {
-                println!("  {table}");
-            }
-        }
+        "tables" => print!("{}", tables_listing(executor)),
         "describe" => {
             if args.is_empty() {
                 eprintln!("error: table name required");
             } else {
-                match args[0] {
-                    "entries" => {
-                        println!("table entries:");
-                        println!("  date (date)");
-                        println!("  flag (str)");
-                        println!("  payee (str)");
-                        println!("  narration (str)");
-                        println!("  tags (set)");
-                        println!("  links (set)");
-                        println!("  meta (object)");
-                    }
-                    "postings" => {
-                        // The executor's own column list, so this cannot
-                        // drift from what a query accepts (#2505).
-                        println!("table postings:");
-                        for column in rustledger_query::executor::POSTING_COLUMNS {
-                            println!("  {} ({})", column.name, column.type_name);
-                        }
-                    }
-                    _ => eprintln!("error: unknown table \"{}\"", args[0]),
+                match describe_table(executor, args[0]) {
+                    Ok(description) => print!("{description}"),
+                    Err(e) => eprintln!("error: {e}"),
                 }
             }
         }
@@ -426,6 +461,10 @@ fn handle_dot_command(
                         println!("  entries, postings");
                         print!("  ");
                         println!("{}", SYSTEM_TABLES.join(", "));
+                        let created = executor.created_tables().names();
+                        if !created.is_empty() {
+                            println!("  {}", created.join(", "));
+                        }
                     }
                     Err(e) => eprintln!("error: {e}"),
                 }
@@ -437,4 +476,93 @@ fn handle_dot_command(
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{describe_table, tables_listing};
+    use rustledger_core::{Amount, Directive, Open, Posting, Transaction, naive_date};
+    use rustledger_query::{Executor, parse};
+
+    fn ledger() -> Vec<Directive> {
+        let date = naive_date(2024, 1, 1).unwrap();
+        vec![
+            Directive::Open(Open::new(date, "Assets:Cash")),
+            Directive::Open(Open::new(date, "Expenses:Food")),
+            Directive::Transaction(
+                Transaction::new(date, "lunch")
+                    .with_synthesized_posting(Posting::new(
+                        "Expenses:Food",
+                        Amount::new(rust_decimal::Decimal::TEN, "USD"),
+                    ))
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:Cash",
+                        Amount::new(-rust_decimal::Decimal::TEN, "USD"),
+                    )),
+            ),
+        ]
+    }
+
+    fn run(executor: &mut Executor<'_>, query: &str) {
+        executor
+            .execute(&parse(query).expect("parses"))
+            .unwrap_or_else(|e| panic!("{query}: {e}"));
+    }
+
+    /// `.tables` and `.describe` list the tables `CREATE TABLE` made in the
+    /// session, as bean-query's do (#2579). They listed only the built-in
+    /// ones, so a table the session had just made was invisible to both.
+    #[test]
+    fn created_tables_are_listed_and_described() {
+        let directives = ledger();
+        let mut executor = Executor::new(&directives);
+        assert!(!tables_listing(&executor).contains("Created tables"));
+        assert_eq!(
+            describe_table(&executor, "foo"),
+            Err("unknown table \"foo\"".to_string())
+        );
+
+        run(
+            &mut executor,
+            "CREATE TABLE Foo AS SELECT account, number, position, date",
+        );
+        run(&mut executor, "CREATE TABLE bar (x int, y)");
+
+        let listing = tables_listing(&executor);
+        assert!(
+            listing.ends_with("\nCreated tables:\n  bar\n  foo\n"),
+            "{listing}"
+        );
+
+        // Types from the values, in bean-query's names. The posting-derived
+        // values a table keeps under NUL-named columns are not shown.
+        assert_eq!(
+            describe_table(&executor, "foo").as_deref(),
+            Ok(
+                "table foo:\n  account (str)\n  number (decimal)\n  position (position)\n  date (date)\n"
+            )
+        );
+        // Declared types, and `object` for an undeclared column with no value.
+        assert_eq!(
+            describe_table(&executor, "BAR").as_deref(),
+            Ok("table BAR:\n  x (int)\n  y (object)\n")
+        );
+        run(&mut executor, "INSERT INTO bar VALUES (1, 'a')");
+        assert_eq!(
+            describe_table(&executor, "bar").as_deref(),
+            Ok("table bar:\n  x (int)\n  y (str)\n")
+        );
+
+        // A created table shadows a built-in one, as in a query's FROM.
+        run(&mut executor, "CREATE TABLE entries (z)");
+        assert_eq!(
+            describe_table(&executor, "entries").as_deref(),
+            Ok("table entries:\n  z (object)\n")
+        );
+        // The built-in descriptions are unchanged.
+        assert!(
+            describe_table(&executor, "postings")
+                .is_ok_and(|d| d.starts_with("table postings:\n  type (str)\n"))
+        );
+    }
 }

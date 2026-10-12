@@ -383,15 +383,16 @@ pub fn validate_transaction_balance(
     //
     // Unreachable from `rledger check`, whose pipeline books BEFORE Late
     // validation and drops failed transactions (`run_booking`'s
-    // `failed_indices`), so every posting it sees is filled. It matters for
-    // the LSP, which collapses Early+Late into one pass and therefore does
-    // validate transactions whose booking failed: without this it reported
+    // `failed_indices`), so every posting it sees is filled. The LSP used to
+    // validate transactions whose booking failed, and without this reported
     // "does not balance: residual 1e29 USD" where `check` reported that the
-    // posting amount could not be computed at all (#1863).
+    // posting amount could not be computed at all (#1863). It now leaves
+    // them out of Late validation as `check` does (#2510), so this guard is
+    // reached only by callers that validate an unbooked ledger.
     //
     // Returning silently is right ONLY because something else has already
     // spoken: `check` reports the booking error, and the LSP surfaces it
-    // directly (`booking_error_code`). One case is not covered — a
+    // directly (`ErrorCode::for_booking_failure`). One case is not covered — a
     // post-booking plugin that emits a posting with no units. Nothing in-tree
     // does, and the plugin wire format permitting it is the deeper problem,
     // but such a transaction would now pass silently where it previously drew
@@ -598,7 +599,8 @@ pub fn process_inventory_reduction(
                 rustledger_core::BookingError::NoMatchingLot { .. }
                 | rustledger_core::BookingError::CurrencyMismatch { .. }
                 | rustledger_core::BookingError::MergeMismatch { .. }
-                | rustledger_core::BookingError::MergeSpecMismatch { .. } => {
+                | rustledger_core::BookingError::MergeSpecMismatch { .. }
+                | rustledger_core::BookingError::AverageSpecMismatch { .. } => {
                     format!("cost spec: {:?}", posting.cost)
                 }
                 rustledger_core::BookingError::Overflow(e) => {

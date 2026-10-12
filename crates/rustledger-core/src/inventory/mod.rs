@@ -210,6 +210,19 @@ pub enum BookingError {
         /// Which part of the spec disagrees, and with what.
         detail: MergeSpecMismatch,
     },
+    /// An AVERAGE sale's cost spec writes a date or label (#2627).
+    ///
+    /// An AVERAGE sale sells from the account's pool, one lot with no date or
+    /// label, so a date or label written on its spec describes a lot that does
+    /// not exist, as on a `{*}` sale ([`MergeSpecMismatch::DateOrLabel`]). It
+    /// used to be dropped without a word.
+    AverageSpecDateOrLabel {
+        /// The commodity being reduced (e.g. `AAPL`).
+        currency: crate::Currency,
+        /// The date or label as the spec writes it (`2024-01-02`,
+        /// `"lot-a"`).
+        stated: String,
+    },
     /// The arithmetic left `rust_decimal`'s ~±7.9e28 range (#1863).
     ///
     /// Reported rather than clamped: `Decimal::MIN == -Decimal::MAX`, so
@@ -393,6 +406,11 @@ impl fmt::Display for BookingError {
             Self::MergeSpecMismatch { currency, detail } => {
                 write!(f, "{{*}} merge of {currency}: {detail}")
             }
+            Self::AverageSpecDateOrLabel { currency, stated } => write!(
+                f,
+                "AVERAGE pool of {currency} is one lot with no date or label, so the cost \
+                 spec's {stated} describes no lot; remove it"
+            ),
             Self::Overflow(e) => write!(f, "{e}"),
         }
     }
@@ -445,7 +463,9 @@ impl fmt::Display for AccountedBookingError {
             // The currency is already named in the inner message; the account
             // is the context this wrapper exists to add.
             BookingError::Overflow(e) => write!(f, "{}: {e}", self.account),
-            BookingError::MergeMismatch { .. } | BookingError::MergeSpecMismatch { .. } => {
+            BookingError::MergeMismatch { .. }
+            | BookingError::MergeSpecMismatch { .. }
+            | BookingError::AverageSpecDateOrLabel { .. } => {
                 write!(f, "{}: {}", self.account, self.error)
             }
             BookingError::InsufficientUnits {

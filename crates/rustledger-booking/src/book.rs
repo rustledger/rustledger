@@ -1007,6 +1007,20 @@ impl BookingEngine {
                                 )
                             });
                         }
+                        // An AVERAGE sale sells from the account's pool, which
+                        // is one undated, unlabeled lot (pools are undated on
+                        // purpose: `report capgains` gives them an unknown
+                        // holding period). A date or label written on the
+                        // spec describes a lot the pool is not, so it is
+                        // refused, as on a `{*}` sale (#2398), rather than
+                        // dropped without a word (#2627). Beancount has no
+                        // AVERAGE booking to compare with (bean-check 3.2.3:
+                        // `AVERAGE method is not supported`). A `{*}` spec
+                        // reports it in `check_merge_spec`'s words below.
+                        if method == BookingMethod::Average && !cost_spec.merge {
+                            check_average_spec_date_label(cost_spec, units)
+                                .map_err(|e| convert_core_booking_error(e, &posting.account))?;
+                        }
                         // Only here: `apply`, the validator and the query
                         // replay see the BOOKED posting, whose cost is the
                         // pool's own by then, and a filtered replay builds a
@@ -2463,6 +2477,30 @@ fn check_merge_spec(
         }));
     }
     Ok(())
+}
+
+/// Refuse a date or label on an AVERAGE sale's cost spec (#2627).
+///
+/// The sale books from the account's pool, one lot with no date or label, so
+/// a written date or label names a lot that does not exist. It is the same
+/// claim a `{*}` sale makes and [`check_merge_spec`] refuses (#2398), and the
+/// one the ordered methods refuse as "No matching lot" when no lot carries
+/// it. Pools are undated on purpose, so this holds even when the pool happens
+/// to be a single lot bought on the written date: the sale still takes from
+/// the pool, and its booked lot has no date.
+fn check_average_spec_date_label(
+    spec: &CostSpec,
+    units: &rustledger_core::Amount,
+) -> Result<(), rustledger_core::BookingError> {
+    let stated = match (&spec.date, &spec.label) {
+        (Some(date), _) => date.to_string(),
+        (None, Some(label)) => format!("\"{label}\""),
+        (None, None) => return Ok(()),
+    };
+    Err(rustledger_core::BookingError::AverageSpecDateOrLabel {
+        currency: units.currency.clone(),
+        stated,
+    })
 }
 
 /// Whether `a` and `b` are more than `allowance` apart. Checked, since a

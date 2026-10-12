@@ -1571,6 +1571,47 @@ impl Inventory {
         Ok(self.plan_merge(units)?.pool)
     }
 
+    /// The pool an AVERAGE or `{*}` reduction of `units` draws from, summed
+    /// exactly: `(units, total cost)`, each signed like the pool's lots
+    /// (#2603).
+    ///
+    /// The pool is the one both reductions take: the lots of `units.currency`
+    /// held at cost on the side the reduction faces, as AVERAGE's reduction
+    /// and `{*}`'s merge select them. A lot's cost is its kept exact total where
+    /// there is one (#2425), else `units × per-unit`, and the sums are taken in
+    /// `BigDecimal`, so neither rounds. The average cost is `total / units`, a
+    /// quotient the caller compares against without dividing.
+    ///
+    /// `None` when that side holds no lot at cost: nothing to compare against.
+    #[must_use]
+    pub fn reduction_pool_exact(
+        &self,
+        units: &Amount,
+    ) -> Option<(bigdecimal::BigDecimal, bigdecimal::BigDecimal)> {
+        use crate::decimal::to_bigdecimal;
+        let mut pool_units = bigdecimal::BigDecimal::from(0);
+        let mut pool_total = bigdecimal::BigDecimal::from(0);
+        let mut any = false;
+        for (idx, p) in self.positions.iter_slots() {
+            let Some(cost) = p.cost.as_ref() else {
+                continue;
+            };
+            if p.units.currency != units.currency
+                || p.is_empty()
+                || p.units.number.is_sign_positive() == units.number.is_sign_positive()
+            {
+                continue;
+            }
+            any = true;
+            pool_units += to_bigdecimal(p.units.number);
+            pool_total += match self.positions.total(idx) {
+                Some(total) => to_bigdecimal(total),
+                None => to_bigdecimal(p.units.number) * to_bigdecimal(cost.number),
+            };
+        }
+        any.then_some((pool_units, pool_total))
+    }
+
     /// Cost merge `{*}`: merge all lots of the currency into a single
     /// weighted-average-cost lot, then reduce from it.
     ///

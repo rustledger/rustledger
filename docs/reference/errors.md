@@ -202,6 +202,33 @@ pool to merge. Remove the `*`; to keep an account at its average cost, book it
 merge runs while booking, before interpolation could solve them. Beancount
 refuses every `{*}` (`Cost merging is not supported yet`).
 
+A sale from an account booked `AVERAGE` reports it when its spec states a cost
+the pool is not. The sale is booked at the pool's average cost, so a cost
+written on it is a claim about that average, checked the way a cost on any
+other method's sale must match a lot:
+
+```beancount
+2024-01-01 open Assets:Brokerage X "AVERAGE"
+; ... the pool holds 20 X at an average of 11.00 EUR
+2024-03-01 * "Sell"
+  Assets:Brokerage  -1 X {99.00 EUR}  ; the pool costs 11.00 EUR per unit
+  Assets:Cash       99.00 EUR
+  Income:Gains
+```
+
+The claim holds when it is a correct rounding of the pool's exact average at
+the precision written: no more than half a unit in its last written digit away,
+the half-way case included. That is the rule a `{*}` claim follows. For a pool
+of 106.666… USD, `{106.67 USD}` and `{107 USD}` hold and `{106.66 USD}` does
+not. The verdict depends only on the claim and the pool, never on the
+transaction's other postings or on `infer_tolerance_from_cost`. A total cost is
+compared as a total: it must round what the units sold cost at the average, to
+half a unit in the total's last digit. A compound `{a # b}` states the total
+`a × units + b`, and holds within the units sold times half a unit of `a`,
+plus half a unit of `b`, since each part is rounded to its own places. A spec that names no
+cost (`{}` or `{EUR}`) books at the pool as before. Beancount has no `AVERAGE`
+booking (it refuses the method), so this rule is rustledger's own.
+
 A sale from an account booked `AVERAGE` reports it when its spec writes a date
 or label (`-1 X {2024-01-02}`, `-1 X {"lot-a"}`): the sale takes from the
 account's pool, one lot with neither, so the date or label describes no lot,

@@ -110,12 +110,15 @@ impl ErrorCode {
             // the pool application produced, which is a lot-matching failure
             // from the ledger author's point of view. So is a merge spec that
             // states a cost the pool does not have (#2398): it is what
-            // `{100.00 USD}` reports when no lot costs 100. So is a date or
-            // label on an AVERAGE sale (#2627): the pool carries neither.
+            // `{100.00 USD}` reports when no lot costs 100. And so is an
+            // AVERAGE sale stating a cost its pool does not have (#2603).
+            // So is a date or label on an AVERAGE sale (#2627): the pool
+            // carries neither.
             B::NoMatchingLot { .. }
             | B::CurrencyMismatch { .. }
             | B::MergeMismatch { .. }
             | B::MergeSpecMismatch { .. }
+            | B::AverageSpecMismatch { .. }
             | B::AverageSpecDateOrLabel { .. } => Self::NoMatchingLot,
         }
     }

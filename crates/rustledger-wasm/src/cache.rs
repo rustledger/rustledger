@@ -220,11 +220,15 @@ use crate::types::{Error, LedgerOptions};
 /// unchanged -- parsed directives did not move. `Ledger` archives booked
 /// directives and their errors, so a v37 blob would serve the old amount, or
 /// no E3001 where one is now reported.
-/// v39: a date or label written on an AVERAGE sale's cost spec is refused
+/// v39: a cost written on an AVERAGE sale is checked against the pool's
+/// average (#2603). Loader v38, unchanged -- parsed directives did not move.
+/// A sale stating a cost its pool is not now fails, so a v38 blob would serve
+/// its old booked lots and no error.
+/// v40: a date or label written on an AVERAGE sale's cost spec is refused
 /// instead of dropped (#2627). Loader v38, unchanged -- parsed directives did
 /// not move. A restored `Ledger` skips booking and serves its cached errors,
-/// so a v38 blob of such a ledger would go on reporting none.
-pub const CACHE_VERSION: u32 = 39;
+/// so a v39 blob of such a ledger would go on reporting none.
+pub const CACHE_VERSION: u32 = 40;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

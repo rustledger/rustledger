@@ -23,21 +23,16 @@ use rust_decimal::Decimal;
 use rustledger_core::NaiveDate;
 use std::collections::HashSet;
 use std::str::FromStr;
-use std::sync::LazyLock;
 
 use crate::types::{
-    AmountData, DirectiveData, DirectiveWrapper, OpenData, PluginInput, PluginOp, PluginOutput,
-    PostingData, TransactionData,
+    AmountData, DirectiveData, DirectiveWrapper, OpenData, PluginError, PluginInput, PluginOp,
+    PluginOutput, PostingData, TransactionData,
 };
 
 use super::super::{NativePlugin, RegularPlugin};
-
-/// Regex for parsing capital gains config entries.
-/// Format: `'pattern': ['to_replace', 'repl1', 'repl2']`
-static CONFIG_ENTRY_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"'([^']+)'\s*:\s*\[\s*'([^']*)'\s*,\s*'([^']*)'\s*,\s*'([^']*)'\s*\]")
-        .expect("CONFIG_ENTRY_RE: invalid regex pattern")
-});
+use super::py_literal::{self, PyValue};
+use super::py_regex;
+use super::utils::python_match;
 
 /// Plugin for classifying capital gains into long/short term categories.
 pub struct CapitalGainsLongShortPlugin;
@@ -78,38 +73,99 @@ impl RegularPlugin for CapitalGainsGainLossPlugin {}
 
 /// Configuration for `long_short` classification.
 struct LongShortConfig {
+    /// Matched as Python's `re.match` matches: at the start of the account.
     pattern: Regex,
     account_to_replace: String,
     short_replacement: String,
     long_replacement: String,
 }
 
-/// Configuration for `gain_loss` classification.
+/// One `gain_loss` rewrite.
 struct GainLossConfig {
+    /// Matched as Python's `re.match` matches: at the start of the account.
     pattern: Regex,
     account_to_replace: String,
     gains_replacement: String,
     losses_replacement: String,
 }
 
+/// One config entry, `'pattern': ['to_replace', 'first', 'second']`.
+struct Rule {
+    pattern: Regex,
+    to_replace: String,
+    first: String,
+    second: String,
+}
+
+/// The config's rules in dict order (a repeated key keeps its first position
+/// and takes its last value, as in a Python dict), read as the upstream
+/// plugins read it: `literal_eval`, then `re.compile` on each key.
+fn parse_rules(config: &str, plugin: &str) -> Result<Vec<Rule>, PluginError> {
+    let invalid =
+        |why: &str| PluginError::error(format!("Invalid configuration for {plugin}: {why}"));
+    let Ok(PyValue::Dict(entries)) = py_literal::parse(config) else {
+        return Err(invalid("expected a dict"));
+    };
+    let mut merged: Vec<(String, PyValue)> = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        let PyValue::Str(key) = key else {
+            return Err(invalid("a pattern must be a string"));
+        };
+        if let Some(entry) = merged.iter_mut().find(|(k, _)| *k == key) {
+            entry.1 = value;
+        } else {
+            merged.push((key, value));
+        }
+    }
+    let mut rules = Vec::with_capacity(merged.len());
+    for (key, value) in merged {
+        let PyValue::Seq(items) = value else {
+            return Err(invalid(&format!(
+                "the value for '{key}' must be a list of three strings"
+            )));
+        };
+        let [
+            PyValue::Str(to_replace),
+            PyValue::Str(first),
+            PyValue::Str(second),
+        ] = items.as_slice()
+        else {
+            return Err(invalid(&format!(
+                "the value for '{key}' must be a list of three strings"
+            )));
+        };
+        let pattern = py_regex::compile_match(&key).map_err(|e| {
+            PluginError::error(format!("{plugin}: the pattern '{key}' cannot be used: {e}"))
+        })?;
+        rules.push(Rule {
+            pattern,
+            to_replace: to_replace.clone(),
+            first: first.clone(),
+            second: second.clone(),
+        });
+    }
+    if rules.is_empty() {
+        return Err(invalid("the dict is empty"));
+    }
+    Ok(rules)
+}
+
+/// Every input directive kept, and `error`.
+fn unchanged(input: &PluginInput, error: Option<PluginError>) -> PluginOutput {
+    PluginOutput {
+        ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
+        errors: error.into_iter().collect(),
+    }
+}
+
 /// Process entries with `long_short` classification.
 fn process_long_short(input: PluginInput) -> PluginOutput {
-    let config = match &input.config {
+    let config = match input.config.as_deref() {
         Some(c) => match parse_long_short_config(c) {
-            Some(cfg) => cfg,
-            None => {
-                return PluginOutput {
-                    ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
-                    errors: Vec::new(),
-                };
-            }
+            Ok(cfg) => cfg,
+            Err(error) => return unchanged(&input, Some(error)),
         },
-        None => {
-            return PluginOutput {
-                ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
-                errors: Vec::new(),
-            };
-        }
+        None => return unchanged(&input, None),
     };
 
     let mut new_accounts: HashSet<String> = HashSet::new();
@@ -144,7 +200,7 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
             let has_generic = txn
                 .postings
                 .iter()
-                .any(|p| config.pattern.is_match(&p.account));
+                .any(|p| python_match(&config.pattern, &p.account));
             let has_specific = txn.postings.iter().any(|p| {
                 p.account.contains(&config.short_replacement)
                     || p.account.contains(&config.long_replacement)
@@ -248,7 +304,7 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
             let orig_postings: Vec<&PostingData> = txn
                 .postings
                 .iter()
-                .filter(|p| config.pattern.is_match(&p.account))
+                .filter(|p| python_match(&config.pattern, &p.account))
                 .collect();
 
             if orig_postings.is_empty() {
@@ -276,7 +332,7 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
             let mut new_postings: Vec<PostingData> = txn
                 .postings
                 .iter()
-                .filter(|p| !config.pattern.is_match(&p.account))
+                .filter(|p| !python_match(&config.pattern, &p.account))
                 .cloned()
                 .collect();
 
@@ -371,22 +427,12 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
 
 /// Process entries with `gain_loss` classification.
 fn process_gain_loss(input: PluginInput) -> PluginOutput {
-    let config = match &input.config {
+    let rules = match input.config.as_deref() {
         Some(c) => match parse_gain_loss_config(c) {
-            Some(cfg) => cfg,
-            None => {
-                return PluginOutput {
-                    ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
-                    errors: Vec::new(),
-                };
-            }
+            Ok(rules) => rules,
+            Err(error) => return unchanged(&input, Some(error)),
         },
-        None => {
-            return PluginOutput {
-                ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
-                errors: Vec::new(),
-            };
-        }
+        None => return unchanged(&input, None),
     };
 
     let mut new_accounts: HashSet<String> = HashSet::new();
@@ -420,23 +466,32 @@ fn process_gain_loss(input: PluginInput) -> PluginOutput {
             let mut new_postings: Vec<PostingData> = Vec::new();
 
             for posting in &txn.postings {
-                if config.pattern.is_match(&posting.account)
-                    && let Some(units) = &posting.units
-                    && let Ok(number) = Decimal::from_str(&units.number)
-                {
-                    let new_account = if number < Decimal::ZERO {
-                        // Negative = gains (income is negative)
-                        posting
-                            .account
-                            .replace(&config.account_to_replace, &config.gains_replacement)
-                    } else {
-                        // Positive = losses
-                        posting
-                            .account
-                            .replace(&config.account_to_replace, &config.losses_replacement)
-                    };
-
-                    new_accounts.insert(new_account.clone());
+                // Every rule in config order, each matched against the account
+                // as the rules before it left it, as upstream's loop does.
+                let number = posting
+                    .units
+                    .as_ref()
+                    .and_then(|units| Decimal::from_str(&units.number).ok());
+                let mut new_account = posting.account.clone();
+                let mut rewritten = false;
+                if let Some(number) = number {
+                    for config in &rules {
+                        if python_match(&config.pattern, &new_account) {
+                            new_account = if number < Decimal::ZERO {
+                                // Negative = gains (income is negative)
+                                new_account
+                                    .replace(&config.account_to_replace, &config.gains_replacement)
+                            } else {
+                                // Positive = losses
+                                new_account
+                                    .replace(&config.account_to_replace, &config.losses_replacement)
+                            };
+                            new_accounts.insert(new_account.clone());
+                            rewritten = true;
+                        }
+                    }
+                }
+                if rewritten {
                     new_postings.push(PostingData {
                         account: new_account,
                         units: posting.units.clone(),
@@ -505,40 +560,34 @@ fn process_gain_loss(input: PluginInput) -> PluginOutput {
     }
 }
 
-/// Parse `long_short` configuration.
+/// Parse `long_short` configuration: its first entry, as upstream reads
+/// `next(iter(config_obj))`.
 /// Format: `{'pattern': ['to_replace', 'short_repl', 'long_repl']}`
-fn parse_long_short_config(config: &str) -> Option<LongShortConfig> {
-    // Parse pattern: 'key': ['val1', 'val2', 'val3']
-    let cap = CONFIG_ENTRY_RE.captures(config)?;
-    let pattern = Regex::new(&cap[1]).ok()?;
-    let account_to_replace = cap[2].to_string();
-    let short_replacement = cap[3].to_string();
-    let long_replacement = cap[4].to_string();
-
-    Some(LongShortConfig {
-        pattern,
-        account_to_replace,
-        short_replacement,
-        long_replacement,
+fn parse_long_short_config(config: &str) -> Result<LongShortConfig, PluginError> {
+    let rule = parse_rules(config, "long_short")?
+        .into_iter()
+        .next()
+        .expect("parse_rules returns at least one rule");
+    Ok(LongShortConfig {
+        pattern: rule.pattern,
+        account_to_replace: rule.to_replace,
+        short_replacement: rule.first,
+        long_replacement: rule.second,
     })
 }
 
-/// Parse `gain_loss` configuration.
-/// Format: `{'pattern': ['to_replace', 'gains_repl', 'losses_repl']}`
-fn parse_gain_loss_config(config: &str) -> Option<GainLossConfig> {
-    // Parse pattern: 'key': ['val1', 'val2', 'val3']
-    let cap = CONFIG_ENTRY_RE.captures(config)?;
-    let pattern = Regex::new(&cap[1]).ok()?;
-    let account_to_replace = cap[2].to_string();
-    let gains_replacement = cap[3].to_string();
-    let losses_replacement = cap[4].to_string();
-
-    Some(GainLossConfig {
-        pattern,
-        account_to_replace,
-        gains_replacement,
-        losses_replacement,
-    })
+/// Parse `gain_loss` configuration: every entry, in order.
+/// Format: `{'pattern': ['to_replace', 'gains_repl', 'losses_repl'], ...}`
+fn parse_gain_loss_config(config: &str) -> Result<Vec<GainLossConfig>, PluginError> {
+    Ok(parse_rules(config, "gain_loss")?
+        .into_iter()
+        .map(|rule| GainLossConfig {
+            pattern: rule.pattern,
+            account_to_replace: rule.to_replace,
+            gains_replacement: rule.first,
+            losses_replacement: rule.second,
+        })
+        .collect())
 }
 
 /// Format a decimal number.
@@ -560,9 +609,7 @@ mod tests {
     #[test]
     fn test_parse_long_short_config() {
         let config = "{'Income.*:Capital-Gains': [':Capital-Gains', ':Capital-Gains:Short', ':Capital-Gains:Long']}";
-        let parsed = parse_long_short_config(config);
-        assert!(parsed.is_some());
-        let cfg = parsed.unwrap();
+        let cfg = parse_long_short_config(config).unwrap_or_else(|e| panic!("{e:?}"));
         assert_eq!(cfg.account_to_replace, ":Capital-Gains");
         assert_eq!(cfg.short_replacement, ":Capital-Gains:Short");
         assert_eq!(cfg.long_replacement, ":Capital-Gains:Long");
@@ -571,9 +618,9 @@ mod tests {
     #[test]
     fn test_parse_gain_loss_config() {
         let config = "{'Income.*:Long': [':Long', ':Long:Gains', ':Long:Losses']}";
-        let parsed = parse_gain_loss_config(config);
-        assert!(parsed.is_some());
-        let cfg = parsed.unwrap();
+        let rules = parse_gain_loss_config(config).unwrap_or_else(|e| panic!("{e:?}"));
+        assert_eq!(rules.len(), 1);
+        let cfg = &rules[0];
         assert_eq!(cfg.account_to_replace, ":Long");
         assert_eq!(cfg.gains_replacement, ":Long:Gains");
         assert_eq!(cfg.losses_replacement, ":Long:Losses");

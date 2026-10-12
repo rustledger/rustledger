@@ -12,6 +12,7 @@ use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutp
 
 use super::super::{NativePlugin, RegularPlugin};
 use super::py_literal::{self, PyValue};
+use super::py_regex::PyRegexError;
 use super::utils::{python_match, python_match_regex};
 
 /// Context naming a currency that only a `price` directive uses.
@@ -42,12 +43,17 @@ fn ignore_patterns(
         };
         let compiled = (python_match_regex(&key), python_match_regex(&value));
         // beancount reports each pattern that does not compile, naming the
-        // value either way.
-        for result in [&compiled.0, &compiled.1] {
-            if result.is_err() {
-                errors.push(PluginError::error(format!(
+        // value either way. A pattern Python compiles and rledger cannot
+        // express gets its own message, naming the construct (#2601).
+        for (pattern, result) in [(&key, &compiled.0), (&value, &compiled.1)] {
+            match result {
+                Err(PyRegexError::Invalid(_)) => errors.push(PluginError::error(format!(
                     "Invalid regexp: '{value}' for {key}"
-                )));
+                ))),
+                Err(e @ PyRegexError::Unsupported(_)) => errors.push(PluginError::error(format!(
+                    "check_commodity: the pattern '{pattern}' cannot be used: {e}"
+                ))),
+                Ok(_) => {}
             }
         }
         if let (Ok(account), Ok(currency)) = compiled {

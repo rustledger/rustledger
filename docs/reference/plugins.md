@@ -626,13 +626,15 @@ Options: None
 Renames accounts using regex patterns. Useful for bulk account reorganization.
 
 ```beancount
-plugin "beancount.plugins.rename_accounts" "{'Expenses:Food:(.*)': 'Expenses:Dining:$1'}"
+plugin "beancount.plugins.rename_accounts" "{'Expenses:Food:(.*)': 'Expenses:Dining:\\\\1'}"
 
 2024-01-01 open Expenses:Food:Groceries
 ; Becomes: 2024-01-01 open Expenses:Dining:Groceries
 ```
 
-Options: Python dict mapping regex patterns to replacement strings. Use `$1`, `$2` for capture groups.
+Options: Python dict mapping regex patterns to replacement strings, applied as Python's `re.sub` applies them: every match anywhere in the account name is replaced, and the replacement refers to a group as `\1` or `\g<name>` (`$1` is literal text). The beancount string and the Python string literal each consume one level of backslashes, so `\1` is written `\\\\1` in the file (or `r'...\\1'` with a raw Python string).
+
+Regular expressions in plugin configs (`rename_accounts`, `check_commodity`, `onecommodity`, `long_short`, `gain_loss`) are read as Python's `re` reads them. A construct Python supports and rledger cannot express (lookahead and lookbehind, backreferences, conditional and atomic groups, possessive quantifiers, `\N{...}`, the `(?a)` and `(?x)` flags, and the word boundaries `\b` and `\B`) is reported as an error naming the plugin and the construct, never matched differently. With `(?i)`, case folding follows Unicode simple case folding, which differs from Python's for a few non-ASCII letters (Python matches `i` with the dotless `ı`).
 
 ### rx_txn_plugin
 

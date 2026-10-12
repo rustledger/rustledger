@@ -8219,9 +8219,9 @@ fn test_capital_gains_long_short_no_config_passthrough() {
     assert_eq!(output.directives.len(), 2);
 }
 
-/// Malformed config → plugin treats as no-op (the inner regex parse
-/// fails, plugin returns input unchanged). Pins the `parse_*_config
-/// → None → passthrough` branch.
+/// Malformed config → the plugin changes nothing and says why, as
+/// beancount's raises on a config `literal_eval` cannot read (#2601;
+/// before, it passed the input through silently).
 #[test]
 fn test_capital_gains_long_short_invalid_config_passthrough() {
     let plugin = CapitalGainsLongShortPlugin;
@@ -8233,7 +8233,14 @@ fn test_capital_gains_long_short_invalid_config_passthrough() {
         "this is not valid plugin config",
     );
     let output = process_and_materialize(&plugin, input);
-    assert!(output.errors.is_empty());
+    assert_eq!(output.errors.len(), 1, "{:?}", output.errors);
+    assert!(
+        output.errors[0]
+            .message
+            .starts_with("Invalid configuration for long_short"),
+        "{}",
+        output.errors[0].message
+    );
     assert_eq!(output.directives.len(), 2);
 }
 
@@ -8583,8 +8590,7 @@ fn test_capital_gains_gain_loss_no_config_passthrough() {
     assert_eq!(output.directives.len(), 2);
 }
 
-/// Malformed config → no-op (regex parse fails). Pins the
-/// `parse_gain_loss_config → None → passthrough` branch.
+/// Malformed config → the plugin changes nothing and says why (#2601).
 #[test]
 fn test_capital_gains_gain_loss_invalid_config_passthrough() {
     let plugin = CapitalGainsGainLossPlugin;
@@ -8596,7 +8602,14 @@ fn test_capital_gains_gain_loss_invalid_config_passthrough() {
         "{ malformed",
     );
     let output = process_and_materialize(&plugin, input);
-    assert!(output.errors.is_empty());
+    assert_eq!(output.errors.len(), 1, "{:?}", output.errors);
+    assert!(
+        output.errors[0]
+            .message
+            .starts_with("Invalid configuration for gain_loss"),
+        "{}",
+        output.errors[0].message
+    );
     assert_eq!(output.directives.len(), 2);
 }
 

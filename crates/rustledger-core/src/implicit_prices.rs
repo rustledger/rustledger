@@ -20,6 +20,30 @@
 
 use rust_decimal::Decimal;
 
+/// The per-unit price of a total price `total` paid for `units` (`@@` → `@`).
+///
+/// `total / |units|`, rounded once. The one rule behind every `@@` → `@`
+/// conversion: [`extract_per_unit_price`], the booking crate's
+/// `normalize_prices`, and booking's split of a multi-lot reduction, where
+/// each split posting carries the per-unit price of the WHOLE sale (#2569).
+/// They divide the same total by the same units, or one sale shows two
+/// prices.
+///
+/// `None` when the units are zero, when the quotient leaves `Decimal`'s range
+/// (where a bare `/` panics, #2340), and when a nonzero total divides to zero:
+/// a quotient below `Decimal`'s `1e-28` floor rounds to `0` without failing,
+/// and a price of zero for money actually paid is a fabricated number, not a
+/// rounding. Each caller keeps what it had instead.
+#[must_use]
+pub fn per_unit_price(total: Decimal, units: Decimal) -> Option<Decimal> {
+    if units.is_zero() {
+        return None;
+    }
+    total
+        .checked_div(units.abs())
+        .filter(|per_unit| !per_unit.is_zero() || total.is_zero())
+}
+
 /// Decide the per-unit price implied by a posting and the quote
 /// currency to pair with it.
 ///
@@ -78,13 +102,12 @@ pub fn extract_per_unit_price<T>(
     // Priority 1: price annotation.
     if let Some((is_total, amount, currency)) = annotation {
         if is_total {
-            if !units_number.is_zero()
-                && let Some(per_unit) = amount.checked_div(units_number.abs())
-            {
+            if let Some(per_unit) = per_unit_price(amount, units_number) {
                 return Some((per_unit, currency));
             }
-            // Zero units, or a quotient outside `Decimal`'s range where a bare
-            // `/` would PANIC (#2340): fall through to cost, exactly as the
+            // Zero units, a quotient outside `Decimal`'s range where a bare
+            // `/` would PANIC (#2340), or one that underflowed to zero: fall
+            // through to cost, exactly as the
             // zero-units case always has. The currency is dropped along with
             // the value, so the cost branch picks the cost's currency, not
             // this one.
@@ -153,6 +176,31 @@ mod tests {
         // @@ 1500 USD with 10 units → 1500 / 10 = 150.
         let p = extract_per_unit_price(dec!(10), Some((true, dec!(1500), "USD")), None);
         assert_eq!(p, Some((dec!(150), "USD")));
+    }
+
+    #[test]
+    fn per_unit_price_divides_once_and_refuses_what_it_cannot_represent() {
+        assert_eq!(
+            per_unit_price(dec!(6000.00), dec!(-1000)).map(|p| p.to_string()),
+            Some("6.00".to_string())
+        );
+        assert_eq!(per_unit_price(dec!(0), dec!(5)), Some(dec!(0)));
+        assert_eq!(per_unit_price(dec!(5), dec!(0)), None);
+        // Overflow: a bare `/` panics here (#2340).
+        assert_eq!(per_unit_price(Decimal::MAX, dec!(0.5)), None);
+        // Underflow: 0.01 / 1e27 is 1e-29, which `checked_div` rounds to
+        // `Some(0)`. A zero price for money paid is not a rounding.
+        assert_eq!(
+            per_unit_price(dec!(0.01), dec!(1000000000000000000000000000)),
+            None
+        );
+        // The annotation then falls through to the cost, as for zero units.
+        let p = extract_per_unit_price(
+            dec!(1000000000000000000000000000),
+            Some((true, dec!(0.01), "EUR")),
+            Some((Some(crate::CostNumber::PerUnit { value: dec!(3) }), "USD")),
+        );
+        assert_eq!(p, Some((dec!(3), "USD")));
     }
 
     #[test]

@@ -75,6 +75,10 @@ impl NativePlugin for CheckAverageCostPlugin {
                 }
             },
         };
+        // Deliberate divergence: beancount computes `D(1 - tolerance)` from
+        // the binary float, so with `0.1` its lower bound is 0.9000000000000000222
+        // and a cost of exactly 90% of the average fails there. The bounds
+        // here are exact decimals, so a cost exactly at a bound passes.
         let min_tolerance = Decimal::ONE - tolerance;
         let max_tolerance = Decimal::ONE + tolerance;
 
@@ -133,6 +137,18 @@ impl NativePlugin for CheckAverageCostPlugin {
                 let Ok(cost_number) = Decimal::from_str(cost_text) else {
                     continue;
                 };
+                // The cost as beancount prints it: a `{{total}}` cost is
+                // booked as `total / units` at Python's 28 digits, where
+                // `rust_decimal` keeps 29.
+                let shown_cost = match &cost.number {
+                    Some(rustledger_plugin_types::CostNumberData::PerUnitFromTotal {
+                        total,
+                        ..
+                    }) => Decimal::from_str(total)
+                        .map(|t| python_quotient(t, units_num.abs()))
+                        .unwrap_or_else(|_| cost_text.to_string()),
+                    _ => cost_text.to_string(),
+                };
 
                 let key = (
                     posting.account.as_str(),
@@ -155,7 +171,7 @@ impl NativePlugin for CheckAverageCostPlugin {
                         errors.push(at_entry(
                             PluginError::error(format!(
                                 "Cost basis on reducing posting is too far from the average cost ({} vs. {})",
-                                cost_text,
+                                shown_cost,
                                 python_quotient(*total_cost, *total_units)
                             )),
                             wrapper,
@@ -177,6 +193,8 @@ impl NativePlugin for CheckAverageCostPlugin {
 
 /// `config` as a Python float literal (`0.01`, `1e-2`), as beancount's
 /// `eval` must find one; `None` for anything else, an integer included.
+/// beancount `eval`s the config with builtins, so an expression such as
+/// `float('0.1')` also works there; only a literal does here.
 fn parse_float(config: &str) -> Option<rust_decimal::Decimal> {
     use std::str::FromStr;
     let Ok(PyValue::Number { text, .. }) = py_literal::parse(config) else {

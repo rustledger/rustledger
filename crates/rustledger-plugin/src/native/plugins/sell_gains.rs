@@ -29,7 +29,15 @@ use super::utils::at_entry;
 /// `inferred_tolerance_default`, `inferred_tolerance_multiplier` and
 /// `infer_tolerance_from_cost` options. Plugins are not given those options
 /// (they are not in `PluginOptions`, whose wire layout a WASM plugin decodes
-/// positionally), so this uses beancount's defaults for them.
+/// positionally), so this uses beancount's defaults for them. beancount also
+/// leaves out of the tolerance a posting booking interpolated; rledger's
+/// plugin data does not mark those, so an interpolated posting's precision
+/// counts here and can widen the tolerance (a cash leg booking computed as
+/// `40.00` allows 0.01 where beancount allows none).
+///
+/// Deliberate divergence: a `@@` total price is used exactly. beancount
+/// turns it into a 28-digit per-unit price and multiplies back, so `-3 AAA
+/// @@ 40 USD` against 40 USD of proceeds fails there by 1e-26.
 pub struct SellGainsPlugin;
 
 /// Amounts per currency, in the order each currency first appears, as a
@@ -57,11 +65,25 @@ impl Amounts {
     }
 }
 
+/// beancount's `CURRENCY_ORDER`, which sorts an inventory's positions for
+/// printing; any other currency sorts after these, by name length.
+const CURRENCY_ORDER: [&str; 8] = ["USD", "EUR", "JPY", "CAD", "GBP", "AUD", "NZD", "CHF"];
+
 impl std::fmt::Display for Amounts {
-    /// As beancount prints an inventory: `(26 USD, 1 EUR)`.
+    /// As beancount prints an inventory, `(26 USD, 1 EUR)`: sorted by
+    /// `Position.sortkey`, its currency's place in `CURRENCY_ORDER` (else
+    /// 8 + the name's length), then the number.
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let mut sorted: Vec<&(String, Decimal)> = self.0.iter().collect();
+        sorted.sort_by_key(|(currency, number)| {
+            let order = CURRENCY_ORDER
+                .iter()
+                .position(|c| c == currency)
+                .unwrap_or(8 + currency.len());
+            (order, *number)
+        });
         f.write_str("(")?;
-        for (i, (currency, number)) in self.0.iter().enumerate() {
+        for (i, (currency, number)) in sorted.into_iter().enumerate() {
             if i > 0 {
                 f.write_str(", ")?;
             }

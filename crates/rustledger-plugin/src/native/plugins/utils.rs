@@ -1,7 +1,8 @@
 //! Shared utility functions for native plugins.
 
-/// Whether a metadata value is falsy in Python (`FALSE`, `0`, `""`); every
-/// other value, an amount or a date included, is truthy.
+/// Whether a metadata value is falsy in Python (`FALSE`, `0`, `""`, and an
+/// amount of zero, as beancount's `Amount.__bool__` is `number != 0`); every
+/// other value, a date included, is truthy.
 #[must_use]
 pub fn falsy(value: &crate::types::MetaValueData) -> bool {
     use crate::types::MetaValueData;
@@ -9,6 +10,10 @@ pub fn falsy(value: &crate::types::MetaValueData) -> bool {
         MetaValueData::Bool(b) => !b,
         MetaValueData::String(s) => s.is_empty(),
         MetaValueData::Number(n) => n
+            .parse::<rust_decimal::Decimal>()
+            .is_ok_and(|d| d.is_zero()),
+        MetaValueData::Amount(a) => a
+            .number
             .parse::<rust_decimal::Decimal>()
             .is_ok_and(|d| d.is_zero()),
         _ => false,
@@ -107,4 +112,30 @@ pub fn python_match(regex: &regex::Regex, text: &str) -> bool {
 /// The pattern is not a valid regular expression.
 pub fn python_match_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
     regex::Regex::new(&format!("^(?:{pattern})"))
+}
+
+#[cfg(test)]
+mod falsy_tests {
+    use super::falsy;
+    use crate::types::{AmountData, MetaValueData};
+
+    /// Python truthiness of a metadata value, as beancount reads one: an
+    /// amount is falsy when its number is zero (`Amount.__bool__`).
+    #[test]
+    fn falsy_follows_python_truthiness() {
+        let amount = |n: &str| {
+            MetaValueData::Amount(AmountData {
+                number: n.to_string(),
+                currency: "USD".to_string(),
+            })
+        };
+        assert!(falsy(&amount("0")));
+        assert!(falsy(&amount("0.00")));
+        assert!(!falsy(&amount("1")));
+        assert!(falsy(&MetaValueData::Bool(false)));
+        assert!(falsy(&MetaValueData::String(String::new())));
+        assert!(falsy(&MetaValueData::Number("0".to_string())));
+        assert!(!falsy(&MetaValueData::String("yes".to_string())));
+        assert!(!falsy(&MetaValueData::Date("2024-01-01".to_string())));
+    }
 }

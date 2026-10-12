@@ -589,7 +589,32 @@ fn native_and_python_implementations_agree() {
 fn native_plugins_without_a_python_twin_match_beancount() {
     // Validators: (plugin and config, ledger body after a header line and a
     // blank line, what bean-check prints).
-    let validators: [(&str, &str, &[&str]); 5] = [
+    let validators: [(&str, &str, &[&str]); 7] = [
+        (
+            // A `{{total}}` cost prints at Python's 28 digits.
+            "check_average_cost\" \"0.1",
+            "2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock \"NONE\"\n\
+             2024-01-02 * \"buy\"\n  Assets:Stock  10 AAA {100 USD}\n  Assets:Cash\n\
+             2024-01-03 * \"buy, total cost\"\n  Assets:Stock  3 AAA {{100 USD}}\n  Assets:Cash\n\
+             2024-01-04 * \"sell, total cost\"\n  Assets:Stock  -3 AAA {{200 USD}}\n  Assets:Cash\n",
+            &[
+                "ledger.beancount:11: error[PLUGIN]: Cost basis on reducing posting is too far from the average cost (66.66666666666666666666666667 vs. 84.61538461538461538461538462)",
+            ],
+        ),
+        (
+            // Amounts print in beancount's inventory order, USD before EUR,
+            // whatever order the postings were written in.
+            "sellgains",
+            "2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n2024-01-01 open Income:Gains\n\
+             2024-01-02 * \"buy\"\n  Assets:Stock  100 AAA {10 EUR}\n  Assets:Stock  100 BBB {10 USD}\n  \
+             Assets:Cash  -1000 EUR\n  Assets:Cash  -1000 USD\n\
+             2024-01-03 * \"euros written first\"\n  Assets:Stock  -1 AAA {10 EUR} @ 13 EUR\n  \
+             Assets:Stock  -1 BBB {10 USD} @ 13 USD\n  Assets:Cash  13 EUR\n  Assets:Cash  14 USD\n  \
+             Income:Gains  -3 EUR\n  Income:Gains  -4 USD\n",
+            &[
+                "ledger.beancount:11: error[PLUGIN]: Invalid price vs. proceeds/gains: (13 USD, 13 EUR) vs. (14 USD, 13 EUR); difference: (-1 USD)",
+            ],
+        ),
         (
             // An implicit price is at its transaction's location, as
             // beancount's: `unique_prices` reports the disagreement there.
@@ -867,7 +892,7 @@ fn native_plugins_without_a_python_twin_match_beancount() {
     }
     assert!(
         mismatches.is_empty(),
-        "{} mismatches with beancount across the 14 cases:\n{}",
+        "{} mismatches with beancount across the 16 cases:\n{}",
         mismatches.len(),
         mismatches.join("\n")
     );

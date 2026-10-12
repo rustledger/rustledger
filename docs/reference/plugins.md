@@ -330,7 +330,7 @@ Options: None
 
 ### sellgains
 
-Cross-checks a sale's proceeds against its price. For a transaction whose postings at cost all have a price, the priced value of those postings must match the weight of the transaction's Assets, Liabilities, Equity and Expenses postings (Income, the gain, is left out), within twice the transaction's tolerance. This catches a typo in the proceeds when the gain is elided. The tolerance uses beancount's default tolerance options; `inferred_tolerance_default` and the other tolerance options are not passed to plugins.
+Cross-checks a sale's proceeds against its price. For a transaction whose postings at cost all have a price, the priced value of those postings must match the weight of the transaction's Assets, Liabilities, Equity and Expenses postings (Income, the gain, is left out), within twice the transaction's tolerance. This catches a typo in the proceeds when the gain is elided. The tolerance uses beancount's default tolerance options (`inferred_tolerance_default` and the other tolerance options are not passed to plugins), and, unlike beancount's, counts the precision of a posting booking interpolated.
 
 ```beancount
 plugin "beancount.plugins.sellgains"
@@ -438,7 +438,7 @@ Options: None
 
 ### check_closing
 
-Inserts zero balance assertions when a posting has a truthy `closing` metadata value (`TRUE`, a non-empty string, a non-zero number), and removes the `closing` key from the posting. The assertion is dated one day after the transaction.
+Inserts zero balance assertions when a posting has a truthy `closing` metadata value (`TRUE`, a non-empty string, a non-zero number or amount), and removes the `closing` key from the posting. The assertion is dated one day after the transaction.
 
 ```beancount
 plugin "beancount.plugins.check_closing"

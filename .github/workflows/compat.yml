@@ -1611,8 +1611,13 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.11'
-      - name: Install beancount and beanprice
-        run: pip install beancount beanprice
+      - name: Install beancount, beanprice and beancount-options
+        run: |
+          pip install beancount beanprice
+          # The Python counterparts of the option plugins, for
+          # options_plugins_parity. Pinned to an immutable commit, as the
+          # compat job pins its plugin repos; bump deliberately.
+          pip install git+https://github.com/rustledger/beancount-options@d1602624ac5b13282aa000b10c3a16c418d07782
       - name: Assert python tools are runnable (no silent skips)
         run: |
           # The tests skip when these binaries are missing. This step
@@ -1622,6 +1627,7 @@ jobs:
           # bean-price has no --version flag (it errors demanding sources);
           # --help is the probe bean_price_compat.rs itself uses.
           bean-price --help > /dev/null
+          python -c "import beancount_options.check_option_expiry"
       # The CPython WASI runtime that python_plugin_wasi and
       # plugin_conformance run Python plugins with. Without this every run
       # downloaded it (~14 MB) for those suites, and once more for the test
@@ -1670,7 +1676,7 @@ jobs:
           set -o pipefail
           # `ag-rledger`: python_plugin_wasi also checks that ag-rledger
           # carries the Python runtime's notices in its envelope (#2566).
-          cargo test -p rustledger --features ag-rledger --test integration_test --test bean_price_compat --test python_plugin_wasi --test plugin_conformance -- --nocapture 2>&1 | tee /tmp/gated-tests.log
+          cargo test -p rustledger --features ag-rledger --test integration_test --test bean_price_compat --test python_plugin_wasi --test plugin_conformance --test options_plugins_parity -- --nocapture 2>&1 | tee /tmp/gated-tests.log
           cargo test -p rustledger-core --test synthetic_generation -- --nocapture 2>&1 | tee -a /tmp/gated-tests.log
       - name: The cached CPython runtime was used, not downloaded again
         if: steps.cpython-cache.outputs.cache-hit == 'true'
@@ -1692,7 +1698,7 @@ jobs:
           # Every gated suite prints a recognizable marker when it skips;
           # any of them appearing means an availability probe drifted
           # despite the assert step above.
-          if grep -Eq "Skipping: Python beancount not available|bean-check not found, skipping|skipping bean-price compat|Skipping: CPython WASI runtime unavailable|Skipping: conformance WASM guests unavailable" /tmp/gated-tests.log; then
+          if grep -Eq "Skipping: Python beancount not available|bean-check not found, skipping|skipping bean-price compat|Skipping: CPython WASI runtime unavailable|Skipping: conformance WASM guests unavailable|Skipping: beancount-options not installed" /tmp/gated-tests.log; then
             echo "::error::python-gated tests skipped despite the tools being installed — availability probe drifted"
             exit 1
           fi

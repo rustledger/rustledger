@@ -90,6 +90,9 @@ mod tests {
             "AAPL261016X00230000",
             "AAPL261016P0023000",
             "TOOLONGX261016P00230000",
+            "ABCDEFG261016P00230000", // 7-character root
+            "1ABC261016P00230000",    // root starts with a digit
+            ".ABC261016P00230000",    // root starts with a dot
             // Arabic-Indic digits: `\d` would match them.
             "AAPL\u{662}\u{666}\u{661}\u{660}\u{661}\u{666}P00230000",
         ] {

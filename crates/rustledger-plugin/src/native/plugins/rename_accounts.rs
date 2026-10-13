@@ -8,24 +8,21 @@
 //! plugin "beancount_reds_plugins.rename_accounts.rename_accounts" "{'Expenses:Taxes': 'Income:Taxes'}"
 //! ```
 //!
-//! The configuration is a Python-style dict where keys are regex patterns and
-//! values are replacement strings. All accounts matching a pattern will be
-//! renamed using the corresponding replacement.
+//! The configuration is a Python dict where keys are regex patterns and
+//! values are replacement strings, as Python's `re.sub` takes them: every
+//! match of a pattern anywhere in an account name is replaced, and the
+//! replacement refers to groups as `\1` or `\g<name>` (`$1` is literal text).
 
 use regex::Regex;
-use std::sync::LazyLock;
 
 use crate::types::{
-    DirectiveData, DirectiveWrapper, PadData, PluginInput, PluginOp, PluginOutput, PostingData,
+    DirectiveData, DirectiveWrapper, PadData, PluginError, PluginInput, PluginOp, PluginOutput,
+    PostingData,
 };
 
 use super::super::{NativePlugin, RegularPlugin};
-
-/// Regex for parsing config key-value pairs.
-/// Format: `'pattern': 'replacement'`
-static CONFIG_KV_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"'([^']+)'\s*:\s*'([^']*)'").expect("CONFIG_KV_RE: invalid regex pattern")
-});
+use super::py_literal::{self, PyValue};
+use super::py_regex;
 
 /// Plugin for renaming accounts using regex patterns.
 pub struct RenameAccountsPlugin;
@@ -41,14 +38,15 @@ impl NativePlugin for RenameAccountsPlugin {
 
     fn process(&self, input: PluginInput) -> PluginOutput {
         // Parse configuration to get renames
-        let renames = match &input.config {
+        let (renames, warnings) = match &input.config {
             Some(config) => match parse_config(config) {
                 Ok(r) => r,
-                Err(_) => {
-                    // If config parsing fails, return unchanged
+                Err(message) => {
+                    // A config the plugin cannot use renames nothing, and
+                    // says why: beancount's plugin raises on one.
                     return PluginOutput {
                         ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
-                        errors: Vec::new(),
+                        errors: vec![PluginError::error(message)],
                     };
                 }
             },
@@ -76,7 +74,7 @@ impl NativePlugin for RenameAccountsPlugin {
 
         PluginOutput {
             ops,
-            errors: Vec::new(),
+            errors: warnings.into_iter().map(PluginError::warning).collect(),
         }
     }
 }
@@ -109,7 +107,9 @@ fn directive_has_same_accounts(a: &DirectiveWrapper, b: &DirectiveWrapper) -> bo
     }
 }
 
-/// A rename rule: compiled regex and replacement string.
+/// A rename rule: compiled regex and replacement string, the replacement in
+/// `regex`'s syntax (translated from Python's by
+/// [`py_regex::translate_replacement`]).
 struct RenameRule {
     pattern: Regex,
     replacement: String,
@@ -182,30 +182,62 @@ fn rename_in_directive(
     directive
 }
 
-/// Parse configuration string into rename rules.
+/// Parse configuration string into rename rules, as upstream reads it:
+/// `literal_eval` (so a repeated pattern keeps its first position and takes
+/// its last replacement), `re.compile` on each pattern, and `re.subn` with
+/// each replacement.
 /// Format: "{'pattern1': 'replacement1', 'pattern2': 'replacement2'}"
-fn parse_config(config: &str) -> Result<Vec<RenameRule>, String> {
-    let mut rules = Vec::new();
+fn parse_config(config: &str) -> Result<(Vec<RenameRule>, Vec<String>), String> {
+    let invalid = |why: &str| format!("Invalid configuration for rename_accounts: {why}");
+    let Ok(PyValue::Dict(entries)) = py_literal::parse(config) else {
+        return Err(invalid("expected a dict of pattern to replacement"));
+    };
+    let mut merged: Vec<(String, String)> = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        let (PyValue::Str(pattern), PyValue::Str(replacement)) = (key, value) else {
+            return Err(invalid("patterns and replacements must be strings"));
+        };
+        if let Some(entry) = merged.iter_mut().find(|(p, _)| *p == pattern) {
+            entry.1 = replacement;
+        } else {
+            merged.push((pattern, replacement));
+        }
+    }
 
-    // Parse Python-style dict: {'key': 'value', ...}
-    // Use cached regex to extract key-value pairs
-    for cap in CONFIG_KV_RE.captures_iter(config) {
-        let pattern_str = &cap[1];
-        let replacement = cap[2].to_string();
-
-        let pattern = Regex::new(pattern_str).map_err(|e| e.to_string())?;
-
+    let mut rules = Vec::with_capacity(merged.len());
+    let mut warnings = Vec::new();
+    for (pattern_str, replacement) in merged {
+        let pattern = py_regex::compile_sub(&pattern_str).map_err(|e| {
+            format!("rename_accounts: the pattern '{pattern_str}' cannot be used: {e}")
+        })?;
+        // A `$1` is literal text to Python's `re.sub`, as here; rledger read
+        // it as a group before #2601, so a config written for that is
+        // pointed at `\1`.
+        let chars: Vec<char> = replacement.chars().collect();
+        if chars
+            .windows(2)
+            .any(|w| w[0] == '$' && (w[1].is_ascii_alphanumeric() || w[1] == '_' || w[1] == '{'))
+        {
+            warnings.push(format!(
+                "rename_accounts: the replacement '{replacement}' contains `$`, which Python's `re.sub` takes as literal text; a group is written `\\1` or `\\g<name>`"
+            ));
+        }
+        let translated = py_regex::translate_replacement(&replacement, &pattern).map_err(|e| {
+            let why = match e {
+                py_regex::PyRegexError::Invalid(why) => format!("it is not a valid replacement: {why}"),
+                other @ py_regex::PyRegexError::Unsupported(_) => other.to_string(),
+            };
+            format!(
+                "rename_accounts: the replacement '{replacement}' for '{pattern_str}' cannot be used: {why}"
+            )
+        })?;
         rules.push(RenameRule {
-            pattern,
-            replacement,
+            pattern: pattern.regex,
+            replacement: translated,
         });
     }
 
-    if rules.is_empty() {
-        return Err("No rename rules found in config".to_string());
-    }
-
-    Ok(rules)
+    Ok((rules, warnings))
 }
 
 #[cfg(test)]
@@ -315,9 +347,10 @@ mod tests {
                 title: None,
                 ..Default::default()
             },
-            // Rename all Food sub-accounts to Dining
-            // In Rust regex, backreferences use $1 syntax
-            config: Some("{'Expenses:Food:(.*)': 'Expenses:Dining:$1'}".to_string()),
+            // Rename all Food sub-accounts to Dining. The replacement is
+            // Python's `re.sub` syntax: `\1` is group 1 (the Python literal
+            // `'\\1'` is the two characters `\1`).
+            config: Some(r"{'Expenses:Food:(.*)': 'Expenses:Dining:\\1'}".to_string()),
         };
 
         let input_dirs = input.directives.clone();

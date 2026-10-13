@@ -1,12 +1,12 @@
 //! Zero balance assertion on account closing.
 
 use crate::types::{
-    AmountData, BalanceData, DirectiveData, DirectiveWrapper, MetaValueData, PluginInput, PluginOp,
-    PluginOutput,
+    AmountData, BalanceData, DirectiveData, DirectiveWrapper, PluginInput, PluginOp, PluginOutput,
+    PostingData,
 };
 
 use super::super::{NativePlugin, RegularPlugin};
-use super::utils::increment_date;
+use super::utils::{falsy, increment_date};
 
 /// Plugin that inserts zero balance assertion when posting has `closing: TRUE` metadata.
 ///
@@ -25,6 +25,7 @@ impl NativePlugin for CheckClosingPlugin {
 
     fn process(&self, input: PluginInput) -> PluginOutput {
         let mut ops: Vec<PluginOp> = Vec::new();
+        let mut inserts: Vec<PluginOp> = Vec::new();
 
         // Default currency for auto-balanced (units=None) closing postings:
         // prefer the user's first operating currency, falling back to "USD"
@@ -37,50 +38,62 @@ impl NativePlugin for CheckClosingPlugin {
             .unwrap_or_else(|| "USD".to_string());
 
         for (i, wrapper) in input.directives.iter().enumerate() {
-            ops.push(PluginOp::Keep(i));
+            let DirectiveData::Transaction(txn) = &wrapper.data else {
+                ops.push(PluginOp::Keep(i));
+                continue;
+            };
+            // As beancount's plugin: any truthy `closing` value marks the
+            // posting (it read only `TRUE`), and the marker is removed from
+            // the posting once expanded (#2600).
+            let closing = |posting: &PostingData| {
+                posting
+                    .metadata
+                    .iter()
+                    .any(|(key, val)| key == "closing" && !falsy(val))
+            };
+            if !txn.postings.iter().any(closing) {
+                ops.push(PluginOp::Keep(i));
+                continue;
+            }
+            let mut modified = txn.clone();
+            for posting in &mut modified.postings {
+                if !closing(posting) {
+                    continue;
+                }
+                posting.metadata.retain(|(key, _)| key != "closing");
+                if let Some(next_date) = increment_date(&wrapper.date) {
+                    let currency = posting
+                        .units
+                        .as_ref()
+                        .map_or_else(|| default_currency.clone(), |u| u.currency.clone());
 
-            if let DirectiveData::Transaction(txn) = &wrapper.data {
-                for posting in &txn.postings {
-                    // Check for closing: TRUE metadata
-                    let has_closing = posting.metadata.iter().any(|(key, val)| {
-                        key == "closing" && matches!(val, MetaValueData::Bool(true))
-                    });
-
-                    if has_closing {
-                        // Parse the date and add one day
-                        if let Some(next_date) = increment_date(&wrapper.date) {
-                            // Use the posting's units currency if present,
-                            // otherwise the resolved default (operating
-                            // currency or "USD" fallback).
-                            let currency = posting
-                                .units
-                                .as_ref()
-                                .map_or_else(|| default_currency.clone(), |u| u.currency.clone());
-
-                            // Add zero balance assertion
-                            ops.push(PluginOp::Insert(DirectiveWrapper {
-                                directive_type: "balance".to_string(),
-                                date: next_date,
-                                filename: None, // Plugin-generated
-                                lineno: None,
-                                data: DirectiveData::Balance(BalanceData {
-                                    account: posting.account.clone(),
-                                    amount: AmountData {
-                                        number: "0".to_string(),
-                                        currency,
-                                    },
-                                    tolerance: None,
-                                    metadata: vec![],
-                                }),
-                            }));
-                        }
-                    }
+                    inserts.push(PluginOp::Insert(DirectiveWrapper {
+                        directive_type: "balance".to_string(),
+                        date: next_date,
+                        filename: None, // Plugin-generated
+                        lineno: None,
+                        data: DirectiveData::Balance(BalanceData {
+                            account: posting.account.clone(),
+                            amount: AmountData {
+                                number: "0".to_string(),
+                                currency,
+                            },
+                            tolerance: None,
+                            metadata: vec![],
+                        }),
+                    }));
                 }
             }
+            ops.push(PluginOp::Modify(
+                i,
+                DirectiveWrapper {
+                    data: DirectiveData::Transaction(modified),
+                    ..wrapper.clone()
+                },
+            ));
         }
+        ops.extend(inserts);
 
-        // Final ordering is the loader's responsibility — it re-sorts
-        // directives after the plugin pass.
         PluginOutput {
             ops,
             errors: Vec::new(),

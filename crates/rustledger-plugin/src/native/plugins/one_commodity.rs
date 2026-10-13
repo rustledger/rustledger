@@ -13,27 +13,14 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use crate::types::{
-    DirectiveData, DirectiveWrapper, MetaValueData, PluginError, PluginInput, PluginOp,
-    PluginOutput,
+    DirectiveData, DirectiveWrapper, PluginError, PluginInput, PluginOp, PluginOutput,
 };
 
 use super::super::{NativePlugin, RegularPlugin};
-use super::utils::{at_entry, python_match, python_match_regex};
+use super::utils::{at_entry, falsy, python_match, python_match_regex};
 
 /// Plugin that enforces single commodity per account.
 pub struct OneCommodityPlugin;
-
-/// Whether a metadata value is falsy in Python (`FALSE`, `0`, `""`).
-fn falsy(value: &MetaValueData) -> bool {
-    match value {
-        MetaValueData::Bool(b) => !b,
-        MetaValueData::String(s) => s.is_empty(),
-        MetaValueData::Number(n) => n
-            .parse::<rust_decimal::Decimal>()
-            .is_ok_and(|d| d.is_zero()),
-        _ => false,
-    }
-}
 
 /// Currencies seen per account, in first-seen account order, with the
 /// entry to locate an error at.

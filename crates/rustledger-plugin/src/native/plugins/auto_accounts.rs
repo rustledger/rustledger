@@ -1,7 +1,8 @@
 //! Auto-generate Open directives for accounts used without explicit open.
 
 use crate::types::{
-    DirectiveData, DirectiveWrapper, OpenData, PluginInput, PluginOp, PluginOutput,
+    BalanceData, CloseData, DirectiveData, DirectiveWrapper, DocumentData, NoteData, OpenData,
+    PluginInput, PluginOp, PluginOutput,
 };
 
 use super::super::{NativePlugin, SynthPlugin};
@@ -48,9 +49,16 @@ impl NativePlugin for AutoAccountsPlugin {
                             .or_insert_with(|| wrapper.date.clone());
                     }
                 }
-                DirectiveData::Balance(data) => {
+                // Every directive naming one account, as beancount's
+                // `getters.get_accounts_use_map` counts them: a `note`,
+                // `document` or `close` on an account nothing else names
+                // opened it there; here it was left unopened (E1001, #2600).
+                DirectiveData::Balance(BalanceData { account, .. })
+                | DirectiveData::Note(NoteData { account, .. })
+                | DirectiveData::Document(DocumentData { account, .. })
+                | DirectiveData::Close(CloseData { account, .. }) => {
                     account_first_use
-                        .entry(data.account.clone())
+                        .entry(account.clone())
                         .and_modify(|existing| {
                             if wrapper.date < *existing {
                                 existing.clone_from(&wrapper.date);

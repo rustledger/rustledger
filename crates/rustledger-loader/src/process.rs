@@ -1059,10 +1059,11 @@ fn run_booking(
 /// `unrealized`, and `valuation` see filled-in per-unit values on the
 /// `CostNumber::PerUnitFromTotal` variant).
 ///
-/// Standalone callers (LSP / FFI / tests on already-booked input) pass
-/// [`PluginPass::PostBooking`] — synth plugins are a loader-internal
-/// concern and would re-Open already-opened accounts if run a second
-/// time.
+/// Standalone callers on already-booked input (FFI, tests) pass
+/// [`PluginPass::PostBooking`] — synth plugins would re-Open
+/// already-opened accounts if run a second time. The LSP, which books
+/// its own unbooked buffers, runs both passes around its booking, as
+/// `process` does (#2626).
 #[cfg(feature = "plugins")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginPass {

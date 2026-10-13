@@ -12,6 +12,7 @@ use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutp
 
 use super::super::{NativePlugin, RegularPlugin};
 use super::py_literal::{self, PyValue};
+use super::py_regex::PyRegexError;
 use super::utils::{python_match, python_match_regex};
 
 /// Context naming a currency that only a `price` directive uses.
@@ -34,20 +35,37 @@ fn ignore_patterns(
     let Ok(PyValue::Dict(entries)) = py_literal::parse(config) else {
         return Err(invalid());
     };
+    // A repeated key keeps its first position and takes its last value, as
+    // in the Python dict beancount's plugin reads.
+    // Merged before the values are checked: a value a later repeat replaces
+    // is never read.
+    let mut merged: Vec<(PyValue, PyValue)> = Vec::with_capacity(entries.len());
+    for (key, value) in entries {
+        if let Some(entry) = merged.iter_mut().find(|(k, _)| *k == key) {
+            entry.1 = value;
+        } else {
+            merged.push((key, value));
+        }
+    }
     let mut patterns = Vec::new();
     let mut errors = Vec::new();
-    for (key, value) in entries {
+    for (key, value) in merged {
         let (PyValue::Str(key), PyValue::Str(value)) = (key, value) else {
             return Err(invalid());
         };
         let compiled = (python_match_regex(&key), python_match_regex(&value));
         // beancount reports each pattern that does not compile, naming the
-        // value either way.
-        for result in [&compiled.0, &compiled.1] {
-            if result.is_err() {
-                errors.push(PluginError::error(format!(
+        // value either way. A pattern Python compiles and rledger cannot
+        // express gets its own message, naming the construct (#2601).
+        for (pattern, result) in [(&key, &compiled.0), (&value, &compiled.1)] {
+            match result {
+                Err(PyRegexError::Invalid(_)) => errors.push(PluginError::error(format!(
                     "Invalid regexp: '{value}' for {key}"
-                )));
+                ))),
+                Err(e @ PyRegexError::Unsupported(_)) => errors.push(PluginError::error(format!(
+                    "check_commodity: the pattern '{pattern}' cannot be used: {e}"
+                ))),
+                Ok(_) => {}
             }
         }
         if let (Ok(account), Ok(currency)) = compiled {

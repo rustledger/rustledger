@@ -169,6 +169,11 @@ impl NativePlugin for ValuationPlugin {
 
         // Track state per account
         let mut account_states: HashMap<String, AccountState> = HashMap::new();
+        // The configured accounts in the order their first config appears, as
+        // upstream's `account_mapping` dict keeps them. The commodities this
+        // plugin synthesizes are emitted in this order; iterating
+        // `account_states` emitted them in hash order (#2625).
+        let mut config_order: Vec<String> = Vec::new();
 
         // Track which commodities already exist
         let mut commodities_present: HashSet<String> = HashSet::new();
@@ -185,6 +190,9 @@ impl NativePlugin for ValuationPlugin {
                         && matches!(custom.values.first(), Some(MetaValueData::String(s)) if s == "config")
                         && let Some(config) = parse_config(&custom.metadata)
                     {
+                        if !account_states.contains_key(&config.account) {
+                            config_order.push(config.account.clone());
+                        }
                         account_states.insert(config.account.clone(), AccountState::new(config));
                     }
                 }
@@ -264,7 +272,7 @@ impl NativePlugin for ValuationPlugin {
         // Generate commodity directives for synthetic currencies that don't exist
         // Use the last transaction date, not 1970-01-01
         if let Some(date) = last_date {
-            for state in account_states.values() {
+            for state in config_order.iter().map(|account| &account_states[account]) {
                 if !commodities_present.contains(&state.config.currency) {
                     ops.push(PluginOp::Insert(DirectiveWrapper {
                         directive_type: "commodity".to_string(),

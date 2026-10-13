@@ -22,10 +22,13 @@ impl NativePlugin for CloseTreePlugin {
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
-        use std::collections::HashSet;
+        use std::collections::{BTreeSet, HashSet};
 
-        // Collect all accounts that are used
-        let mut all_accounts: HashSet<String> = HashSet::new();
+        // Collect all accounts that are used. Sorted, so the closes it inserts
+        // come out in the same order every run: a `HashSet` here emitted them
+        // in hash order (#2625). Beancount's own plugin walks a `set`, whose
+        // order varies from run to run, so there is no order of its to match.
+        let mut all_accounts: BTreeSet<String> = BTreeSet::new();
         for wrapper in &input.directives {
             if let DirectiveData::Open(data) = &wrapper.data {
                 all_accounts.insert(data.account.clone());

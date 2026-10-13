@@ -167,20 +167,21 @@ fn option_warning_severity(warning: &rustledger_loader::OptionWarning) -> Diagno
 /// The `rledger check` pipeline is:
 /// sort → synth-plugins → Early validation → book → regular-plugins → Late validation → finalize.
 ///
-/// This function is a **simplified single-pass approximation** of that
-/// pipeline: it runs `sort → book → all-plugins → validate` in one go.
-/// We deliberately do *not* split plugins into synth/regular passes or
-/// run Early/Late validation separately — the LSP path optimizes for
-/// fast incremental feedback while editing, and the loader's interleaved
-/// pipeline would require re-wiring around the LSP's directive overlay
-/// model. As a result the LSP may report a slightly different error set
-/// than `rledger check` in edge cases that depend on synth plugins'
-/// interaction with Early validation; the canonical behavior is the
-/// loader's (`rustledger_loader::process`, the
-/// sort → synth → Early → book → regular → Late → finalize pipeline).
+/// This function runs the same phases in the same order, `sort → synth →
+/// Early → book → regular → Late`, on the entry set `check` gives each:
+/// synth plugins and Early validation see every transaction as written,
+/// regular plugins and Late only those booking accepted (#2510, #2626). It
+/// is not `rustledger_loader::process` itself, which is the canonical
+/// behavior.
+///
+/// Two inputs differ from `check`'s. In multi-file mode the directives of
+/// files without an open buffer come from the loader's processed output,
+/// already booked and plugin-processed, so for them the LSP's phases run a
+/// second time (that predates #2626). And `finalize` does not run here, as
+/// the next paragraph explains.
 ///
 /// Reviewed 2026-07 (duplication sweep, "finalize consumers" family):
-/// keeping this approximation is deliberate — the overlay model swaps
+/// keeping this separate pipeline is deliberate — the overlay model swaps
 /// per-buffer directive sets that `process()` (which starts from a raw
 /// `LoadResult`) cannot ingest, and `finalize`'s only current step that
 /// touches directive VALUES (`normalize_prices`, `@@`→`@`) runs AFTER
@@ -190,7 +191,7 @@ fn option_warning_severity(warning: &rustledger_loader::OptionWarning) -> Diagno
 ///
 /// Running plugins after booking (rather than before) keeps
 /// plugin-transformed directives (e.g., `effective_date` splitting
-/// transactions across dates) visible to validation (#793).
+/// transactions across dates) visible to Late validation (#793).
 ///
 /// # Arguments
 /// * `directives` - Owned directive list to validate. The caller is
@@ -225,9 +226,10 @@ pub fn validation_errors_to_diagnostics(
 }
 
 /// The file-INDEPENDENT, expensive half of LSP validation, computed once per
-/// ledger snapshot: sort into booking order, book + interpolate every
-/// transaction, run both plugin passes, then the Early + Late validation
-/// passes. The resulting errors span every file (each tagged with its
+/// ledger snapshot: sort into booking order, the synth plugin pass, Early
+/// validation, booking + interpolation of every transaction, then the
+/// regular plugin pass and Late validation without the transactions booking
+/// refused. The resulting errors span every file (each tagged with its
 /// `file_id`); per-file diagnostics are derived from this by
 /// [`map_validation_to_diagnostics`].
 ///
@@ -279,6 +281,31 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
+/// The order `rledger check` books in: `booking_sort_key`, then, between
+/// directives it ties, the loader's canonical order (no location first, then
+/// file, then position), which the loader sorts by before booking. The
+/// overlay appends open buffers last, so sorting on `booking_sort_key` alone
+/// booked a same-date buy in an included file before a sale in the main
+/// file that `check` books first.
+fn booking_order(
+    d: &Spanned<Directive>,
+) -> (
+    (
+        rustledger_core::NaiveDate,
+        rustledger_core::DirectivePriority,
+    ),
+    bool,
+    u16,
+    usize,
+) {
+    (
+        rustledger_core::booking_sort_key(&d.value),
+        d.file_id != rustledger_parser::SYNTHESIZED_FILE_ID,
+        d.file_id,
+        d.span.start,
+    )
+}
+
 pub(crate) fn run_ledger_validation(
     mut booked_directives: Vec<Spanned<Directive>>,
     validation_options: ValidationOptions,
@@ -289,9 +316,42 @@ pub(crate) fn run_ledger_validation(
 
     // Booking order via the canonical comparator — the SINGLE source for
     // (date, priority), shared with the loader and booking engine so the LSP
-    // cannot drift from `rledger check`'s order. The sort is stable, so
-    // same-date directives keep file order, which is the order they book in.
-    booked_directives.sort_by_cached_key(|d| rustledger_core::booking_sort_key(&d.value));
+    // cannot drift from `rledger check`'s order; ties broken by file and
+    // position, as the loader orders directives before booking (see
+    // [`booking_order`]).
+    booked_directives.sort_by_cached_key(booking_order);
+
+    // The phases run in `rledger check`'s order, on the entry set `check`
+    // gives each one: synth plugins and Early validation before booking, on
+    // every transaction as written; regular plugins and Late validation after
+    // it, without the transactions booking refused. `check` sets a refused
+    // transaction aside before its regular plugins run, so the LSP running
+    // them over one gave plugin diagnostics `check` never does (#2626), and
+    // Early validation after booking missed an E1001 for a posting booking
+    // interpolates to zero and prunes.
+    let load_options = lsp_load_options();
+    let mut plugin_errors = Vec::new();
+    // Synth pass first, so `auto_accounts` can synthesize the Opens Early
+    // validation needs (no spurious E1001s).
+    let mut plugins_ok = match plugin_ctx {
+        Some(ctx) => run_plugin_pass(
+            &mut booked_directives,
+            ctx,
+            &load_options,
+            &mut plugin_errors,
+            rustledger_loader::PluginPass::PreBookingSynth,
+        ),
+        None => true,
+    };
+    // What the synth pass inserted (opens, documents) back in booking order.
+    booked_directives.sort_by_cached_key(booking_order);
+
+    // Early validation (account lifecycle, structure) on the directives as
+    // written. See `rustledger_validate::Phase` for the architecture
+    // rationale.
+    let today = jiff::Zoned::now().date();
+    let session = ValidationSession::new(validation_options.clone());
+    let (session, mut errors) = session.run_early_spanned(&booked_directives, today);
 
     // Run booking/interpolation on transactions before validation.
     // This fills in missing amounts (auto-balancing) so validation sees the complete picture.
@@ -333,10 +393,10 @@ pub(crate) fn run_ledger_validation(
     // (#2510). Each entry keeps the bare failure text beside it for the
     // de-duplication against validator restatements below.
     let mut booking_errors: Vec<(BookingDiagnostic, String)> = Vec::new();
-    // The transactions whose booking failed, by position, so Late validation
-    // can leave them out below.
-    let mut failed: std::collections::HashSet<(u16, Span)> = std::collections::HashSet::new();
-    for spanned in &mut booked_directives {
+    // Which directives are transactions booking refused, by index, so the
+    // regular plugins and Late validation can leave them out below.
+    let mut failed = vec![false; booked_directives.len()];
+    for (index, spanned) in booked_directives.iter_mut().enumerate() {
         let (span, file_id) = (spanned.span, spanned.file_id);
         let Directive::Transaction(txn) = &mut spanned.value else {
             continue;
@@ -347,10 +407,9 @@ pub(crate) fn run_ledger_validation(
         });
         match outcome {
             Ok(result) => *txn = result.transaction,
-            // Leave the transaction as written: Early validation still checks
-            // it (account lifecycle), Late validation does not (see below).
+            // Leave the transaction as written; it is set aside below.
             Err(e) => {
-                failed.insert((file_id, span));
+                failed[index] = true;
                 booking_errors.push((
                     BookingDiagnostic {
                         code: rustledger_validate::ErrorCode::booking_failure_code_str(&e),
@@ -364,75 +423,42 @@ pub(crate) fn run_ledger_validation(
         }
     }
 
-    let mut plugin_errors_out = Vec::new();
-
-    // LSP runs both plugin passes — synth then regular — on already-booked
-    // directives. The loader's process::process() splits these around its
-    // own Early/Late validation phases; the LSP collapses validation into
-    // a single step but still needs both plugin passes to fire so that
-    // synth-injected Opens (auto_accounts) suppress spurious E1001s and
-    // regular plugins (effective_date, etc.) transform directives before
-    // validation.
-    if let Some(ctx) = plugin_ctx {
-        let load_options = lsp_load_options();
-        let mut plugin_errors = Vec::new();
-        // Run synth pass first so auto_accounts can synthesize Opens
-        // for accounts referenced without explicit declaration; this
-        // suppresses spurious E1001 diagnostics in the LSP.
-        let synth_result = rustledger_loader::run_plugins(
-            &mut booked_directives,
-            ctx.plugins,
-            ctx.file_options,
-            &load_options,
-            ctx.source_map,
-            &mut plugin_errors,
-            rustledger_loader::PluginPass::PreBookingSynth,
-        );
-        match synth_result.and_then(|()| {
-            rustledger_loader::run_plugins(
-                &mut booked_directives,
-                ctx.plugins,
-                ctx.file_options,
-                &load_options,
-                ctx.source_map,
-                &mut plugin_errors,
-                rustledger_loader::PluginPass::PostBooking,
-            )
-        }) {
-            Ok(()) => {
-                for err in &plugin_errors {
-                    let severity = match err.severity {
-                        rustledger_loader::ErrorSeverity::Error => DiagnosticSeverity::ERROR,
-                        rustledger_loader::ErrorSeverity::Warning => DiagnosticSeverity::WARNING,
-                    };
-                    plugin_errors_out.push((severity, err.code.clone(), err.message.clone()));
-                }
-            }
-            Err(e) => {
-                tracing::warn!("Plugin execution failed in LSP: {e}");
-            }
-        }
-    }
-
-    // LSP receives already-booked directives, so it has no booking step
-    // to interleave between phases. Run Early + Late back-to-back
-    // against the same input. See `rustledger_validate::Phase` for the
-    // architecture rationale.
-    let today = jiff::Zoned::now().date();
-    let session = ValidationSession::new(validation_options);
-    let (session, mut errors) = session.run_early_spanned(&booked_directives, today);
-    // Late validation (currency constraints, balance residuals, inventories,
-    // balance assertions) skips the transactions booking refused, as
-    // `rledger check` does: its pipeline runs Early before booking and drops
-    // a failed transaction before Late. Validating one here judged amounts
-    // booking never resolved: a bare-price posting whose price could not be
-    // computed drew three E3001 "does not balance" diagnostics beside its
-    // `BOOK` (#2510), and its units still moved the balance an assertion
-    // checks.
-    if !failed.is_empty() {
-        booked_directives.retain(|d| {
-            !(matches!(d.value, Directive::Transaction(_)) && failed.contains(&(d.file_id, d.span)))
+    // Regular plugins and Late validation (currency constraints, balance
+    // residuals, inventories, balance assertions) skip the transactions
+    // booking refused, as `rledger check` does: it drops a failed
+    // transaction before its regular plugins and Late. Validating one here judged amounts booking never
+    // resolved: a bare-price posting whose price could not be computed drew
+    // three E3001 "does not balance" diagnostics beside its `BOOK` (#2510),
+    // and its units still moved the balance an assertion checks.
+    if failed.contains(&true) {
+        let mut index = 0;
+        booked_directives.retain(|_| {
+            index += 1;
+            !failed[index - 1]
         });
+    }
+    // Regular plugins (effective_date, etc.) transform directives before
+    // Late validation, as in `check`.
+    if let Some(ctx) = plugin_ctx
+        && plugins_ok
+    {
+        plugins_ok = run_plugin_pass(
+            &mut booked_directives,
+            ctx,
+            &load_options,
+            &mut plugin_errors,
+            rustledger_loader::PluginPass::PostBooking,
+        );
+    }
+    let mut plugin_errors_out = Vec::new();
+    if plugin_ctx.is_some() && plugins_ok {
+        for err in &plugin_errors {
+            let severity = match err.severity {
+                rustledger_loader::ErrorSeverity::Error => DiagnosticSeverity::ERROR,
+                rustledger_loader::ErrorSeverity::Warning => DiagnosticSeverity::WARNING,
+            };
+            plugin_errors_out.push((severity, err.code.clone(), err.message.clone()));
+        }
     }
     let (session, late_errs) = session.run_late_spanned(&booked_directives, today);
     errors.extend(late_errs);
@@ -461,6 +487,32 @@ pub(crate) fn run_ledger_validation(
         errors,
         booking_errors,
         plugin_errors: plugin_errors_out,
+    }
+}
+
+/// Run one plugin pass over `directives`; `false` (after logging) when the
+/// pass failed outright, in which case its errors are not shown.
+fn run_plugin_pass(
+    directives: &mut Vec<Spanned<Directive>>,
+    ctx: &PluginContext<'_>,
+    load_options: &LoadOptions,
+    plugin_errors: &mut Vec<rustledger_loader::LedgerError>,
+    pass: rustledger_loader::PluginPass,
+) -> bool {
+    match rustledger_loader::run_plugins(
+        directives,
+        ctx.plugins,
+        ctx.file_options,
+        load_options,
+        ctx.source_map,
+        plugin_errors,
+        pass,
+    ) {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!("Plugin execution failed in LSP: {e}");
+            false
+        }
     }
 }
 
@@ -791,6 +843,15 @@ fn build_live_directive_overlay(
             );
             let mut d = d.clone();
             d.file_id = *fid;
+            // Its postings too, as the loader tags them: validation keys a
+            // posting by `(posting.file_id, posting.span)`, so a posting left
+            // at file 0 could stand for the main file's posting at the same
+            // byte span and hide that one's E1001.
+            if let Directive::Transaction(txn) = &mut d.value {
+                for posting in &mut txn.postings {
+                    posting.file_id = *fid;
+                }
+            }
             merged.push(d);
         }
     }
@@ -3221,5 +3282,219 @@ plugin "auto_accounts"
                 "{needle}: same line as check"
             );
         }
+    }
+
+    /// #2626: a regular plugin does not see a transaction booking refused,
+    /// in the LSP as in `rledger check`. `check` sets the transaction aside
+    /// before its regular plugins run; the LSP ran them over it, so
+    /// `leafonly` reported the parent account the refused transaction posts
+    /// to, a diagnostic `check` never gives. The whole diagnostic set (code
+    /// and message) is compared against what the loader reports for the file.
+    #[test]
+    fn regular_plugins_skip_transactions_booking_refused_as_check_does() {
+        let source = "plugin \"beancount.plugins.leafonly\"\n\
+                      2024-01-01 open Assets:Cash\n\
+                      2024-01-01 open Assets:Stock\n\
+                      2024-01-01 open Assets:Stock:Sub\n\
+                      2024-01-02 * \"no currency to infer\"\n  \
+                      Assets:Stock  12.50\n  Assets:Cash\n";
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("main.beancount");
+        std::fs::write(&path, source).unwrap();
+        let ledger = rustledger_loader::load(&path, &rustledger_loader::LoadOptions::default())
+            .expect("load");
+        let mut check: Vec<(String, String)> = ledger
+            .errors
+            .iter()
+            .map(|e| (e.code.clone(), e.message.clone()))
+            .collect();
+        check.sort();
+        assert!(
+            check.iter().any(|(code, _)| code == "BOOK"),
+            "booking must refuse the transaction: {check:?}"
+        );
+        assert!(
+            !check.iter().any(|(_, m)| m.contains("Non-leaf")),
+            "check runs no regular plugin over the refused transaction: {check:?}"
+        );
+
+        let parsed = parse(source);
+        let diags = all_diagnostics(
+            &parsed,
+            source,
+            None,
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
+        let mut lsp: Vec<(String, String)> = diags
+            .iter()
+            .map(|d| (get_code(d), d.message.clone()))
+            .collect();
+        lsp.sort();
+        assert_eq!(lsp, check, "the LSP gives the diagnostics check gives");
+    }
+
+    /// Early validation runs before booking, as in `rledger check` (#2626):
+    /// a posting to an unopened account that booking interpolates to zero
+    /// and prunes still gets the E1001 `check` gives. Validated after
+    /// booking, the posting was gone and the LSP said nothing.
+    #[test]
+    fn early_validation_sees_postings_booking_prunes_as_check_does() {
+        let source = "2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Bank\n\
+                      2024-01-02 * \"x\"\n  Assets:Cash  10 USD\n  Assets:Bank  -10 USD\n  \
+                      Expenses:Unopened\n";
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("main.beancount");
+        std::fs::write(&path, source).unwrap();
+        let ledger = rustledger_loader::load(&path, &rustledger_loader::LoadOptions::default())
+            .expect("load");
+        let check: Vec<&str> = ledger.errors.iter().map(|e| e.code.as_str()).collect();
+        assert_eq!(check, ["E1001"], "{:?}", ledger.errors);
+
+        let parsed = parse(source);
+        let diags = all_diagnostics(
+            &parsed,
+            source,
+            None,
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
+        let lsp: Vec<String> = diags.iter().map(get_code).collect();
+        assert_eq!(lsp, ["E1001"], "{diags:?}");
+        assert!(diags[0].message.contains("Expenses:Unopened"), "{diags:?}");
+    }
+
+    /// A diagnostic's `(code, file, line)`.
+    type Located = (String, String, u32);
+
+    /// `(code, file, line)` of every diagnostic the multi-file path gives
+    /// for the journal `files[0]` includes, with the files at `open` open
+    /// and the one at `primary` the current buffer; and the same of what
+    /// the loader (`rledger check`) reports.
+    fn multi_file_vs_check(
+        files: &[(&str, &str)],
+        primary: usize,
+        open: &[usize],
+    ) -> (Vec<Located>, Vec<Located>) {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, text) in files {
+            std::fs::write(dir.path().join(name), text).unwrap();
+        }
+        let main = dir.path().join(files[0].0);
+        let ledger = rustledger_loader::load(&main, &rustledger_loader::LoadOptions::default())
+            .expect("load");
+        let name_of =
+            |path: &std::path::Path| path.file_name().unwrap().to_string_lossy().into_owned();
+        let mut check: Vec<Located> = ledger
+            .errors
+            .iter()
+            .map(|e| {
+                let loc = e.location.as_ref().expect("located");
+                (e.code.clone(), name_of(&loc.file), loc.line as u32)
+            })
+            .collect();
+        check.sort();
+
+        let mut state = LedgerState::new();
+        state.load(&main).expect("load");
+        let sources: Vec<(u16, String, Arc<str>)> = state
+            .ledger()
+            .unwrap()
+            .source_map
+            .files()
+            .iter()
+            .map(|f| (f.id as u16, name_of(&f.path), f.source.clone()))
+            .collect();
+        let parses: Vec<ParseResult> = sources.iter().map(|(_, _, src)| parse(src)).collect();
+        let targets: Vec<FileDiagTarget<'_>> = sources
+            .iter()
+            .zip(&parses)
+            .map(|((file_id, _, source), parse)| FileDiagTarget {
+                file_id: *file_id,
+                source,
+                parse,
+            })
+            .collect();
+        let overlay: Vec<(u16, &[Spanned<Directive>])> = open
+            .iter()
+            .map(|&i| (sources[i].0, parses[i].directives.as_slice()))
+            .collect();
+        let per_file = ledger_diagnostics_multi(
+            &state,
+            Some(sources[primary].0),
+            &parses[primary],
+            &overlay,
+            &targets,
+            PositionEncoding::Utf16,
+        );
+        let mut lsp: Vec<Located> = per_file
+            .iter()
+            .enumerate()
+            .flat_map(|(i, diags)| {
+                let name = sources[i].1.clone();
+                // An inventory failure keeps its E4xxx code in the LSP where
+                // `check` labels it `BOOK` (the #2510 mapping).
+                diags.iter().map(move |d| {
+                    let code = get_code(d);
+                    let code = if code.starts_with("E4") {
+                        "BOOK".to_string()
+                    } else {
+                        code
+                    };
+                    (code, name.clone(), d.range.start.line + 1)
+                })
+            })
+            .collect();
+        lsp.sort();
+        (lsp, check)
+    }
+
+    /// An open buffer's postings carry its file id, as the loader tags them.
+    /// Left at file 0, an unopened posting in an included buffer stood for
+    /// the main file's posting at the same byte span, and that one's E1001
+    /// disappeared (#2626 review).
+    #[test]
+    fn an_open_buffer_posting_does_not_hide_a_main_file_e1001() {
+        let files = [
+            (
+                "main.beancount",
+                "include \"other.beancount\"\n2024-01-02 * \"x\"\n  Assets:Cash  10 USD\n  \
+                 Expenses:Zzzz -10 USD\n2024-01-01 open Assets:Cash\n",
+            ),
+            (
+                "other.beancount",
+                "; ccccccccccccccccccccccc\n2024-01-02 * \"y\"\n  Assets:Cash  10 USD\n  \
+                 Expenses:Yyyyyyyyyyyy\n",
+            ),
+        ];
+        let (lsp, check) = multi_file_vs_check(&files, 0, &[0, 1]);
+        assert_eq!(lsp, check);
+    }
+
+    /// Same-date directives from different files book in `check`'s order:
+    /// the main file's sale before the included file's buy, so the sale is
+    /// refused, as `check` refuses it. The overlay appends open buffers
+    /// last, and sorting by date and type alone booked the buy first.
+    #[test]
+    fn same_date_transactions_across_files_book_in_checks_order() {
+        let files = [
+            (
+                "main.beancount",
+                "2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n\
+                 include \"other.beancount\"\n\
+                 2024-01-02 * \"sell\"\n  Assets:Stock  -5 HOOL {}\n  Assets:Cash  500 USD\n",
+            ),
+            (
+                "other.beancount",
+                "2024-01-02 * \"buy\"\n  Assets:Stock  10 HOOL {100 USD}\n  Assets:Cash\n",
+            ),
+        ];
+        let (lsp, check) = multi_file_vs_check(&files, 0, &[0]);
+        assert!(!check.is_empty(), "check refuses the sale");
+        assert_eq!(lsp, check);
     }
 }

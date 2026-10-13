@@ -242,12 +242,17 @@ use crate::types::{Error, LedgerOptions};
 /// v43: loader v39, a `#tag` / `^link` line after a transaction's first
 /// posting is a parse error and its tags are dropped (#2575). Parsed
 /// directives changed, so a v42 blob would serve the late tags and no error.
-/// v44: a sale written with its units elided is booked as the same sale
+/// v44: `event` and `custom` share the transaction `DirectivePriority`, so a
+/// same-date `event` or `custom` keeps its file position among transactions
+/// (#2576). Loader v39, unchanged -- parsed directives did not move. `Ledger`
+/// archives the processed, sorted directives, so a v43 blob would serve the
+/// old order (a same-date `custom` after the date's transactions and `close`).
+/// v45: a sale written with its units elided is booked as the same sale
 /// with its units written: its lots are matched and its disposal recorded,
 /// and an AVERAGE one carries the pool's exact cost (#2647). Loader v39,
 /// unchanged -- parsed directives did not move. `Ledger` archives booked
-/// directives, so a v43 blob would serve the old, unmatched posting.
-pub const CACHE_VERSION: u32 = 44;
+/// directives, so a v44 blob would serve the old, unmatched posting.
+pub const CACHE_VERSION: u32 = 45;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -558,14 +563,21 @@ mod tests {
     /// The fixture puts a `pad` and a `balance` on the SAME DATE, because
     /// that pair is the one whose relative order the priorities decide. With
     /// them on different dates the date component of the sort key settles it
-    /// and a priority swap changes nothing here.
+    /// and a priority swap changes nothing here. For the same reason it puts
+    /// a `custom`, an `event` and a `note` on a transaction's date (#2576).
     #[test]
     fn processed_ledger_archived_form_is_pinned() {
         // Moved once so far: swapping `Pad` and `Balance` in
         // `DirectivePriority` (#2179) reorders the same-date pair in the
         // fixture. That is the change this test was written to catch, and it
         // caught it on the rebase rather than in review.
-        const PROCESSED_LAYOUT_HASH: u64 = 0xa8a8_b0cf_5355_f95d;
+        //
+        // Moved again for #2576, which ranks `event` and `custom` with
+        // transactions: the fixture gained a same-date `custom` written
+        // before the transaction and an `event` and `note` after it, whose
+        // order the ranks decide (custom, transaction, event, note now;
+        // transaction, note, event, custom before).
+        const PROCESSED_LAYOUT_HASH: u64 = 0x1dd9_f6a2_4d28_0afa;
 
         let src = "\
 2024-01-01 open Assets:Bank USD\n\
@@ -574,9 +586,12 @@ mod tests {
 2024-01-04 pad Assets:Bank Equity:Opening-Balances\n\
 2024-01-04 balance Assets:Bank  10.00 USD\n\
 \n\
+2024-01-05 custom \"fava-option\" \"locale\" \"en\"\n\
 2024-01-05 * \"payee\" \"narration\"\n\
 \x20\x20Assets:Bank  5.00 USD\n\
 \x20\x20Equity:Opening-Balances\n\
+2024-01-05 event \"location\" \"Paris\"\n\
+2024-01-05 note Assets:Bank \"after the event\"\n\
 \n\
 2024-01-06 balance Assets:Bank  15.00 USD\n";
 

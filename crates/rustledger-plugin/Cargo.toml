@@ -30,6 +30,7 @@ python-plugins = [
 rustledger-booking.workspace = true
 rustledger-core.workspace = true
 rustledger-ops.workspace = true
+rustledger-parser.workspace = true
 rustledger-plugin-types.workspace = true
 wasmtime = { workspace = true, optional = true }
 wasmtime-wasi = { workspace = true, optional = true }
@@ -42,6 +43,10 @@ rmp-serde.workspace = true
 thiserror.workspace = true
 anyhow.workspace = true
 rust_decimal.workspace = true
+rustc-hash.workspace = true
+# Python-precision quotients in plugin messages (already in the tree through
+# rustledger-core).
+bigdecimal = "0.4"
 jiff.workspace = true
 regex.workspace = true
 

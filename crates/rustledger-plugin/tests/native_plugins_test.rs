@@ -3558,8 +3558,10 @@ fn test_check_closing_false_value_no_emission() {
     assert_eq!(balance_count, 0);
 }
 
-/// Non-Bool `closing` metadata (e.g., a String) does not trigger emission —
-/// the plugin's `matches!(val, MetaValueData::Bool(true))` guard rejects it.
+/// Any truthy `closing` value marks the posting, as beancount reads it
+/// (`posting.meta.get("closing", False)`): a non-empty string emits the
+/// balance and the marker is removed from the posting (#2600; only `TRUE`
+/// did before, and the marker stayed).
 #[test]
 fn test_check_closing_non_bool_metadata_no_emission() {
     let plugin = CheckClosingPlugin;
@@ -3613,7 +3615,15 @@ fn test_check_closing_non_bool_metadata_no_emission() {
         .iter()
         .filter(|d| d.directive_type == "balance")
         .count();
-    assert_eq!(balance_count, 0);
+    assert_eq!(balance_count, 1);
+    let marker_left = output.directives.iter().any(|d| match &d.data {
+        DirectiveData::Transaction(t) => t
+            .postings
+            .iter()
+            .any(|p| p.metadata.iter().any(|(k, _)| k == "closing")),
+        _ => false,
+    });
+    assert!(!marker_left, "the closing marker is removed once expanded");
 }
 
 /// Closing posting with `units = None` uses the first operating currency.
@@ -4676,16 +4686,16 @@ fn test_pedantic_runs_multiple_validators() {
     ]);
     let output = process_and_materialize(&plugin, input);
     let messages: Vec<&str> = output.errors.iter().map(|e| e.message.as_str()).collect();
-    // The leaf-only violation (`Expenses:Food:Restaurant` is only
-    // opened, but makes `Expenses:Food` a parent, as in bean-check), and
-    // the undeclared commodity. Before #2500's review this test expected
-    // one error, and the one it got was the commodity's: leafonly missed
-    // the violation the test is named for.
+    // In beancount's plugin order: the undeclared commodity, the leaf-only
+    // violation (`Expenses:Food:Restaurant` is only opened, but makes
+    // `Expenses:Food` a parent, as in bean-check), and the unused account
+    // (`nounused` is one of the nine; rledger ran four before #2600).
     assert_eq!(
         messages,
         [
+            "Missing Commodity directive for 'USD' in 'Assets:Cash'",
             "Non-leaf account 'Expenses:Food' has postings on it",
-            "Missing Commodity directive for 'USD' in 'Assets:Cash'"
+            "Unused account 'Expenses:Food:Restaurant'",
         ]
     );
 }
@@ -4965,503 +4975,195 @@ fn test_rx_txn_works_alongside_other_tags() {
 // SellGainsPlugin Tests
 // ============================================================================
 //
-// `sell_gains` walks every transaction and, for each *sale* posting
-// (negative units with both cost and price), warns when the expected
-// gain `(price - cost) * |units|` is non-zero AND no Income:* /
-// Expenses:* posting exists in the same transaction. It does NOT
-// inspect the gain posting's amount — only its presence.
-//
-// Matrix below pins:
-//   - sale + missing gain posting → warns
-//   - sale + Income posting → silent
-//   - sale + Expenses posting → silent (plugin treats either as ok)
-//   - buy (positive units) → silent regardless
-//   - sale at cost (zero gain) → silent
-//   - sale without cost or price → silent (preconditions not met)
-//   - two sales sharing one Income posting → ZERO warnings (both
-//     sales are considered covered by the single Income posting,
-//     because `has_gain_posting` is checked per-transaction, not
-//     per-sale-posting — documented quirk)
+// `sellgains` is beancount's: for a transaction whose postings at cost all
+// carry a price, the priced value of those postings (`-units × price`) must
+// match, per currency and within twice the transaction's tolerance, the
+// weight of its Assets/Liabilities/Equity/Expenses postings. Income is left
+// out (it is the gain the check lets you elide). The error is beancount's
+// message, at the transaction (#2600; rledger's own check only warned when
+// a priced sale had no Income or Expenses posting at all).
 
-/// Helper: build a 3-posting transaction (the asset, the cash,
-/// and an Income:* / Expenses:* posting) for `sell_gains` testing.
-/// `gain_account` lets us pick `Income:Capital-Gains` or
-/// `Expenses:Capital-Losses` to exercise both branches of the
-/// `starts_with` check in the plugin.
-fn make_sale_with_gain_posting(
-    date: &str,
-    asset_account: &str,
-    units: (&str, &str),
-    cost: (&str, &str),
-    price: (&str, &str),
-    gain_account: &str,
-    gain_amount: (&str, &str),
-) -> DirectiveWrapper {
+/// A posting of `number currency` to `account`.
+fn sg_posting(account: &str, number: &str, currency: &str) -> PostingData {
+    PostingData {
+        account: account.to_string(),
+        units: Some(AmountData {
+            number: number.to_string(),
+            currency: currency.to_string(),
+        }),
+        cost: None,
+        price: None,
+        flag: None,
+        metadata: vec![],
+        span: None,
+    }
+}
+
+/// A posting of `units` held at `cost` USD per unit, priced at `price` USD
+/// when given.
+fn sg_lot(units: &str, cost: &str, price: Option<&str>) -> PostingData {
+    let mut posting = sg_posting("Assets:Stock", units, "AAPL");
+    posting.cost = Some(CostData {
+        number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
+            value: cost.to_string(),
+        }),
+        currency: Some("USD".to_string()),
+        date: None,
+        label: None,
+        merge: false,
+    });
+    posting.price = price.map(|p| PriceAnnotationData {
+        is_total: false,
+        amount: Some(AmountData {
+            number: p.to_string(),
+            currency: "USD".to_string(),
+        }),
+        number: None,
+        currency: None,
+    });
+    posting
+}
+
+/// A transaction of `postings`, located at `ledger.beancount:10`.
+fn sg_txn(postings: Vec<PostingData>) -> DirectiveWrapper {
     DirectiveWrapper {
         directive_type: "transaction".to_string(),
-        date: date.to_string(),
-        filename: None,
-        lineno: None,
+        date: "2024-06-15".to_string(),
+        filename: Some("ledger.beancount".to_string()),
+        lineno: Some(10),
         data: DirectiveData::Transaction(TransactionData {
             flag: "*".to_string(),
             payee: None,
-            narration: "Sell with gain posting".to_string(),
+            narration: "Sell".to_string(),
             tags: vec![],
             links: vec![],
             metadata: vec![],
-            postings: vec![
-                PostingData {
-                    account: asset_account.to_string(),
-                    units: Some(AmountData {
-                        number: units.0.to_string(),
-                        currency: units.1.to_string(),
-                    }),
-                    cost: Some(CostData {
-                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
-                            value: cost.0.to_string(),
-                        }),
-                        currency: Some(cost.1.to_string()),
-                        date: None,
-                        label: None,
-                        merge: false,
-                    }),
-                    price: Some(PriceAnnotationData {
-                        is_total: false,
-                        amount: Some(AmountData {
-                            number: price.0.to_string(),
-                            currency: price.1.to_string(),
-                        }),
-                        number: None,
-                        currency: None,
-                    }),
-                    flag: None,
-                    metadata: vec![],
-                    span: None,
-                },
-                PostingData {
-                    account: "Assets:Cash".to_string(),
-                    units: None,
-                    cost: None,
-                    price: None,
-                    flag: None,
-                    metadata: vec![],
-                    span: None,
-                },
-                PostingData {
-                    account: gain_account.to_string(),
-                    units: Some(AmountData {
-                        number: gain_amount.0.to_string(),
-                        currency: gain_amount.1.to_string(),
-                    }),
-                    cost: None,
-                    price: None,
-                    flag: None,
-                    metadata: vec![],
-                    span: None,
-                },
-            ],
+            postings,
         }),
     }
 }
 
-/// Sale at $150 vs cost $100, no Income/Expenses posting → 1 warning.
-/// Existing test, kept (and tightened in #1005).
+fn sg_messages(postings: Vec<PostingData>) -> Vec<String> {
+    let output = process_and_materialize(&SellGainsPlugin, make_input(vec![sg_txn(postings)]));
+    output.errors.iter().map(|e| e.message.clone()).collect()
+}
+
+/// Proceeds matching the price, the gain posted to Income → nothing.
 #[test]
-fn test_sell_gains_warns_missing_gains_posting() {
-    let plugin = SellGainsPlugin;
-    let input = make_input(vec![
-        make_open("2024-01-01", "Assets:Stock"),
-        make_open("2024-01-01", "Assets:Cash"),
-        make_transaction_with_cost_and_price(
-            "2024-06-15",
-            "Sell stock",
-            "Assets:Stock",
-            ("-10", "AAPL"),
-            ("100", "USD"),
-            ("150", "USD"),
-            "Assets:Cash",
-        ),
-    ]);
-    let output = process_and_materialize(&plugin, input);
+fn test_sell_gains_silent_when_proceeds_match_price() {
+    assert!(
+        sg_messages(vec![
+            sg_lot("-10", "100", Some("150")),
+            sg_posting("Assets:Cash", "1500.00", "USD"),
+            sg_posting("Income:Gains", "-500.00", "USD"),
+        ])
+        .is_empty()
+    );
+}
+
+/// A typo in the proceeds is the error beancount gives, at the
+/// transaction: `(1500 USD)` priced against `(1600.00 USD)` received.
+#[test]
+fn test_sell_gains_reports_proceeds_that_do_not_match_the_price() {
+    let output = process_and_materialize(
+        &SellGainsPlugin,
+        make_input(vec![sg_txn(vec![
+            sg_lot("-10", "100", Some("150")),
+            sg_posting("Assets:Cash", "1600.00", "USD"),
+            sg_posting("Income:Gains", "-600.00", "USD"),
+        ])]),
+    );
+    assert_eq!(output.errors.len(), 1);
+    let error = &output.errors[0];
     assert_eq!(
-        output.errors.len(),
-        1,
-        "exactly one warning for the single sale missing gains posting"
+        error.message,
+        "Invalid price vs. proceeds/gains: (1500 USD) vs. (1600.00 USD); difference: (-100.00 USD)"
     );
-    assert!(
-        output.errors[0].message.contains("gain") || output.errors[0].message.contains("Gain"),
-        "warning should reference the missing gains posting"
-    );
+    assert_eq!(error.severity, PluginErrorSeverity::Error);
+    assert_eq!(error.source_file.as_deref(), Some("ledger.beancount"));
+    assert_eq!(error.line_number, Some(10));
 }
 
-/// Sale with a balancing `Income:Capital-Gains` posting → no warning.
-/// The plugin only checks for *presence* of an Income/Expenses
-/// posting, not whether its amount actually matches the expected
-/// gain.
+/// Fees are Expenses, so they count toward the proceeds.
 #[test]
-fn test_sell_gains_silent_with_income_posting() {
-    let plugin = SellGainsPlugin;
-    let input = make_input(vec![
-        make_open("2024-01-01", "Assets:Stock"),
-        make_open("2024-01-01", "Assets:Cash"),
-        make_open("2024-01-01", "Income:Capital-Gains"),
-        make_sale_with_gain_posting(
-            "2024-06-15",
-            "Assets:Stock",
-            ("-10", "AAPL"),
-            ("100", "USD"),
-            ("150", "USD"),
-            "Income:Capital-Gains",
-            ("-500", "USD"), // gain = (150-100)*10
-        ),
-    ]);
-    let output = process_and_materialize(&plugin, input);
+fn test_sell_gains_counts_expenses_toward_proceeds() {
     assert!(
-        output.errors.is_empty(),
-        "no warning when Income:Capital-Gains posting is present (got {} warnings)",
-        output.errors.len()
+        sg_messages(vec![
+            sg_lot("-10", "100", Some("150")),
+            sg_posting("Assets:Cash", "1490.00", "USD"),
+            sg_posting("Expenses:Fees", "10.00", "USD"),
+            sg_posting("Income:Gains", "-500.00", "USD"),
+        ])
+        .is_empty()
     );
 }
 
-/// Sale + `Expenses:*` posting also satisfies the check (the plugin
-/// looks for either prefix). Pins this branch — losses can be booked
-/// to an Expenses account instead of negative-Income.
+/// A lot at cost without a price → the transaction is not checked at all.
 #[test]
-fn test_sell_gains_silent_with_expenses_posting() {
-    let plugin = SellGainsPlugin;
-    let input = make_input(vec![
-        make_open("2024-01-01", "Assets:Stock"),
-        make_open("2024-01-01", "Assets:Cash"),
-        make_open("2024-01-01", "Expenses:Capital-Losses"),
-        make_sale_with_gain_posting(
-            "2024-06-15",
-            "Assets:Stock",
-            ("-10", "AAPL"),
-            ("100", "USD"),
-            ("80", "USD"), // selling at a loss
-            "Expenses:Capital-Losses",
-            ("200", "USD"),
-        ),
-    ]);
-    let output = process_and_materialize(&plugin, input);
+fn test_sell_gains_skips_a_transaction_with_an_unpriced_lot() {
     assert!(
-        output.errors.is_empty(),
-        "no warning when Expenses:* posting is present (got {} warnings)",
-        output.errors.len()
+        sg_messages(vec![
+            sg_lot("-10", "100", Some("150")),
+            sg_lot("-1", "100", None),
+            sg_posting("Assets:Cash", "1.00", "USD"),
+            sg_posting("Income:Gains", "-1.00", "USD"),
+        ])
+        .is_empty()
     );
 }
 
-/// Buy (positive units) is never a sale — plugin should be silent
-/// regardless of whether an Income/Expenses posting is present. Pins
-/// the `units >= ZERO → continue` short-circuit.
+/// Proceeds in a currency the price is not in → reported.
 #[test]
-fn test_sell_gains_silent_for_buy() {
-    let plugin = SellGainsPlugin;
-    let input = make_input(vec![
-        make_open("2024-01-01", "Assets:Stock"),
-        make_open("2024-01-01", "Assets:Cash"),
-        make_transaction_with_cost_and_price(
-            "2024-01-15",
-            "Buy stock",
-            "Assets:Stock",
-            ("10", "AAPL"), // positive — buy, not sale
-            ("100", "USD"),
-            ("100", "USD"),
-            "Assets:Cash",
-        ),
-    ]);
-    let output = process_and_materialize(&plugin, input);
-    assert!(
-        output.errors.is_empty(),
-        "buys are not flagged regardless of postings (got {} warnings)",
-        output.errors.len()
+fn test_sell_gains_reports_proceeds_in_another_currency() {
+    assert_eq!(
+        sg_messages(vec![
+            sg_lot("-1", "10", Some("13")),
+            sg_posting("Assets:Cash", "13", "USD"),
+            sg_posting("Assets:Cash", "1", "EUR"),
+            sg_posting("Income:Gains", "-1", "EUR"),
+            sg_posting("Income:Gains", "-3", "USD"),
+        ]),
+        ["Invalid price vs. proceeds/gains: (13 USD) vs. (13 USD, 1 EUR); difference: (-1 EUR)"]
     );
 }
 
-/// Sale at exactly cost basis (zero gain) → no warning even without
-/// an Income posting. Pins the `expected_gain != ZERO` guard.
+/// A buy has no price to check against here (its lot has no price).
 #[test]
-fn test_sell_gains_silent_when_gain_is_zero() {
-    let plugin = SellGainsPlugin;
-    let input = make_input(vec![
-        make_open("2024-01-01", "Assets:Stock"),
-        make_open("2024-01-01", "Assets:Cash"),
-        make_transaction_with_cost_and_price(
-            "2024-06-15",
-            "Sell at cost",
-            "Assets:Stock",
-            ("-10", "AAPL"),
-            ("100", "USD"),
-            ("100", "USD"), // same as cost → no gain
-            "Assets:Cash",
-        ),
-    ]);
-    let output = process_and_materialize(&plugin, input);
+fn test_sell_gains_silent_for_unpriced_buy() {
     assert!(
-        output.errors.is_empty(),
-        "zero gain doesn't warrant a warning (got {} warnings)",
-        output.errors.len()
+        sg_messages(vec![
+            sg_lot("10", "100", None),
+            sg_posting("Assets:Cash", "-1000", "USD"),
+        ])
+        .is_empty()
     );
 }
 
-/// Sale missing either cost or price → preconditions not met, plugin
-/// skips. Pins the `(units, cost, price)` triple-Some pattern guard.
-#[test]
-fn test_sell_gains_silent_without_cost() {
-    let plugin = SellGainsPlugin;
-    let input = make_input(vec![
-        make_open("2024-01-01", "Assets:Stock"),
-        make_open("2024-01-01", "Assets:Cash"),
-        // Standard transfer without cost/price annotations
-        make_transaction(
-            "2024-06-15",
-            "Transfer stock",
-            vec![
-                ("Assets:Stock", "-10", "AAPL"),
-                ("Assets:Cash", "1500", "USD"),
-            ],
-        ),
-    ]);
-    let output = process_and_materialize(&plugin, input);
-    assert!(
-        output.errors.is_empty(),
-        "sale without cost/price annotation is not flagged (got {} warnings)",
-        output.errors.len()
-    );
-}
-
-/// Two sale postings in one transaction sharing a single Income
-/// posting → both are considered "covered" by the shared posting.
-/// This is a quirk of the plugin's per-transaction (not per-posting)
-/// check for `has_gain_posting`. Pins the actual behavior so a
-/// future refactor that tightens to per-posting matching is caught
-/// by this test (and would require updating it).
-#[test]
-fn test_sell_gains_two_sales_share_one_income_posting() {
-    let plugin = SellGainsPlugin;
-    // Build a transaction with TWO sale postings + one Income posting.
-    let txn = DirectiveWrapper {
-        directive_type: "transaction".to_string(),
-        date: "2024-06-15".to_string(),
-        filename: None,
-        lineno: None,
-        data: DirectiveData::Transaction(TransactionData {
-            flag: "*".to_string(),
-            payee: None,
-            narration: "Sell two lots".to_string(),
-            tags: vec![],
-            links: vec![],
-            metadata: vec![],
-            postings: vec![
-                // First sale (gain)
-                PostingData {
-                    account: "Assets:Stock".to_string(),
-                    units: Some(AmountData {
-                        number: "-5".to_string(),
-                        currency: "AAPL".to_string(),
-                    }),
-                    cost: Some(CostData {
-                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
-                            value: "100".to_string(),
-                        }),
-                        currency: Some("USD".to_string()),
-                        date: None,
-                        label: None,
-                        merge: false,
-                    }),
-                    price: Some(PriceAnnotationData {
-                        is_total: false,
-                        amount: Some(AmountData {
-                            number: "150".to_string(),
-                            currency: "USD".to_string(),
-                        }),
-                        number: None,
-                        currency: None,
-                    }),
-                    flag: None,
-                    metadata: vec![],
-                    span: None,
-                },
-                // Second sale (loss)
-                PostingData {
-                    account: "Assets:Stock".to_string(),
-                    units: Some(AmountData {
-                        number: "-3".to_string(),
-                        currency: "AAPL".to_string(),
-                    }),
-                    cost: Some(CostData {
-                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
-                            value: "200".to_string(),
-                        }),
-                        currency: Some("USD".to_string()),
-                        date: None,
-                        label: None,
-                        merge: false,
-                    }),
-                    price: Some(PriceAnnotationData {
-                        is_total: false,
-                        amount: Some(AmountData {
-                            number: "180".to_string(),
-                            currency: "USD".to_string(),
-                        }),
-                        number: None,
-                        currency: None,
-                    }),
-                    flag: None,
-                    metadata: vec![],
-                    span: None,
-                },
-                PostingData {
-                    account: "Income:Capital-Gains".to_string(),
-                    units: Some(AmountData {
-                        number: "-190".to_string(), // 250 gain - 60 loss
-                        currency: "USD".to_string(),
-                    }),
-                    cost: None,
-                    price: None,
-                    flag: None,
-                    metadata: vec![],
-                    span: None,
-                },
-                PostingData {
-                    account: "Assets:Cash".to_string(),
-                    units: None,
-                    cost: None,
-                    price: None,
-                    flag: None,
-                    metadata: vec![],
-                    span: None,
-                },
-            ],
-        }),
-    };
-    let input = make_input(vec![
-        make_open("2024-01-01", "Assets:Stock"),
-        make_open("2024-01-01", "Assets:Cash"),
-        make_open("2024-01-01", "Income:Capital-Gains"),
-        txn,
-    ]);
-    let output = process_and_materialize(&plugin, input);
-    assert!(
-        output.errors.is_empty(),
-        "single Income posting covers both sales in this transaction \
-         (per-transaction check, not per-posting); got {} warnings",
-        output.errors.len()
-    );
-}
-
-// Property test: a sale with no Income/Expenses posting warns iff the
-// expected gain `(sale_price - cost_per) * |units|` is non-zero.
-//
-// The plugin's invariant is binary: when `expected_gain != 0` AND no
-// gain-shaped posting exists, emit exactly one warning per sale; when
-// either `expected_gain == 0` (sale at cost) OR a gain posting exists,
-// stay silent. Generators sweep cost and price independently in cents
-// (covers `P > C` gains, `P < C` losses, and the `P == C` zero-gain
-// case), and a boolean toggles the presence of an Income posting.
 proptest::proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
 
+    /// Proceeds off by `delta` cents from `units × price`: an error iff
+    /// `|delta|` exceeds twice the tolerance the cash posting's two decimal
+    /// places give (2 × 0.005 USD = 1 cent).
     #[test]
-    fn prop_sell_gains_warns_iff_nonzero_gain_with_no_income_posting(
+    fn prop_sell_gains_reports_iff_proceeds_miss_price_beyond_tolerance(
         units in 1u32..1000,
         cost_cents in 1u32..1_000_000,
         sale_cents in 1u32..1_000_000,
-        with_income_posting in proptest::bool::ANY,
+        delta_cents in -300i64..300,
     ) {
         use rust_decimal::Decimal;
-
-        let plugin = SellGainsPlugin;
-        let cost_d = Decimal::new(i64::from(cost_cents), 2);
-        let sale_d = Decimal::new(i64::from(sale_cents), 2);
+        let sale = Decimal::new(i64::from(sale_cents), 2);
+        let cost = Decimal::new(i64::from(cost_cents), 2);
         let units_d = Decimal::from(units);
-        let expected_gain = (sale_d - cost_d) * units_d;
-
-        // Build the sale posting: -units AAPL {cost USD} @ sale USD.
-        let sale_posting = PostingData {
-            account: "Assets:Brokerage".to_string(),
-            units: Some(AmountData {
-                number: format!("-{units}"),
-                currency: "AAPL".to_string(),
-            }),
-            cost: Some(CostData {
-                number: Some(rustledger_plugin_types::CostNumberData::PerUnit { value: cost_d.to_string() }),
-                currency: Some("USD".to_string()),
-                date: None,
-                label: None,
-                merge: false,
-            }),
-            price: Some(PriceAnnotationData {
-                is_total: false,
-                amount: Some(AmountData {
-                    number: sale_d.to_string(),
-                    currency: "USD".to_string(),
-                }),
-                number: None,
-                currency: None,
-            }),
-            flag: None,
-            metadata: vec![],
-                    span: None,
-        };
-        // Balancing posting — auto-balanced (units=None) so it doesn't
-        // introduce a second sale leg the plugin would also analyze.
-        let cash_posting = PostingData {
-            account: "Assets:Cash".to_string(),
-            units: None,
-            cost: None,
-            price: None,
-            flag: None,
-            metadata: vec![],
-            span: None,
-        };
-        // Optional Income posting that satisfies the gain-coverage
-        // condition. The plugin only checks for the prefix, not the
-        // amount, so any Income:* account suppresses the warning.
-        let income_posting = PostingData {
-            account: "Income:Capital-Gains".to_string(),
-            units: None,
-            cost: None,
-            price: None,
-            flag: None,
-            metadata: vec![],
-            span: None,
-        };
-        let mut postings = vec![sale_posting, cash_posting];
-        if with_income_posting {
-            postings.push(income_posting);
-        }
-
-        let input = make_input(vec![
-            make_open("2024-01-01", "Assets:Brokerage"),
-            make_open("2024-01-01", "Assets:Cash"),
-            make_open("2024-01-01", "Income:Capital-Gains"),
-            DirectiveWrapper {
-                directive_type: "transaction".to_string(),
-                date: "2024-06-15".to_string(),
-                filename: None,
-                lineno: None,
-                data: DirectiveData::Transaction(TransactionData {
-                    flag: "*".to_string(),
-                    payee: None,
-                    narration: "Sale".to_string(),
-                    tags: vec![],
-                    links: vec![],
-                    metadata: vec![],
-                    postings,
-                }),
-            },
+        let cash = units_d * sale + Decimal::new(delta_cents, 2);
+        let gain = units_d * cost - cash;
+        let messages = sg_messages(vec![
+            sg_lot(&format!("-{units}"), &cost.to_string(), Some(&sale.to_string())),
+            sg_posting("Assets:Cash", &cash.to_string(), "USD"),
+            sg_posting("Income:Gains", &gain.to_string(), "USD"),
         ]);
-
-        let output = process_and_materialize(&plugin, input);
-
-        let should_warn = expected_gain != Decimal::ZERO && !with_income_posting;
-        let expected_count = usize::from(should_warn);
-        proptest::prop_assert_eq!(
-            output.errors.len(), expected_count,
-            "expected {} warning(s) for cost={} sale={} units={} with_income={}",
-            expected_count, cost_d, sale_d, units, with_income_posting
-        );
+        proptest::prop_assert_eq!(messages.len(), usize::from(delta_cents.abs() > 1), "{:?}", messages);
     }
 }
 
@@ -7364,16 +7066,17 @@ fn test_check_average_cost_warns_when_sale_cost_diverges_from_average() {
         ),
     ]);
     let output = process_and_materialize(&plugin, input);
+    // beancount's message and severity (#2600).
     assert_eq!(
         output.errors.len(),
         1,
-        "exactly one warning for the diverging sale"
+        "exactly one error for the diverging sale"
     );
-    let msg = &output.errors[0].message;
-    assert!(
-        msg.contains("Assets:Stock") && msg.contains("AAPL"),
-        "warning should reference the account and commodity; got: {msg}"
+    assert_eq!(
+        output.errors[0].message,
+        "Cost basis on reducing posting is too far from the average cost (100 vs. 150)"
     );
+    assert_eq!(output.errors[0].severity, PluginErrorSeverity::Error);
 }
 
 /// Account is NOT opened with NONE booking → plugin skips it
@@ -8235,9 +7938,9 @@ fn test_capital_gains_long_short_no_config_passthrough() {
     assert_eq!(output.directives.len(), 2);
 }
 
-/// Malformed config → plugin treats as no-op (the inner regex parse
-/// fails, plugin returns input unchanged). Pins the `parse_*_config
-/// → None → passthrough` branch.
+/// Malformed config → the plugin changes nothing and says why, as
+/// beancount's raises on a config `literal_eval` cannot read (#2601;
+/// before, it passed the input through silently).
 #[test]
 fn test_capital_gains_long_short_invalid_config_passthrough() {
     let plugin = CapitalGainsLongShortPlugin;
@@ -8249,7 +7952,14 @@ fn test_capital_gains_long_short_invalid_config_passthrough() {
         "this is not valid plugin config",
     );
     let output = process_and_materialize(&plugin, input);
-    assert!(output.errors.is_empty());
+    assert_eq!(output.errors.len(), 1, "{:?}", output.errors);
+    assert!(
+        output.errors[0]
+            .message
+            .starts_with("Invalid configuration for long_short"),
+        "{}",
+        output.errors[0].message
+    );
     assert_eq!(output.directives.len(), 2);
 }
 
@@ -8599,8 +8309,7 @@ fn test_capital_gains_gain_loss_no_config_passthrough() {
     assert_eq!(output.directives.len(), 2);
 }
 
-/// Malformed config → no-op (regex parse fails). Pins the
-/// `parse_gain_loss_config → None → passthrough` branch.
+/// Malformed config → the plugin changes nothing and says why (#2601).
 #[test]
 fn test_capital_gains_gain_loss_invalid_config_passthrough() {
     let plugin = CapitalGainsGainLossPlugin;
@@ -8612,7 +8321,14 @@ fn test_capital_gains_gain_loss_invalid_config_passthrough() {
         "{ malformed",
     );
     let output = process_and_materialize(&plugin, input);
-    assert!(output.errors.is_empty());
+    assert_eq!(output.errors.len(), 1, "{:?}", output.errors);
+    assert!(
+        output.errors[0]
+            .message
+            .starts_with("Invalid configuration for gain_loss"),
+        "{}",
+        output.errors[0].message
+    );
     assert_eq!(output.directives.len(), 2);
 }
 

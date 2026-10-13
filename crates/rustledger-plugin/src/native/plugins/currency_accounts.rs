@@ -70,15 +70,17 @@ impl NativePlugin for CurrencyAccountsPlugin {
         use std::collections::{BTreeMap, HashSet};
         use std::str::FromStr;
 
-        // Get base account from config if provided. We only check for
-        // non-empty (Python's plugin additionally validates that it is a
-        // well-formed account name and falls back to the default when
-        // it isn't, but we skip that check for simplicity).
+        // The base account from the config, when it is a valid account
+        // name; the default otherwise, as beancount's plugin falls back.
+        // With no config at all beancount 3's plugin fails (its `config`
+        // argument is required); the default is used here. Any
+        // non-empty text was used before, so `"not an account"` made accounts
+        // named `not an account:EUR` that no printer could write (#2600).
         let base_account = input
             .config
             .as_ref()
             .map(|c| c.trim().to_string())
-            .filter(|s| !s.is_empty())
+            .filter(|s| rustledger_parser::is_valid_account_name(s))
             .unwrap_or_else(|| self.base_account.clone());
 
         // Find earliest date and collect existing Open accounts in one pass.
@@ -109,9 +111,11 @@ impl NativePlugin for CurrencyAccountsPlugin {
 
             // Group postings by key and track whether any posting has a price.
             //
-            // Use BTreeMap for deterministic iteration so the order in which
-            // neutralizing postings are appended is stable across runs.
+            // BTreeMap for lookups; `group_order` keeps the groups in the
+            // order their first posting appears, the order beancount's
+            // plugin appends the neutralizing postings in.
             let mut curmap: BTreeMap<String, Vec<usize>> = BTreeMap::new();
+            let mut group_order: Vec<String> = Vec::new();
             let mut has_price = false;
 
             for (i, posting) in txn.postings.iter().enumerate() {
@@ -135,6 +139,9 @@ impl NativePlugin for CurrencyAccountsPlugin {
                     has_price = true;
                 }
 
+                if !curmap.contains_key(&key) {
+                    group_order.push(key.clone());
+                }
                 curmap.entry(key).or_default().push(i);
             }
 
@@ -275,9 +282,17 @@ impl NativePlugin for CurrencyAccountsPlugin {
                 new_postings.push(posting);
             }
 
-            // Append neutralizing postings (sorted by group key for
-            // deterministic output).
-            for (group_key, inv) in &group_inv {
+            // Append neutralizing postings, in the order the groups first
+            // appear in the transaction as rledger books it. Deliberate
+            // divergence: beancount's plugin also moves each group's postings
+            // together ahead of its neutralizer, and beancount's booking has
+            // already regrouped the postings by weight currency, so its order
+            // can differ; the written postings keep their order here, as
+            // `zerosum` keeps its (see the note there).
+            for group_key in &group_order {
+                let Some(inv) = group_inv.get(group_key) else {
+                    continue;
+                };
                 // A group's cost basis is denominated in exactly the
                 // currency the group is keyed on, so this map holds at most
                 // one entry (len 0 means the basis netted to zero, which
@@ -315,6 +330,11 @@ impl NativePlugin for CurrencyAccountsPlugin {
 
             let mut modified_txn = txn.clone();
             modified_txn.postings = new_postings;
+            // Marked as processed, as beancount's plugin marks it.
+            modified_txn.metadata.push((
+                "currency_accounts_processed".to_string(),
+                crate::types::MetaValueData::Bool(true),
+            ));
 
             ops.push(PluginOp::Modify(
                 i,

@@ -556,22 +556,22 @@ user-login = "dtolnay"
 user-name = "David Tolnay"
 
 [[publisher.jiff]]
-version = "0.2.37"
-when = "2026-09-12"
+version = "0.2.38"
+when = "2026-10-06"
 user-id = 189
 user-login = "BurntSushi"
 user-name = "Andrew Gallant"
 
 [[publisher.jiff-static]]
-version = "0.2.37"
-when = "2026-09-12"
+version = "0.2.38"
+when = "2026-10-06"
 user-id = 189
 user-login = "BurntSushi"
 user-name = "Andrew Gallant"
 
 [[publisher.jiff-tzdb]]
-version = "0.1.8"
-when = "2026-07-09"
+version = "0.1.9"
+when = "2026-10-06"
 user-id = 189
 user-login = "BurntSushi"
 user-name = "Andrew Gallant"
@@ -891,8 +891,8 @@ user-login = "dtolnay"
 user-name = "David Tolnay"
 
 [[publisher.serde_json]]
-version = "1.0.151"
-when = "2026-07-20"
+version = "1.0.154"
+when = "2026-10-11"
 user-id = 3618
 user-login = "dtolnay"
 user-name = "David Tolnay"
@@ -975,8 +975,8 @@ user-login = "sffc"
 user-name = "Shane F. Carr"
 
 [[publisher.tokio]]
-version = "1.53.1"
-when = "2026-07-20"
+version = "1.53.2"
+when = "2026-10-03"
 user-id = 6741
 user-login = "Darksonn"
 user-name = "Alice Ryhl"

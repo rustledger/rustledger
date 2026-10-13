@@ -126,7 +126,7 @@ plugin "beancount.plugins.implicit_prices"
 
 ## Built-in Plugins
 
-rustledger includes 31 native plugins. Here are the most commonly used:
+rustledger includes 33 native plugins. Here are the most commonly used:
 
 ### Validation Plugins
 
@@ -136,6 +136,8 @@ rustledger includes 31 native plugins. Here are the most commonly used:
 | `check_closing` | Zero balance assertion on posting with `closing: TRUE` |
 | `check_commodity` | Ensure commodities are declared |
 | `check_drained` | Zero balance assertion on balance sheet account close |
+| `check_option_assignment` | Check an assigned short option's stock basis or proceeds |
+| `check_option_expiry` | Error on option contracts open past expiry |
 | `coherent_cost` | A currency is held at cost everywhere or nowhere |
 | `commodity_attr` | Validate commodity metadata attributes |
 | `leafonly` | Restrict postings to leaf accounts |
@@ -172,7 +174,7 @@ rustledger includes 31 native plugins. Here are the most commonly used:
 ### All Built-in Plugins
 
 <details>
-<summary>Complete list of 31 native plugins</summary>
+<summary>Complete list of 33 native plugins</summary>
 
 | Plugin | Description |
 |--------|-------------|
@@ -185,6 +187,8 @@ rustledger includes 31 native plugins. Here are the most commonly used:
 | `check_closing` | Zero balance on account close |
 | `check_commodity` | Validate commodity declarations |
 | `check_drained` | Ensure accounts drained before close |
+| `check_option_assignment` | Check an assigned short option's stock basis or proceeds |
+| `check_option_expiry` | Error on option contracts open past expiry |
 | `close_tree` | Close descendant accounts |
 | `coherent_cost` | Held at cost everywhere or nowhere |
 | `commodity_attr` | Validate commodity attributes |
@@ -465,6 +469,66 @@ plugin "beancount.plugins.check_drained"
 2024-12-31 close Assets:Bank
 ; Generates: 2025-01-01 balance Assets:Bank 0 USD
 ```
+
+Options: None
+
+### check_option_assignment
+
+Checks the stock leg when a short option is assigned. For a short put, the stock's basis must be strike × shares − premium. For a short call, the sale proceeds must be strike × shares + premium. Options are recognized by OCC symbol, as for `check_option_expiry`.
+
+An assignment is a transaction that reduces a short option position and also moves the option's root commodity (stock rises for a put, falls for a call). Ordinary closes, long options, cash-settled index options, and assignments split across two transactions are not checked. Each assignment gets at most one error, from the first rule that fails:
+
+1. Stock units = 100 × contracts.
+2. The option leg is closed at cost (no gain realized on it).
+3. Basis (put) or proceeds (call) match within half a cent per share, compared as totals across all lots.
+
+```beancount
+plugin "beancount_options.check_option_assignment"
+
+2026-01-01 open Assets:Broker:Cash USD
+2026-01-01 open Assets:Broker:Stock AAPL
+2026-01-01 open Assets:Broker:Options
+2026-01-01 open Income:Trading:Gains
+
+2026-09-03 * "Sell to open 1 AAPL 2026-10-16 225 put @ 3.00"
+  Assets:Broker:Options  -1 AAPL261016P00225000 {300.00 USD}
+  Assets:Broker:Cash     300.00 USD
+
+2026-10-16 * "Assigned: buy 100 AAPL at 225, premium booked as income"
+  Assets:Broker:Options   1 AAPL261016P00225000 {}
+  Assets:Broker:Stock   100 AAPL {225.00 USD}
+  Assets:Broker:Cash  -22500.00 USD
+  Income:Trading:Gains   -300.00 USD
+; Error: AAPL261016P00225000 assignment: AAPL basis 22500.00 USD, expected 22200.00 USD (strike 225 × 100 − premium 300.00)
+```
+
+The correct entry drops the income line and writes the stock lot as `{222.00 USD}`.
+
+Its Python counterpart in [beancount-options](https://github.com/rustledger/beancount-options) is not released yet, so until it is, `bean-check` and Fava fail on this `plugin` line. To keep a file portable meanwhile, leave the line out and enable the plugin on the command line: `rledger check --native-plugin check_option_assignment ledger.beancount`.
+
+Options: None
+
+### check_option_expiry
+
+Reports an error for each option contract whose net position in an account is non-zero after its expiry date. Contracts are recognized by their OCC symbol with spaces removed: a root of 1–6 letters, digits or dots starting with a letter (adjusted roots such as `XYZ1` are checked too), the expiry as `YYMMDD`, `C` or `P`, and the strike × 1000 as 8 digits (`AAPL261016P00230000` is the AAPL 2026-10-16 230 put). Other commodities are ignored.
+
+"Today" is the date of the last directive of any kind in the ledger, so the check is deterministic. A close dated on the expiry day is accepted, and a ledger that ends on or before expiry is not reported. Each transaction's legs on one contract are netted before they apply, and the error is located at the transaction that opened the position still open (the last one that moved it off zero or across it). The plugin only reports; it never inserts or changes directives.
+
+```beancount
+plugin "beancount_options.check_option_expiry"
+
+2026-01-01 open Assets:Broker:Cash USD
+2026-01-01 open Assets:Broker:Options
+
+2026-09-02 * "Sell to open 1 AAPL 2026-10-16 230 put"
+  Assets:Broker:Options  -1 AAPL261016P00230000 {250.00 USD}
+  Assets:Broker:Cash     250.00 USD
+
+2026-10-20 balance Assets:Broker:Cash 250.00 USD
+; Error: AAPL261016P00230000 expired 2026-10-16 but -1 contract(s) remain open in Assets:Broker:Options
+```
+
+Its Python counterpart is `beancount_options.check_option_expiry` in [beancount-options](https://github.com/rustledger/beancount-options) (`pip install git+https://github.com/rustledger/beancount-options`). rledger matches a native plugin by the last part of the name, so the same `plugin` line runs the native plugin under `rledger` and the Python one under `bean-check` and Fava, with the same messages at the same lines.
 
 Options: None
 
@@ -825,6 +889,7 @@ Most Python beancount plugins have native equivalents:
 | `zerosum` | ✅ `zerosum` |
 | `unrealized` | ✅ `unrealized` |
 | `rename_accounts` | ✅ `rename_accounts` |
+| `beancount_options.check_option_expiry` | ✅ `check_option_expiry` |
 | Custom Python | Rewrite in Rust |
 
 ### Python Plugin Limitations

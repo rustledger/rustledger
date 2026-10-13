@@ -15,6 +15,8 @@ Beancount plugin system with 30 native plugins and WASM support.
 | `check_closing` | Zero balance on account close |
 | `check_commodity` | Validate commodity declarations |
 | `check_drained` | Ensure accounts drained before close |
+| `check_option_assignment` | Check premium is folded into the stock leg on assignment |
+| `check_option_expiry` | Error on option contracts open past expiry |
 | `close_tree` | Close descendant accounts |
 | `coherent_cost` | Enforce cost OR price (not both) |
 | `commodity_attr` | Validate commodity attributes |

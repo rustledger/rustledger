@@ -65,6 +65,8 @@ Rustledger supports 31 native plugins that match Python beancount behavior:
 - `sellgains`, `split_expenses`, `unique_prices`, `unrealized`
 - `valuation`, `zerosum`
 
+`check_option_expiry` matches `beancount_options.check_option_expiry` from [beancount-options](https://github.com/rustledger/beancount-options), the Python package that holds the counterparts of rustledger's option plugins; `check_option_assignment`'s counterpart is not released yet.
+
 Additionally, `document_discovery` auto-discovers documents from `option "documents"` directories.
 
 **Workaround**: Use rustledger's native plugins where available, or remove unsupported plugin directives.

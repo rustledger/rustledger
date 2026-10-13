@@ -126,7 +126,7 @@ plugin "beancount.plugins.implicit_prices"
 
 ## Built-in Plugins
 
-rustledger includes 32 native plugins. Here are the most commonly used:
+rustledger includes 33 native plugins. Here are the most commonly used:
 
 ### Validation Plugins
 
@@ -136,6 +136,7 @@ rustledger includes 32 native plugins. Here are the most commonly used:
 | `check_closing` | Zero balance assertion on posting with `closing: TRUE` |
 | `check_commodity` | Ensure commodities are declared |
 | `check_drained` | Zero balance assertion on balance sheet account close |
+| `check_option_assignment` | Check an assigned short option's stock basis or proceeds |
 | `check_option_expiry` | Error on option contracts open past expiry |
 | `coherent_cost` | A currency is held at cost everywhere or nowhere |
 | `commodity_attr` | Validate commodity metadata attributes |
@@ -173,7 +174,7 @@ rustledger includes 32 native plugins. Here are the most commonly used:
 ### All Built-in Plugins
 
 <details>
-<summary>Complete list of 32 native plugins</summary>
+<summary>Complete list of 33 native plugins</summary>
 
 | Plugin | Description |
 |--------|-------------|
@@ -186,6 +187,7 @@ rustledger includes 32 native plugins. Here are the most commonly used:
 | `check_closing` | Zero balance on account close |
 | `check_commodity` | Validate commodity declarations |
 | `check_drained` | Ensure accounts drained before close |
+| `check_option_assignment` | Check an assigned short option's stock basis or proceeds |
 | `check_option_expiry` | Error on option contracts open past expiry |
 | `close_tree` | Close descendant accounts |
 | `coherent_cost` | Held at cost everywhere or nowhere |

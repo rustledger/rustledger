@@ -12,8 +12,9 @@ use regex::Regex;
 use rust_decimal::Decimal;
 
 /// OCC option symbol with spaces removed: root, `YYMMDD`, `C`/`P`, 8-digit strike.
+/// `[0-9]`, not `\d`, so it accepts exactly what the Python counterpart accepts.
 static OCC_SYMBOL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"^([A-Z][A-Z0-9.]{0,5})(\d{2})(\d{2})(\d{2})([CP])(\d{8})$")
+    Regex::new(r"^([A-Z][A-Z0-9.]{0,5})([0-9]{2})([0-9]{2})([0-9]{2})([CP])([0-9]{8})$")
         .expect("OCC symbol regex is valid")
 });
 
@@ -43,6 +44,7 @@ pub struct OccSymbol {
 /// is not one, including impossible dates such as month 13 or 2026-02-30.
 pub fn parse_occ(symbol: &str) -> Option<OccSymbol> {
     let caps = OCC_SYMBOL_RE.captures(symbol)?;
+    // OCC years are two digits; 20xx is deliberate and matches beancount-options.
     let year: i16 = 2000 + caps[2].parse::<i16>().ok()?;
     let month: i8 = caps[3].parse().ok()?;
     let day: i8 = caps[4].parse().ok()?;
@@ -88,6 +90,8 @@ mod tests {
             "AAPL261016X00230000",
             "AAPL261016P0023000",
             "TOOLONGX261016P00230000",
+            // Arabic-Indic digits: `\d` would match them.
+            "AAPL\u{662}\u{666}\u{661}\u{660}\u{661}\u{666}P00230000",
         ] {
             assert_eq!(parse_occ(s), None, "{s}");
         }

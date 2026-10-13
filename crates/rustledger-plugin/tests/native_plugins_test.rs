@@ -9144,6 +9144,130 @@ fn test_option_expiry_two_contracts() {
     assert_eq!(errors.len(), 2, "{errors:?}");
 }
 
+/// `w` with a line number, so a test can tell which entry an error names.
+fn at_line(mut w: DirectiveWrapper, line: u32) -> DirectiveWrapper {
+    w.filename = Some("ledger.beancount".to_string());
+    w.lineno = Some(line);
+    w
+}
+
+/// A short that a single larger buy turns long is a new position: the
+/// error names the entry that crossed zero, not the old sell-to-open.
+#[test]
+fn test_option_expiry_sign_change_reopens() {
+    let errors = option_expiry_errors(vec![
+        at_line(
+            option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+            7,
+        ),
+        at_line(
+            option_txn("2026-09-10", OPT_ACCT, "2", "AAPL261016P00230000"),
+            11,
+        ),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].message.contains(" but 1 contract(s) "),
+        "{errors:?}"
+    );
+    assert_eq!(errors[0].line_number, Some(11));
+
+    let errors = option_expiry_errors(vec![
+        at_line(
+            option_txn("2026-09-02", OPT_ACCT, "2", "AAPL261016P00230000"),
+            7,
+        ),
+        at_line(
+            option_txn("2026-09-10", OPT_ACCT, "-3", "AAPL261016P00230000"),
+            11,
+        ),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].message.contains(" but -1 contract(s) "),
+        "{errors:?}"
+    );
+    assert_eq!(errors[0].line_number, Some(11));
+}
+
+/// Each entry's legs are netted first, so posting order inside one entry
+/// doesn't move the error, and an entry whose legs cancel changes nothing.
+#[test]
+fn test_option_expiry_nets_each_entry() {
+    for (first, second) in [("1", "-1"), ("-1", "1")] {
+        let cancelling = make_transaction(
+            "2026-09-10",
+            "cancelling legs",
+            vec![
+                (OPT_ACCT, first, "AAPL261016P00230000"),
+                (OPT_ACCT, second, "AAPL261016P00230000"),
+            ],
+        );
+        let errors = option_expiry_errors(vec![
+            at_line(
+                option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+                7,
+            ),
+            at_line(cancelling, 11),
+            later_entry("2026-11-01"),
+        ]);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].line_number, Some(7), "order {first}, {second}");
+    }
+}
+
+/// Two openers that stack without going flat: reported at the first.
+#[test]
+fn test_option_expiry_stacked_openers() {
+    let errors = option_expiry_errors(vec![
+        at_line(
+            option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+            7,
+        ),
+        at_line(
+            option_txn("2026-09-05", OPT_ACCT, "-1", "AAPL261016P00230000"),
+            11,
+        ),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].message.contains(" but -2 contract(s) "),
+        "{errors:?}"
+    );
+    assert_eq!(errors[0].line_number, Some(7));
+}
+
+/// Roots with digits and dots (adjusted contracts, share classes), and the
+/// shortest and longest root lengths, are all checked.
+#[test]
+fn test_option_expiry_root_shapes() {
+    let roots = ["XYZ1", "BRK.B", "ABCDEF", "F"];
+    let mut directives: Vec<DirectiveWrapper> = roots
+        .iter()
+        .map(|r| option_txn("2026-09-02", OPT_ACCT, "-1", &format!("{r}261016C00050000")))
+        .collect();
+    directives.push(later_entry("2026-11-01"));
+    let errors = option_expiry_errors(directives);
+    assert_eq!(errors.len(), 4, "{errors:?}");
+}
+
+/// A count of 100 prints as `100`, not `1E+2`.
+#[test]
+fn test_option_expiry_hundred_contracts_message() {
+    let errors = option_expiry_errors(vec![
+        option_txn("2026-09-02", OPT_ACCT, "100", "AAPL261016P00230000"),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016P00230000 expired 2026-10-16 but 100 contract(s) remain open in Assets:Broker:Options"
+    );
+}
+
 /// The plugin is reachable by name through the registry.
 #[test]
 fn test_option_expiry_registered() {

@@ -252,7 +252,13 @@ use crate::types::{Error, LedgerOptions};
 /// and an AVERAGE one carries the pool's exact cost (#2647). Loader v39,
 /// unchanged -- parsed directives did not move. `Ledger` archives booked
 /// directives, so a v44 blob would serve the old, unmatched posting.
-pub const CACHE_VERSION: u32 = 45;
+/// v46: `commodity`, `note`, `query` and `price` share the transaction
+/// `DirectivePriority`, so a same-date one keeps its file position among
+/// transactions (#2629). Loader v39, unchanged -- parsed directives did not
+/// move. `Ledger` archives the processed, sorted directives, so a v45 blob
+/// would serve the old order (a same-date `price` after the date's
+/// transactions, a `commodity` before its balances).
+pub const CACHE_VERSION: u32 = 46;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -564,7 +570,8 @@ mod tests {
     /// that pair is the one whose relative order the priorities decide. With
     /// them on different dates the date component of the sort key settles it
     /// and a priority swap changes nothing here. For the same reason it puts
-    /// a `custom`, an `event` and a `note` on a transaction's date (#2576).
+    /// a `custom`, an `event` and a `note` on a transaction's date (#2576),
+    /// and a `price` before it and a `commodity` after it (#2629).
     #[test]
     fn processed_ledger_archived_form_is_pinned() {
         // Moved once so far: swapping `Pad` and `Balance` in
@@ -577,7 +584,12 @@ mod tests {
         // before the transaction and an `event` and `note` after it, whose
         // order the ranks decide (custom, transaction, event, note now;
         // transaction, note, event, custom before).
-        const PROCESSED_LAYOUT_HASH: u64 = 0x1dd9_f6a2_4d28_0afa;
+        //
+        // And for #2629, which ranks `commodity`, `note`, `query` and `price`
+        // with transactions: the fixture gained a same-date `price` written
+        // before the transaction and a `commodity` after it (price,
+        // transaction, commodity now; commodity first and price last before).
+        const PROCESSED_LAYOUT_HASH: u64 = 0xbe97_fc05_7eb2_8e1e;
 
         let src = "\
 2024-01-01 open Assets:Bank USD\n\
@@ -587,11 +599,13 @@ mod tests {
 2024-01-04 balance Assets:Bank  10.00 USD\n\
 \n\
 2024-01-05 custom \"fava-option\" \"locale\" \"en\"\n\
+2024-01-05 price USD 0.90 EUR\n\
 2024-01-05 * \"payee\" \"narration\"\n\
 \x20\x20Assets:Bank  5.00 USD\n\
 \x20\x20Equity:Opening-Balances\n\
 2024-01-05 event \"location\" \"Paris\"\n\
 2024-01-05 note Assets:Bank \"after the event\"\n\
+2024-01-05 commodity USD\n\
 \n\
 2024-01-06 balance Assets:Bank  15.00 USD\n";
 

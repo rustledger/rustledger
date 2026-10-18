@@ -252,7 +252,11 @@ use crate::types::{Error, LedgerOptions};
 /// and an AVERAGE one carries the pool's exact cost (#2647). Loader v39,
 /// unchanged -- parsed directives did not move. `Ledger` archives booked
 /// directives, so a v44 blob would serve the old, unmatched posting.
-pub const CACHE_VERSION: u32 = 45;
+/// v46: a lot-matching booking failure carries its E4xxx code instead of
+/// `BOOK` (#2631). Loader v39, unchanged -- parsed directives did not move.
+/// `LedgerPayload.errors` is restored verbatim, so a v45 blob would serve
+/// `BOOK` where a fresh load gives E4001-E4004.
+pub const CACHE_VERSION: u32 = 46;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

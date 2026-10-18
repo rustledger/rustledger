@@ -2,18 +2,23 @@
 
 use rust_decimal::Decimal;
 use rustc_hash::FxHashMap;
-use rustledger_core::{Amount, BookingMethod, Inventory, Posting, Transaction};
+use rustledger_core::{Amount, BookingMethod, Inventory, NaiveDate, Posting, Transaction};
 
 use super::helpers::push_account_not_open;
 use crate::error::{ErrorCode, ValidationError};
-use crate::{AccountState, LedgerState, ValidationOptions};
+use crate::{AccountState, LedgerState, PendingPostingError, ValidationOptions};
 
-/// Validate a Transaction directive.
 /// Early-phase transaction validation — runs on pre-booking directives.
 ///
-/// Includes only checks that don't require booked amounts:
-/// structure (posting count), account-presence (E1001), and
-/// account-lifecycle (used-before-open / used-after-close).
+/// Reports the structural checks that need the pre-booking shape (posting
+/// count, multiple elided amounts, negative costs). Account errors on the
+/// postings — presence (E1001) and the open/close dates — are judged
+/// against the provisional pre-plugin table and HELD under the
+/// transaction's source identity (`location`), not reported: the late
+/// phase judges every posting it sees against the post-plugin accounts and
+/// drops the held errors, so only a posting late never sees (booking
+/// dropped it, or booking refused its transaction) is reported from here.
+/// See `LedgerState::pending_posting_errors`.
 ///
 /// Currency-constraint checking (which calls `posting.amount()`) is
 /// deliberately deferred to the late phase, since elided postings have
@@ -21,99 +26,123 @@ use crate::{AccountState, LedgerState, ValidationOptions};
 pub fn validate_transaction_early(
     state: &mut LedgerState,
     txn: &Transaction,
+    location: Option<(rustledger_parser::Span, u16)>,
     errors: &mut Vec<ValidationError>,
 ) {
     if !validate_transaction_structure(txn, errors) {
         return;
     }
-    // Inline the presence + lifecycle subset of `validate_posting_accounts`
-    // here — we don't want to run the currency check yet (deferred to late
-    // phase so it sees filled units).
-    for posting in &txn.postings {
-        if let Some(account_state) = state.accounts.get(&posting.account) {
-            validate_account_lifecycle(txn, posting, account_state, errors);
+    // Only a transaction with a real source identity can be matched up in
+    // late. A synthesized one shares the `(SYNTHESIZED_FILE_ID, Span::ZERO)`
+    // sentinel and an unspanned caller has no identity; both hand late the
+    // same list (no booking or plugins in between), so late covers them.
+    let Some((span, file_id)) = location else {
+        return;
+    };
+    if file_id == rustledger_core::SYNTHESIZED_FILE_ID {
+        return;
+    }
+    let mut held = Vec::new();
+    for (i, posting) in txn.postings.iter().enumerate() {
+        let mut found = Vec::new();
+        match state.early_accounts.get(&posting.account) {
+            Some(&(opened, closed)) => {
+                lifecycle_errors(txn, posting, opened, closed, &mut found);
+            }
+            None => push_account_not_open(state, &posting.account, txn.date, "Account", &mut found),
+        }
+        // One judgment per account per transaction, as late makes.
+        if !found.is_empty() && !first_posting_to_account(txn, i) {
             continue;
         }
-        // Account not opened. Only flag *elided* postings here: booking
-        // interpolates them, so the account must exist before booking (the
-        // Python #877-equivalent case). Explicit postings are deferred to the
-        // late phase so account-rewriting regular plugins (`rename_accounts`,
-        // `split_expenses`, …) — which run after early — aren't falsely flagged
-        // on their pre-rewrite account name. The recorded key lets the late
-        // phase skip re-reporting an elided posting that is still unopened.
-        if posting.units.is_none() {
-            push_account_not_open(state, &posting.account, txn.date, "Account", errors);
-            // Key by the posting's source identity (not account/date) so the
-            // late phase skips *this* posting only — a different posting that
-            // merely shares the account on the same date is still reported.
-            state
-                .account_not_open_early
-                .insert((posting.file_id, posting.span));
-        } else if posting.file_id != rustledger_core::SYNTHESIZED_FILE_ID {
-            // Explicit posting, account absent at this point in the sorted
-            // stream. Presence is re-checked late (plugin renames), but if
-            // the account turns out to exist by then, the DATE check must
-            // still run: a use-before-open posting always streams before its
-            // `open`, so this is the only chance to notice the deferral.
-            //
-            // Synthesized postings are NOT deferred: they all share the
-            // sentinel `(SYNTHESIZED_FILE_ID, Span::ZERO)` identity, so a
-            // deferred key from one would match every synthesized posting
-            // to the same account in late — re-running lifecycle on
-            // postings whose account existed early and double-reporting
-            // posting-after-close. Programmatically built postings dated
-            // before their open therefore stay unchecked, the same
-            // documented gap as plugin-ADDED postings (which also lack a
-            // stable source identity).
-            state.lifecycle_deferred.insert((
-                posting.file_id,
-                posting.span,
-                posting.account.clone(),
-            ));
+        for mut error in found {
+            error.span = Some(span);
+            error.file_id = Some(file_id);
+            held.push(PendingPostingError {
+                posting: (posting.file_id, posting.span),
+                account: posting.account.clone(),
+                elided: posting.units.is_none(),
+                error,
+            });
         }
+    }
+    if !held.is_empty() {
+        state
+            .pending_posting_errors
+            .entry((file_id, span))
+            .or_default()
+            .extend(held);
     }
 }
 
-/// Late-phase transaction validation — runs on post-booking directives.
+/// Late-phase transaction validation — runs on post-booking, post-plugin
+/// directives.
 ///
-/// Includes checks that need filled-in amounts: currency-constraint
-/// enforcement on filled postings, tolerance calculation, balance
-/// residual, and inventory updates (lot matching, capital gains).
+/// The authority on every posting it sees: account presence (E1001), the
+/// open/close dates, and the currency constraint, against the accounts the
+/// post-plugin stream opened. Then the balance residual and the inventory
+/// updates (lot matching, capital gains).
 pub fn validate_transaction_late(
     state: &mut LedgerState,
     txn: &Transaction,
+    location: Option<(rustledger_parser::Span, u16)>,
     errors: &mut Vec<ValidationError>,
 ) {
-    // Currency-constraint checks on filled postings (they call
-    // `posting.amount()`, `None` for elided postings until booking fills them).
-    //
-    // Account-presence (E1001) for *explicit* postings is also emitted here —
-    // deferred from the early phase so account-rewriting regular plugins have
-    // already run and we see the final account names. Elided postings were
-    // checked early (booking needs the account); `account_not_open_early`
-    // guards against double-reporting one that is still unopened.
-    for posting in &txn.postings {
-        if let Some(account_state) = state.accounts.get(&posting.account) {
-            // Lifecycle (open/close DATE) check for postings the early phase
-            // couldn't judge: their account was absent then (its `open`
-            // streams later, or a plugin renamed the posting), but by late
-            // `accounts` holds every open in the ledger, so presence alone
-            // proves nothing about dates. Postings whose account existed
-            // early already had lifecycle checked there — re-running those
-            // here would double-report posting-after-close.
-            if state.lifecycle_deferred.contains(&(
-                posting.file_id,
-                posting.span,
-                posting.account.clone(),
-            )) {
-                validate_account_lifecycle(txn, posting, account_state, errors);
-            }
+    for (i, posting) in txn.postings.iter().enumerate() {
+        // Presence and the open/close dates are judged once per account per
+        // transaction, as beancount does (it checks the set of accounts an
+        // entry references). Booking can split one posting into several to
+        // the same account (a reduction across lots, an elided posting
+        // absorbing two currencies), which must not multiply the error.
+        //
+        // The duplicate check runs only once an error was found, so the
+        // clean path pays nothing for it.
+        let before = errors.len();
+        let account_state = state.accounts.get(&posting.account);
+        match account_state {
+            Some(account_state) => validate_account_lifecycle(txn, posting, account_state, errors),
+            None => push_account_not_open(state, &posting.account, txn.date, "Account", errors),
+        }
+        if errors.len() > before && !first_posting_to_account(txn, i) {
+            errors.truncate(before);
+        }
+        if let Some(account_state) = account_state {
             validate_posting_currency(state, txn, posting, account_state, errors);
-        } else if !state
-            .account_not_open_early
-            .contains(&(posting.file_id, posting.span))
-        {
-            push_account_not_open(state, &posting.account, txn.date, "Account", errors);
+        }
+    }
+
+    // The early phase's held judgments of this transaction's postings: late
+    // just judged every posting still here, so drop them — except an elided
+    // posting booking removed (a zero-value interpolation), which only early
+    // saw. That is the elided-zero-to-unopened-account case beancount misses
+    // (#877), which rustledger reports on purpose.
+    //
+    // A posting is "removed" when no posting here carries its source
+    // identity. A transaction whose postings ALL lost their identity went
+    // through a plugin that rebuilds postings (the Python plugin bridge does
+    // not carry posting spans), so absence proves nothing there; late's own
+    // check above stands alone, rather than reporting a renamed posting
+    // under its old name a second time.
+    if let Some((span, file_id)) = location
+        && !state.pending_posting_errors.is_empty()
+        && let Some(held) = state.pending_posting_errors.remove(&(file_id, span))
+    {
+        let has_identity = txn
+            .postings
+            .iter()
+            .any(|p| p.file_id != rustledger_core::SYNTHESIZED_FILE_ID);
+        if has_identity {
+            for pending in held {
+                // Gone, and no posting left to the same account (late judged
+                // that account itself above, once per transaction).
+                if pending.elided
+                    && !txn.postings.iter().any(|p| {
+                        (p.file_id, p.span) == pending.posting || p.account == pending.account
+                    })
+                {
+                    errors.push(pending.error);
+                }
+            }
         }
     }
 
@@ -123,6 +152,14 @@ pub fn validate_transaction_late(
 
     // Update inventories with booking validation
     update_inventories(state, txn, errors);
+}
+
+/// Whether `txn.postings[i]` is the first posting in `txn` to its account.
+/// A scan of the earlier postings: transactions have a handful, and this
+/// allocates nothing.
+fn first_posting_to_account(txn: &Transaction, i: usize) -> bool {
+    let account = &txn.postings[i].account;
+    !txn.postings[..i].iter().any(|p| &p.account == account)
 }
 
 /// Validate transaction structure.
@@ -290,19 +327,42 @@ pub fn validate_account_lifecycle(
     account_state: &AccountState,
     errors: &mut Vec<ValidationError>,
 ) {
-    if txn.date < account_state.opened {
+    lifecycle_errors(
+        txn,
+        posting,
+        account_state.opened,
+        account_state.closed,
+        errors,
+    );
+}
+
+/// The open/close date check behind [`validate_account_lifecycle`], on bare
+/// dates so the early phase's provisional table can share it.
+fn lifecycle_errors(
+    txn: &Transaction,
+    posting: &Posting,
+    opened: NaiveDate,
+    closed: Option<NaiveDate>,
+    errors: &mut Vec<ValidationError>,
+) {
+    if txn.date < opened {
         errors.push(ValidationError::new(
             ErrorCode::AccountNotOpen,
             format!(
                 "Account {} used on {} but not opened until {}",
-                posting.account, txn.date, account_state.opened
+                posting.account, txn.date, opened
             ),
             txn.date,
         ));
     }
 
-    if let Some(closed) = account_state.closed
-        && txn.date >= closed
+    // A posting ON the close date is allowed: beancount walks the entries in
+    // booking order, where a `close` sorts after every transaction of its
+    // day, so the account is still active for them. Both phases register
+    // every close before walking the transactions, so the order has to be
+    // expressed as the date comparison: strictly after.
+    if let Some(closed) = closed
+        && txn.date > closed
     {
         errors.push(ValidationError::new(
             ErrorCode::AccountClosed,

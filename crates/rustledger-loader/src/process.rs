@@ -415,12 +415,13 @@ impl LedgerError {
 /// ```text
 ///   1. sort                         (canonical display order)
 ///   2. synth plugins                (auto_accounts, document_discovery)
-///   3. Early validation             (account presence, structural, lifecycle)
+///   3. Early validation             (structural; posting account errors held)
 ///   4. booking                      (cost spec resolution, interpolation)
 ///   5. partition                    (set aside failed-booking txns)
 ///   6. regular plugins              (file plugins + extras, on booked only)
-///   7. Late validation              (balance, currency, inventory, on booked only)
-///   8. finalize                     (unused-pad warnings)
+///   7. Late validation              (accounts, balance, currency, inventory, on
+///                                    what the regular plugins produced)
+///   8. finalize                     (unused pads; held errors late never saw)
 ///   9. re-merge                     (booked + failed → final Ledger.directives)
 /// ```
 pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, ProcessError> {
@@ -655,9 +656,9 @@ impl crate::Directives<crate::Raw> {
 
 impl crate::Directives<crate::Sorted> {
     /// Run synth-only plugins (`auto_accounts`, `document_discovery`)
-    /// BEFORE early validation so the synthesizers inject Opens /
-    /// Documents that Early checks depend on (E1001 account
-    /// presence, E5001 missing-document file).
+    /// BEFORE early validation and booking so the synthesizers' Opens /
+    /// Documents are in the stream from the start (Early judges posting
+    /// accounts against the Opens it sees).
     ///
     /// Only this narrow synth subset runs here; everything else
     /// waits until after booking (post-booking plugin pass) so
@@ -699,17 +700,17 @@ impl crate::Directives<crate::Sorted> {
 }
 
 impl crate::Directives<crate::Synthed> {
-    /// Run the early-phase validators. Account-presence /
-    /// lifecycle / structural errors are collected into `errors`
-    /// (via the `LedgerError` stream); the directive list itself is
-    /// unchanged by validation.
+    /// Run the early-phase validators. Structural errors are collected
+    /// into `errors` (via the `LedgerError` stream); posting account
+    /// errors are held in the session for late / finalize (account-name
+    /// checks run on what the regular plugins produce, #2648). The
+    /// directive list itself is unchanged by validation.
     ///
-    /// Runs on pre-booking directives, AFTER synth plugins so
-    /// account-presence checks (E1001) see any Opens that plugins
-    /// like `auto_accounts` injected. This is what lets booking
-    /// match Python's "prune zero-interp postings" behavior without
-    /// losing E1001 on the elided-zero-to-unopened-account case
-    /// (rustledger#877).
+    /// Runs on pre-booking directives, AFTER synth plugins so the held
+    /// account judgments see any Opens that plugins like `auto_accounts`
+    /// injected. This is what lets booking match Python's "prune
+    /// zero-interp postings" behavior without losing E1001 on the
+    /// elided-zero-to-unopened-account case (rustledger#877).
     #[cfg(feature = "validation")]
     pub(crate) fn early_validate(
         mut self,
@@ -1052,8 +1053,7 @@ fn run_booking(
 ///
 /// The loader pipeline calls `run_plugins` twice: once with
 /// [`PluginPass::PreBookingSynth`] before the Early validation phase
-/// (so synthesizers can inject Opens / Documents that early checks
-/// depend on), and once with [`PluginPass::PostBooking`] after booking
+/// (so synthesizers can inject Opens / Documents before booking), and once with [`PluginPass::PostBooking`] after booking
 /// (so cost-spec-reading plugins like `implicit_prices`,
 /// `capital_gains_classifier`, `check_average_cost`, `sell_gains`,
 /// `unrealized`, and `valuation` see filled-in per-unit values on the
@@ -1067,10 +1067,10 @@ fn run_booking(
 #[cfg(feature = "plugins")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginPass {
-    /// Only plugins that synthesize directives the Early validator
-    /// depends on: `auto_accounts` (synthesizes Open directives) and
-    /// the built-in document discovery walker (synthesizes Document
-    /// directives the early phase checks for missing files).
+    /// Only plugins that synthesize directives the pre-booking stream
+    /// needs: `auto_accounts` (synthesizes Open directives the Early
+    /// validator judges posting accounts against) and the built-in
+    /// document discovery walker (synthesizes Document directives).
     PreBookingSynth,
     /// All file-declared plugins and CLI `extra_plugins`, EXCLUDING
     /// `auto_accounts` and `document_discovery` (those ran pre-booking).

@@ -87,13 +87,13 @@ pub fn validate_pad(
         .push(pending_pad);
 }
 
-/// Early-phase balance validation — runs on pre-booking directives.
-///
-/// Only checks account presence (E1001). The actual-vs-asserted
-/// comparison is deferred to the late phase, since it depends on the
-/// inventory state that booking + the late-phase transaction validator
-/// build up.
-pub fn validate_balance_early(
+/// Balance account checks — account presence (E1001) and the open's
+/// currency constraint (E5002). Runs in the late phase's walk, on the
+/// post-plugin stream, immediately before [`validate_balance_late`]'s
+/// actual-vs-asserted comparison: a `balance` a plugin renamed is judged
+/// under its new name (#2648), and one a plugin inserted (`check_drained`)
+/// gets the currency check a written one gets (#2651).
+pub fn validate_balance_account(
     state: &LedgerState,
     bal: &Balance,
     errors: &mut Vec<ValidationError>,
@@ -138,9 +138,8 @@ pub fn validate_balance_late(
     bal: &Balance,
     errors: &mut Vec<ValidationError>,
 ) {
-    // The early phase already verified the account exists. If somehow
-    // it disappeared between phases (it shouldn't), bail out quietly —
-    // the early error is already in the report.
+    // `validate_balance_account`, called just before this, already
+    // reported an unopened account; there is nothing to compare against.
     if !state.accounts.contains_key(&bal.account) {
         return;
     }
@@ -162,11 +161,11 @@ pub fn validate_balance_late(
         // semantics — Pad creates an entry "between" D and the next
         // balance). Filter `pending_pads` to those whose date precedes
         // this balance; later-dated pads are still pending for some
-        // future balance and must not be considered here. Required
-        // because the phase split pre-registers ALL pads during Early
-        // before any Balance runs in Late.
+        // future balance and must not be considered here. (The walk
+        // registers pads in date order, so a later-dated pad is not
+        // normally here yet; the filter keeps this independent of that.)
         //
-        // The early-phase iteration sorts pads by date (see
+        // The late-phase walk visits pads in date order (see
         // `validate_phase_inner`), so `pending_pads` is itself in
         // date-sorted push order — `effective_idx.last()` is therefore
         // the most recent effective pad (Python's `active_pad`).

@@ -133,20 +133,25 @@ pub struct ValidationOptions {
     pub check_documents: bool,
     /// Whether to warn about future-dated entries.
     pub warn_future_dates: bool,
-    /// Base directory for resolving relative document paths.
+    /// Base directory for resolving relative document paths. When set, it
+    /// overrides [`Self::document_source_dirs`] for every directive; meant for
+    /// callers validating a single buffer whose directives all come from one
+    /// file in this directory.
     pub document_base: Option<std::path::PathBuf>,
-    /// Document directories from `option "documents"`.
-    /// Relative document paths are resolved against these directories.
-    /// Paths are resolved against the ledger file's directory at load time.
-    pub document_dirs: Vec<std::path::PathBuf>,
     /// Directory of each source file, indexed by `file_id` (the `u16` carried
-    /// by `Spanned<Directive>`). A relative `document` path with no
-    /// `document_base`/`documents` option is resolved against its own
-    /// directive's source-file directory — matching Beancount, which
+    /// by `Spanned<Directive>`). A relative `document` path is resolved against
+    /// its own directive's source-file directory — matching Beancount, which
     /// normalizes the path at parse time, and `include`, which resolves
     /// relative to the including file. Empty for callers that don't supply
-    /// source locations (the resolution then falls back to the process CWD,
-    /// the pre-fix behavior).
+    /// source locations (the resolution then falls back to the process CWD).
+    ///
+    /// `option "documents"` plays NO part in this. Beancount uses those
+    /// roots only to discover documents, never to resolve a `document`
+    /// directive's path, so a relative path that exists only under a
+    /// documents root is "File does not exist" in `bean-check` as well. A
+    /// former `document_dirs` search path did consult them, which reported a
+    /// path that resolved next to its file as missing whenever the option
+    /// was set (#2650).
     pub document_source_dirs: Vec<std::path::PathBuf>,
     /// Valid account type prefixes (from options like `name_assets`, `name_liabilities`, etc.).
     /// Defaults to `["Assets", "Liabilities", "Equity", "Income", "Expenses"]`.
@@ -179,7 +184,6 @@ impl Default for ValidationOptions {
             check_documents: true, // Python beancount validates document files by default
             warn_future_dates: false,
             document_base: None,
-            document_dirs: Vec::new(),
             document_source_dirs: Vec::new(),
             account_types: vec![
                 "Assets".to_string(),
@@ -226,10 +230,11 @@ impl ValidationOptions {
         self
     }
 
-    /// Set document directories (resolved paths).
+    /// Set the base directory every relative `document` path resolves against
+    /// (see [`ValidationOptions::document_base`]).
     #[must_use]
-    pub fn with_document_dirs(mut self, dirs: Vec<std::path::PathBuf>) -> Self {
-        self.document_dirs = dirs;
+    pub fn with_document_base(mut self, base: impl Into<std::path::PathBuf>) -> Self {
+        self.document_base = Some(base.into());
         self
     }
 
@@ -759,20 +764,13 @@ fn check_unused_pads(state: &LedgerState) -> Vec<ValidationError> {
 /// per-directive loop can answer "does this document exist?" with a
 /// hashmap lookup instead of a syscall.
 ///
-/// Returns a `doc.path -> found` map. Resolution mirrors
-/// [`validators::document::validate_document`]: absolute paths check
-/// themselves; relative paths try `document_base`, then each entry of
-/// `document_dirs` in order with short-circuit on first hit, then fall
-/// back to the path as-is. Two `Document` directives with the same
-/// `path` resolve identically, so the map dedupes naturally.
+/// Returns a `(doc.path, file_id) -> found` map. Resolution is
+/// [`document_file_exists`], shared with
+/// [`validators::document::validate_document`].
 ///
 /// The per-document resolutions run via `rayon`'s `par_iter` above
 /// [`PARALLEL_DOC_EXISTS_THRESHOLD`]; below that, the dispatch
-/// overhead outweighs the I/O parallelism. Crucially the unit of
-/// parallel work is **one Document**, not one candidate path — this
-/// preserves the short-circuit on `document_dirs` so we don't issue
-/// more total syscalls than the pre-fix sequential code did. Caught
-/// by Copilot review on PR #1082.
+/// overhead outweighs the I/O parallelism.
 ///
 /// When `check_documents` is disabled the function short-circuits to
 /// an empty map.
@@ -798,11 +796,8 @@ fn build_document_exists_cache<'a, D: ValidatableDirective>(
     }
     let keys: Vec<(&str, Option<u16>)> = keys.into_iter().collect();
 
-    // One closure-per-key resolves it through the same priority chain the
-    // validator uses (see `document_file_exists`). Stops on the first hit so a
-    // Document found in `document_dirs[0]` still costs exactly one syscall —
-    // matching pre-fix sequential I/O cost, but in parallel across Documents.
-    // Keys borrow `&'a str` from the `directives` slice, so neither the cache
+    // One closure-per-key resolves it through the same rule the validator
+    // uses (see `document_file_exists`): one syscall per key. Keys borrow `&'a str` from the `directives` slice, so neither the cache
     // build nor the validator lookup allocates a `String`.
     let resolve = |(s, file_id): (&'a str, Option<u16>)| {
         ((s, file_id), document_file_exists(s, file_id, options))
@@ -815,30 +810,37 @@ fn build_document_exists_cache<'a, D: ValidatableDirective>(
     }
 }
 
-/// Resolve whether a `document` directive's file exists, using one priority
-/// chain shared by the pre-pass cache and the validator:
-///   1. absolute path → check as-is;
-///   2. `document_base` set → resolve against it;
-///   3. `documents` option dirs non-empty → found if any contains it;
-///   4. otherwise → resolve against the directive's own source-file directory
+/// Resolve whether a `document` directive's file exists, using one rule
+/// shared by the pre-pass cache and the validator (see
+/// [`resolve_document_path`]).
+fn document_file_exists(path: &str, file_id: Option<u16>, options: &ValidationOptions) -> bool {
+    resolve_document_path(path, file_id, options).exists()
+}
+
+/// Where a `document` directive's path points:
+///   1. absolute path → as-is;
+///   2. `document_base` set → joined onto it;
+///   3. otherwise → joined onto the directive's own source-file directory
 ///      (matching Beancount, which normalizes at parse time, and `include`),
 ///      falling back to the process CWD only when the source directory is
 ///      unknown (unspanned directives, or no source map supplied).
-fn document_file_exists(path: &str, file_id: Option<u16>, options: &ValidationOptions) -> bool {
+///
+/// `option "documents"` is deliberately absent: beancount never resolves a
+/// `document` path against a documents root (#2650).
+pub(crate) fn resolve_document_path(
+    path: &str,
+    file_id: Option<u16>,
+    options: &ValidationOptions,
+) -> std::path::PathBuf {
     let doc_path = std::path::Path::new(path);
     if doc_path.is_absolute() {
-        doc_path.exists()
+        doc_path.to_path_buf()
     } else if let Some(base) = &options.document_base {
-        base.join(doc_path).exists()
-    } else if !options.document_dirs.is_empty() {
-        options
-            .document_dirs
-            .iter()
-            .any(|dir| dir.join(doc_path).exists())
+        base.join(doc_path)
     } else if let Some(dir) = file_id.and_then(|id| options.document_source_dirs.get(id as usize)) {
-        dir.join(doc_path).exists()
+        dir.join(doc_path)
     } else {
-        doc_path.exists()
+        doc_path.to_path_buf()
     }
 }
 
@@ -1831,15 +1833,12 @@ mod tests {
     }
 
     #[test]
-    fn test_validate_document_relative_path_in_document_dirs() {
-        // Use a unique filename so the CWD fallback (triggered when
-        // document_dirs is empty) doesn't pick up a same-named file that
-        // happens to exist in the test runner's working directory.
+    fn test_validate_document_relative_path_against_document_base() {
+        // Use a unique filename so the CWD fallback (no base set) doesn't
+        // pick up a same-named file in the test runner's working directory.
         let filename = "rustledger_test_889_relative_receipt.pdf";
         let dir = tempfile::tempdir().unwrap();
-        let doc_subdir = dir.path().join("documents");
-        std::fs::create_dir_all(&doc_subdir).unwrap();
-        std::fs::write(doc_subdir.join(filename), "test").unwrap();
+        std::fs::write(dir.path().join(filename), "test").unwrap();
 
         let directives = vec![
             Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
@@ -1853,29 +1852,25 @@ mod tests {
             }),
         ];
 
-        // Without document_dirs, should fail
+        // No base: resolved against the CWD, where it does not exist.
         let errors = validate(&directives);
         assert!(
             errors.iter().any(|e| e.code == ErrorCode::DocumentNotFound),
-            "Should error when document_dirs not set"
+            "Should error when no base is set"
         );
 
-        // With document_dirs pointing to the directory, should pass
-        let options = ValidationOptions::default().with_document_dirs(vec![doc_subdir]);
+        let options = ValidationOptions::default().with_document_base(dir.path());
         let errors = validate_with_options(&directives, options);
         assert!(
             !errors.iter().any(|e| e.code == ErrorCode::DocumentNotFound),
-            "Should find document in document_dirs: {errors:?}"
+            "Should find document against document_base: {errors:?}"
         );
     }
 
     #[test]
-    fn test_validate_document_relative_path_not_found_in_dirs() {
-        // Use a unique filename — see comment in the sibling test above.
+    fn test_validate_document_relative_path_not_found_names_resolved_path() {
         let filename = "rustledger_test_889_nonexistent.pdf";
         let dir = tempfile::tempdir().unwrap();
-        let doc_subdir = dir.path().join("documents");
-        std::fs::create_dir_all(&doc_subdir).unwrap();
 
         let directives = vec![
             Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
@@ -1889,41 +1884,39 @@ mod tests {
             }),
         ];
 
-        let options = ValidationOptions::default().with_document_dirs(vec![doc_subdir]);
+        let options = ValidationOptions::default().with_document_base(dir.path());
         let errors = validate_with_options(&directives, options);
-        assert!(
-            errors.iter().any(|e| e.code == ErrorCode::DocumentNotFound),
-            "Should error when file not found in any document_dir"
-        );
+        let err = errors
+            .iter()
+            .find(|e| e.code == ErrorCode::DocumentNotFound)
+            .expect("missing file must be reported");
+        let expected = format!("resolved path: {}", dir.path().join(filename).display());
+        assert_eq!(err.context.as_deref(), Some(expected.as_str()));
     }
 
     #[test]
-    fn test_validate_document_absolute_path_ignores_document_dirs() {
+    fn test_validate_document_absolute_path_ignores_document_base() {
         let filename = "rustledger_test_889_absolute_receipt.pdf";
         let dir = tempfile::tempdir().unwrap();
-        let doc_subdir = dir.path().join("documents");
-        std::fs::create_dir_all(&doc_subdir).unwrap();
-        std::fs::write(doc_subdir.join(filename), "test").unwrap();
+        std::fs::write(dir.path().join(filename), "test").unwrap();
 
         let directives = vec![
             Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
             Directive::Document(Document {
                 date: date(2024, 1, 15),
                 account: "Assets:Bank".into(),
-                path: doc_subdir.join(filename).display().to_string(),
+                path: dir.path().join(filename).display().to_string(),
                 tags: Default::default(),
                 links: Default::default(),
                 meta: Default::default(),
             }),
         ];
 
-        // Absolute path should work regardless of document_dirs
-        let options = ValidationOptions::default()
-            .with_document_dirs(vec![std::path::PathBuf::from("/nonexistent/path")]);
+        let options = ValidationOptions::default().with_document_base("/nonexistent/path");
         let errors = validate_with_options(&directives, options);
         assert!(
             !errors.iter().any(|e| e.code == ErrorCode::DocumentNotFound),
-            "Absolute path should work even with wrong document_dirs: {errors:?}"
+            "Absolute path should work even with a wrong document_base: {errors:?}"
         );
     }
 
@@ -1933,8 +1926,8 @@ mod tests {
     ///
     /// 1. The found documents validate without `DocumentNotFound`.
     /// 2. The missing documents still report `DocumentNotFound`.
-    /// 3. The error-context "searched: ..." message survives the
-    ///    cache-routed code path (was constructed inline before).
+    /// 3. The error-context "resolved path: ..." message survives the
+    ///    cache-routed code path.
     #[test]
     fn test_validate_document_parallel_batch_check() {
         let dir = tempfile::tempdir().unwrap();
@@ -1960,7 +1953,7 @@ mod tests {
             }));
         }
 
-        let options = ValidationOptions::default().with_document_dirs(vec![doc_subdir]);
+        let options = ValidationOptions::default().with_document_base(doc_subdir);
         let errors = validate_with_options(&directives, options);
 
         let not_found_count = errors
@@ -1972,9 +1965,8 @@ mod tests {
             "exactly 50 of 100 documents should error as not-found"
         );
 
-        // Spot-check that the error context message still mentions the
-        // searched document_dirs path (it's built from
-        // state.options.document_dirs, independently of the cache).
+        // Spot-check that the error context names the resolved path (it is
+        // rebuilt from the options, independently of the cache).
         let example = errors
             .iter()
             .find(|e| e.code == ErrorCode::DocumentNotFound)
@@ -1983,8 +1975,8 @@ mod tests {
             example
                 .context
                 .as_deref()
-                .is_some_and(|c| c.contains("searched")),
-            "error context should mention the searched dirs, got: {:?}",
+                .is_some_and(|c| c.starts_with("resolved path: ")),
+            "error context should name the resolved path, got: {:?}",
             example.context
         );
     }

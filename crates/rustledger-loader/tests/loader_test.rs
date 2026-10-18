@@ -2734,3 +2734,191 @@ fn native_plugins_only_skips_wasm_and_python_plugins_2486() {
         ledger.errors
     );
 }
+
+// ============================================================================
+// `document` path resolution and discovery vs `option "documents"`
+// ============================================================================
+
+/// Messages of the errors of `code` in a processed ledger.
+fn ledger_errors_with_code(ledger: &rustledger_loader::Ledger, code: &str) -> Vec<String> {
+    ledger
+        .errors
+        .iter()
+        .filter(|e| e.code == code)
+        .map(|e| e.message.clone())
+        .collect()
+}
+
+/// #2650: a relative `document` path resolves next to the file that holds
+/// the directive, whether or not `option "documents"` is set. Beancount
+/// joins it onto the directive's file directory at parse time and never
+/// consults the documents roots (checked with bean-check, both ways: only
+/// `only-in-docs.pdf`, which exists solely under the documents root, is
+/// "File does not exist"). A documents root used to replace the file's
+/// directory, so every path that resolved next to its file was a false
+/// E8001 once the option was set.
+#[test]
+fn relative_document_resolves_next_to_its_file_with_or_without_documents_option() {
+    use rustledger_loader::{LoadOptions, load};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for p in [
+        "docs/only-in-docs.pdf",
+        "sub/files/a.pdf",
+        "sub/docs2/in-sub.pdf",
+    ] {
+        let p = root.join(p);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, "x").unwrap();
+    }
+    std::fs::write(
+        root.join("sub/inc.beancount"),
+        "2024-01-07 document Assets:Cash \"files/a.pdf\"\n\
+         2024-01-08 document Assets:Cash \"docs2/in-sub.pdf\"\n",
+    )
+    .unwrap();
+    let body = "2020-01-01 open Assets:Cash\n\
+                2024-01-05 document Assets:Cash \"sub/files/a.pdf\"\n\
+                2024-01-06 document Assets:Cash \"only-in-docs.pdf\"\n\
+                include \"sub/inc.beancount\"\n";
+    for (name, header) in [
+        ("with.beancount", "option \"documents\" \"docs\"\n"),
+        ("without.beancount", ""),
+    ] {
+        let path = root.join(name);
+        std::fs::write(&path, format!("{header}{body}")).unwrap();
+        let ledger = load(&path, &LoadOptions::default()).expect("load");
+        assert_eq!(
+            ledger_errors_with_code(&ledger, "E8001"),
+            ["Document file not found: only-in-docs.pdf"],
+            "{name}: only the path that exists solely under the documents \
+             root is missing, as in bean-check"
+        );
+    }
+}
+
+/// The ledger of the #2649 tests: `docs/` holds a file for `Expenses:Food`
+/// (named only by a posting), one for `Expenses:Rent` (named by nothing) and
+/// one for `Assets:Cash`.
+fn discovery_ledger(header: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    for p in [
+        "docs/Expenses/Food/2024-01-01.receipt.pdf",
+        "docs/Expenses/Rent/2024-01-02.lease.pdf",
+        "docs/Assets/Cash/2024-03-01.stmt.pdf",
+    ] {
+        let p = dir.path().join(p);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, "x").unwrap();
+    }
+    let path = dir.path().join("main.beancount");
+    std::fs::write(
+        &path,
+        format!(
+            "option \"documents\" \"docs\"\n{header}\
+             2024-02-01 * \"x\"\n  Expenses:Food  10 USD\n  Assets:Cash  -10 USD\n"
+        ),
+    )
+    .unwrap();
+    (dir, path)
+}
+
+/// `(date, kind, account)` of every `open` and `document`, in order.
+fn opens_and_documents(ledger: &rustledger_loader::Ledger) -> Vec<(String, &'static str, String)> {
+    use rustledger_core::Directive;
+    ledger
+        .directives
+        .iter()
+        .filter_map(|d| match &d.value {
+            Directive::Open(o) => Some((o.date.to_string(), "open", o.account.to_string())),
+            Directive::Document(doc) => {
+                Some((doc.date.to_string(), "document", doc.account.to_string()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// #2649: beancount discovers documents (`PLUGINS_PRE`) for every account
+/// the ledger names, then `auto_accounts` opens each account on its first
+/// use, a discovered document included. `bean-check` on this ledger: no
+/// errors, `Expenses:Food` opened 2024-01-01 (the receipt's date, before the
+/// posting), `Expenses:Rent` (named by nothing) not discovered. The
+/// discovery used to keep only accounts with an `open`, so the receipt was
+/// dropped and the account opened at the posting.
+#[test]
+fn discovered_document_counts_for_auto_accounts() {
+    use rustledger_loader::{LoadOptions, load};
+
+    let expected = vec![
+        (
+            "2024-01-01".to_string(),
+            "open",
+            "Expenses:Food".to_string(),
+        ),
+        (
+            "2024-01-01".to_string(),
+            "document",
+            "Expenses:Food".to_string(),
+        ),
+        ("2024-02-01".to_string(), "open", "Assets:Cash".to_string()),
+        (
+            "2024-03-01".to_string(),
+            "document",
+            "Assets:Cash".to_string(),
+        ),
+    ];
+
+    // Declared in the file, and enabled by the caller (`check --auto`):
+    // both run after discovery, as beancount's `PLUGINS_AUTO` does.
+    let (_dir, declared) = discovery_ledger("plugin \"beancount.plugins.auto_accounts\"\n");
+    let (_dir2, plain) = discovery_ledger("");
+    let auto = LoadOptions {
+        auto_accounts: true,
+        ..LoadOptions::default()
+    };
+    for (what, path, options) in [
+        ("declared", &declared, LoadOptions::default()),
+        ("--auto", &plain, auto),
+    ] {
+        let ledger = load(path, &options).expect("load");
+        assert_eq!(opens_and_documents(&ledger), expected, "{what}");
+        let errors: Vec<_> = ledger
+            .errors
+            .iter()
+            .filter(|e| matches!(e.severity, rustledger_loader::ErrorSeverity::Error))
+            .map(|e| (&e.code, &e.message))
+            .collect();
+        assert!(errors.is_empty(), "{what}: {errors:?}");
+    }
+}
+
+/// #2649, without `auto_accounts`: a document for an account that only a
+/// posting names is still discovered, and reported as an unknown account
+/// next to the posting. `bean-check` reports exactly these two errors (the
+/// document's and the posting's).
+#[test]
+fn discovered_document_on_unopened_named_account_is_reported_like_beancount() {
+    use rustledger_loader::{LoadOptions, load};
+
+    let (_dir, path) = discovery_ledger("2020-01-01 open Assets:Cash\n");
+    let ledger = load(&path, &LoadOptions::default()).expect("load");
+    let unknown: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.code == "E1001")
+        .map(|e| e.message.as_str())
+        .collect();
+    assert_eq!(
+        unknown.len(),
+        2,
+        "the discovered document and the posting: {unknown:?}"
+    );
+    assert!(
+        opens_and_documents(&ledger)
+            .iter()
+            .any(|(_, kind, account)| *kind == "document" && account == "Expenses:Food"),
+        "the receipt is discovered"
+    );
+}

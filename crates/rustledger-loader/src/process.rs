@@ -1123,25 +1123,17 @@ pub fn run_plugins(
     // call.
     let registry = NativePluginRegistry::global();
 
-    // Build the unified list of plugins to invoke for this pass:
-    //   1. Implicit synth plugins triggered by `LoadOptions` /
-    //      `file_options` (auto_accounts via `options.auto_accounts`;
-    //      document_discovery via non-empty `file_options.documents`).
+    // Build the unified list of plugins to invoke for this pass, in
+    // beancount's order (`PLUGINS_PRE`, file plugins, `PLUGINS_AUTO`):
+    //   1. document_discovery, via non-empty `file_options.documents`.
     //   2. File-declared plugins from `plugin "..."` directives.
     //   3. CLI `--plugin` extras.
+    //   4. auto_accounts, via `options.auto_accounts`.
     // Pass classification happens here — once — via `registry.find_synth`.
     // A plugin enters the list iff its pass matches the requested `pass`.
     let mut entries: Vec<PluginInvocation> = Vec::new();
 
     if matches!(pass, PluginPass::PreBookingSynth) {
-        // Implicit synth: API-level auto_accounts flag.
-        if options.auto_accounts {
-            entries.push(PluginInvocation {
-                name: rustledger_plugin::AUTO_ACCOUNTS_NAME.to_string(),
-                config: None,
-                force_python: false,
-            });
-        }
         // Implicit synth: document_discovery, driven by `option "documents"`.
         // The plugin sits in the registry as a ZST; we hand it the
         // resolved directories + base_dir via its config JSON.
@@ -1196,6 +1188,20 @@ pub fn run_plugins(
                 force_python: false,
             });
         }
+    }
+
+    // Implicit synth: API-level auto_accounts flag (`check --auto`). It goes
+    // LAST, where beancount puts its `--auto` plugins (`PLUGINS_AUTO`, after
+    // the file's plugins), and in any case after document discovery, which
+    // beancount runs first (`PLUGINS_PRE`): a discovered document can name an
+    // account first, and `auto_accounts` must see it to open the account on
+    // that date (#2649).
+    if matches!(pass, PluginPass::PreBookingSynth) && options.auto_accounts {
+        entries.push(PluginInvocation {
+            name: rustledger_plugin::AUTO_ACCOUNTS_NAME.to_string(),
+            config: None,
+            force_python: false,
+        });
     }
 
     if entries.is_empty() {
@@ -1699,7 +1705,7 @@ pub fn document_source_dirs(source_map: &SourceMap) -> Vec<std::path::PathBuf> {
 
 /// Build a [`rustledger_validate::ValidationOptions`] from loader-level file options.
 ///
-/// Layers the path-relative document directories and the *effective* booking
+/// Layers the per-file document source directories and the *effective* booking
 /// method onto [`validation_options_from_options`] (the shared option-derived
 /// core). Factored out of the old `run_validation` so both the early and late
 /// phases in `process()` share the same `ValidationSession` configuration.
@@ -1709,19 +1715,9 @@ fn build_validation_options(
     source_map: &SourceMap,
     default_booking_method: BookingMethod,
 ) -> rustledger_validate::ValidationOptions {
-    // Document dirs resolve against the main file's parent directory (CWD as a
-    // fallback when the source map is empty — matches the pre-refactor behavior).
-    let base_dir = source_map
-        .files()
-        .first()
-        .and_then(|f| f.path.parent())
-        .unwrap_or_else(|| std::path::Path::new("."));
-
+    // A relative `document` path resolves against its own directive's file,
+    // never against an `option "documents"` root (#2650).
     validation_options_from_options(file_options)
-        .with_document_dirs(resolve_document_dirs(
-            &file_options.documents,
-            Some(base_dir),
-        ))
         .with_document_source_dirs(document_source_dirs(source_map))
         .with_default_booking_method(default_booking_method)
 }

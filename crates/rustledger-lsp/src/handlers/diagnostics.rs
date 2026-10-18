@@ -22,20 +22,15 @@ use crate::ledger_state::LedgerState;
 /// stay in lockstep with `rledger check`. Issue #1648 was exactly the drift from
 /// a hand-maintained copy that dropped the tolerance options.
 ///
-/// Relative document directories are resolved against `base_dir` to match the
-/// loader's `run_plugins` behavior.
+/// A relative `document` path resolves against its own directive's file, as
+/// in the loader (never against an `option "documents"` root, #2650).
 ///
 /// See issues #572 and #1648.
 fn build_validation_options_from_loader(
     loader_options: &LoaderOptions,
     source_map: &SourceMap,
-    base_dir: &std::path::Path,
 ) -> ValidationOptions {
     rustledger_loader::validation_options_from_options(loader_options)
-        .with_document_dirs(rustledger_loader::resolve_document_dirs(
-            &loader_options.documents,
-            Some(base_dir),
-        ))
         .with_document_source_dirs(rustledger_loader::document_source_dirs(source_map))
 }
 
@@ -48,9 +43,9 @@ fn build_validation_options_from_loader(
 /// the tolerance options (`inferred_tolerance_default`, …) alike — instead of a
 /// hand-maintained subset (issue #1648).
 ///
-/// Relative `documents` directories are resolved against `base_dir` when
-/// provided; when `None`, they are kept as-is (tests and single-file buffers
-/// without an on-disk path rely on this fallback).
+/// Relative `document` paths resolve against `base_dir`, the buffer's own
+/// directory, as the loader resolves them against their file (#2650); when
+/// `None` (a buffer without an on-disk path), against the process CWD.
 ///
 /// See issues #572 and #1648.
 fn build_validation_options_from_file(
@@ -67,9 +62,11 @@ fn build_validation_options_from_file(
         options.set(key, value);
     }
 
-    rustledger_loader::validation_options_from_options(&options).with_document_dirs(
-        rustledger_loader::resolve_document_dirs(&options.documents, base_dir),
-    )
+    let vo = rustledger_loader::validation_options_from_options(&options);
+    match base_dir {
+        Some(dir) => vo.with_document_base(dir),
+        None => vo,
+    }
 }
 
 /// Convert parse errors to LSP diagnostics.
@@ -954,15 +951,9 @@ pub fn all_diagnostics(
         let validation_options = if let Some(ls) = ledger_state
             && let Some(ledger) = ls.ledger()
         {
-            let base_dir = ledger
-                .source_map
-                .files()
-                .first()
-                .and_then(|f| f.path.parent())
-                .unwrap_or_else(|| std::path::Path::new("."));
-            build_validation_options_from_loader(&ledger.options, &ledger.source_map, base_dir)
+            build_validation_options_from_loader(&ledger.options, &ledger.source_map)
         } else {
-            // Single-file: resolve relative document dirs against the
+            // Single-file: resolve relative document paths against the
             // current file's parent directory so they don't end up being
             // interpreted relative to the LSP process CWD.
             let base_dir = current_file_path.and_then(|p| p.parent());
@@ -1238,14 +1229,8 @@ pub(crate) fn ledger_diagnostics_multi(
             } else {
                 Vec::new()
             };
-        let base_dir = ledger
-            .source_map
-            .files()
-            .first()
-            .and_then(|f| f.path.parent())
-            .unwrap_or_else(|| std::path::Path::new("."));
         let validation_options =
-            build_validation_options_from_loader(&ledger.options, &ledger.source_map, base_dir);
+            build_validation_options_from_loader(&ledger.options, &ledger.source_map);
         run_ledger_validation(booked_directives, validation_options, plugin_ctx.as_ref())
     } else {
         LedgerValidation {
@@ -1323,11 +1308,7 @@ mod tests {
     fn from_loader_carries_inferred_tolerance_default() {
         let mut opts = LoaderOptions::new();
         opts.set("inferred_tolerance_default", "CLP:0.5");
-        let vo = build_validation_options_from_loader(
-            &opts,
-            &SourceMap::new(),
-            std::path::Path::new("/tmp"),
-        );
+        let vo = build_validation_options_from_loader(&opts, &SourceMap::new());
         assert_eq!(
             vo.inferred_tolerance_default.get("CLP"),
             Some(&rust_decimal::Decimal::new(5, 1))
@@ -1342,11 +1323,7 @@ mod tests {
 
         let mut opts = LoaderOptions::new();
         opts.set("booking_method", "FIFO");
-        let vo = build_validation_options_from_loader(
-            &opts,
-            &SourceMap::new(),
-            std::path::Path::new("/"),
-        );
+        let vo = build_validation_options_from_loader(&opts, &SourceMap::new());
         assert_eq!(vo.default_booking_method, BookingMethod::Fifo);
 
         let file_options = vec![("booking_method".to_string(), "FIFO".to_string(), Span::ZERO)];

@@ -244,6 +244,12 @@ Root directory for documents.
 option "documents" "/home/user/finances/documents"
 ```
 
+A relative root is relative to the ledger file. The roots are only searched
+for dated files (`Account/Sub/YYYY-MM-DD.name.ext`) to turn into `document`
+entries, for every account the ledger names, as in beancount; a `document`
+directive's own relative path is always relative to the file it is written
+in, never to a documents root.
+
 ## All Options
 
 | Option | Type | Default | Description |

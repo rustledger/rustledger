@@ -529,9 +529,18 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         infer_from_cost: raw.options.infer_tolerance_from_cost,
         defaults: raw.options.inferred_tolerance_default.clone(),
     };
+    // Booking marks the postings it interpolates for the regular plugins
+    // (#2653), which `run_plugins` removes once they have run; when no
+    // plugin can run there is nothing to mark for.
+    #[cfg(feature = "plugins")]
+    let mark_interpolated =
+        (options.run_plugins && !raw.plugins.is_empty()) || !options.extra_plugins.is_empty();
+    #[cfg(not(feature = "plugins"))]
+    let mark_interpolated = false;
     let (booked, failed) = directives.book(
         effective_booking_method,
         tolerance_policy,
+        mark_interpolated,
         &mut errors,
         options.collect_capital_gains.then_some(&mut capital_gains),
         &raw.source_map,
@@ -765,6 +774,7 @@ impl crate::Directives<crate::EarlyValidated> {
         mut self,
         effective_method: rustledger_core::BookingMethod,
         tolerance_policy: rustledger_booking::TolerancePolicy,
+        mark_interpolated: bool,
         errors: &mut Vec<LedgerError>,
         gains: Option<&mut Vec<rustledger_booking::CapitalGain>>,
         source_map: &SourceMap,
@@ -776,6 +786,7 @@ impl crate::Directives<crate::EarlyValidated> {
             std::mem::take(self.as_vec_mut()),
             effective_method,
             tolerance_policy,
+            mark_interpolated,
             errors,
             gains,
             source_map,
@@ -961,14 +972,16 @@ fn run_booking(
     mut directives: Vec<Spanned<Directive>>,
     booking_method: BookingMethod,
     tolerance_policy: rustledger_booking::TolerancePolicy,
+    mark_interpolated: bool,
     errors: &mut Vec<LedgerError>,
     mut gains: Option<&mut Vec<rustledger_booking::CapitalGain>>,
     source_map: &SourceMap,
 ) -> (Vec<Spanned<Directive>>, Vec<Spanned<Directive>>) {
     use rustledger_booking::BookingEngine;
 
-    let mut engine =
-        BookingEngine::with_method(booking_method).with_tolerance_policy(tolerance_policy);
+    let mut engine = BookingEngine::with_method(booking_method)
+        .with_tolerance_policy(tolerance_policy)
+        .with_interpolated_marks(mark_interpolated);
     engine.register_account_methods(directives.iter().map(|s| &s.value));
 
     // Build an index ordered for booking. `directives` is already in
@@ -1098,6 +1111,13 @@ struct PluginInvocation {
 /// `pass` selects which subset of plugins to run — see [`PluginPass`].
 /// The loader pipeline calls this twice (synth pass before Early,
 /// regular pass after booking).
+///
+/// The [`PluginPass::PostBooking`] pass ends by removing the interpolation
+/// marks booking puts on postings for plugins to read
+/// ([`rustledger_booking::BookingEngine::with_interpolated_marks`], #2653),
+/// whether or not a plugin ran, so Late validation and everything after it
+/// see the ledger as before. That includes a mark a plugin set itself
+/// (`split_expenses` marks the postings it adds, as beancount's does).
 #[cfg(feature = "plugins")]
 pub fn run_plugins(
     directives: &mut Vec<Spanned<Directive>>,
@@ -1108,7 +1128,37 @@ pub fn run_plugins(
     errors: &mut Vec<LedgerError>,
     pass: PluginPass,
 ) -> Result<(), ProcessError> {
-    use rustledger_plugin::{NativePluginRegistry, PluginOptions};
+    let result = dispatch_plugins(
+        directives,
+        file_plugins,
+        file_options,
+        options,
+        source_map,
+        errors,
+        pass,
+    );
+    if pass == PluginPass::PostBooking {
+        for directive in directives.iter_mut() {
+            if let Directive::Transaction(txn) = &mut directive.value {
+                rustledger_booking::clear_interpolated_marks(txn);
+            }
+        }
+    }
+    result
+}
+
+/// [`run_plugins`] without the removal of the interpolation marks.
+#[cfg(feature = "plugins")]
+fn dispatch_plugins(
+    directives: &mut Vec<Spanned<Directive>>,
+    file_plugins: &[Plugin],
+    file_options: &Options,
+    options: &LoadOptions,
+    source_map: &SourceMap,
+    errors: &mut Vec<LedgerError>,
+    pass: PluginPass,
+) -> Result<(), ProcessError> {
+    use rustledger_plugin::NativePluginRegistry;
 
     // Resolve document directories relative to the main file's directory.
     // Used to build doc_discovery's per-call config in the synth pass.
@@ -1202,19 +1252,9 @@ pub fn run_plugins(
         return Ok(());
     }
 
-    let plugin_options = PluginOptions {
-        operating_currencies: file_options.operating_currency.clone(),
-        title: file_options.title.clone(),
-        // Without these a plugin can only hardcode `Expenses:` etc., which
-        // silently matches nothing on a renamed ledger (#1964).
-        account_types: rustledger_plugin::PluginAccountTypes {
-            assets: file_options.name_assets.clone(),
-            liabilities: file_options.name_liabilities.clone(),
-            equity: file_options.name_equity.clone(),
-            income: file_options.name_income.clone(),
-            expenses: file_options.name_expenses.clone(),
-        },
-    };
+    // The ledger's roots (#1964) and tolerance options (#2653): without them
+    // a plugin silently judges by beancount's defaults.
+    let plugin_options = file_options.plugin_options();
 
     // Dispatch each entry: resolve it to a concrete runtime, then run + apply
     // uniformly. Resolution (classification, path-security, feature-gating, the

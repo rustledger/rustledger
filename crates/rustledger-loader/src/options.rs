@@ -961,6 +961,40 @@ impl Options {
         }
     }
 
+    /// The options a plugin is given: the ledger's operating currencies,
+    /// title, account roots and tolerance options.
+    ///
+    /// The one place every host that runs plugins over a loaded ledger
+    /// builds them from, so a new field cannot reach one surface and not
+    /// another: a plugin given defaults misjudges a ledger that renames its
+    /// roots (#1964) or sets its tolerances (#2653), silently.
+    #[cfg(feature = "plugins")]
+    #[must_use]
+    pub fn plugin_options(&self) -> rustledger_plugin::PluginOptions {
+        // Sorted, so a plugin sees the same input on every run: the map's
+        // order is not stable.
+        let mut inferred_tolerance_default: Vec<(String, String)> = self
+            .inferred_tolerance_default
+            .iter()
+            .map(|(currency, number)| (currency.clone(), number.to_string()))
+            .collect();
+        inferred_tolerance_default.sort();
+        rustledger_plugin::PluginOptions {
+            operating_currencies: self.operating_currency.clone(),
+            title: self.title.clone(),
+            account_types: rustledger_plugin::PluginAccountTypes {
+                assets: self.name_assets.clone(),
+                liabilities: self.name_liabilities.clone(),
+                equity: self.name_equity.clone(),
+                income: self.name_income.clone(),
+                expenses: self.name_expenses.clone(),
+            },
+            inferred_tolerance_default,
+            tolerance_multiplier: self.inferred_tolerance_multiplier.to_string(),
+            infer_tolerance_from_cost: self.infer_tolerance_from_cost,
+        }
+    }
+
     /// Get all account type prefixes.
     #[must_use]
     pub fn account_types(&self) -> [&str; 5] {

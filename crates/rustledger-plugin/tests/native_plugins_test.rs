@@ -5139,6 +5139,99 @@ fn test_sell_gains_silent_for_unpriced_buy() {
     );
 }
 
+/// `sg_messages` with the ledger's `options`.
+fn sg_messages_with(options: PluginOptions, postings: Vec<PostingData>) -> Vec<String> {
+    let mut input = make_input(vec![sg_txn(postings)]);
+    input.options = options;
+    let output = process_and_materialize(&SellGainsPlugin, input);
+    output.errors.iter().map(|e| e.message.clone()).collect()
+}
+
+/// The ledger's tolerance options decide the tolerance, as in beancount
+/// (#2653): proceeds 4 cents off fail on the defaults (twice 0.005) and
+/// pass with `tolerance_multiplier` 5, with `inferred_tolerance_default`
+/// `USD:0.05`, or with `infer_tolerance_from_cost` on units written to one
+/// place (bean-check agrees on all four). Plugins used to get beancount's
+/// default options whatever the ledger set.
+#[test]
+fn test_sell_gains_uses_the_ledgers_tolerance_options() {
+    let postings = |units: &str| {
+        vec![
+            sg_lot(units, "100", Some("150")),
+            sg_posting("Assets:Cash", "300.04", "USD"),
+            sg_posting("Income:Gains", "-100.04", "USD"),
+        ]
+    };
+    let off =
+        ["Invalid price vs. proceeds/gains: (300 USD) vs. (300.04 USD); difference: (-0.04 USD)"];
+    assert_eq!(
+        sg_messages_with(PluginOptions::default(), postings("-2")),
+        off
+    );
+    assert_eq!(
+        sg_messages_with(PluginOptions::default(), postings("-2.0")),
+        ["Invalid price vs. proceeds/gains: (300.0 USD) vs. (300.04 USD); difference: (-0.04 USD)"]
+    );
+    for (what, options, units) in [
+        (
+            "tolerance_multiplier",
+            PluginOptions {
+                tolerance_multiplier: "5".to_string(),
+                ..Default::default()
+            },
+            "-2",
+        ),
+        (
+            "inferred_tolerance_default",
+            PluginOptions {
+                inferred_tolerance_default: vec![("USD".to_string(), "0.05".to_string())],
+                ..Default::default()
+            },
+            "-2",
+        ),
+        (
+            "infer_tolerance_from_cost",
+            PluginOptions {
+                infer_tolerance_from_cost: true,
+                ..Default::default()
+            },
+            "-2.0",
+        ),
+    ] {
+        assert!(
+            sg_messages_with(options, postings(units)).is_empty(),
+            "{what} must widen the tolerance"
+        );
+    }
+}
+
+/// A posting booking interpolated is left out of the tolerance, as in
+/// beancount (#2653): cash booking computed as `40.0` gives no slack, so
+/// 39.99 priced against 40.0 received fails, while the same `40.0` written
+/// by hand allows 0.1 and passes (bean-check agrees on both).
+#[test]
+fn test_sell_gains_leaves_an_interpolated_posting_out_of_the_tolerance() {
+    let postings = |interpolated: bool| {
+        let mut cash = sg_posting("Assets:Cash", "40.0", "USD");
+        if interpolated {
+            cash.metadata.push((
+                rustledger_plugin_types::AUTOMATIC_META.to_string(),
+                MetaValueData::Bool(true),
+            ));
+        }
+        vec![
+            sg_lot("-3", "10.0", Some("13.33")),
+            cash,
+            sg_posting("Income:Gains", "-10", "USD"),
+        ]
+    };
+    assert!(sg_messages(postings(false)).is_empty());
+    assert_eq!(
+        sg_messages(postings(true)),
+        ["Invalid price vs. proceeds/gains: (39.99 USD) vs. (40.0 USD); difference: (-0.01 USD)"]
+    );
+}
+
 proptest::proptest! {
     #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
 

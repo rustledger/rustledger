@@ -23,6 +23,8 @@
 //! | WASM importer + `importers.toml` `[payees]` | `extract --wasm-importer x.wasm` | extract |
 //! | WASM + Python | an entry returned whole keeps its tags and links (notes and documents) | query |
 //! | Python compat layer | events, queries and prices (`@@` as per-unit) read as beancount presents them, and return unchanged | check, query |
+//! | native, WASM, Python | the ledger's tolerance options and booking's interpolation marks reach every kind, through every entry point; `sellgains` judges by them; the marks are gone from the ledger afterwards (#2653) | check, query, report |
+//! | WASM vs Python vs beancount | the tolerance options and interpolated postings a plugin reads agree, and are what beancount's `options_map` and `__automatic__` give | check |
 //!
 //! And the LIMITS of each sandboxed kind (WASM plugin, Python plugin,
 //! WASM importer), through the same commands:
@@ -576,6 +578,46 @@ fn native_and_python_implementations_agree() {
         );
         out.failed_cleanly();
     }
+
+    // The inputs both kinds read (#2653): the WASM guest, which decodes the
+    // `PluginInput` a native plugin is given, and a Python plugin read the
+    // same tolerance options and the same interpolated postings, in the
+    // ledger's order, and the Python plugin reads them exactly as it does
+    // under bean-check (`INTERPOLATED`, `python_inputs_report`). Native
+    // `sellgains` judging by them is held to bean-check in
+    // `native_plugins_without_a_python_twin_match_beancount`.
+    let wasm_list = guests().map(|guests| {
+        let dir = tempfile::tempdir().unwrap();
+        install_wasm_plugin(dir.path(), guests);
+        write_inputs_ledger(dir.path(), "plugin \"conformance.wasm\"");
+        let out = run(dir.path(), &["check", "ledger.beancount"]);
+        reported_list(&out, "conformance: WASM plugin options:")
+    });
+    let python_list = python_ready().then(|| {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("inputs.py"), INPUTS_PY).unwrap();
+        write_inputs_ledger(dir.path(), "plugin \"inputs.py\"");
+        let out = run(dir.path(), &["check", "ledger.beancount"]);
+        out.has(&python_inputs_report(INTERPOLATED));
+        reported_list(&out, "conformance: Python plugin options:")
+    });
+    for list in [&wasm_list, &python_list].into_iter().flatten() {
+        assert_eq!(list, INTERPOLATED);
+    }
+}
+
+/// The `interpolated:` list of the report line starting `prefix` in `out`.
+#[track_caller]
+fn reported_list(out: &Out, prefix: &str) -> String {
+    let line = out
+        .text
+        .lines()
+        .find_map(|l| l.split_once(prefix).map(|(_, rest)| rest))
+        .unwrap_or_else(|| panic!("no {prefix:?} line in:\n{}", out.text));
+    let (_, list) = line
+        .split_once("interpolated: ")
+        .unwrap_or_else(|| panic!("no interpolated list in {line:?}"));
+    list.trim_end().to_string()
 }
 
 /// The native plugins whose beancount modules the Python compat layer cannot
@@ -591,7 +633,7 @@ fn native_and_python_implementations_agree() {
 fn native_plugins_without_a_python_twin_match_beancount() {
     // Validators: (plugin and config, ledger body after a header line and a
     // blank line, what bean-check prints).
-    let validators: [(&str, &str, &[&str]); 11] = [
+    let validators: [(&str, &str, &[&str]); 15] = [
         (
             // Python's `abs()` rounds units of 29 digits before a total cost
             // is divided by them.
@@ -716,6 +758,72 @@ fn native_plugins_without_a_python_twin_match_beancount() {
             &[
                 "ledger.beancount:15: error[PLUGIN]: Invalid price vs. proceeds/gains: (26 USD) vs. (27.00 USD); difference: (-1.00 USD)",
                 "ledger.beancount:23: error[PLUGIN]: Invalid price vs. proceeds/gains: (13 USD) vs. (13 USD, 1 EUR); difference: (-1 EUR)",
+            ],
+        ),
+        (
+            // The ledger's `tolerance_multiplier` decides (#2653): 5 lets
+            // proceeds 4 cents off pass and 11 cents off fail; the default
+            // 0.5 fails both.
+            "sellgains",
+            "option \"tolerance_multiplier\" \"5\"\n\
+             2024-01-01 open Assets:Cash\n\
+             2024-01-01 open Assets:Stock\n\
+             2024-01-01 open Income:Gains\n\
+             2024-01-02 * \"buy\"\n  Assets:Stock  10 AAA {100 USD}\n  Assets:Cash  -1000 USD\n\
+             2024-01-05 * \"within five times the tolerance\"\n  Assets:Stock  -2 AAA {100 USD} @ 150 USD\n  Assets:Cash  300.04 USD\n  Income:Gains\n\
+             2024-01-06 * \"beyond it\"\n  Assets:Stock  -2 AAA {100 USD} @ 150 USD\n  Assets:Cash  300.11 USD\n  Income:Gains\n",
+            &[
+                "ledger.beancount:14: error[PLUGIN]: Invalid price vs. proceeds/gains: (300 USD) vs. (300.11 USD); difference: (-0.11 USD)",
+            ],
+        ),
+        (
+            // A posting booking interpolated widens nothing (#2653): cash
+            // computed as `40.0` gives no slack, where the same cash written
+            // by hand allows 0.1.
+            "sellgains",
+            "2024-01-01 open Assets:Cash\n\
+             2024-01-01 open Assets:Stock\n\
+             2024-01-01 open Income:Gains\n\
+             2024-01-02 * \"buy\"\n  Assets:Stock  10 AAA {10.0 USD}\n  Assets:Cash  -100.0 USD\n\
+             2024-01-05 * \"interpolated cash\"\n  Assets:Stock  -3 AAA {10.0 USD} @ 13.33 USD\n  Assets:Cash\n  Income:Gains  -10 USD\n\
+             2024-01-06 * \"written cash\"\n  Assets:Stock  -3 AAA {10.0 USD} @ 13.33 USD\n  Assets:Cash  40.0 USD\n  Income:Gains  -10 USD\n",
+            &[
+                "ledger.beancount:9: error[PLUGIN]: Invalid price vs. proceeds/gains: (39.99 USD) vs. (40.0 USD); difference: (-0.01 USD)",
+            ],
+        ),
+        (
+            // `inferred_tolerance_default` (#2653): a currency's default
+            // floors its tolerance, and `*` is the tolerance of a currency
+            // nothing else gives one; with no option all three fail.
+            "sellgains",
+            "option \"inferred_tolerance_default\" \"USD:0.05\"\n\
+             option \"inferred_tolerance_default\" \"*:0.02\"\n\
+             2024-01-01 open Assets:Cash\n\
+             2024-01-01 open Assets:Stock\n\
+             2024-01-01 open Income:Gains\n\
+             2024-01-01 open Assets:Euro\n\
+             2024-01-02 * \"buy\"\n  Assets:Stock  10 AAA {100 USD}\n  Assets:Cash  -1000 USD\n\
+             2024-01-03 * \"buy in euros\"\n  Assets:Stock  10 BBB {10 EUR}\n  Assets:Euro  -100 EUR\n\
+             2024-01-05 * \"within the dollar default\"\n  Assets:Stock  -2 AAA {100 USD} @ 150 USD\n  Assets:Cash  300.04 USD\n  Income:Gains\n\
+             2024-01-06 * \"within the default for the rest\"\n  Assets:Stock  -1 BBB {10 EUR} @ 13.03 EUR\n  Assets:Euro  13 EUR\n  Income:Gains\n\
+             2024-01-07 * \"beyond it\"\n  Assets:Stock  -1 BBB {10 EUR} @ 13.05 EUR\n  Assets:Euro  13 EUR\n  Income:Gains\n",
+            &[
+                "ledger.beancount:23: error[PLUGIN]: Invalid price vs. proceeds/gains: (13.05 EUR) vs. (13 EUR); difference: (0.05 EUR)",
+            ],
+        ),
+        (
+            // `infer_tolerance_from_cost` (#2653): units written to one place
+            // imply a tolerance of 0.05 x 150 USD; whole units imply none.
+            "sellgains",
+            "option \"infer_tolerance_from_cost\" \"TRUE\"\n\
+             2024-01-01 open Assets:Cash\n\
+             2024-01-01 open Assets:Stock\n\
+             2024-01-01 open Income:Gains\n\
+             2024-01-02 * \"buy\"\n  Assets:Stock  10 AAA {100 USD}\n  Assets:Cash  -1000 USD\n\
+             2024-01-05 * \"units to one place\"\n  Assets:Stock  -2.0 AAA {100 USD} @ 150 USD\n  Assets:Cash  300.04 USD\n  Income:Gains\n\
+             2024-01-06 * \"whole units\"\n  Assets:Stock  -2 AAA {100 USD} @ 150 USD\n  Assets:Cash  300.04 USD\n  Income:Gains\n",
+            &[
+                "ledger.beancount:14: error[PLUGIN]: Invalid price vs. proceeds/gains: (300 USD) vs. (300.04 USD); difference: (-0.04 USD)",
             ],
         ),
         (
@@ -1464,7 +1572,7 @@ fn wasm_guests_cannot_import_host_functions() {
         (import "wasi_snapshot_preview1" "fd_read" (func (param i32 i32 i32 i32) (result i32)))
         (memory (export "memory") 1)
         (func (export "alloc") (param i32) (result i32) i32.const 0)
-        (func (export "__rustledger_abi_version") (result i32) i32.const 2)
+        (func (export "__rustledger_abi_version") (result i32) i32.const 3)
         (func (export "process") (param i32 i32) (result i64) i64.const 0)
         (func (export "identify") (param i32 i32) (result i64) i64.const 0)
         (func (export "extract") (param i32 i32) (result i64) i64.const 0)
@@ -1635,6 +1743,202 @@ fn tags_and_links_survive_a_plugin_round_trip() {
         out.has("passthrough saw ['statement.pdf']")
             .lacks("plugin execution failed");
         assert_tags_kept(&out);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tolerance options and interpolation marks (#2653)
+// ---------------------------------------------------------------------------
+
+/// A ledger setting every tolerance option, with a posting booking
+/// interpolates in each way beancount marks `__automatic__`: elided units,
+/// a bare-currency price, a bare-currency cost, an elided posting split
+/// across two currencies; one interpolated from a zero residual (pruned, as
+/// beancount prunes it) and a transaction written out in full. Titled for
+/// the WASM guest to report what it receives.
+const INPUTS_LEDGER: &str = "\
+option \"title\" \"conformance inputs\"
+option \"inferred_tolerance_default\" \"USD:0.003\"
+option \"inferred_tolerance_default\" \"*:0.5\"
+option \"tolerance_multiplier\" \"0.6\"
+option \"infer_tolerance_from_cost\" \"TRUE\"
+PLUGINS
+2024-01-01 open Assets:Bank
+2024-01-01 open Assets:Eur
+2024-01-01 open Assets:Stock
+2024-01-01 open Expenses:Food
+2024-01-01 open Equity:Open
+
+2024-01-02 * \"units\"
+  Expenses:Food  3.00 USD
+  Assets:Bank
+
+2024-01-03 * \"price\"
+  Assets:Eur  10.00 EUR @ USD
+  Assets:Bank  -12.00 USD
+
+2024-01-04 * \"cost\"
+  Assets:Stock  3 AAA {USD}
+  Assets:Bank  -30.00 USD
+
+2024-01-05 * \"split\"
+  Assets:Bank  10.00 USD
+  Assets:Eur  5.00 EUR
+  Equity:Open
+
+2024-01-06 * \"zero\"
+  Assets:Bank  5.00 USD
+  Assets:Bank  -5.00 USD
+  Equity:Open
+
+2024-01-07 * \"written\"
+  Assets:Bank  1.00 USD
+  Equity:Open  -1.00 USD
+";
+
+/// The postings of [`INPUTS_LEDGER`] beancount marks `__automatic__`, as
+/// `narration/account`, in its order (bean-check running [`INPUTS_PY`]).
+const INTERPOLATED: &str =
+    "units/Assets:Bank, price/Assets:Eur, cost/Assets:Stock, split/Equity:Open, split/Equity:Open";
+
+/// A Python plugin reporting the options and marks it reads, in beancount's
+/// shapes. Under bean-check (as module `inputs`) it reports
+/// [`python_inputs_report`] with [`INTERPOLATED`] word for word.
+const INPUTS_PY: &str = "\
+import collections
+from beancount.core.data import Transaction, new_metadata
+Report = collections.namedtuple('Report', 'source message entry')
+__plugins__ = ['inputs']
+def inputs(entries, options_map):
+    tol = options_map['inferred_tolerance_default']
+    defaults = ', '.join(f'{c}={tol[c]!r}' for c in sorted(tol))
+    marked = ', '.join(
+        f'{e.narration}/{p.account}'
+        for e in entries if isinstance(e, Transaction)
+        for p in e.postings if p.meta and '__automatic__' in p.meta)
+    msg = (f\"conformance: Python plugin options: tolerance defaults {type(tol).__name__} [{defaults}], \"
+           f\"multiplier {options_map['tolerance_multiplier']!r}, \"
+           f\"deprecated multiplier {options_map['inferred_tolerance_multiplier']!r}, \"
+           f\"from cost {options_map['infer_tolerance_from_cost']!r}; interpolated: {marked}\")
+    return entries, [Report(new_metadata('<inputs>', 0), msg, None)]
+";
+
+/// What [`INPUTS_PY`] reports, with `interpolated` as its list. beancount's
+/// `options_map` holds `inferred_tolerance_default` as a dict of Decimals,
+/// and keeps the deprecated `inferred_tolerance_multiplier` at its default
+/// (setting it sets its alias `tolerance_multiplier`).
+fn python_inputs_report(interpolated: &str) -> String {
+    format!(
+        "conformance: Python plugin options: tolerance defaults dict \
+         [*=Decimal('0.5'), USD=Decimal('0.003')], multiplier Decimal('0.6'), \
+         deprecated multiplier Decimal('0.5'), from cost True; interpolated: {interpolated}"
+    )
+}
+
+/// What the WASM guest reports for [`INPUTS_LEDGER`], with `interpolated`
+/// as its list: the options as `PluginOptions` carries them, the marks as
+/// `PostingData::is_interpolated` reads them.
+fn wasm_inputs_report(interpolated: &str) -> String {
+    format!(
+        "conformance: WASM plugin options: tolerance defaults [*=0.5, USD=0.003], \
+         multiplier 0.6, from cost true; interpolated: {interpolated}"
+    )
+}
+
+/// `dir/ledger.beancount` = [`INPUTS_LEDGER`] with `plugins` for its
+/// plugin lines.
+fn write_inputs_ledger(dir: &Path, plugins: &str) {
+    std::fs::write(
+        dir.join("ledger.beancount"),
+        INPUTS_LEDGER.replace("PLUGINS", plugins),
+    )
+    .unwrap();
+}
+
+/// `check`, `query` and `report` on a ledger whose plugins (the WASM guest,
+/// a Python plugin) report the tolerance options and interpolation marks
+/// they receive: every command gives each kind the ledger's options and
+/// booking's marks (#2653). Before, the options did not reach plugins at all
+/// (a WASM guest and a Python plugin had beancount's defaults, or no key)
+/// and no posting was marked.
+///
+/// `check --plugin x.wasm` runs its plugin on the finished ledger, after the
+/// loader has removed the marks: it gets the options and sees no posting
+/// interpolated, asserted here so a change to either is seen.
+#[test]
+fn plugin_inputs_carry_tolerance_options_and_interpolation_marks() {
+    if let Some(guests) = guests() {
+        let dir = tempfile::tempdir().unwrap();
+        install_wasm_plugin(dir.path(), guests);
+        write_inputs_ledger(dir.path(), "plugin \"conformance.wasm\"");
+        for (cmd, out) in all_commands(dir.path()) {
+            out.has(&wasm_inputs_report(INTERPOLATED))
+                .lacks("plugin execution failed");
+            assert!(!out.text.contains(" interpolated: \n"), "{cmd}");
+        }
+        write_inputs_ledger(dir.path(), "");
+        run(
+            dir.path(),
+            &["check", "--plugin", "conformance.wasm", "ledger.beancount"],
+        )
+        .has(&wasm_inputs_report(""));
+    }
+
+    if python_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("inputs.py"), INPUTS_PY).unwrap();
+        write_inputs_ledger(dir.path(), "plugin \"inputs.py\"");
+        for (_, out) in all_commands(dir.path()) {
+            out.has(&python_inputs_report(INTERPOLATED));
+        }
+        write_inputs_ledger(dir.path(), "plugin \"python:./inputs.py\"");
+        run(dir.path(), &["check", "ledger.beancount"]).has(&python_inputs_report(INTERPOLATED));
+    }
+}
+
+/// The marks exist only while plugins run: a ledger whose plugins ran
+/// prints no `__automatic__` key afterwards, whichever plugin kind ran, and
+/// neither does a mark a plugin set itself (`split_expenses` marks the
+/// postings it adds) (#2653).
+#[test]
+fn interpolation_marks_are_gone_after_the_plugins_ran() {
+    let print = |dir: &Path| {
+        run(
+            dir,
+            &["query", "ledger.beancount", "PRINT FROM year = 2024"],
+        )
+    };
+    let dir = tempfile::tempdir().unwrap();
+    write_inputs_ledger(dir.path(), "plugin \"beancount.plugins.sellgains\"");
+    print(dir.path()).has("Equity:Open").lacks("__automatic__");
+
+    std::fs::write(
+        dir.path().join("ledger.beancount"),
+        "plugin \"beancount.plugins.split_expenses\" \"Martin Caroline\"\n\
+         2024-01-01 open Assets:Cash\n\
+         2024-01-01 open Expenses:Food\n\
+         2024-01-01 open Expenses:Food:Martin\n\
+         2024-01-01 open Expenses:Food:Caroline\n\
+         2024-01-02 * \"dinner\"\n  Expenses:Food  10.00 USD\n  Assets:Cash\n",
+    )
+    .unwrap();
+    print(dir.path())
+        .has("Expenses:Food:Caroline")
+        .lacks("__automatic__");
+
+    if let Some(guests) = guests() {
+        install_wasm_plugin(dir.path(), guests);
+        write_inputs_ledger(dir.path(), "plugin \"conformance.wasm\" \"rebuild\"");
+        print(dir.path())
+            .has(&wasm_inputs_report(INTERPOLATED))
+            .lacks("__automatic__");
+    }
+    if python_ready() {
+        std::fs::write(dir.path().join("inputs.py"), INPUTS_PY).unwrap();
+        write_inputs_ledger(dir.path(), "plugin \"inputs.py\"");
+        print(dir.path())
+            .has(&python_inputs_report(INTERPOLATED))
+            .lacks("__automatic__");
     }
 }
 
@@ -2191,7 +2495,7 @@ fn wasm_module_text_in_load_errors_is_escaped() {
         (import "m\1b[2J\1b]0;pwned\07" "f" (func))
         (memory (export "memory") 1)
         (func (export "alloc") (param i32) (result i32) i32.const 0)
-        (func (export "__rustledger_abi_version") (result i32) i32.const 2)
+        (func (export "__rustledger_abi_version") (result i32) i32.const 3)
         (func (export "process") (param i32 i32) (result i64) i64.const 0)
         (func (export "identify") (param i32 i32) (result i64) i64.const 0)
         (func (export "extract") (param i32 i32) (result i64) i64.const 0)
@@ -2242,7 +2546,7 @@ fn wasm_importer_trap_and_decode_text_is_escaped() {
     let trap = r#"(module
         (memory (export "memory") 1)
         (func (export "alloc") (param i32) (result i32) i32.const 1024)
-        (func (export "__rustledger_abi_version") (result i32) i32.const 2)
+        (func (export "__rustledger_abi_version") (result i32) i32.const 3)
         (func (export "identify") (param i32 i32) (result i64) i64.const 0)
         (func (export "extract") (param i32 i32) (result i64) i64.const 0)
         (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 0)
@@ -2255,7 +2559,7 @@ fn wasm_importer_trap_and_decode_text_is_escaped() {
   (data (i32.const 256) "\81\a7\6d\61\74\63\68\65\73\c3")
   (data (i32.const 512) "\83\aa\64\69\72\65\63\74\69\76\65\73\91\82\a4\64\61\74\65\aa\32\30\32\34\2d\30\31\2d\30\31\a4\74\79\70\65\ae\1b\5b\32\4a\1b\5d\30\3b\70\77\6e\65\64\07\a8\77\61\72\6e\69\6e\67\73\90\a6\65\72\72\6f\72\73\90")
   (func (export "alloc") (param i32) (result i32) i32.const 4096)
-  (func (export "__rustledger_abi_version") (result i32) i32.const 2)
+  (func (export "__rustledger_abi_version") (result i32) i32.const 3)
   (func (export "identify") (param i32 i32) (result i64) i64.const 1099511627786)
   (func (export "extract") (param i32 i32) (result i64) i64.const 2199023255620)
   (func (export "extract_enriched") (param i32 i32) (result i64) i64.const 2199023255620)

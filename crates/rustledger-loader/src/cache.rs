@@ -1759,6 +1759,33 @@ mod tests {
         assert_eq!(paths[1], PathBuf::from("/path/to/include.beancount"));
     }
 
+    /// A cache hit rebuilds each file as the loader built it (#2635): the
+    /// stored path is the one the file was opened by, and its identity is
+    /// re-derived from it. Storing (or restoring) only the resolved path made
+    /// a hit resolve a symlinked ledger's relative paths next to the target.
+    #[cfg(unix)]
+    #[test]
+    fn into_load_result_keeps_the_opened_path() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("real")).unwrap();
+        std::fs::create_dir_all(dir.path().join("view")).unwrap();
+        let target = dir.path().join("real/main.beancount");
+        std::fs::write(&target, "2024-01-01 open Assets:A\n").unwrap();
+        let link = dir.path().join("view/main.beancount");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+        let entry = CacheEntry {
+            directives: vec![],
+            options: CachedOptions::from(&Options::new()),
+            plugins: vec![],
+            files: vec![link.to_string_lossy().into_owned()],
+        };
+        let result = entry.into_load_result();
+        let file = &result.source_map.files()[0];
+        assert_eq!(file.opened_path, link);
+        assert_eq!(file.path, target.canonicalize().unwrap());
+        assert_eq!(file.dir(), dir.path().join("view"));
+    }
+
     #[test]
     fn test_reintern_balance_directive() {
         use rustledger_core::Balance;

@@ -431,8 +431,9 @@ impl Executor<'_> {
                         ));
                     }
                 };
-                // Use cached regex matching
-                let re = self.require_regex(pattern)?;
+                // bean-query: `re.search(pattern, s, re.IGNORECASE)`, the
+                // pattern read with Python's grammar (#2656).
+                let re = self.python_regex(pattern, super::RegexMode::SearchIgnoreCase)?;
                 Ok(Value::Boolean(re.is_match(s)))
             }
             BinaryOperator::In => {
@@ -478,7 +479,7 @@ impl Executor<'_> {
                         return Err(QueryError::Type("!~ requires string pattern".to_string()));
                     }
                 };
-                let re = self.require_regex(pattern)?;
+                let re = self.python_regex(pattern, super::RegexMode::SearchIgnoreCase)?;
                 Ok(Value::Boolean(!re.is_match(s)))
             }
             BinaryOperator::NotIn => {

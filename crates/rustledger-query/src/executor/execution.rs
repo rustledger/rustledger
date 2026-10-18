@@ -1171,7 +1171,7 @@ impl Executor<'_> {
                     }
                 },
             };
-            let regex = self.require_regex(&pattern)?;
+            let regex = self.python_regex(&pattern, super::RegexMode::SearchIgnoreCase)?;
             return Ok(Value::Boolean(match row.get(accounts) {
                 Some(Value::StringSet(set)) => set.iter().any(|a| regex.is_match(a)),
                 _ => false,
@@ -1395,8 +1395,13 @@ impl Executor<'_> {
         // writes. Here it matches accounts containing `account`.
         let account_pattern = &query.account_pattern;
 
-        // Try to compile as regex (using cache)
-        let account_regex = self.get_or_compile_regex(account_pattern);
+        // bean-query's `transform_journal` makes it `account ~ "<pattern>"`,
+        // so it is a Python regex searched case-insensitively (#2656). A
+        // pattern rledger cannot use is an error, as it is for `~`: it used to
+        // fall back to a substring match, which answered a refused lookahead
+        // or a typo'd `(` with rows matching something else.
+        let account_regex =
+            self.python_regex(account_pattern, super::RegexMode::SearchIgnoreCase)?;
 
         let columns = vec![
             "date".to_string(),
@@ -1467,12 +1472,7 @@ impl Executor<'_> {
             });
 
             for (i, posting) in txn.postings.iter().enumerate() {
-                // Match account using regex or substring
-                let mut matches = if let Some(ref regex) = account_regex {
-                    regex.is_match(&posting.account)
-                } else {
-                    posting.account.contains(account_pattern)
-                };
+                let mut matches = account_regex.is_match(&posting.account);
                 if matches
                     && row_filter
                     && let Some(filter) = from_filter

@@ -3370,6 +3370,7 @@ dependencies = [
  "imbl",
  "jiff",
  "proptest",
+ "regex",
  "rkyv",
  "rust_decimal",
  "rust_decimal_macros",

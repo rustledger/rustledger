@@ -252,8 +252,8 @@ pub(crate) struct LedgerValidation {
 /// A booking failure, ready to show.
 ///
 /// Not a [`ValidationError`]: that type's code is an [`ErrorCode`], and a
-/// failure no validation code describes is labeled `BOOK`, as `rledger check`
-/// labels it (#2510).
+/// failure no validation code describes is labeled `BOOK`. `rledger check`
+/// labels every failure with the same code (#2510, #2631).
 ///
 /// [`ErrorCode`]: rustledger_validate::ErrorCode
 struct BookingDiagnostic {
@@ -379,7 +379,7 @@ pub(crate) fn run_ledger_validation(
     booking_engine.register_account_methods(booked_directives.iter().map(|s| &s.value));
     // Booking failures, surfaced as diagnostics below.
     //
-    // `rledger check` reports these itself (`run_booking` pushes a BOOK error
+    // `rledger check` reports these itself (`run_booking` pushes the error
     // and drops the transaction before Late validation). The LSP used to drop
     // the error on the floor and let validation re-derive something from the
     // un-interpolated transaction, which produced a DIFFERENT and misleading
@@ -3436,17 +3436,11 @@ plugin "auto_accounts"
             .enumerate()
             .flat_map(|(i, diags)| {
                 let name = sources[i].1.clone();
-                // An inventory failure keeps its E4xxx code in the LSP where
-                // `check` labels it `BOOK` (the #2510 mapping).
-                diags.iter().map(move |d| {
-                    let code = get_code(d);
-                    let code = if code.starts_with("E4") {
-                        "BOOK".to_string()
-                    } else {
-                        code
-                    };
-                    (code, name.clone(), d.range.start.line + 1)
-                })
+                // Codes compared as they are: a lot-matching failure is E4xxx
+                // on both surfaces (#2631).
+                diags
+                    .iter()
+                    .map(move |d| (get_code(d), name.clone(), d.range.start.line + 1))
             })
             .collect();
         lsp.sort();
@@ -3496,5 +3490,169 @@ plugin "auto_accounts"
         let (lsp, check) = multi_file_vs_check(&files, 0, &[0]);
         assert!(!check.is_empty(), "check refuses the sale");
         assert_eq!(lsp, check);
+    }
+
+    /// #2631: a booking failure carries one code on both surfaces. `rledger
+    /// check` labeled every one `BOOK` while the LSP gave a lot-matching
+    /// failure its E4xxx code; both now label through
+    /// `ErrorCode::booking_failure_code_str`. Every booking failure a ledger
+    /// can reach, by variant, is compared field by field (code, message,
+    /// line) between the loader and the LSP, and its code pinned. The
+    /// interpolation variants are covered one by one in
+    /// `interpolation_failures_match_check_code_message_and_line`; one stands
+    /// for them here. (`NotBooked` needs an unbooked ledger handed to
+    /// validation, which no file can produce; its code is pinned in
+    /// rustledger-validate.)
+    #[test]
+    fn every_booking_failure_has_one_code_on_both_surfaces() {
+        let head = "2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n\
+                    2024-01-01 open Assets:Strict AAPL \"STRICT\"\n\
+                    2024-01-01 open Assets:Avg X \"AVERAGE\"\n\
+                    2024-01-01 open Income:Gains\n";
+        let buy = "2024-01-02 * \"buy\"\n  Assets:Stock  10 AAPL {100 USD}\n  Assets:Cash\n\
+                   2024-01-03 * \"buy\"\n  Assets:Stock  10 AAPL {110 USD}\n  Assets:Cash\n";
+        let cases: [(&str, String, &str, &str); 11] = [
+            (
+                "NoMatchingLot",
+                format!(
+                    "{buy}2024-02-01 * \"sell\"\n  Assets:Stock  -5 AAPL {{200 USD}}\n  Assets:Cash\n"
+                ),
+                "No matching lot for AAPL in Assets:Stock (",
+                "E4001",
+            ),
+            (
+                "InsufficientUnits",
+                format!(
+                    "{buy}2024-02-01 * \"sell\"\n  Assets:Stock  -15 AAPL {{100 USD}}\n  Assets:Cash\n"
+                ),
+                "Not enough units",
+                "E4002",
+            ),
+            (
+                "AmbiguousMatch",
+                "2024-01-02 * \"buy\"\n  Assets:Strict  10 AAPL {100 USD}\n  Assets:Cash\n\
+                 2024-01-03 * \"buy\"\n  Assets:Strict  10 AAPL {110 USD}\n  Assets:Cash\n\
+                 2024-02-01 * \"sell\"\n  Assets:Strict  -5 AAPL {}\n  Assets:Cash  550 USD\n  Income:Gains\n"
+                    .to_string(),
+                "Ambiguous lot match",
+                "E4003",
+            ),
+            (
+                "Overflow",
+                "2024-01-02 * \"buy\"\n  Assets:Stock  50000000000000000000000000000 X {1 USD}\n  \
+                 Assets:Cash\n\
+                 2024-01-03 * \"buy\"\n  Assets:Stock  50000000000000000000000000000 X {1 USD}\n  \
+                 Assets:Cash  -50000000000000000000000000000 USD\n"
+                    .to_string(),
+                "exceeds the representable range",
+                "E4004",
+            ),
+            (
+                "MergeSpecMismatch",
+                format!(
+                    "{buy}2024-02-01 * \"sell\"\n  Assets:Stock  -5 AAPL {{*, 50 USD}}\n  Assets:Cash\n"
+                ),
+                "not the 50 USD the cost spec states",
+                "E4001",
+            ),
+            (
+                "MergeOnNoReduction",
+                "2024-02-01 * \"buy\"\n  Assets:Stock  5 AAPL {*}\n  Assets:Cash  -500 USD\n"
+                    .to_string(),
+                "reduces no lot",
+                "E4001",
+            ),
+            (
+                "AverageSpecMismatch",
+                "2024-01-02 * \"buy\"\n  Assets:Avg  10 X {11 EUR}\n  Assets:Cash\n\
+                 2024-02-01 * \"sell\"\n  Assets:Avg  -1 X {99.00 EUR}\n  Assets:Cash\n"
+                    .to_string(),
+                "not the 99.00 EUR the cost spec states",
+                "E4001",
+            ),
+            (
+                "AverageSpecDateOrLabel",
+                "2024-01-02 * \"buy\"\n  Assets:Avg  10 X {11 EUR}\n  Assets:Cash\n\
+                 2024-02-01 * \"sell\"\n  Assets:Avg  -1 X {2024-01-02}\n  Assets:Cash\n"
+                    .to_string(),
+                "describes no lot",
+                "E4001",
+            ),
+            (
+                "CostPriceCurrencyMismatch",
+                format!(
+                    "{buy}2024-02-01 * \"sell\"\n  Assets:Stock  -5 AAPL {{100 USD}} @ 90 EUR\n  \
+                     Assets:Cash  450 EUR\n  Income:Gains\n"
+                ),
+                "Cost and price currencies must match",
+                "E4001",
+            ),
+            (
+                "NoLotInInferredCostCurrency",
+                "2024-01-02 * \"buy\"\n  Assets:Stock  10 AAPL {100 USD}\n  Assets:Cash\n\
+                 2024-02-01 * \"sell\"\n  Assets:Stock  -5 AAPL {}\n  \
+                 Assets:Cash  450 EUR\n  Income:Gains\n"
+                    .to_string(),
+                "held at a cost in EUR",
+                "E4001",
+            ),
+            (
+                "Interpolation",
+                "2024-02-01 * \"x\"\n  Assets:Stock  12.50\n  Assets:Cash\n".to_string(),
+                "cannot infer currency",
+                "BOOK",
+            ),
+        ];
+        for (variant, body, needle, expected) in cases {
+            let source = format!("{head}{body}");
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("main.beancount");
+            std::fs::write(&path, &source).unwrap();
+            let ledger = rustledger_loader::load(&path, &rustledger_loader::LoadOptions::default())
+                .expect("load");
+            let check: Vec<(String, String, usize)> = ledger
+                .errors
+                .iter()
+                .filter(|e| e.is_booking_failure())
+                .map(|e| {
+                    let line = e.location.as_ref().expect("check locates it").line;
+                    (e.code.clone(), e.message.clone(), line)
+                })
+                .collect();
+            assert_eq!(
+                check.len(),
+                1,
+                "{variant}: check must refuse one transaction: {:?}",
+                ledger.errors
+            );
+            assert_eq!(check[0].0, expected, "{variant}: check's code: {check:?}");
+            assert!(
+                check[0].1.contains(needle),
+                "{variant}: the fixture no longer reaches this failure: {check:?}"
+            );
+
+            let parsed = parse(&source);
+            let diags = all_diagnostics(
+                &parsed,
+                &source,
+                None,
+                None,
+                None,
+                &[],
+                PositionEncoding::Utf16,
+            );
+            let lsp: Vec<(String, String, usize)> = diags
+                .iter()
+                .filter(|d| d.message == check[0].1)
+                .map(|d| {
+                    (
+                        get_code(d),
+                        d.message.clone(),
+                        d.range.start.line as usize + 1,
+                    )
+                })
+                .collect();
+            assert_eq!(lsp, check, "{variant}: the LSP's diagnostic: {diags:?}");
+        }
     }
 }

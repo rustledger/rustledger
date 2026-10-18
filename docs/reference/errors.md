@@ -251,11 +251,12 @@ Beancount has no `AVERAGE` booking to compare with
 
 ### BOOK: Cannot Infer Currency
 
-`BOOK` is the code for a transaction booking could not complete. `rledger
-check` gives it to every booking failure; the editor (LSP) gives it to every
-interpolation failure, the ones below and the others that leave a posting's
-amount, cost or price undetermined, and gives a lot-matching failure its
-E4xxx code. Both show the same message at the same posting.
+`BOOK` is the code for a transaction booking could not complete when no
+E4xxx code describes the failure: every interpolation failure, the ones below
+and the others that leave a posting's amount, cost or price undetermined. A
+lot-matching failure carries its E4xxx code instead (E4001, E4002, E4003, or
+E4004 for an overflow). `rledger check` and the editor (LSP) give a failure
+the same code, message and posting.
 
 **Cause**: A posting writes a number but no currency (`Assets:Cash  42.50`),
 and nothing determines which currency it is in. Reported as

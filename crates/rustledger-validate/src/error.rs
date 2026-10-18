@@ -125,12 +125,16 @@ impl ErrorCode {
 }
 
 impl ErrorCode {
-    /// The validation code the LSP gives a booking failure, or `None` for
-    /// [`rustledger_booking::BOOKING_FAILURE_CODE`] (`BOOK`), the code
-    /// `rledger check` gives every booking failure.
+    /// The validation code a booking failure is reported under, or `None`
+    /// for [`rustledger_booking::BOOKING_FAILURE_CODE`] (`BOOK`).
     ///
-    /// CANONICAL for every surface that labels booking failures with
-    /// validation codes (the LSP), so the classification lives in one place.
+    /// CANONICAL for every surface that labels booking failures: the
+    /// loader's booking pass (`rledger check`, WASM, FFI) and the LSP both
+    /// label through [`Self::booking_failure_code_str`], so one failure
+    /// carries one code everywhere. `check` used to label every booking
+    /// failure `BOOK` while the LSP gave a lot-matching failure its E4xxx
+    /// code (#2631); the specific code won, since it says which of the
+    /// documented lot-matching failures happened.
     ///
     /// Interpolation failures are `BOOK`, as on the command line (#2510).
     /// The LSP used to file every one of them but the overflow under E3001,

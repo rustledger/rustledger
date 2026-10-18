@@ -696,10 +696,14 @@ fn test_file_level_booking_method_applied() {
     let ledger = load(&path, &options).expect("should load and process");
 
     // No booking errors — FIFO resolves the ambiguity.
-    let booking_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    let booking_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert!(
         booking_errors.is_empty(),
-        "expected no BOOK errors under file-level FIFO, got: {booking_errors:?}"
+        "expected no booking failures under file-level FIFO, got: {booking_errors:?}"
     );
     // And the ledger reports the method it booked with, so consumers that
     // realize balances again default to it too (#2386).
@@ -750,10 +754,14 @@ fn test_booking_method_lifo() {
 
     let ledger = load(&path, &options).expect("should load and process");
 
-    let booking_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    let booking_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert!(
         booking_errors.is_empty(),
-        "expected no BOOK errors under LIFO, got: {booking_errors:?}"
+        "expected no booking failures under LIFO, got: {booking_errors:?}"
     );
 }
 
@@ -764,10 +772,14 @@ fn test_booking_method_hifo() {
 
     let ledger = load(&path, &options).expect("should load and process");
 
-    let booking_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    let booking_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert!(
         booking_errors.is_empty(),
-        "expected no BOOK errors under HIFO, got: {booking_errors:?}"
+        "expected no booking failures under HIFO, got: {booking_errors:?}"
     );
 }
 
@@ -781,10 +793,14 @@ fn test_booking_method_average() {
 
     let ledger = load(&path, &options).expect("should load and process");
 
-    let booking_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    let booking_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert!(
         booking_errors.is_empty(),
-        "expected no BOOK errors under AVERAGE, got: {booking_errors:?}"
+        "expected no booking failures under AVERAGE, got: {booking_errors:?}"
     );
 }
 
@@ -795,10 +811,14 @@ fn test_booking_method_none() {
 
     let ledger = load(&path, &options).expect("should load and process");
 
-    let booking_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    let booking_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert!(
         booking_errors.is_empty(),
-        "expected no BOOK errors under NONE, got: {booking_errors:?}"
+        "expected no booking failures under NONE, got: {booking_errors:?}"
     );
 }
 
@@ -845,10 +865,14 @@ fn test_booking_method_strict_with_size() {
 
     let ledger = load(&path, &options).expect("should load and process");
 
-    let booking_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    let booking_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert!(
         booking_errors.is_empty(),
-        "expected no BOOK errors under STRICT_WITH_SIZE, got: {booking_errors:?}"
+        "expected no booking failures under STRICT_WITH_SIZE, got: {booking_errors:?}"
     );
 }
 
@@ -859,10 +883,14 @@ fn test_booking_method_strict_ambiguous_errors() {
 
     let ledger = load(&path, &options).expect("should load and process");
 
-    let booking_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    let booking_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert!(
         !booking_errors.is_empty(),
-        "expected BOOK errors under STRICT with ambiguous lots, got: {booking_errors:?}"
+        "expected booking failures under STRICT with ambiguous lots, got: {booking_errors:?}"
     );
 }
 
@@ -897,10 +925,14 @@ option "booking_method" "STRICT"
     let options = LoadOptions::default(); // default = Strict
     let ledger = load(&path, &options).expect("should load and process");
 
-    let booking_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    let booking_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert!(
         booking_errors.is_empty(),
-        "expected no BOOK errors with per-account FIFO override, got: {booking_errors:?}"
+        "expected no booking failures with per-account FIFO override, got: {booking_errors:?}"
     );
 }
 
@@ -916,10 +948,14 @@ fn test_booking_method_api_override() {
     let ledger = load(&path, &options).expect("should load and process");
 
     // File-level option takes precedence when explicitly set
-    let booking_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    let booking_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert!(
         booking_errors.is_empty(),
-        "expected no BOOK errors (file FIFO overrides API LIFO), got: {booking_errors:?}"
+        "expected no booking failures (file FIFO overrides API LIFO), got: {booking_errors:?}"
     );
 }
 
@@ -2248,19 +2284,25 @@ fn test_booking_failure_partitioned_from_late_validation() {
     let path = fixtures_path("booking_failure_partition.beancount");
     let ledger = load(&path, &LoadOptions::default()).expect("should load");
 
-    // Exactly one BOOK error for the failed txn.
-    let book_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    // Exactly one booking failure for the failed txn.
+    let book_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert_eq!(
         book_errors.len(),
         1,
-        "expected exactly one BOOK error on the failing txn; got: {book_errors:?}"
+        "expected exactly one booking failure on the failing txn; got: {book_errors:?}"
     );
 
     // No cascading validation errors — partition keeps the failed txn
-    // out of Late's iteration.
+    // out of Late's iteration. The booking failure itself carries an
+    // E4xxx code (#2631), so it is excluded by origin, not by code.
     let cascading: Vec<_> = ledger
         .errors
         .iter()
+        .filter(|e| !e.is_booking_failure())
         .filter(|e| e.code.starts_with('E') || e.code.starts_with('W'))
         .collect();
     assert!(
@@ -2615,7 +2657,10 @@ fn test_total_cost_reduction_with_a_wrong_total_is_reported() {
     let ledger = load(&path, &LoadOptions::default()).expect("should load and process");
 
     assert!(
-        ledger.errors.iter().any(|e| e.code == "BOOK"),
+        ledger
+            .errors
+            .iter()
+            .any(rustledger_loader::LedgerError::is_booking_failure),
         "two lots at 50.00 do not cost 90.00 together; beancount reports \
          \"No position matches\" and so must we -- got errors: {:?}",
         ledger.errors,
@@ -2647,7 +2692,7 @@ fn test_booking_error_points_at_the_failing_posting() {
     let booking_error = ledger
         .errors
         .iter()
-        .find(|e| e.code == "BOOK")
+        .find(|e| e.is_booking_failure())
         .expect("the wrong total must be reported");
 
     let location = booking_error

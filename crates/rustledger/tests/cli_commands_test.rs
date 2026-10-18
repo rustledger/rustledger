@@ -168,7 +168,7 @@ fn test_check_invalid_account_root_is_parse_phase() {
 /// silent-accept bug) and not two (the old validator/booking double-report).
 ///
 /// Since #859, the validator no longer re-runs lot matching on pre-booked
-/// directives, so the sole reporter is the booking engine (code "BOOK").
+/// directives, so the sole reporter is the booking engine (code "E4003", #2631).
 #[test]
 fn test_check_ambiguous_lot_match_reports_once() {
     let rledger = require_rledger!();
@@ -218,30 +218,27 @@ fn test_check_ambiguous_lot_match_reports_once() {
         .as_array()
         .expect("diagnostics array missing");
     // The booking engine is the sole reporter of lot-matching errors (#859).
-    // The validator no longer re-runs lot matching on unbooked postings.
-    let book_errors: Vec<_> = diagnostics.iter().filter(|d| d["code"] == "BOOK").collect();
+    // The validator no longer re-runs lot matching on unbooked postings. The
+    // failure carries its lot-matching code, E4003, as in the LSP (#2631).
+    let book_errors: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d["code"] == "E4003")
+        .collect();
 
     assert_eq!(
         book_errors.len(),
         1,
-        "expected exactly one BOOK diagnostic, got {}: {json}",
+        "expected exactly one E4003 diagnostic, got {}: {json}",
         book_errors.len()
     );
     let msg = book_errors[0]["message"].as_str().unwrap_or("");
     assert!(
         msg.to_lowercase().contains("ambiguous"),
-        "BOOK diagnostic should mention 'ambiguous', got: {msg}"
+        "E4003 diagnostic should mention 'ambiguous', got: {msg}"
     );
-
-    // Confirm the validator does NOT double-report as E4003.
-    let e4003: Vec<_> = diagnostics
-        .iter()
-        .filter(|d| d["code"] == "E4003")
-        .collect();
     assert!(
-        e4003.is_empty(),
-        "validator should not re-report booking errors, but found {} E4003 diagnostics",
-        e4003.len()
+        !diagnostics.iter().any(|d| d["code"] == "BOOK"),
+        "a lot-matching failure is not `BOOK` (#2631): {json}"
     );
 }
 

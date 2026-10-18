@@ -316,8 +316,9 @@ pub(crate) struct PendingPostingError {
     pub(crate) posting: (u16, rustledger_core::Span),
     /// The posting's account as early saw it.
     pub(crate) account: Account,
-    /// Whether the posting was elided (`units: None`) before booking. Only
-    /// an elided posting can vanish from a transaction booking kept, so only
+    /// Whether the posting's amount was incomplete before booking (no units,
+    /// or a currency with no number). Only such a posting can vanish from a
+    /// transaction booking kept (interpolated to zero and dropped), so only
     /// its error can outlive late's check of that transaction.
     pub(crate) elided: bool,
     /// The error, already anchored to the transaction's location.
@@ -3414,6 +3415,89 @@ mod tests {
             (e.span, e.file_id),
             (Some(rustledger_parser::Span::new(100, 150)), Some(0)),
             "the held error keeps the transaction's location"
+        );
+    }
+
+    /// The #877 case also covers a posting written as a bare currency
+    /// (`Expenses:X  USD`): booking interpolates its number and drops it
+    /// when that is zero, exactly like a fully elided one.
+    #[test]
+    fn currency_only_posting_dropped_by_booking_is_still_reported() {
+        let bank = posting_at(
+            110,
+            Posting::new("Assets:Bank", Amount::new(dec!(0.00), "USD")),
+        );
+        let currency_only = posting_at(
+            130,
+            Posting::with_incomplete(
+                "Expenses:NeverOpened",
+                rustledger_core::IncompleteAmount::CurrencyOnly("USD".into()),
+            ),
+        );
+        let open = at(
+            0,
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+        );
+        let raw = Transaction::new(date(2024, 1, 15), "x")
+            .with_posting(bank.clone())
+            .with_posting(currency_only);
+        let booked = Transaction::new(date(2024, 1, 15), "x").with_posting(bank);
+        let errors = across(
+            &[open.clone(), at(100, Directive::Transaction(raw))],
+            &[open, at(100, Directive::Transaction(booked))],
+        );
+        assert_eq!(
+            count(&errors, ErrorCode::AccountNotOpen, "Expenses:NeverOpened"),
+            1,
+            "{errors:?}"
+        );
+    }
+
+    /// The Python plugin bridge does not carry posting spans, so after a
+    /// Python plugin every posting is synthesized. A dropped elided posting
+    /// is still reported (its account is gone too), and one that survived
+    /// is reported once, by late, not a second time from the held error.
+    #[test]
+    fn held_errors_survive_a_plugin_that_drops_posting_identity() {
+        let open = at(
+            0,
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+        );
+        let raw = |amount| {
+            Transaction::new(date(2024, 1, 15), "x")
+                .with_posting(posting_at(
+                    110,
+                    Posting::new("Assets:Bank", Amount::new(amount, "USD")),
+                ))
+                .with_posting(posting_at(130, Posting::auto("Expenses:NeverOpened")))
+        };
+        // Dropped by booking (zero), then round-tripped through Python.
+        let dropped = Transaction::new(date(2024, 1, 15), "x")
+            .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(0), "USD")));
+        let errors = across(
+            &[open.clone(), at(100, Directive::Transaction(raw(dec!(0))))],
+            &[open.clone(), at(100, Directive::Transaction(dropped))],
+        );
+        assert_eq!(
+            count(&errors, ErrorCode::AccountNotOpen, "Expenses:NeverOpened"),
+            1,
+            "dropped: {errors:?}"
+        );
+        // Survived booking (non-zero), then round-tripped through Python.
+        let survived = Transaction::new(date(2024, 1, 15), "x")
+            .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(-5), "USD")))
+            .with_synthesized_posting(Posting::new(
+                "Expenses:NeverOpened",
+                Amount::new(dec!(5), "USD"),
+            ));
+        let errors = across(
+            &[open.clone(), at(100, Directive::Transaction(raw(dec!(-5))))],
+            &[open, at(100, Directive::Transaction(survived))],
+        );
+        assert_eq!(
+            count(&errors, ErrorCode::AccountNotOpen, "Expenses:NeverOpened"),
+            1,
+            "survived: {errors:?}"
         );
     }
 

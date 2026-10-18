@@ -2452,6 +2452,28 @@ fn test_plugin_inserted_balance_gets_currency_check() {
     );
 }
 
+/// The rustledger#877 strictness (an incomplete posting to an unopened
+/// account that booking interpolates to zero and drops is still reported;
+/// beancount misses it) covers a bare-currency posting as well as a fully
+/// elided one.
+#[test]
+fn test_zero_interpolated_posting_to_unopened_account_is_reported() {
+    for leg in ["Expenses:Unopened", "Expenses:Unopened USD"] {
+        let errors = load_codes(&format!(
+            "2020-01-01 open Assets:Cash\n\
+             2020-01-03 * \"zero\"\n  Assets:Cash 0 USD\n  {leg}\n"
+        ));
+        assert_eq!(
+            errors
+                .iter()
+                .filter(|(c, m)| c == "E1001" && m.contains("Expenses:Unopened"))
+                .count(),
+            1,
+            "{leg}: {errors:?}"
+        );
+    }
+}
+
 /// A transaction booking refused never reaches the late phase, but its
 /// postings' account errors are still reported (from the early phase's
 /// held judgment). Stricter than beancount, which drops the refused entry

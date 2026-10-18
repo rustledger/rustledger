@@ -61,7 +61,9 @@ pub fn validate_transaction_early(
             held.push(PendingPostingError {
                 posting: (posting.file_id, posting.span),
                 account: posting.account.clone(),
-                elided: posting.units.is_none(),
+                // Booking can drop any posting whose amount it has to
+                // interpolate: fully elided, or a currency with no number.
+                elided: posting.amount().is_none(),
                 error,
             });
         }
@@ -118,30 +120,25 @@ pub fn validate_transaction_late(
     // (#877), which rustledger reports on purpose.
     //
     // A posting is "removed" when no posting here carries its source
-    // identity. A transaction whose postings ALL lost their identity went
-    // through a plugin that rebuilds postings (the Python plugin bridge does
-    // not carry posting spans), so absence proves nothing there; late's own
-    // check above stands alone, rather than reporting a renamed posting
-    // under its old name a second time.
+    // identity or its account. The account half matters when the identity
+    // is gone for another reason: the Python plugin bridge does not carry
+    // posting spans, so after a Python plugin no posting has its identity,
+    // and a posting still naming the account was just judged above. (A
+    // Python plugin that RENAMES an elided posting therefore still gets the
+    // old name reported, as before #2648; a native plugin keeps the
+    // posting's identity, so its renames are clean.)
     if let Some((span, file_id)) = location
         && !state.pending_posting_errors.is_empty()
         && let Some(held) = state.pending_posting_errors.remove(&(file_id, span))
     {
-        let has_identity = txn
-            .postings
-            .iter()
-            .any(|p| p.file_id != rustledger_core::SYNTHESIZED_FILE_ID);
-        if has_identity {
-            for pending in held {
-                // Gone, and no posting left to the same account (late judged
-                // that account itself above, once per transaction).
-                if pending.elided
-                    && !txn.postings.iter().any(|p| {
-                        (p.file_id, p.span) == pending.posting || p.account == pending.account
-                    })
-                {
-                    errors.push(pending.error);
-                }
+        for pending in held {
+            if pending.elided
+                && !txn
+                    .postings
+                    .iter()
+                    .any(|p| (p.file_id, p.span) == pending.posting || p.account == pending.account)
+            {
+                errors.push(pending.error);
             }
         }
     }

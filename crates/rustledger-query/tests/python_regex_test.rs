@@ -193,9 +193,17 @@ fn subst_is_python_re_sub() {
             &["beans coffee 2x", "c$1ffee beans 2x"],
         ])
     );
+    // NULL in, NULL out: a transaction with no payee. This was a type error.
+    let no_payee = r#"
+2023-01-01 open Assets:Bank USD
+2023-01-01 open Expenses:Food USD
+2023-01-05 * "Lunch"
+  Expenses:Food      20.00 USD
+  Assets:Bank       -20.00 USD
+"#;
     assert_eq!(
-        rows(LEDGER, "SELECT subst('a', 'b', payee) WHERE payee IS NULL"),
-        table(&[])
+        rows(no_payee, "SELECT subst('a', 'b', payee), 'k'"),
+        table(&[&["", "k"], &["", "k"]])
     );
 }
 

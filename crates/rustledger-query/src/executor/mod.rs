@@ -2794,7 +2794,6 @@ impl<'a> Executor<'a> {
                         use rust_decimal::prelude::ToPrimitive;
                         n.to_i64()
                     }
-                    Value::Null => return Ok(Value::Null),
                     _ => {
                         return Err(QueryError::Type(
                             "GREPN: third argument must be an integer".to_string(),

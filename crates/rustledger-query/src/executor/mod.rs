@@ -1601,8 +1601,8 @@ impl<'a> Executor<'a> {
             // rows). Where every posting of the account in the window was
             // selected, the engine's booked inventory is that sum, realized
             // as booking realizes it (#1985); where some were not, it is the
-            // plain sum of the selected ones, as
-            // `SUM(position)` computes it, AVERAGE pools merged; an account
+            // sum of the selected ones as `SUM(position)` computes it (an
+            // AVERAGE account's realized on their own, below); an account
             // with none is no row.
             account_balances
                 .retain(|account, _| selection.get(account).is_some_and(|s| s.selected));

@@ -1000,7 +1000,8 @@ pub use phase::{EarlyDone, LateDone, Pending, SessionPhase};
 /// 4. [`run_late`](Self::run_late) consumes `EarlyDone` and returns
 ///    `(ValidationSession<LateDone>, Vec<ValidationError>)`.
 /// 5. [`finalize`](Self::finalize) consumes `LateDone` and returns the
-///    deferred E2003 unused-pad warnings.
+///    deferred E2003 unused-pad warnings and the held posting errors of
+///    transactions late never saw.
 ///
 /// Standalone callers that don't run booking between phases (LSP,
 /// FFI, tests) run all four calls back-to-back against the same
@@ -1052,7 +1053,7 @@ pub use phase::{EarlyDone, LateDone, Pending, SessionPhase};
 ///
 /// let session = ValidationSession::new(ValidationOptions::default());
 /// let (session, mut errors) = session.run_early(&directives, today);
-/// // ... booking runs here; plugins ran BEFORE Early ...
+/// // ... booking and the regular plugins run here ...
 /// let (session, late_errors) = session.run_late(&directives, today);
 /// errors.extend(late_errors);
 /// errors.extend(session.finalize());
@@ -1089,10 +1090,11 @@ impl ValidationSession<Pending> {
 
     /// Run [`Phase::Early`] over a slice of raw [`Directive`]s.
     ///
-    /// `Early` runs account/structural checks that don't need filled-in
-    /// amounts. The session's internal `LedgerState` is updated so
-    /// [`run_late`](ValidationSession::<EarlyDone>::run_late) sees the
-    /// accumulated state (open accounts, commodities, pending pads).
+    /// `Early` runs the structural checks that need the pre-booking shape
+    /// and holds its judgment of each transaction's posting accounts in the
+    /// session, for [`run_late`](ValidationSession::<EarlyDone>::run_late)
+    /// to drop and [`finalize`](ValidationSession::<LateDone>::finalize) to
+    /// report what late never saw (see [`Phase`]).
     ///
     /// Consumes the session and returns it bound to [`EarlyDone`]
     /// alongside the errors collected during the phase. The new phase
@@ -1145,9 +1147,11 @@ impl ValidationSession<Pending> {
 impl ValidationSession<EarlyDone> {
     /// Run [`Phase::Late`] over a slice of raw [`Directive`]s.
     ///
-    /// `Late` runs balance/inventory/currency checks that need
-    /// filled-in amounts. Must be called AFTER booking has run on the
-    /// directive list (and after the post-booking plugin pass, if any).
+    /// `Late` runs every account-dependent check, the currency
+    /// constraints and the balance / inventory checks that need filled-in
+    /// amounts. Must be called AFTER booking has run on the directive list
+    /// and after the post-booking plugin pass, if any: it validates what
+    /// the plugins produced (see [`Phase`]).
     ///
     /// Consumes the session and returns it bound to [`LateDone`]
     /// alongside the errors collected during the phase. The new phase

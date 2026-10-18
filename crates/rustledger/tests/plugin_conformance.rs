@@ -1874,22 +1874,38 @@ fn plugin_inputs_carry_tolerance_options_and_interpolation_marks() {
         for (cmd, out) in all_commands(dir.path()) {
             out.has(&wasm_inputs_report(INTERPOLATED))
                 .lacks("plugin execution failed");
-            assert!(!out.text.contains(" interpolated: \n"), "{cmd}");
+            assert_eq!(
+                reported_list(&out, "conformance: WASM plugin options:"),
+                INTERPOLATED,
+                "{cmd}"
+            );
         }
         write_inputs_ledger(dir.path(), "");
-        run(
+        let out = run(
             dir.path(),
             &["check", "--plugin", "conformance.wasm", "ledger.beancount"],
-        )
-        .has(&wasm_inputs_report(""));
+        );
+        out.has(&wasm_inputs_report(""));
+        // `has` matches a prefix, so compare the list itself: empty.
+        assert_eq!(
+            reported_list(&out, "conformance: WASM plugin options:"),
+            "",
+            "{}",
+            out.text
+        );
     }
 
     if python_ready() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("inputs.py"), INPUTS_PY).unwrap();
         write_inputs_ledger(dir.path(), "plugin \"inputs.py\"");
-        for (_, out) in all_commands(dir.path()) {
+        for (cmd, out) in all_commands(dir.path()) {
             out.has(&python_inputs_report(INTERPOLATED));
+            assert_eq!(
+                reported_list(&out, "conformance: Python plugin options:"),
+                INTERPOLATED,
+                "{cmd}"
+            );
         }
         write_inputs_ledger(dir.path(), "plugin \"python:./inputs.py\"");
         run(dir.path(), &["check", "ledger.beancount"]).has(&python_inputs_report(INTERPOLATED));

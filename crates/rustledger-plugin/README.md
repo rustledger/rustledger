@@ -1,6 +1,6 @@
 # rustledger-plugin
 
-Beancount plugin system with 30 native plugins and WASM support.
+Beancount plugin system with 33 native plugins and WASM support.
 
 ## Native Plugins
 

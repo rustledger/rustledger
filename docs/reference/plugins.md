@@ -29,7 +29,7 @@ rustledger supports three types of plugins:
 │  ┌─────────────┐ ┌─────────────┐ ┌─────────────┐       │
 │  │   Native    │ │    WASM     │ │   Python    │       │
 │  │  Registry   │ │   Runtime   │ │   Runtime   │       │
-│  │  (31 plugins)│ │ (Wasmtime)  │ │(CPython-WASI)│      │
+│  │  (33 plugins)│ │ (Wasmtime)  │ │(CPython-WASI)│      │
 │  └─────────────┘ └─────────────┘ └─────────────┘       │
 └─────────────────────────────────────────────────────────┘
                           │
@@ -476,11 +476,13 @@ Options: None
 
 Checks the stock leg when a short option is assigned. For a short put, the stock's basis must be strike × shares − premium. For a short call, the sale proceeds must be strike × shares + premium. Options are recognized by OCC symbol, as for `check_option_expiry`.
 
-An assignment is a transaction that reduces a short option position and also moves the option's root commodity (stock rises for a put, falls for a call). Ordinary closes, long options, cash-settled index options, and assignments split across two transactions are not checked. Each assignment gets at most one error, from the first rule that fails:
+An assignment is a transaction that reduces a short option position and also moves the option's root commodity (stock rises for a put, falls for a call). Puts and calls on one root are separate, so a put assigned in the same entry as a call bought back is still checked. Ordinary closes, long options, cash-settled index options, assignments split across two transactions, and shorts held without a cost (`-1 AAPL261016P00225000 @ 3.00 USD`, so the premium is unknown) are not checked. Each assignment gets at most one error, from the first rule that fails:
 
 1. Stock units = 100 × contracts.
-2. The option leg is closed at cost (no gain realized on it).
-3. Basis (put) or proceeds (call) match within half a cent per share, compared as totals across all lots.
+2. The option leg is closed at cost (no gain realized on it). Closing it at `@ 0.00 USD` counts as realizing the premium, as in `sellgains`.
+3. Basis (put) or proceeds (call) match within half a cent per share, compared as totals across all lots. A put's stock leg needs a cost and a call's a price; when an assigned call opens a short stock position (no stock held in that account before), the short lot's cost is its proceeds.
+
+Units count contracts: 1 unit is 1 contract, and the cost per unit is the premium × 100 (`-1 AAPL261016P00225000 {300.00 USD}` for a 3.00 premium). A ledger that records options in share units (`-100 … {3.00 USD}`) gets a share-count error from this plugin.
 
 ```beancount
 plugin "beancount_options.check_option_assignment"
@@ -506,13 +508,13 @@ The correct entry drops the income line and writes the stock lot as `{222.00 USD
 
 Its Python counterpart in [beancount-options](https://github.com/rustledger/beancount-options) is not released yet, so until it is, `bean-check` and Fava fail on this `plugin` line. To keep a file portable meanwhile, leave the line out and enable the plugin on the command line: `rledger check --native-plugin check_option_assignment ledger.beancount`.
 
-Options: None
+Options: None. A config string gives a warning and is ignored.
 
 ### check_option_expiry
 
 Reports an error for each option contract whose net position in an account is non-zero after its expiry date. Contracts are recognized by their OCC symbol with spaces removed: a root of 1–6 letters, digits or dots starting with a letter (adjusted roots such as `XYZ1` are checked too), the expiry as `YYMMDD`, `C` or `P`, and the strike × 1000 as 8 digits (`AAPL261016P00230000` is the AAPL 2026-10-16 230 put). Other commodities are ignored.
 
-"Today" is the date of the last directive of any kind in the ledger, so the check is deterministic. A close dated on the expiry day is accepted, and a ledger that ends on or before expiry is not reported. Each transaction's legs on one contract are netted before they apply, and the error is located at the transaction that opened the position still open (the last one that moved it off zero or across it). The plugin only reports; it never inserts or changes directives.
+"Today" is the date of the last directive of any kind in the ledger, so the check is deterministic. A close dated on the expiry day is accepted, and a ledger that ends on or before expiry is not reported. Each transaction's legs on one contract are netted before they apply, and the error is located at the transaction that opened the position still open (the last one that moved it off zero or across it). Same-day entries are taken in beancount's order (date, then line number, whatever the file), so with trades split across included files the error names the entry `bean-check` names. Units count contracts: `-1` is one short contract, as for `check_option_assignment`. The plugin only reports; it never inserts or changes directives.
 
 ```beancount
 plugin "beancount_options.check_option_expiry"
@@ -530,7 +532,7 @@ plugin "beancount_options.check_option_expiry"
 
 Its Python counterpart is `beancount_options.check_option_expiry` in [beancount-options](https://github.com/rustledger/beancount-options) (`pip install git+https://github.com/rustledger/beancount-options`). rledger matches a native plugin by the last part of the name, so the same `plugin` line runs the native plugin under `rledger` and the Python one under `bean-check` and Fava, with the same messages at the same lines.
 
-Options: None
+Options: None natively yet. beancount-options accepts `"{'as_of': 'YYYY-MM-DD'}"`; rledger warns that it ignores the config and applies the default rules.
 
 ### commodity_attr
 

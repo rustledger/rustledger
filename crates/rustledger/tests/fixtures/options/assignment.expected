@@ -1,0 +1,4 @@
+42: NVDA261016P00150000 assignment: NVDA basis 15000.00 USD, expected 14600.00 USD (strike 150 × 100 − premium 400.00)
+68: AMD261016P00100000 assignment: option leg priced at 0.00 USD, not its cost 150.00 USD; close it at cost and fold the premium into the AMD leg
+79: META261016P00500000 assignment: META purchase has no cost; expected basis 49200.00 USD
+92: SPY261016P00550000 assignment: SPY basis 55000.00 USD, expected 54500.00 USD (strike 550 × 100 − premium 500.00)

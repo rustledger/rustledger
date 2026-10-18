@@ -1615,9 +1615,12 @@ jobs:
         run: |
           pip install beancount beanprice
           # The Python counterparts of the option plugins, for
-          # options_plugins_parity. Pinned to an immutable commit, as the
+          # options_plugins_parity, which also reads the checkout's shared
+          # cases (tests/cases/). Pinned to an immutable commit, as the
           # compat job pins its plugin repos; bump deliberately.
-          pip install git+https://github.com/rustledger/beancount-options@d1602624ac5b13282aa000b10c3a16c418d07782
+          git clone --quiet https://github.com/rustledger/beancount-options "$RUNNER_TEMP/beancount-options"
+          git -C "$RUNNER_TEMP/beancount-options" checkout --quiet b828d6bca32a57d97c569369c253654c39d3537a
+          pip install "$RUNNER_TEMP/beancount-options"
       - name: Assert python tools are runnable (no silent skips)
         run: |
           # The tests skip when these binaries are missing. This step
@@ -1669,6 +1672,7 @@ jobs:
           RLEDGER_REQUIRE_PYTHON_WASI: '1'
           RLEDGER_REQUIRE_WASM32: '1'
           XDG_CACHE_HOME: ${{ runner.temp }}/xdg-cache
+          BEANCOUNT_OPTIONS_DIR: ${{ runner.temp }}/beancount-options
         run: |
           # tee the output so the skip-marker check below inspects THIS
           # run (a rerun inside an `if` would mask test failures and

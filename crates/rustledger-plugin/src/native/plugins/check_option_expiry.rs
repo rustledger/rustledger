@@ -13,6 +13,15 @@
 //! entry that takes the position across zero opens a new one; the error
 //! names the entry that opened the position still open.
 //!
+//! Same-day entries are taken in beancount's `entry_sortkey` order (date,
+//! type, line number), so the entry named is the one `bean-check` names
+//! even when same-day trades are split across included files. A position
+//! whose net leaves `Decimal`'s range is not checked.
+//!
+//! The plugin reads no config yet: a non-blank config string (`as_of` is
+//! beancount-options only for now) gives one warning, and the default
+//! rules apply.
+//!
 //! The plugin only reports: every directive is kept unchanged and nothing is
 //! inserted, so a ledger stays complete without it.
 
@@ -33,6 +42,8 @@ struct Position {
     /// Index of the directive that opened the current position: the last one
     /// that moved it away from flat or across zero.
     opened_at: usize,
+    /// The net left `Decimal`'s range; the position is no longer checked.
+    overflowed: bool,
 }
 
 /// Plugin that reports option contracts left open past expiry.
@@ -48,10 +59,22 @@ impl NativePlugin for CheckOptionExpiryPlugin {
     }
 
     fn process(&self, input: PluginInput) -> PluginOutput {
-        // Walk directives in date order without assuming the input is sorted.
-        // `sort_by` is stable, so same-day directives keep their file order.
+        let mut errors = Vec::new();
+        if super::option_symbol::config_is_set(input.config.as_deref()) {
+            errors.push(PluginError::warning(
+                "check_option_expiry: the config is ignored; rledger does not support as_of yet",
+            ));
+        }
+
+        // Walk directives in beancount's `entry_sortkey` order (date, type,
+        // line) without assuming the input is sorted. The loader keeps file
+        // order for same-day entries; beancount does not.
         let mut order: Vec<usize> = (0..input.directives.len()).collect();
-        order.sort_by(|&a, &b| input.directives[a].date.cmp(&input.directives[b].date));
+        order.sort_by(|&a, &b| {
+            input.directives[a]
+                .sort_key()
+                .cmp(&input.directives[b].sort_key())
+        });
 
         let mut positions: BTreeMap<(String, String), Position> = BTreeMap::new();
         for &i in &order {
@@ -61,7 +84,8 @@ impl NativePlugin for CheckOptionExpiryPlugin {
             // Net this entry's legs per (account, contract) first, so posting
             // order inside one entry doesn't matter and legs that cancel are a
             // no-op.
-            let mut deltas: BTreeMap<(&str, &str), (Decimal, String)> = BTreeMap::new();
+            // `None` once the entry's legs on a contract overflow.
+            let mut deltas: BTreeMap<(&str, &str), (Option<Decimal>, String)> = BTreeMap::new();
             for posting in &txn.postings {
                 let Some(units) = &posting.units else {
                     continue;
@@ -72,10 +96,11 @@ impl NativePlugin for CheckOptionExpiryPlugin {
                 let Ok(number) = Decimal::from_str(&units.number) else {
                     continue;
                 };
-                deltas
+                let delta = &mut deltas
                     .entry((posting.account.as_str(), units.currency.as_str()))
-                    .or_insert((Decimal::ZERO, occ.expiry))
-                    .0 += number;
+                    .or_insert((Some(Decimal::ZERO), occ.expiry))
+                    .0;
+                *delta = delta.and_then(|d| d.checked_add(number));
             }
             for ((account, symbol), (delta, expiry)) in deltas {
                 let pos = positions
@@ -84,8 +109,12 @@ impl NativePlugin for CheckOptionExpiryPlugin {
                         expiry,
                         net: Decimal::ZERO,
                         opened_at: i,
+                        overflowed: false,
                     });
-                let new_net = pos.net + delta;
+                let Some(new_net) = delta.and_then(|d| pos.net.checked_add(d)) else {
+                    pos.overflowed = true;
+                    continue;
+                };
                 // Opening from flat or crossing zero starts a new position;
                 // going flat or growing one does not.
                 if !new_net.is_zero() && new_net.cmp(&Decimal::ZERO) != pos.net.cmp(&Decimal::ZERO)
@@ -99,10 +128,9 @@ impl NativePlugin for CheckOptionExpiryPlugin {
         // ISO dates compare correctly as strings.
         let last_date = input.directives.iter().map(|d| d.date.as_str()).max();
 
-        let mut errors = Vec::new();
         if let Some(last_date) = last_date {
             for ((account, symbol), pos) in &positions {
-                if pos.net.is_zero() || pos.expiry.as_str() >= last_date {
+                if pos.overflowed || pos.net.is_zero() || pos.expiry.as_str() >= last_date {
                     continue;
                 }
                 let mut error = PluginError::error(format!(

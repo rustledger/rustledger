@@ -19,7 +19,7 @@ static OCC_SYMBOL_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Put or call.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum OptionRight {
     /// Right to buy the underlying.
     Call,
@@ -60,6 +60,15 @@ pub fn parse_occ(symbol: &str) -> Option<OccSymbol> {
         expiry: date.to_string(),
         right,
         strike: strike.normalize(),
+    })
+}
+
+/// Whether a plugin was given a config: anything but ASCII whitespace,
+/// which beancount-options strips (` \t\n\r\x0c\x0b`; not Unicode spaces).
+pub fn config_is_set(config: Option<&str>) -> bool {
+    config.is_some_and(|c| {
+        !c.trim_matches([' ', '\t', '\n', '\r', '\x0c', '\x0b'])
+            .is_empty()
     })
 }
 

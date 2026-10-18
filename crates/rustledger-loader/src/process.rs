@@ -1053,7 +1053,8 @@ fn run_booking(
 ///
 /// The loader pipeline calls `run_plugins` twice: once with
 /// [`PluginPass::PreBookingSynth`] before the Early validation phase
-/// (so synthesizers can inject Opens / Documents before booking), and once with [`PluginPass::PostBooking`] after booking
+/// (so synthesizers can inject Opens / Documents before booking), and
+/// once with [`PluginPass::PostBooking`] after booking
 /// (so cost-spec-reading plugins like `implicit_prices`,
 /// `capital_gains_classifier`, `check_average_cost`, `sell_gains`,
 /// `unrealized`, and `valuation` see filled-in per-unit values on the

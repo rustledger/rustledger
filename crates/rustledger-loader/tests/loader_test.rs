@@ -2951,4 +2951,33 @@ fn path_security_follows_the_link_directory() {
         "a symlinked include pointing out of the root is refused: {:?}",
         result.errors
     );
+    // A glob's directory prefix is checked in the spelling the include is
+    // read in, lexically: `deep/../` is `view/`, inside the root, although
+    // `view/deep` links out of it. Beancount reads the same file: its glob
+    // lists the physical directory, then `normpath` names
+    // `view/up.beancount`.
+    std::fs::write(
+        dir.path().join("view/globber.beancount"),
+        "include \"deep/../up*.beancount\"\n",
+    )
+    .unwrap();
+    let result = Loader::new()
+        .with_path_security(true)
+        .load(&dir.path().join("view/globber.beancount"))
+        .expect("load");
+    assert!(
+        result.errors.is_empty(),
+        "the lexical prefix is inside the root: {:?}",
+        result.errors
+    );
+    let opened: Vec<_> = result
+        .source_map
+        .files()
+        .iter()
+        .map(|f| f.opened_path.clone())
+        .collect();
+    assert!(
+        opened.iter().any(|p| p.ends_with("view/up.beancount")),
+        "{opened:?}"
+    );
 }

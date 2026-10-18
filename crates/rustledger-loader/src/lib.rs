@@ -714,7 +714,7 @@ impl Loader {
                     // — under a `VirtualFileSystem` the disk `normalize_path`
                     // would have compared a disk-canonicalized prefix against a
                     // pure-string root.
-                    self.fs.normalize(&prefix_path)
+                    self.fs.normalize(&self.fs.normalize_lexical(&prefix_path))
                 } else {
                     // The same spelling the file gets below: lexical first,
                     // so a `..` after a symlink is checked as the file read.

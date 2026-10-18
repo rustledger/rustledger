@@ -98,7 +98,9 @@ pub fn validate_balance_account(
     bal: &Balance,
     errors: &mut Vec<ValidationError>,
 ) {
-    require_account_open(state, &bal.account, bal.date, "Account", errors);
+    if !require_account_open(state, &bal.account, bal.date, "Account", errors) {
+        return;
+    }
 
     // Flag a balance asserted in a currency the account doesn't allow. Without
     // this, the only signal is a confusing "Balance failed ... got 0 EUR" (the
@@ -139,7 +141,9 @@ pub fn validate_balance_late(
     errors: &mut Vec<ValidationError>,
 ) {
     // `validate_balance_account`, called just before this, already
-    // reported an unopened account; there is nothing to compare against.
+    // reported an unopened account. One never opened has no inventory to
+    // compare against; one opened LATER is still compared, as beancount
+    // compares it (it reports both the inactive account and the failure).
     if !state.accounts.contains_key(&bal.account) {
         return;
     }

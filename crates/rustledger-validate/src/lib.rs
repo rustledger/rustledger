@@ -4210,6 +4210,41 @@ mod tests {
     }
 
     #[test]
+    fn pad_balance_and_note_before_the_open_are_unopened() {
+        // Late registers every `open` before its walk, so a presence check
+        // must also compare dates: a `pad`, `balance` or `note` dated before
+        // its account's `open` refers to an account not yet open (E1001), as
+        // when opens were registered as the walk reached them. The pad is
+        // not registered and the balance is not currency-checked (no E5002);
+        // the balance IS still compared (E2001), as beancount compares it.
+        let mut open = Open::new(date(2020, 2, 1), "Assets:Bank");
+        open.currencies = vec!["USD".into()];
+        let directives = vec![
+            open_at(date(2020, 1, 1), "Equity:Opening"),
+            Directive::Pad(Pad::new(date(2020, 1, 5), "Assets:Bank", "Equity:Opening")),
+            Directive::Balance(Balance::new(
+                date(2020, 1, 10),
+                "Assets:Bank",
+                Amount::new(dec!(100), "EUR"),
+            )),
+            Directive::Note(Note::new(date(2020, 1, 12), "Assets:Bank", "early")),
+            Directive::Open(open),
+        ];
+        let errors = validate(&directives);
+        let codes: Vec<ErrorCode> = errors.iter().map(|e| e.code).collect();
+        assert_eq!(
+            codes,
+            [
+                ErrorCode::AccountNotOpen,
+                ErrorCode::AccountNotOpen,
+                ErrorCode::BalanceAssertionFailed,
+                ErrorCode::AccountNotOpen
+            ],
+            "{errors:?}"
+        );
+    }
+
+    #[test]
     fn posting_on_the_close_date_is_clean() {
         // beancount walks entries in booking order, where a `close` sorts
         // after every transaction of its day, so a posting on the close date

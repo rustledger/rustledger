@@ -252,7 +252,11 @@ use crate::types::{Error, LedgerOptions};
 /// and an AVERAGE one carries the pool's exact cost (#2647). Loader v39,
 /// unchanged -- parsed directives did not move. `Ledger` archives booked
 /// directives, so a v44 blob would serve the old, unmatched posting.
-pub const CACHE_VERSION: u32 = 45;
+/// v46: loader v40, a file's includes resolve next to the path it was opened
+/// by, symlinks kept (#2635); `HostFs` no longer resolves them next to the
+/// `realpath`. A v45 blob of a ledger reached through a symlink would serve
+/// the directives of the files next to the link's target.
+pub const CACHE_VERSION: u32 = 46;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -284,7 +288,7 @@ pub const CACHE_VERSION: u32 = 45;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 39;
+const LOADER_CACHE_VERSION_PIN: u32 = 40;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

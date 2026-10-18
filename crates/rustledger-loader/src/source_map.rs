@@ -1,7 +1,7 @@
 //! Source map for tracking file locations.
 
 use rustledger_parser::Span;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 /// A source file in the source map.
@@ -9,8 +9,16 @@ use std::sync::Arc;
 pub struct SourceFile {
     /// Unique ID for this file.
     pub id: usize,
-    /// Path to the file.
+    /// Path to the file: its identity, symlinks resolved on disk (see
+    /// [`crate::FileSystem::normalize`]). Two includes of one file share it.
     pub path: PathBuf,
+    /// The path the file was opened by: absolute, `.` and `..` collapsed
+    /// textually, symlinks NOT resolved (see
+    /// [`crate::FileSystem::normalize_lexical`]). Relative paths written in
+    /// the file — `include`, `document`, `option "documents"` — resolve
+    /// against its parent, [`Self::dir`], as beancount resolves them (#2635).
+    /// Equal to [`Self::path`] unless a symlink is on the way.
+    pub opened_path: PathBuf,
     /// Source content (shared via Arc to avoid cloning).
     pub source: Arc<str>,
     /// Line start offsets (byte positions where each line starts).
@@ -56,13 +64,28 @@ pub fn line_col_in(source: &str, offset: usize) -> (usize, usize) {
 
 impl SourceFile {
     /// Create a new source file.
-    const fn new(id: usize, path: PathBuf, source: Arc<str>) -> Self {
+    #[cfg(test)]
+    fn new(id: usize, path: PathBuf, source: Arc<str>) -> Self {
+        let opened_path = path.clone();
+        Self::new_opened(id, path, opened_path, source)
+    }
+
+    /// Create a new source file reached by `opened_path`.
+    const fn new_opened(id: usize, path: PathBuf, opened_path: PathBuf, source: Arc<str>) -> Self {
         Self {
             id,
             path,
+            opened_path,
             source,
             line_starts: std::sync::OnceLock::new(),
         }
+    }
+
+    /// The directory relative paths in this file resolve against: the parent
+    /// of [`Self::opened_path`], or `.` when it has none.
+    #[must_use]
+    pub fn dir(&self) -> &Path {
+        self.opened_path.parent().unwrap_or_else(|| Path::new("."))
     }
 
     /// The line-start table, built on first use.
@@ -182,13 +205,32 @@ impl SourceMap {
     /// `Spanned<T>` use a `u16` for `file_id`, and the topmost value is
     /// reserved as a sentinel for plugin-synthesized directives.
     pub fn add_file(&mut self, path: PathBuf, source: Arc<str>) -> usize {
+        let opened_path = path.clone();
+        self.add_opened_file(path, opened_path, source)
+    }
+
+    /// Add a file reached by `opened_path` whose identity is `path`; see
+    /// [`SourceFile::opened_path`].
+    ///
+    /// Returns the file ID.
+    ///
+    /// # Panics
+    ///
+    /// As [`Self::add_file`].
+    pub fn add_opened_file(
+        &mut self,
+        path: PathBuf,
+        opened_path: PathBuf,
+        source: Arc<str>,
+    ) -> usize {
         let id = self.files.len();
         assert!(
             id < rustledger_parser::SYNTHESIZED_FILE_ID as usize,
             "SourceMap exceeded {} files; file_id {id} collides with SYNTHESIZED_FILE_ID sentinel",
             rustledger_parser::SYNTHESIZED_FILE_ID,
         );
-        self.files.push(SourceFile::new(id, path, source));
+        self.files
+            .push(SourceFile::new_opened(id, path, opened_path, source));
         id
     }
 

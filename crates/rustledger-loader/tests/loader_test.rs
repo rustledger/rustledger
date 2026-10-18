@@ -2734,3 +2734,221 @@ fn native_plugins_only_skips_wasm_and_python_plugins_2486() {
         ledger.errors
     );
 }
+
+// ============================================================================
+// Relative paths in a file reached through a symlink (#2635)
+// ============================================================================
+
+/// `real/` holds the ledger, `view/main.beancount` links to it, and both
+/// directories hold a `2024.beancount`, an `up.beancount`, a `docs/` tree and
+/// (only `view/`) a `receipt.pdf`, each naming its own directory.
+/// `view/plain.beancount` links to `real/plain.beancount`, whose `document`
+/// names `receipt.pdf`.
+#[cfg(unix)]
+fn symlinked_entry_layout() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let files: &[(&str, &str)] = &[
+        ("real/2024.beancount", "2024-01-01 open Assets:Real\n"),
+        (
+            "view/2024.beancount",
+            "2024-01-01 open Assets:View\n2024-01-01 open Assets:Real\n",
+        ),
+        ("real/up.beancount", "2024-01-01 open Assets:RealUp\n"),
+        ("view/up.beancount", "2024-01-01 open Assets:ViewUp\n"),
+        (
+            "real/elsewhere/up.beancount",
+            "2024-01-01 open Assets:ElsewhereUp\n",
+        ),
+        ("real/docs/Assets/Real/2024-02-02.b.pdf", "x"),
+        ("view/docs/Assets/View/2024-02-01.a.pdf", "x"),
+        ("view/receipt.pdf", "x"),
+        (
+            "real/main.beancount",
+            "option \"documents\" \"docs\"\n\
+             include \"2024.beancount\"\n\
+             include \"deep/../up.beancount\"\n",
+        ),
+        // Apart from the `documents` option, which (until #2650) changed how
+        // a relative `document` path resolves.
+        (
+            "real/plain.beancount",
+            "2020-01-01 open Assets:View\n\
+             2024-03-01 document Assets:View \"receipt.pdf\"\n",
+        ),
+    ];
+    for (path, text) in files {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    std::fs::create_dir_all(root.join("real/elsewhere/deeper")).unwrap();
+    // `view/deep` links into `real/`, so `deep/../up.beancount` is
+    // `view/up.beancount` read lexically and `real/elsewhere/up.beancount`
+    // read physically. Beancount READS the lexical one (it `normpath`s the
+    // include), but its `glob` checks that the physical one exists first, so
+    // the physical file has to exist here for bean-check to load at all;
+    // rledger does not repeat that existence check.
+    std::os::unix::fs::symlink(root.join("real/elsewhere/deeper"), root.join("view/deep")).unwrap();
+    std::os::unix::fs::symlink(
+        root.join("real/plain.beancount"),
+        root.join("view/plain.beancount"),
+    )
+    .unwrap();
+    let link = root.join("view/main.beancount");
+    std::os::unix::fs::symlink(root.join("real/main.beancount"), &link).unwrap();
+    (dir, link)
+}
+
+/// #2635: an entry file reached through a symlink resolves its includes,
+/// its relative `document` paths and its `option "documents"` roots next to
+/// the LINK, as beancount does, and a `..` lexically. `bean-check
+/// view/main.beancount` on this layout: exit 0, opens `Assets:View`,
+/// `Assets:ViewUp` and `Assets:Real` (from `view/2024.beancount`), and
+/// discovers `view/docs/.../2024-02-01.a.pdf`; `bean-check
+/// view/plain.beancount`: exit 0, its document is `view/receipt.pdf`. rledger
+/// used to read every one of them next to the link's target.
+#[cfg(unix)]
+#[test]
+fn symlinked_entry_resolves_relative_paths_next_to_the_link() {
+    use rustledger_core::Directive;
+    use rustledger_loader::{LoadOptions, load};
+
+    let (dir, link) = symlinked_entry_layout();
+    let ledger = load(&link, &LoadOptions::default()).expect("load");
+    let errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .map(|e| (&e.code, &e.message))
+        .collect();
+    assert!(errors.is_empty(), "bean-check reports nothing: {errors:?}");
+
+    let mut opens: Vec<String> = Vec::new();
+    let mut documents: Vec<std::path::PathBuf> = Vec::new();
+    for d in &ledger.directives {
+        match &d.value {
+            Directive::Open(o) => opens.push(o.account.to_string()),
+            Directive::Document(doc) => documents.push(doc.path.clone().into()),
+            _ => {}
+        }
+    }
+    opens.sort();
+    assert_eq!(opens, ["Assets:Real", "Assets:View", "Assets:ViewUp"]);
+    let discovered = dir.path().join("view/docs/Assets/View/2024-02-01.a.pdf");
+    assert!(
+        documents
+            .iter()
+            .any(|p| p.ends_with("view/docs/Assets/View/2024-02-01.a.pdf")),
+        "discovered under view/docs ({}): {documents:?}",
+        discovered.display()
+    );
+    assert!(
+        !documents
+            .iter()
+            .any(|p| p.to_string_lossy().contains("real/docs")),
+        "nothing discovered under the target's docs: {documents:?}"
+    );
+
+    // The source map keeps each file's identity normalized (the target) and
+    // its opened spelling (the link).
+    let main = &ledger.source_map.files()[0];
+    assert_eq!(
+        main.path,
+        dir.path()
+            .join("real/main.beancount")
+            .canonicalize()
+            .unwrap()
+    );
+    assert!(main.opened_path.ends_with("view/main.beancount"));
+
+    let plain = load(
+        &dir.path().join("view/plain.beancount"),
+        &LoadOptions::default(),
+    )
+    .expect("load");
+    let errors: Vec<_> = plain.errors.iter().map(|e| (&e.code, &e.message)).collect();
+    assert!(
+        errors.is_empty(),
+        "receipt.pdf is next to the link: {errors:?}"
+    );
+}
+
+/// Identity stays the normalized path (#2635 keeps it for cycle and
+/// duplicate detection): a cycle closed through a symlink is still a cycle.
+#[cfg(unix)]
+#[test]
+fn include_cycle_through_a_symlink_is_still_detected() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.beancount"), "include \"b.beancount\"\n").unwrap();
+    std::fs::write(
+        dir.path().join("b.beancount"),
+        "include \"a-link.beancount\"\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        dir.path().join("a.beancount"),
+        dir.path().join("a-link.beancount"),
+    )
+    .unwrap();
+    let cycle = match Loader::new().load(&dir.path().join("a.beancount")) {
+        Err(e @ LoadError::IncludeCycle { .. }) => Some(e),
+        Err(e) => panic!("expected a cycle, got {e}"),
+        Ok(r) => r
+            .errors
+            .into_iter()
+            .find(|e| matches!(e, LoadError::IncludeCycle { .. })),
+    };
+    assert!(
+        cycle.is_some(),
+        "the link back to a.beancount closes a cycle"
+    );
+}
+
+/// Path security guards the directory the entry file was OPENED from: the
+/// link's includes next to it load, and an include that is itself a symlink
+/// out of that directory is still refused (#2635 must not open a way out).
+#[cfg(unix)]
+#[test]
+fn path_security_follows_the_link_directory() {
+    let (dir, link) = symlinked_entry_layout();
+    let result = Loader::new()
+        .with_path_security(true)
+        .load(&link)
+        .expect("load");
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|e| matches!(e, LoadError::PathTraversal { .. })),
+        "includes next to the link are inside the root: {:?}",
+        result.errors
+    );
+
+    std::fs::write(
+        dir.path().join("secret.beancount"),
+        "2024-01-01 open Assets:Secret\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        dir.path().join("secret.beancount"),
+        dir.path().join("view/escape.beancount"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("view/entry.beancount"),
+        "include \"escape.beancount\"\n",
+    )
+    .unwrap();
+    let result = Loader::new()
+        .with_path_security(true)
+        .load(&dir.path().join("view/entry.beancount"))
+        .expect("load");
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|e| matches!(e, LoadError::PathTraversal { .. })),
+        "a symlinked include pointing out of the root is refused: {:?}",
+        result.errors
+    );
+}

@@ -207,7 +207,8 @@ pub struct CacheEntry {
     pub options: CachedOptions,
     /// Plugin declarations.
     pub plugins: Vec<CachedPlugin>,
-    /// All files that were loaded (as strings, for serialization).
+    /// All files that were loaded (as strings, for serialization), each by
+    /// the path it was opened by ([`crate::SourceFile::opened_path`]).
     pub files: Vec<String>,
 }
 
@@ -261,7 +262,9 @@ impl CacheEntry {
                     Ok(s) => s,
                     Err(e) => String::from_utf8_lossy(e.as_bytes()).into_owned(),
                 };
-                source_map.add_file(path, content.into());
+                // Identity re-derived the way the loader derives it.
+                let canonical = crate::FileSystem::normalize(&crate::DiskFileSystem, &path);
+                source_map.add_opened_file(canonical, path, content.into());
             }
         }
 
@@ -520,12 +523,18 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     A v38 blob of such a file holds the late tags on the transaction and
 ///     no error, because the file used to parse clean and was cacheable.
 ///
+/// v40: a file's includes and relative `document` paths resolve next to the
+///     path it was opened by, symlinks kept, as beancount resolves them
+///     (#2635), and `files` holds those opened paths. A v39 entry of a ledger
+///     reached through a symlink holds the files next to the link's TARGET,
+///     still unchanged and so still hash-valid, and would keep serving them.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 39;
+pub const CACHE_VERSION: u32 = 40;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1283,7 +1292,9 @@ mod tests {
         // same archived `CostNumber` encoding.
         // v39 (#2575) drops tags written after a transaction's first posting
         // and adds an error; no `CostNumber` is involved.
-        const FIXTURE_VERSION: u32 = 39;
+        // v40 (#2635) changes which FILES an include through a symlink reads;
+        // no archived encoding moves, so the byte arrays below still hold.
+        const FIXTURE_VERSION: u32 = 40;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1401,7 +1412,9 @@ mod tests {
         // no `MetaValue`; the hash below is unchanged.
         // v39 (#2575) drops late transaction tags, which are not `MetaValue`s;
         // the hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 39;
+        // v40 (#2635) changes which files a symlinked include reads, not how
+        // anything is archived; the hash below is unchanged.
+        const FIXTURE_VERSION: u32 = 40;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

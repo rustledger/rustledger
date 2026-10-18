@@ -153,8 +153,9 @@ fn without_comments(mut d: Directive) -> Directive {
 }
 
 /// Where a `document` path points: absolute as written, otherwise against
-/// the directory of the file that contains the directive (the rule the
-/// validator falls back to, and the one beancount applies at parse time).
+/// the directory the file that contains the directive was opened from,
+/// symlinks kept (the rule the validator falls back to, and the one beancount
+/// applies at parse time, #2635).
 ///
 /// Stricter than the validator, which consults `option "documents"` and
 /// `document_base` first: a relative path that moves to a different
@@ -166,7 +167,7 @@ fn resolve_document(source_map: &SourceMap, file_id: u16, path: &str) -> Option<
     if p.is_absolute() {
         return Some(p.to_path_buf());
     }
-    let dir = source_map.get(file_id as usize)?.path.parent()?;
+    let dir = source_map.get(file_id as usize)?.dir();
     let mut out = PathBuf::new();
     for c in dir.join(p).components() {
         match c {

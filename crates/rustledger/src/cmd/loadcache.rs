@@ -94,7 +94,10 @@ pub fn load_result_cached(
             .source_map
             .files()
             .iter()
-            .map(|f| f.path.to_string_lossy().into_owned())
+            // The opened spelling: a hit rebuilds each file's identity from
+            // it, while its own includes and documents resolve against it
+            // (#2635); the normalized path alone would lose a symlink.
+            .map(|f| f.opened_path.to_string_lossy().into_owned())
             .collect();
         let files = if files.is_empty() {
             vec![file.to_string_lossy().into_owned()]

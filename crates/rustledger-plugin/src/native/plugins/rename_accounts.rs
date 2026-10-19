@@ -13,8 +13,6 @@
 //! match of a pattern anywhere in an account name is replaced, and the
 //! replacement refers to groups as `\1` or `\g<name>` (`$1` is literal text).
 
-use regex::Regex;
-
 use crate::types::{
     DirectiveData, DirectiveWrapper, PadData, PluginError, PluginInput, PluginOp, PluginOutput,
     PostingData,
@@ -64,7 +62,17 @@ impl NativePlugin for RenameAccountsPlugin {
         // a Modify wrapper for directives the rename rules didn't touch.
         let mut ops: Vec<PluginOp> = Vec::with_capacity(input.directives.len());
         for (i, directive) in input.directives.iter().enumerate() {
-            let renamed = rename_in_directive(directive.clone(), &renames);
+            let renamed = match rename_in_directive(directive.clone(), &renames) {
+                Ok(renamed) => renamed,
+                // Renaming nothing, and saying why, as for a config the
+                // plugin cannot use.
+                Err(message) => {
+                    return PluginOutput {
+                        ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
+                        errors: vec![PluginError::error(message)],
+                    };
+                }
+            };
             if directive_has_same_accounts(directive, &renamed) {
                 ops.push(PluginOp::Keep(i));
             } else {
@@ -111,55 +119,64 @@ fn directive_has_same_accounts(a: &DirectiveWrapper, b: &DirectiveWrapper) -> bo
 /// `regex`'s syntax (translated from Python's by
 /// [`py_regex::translate_replacement`]).
 struct RenameRule {
-    pattern: Regex,
+    pattern: py_regex::PyRegex,
     replacement: String,
 }
 
 /// Apply renames to an account name.
-fn rename_account(account: &str, renames: &[RenameRule]) -> String {
+///
+/// # Errors
+///
+/// A pattern's word boundary cannot be evaluated exactly on the account
+/// (#2656), as it stands when that rule is applied.
+fn rename_account(account: &str, renames: &[RenameRule]) -> Result<String, String> {
     let mut result = account.to_string();
     for rule in renames {
-        if rule.pattern.is_match(&result) {
-            result = rule
-                .pattern
-                .replace_all(&result, &rule.replacement)
-                .to_string();
-        }
+        result = rule
+            .pattern
+            .replace_all(&result, &rule.replacement)
+            .map_err(|e| {
+                format!("rename_accounts: a pattern cannot be matched against {result}: {e}")
+            })?
+            .into_owned();
     }
-    result
+    Ok(result)
 }
 
 /// Apply renames to a posting.
-fn rename_in_posting(mut posting: PostingData, renames: &[RenameRule]) -> PostingData {
-    posting.account = rename_account(&posting.account, renames);
-    posting
+fn rename_in_posting(
+    mut posting: PostingData,
+    renames: &[RenameRule],
+) -> Result<PostingData, String> {
+    posting.account = rename_account(&posting.account, renames)?;
+    Ok(posting)
 }
 
 /// Apply renames to a directive.
 fn rename_in_directive(
     mut directive: DirectiveWrapper,
     renames: &[RenameRule],
-) -> DirectiveWrapper {
+) -> Result<DirectiveWrapper, String> {
     match &mut directive.data {
         DirectiveData::Transaction(txn) => {
             txn.postings = txn
                 .postings
                 .drain(..)
                 .map(|p| rename_in_posting(p, renames))
-                .collect();
+                .collect::<Result<_, _>>()?;
         }
         DirectiveData::Open(open) => {
-            open.account = rename_account(&open.account, renames);
+            open.account = rename_account(&open.account, renames)?;
         }
         DirectiveData::Close(close) => {
-            close.account = rename_account(&close.account, renames);
+            close.account = rename_account(&close.account, renames)?;
         }
         DirectiveData::Balance(balance) => {
-            balance.account = rename_account(&balance.account, renames);
+            balance.account = rename_account(&balance.account, renames)?;
         }
         DirectiveData::Pad(pad) => {
-            let account = rename_account(&pad.account, renames);
-            let source_account = rename_account(&pad.source_account, renames);
+            let account = rename_account(&pad.account, renames)?;
+            let source_account = rename_account(&pad.source_account, renames)?;
             *pad = PadData {
                 account,
                 source_account,
@@ -167,10 +184,10 @@ fn rename_in_directive(
             };
         }
         DirectiveData::Note(note) => {
-            note.account = rename_account(&note.account, renames);
+            note.account = rename_account(&note.account, renames)?;
         }
         DirectiveData::Document(doc) => {
-            doc.account = rename_account(&doc.account, renames);
+            doc.account = rename_account(&doc.account, renames)?;
         }
         // Price, Commodity, Event, Query, Custom don't have accounts
         DirectiveData::Price(_)
@@ -179,7 +196,7 @@ fn rename_in_directive(
         | DirectiveData::Query(_)
         | DirectiveData::Custom(_) => {}
     }
-    directive
+    Ok(directive)
 }
 
 /// Parse configuration string into rename rules, as upstream reads it:

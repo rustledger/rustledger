@@ -66,7 +66,9 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
     let Some(file) = &args.file else {
         bail!("FILE is required (or set default.file in config)");
     };
+    let given = file;
     let file = super::existing_file(file)?;
+    super::refuse_link_elsewhere(given, &file, "merge")?;
     let (source, original) = super::read_source(&file)?;
 
     let file_dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -77,7 +79,7 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
         removable: Vec::new(),
         root_dir: file_dir.clone(),
     };
-    let merged = flat.flatten(&file, &source, true)?;
+    let merged = flat.flatten(&file, &file, &source, true)?;
     if flat.order.is_empty() {
         bail!(
             "{} includes nothing; there is nothing to merge",
@@ -201,8 +203,10 @@ struct Flattener {
 
 impl Flattener {
     /// `path`'s own text without its include lines, then each included file
-    /// flattened, in include order.
-    fn flatten(&mut self, path: &Path, source: &str, owned: bool) -> Result<String> {
+    /// flattened, in include order. `opened` is the path `path` was reached
+    /// by, symlinks kept: its includes resolve next to it, as the loader and
+    /// beancount resolve them (#2635).
+    fn flatten(&mut self, path: &Path, opened: &Path, source: &str, owned: bool) -> Result<String> {
         let seg = segment(source, path)?;
         let nl = super::newline_of(source);
         // Only the file being merged into keeps a byte-order mark; one from
@@ -230,7 +234,7 @@ impl Flattener {
             super::push_block(&mut out, &seg.trailing, nl);
         }
 
-        let base = path.parent().unwrap_or_else(|| Path::new("."));
+        let base = opened.parent().unwrap_or_else(|| Path::new("."));
         for inc in includes {
             for (named, target) in resolve_include(base, &inc)? {
                 if !self.visited.insert(target.clone()) {
@@ -252,7 +256,7 @@ impl Flattener {
                 let (text, bytes) = super::read_source(&target)?;
                 self.order.push(target.clone());
                 self.originals.push((target.clone(), bytes));
-                let inner = self.flatten(&target, &text, removable)?;
+                let inner = self.flatten(&target, &lexical(&named), &text, removable)?;
                 if !out.is_empty() && !out.ends_with("\n\n") {
                     out.push_str(nl);
                 }
@@ -299,7 +303,9 @@ fn resolve_include(base: &Path, include: &str) -> Result<Vec<(PathBuf, PathBuf)>
     paths
         .into_iter()
         .map(|p| {
-            let c = p
+            // Lexically first, as the loader spells it: a `..` after a
+            // symlink names the file beancount reads (#2635).
+            let c = lexical(&p)
                 .canonicalize()
                 .with_context(|| format!("included file not found: {}", p.display()))?;
             Ok((p, c))

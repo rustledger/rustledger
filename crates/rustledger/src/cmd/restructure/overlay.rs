@@ -130,6 +130,13 @@ impl FileSystem for OverlayFs {
         normalize(path)
     }
 
+    fn normalize_lexical(&self, path: &Path) -> PathBuf {
+        // The disk's opened spelling: relative paths in a file resolve next
+        // to a symlink, as the loader resolves them on disk (#2635). Planned
+        // files are looked up by `normalize`, which this feeds.
+        DiskFileSystem.normalize_lexical(path)
+    }
+
     fn glob(&self, pattern: &str) -> Result<Vec<PathBuf>, String> {
         // Planned files are keyed by their resolved path, but the loader
         // passes the pattern as written under the including file's directory

@@ -3256,9 +3256,11 @@ version = "0.24.0"
 dependencies = [
  "bigdecimal",
  "criterion",
+ "flate2",
  "imbl",
  "jiff",
  "proptest",
+ "regex",
  "rkyv",
  "rust_decimal",
  "rust_decimal_macros",

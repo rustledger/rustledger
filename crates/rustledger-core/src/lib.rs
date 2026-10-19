@@ -55,6 +55,7 @@ pub mod intern;
 pub mod inventory;
 pub mod meta_json;
 pub mod position;
+pub mod py_regex;
 pub mod shift_spans_impls;
 pub mod sorted_set;
 pub mod span;
@@ -71,8 +72,8 @@ pub use cost::{BookedCost, BookedCostInvariantError, Cost, CostNumber, CostSpec}
 pub use decimal::{
     add_python_scale, checked_add_exact, checked_add_exact_python_scale, checked_add_python_scale,
     checked_div_python_scale, checked_exact_sum_python_scale, checked_mul_exact, checked_sub_exact,
-    checked_sub_python_scale, decimal_from_big_exact, negate_python, round_dp_python,
-    sub_python_scale, to_bigdecimal, with_ideal_scale,
+    checked_sub_python_scale, decimal_from_big_exact, negate_python, py_compound_per_unit, py_div,
+    round_dp_python, sub_python_scale, to_bigdecimal, with_ideal_scale,
 };
 pub use directive::{
     AUTOMATIC_META, Balance, Close, Commodity, Custom, Directive, DirectivePriority, Document,

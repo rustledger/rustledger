@@ -256,13 +256,24 @@ use crate::types::{Error, LedgerOptions};
 /// a blank line or comment (#2628), and `\b` / `\f` in strings decode to
 /// U+0008 / U+000C (#2672). Parsed directives changed, so a v45 blob would
 /// serve the misplaced comment and the old strings.
-/// v47: `commodity`, `note`, `query` and `price` share the transaction
+/// v47: a per-unit number booking derives from a total (`{{T}}`,
+/// `{per # total}`, `@@`, an interpolated `{}` cost) is divided as Python's
+/// `decimal` divides it (#2652): `{{10 USD}}` over 4 units is `2.5`, not
+/// `2.50`, and over 3 is `3.333333333333333333333333333` (28 significant
+/// digits), not `3.3333333333333333333333333333`. Loader v40, unchanged --
+/// parsed directives did not move. `Ledger` archives booked directives, so a
+/// v46 blob would serve the old per-unit costs and prices.
+/// v48: loader v41, a file's includes resolve next to the path it was opened
+/// by, symlinks kept (#2635); `HostFs` no longer resolves them next to the
+/// `realpath`. A v47 blob of a ledger reached through a symlink would serve
+/// the directives of the files next to the link's target.
+/// v49: `commodity`, `note`, `query` and `price` share the transaction
 /// `DirectivePriority`, so a same-date one keeps its file position among
 /// transactions (#2629). Loader v40, unchanged -- parsed directives did not
-/// move. `Ledger` archives the processed, sorted directives, so a v46 blob
+/// move. `Ledger` archives the processed, sorted directives, so a v48 blob
 /// would serve the old order (a same-date `price` after the date's
 /// transactions, a `commodity` before its balances).
-pub const CACHE_VERSION: u32 = 47;
+pub const CACHE_VERSION: u32 = 49;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -294,7 +305,7 @@ pub const CACHE_VERSION: u32 = 47;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 40;
+const LOADER_CACHE_VERSION_PIN: u32 = 41;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

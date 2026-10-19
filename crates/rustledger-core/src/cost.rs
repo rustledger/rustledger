@@ -575,27 +575,31 @@ impl BookedCost {
 
 impl CostNumber {
     /// The effective per-unit value of a compound cost `{a # b}` over `units`:
-    /// `a + b / |units|`.
+    /// `(b + a × |units|) / |units|`, computed exactly as beancount does.
     ///
-    /// The ONE place this is computed. Beancount defines it as
-    /// `(N * a + b) / N`, and that is the form not to evaluate: `N * a` is an
-    /// intermediate product that `checked_mul` rounds to 28 decimal places
-    /// without failing, so for a small lot it becomes zero and the per-unit it
-    /// was headed for is lost — `1e-11` units at `{1e-18 # 0}` booked a cost of
-    /// `0` (#2351). `a + b / N` is the same value with no intermediate product.
-    /// `book.rs` had a copy computing it the other way, which is how the two
-    /// came apart; `CostSpec::resolve` and `implicit_prices` already used this
-    /// form.
+    /// The ONE place this is computed, through [`crate::py_compound_per_unit`]:
+    /// each step rounded to Python's 28-digit `decimal` context in turn, so the
+    /// per-unit cost is beancount's to the last digit and scale (#2652).
+    /// `{1 # 1}` over 3 is `1.333333333333333333333333333` (28 significant
+    /// digits); the `a + b / N` this used before gave
+    /// `1.3333333333333333333333333333`, a different value.
     ///
-    /// `None` for zero units (the per-unit is undefined), or when the quotient
-    /// or the sum leaves `Decimal`'s range — `a + b / N` can overflow on the
-    /// addition even when the quotient fits (#2327).
+    /// Beancount's form is safe to evaluate here because the intermediates
+    /// are held as Python holds them, with an unbounded exponent. It was NOT
+    /// safe in `Decimal`: `N × a` there is a product `checked_mul` rounds to
+    /// 28 decimal places without failing, so `1e-11` units at `{1e-18 # 0}`
+    /// booked a cost of `0` (#2351). `book.rs`, `CostSpec::resolve` and
+    /// `implicit_prices` all call this.
+    ///
+    /// `None` for zero units (the per-unit is undefined), or when the result
+    /// has no `Decimal` (past `Decimal::MAX`, or a nonzero quotient that
+    /// rounds to zero at 28 places; see [`crate::py_div`]).
     #[must_use]
     pub fn compound_per_unit(per_unit: Decimal, total: Decimal, units: Decimal) -> Option<Decimal> {
         if units.is_zero() {
             return None;
         }
-        per_unit.checked_add(total.checked_div(units.abs())?)
+        crate::py_compound_per_unit(per_unit, total, units)
     }
 
     /// Return the per-unit value if this number carries one.
@@ -891,11 +895,12 @@ impl CostSpec {
                 // and the unit count small, where a bare `/` PANICS (#2327).
                 // `None` here means what it means for zero units -- there is no
                 // cost to resolve -- and the booking engine reports the overflow
-                // itself before any caller reaches this.
-                total.checked_div(units.abs())?
+                // itself before any caller reaches this. Divided as beancount
+                // divides (`py_div`, #2652), so `{{10 USD}}` over 4 is `2.5`.
+                crate::py_div(total, units.abs())?
             }
-            // Compound `{a # b}`: beancount's compound_amount, `(N*a + b)/N`,
-            // evaluated as `a + b/N` so that no intermediate product can round
+            // Compound `{a # b}`: beancount's `(N*a + b)/N`, step by step as
+            // Python rounds it (#2652), without an intermediate that can round
             // to zero first (#2351). One implementation, shared with the booker
             // and implicit prices.
             CostNumber::Compound { per_unit, total } => {

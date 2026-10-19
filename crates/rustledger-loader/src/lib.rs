@@ -463,20 +463,30 @@ impl Loader {
         let mut source_map = SourceMap::new();
         let mut errors = Vec::new();
 
-        // Get normalized path (uses filesystem-specific normalization)
-        let canonical = self.fs.normalize(path);
+        // The path as opened (symlinks kept) is what relative paths in the
+        // file resolve against; the normalized one is its identity (#2635).
+        // Identity comes from the opened spelling, so a `..` after a symlink
+        // names the file beancount reads, not the one the OS would.
+        let opened = self.fs.normalize_lexical(path);
+        let canonical = self.fs.normalize(&opened);
 
-        // Set root directory for path security if enabled but not explicitly set
+        // Set root directory for path security if enabled but not explicitly
+        // set: the directory the file was opened from, since that is where
+        // its includes resolve. A root file reached through a symlink into
+        // another directory therefore guards the LINK's directory: includes
+        // must stay under it (checked on their normalized paths, so an
+        // include that is itself a link out of the root is still refused).
         if self.enforce_path_security && self.root_dir.is_none() {
-            self.root_dir = canonical.parent().map(Path::to_path_buf);
+            self.root_dir = opened.parent().map(Path::to_path_buf);
         }
         // Normalize the root through the SAME filesystem namespace as the paths
         // it is compared against. An explicit `with_root_dir(...)` may be
         // relative/un-normalized, and on disk `normalize` makes paths absolute —
         // so without this, a relative root never `starts_with` a normalized path
-        // and every include would be falsely rejected as a traversal. (The
-        // default-derived root is already normalized, so re-normalizing is a
-        // no-op there.)
+        // and every include would be falsely rejected as a traversal. The
+        // default-derived root is the opened (lexical) directory, so this is
+        // also what resolves its symlinks to compare against normalized
+        // include paths.
         if let Some(root) = self.root_dir.take() {
             self.root_dir = Some(self.fs.normalize(&root));
         }
@@ -485,6 +495,7 @@ impl Loader {
         // The root file is typically small (just includes + options).
         self.load_recursive(
             &canonical,
+            &opened,
             None,
             &mut directives,
             &mut options,
@@ -526,7 +537,7 @@ impl Loader {
         // which asked about the process CWD: `rledger check sub/ledger.bean`
         // reported a missing document root that was present, and the same
         // ledger checked clean from inside `sub/` (#1999).
-        let base_dir = source_map.files().first().and_then(|f| f.path.parent());
+        let base_dir = source_map.files().first().map(SourceFile::dir);
         let doc_warnings =
             process::document_root_warnings(&options.documents, base_dir, self.fs.as_ref());
         options.warnings.extend(doc_warnings);
@@ -550,6 +561,7 @@ impl Loader {
     fn load_recursive(
         &mut self,
         path: &Path,
+        opened: &Path,
         pre_parsed: Option<(std::sync::Arc<str>, rustledger_parser::ParseResult)>,
         directives: &mut Vec<Spanned<Directive>>,
         options: &mut Options,
@@ -612,7 +624,11 @@ impl Loader {
         // caller) so an over-large include/glob set fails loudly without a panic.
         let fid_u16 = file_id_to_u16(source_map.files().len())?;
         // Add to source map (Arc::clone is cheap - just increments refcount)
-        let file_id = source_map.add_file(path_buf.clone(), std::sync::Arc::clone(&source));
+        let file_id = source_map.add_opened_file(
+            path_buf.clone(),
+            opened.to_path_buf(),
+            std::sync::Arc::clone(&source),
+        );
         debug_assert_eq!(file_id, fid_u16 as usize);
 
         // Mark as loading (update both stack and set)
@@ -657,8 +673,11 @@ impl Loader {
             });
         }
 
-        // Process includes (with glob pattern support)
-        let base_dir = path.parent().unwrap_or(Path::new("."));
+        // Process includes (with glob pattern support), relative to the
+        // directory this file was OPENED from, symlinks kept — beancount's
+        // rule (#2635). Resolving against `path`, the normalized identity,
+        // read the includes next to a symlink's target instead.
+        let base_dir = opened.parent().unwrap_or(Path::new("."));
         for (include_path, span) in &result.includes {
             let include_site = IncludeSite {
                 file: path_buf.clone(),
@@ -695,9 +714,11 @@ impl Loader {
                     // — under a `VirtualFileSystem` the disk `normalize_path`
                     // would have compared a disk-canonicalized prefix against a
                     // pure-string root.
-                    self.fs.normalize(&prefix_path)
+                    self.fs.normalize(&self.fs.normalize_lexical(&prefix_path))
                 } else {
-                    self.fs.normalize(&full_path)
+                    // The same spelling the file gets below: lexical first,
+                    // so a `..` after a symlink is checked as the file read.
+                    self.fs.normalize(&self.fs.normalize_lexical(&full_path))
                 };
 
                 if !path_to_check.starts_with(root) {
@@ -735,10 +756,13 @@ impl Loader {
                 continue;
             }
 
-            // Normalize and security-check all matched paths first.
+            // Normalize and security-check all matched paths first. Each keeps
+            // its opened spelling (lexical, what its own includes resolve
+            // against) next to its identity.
             let mut valid_paths = Vec::with_capacity(paths_to_load.len());
             for matched_path in paths_to_load {
-                let canonical = self.fs.normalize(&matched_path);
+                let child_opened = self.fs.normalize_lexical(&matched_path);
+                let canonical = self.fs.normalize(&child_opened);
 
                 // Security check: glob could match files outside root via symlinks
                 if self.enforce_path_security
@@ -752,7 +776,7 @@ impl Loader {
                     continue;
                 }
 
-                valid_paths.push(canonical);
+                valid_paths.push((canonical, child_opened));
             }
 
             // Parallel optimization: when loading multiple sibling includes
@@ -778,7 +802,7 @@ impl Loader {
                 let pre_parsed: Vec<Option<(std::sync::Arc<str>, rustledger_parser::ParseResult)>> =
                     valid_paths
                         .par_iter()
-                        .map(|p| {
+                        .map(|(p, _)| {
                             // Skip encrypted files — they need sequential GPG decryption
                             if fs.is_encrypted(p) {
                                 return None;
@@ -796,18 +820,32 @@ impl Loader {
                 // pre-parsed pass their data to load_recursive; files
                 // that weren't (encrypted or I/O error) are loaded
                 // sequentially as a fallback.
-                for (canonical, pre) in valid_paths.iter().zip(pre_parsed) {
+                for ((canonical, child_opened), pre) in valid_paths.iter().zip(pre_parsed) {
                     if let Err(e) = self.load_recursive(
-                        canonical, pre, directives, options, plugins, source_map, errors,
+                        canonical,
+                        child_opened,
+                        pre,
+                        directives,
+                        options,
+                        plugins,
+                        source_map,
+                        errors,
                     ) {
                         errors.push(e.at_include(include_site.clone()));
                     }
                 }
             } else {
                 // Sequential fallback: single file or VFS.
-                for canonical in valid_paths {
+                for (canonical, child_opened) in valid_paths {
                     if let Err(e) = self.load_recursive(
-                        &canonical, None, directives, options, plugins, source_map, errors,
+                        &canonical,
+                        &child_opened,
+                        None,
+                        directives,
+                        options,
+                        plugins,
+                        source_map,
+                        errors,
                     ) {
                         errors.push(e.at_include(include_site.clone()));
                     }

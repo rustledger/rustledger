@@ -796,6 +796,28 @@ def _entry_point_name(item):
     return item if isinstance(item, str) else getattr(item, '__name__', repr(item))
 
 
+def _options_map(options):
+    """The `options_map` a plugin is given: the host's options, with the
+    tolerance options in the shapes beancount's options map holds them
+    (#2653).
+
+    `inferred_tolerance_default` is a dict of currency to Decimal (`'*'`
+    the default for every currency), `tolerance_multiplier` a Decimal and
+    `infer_tolerance_from_cost` a bool. beancount also keeps the deprecated
+    `inferred_tolerance_multiplier` key, always at its default 0.5:
+    setting that option sets `tolerance_multiplier`, its alias.
+    """
+    options['inferred_tolerance_default'] = {
+        currency: _parse_decimal(number)
+        for currency, number in options.get('inferred_tolerance_default') or []
+    }
+    options['tolerance_multiplier'] = _parse_decimal(
+        options.get('tolerance_multiplier') or '0.5')
+    options['inferred_tolerance_multiplier'] = Decimal('0.5')
+    options['infer_tolerance_from_cost'] = bool(options.get('infer_tolerance_from_cost'))
+    return options
+
+
 def run_plugin(module, plugin_name, entries_file, options_json, config=None,
                entry_points=None):
     """
@@ -862,7 +884,7 @@ def run_plugin(module, plugin_name, entries_file, options_json, config=None,
 
     entries = load_entries(entries_file)
     inputs = list(entries)
-    options = json.loads(options_json) if options_json else {}
+    options = _options_map(json.loads(options_json) if options_json else {})
     args = () if config is None else (config,)
 
     errors = []

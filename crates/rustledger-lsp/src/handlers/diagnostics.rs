@@ -375,7 +375,11 @@ pub(crate) fn run_ledger_validation(
             multiplier: validation_options.tolerance_multiplier,
             infer_from_cost: validation_options.infer_tolerance_from_cost,
             defaults: validation_options.inferred_tolerance_default.clone(),
-        });
+        })
+        // Mark the postings booking interpolates for the regular plugins, as
+        // the loader does (#2653), when they will run; their pass removes
+        // the marks before Late validation.
+        .with_interpolated_marks(plugin_ctx.is_some() && plugins_ok);
     booking_engine.register_account_methods(booked_directives.iter().map(|s| &s.value));
     // Booking failures, surfaced as diagnostics below.
     //

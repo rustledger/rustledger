@@ -166,7 +166,11 @@ use serde::{Deserialize, Serialize};
 ///   struct crosses the wire as a `MessagePack` array, so a version-1
 ///   guest cannot decode a version-2 note (`rmp_serde` rejects the longer
 ///   array), and would trap mid-run on the first note it was given.
-pub const ABI_VERSION: u32 = 2;
+/// - 3: [`PluginOptions`] carries the ledger's tolerance options,
+///   `inferred_tolerance_default`, `tolerance_multiplier` and
+///   `infer_tolerance_from_cost` (issue #2653). A version-2 guest cannot
+///   decode the longer options array, and fails on every input.
+pub const ABI_VERSION: u32 = 3;
 
 /// The WASM export symbol a guest uses to advertise [`ABI_VERSION`].
 /// The `wasm_*_main!` macros emit it; the host looks it up by this
@@ -374,8 +378,16 @@ impl PluginAccountTypes {
     }
 }
 
+/// beancount's default `tolerance_multiplier`, as a [`PluginOptions`] holds
+/// it.
+pub const DEFAULT_TOLERANCE_MULTIPLIER: &str = "0.5";
+
+fn default_tolerance_multiplier() -> String {
+    DEFAULT_TOLERANCE_MULTIPLIER.to_string()
+}
+
 /// Ledger options passed to plugins.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginOptions {
     /// Operating currencies (from `option "operating_currency" "USD"`).
     pub operating_currencies: Vec<String>,
@@ -390,6 +402,38 @@ pub struct PluginOptions {
     /// nothing and reproduce the bug this exists to fix.
     #[serde(default)]
     pub account_types: PluginAccountTypes,
+    /// Per-currency tolerance floors (`option "inferred_tolerance_default"
+    /// "USD:0.005"`), as `(currency, number)` pairs sorted by currency; the
+    /// currency `*` is the default for every currency. Empty when the
+    /// ledger sets none. Added in ABI version 3 (issue #2653).
+    #[serde(default)]
+    pub inferred_tolerance_default: Vec<(String, String)>,
+    /// The multiplier of the smallest digit a tolerance is inferred from
+    /// (`option "tolerance_multiplier"`, or its deprecated name
+    /// `inferred_tolerance_multiplier`), as a decimal string; `"0.5"` when
+    /// the ledger sets none. Added in ABI version 3 (issue #2653).
+    #[serde(default = "default_tolerance_multiplier")]
+    pub tolerance_multiplier: String,
+    /// Whether a posting's cost and price widen the tolerance
+    /// (`option "infer_tolerance_from_cost"`). Added in ABI version 3
+    /// (issue #2653).
+    #[serde(default)]
+    pub infer_tolerance_from_cost: bool,
+}
+
+impl Default for PluginOptions {
+    /// What a ledger that sets no option has: beancount's account roots and
+    /// tolerance options.
+    fn default() -> Self {
+        Self {
+            operating_currencies: Vec::new(),
+            title: None,
+            account_types: PluginAccountTypes::default(),
+            inferred_tolerance_default: Vec::new(),
+            tolerance_multiplier: default_tolerance_multiplier(),
+            infer_tolerance_from_cost: false,
+        }
+    }
 }
 
 // ============================================================================
@@ -669,6 +713,30 @@ pub struct PostingData {
     /// Will not be compared during equality check.
     #[serde(default)]
     pub span: Option<SourceSpan>,
+}
+
+/// The metadata key booking sets on a posting it interpolated.
+///
+/// An interpolated posting is one whose units, cost or price number booking
+/// solved from the transaction's residual rather than the ledger writing
+/// it. beancount's `AUTOMATIC_META`; see [`PostingData::is_interpolated`].
+pub const AUTOMATIC_META: &str = "__automatic__";
+
+impl PostingData {
+    /// Whether booking interpolated this posting: solved its units, its
+    /// per-unit or total cost, or its price from the transaction's
+    /// residual (issue #2653).
+    ///
+    /// The mark is [`AUTOMATIC_META`] in the posting's metadata, as in
+    /// beancount, where a plugin tests `AUTOMATIC_META in posting.meta`;
+    /// presence is what counts, as there. The host sets it while plugins
+    /// run and removes it once they have, so it never reaches the ledger
+    /// rledger reports from; a plugin modifying a posting keeps it by
+    /// keeping the posting's metadata.
+    #[must_use]
+    pub fn is_interpolated(&self) -> bool {
+        self.metadata.iter().any(|(key, _)| key == AUTOMATIC_META)
+    }
 }
 
 impl PartialEq for PostingData {
@@ -2150,5 +2218,74 @@ mod account_root_tests {
                 .expect("an older payload still loads");
         assert_eq!(opts.account_types.expenses, "Expenses");
         assert!(opts.account_types.is_expense("Expenses:Food"));
+        // Nor do the tolerance options (#2653): an empty multiplier would
+        // not parse, where beancount's default is 0.5.
+        assert_eq!(opts.tolerance_multiplier, "0.5");
+        assert!(opts.inferred_tolerance_default.is_empty());
+        assert!(!opts.infer_tolerance_from_cost);
+        assert_eq!(
+            super::PluginOptions::default().tolerance_multiplier,
+            super::DEFAULT_TOLERANCE_MULTIPLIER
+        );
+    }
+
+    /// The tolerance options cross the WASM wire intact, and a version-2
+    /// guest cannot read them: options are a `MessagePack` array, so the
+    /// longer one fails to decode as the old shape. That failure is why
+    /// [`super::ABI_VERSION`] is 3 (#2653).
+    #[test]
+    fn tolerance_options_cross_the_wire_and_break_abi_2() {
+        #[derive(serde::Deserialize)]
+        #[allow(dead_code)]
+        struct AbiTwoOptions {
+            operating_currencies: Vec<String>,
+            title: Option<String>,
+            account_types: PluginAccountTypes,
+        }
+
+        let options = super::PluginOptions {
+            inferred_tolerance_default: vec![
+                ("*".to_string(), "0.5".to_string()),
+                ("USD".to_string(), "0.003".to_string()),
+            ],
+            tolerance_multiplier: "0.6".to_string(),
+            infer_tolerance_from_cost: true,
+            ..Default::default()
+        };
+        let bytes = rmp_serde::to_vec(&options).unwrap();
+        let decoded: super::PluginOptions = rmp_serde::from_slice(&bytes).unwrap();
+        assert_eq!(
+            decoded.inferred_tolerance_default,
+            options.inferred_tolerance_default
+        );
+        assert_eq!(decoded.tolerance_multiplier, "0.6");
+        assert!(decoded.infer_tolerance_from_cost);
+
+        assert!(
+            rmp_serde::from_slice::<AbiTwoOptions>(&bytes).is_err(),
+            "a version-2 guest decoded version-3 options; the ABI bump is unneeded"
+        );
+        assert_eq!(super::ABI_VERSION, 3);
+    }
+
+    /// `is_interpolated` reads beancount's mark, by presence (#2653).
+    #[test]
+    fn is_interpolated_reads_the_automatic_mark() {
+        let mut posting = super::PostingData {
+            account: "Assets:Cash".to_string(),
+            units: None,
+            cost: None,
+            price: None,
+            flag: None,
+            metadata: vec![("note".to_string(), super::MetaValueData::Bool(true))],
+            span: None,
+        };
+        assert!(!posting.is_interpolated());
+        posting.metadata.push((
+            super::AUTOMATIC_META.to_string(),
+            super::MetaValueData::Bool(true),
+        ));
+        assert!(posting.is_interpolated());
+        assert_eq!(super::AUTOMATIC_META, "__automatic__");
     }
 }

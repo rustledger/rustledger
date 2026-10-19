@@ -8,6 +8,10 @@
 //! `ansi` puts terminal control sequences in its message, and `rebuild`
 //! returns every directive as a modification instead of keeping it, so
 //! each one makes the full trip through the wire and back (#2573).
+//! A ledger titled `conformance inputs` makes it also report the ledger's
+//! tolerance options and the postings booking interpolated, as the plugin
+//! receives them (#2653); a title, not a config string, so it works through
+//! `check --plugin` too, which passes no config.
 
 use rustledger_plugin_types::{
     DirectiveData, DirectiveWrapper, PluginError, PluginInput, PluginOp, PluginOutput,
@@ -30,8 +34,43 @@ fn misbehave(mode: Option<&str>) {
     }
 }
 
+/// What `inputs` reports: the tolerance options and the interpolated
+/// postings, as `narration/account`.
+fn inputs(input: &PluginInput) -> String {
+    let options = &input.options;
+    let defaults: Vec<String> = options
+        .inferred_tolerance_default
+        .iter()
+        .map(|(currency, number)| format!("{currency}={number}"))
+        .collect();
+    let marked: Vec<String> = input
+        .directives
+        .iter()
+        .filter_map(|w| match &w.data {
+            DirectiveData::Transaction(txn) => Some(txn),
+            _ => None,
+        })
+        .flat_map(|txn| {
+            txn.postings
+                .iter()
+                .filter(|p| p.is_interpolated())
+                .map(move |p| format!("{}/{}", txn.narration, p.account))
+        })
+        .collect();
+    format!(
+        "conformance: WASM plugin options: tolerance defaults [{}], multiplier {}, \
+         from cost {}; interpolated: {}",
+        defaults.join(", "),
+        options.tolerance_multiplier,
+        options.infer_tolerance_from_cost,
+        marked.join(", ")
+    )
+}
+
 fn process(input: PluginInput) -> PluginOutput {
     misbehave(input.config.as_deref());
+    let report =
+        (input.options.title.as_deref() == Some("conformance inputs")).then(|| inputs(&input));
     let n = input.directives.len();
     let mut ops = Vec::with_capacity(n);
     let rebuild = input.config.as_deref() == Some("rebuild");
@@ -62,12 +101,11 @@ fn process(input: PluginInput) -> PluginOutput {
     } else {
         ""
     };
-    PluginOutput {
-        ops,
-        errors: vec![PluginError::warning(format!(
-            "conformance: WASM plugin ran over {n} directives{tail}"
-        ))],
-    }
+    let mut errors = vec![PluginError::warning(format!(
+        "conformance: WASM plugin ran over {n} directives{tail}"
+    ))];
+    errors.extend(report.map(PluginError::warning));
+    PluginOutput { ops, errors }
 }
 
 wasm_plugin_main! {

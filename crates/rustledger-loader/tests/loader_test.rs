@@ -2368,6 +2368,179 @@ fn test_open_check_deferred_past_account_rewriting_plugins() {
     );
 }
 
+/// Load `source` from a temp file and return its diagnostics' codes and
+/// messages, minus the advisory-only E1004 (close with a non-zero balance:
+/// rledger-only, not shown by `rledger check`, and not a beancount error).
+fn load_codes(source: &str) -> Vec<(String, String)> {
+    use rustledger_loader::{LoadOptions, load};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("ledger.beancount");
+    std::fs::write(&path, source).expect("write ledger");
+    let ledger = load(&path, &LoadOptions::default()).expect("load ledger");
+    ledger
+        .errors
+        .iter()
+        .filter(|e| e.code != "E1004")
+        .map(|e| (e.code.clone(), e.message.clone()))
+        .collect()
+}
+
+/// #2648: validation runs on what the regular plugins produced, as in
+/// beancount (plugins, then validation). Each ledger below is what
+/// `bean-check` reports for it.
+#[test]
+fn test_renaming_plugin_is_validated_under_the_new_names() {
+    // A renamed pad + balance: the pad fills the renamed account. Was a
+    // false E2001 + E2003 (the pad was registered under the old name).
+    let errors = load_codes(
+        "plugin \"rename_accounts\" \"{'Cash': 'Money'}\"\n\
+         2020-01-01 open Assets:Cash\n\
+         2020-01-01 open Equity:Opening\n\
+         2020-01-02 pad Assets:Cash Equity:Opening\n\
+         2020-01-05 balance Assets:Cash 100 USD\n",
+    );
+    assert!(errors.is_empty(), "renamed pad + balance: {errors:?}");
+
+    // A balance and close on the old name, only the new name opened. Was a
+    // false E1001 twice.
+    let errors = load_codes(
+        "plugin \"rename_accounts\" \"{'Assets:Cash': 'Assets:Money'}\"\n\
+         2020-01-01 open Assets:Money\n\
+         2020-01-01 open Equity:Opening\n\
+         2020-01-03 * \"x\"\n  Assets:Cash 100 USD\n  Equity:Opening\n\
+         2020-01-04 balance Assets:Cash 100 USD\n\
+         2020-01-05 close Assets:Cash\n",
+    );
+    assert!(errors.is_empty(), "renamed balance + close: {errors:?}");
+
+    // An ELIDED posting on the old name, only the new name opened. Was a
+    // false E1001 (elided postings were judged before the plugin ran).
+    let errors = load_codes(
+        "plugin \"rename_accounts\" \"{'Expenses:Old': 'Expenses:New'}\"\n\
+         2020-01-01 open Assets:Cash\n\
+         2020-01-01 open Expenses:New\n\
+         2020-01-02 * \"x\"\n  Assets:Cash  -10.00 USD\n  Expenses:Old\n",
+    );
+    assert!(errors.is_empty(), "renamed elided posting: {errors:?}");
+
+    // Two opens renamed onto one account: a duplicate open. Was missed.
+    let errors = load_codes(
+        "plugin \"rename_accounts\" \"{'Expenses:Food:Groceries': 'Expenses:Dining'}\"\n\
+         2020-01-01 open Assets:Cash\n\
+         2020-01-01 open Expenses:Food:Groceries\n\
+         2020-01-01 open Expenses:Dining\n\
+         2020-01-01 open Equity:Opening\n\
+         2020-01-02 pad Assets:Cash Equity:Opening\n\
+         2020-01-05 balance Assets:Cash 100 USD\n\
+         2020-01-06 * \"x\"\n  Expenses:Food:Groceries 10 USD\n  Assets:Cash\n\
+         2020-01-07 note Expenses:Food:Groceries \"hi\"\n\
+         2020-12-31 close Expenses:Food:Groceries\n",
+    );
+    let codes: Vec<&str> = errors.iter().map(|(c, _)| c.as_str()).collect();
+    assert_eq!(codes, ["E1002"], "duplicate open from a rename: {errors:?}");
+}
+
+/// #2648: a `close` a plugin inserted (`close_tree` closing a sub-account
+/// with its parent) closes that account for later postings, as in beancount
+/// ("Invalid reference to inactive account").
+#[test]
+fn test_close_tree_inserted_close_is_validated() {
+    let errors = load_codes(
+        "plugin \"close_tree\"\n\
+         2020-01-01 open Assets:Bank\n\
+         2020-01-01 open Assets:Bank:Checking\n\
+         2020-01-01 open Equity:Opening\n\
+         2020-02-01 close Assets:Bank\n\
+         2020-03-01 * \"after close\"\n  Assets:Bank:Checking 5 USD\n  Equity:Opening\n",
+    );
+    let closed = errors
+        .iter()
+        .filter(|(c, m)| c == "E1003" && m.contains("Assets:Bank:Checking"))
+        .count();
+    assert_eq!(
+        closed, 1,
+        "posting after a plugin-inserted close: {errors:?}"
+    );
+}
+
+/// #2651: a `balance` a plugin inserted (`check_drained`) gets the open's
+/// currency-constraint check a written one gets. beancount reports the
+/// transaction's currency, the inserted balance's currency, and its failure.
+#[test]
+fn test_plugin_inserted_balance_gets_currency_check() {
+    let errors = load_codes(
+        "plugin \"check_drained\"\n\
+         2020-01-01 open Assets:Cash USD\n\
+         2020-01-01 open Equity:Opening\n\
+         2020-01-03 * \"x\"\n  Assets:Cash 10 EUR\n  Equity:Opening\n\
+         2020-01-05 close Assets:Cash\n",
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|(c, m)| c == "E5002" && m.contains("Balance directive")),
+        "inserted balance in a disallowed currency: {errors:?}"
+    );
+    let codes: Vec<&str> = errors.iter().map(|(c, _)| c.as_str()).collect();
+    assert_eq!(
+        codes.iter().filter(|c| **c == "E5002").count(),
+        2,
+        "{errors:?}"
+    );
+    assert_eq!(
+        codes.iter().filter(|c| **c == "E2001").count(),
+        1,
+        "{errors:?}"
+    );
+}
+
+/// The rustledger#877 strictness (an incomplete posting to an unopened
+/// account that booking interpolates to zero and drops is still reported;
+/// beancount misses it) covers a bare-currency posting as well as a fully
+/// elided one.
+#[test]
+fn test_zero_interpolated_posting_to_unopened_account_is_reported() {
+    for leg in ["Expenses:Unopened", "Expenses:Unopened USD"] {
+        let errors = load_codes(&format!(
+            "2020-01-01 open Assets:Cash\n\
+             2020-01-03 * \"zero\"\n  Assets:Cash 0 USD\n  {leg}\n"
+        ));
+        assert_eq!(
+            errors
+                .iter()
+                .filter(|(c, m)| c == "E1001" && m.contains("Expenses:Unopened"))
+                .count(),
+            1,
+            "{leg}: {errors:?}"
+        );
+    }
+}
+
+/// A transaction booking refused never reaches the late phase, but its
+/// postings' account errors are still reported (from the early phase's
+/// held judgment). Stricter than beancount, which drops the refused entry
+/// and reports only the booking error; the unopened account is a real,
+/// separate problem, and the posting-after-close half was already reported
+/// this way before #2648.
+#[test]
+fn test_refused_transaction_keeps_its_account_errors() {
+    let errors = load_codes(
+        "2020-01-01 open Assets:Stock\n\
+         2020-01-01 open Assets:Cash\n\
+         2020-01-02 * \"buy\"\n  Assets:Stock 1 HOOL {10 USD}\n  Assets:Cash -10 USD\n\
+         2020-01-03 * \"sell unmatched lot\"\n  Assets:Stock -1 HOOL {20 USD}\n  \
+         Assets:Cash 20 USD\n  Expenses:NeverOpened -10 USD\n",
+    );
+    assert_eq!(
+        errors
+            .iter()
+            .filter(|(c, m)| c == "E1001" && m.contains("Expenses:NeverOpened"))
+            .count(),
+        1,
+        "{errors:?}"
+    );
+}
+
 /// The deferred E1001 dedup is keyed per-posting (`file_id`, span), not per
 /// (account, date): two transactions on the SAME date posting to the SAME
 /// unopened account — one elided (reported early), one explicit (reported

@@ -162,13 +162,13 @@ Input File
 ┌─────────────────────────────────────┐
 │ 3. EARLY VALIDATION                 │
 │    (rustledger-validate)            │
-│    - Account-presence checks        │
-│      (Open before use, etc.) —      │
-│      sees Opens synthesized by      │
-│      synth plugins above            │
-│    - Catches issues that would      │
-│      otherwise be hidden by         │
-│      booking interpolation          │
+│    - Transaction structure checks   │
+│    - Posting account errors judged  │
+│      and HELD (not yet reported):   │
+│      only reported for postings     │
+│      booking drops or refuses —     │
+│      issues booking interpolation   │
+│      would otherwise hide           │
 │      (see Python beancount #877)    │
 └─────────────────────────────────────┘
     │
@@ -197,6 +197,10 @@ Input File
 ┌─────────────────────────────────────┐
 │ 6. LATE VALIDATION                  │
 │    (rustledger-validate)            │
+│    - On what the plugins produced,  │
+│      as beancount validates:        │
+│    - Open/close/pad/note/document,  │
+│      posting presence and dates     │
 │    - Balance assertions             │
 │    - Commodity / currency checks    │
 │    - Post-booking invariants        │
@@ -282,11 +286,11 @@ Plugins are executed by `run_plugins()` in `rustledger-loader`, the single sourc
 
 Plugin execution is **split across two passes** of the pipeline (see the seven-step diagram above). Native plugins declare which pass they belong to via marker subtraits — `SynthPlugin` or `RegularPlugin` — each of which extends the base `NativePlugin` capability. The registry stores them in two separately-typed `Vec`s, and the loader looks up the pass-appropriate kind directly through `find_synth` / `find_regular`. This selects between the two `PluginPass` variants:
 
-- **Synth plugins** (`PluginPass::PreBookingSynth`) run **before Early validation**. These are account- or directive-injecting plugins like `auto_accounts` and `document_discovery`. Running them first means the Early validator's account-presence checks (Open-before-use) see the directives synth plugins inject — preventing false positives that would otherwise occur when a plugin is responsible for opening an account that subsequent transactions reference.
+- **Synth plugins** (`PluginPass::PreBookingSynth`) run **before Early validation**. These are account- or directive-injecting plugins like `auto_accounts` and `document_discovery`. Running them first means the Opens they inject are in the stream before booking, so the Early validator's held posting judgments (and booking itself) see them.
 
 - **Regular plugins** (`PluginPass::PostBooking`) — every plugin implementing `RegularPlugin` — run **after booking**. This is the right phase for plugins that consume booked output, particularly cost-spec readers that need `cost.number_per` filled in from a total cost spec (the booking engine computes this). Validators that need post-interpolation amounts also belong here.
 
-After the regular pass, **Late validation** runs (balance assertions, commodity checks, post-booking invariants), then the loader finalizes the ledger by re-merging plugin-emitted directives into the sorted stream.
+After the regular pass, **Late validation** runs on what the plugins produced, matching beancount's order (plugins, then validation): every account-name check (`open`, `close`, `pad`, `balance`, `note`, `document`, posting presence and dates), balance assertions, commodity checks and post-booking invariants. A renaming plugin is therefore validated under its new names, and a directive a plugin inserts gets the same checks as a written one. Then the loader finalizes the ledger by re-merging plugin-emitted directives into the sorted stream.
 
 ### 5. Binary Cache
 

@@ -200,6 +200,46 @@ fn comments_move_with_the_directive_they_precede() {
     assert!(root.ends_with("; end of file\n"));
 }
 
+/// The equivalence check compares comments again (#2628).
+///
+/// It used to drop them, because the parser put a transaction's header-line
+/// comment into its first posting's `comments` only when something preceded
+/// the transaction, so moving one to the top of a new file changed the field.
+/// The parser now attributes comments the same either way: a split whose
+/// first transaction of a year carries a header comment AND body comments
+/// still passes, and a ledger whose posting comment differs fingerprints
+/// differently.
+#[test]
+fn the_equivalence_check_compares_comments() {
+    let dir = tmp();
+    let ledger = "2023-01-01 open Assets:Bank USD\n\
+                  2023-01-01 open Expenses:Food USD\n\n\
+                  2023-05-01 * \"Lunch\"\n  Expenses:Food  10 USD\n  Assets:Bank\n\n\
+                  ; first of the year\n\
+                  2024-01-02 * \"Lunch\"  ; header note\n  \
+                  ; before food\n  Expenses:Food  12 USD\n  \
+                  ; before bank\n  Assets:Bank\n  \
+                  ; after bank\n";
+    let file = write(dir.path(), "ledger.beancount", ledger);
+    let original = fingerprint(&file);
+    let (code, _, err) = run_split(&split_args(&file, Period::Year));
+    assert_eq!(code, ExitCode::SUCCESS, "{err}");
+    let y2024 = fs::read_to_string(dir.path().join("ledger/2024.beancount")).unwrap();
+    assert!(
+        y2024.starts_with("; first of the year\n2024-01-02 * \"Lunch\"  ; header note\n"),
+        "{y2024}"
+    );
+    assert_eq!(fingerprint(&file), original);
+
+    let other = tmp();
+    let changed = write(
+        other.path(),
+        "ledger.beancount",
+        &ledger.replace("; before bank", "; before the bank"),
+    );
+    assert_ne!(fingerprint(&changed), original);
+}
+
 #[test]
 fn dry_run_writes_nothing() {
     let dir = tmp();

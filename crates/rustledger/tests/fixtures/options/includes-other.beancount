@@ -1,0 +1,3 @@
+2026-09-02 * "Buy 1 more, the same day"
+  Assets:Broker:Options  1 AAPL261016P00230000 @ 2.00 USD
+  Assets:Broker:Cash    -2.00 USD

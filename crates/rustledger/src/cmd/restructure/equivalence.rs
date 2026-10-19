@@ -71,11 +71,7 @@ pub(super) fn load(root: &Path, fs: OverlayFs) -> anyhow::Result<(Fingerprint, V
 }
 
 fn fingerprint(ledger: &Ledger) -> Fingerprint {
-    let directives: Vec<Directive> = ledger
-        .directives
-        .iter()
-        .map(|d| without_comments(d.value.clone()))
-        .collect();
+    let directives: Vec<Directive> = ledger.directives.iter().map(|d| d.value.clone()).collect();
     let documents = ledger
         .directives
         .iter()
@@ -129,27 +125,6 @@ fn fingerprint(ledger: &Ledger) -> Fingerprint {
             .map(|b| format!("{b:?}"))
             .collect(),
     }
-}
-
-/// Drop the comment text the parser hangs on transactions and postings.
-///
-/// Comments carry no meaning, and the restructurer copies them byte for byte,
-/// so they can only differ through how the parser attributes them, and that
-/// depends on what precedes a transaction: the comment on a transaction's
-/// header line lands in its first posting's `comments` when blank lines or
-/// comments precede the transaction, and nowhere when it is the first thing in
-/// its file. Moving a transaction to the top of a new file changes that, and
-/// comparing the field would refuse every split whose first directive carries
-/// a header comment.
-fn without_comments(mut d: Directive) -> Directive {
-    if let Directive::Transaction(t) = &mut d {
-        t.trailing_comments.clear();
-        for p in &mut t.postings {
-            p.value.comments.clear();
-            p.value.trailing_comments.clear();
-        }
-    }
-    d
 }
 
 /// Where a `document` path points: absolute as written, otherwise against

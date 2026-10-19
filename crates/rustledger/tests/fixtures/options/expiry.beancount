@@ -1,0 +1,73 @@
+; check_option_expiry parity fixture: rledger (native) and bean-check with
+; beancount-options must report the same errors, at the same lines, in the
+; same order. Each case is labelled in its narration.
+plugin "beancount_options.check_option_expiry"
+
+2026-01-01 open Assets:Broker:Options
+2026-01-01 open Assets:Broker:Cash
+2026-01-01 open Assets:IRA:Options
+2026-01-01 open Income:Options
+
+2026-09-02 * "partial close: sell 3"
+  Assets:Broker:Options  -3 AAPL261016P00232500 {300.00 USD}
+  Assets:Broker:Cash  900.00 USD
+
+2026-09-20 * "partial close: buy back 2"
+  Assets:Broker:Options  2 AAPL261016P00232500 {} @ 100.00 USD
+  Assets:Broker:Cash  -200.00 USD
+  Income:Options
+
+2026-09-02 * "sign change: short"
+  Assets:Broker:Options  -1 AAPL261016P00230000 @ 300 USD
+  Assets:Broker:Cash  300 USD
+
+2026-09-10 * "sign change: buy two"
+  Assets:Broker:Options  2 AAPL261016P00230000 @ 100 USD
+  Assets:Broker:Cash  -200 USD
+
+2026-09-02 * "netting: open"
+  Assets:IRA:Options  -1 SPY261016C00700000 @ 100 USD
+  Assets:Broker:Cash  100 USD
+
+2026-09-12 * "netting: cancelling legs"
+  Assets:IRA:Options  1 SPY261016C00700000 @ 100 USD
+  Assets:IRA:Options  -1 SPY261016C00700000 @ 100 USD
+
+2026-09-03 * "roots"
+  Assets:Broker:Options  -1 XYZ1261016C00050000 @ 1 USD
+  Assets:Broker:Options  -1 BRK.B261016C00500000 @ 1 USD
+  Assets:Broker:Options  -1 ABCDEF261016C00050000 @ 1 USD
+  Assets:Broker:Options  -1 F261016C00050000 @ 1 USD
+  Assets:Broker:Cash  4 USD
+
+2026-09-03 * "not options: bad month, bad day, root too long"
+  Assets:Broker:Options  -1 AAPL261316P00230000 @ 1 USD
+  Assets:Broker:Options  -1 AAPL261032P00230000 @ 1 USD
+  Assets:Broker:Options  -1 ABCDEFG261016P00230000 @ 1 USD
+  Assets:Broker:Cash  3 USD
+
+2026-09-04 * "hundred long"
+  Assets:Broker:Options  100 AAPL261016C00250000 {3.00 USD}
+  Assets:Broker:Cash  -300.00 USD
+
+2026-09-05 * "closed on expiry day: open"
+  Assets:IRA:Options  -1 AAPL261016P00210000 @ 1 USD
+  Assets:Broker:Cash  1 USD
+
+2026-10-16 * "closed on expiry day: close"
+  Assets:IRA:Options  1 AAPL261016P00210000 @ 1 USD
+  Assets:Broker:Cash  -1 USD
+
+2026-09-20 * "closed after expiry: open"
+  Assets:IRA:Options  -1 AAPL261016P00220000 @ 1 USD
+  Assets:Broker:Cash  1 USD
+
+2026-10-20 * "closed after expiry: close"
+  Assets:IRA:Options  1 AAPL261016P00220000 @ 1 USD
+  Assets:Broker:Cash  -1 USD
+
+2026-09-06 * "not expired by the last date"
+  Assets:Broker:Options  -1 AAPL261218P00200000 @ 1 USD
+  Assets:Broker:Cash  1 USD
+
+2026-11-01 price AAPL 200.00 USD

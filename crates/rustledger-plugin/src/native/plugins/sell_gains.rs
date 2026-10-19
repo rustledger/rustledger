@@ -25,15 +25,13 @@ use super::utils::at_entry;
 /// priced sale had no Income or Expenses posting at all, and so missed the
 /// typo in the proceeds this plugin exists to catch.
 ///
-/// Deliberate divergence: beancount infers the tolerance with the ledger's
-/// `inferred_tolerance_default`, `inferred_tolerance_multiplier` and
-/// `infer_tolerance_from_cost` options. Plugins are not given those options
-/// (they are not in `PluginOptions`, whose wire layout a WASM plugin decodes
-/// positionally), so this uses beancount's defaults for them. beancount also
-/// leaves out of the tolerance a posting booking interpolated; rledger's
-/// plugin data does not mark those, so an interpolated posting's precision
-/// counts here and can widen the tolerance (a cash leg booking computed as
-/// `40.00` allows 0.01 where beancount allows none).
+/// The tolerance is inferred as beancount infers it, with the ledger's
+/// `inferred_tolerance_default`, `tolerance_multiplier` and
+/// `infer_tolerance_from_cost` options, and leaving out a posting booking
+/// interpolated (its precision is booking's, not the ledger's): a cash leg
+/// booking computed as `40.00` allows no slack. Plugins were given neither
+/// the options nor the interpolation mark before #2653, so this used
+/// beancount's default options and counted that leg's precision.
 ///
 /// Amounts tied in beancount's print order (same-length currencies outside
 /// its list, equal numbers) print in the order the postings come in, which
@@ -124,12 +122,8 @@ impl NativePlugin for SellGainsPlugin {
     fn process(&self, input: PluginInput) -> PluginOutput {
         let roots = &input.options.account_types;
         let mut errors = Vec::new();
-        let defaults = rustc_hash::FxHashMap::default();
-        let tolerance_options = rustledger_booking::ToleranceOptions {
-            multiplier: Decimal::new(5, 1),
-            infer_from_cost: false,
-            defaults: &defaults,
-        };
+        let tolerance_policy = super::utils::tolerance_policy(&input.options);
+        let tolerance_options = tolerance_policy.options();
 
         for wrapper in &input.directives {
             let DirectiveData::Transaction(txn) = &wrapper.data else {

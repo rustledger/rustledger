@@ -252,7 +252,11 @@ use crate::types::{Error, LedgerOptions};
 /// and an AVERAGE one carries the pool's exact cost (#2647). Loader v39,
 /// unchanged -- parsed directives did not move. `Ledger` archives booked
 /// directives, so a v44 blob would serve the old, unmatched posting.
-pub const CACHE_VERSION: u32 = 45;
+/// v46: loader v40, a header-line comment stays off the first posting after
+/// a blank line or comment (#2628), and `\b` / `\f` in strings decode to
+/// U+0008 / U+000C (#2672). Parsed directives changed, so a v45 blob would
+/// serve the misplaced comment and the old strings.
+pub const CACHE_VERSION: u32 = 46;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -284,7 +288,7 @@ pub const CACHE_VERSION: u32 = 45;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 39;
+const LOADER_CACHE_VERSION_PIN: u32 = 40;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

@@ -17,10 +17,13 @@
 //!   selected postings equals that account's sum: the same postings,
 //!   realized and presented the same way (#2543).
 //!
-//! A subset booking cannot realize makes `BALANCES` fail, and leaves
-//! `sum(position)` the plain sum of its postings; the property counts those
-//! as "not both defined" and the test asserts the generator still reaches
-//! the realized cases, so the property cannot pass by skipping everything.
+//! A subset booking cannot realize leaves both the plain sum of its
+//! postings: `BALANCES` replays the whole window and realizes a partly
+//! selected account as `sum(position)` does (#2630), where it used to replay
+//! only the selected transactions and fail. `BALANCES WHERE` is the same
+//! query as `BALANCES FROM`, as in bean-query. The test asserts the
+//! generator still reaches the realized cases, so the property cannot pass
+//! by skipping everything.
 
 use proptest::prelude::*;
 use rustledger_booking::BookingEngine;
@@ -238,11 +241,18 @@ proptest! {
         let (text, directives) = ledger(&opens, &script, default);
         for from in FILTERS {
             let Ok(balances) = per_account(&directives, default, &format!("BALANCES{from}")) else {
-                // A subset booking cannot realize: BALANCES refuses it and
-                // `sum(position)` keeps the plain sum. Not both defined.
+                // A ledger booking itself cannot replay. Not both defined.
                 UNREALIZABLE.fetch_add(1, Ordering::Relaxed);
                 continue;
             };
+            // `BALANCES WHERE` filters the same postings (#2630).
+            let where_balances = per_account(
+                &directives,
+                default,
+                &format!("BALANCES{}", from.replace(" FROM ", " WHERE ")),
+            )
+            .expect("BALANCES WHERE runs whenever BALANCES FROM does");
+            prop_assert_eq!(&where_balances, &balances, "BALANCES{}\n{}", from, text);
             // The filter as FROM, and as a WHERE on the same transaction
             // attributes, which keeps the same postings.
             let filtered = [from.to_owned(), from.replace(" FROM ", " WHERE ")];
@@ -305,7 +315,7 @@ fn the_generator_reaches_mixed_average_accounts() {
     let realized = REALIZED_AVERAGE.load(Ordering::Relaxed);
     let mixed = MIXED_AVERAGE.load(Ordering::Relaxed);
     eprintln!(
-        "realized AVERAGE accounts: {realized}, mixed: {mixed}, unrealizable subsets: {}",
+        "realized AVERAGE accounts: {realized}, mixed: {mixed}, unreplayable ledgers: {}",
         UNREALIZABLE.load(Ordering::Relaxed)
     );
     assert!(realized > 200, "only {realized} realized AVERAGE accounts");

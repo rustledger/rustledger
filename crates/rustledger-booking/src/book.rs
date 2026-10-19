@@ -272,6 +272,10 @@ pub struct BookingEngine {
     /// beancount's defaults; the loader overrides it from the ledger's
     /// `option` directives via [`Self::with_tolerance_policy`].
     tolerance: crate::TolerancePolicy,
+    /// Whether booking marks each posting it interpolates with
+    /// [`rustledger_core::AUTOMATIC_META`]. Off by default; see
+    /// [`Self::with_interpolated_marks`].
+    mark_interpolated: bool,
 }
 
 impl BookingEngine {
@@ -283,6 +287,7 @@ impl BookingEngine {
             booking_method: BookingMethod::Fifo,
             account_methods: FxHashMap::default(),
             tolerance: crate::TolerancePolicy::default(),
+            mark_interpolated: false,
         }
     }
 
@@ -294,6 +299,7 @@ impl BookingEngine {
             booking_method: method,
             account_methods: FxHashMap::default(),
             tolerance: crate::TolerancePolicy::default(),
+            mark_interpolated: false,
         }
     }
 
@@ -308,6 +314,24 @@ impl BookingEngine {
     #[must_use]
     pub fn with_tolerance_policy(mut self, policy: crate::TolerancePolicy) -> Self {
         self.tolerance = policy;
+        self
+    }
+
+    /// Mark every posting booking interpolates with
+    /// [`rustledger_core::AUTOMATIC_META`] `= TRUE`, as beancount's booking
+    /// does: a posting whose units, per-unit or total cost, or price number
+    /// was solved from the transaction's residual (#2653). Splitting an
+    /// elided posting across currencies marks every split; a lot matched by
+    /// a reduction is not interpolation and is not marked.
+    ///
+    /// Plugins need the mark (beancount's `sellgains` leaves an interpolated
+    /// posting's precision out of its tolerance), and nothing else should
+    /// see it, so only the loader turns this on, when plugins will run, and
+    /// removes the marks with [`clear_interpolated_marks`] once they have.
+    /// A transaction that fails to book is left without marks, as written.
+    #[must_use]
+    pub const fn with_interpolated_marks(mut self, on: bool) -> Self {
+        self.mark_interpolated = on;
         self
     }
 
@@ -2291,11 +2315,36 @@ impl BookingEngine {
         } = self.prepare(txn)?;
         if let Some(mut resolved) = resolved {
             let gains =
-                self.book_interpolate_apply_with(&mut resolved, &tolerances, &cost_currencies)?;
+                self.book_interpolate_apply_marked(&mut resolved, &tolerances, &cost_currencies)?;
             *txn = resolved;
             return Ok(gains);
         }
-        self.book_interpolate_apply_with(txn, &tolerances, &cost_currencies)
+        self.book_interpolate_apply_marked(txn, &tolerances, &cost_currencies)
+    }
+
+    /// [`Self::book_interpolate_apply_with`], marking the postings it
+    /// interpolates when [`Self::with_interpolated_marks`] is on.
+    ///
+    /// The marks go on after `prepare` has computed the tolerances, which
+    /// must not see them (the tolerance leaves a marked posting out), and
+    /// come off again if booking fails, so a failed transaction reads as
+    /// written: no marked posting exists before booking, as a ledger cannot
+    /// write the key.
+    fn book_interpolate_apply_marked(
+        &mut self,
+        txn: &mut Transaction,
+        tolerances: &crate::InterpolationTolerances,
+        cost_currencies: &crate::interpolate::ElidedCosts,
+    ) -> Result<Vec<CapitalGain>, BookingError> {
+        if !self.mark_interpolated {
+            return self.book_interpolate_apply_with(txn, tolerances, cost_currencies);
+        }
+        let marked = mark_unsolved_numbers(txn);
+        let result = self.book_interpolate_apply_with(txn, tolerances, cost_currencies);
+        if result.is_err() && marked {
+            clear_interpolated_marks(txn);
+        }
+        result
     }
 
     /// [`Self::book_interpolate_apply`] with the tolerances already computed
@@ -2324,6 +2373,9 @@ impl BookingEngine {
             booked = self.book_with(&written, cost_currencies)?;
         }
         let mut candidate = booked.transaction;
+        if self.mark_interpolated {
+            mark_unsolved_costs(&mut candidate);
+        }
         let _ = crate::interpolate::interpolate_in_place_undoable_with(&mut candidate, tolerances)?;
         self.apply(&candidate)?;
         *txn = candidate;
@@ -2352,6 +2404,17 @@ impl BookingEngine {
             cost_currencies,
         } = self.prepare(txn)?;
         let txn = resolved.as_ref().unwrap_or(txn);
+        // Marked after `prepare`, as in `book_interpolate_apply_marked`, and
+        // on a copy, so the caller's transaction is never touched.
+        let marked_copy;
+        let txn = if self.mark_interpolated && has_unsolved_numbers(txn) {
+            let mut copy = txn.clone();
+            mark_unsolved_numbers(&mut copy);
+            marked_copy = copy;
+            &marked_copy
+        } else {
+            txn
+        };
         // Fast path: with no cost specs, `book` is an identity that only clones
         // `txn` verbatim (profiling flagged that clone as ~6 MB / 10k txns — the
         // common case), and it realizes no gains. In the fast path `book(txn)`'s
@@ -2370,11 +2433,86 @@ impl BookingEngine {
         if let Some(written) = Self::with_solved_units(txn, &booked.transaction, &tolerances)? {
             booked = self.book_with(&written, &cost_currencies)?;
         }
+        if self.mark_interpolated {
+            mark_unsolved_costs(&mut booked.transaction);
+        }
         let result = crate::interpolate::interpolate_with_interpolation_tolerances(
             &booked.transaction,
             &tolerances,
         )?;
         Ok((result, booked.gains))
+    }
+}
+
+/// Whether interpolation must solve the units number of `posting`: they are
+/// elided, or written as a bare currency. A number written without its
+/// currency is not one: its currency is inferred, its number is not.
+const fn units_unsolved(posting: &Posting) -> bool {
+    matches!(
+        posting.units,
+        None | Some(IncompleteAmount::CurrencyOnly(_))
+    )
+}
+
+/// Whether interpolation must solve the price number of `posting`: a bare
+/// `@` / `@@`, or one with a currency only.
+fn price_unsolved(posting: &Posting) -> bool {
+    posting
+        .price
+        .as_deref()
+        .is_some_and(|price| matches!(price.amount, None | Some(IncompleteAmount::CurrencyOnly(_))))
+}
+
+/// Whether any posting of `txn` has a units or price number for
+/// interpolation to solve.
+fn has_unsolved_numbers(txn: &Transaction) -> bool {
+    txn.postings
+        .iter()
+        .any(|p| units_unsolved(p) || price_unsolved(p))
+}
+
+/// Mark the postings of the transaction as written whose units or price
+/// number interpolation will solve (#2653), returning whether it marked
+/// any. Marked before booking because booking matches lots for a reduction
+/// whose units were solved, and copies a posting it splits, mark included.
+/// A cost number is marked after booking, by [`mark_unsolved_costs`]: only
+/// then is a `{}` that matched a lot told from one interpolation fills.
+fn mark_unsolved_numbers(txn: &mut Transaction) -> bool {
+    let mut marked = false;
+    for posting in &mut txn.postings {
+        if units_unsolved(posting) || price_unsolved(posting) {
+            mark(posting);
+            marked = true;
+        }
+    }
+    marked
+}
+
+/// Mark the postings of a booked transaction whose cost number
+/// interpolation will solve: an augmentation's `{}`, `{USD}` or
+/// `{2024-01-01}`. Booking has replaced every matched reduction's spec with
+/// its lot's cost by now.
+fn mark_unsolved_costs(txn: &mut Transaction) {
+    for posting in &mut txn.postings {
+        if posting.cost.as_deref().is_some_and(|c| c.number.is_none()) {
+            mark(posting);
+        }
+    }
+}
+
+fn mark(posting: &mut Posting) {
+    posting.meta.insert(
+        rustledger_core::AUTOMATIC_META.to_string(),
+        rustledger_core::MetaValue::Bool(true),
+    );
+}
+
+/// Remove [`rustledger_core::AUTOMATIC_META`] from every posting of `txn`:
+/// the marks [`BookingEngine::with_interpolated_marks`] adds, once the
+/// plugins that read them have run.
+pub fn clear_interpolated_marks(txn: &mut Transaction) {
+    for posting in &mut txn.postings {
+        posting.meta.remove(rustledger_core::AUTOMATIC_META);
     }
 }
 
@@ -5444,5 +5582,196 @@ mod tests {
         let booked = engine.book_and_interpolate(&txn).expect("books");
         let r = engine.apply(&booked.transaction);
         assert!(r.is_err(), "got {r:?}");
+    }
+
+    // ===== Interpolation marks (#2653) =====
+
+    /// Which postings of `txn` carry the interpolation mark, as
+    /// `account units`.
+    fn marked(txn: &Transaction) -> Vec<String> {
+        txn.postings
+            .iter()
+            .filter(|p| p.meta.contains_key(rustledger_core::AUTOMATIC_META))
+            .map(|p| {
+                assert_eq!(
+                    p.meta[rustledger_core::AUTOMATIC_META],
+                    rustledger_core::MetaValue::Bool(true)
+                );
+                format!(
+                    "{} {}",
+                    p.account,
+                    p.amount()
+                        .map_or_else(|| "?".to_string(), ToString::to_string)
+                )
+            })
+            .collect()
+    }
+
+    fn usd(n: Decimal) -> Amount {
+        Amount::new(n, "USD")
+    }
+
+    /// Book `txn` with marks on, as the loader does when plugins run.
+    fn book_marked(engine: &mut BookingEngine, mut txn: Transaction) -> Transaction {
+        engine.book_interpolate_apply(&mut txn).expect("books");
+        txn
+    }
+
+    /// Every way beancount marks `__automatic__`: elided units, a price or
+    /// cost number solved from the residual, and an elided posting split
+    /// across currencies (each split marked). A written posting, and a
+    /// reduction's lot matched by booking, are not interpolation.
+    #[test]
+    fn booking_marks_the_postings_it_interpolates() {
+        let mut engine = BookingEngine::new().with_interpolated_marks(true);
+        let units = Transaction::new(date(2024, 1, 2), "units")
+            .with_synthesized_posting(Posting::new("Expenses:Food", usd(dec!(3.00))))
+            .with_synthesized_posting(Posting::auto("Assets:Bank"));
+        assert_eq!(
+            marked(&book_marked(&mut engine, units)),
+            ["Assets:Bank -3.00 USD"]
+        );
+
+        let price = Transaction::new(date(2024, 1, 3), "price")
+            .with_synthesized_posting(
+                Posting::new("Assets:Eur", Amount::new(dec!(10.00), "EUR")).with_price(
+                    PriceAnnotation {
+                        kind: rustledger_core::PriceKind::Unit,
+                        amount: Some(IncompleteAmount::CurrencyOnly("USD".into())),
+                    },
+                ),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Bank", usd(dec!(-12.00))));
+        assert_eq!(
+            marked(&book_marked(&mut engine, price)),
+            ["Assets:Eur 10.00 EUR"]
+        );
+
+        let cost = Transaction::new(date(2024, 1, 4), "cost")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(3), "AAA"))
+                    .with_cost(CostSpec::empty().with_currency("USD")),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Bank", usd(dec!(-30.00))));
+        assert_eq!(
+            marked(&book_marked(&mut engine, cost)),
+            ["Assets:Stock 3 AAA"]
+        );
+
+        let split = Transaction::new(date(2024, 1, 5), "split")
+            .with_synthesized_posting(Posting::new("Assets:Bank", usd(dec!(10.00))))
+            .with_synthesized_posting(Posting::new("Assets:Eur", Amount::new(dec!(5.00), "EUR")))
+            .with_synthesized_posting(Posting::auto("Equity:Open"));
+        assert_eq!(
+            marked(&book_marked(&mut engine, split)),
+            ["Equity:Open -10.00 USD", "Equity:Open -5.00 EUR"]
+        );
+
+        // The lot bought above, sold with its cash written: booking matches
+        // the lot, it interpolates nothing.
+        let sale = Transaction::new(date(2024, 1, 6), "sale")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(-3), "AAA"))
+                    .with_cost(CostSpec::empty()),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Bank", usd(dec!(30.00))));
+        assert!(marked(&book_marked(&mut engine, sale)).is_empty());
+
+        // Written in full: nothing to mark.
+        let written = Transaction::new(date(2024, 1, 7), "written")
+            .with_synthesized_posting(Posting::new("Assets:Bank", usd(dec!(1.00))))
+            .with_synthesized_posting(Posting::new("Equity:Open", usd(dec!(-1.00))));
+        assert!(marked(&book_marked(&mut engine, written)).is_empty());
+    }
+
+    /// Off by default: a booking engine nobody asked for marks marks nothing,
+    /// so no consumer but the plugin pass ever sees one.
+    #[test]
+    fn booking_marks_nothing_unless_asked() {
+        let mut engine = BookingEngine::new();
+        let units = Transaction::new(date(2024, 1, 2), "units")
+            .with_synthesized_posting(Posting::new("Expenses:Food", usd(dec!(3.00))))
+            .with_synthesized_posting(Posting::auto("Assets:Bank"));
+        assert!(marked(&book_marked(&mut engine, units)).is_empty());
+    }
+
+    /// A transaction booking refuses reads as written: the marks put on
+    /// before booking come off again (the loader hands it back to the
+    /// ledger), on both booking paths.
+    #[test]
+    fn a_refused_transaction_keeps_no_marks() {
+        let mut engine = BookingEngine::new().with_interpolated_marks(true);
+        // Two elided postings in one currency: ambiguous.
+        let mut ambiguous = Transaction::new(date(2024, 1, 2), "ambiguous")
+            .with_synthesized_posting(Posting::new("Expenses:Food", usd(dec!(3.00))))
+            .with_synthesized_posting(Posting::auto("Assets:Bank"))
+            .with_synthesized_posting(Posting::auto("Assets:Cash"));
+        let before = ambiguous.clone();
+        assert!(engine.book_interpolate_apply(&mut ambiguous).is_err());
+        assert_eq!(ambiguous, before);
+        assert!(marked(&ambiguous).is_empty());
+
+        // A sale of more than the lot held, its cash elided (the slow path).
+        let lot = || {
+            CostSpec::empty()
+                .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(10) })
+                .with_currency("USD")
+        };
+        let mut strict = BookingEngine::with_method(rustledger_core::BookingMethod::Strict)
+            .with_interpolated_marks(true);
+        let buy = Transaction::new(date(2024, 1, 3), "buy")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(3), "ZZZ")).with_cost(lot()),
+            )
+            .with_synthesized_posting(Posting::auto("Assets:Bank"));
+        book_marked(&mut strict, buy);
+        let mut oversold = Transaction::new(date(2024, 1, 4), "oversold")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(-5), "ZZZ")).with_cost(lot()),
+            )
+            .with_synthesized_posting(Posting::auto("Assets:Bank"));
+        let before = oversold.clone();
+        assert!(strict.book_interpolate_apply(&mut oversold).is_err());
+        assert_eq!(oversold, before);
+        assert!(marked(&oversold).is_empty());
+    }
+
+    /// The LSP's path, `book_and_interpolate`, marks its result the same way
+    /// and leaves the transaction it was given alone.
+    #[test]
+    fn book_and_interpolate_marks_its_result_not_its_input() {
+        let engine = BookingEngine::new().with_interpolated_marks(true);
+        let txn = Transaction::new(date(2024, 1, 2), "units")
+            .with_synthesized_posting(Posting::new("Expenses:Food", usd(dec!(3.00))))
+            .with_synthesized_posting(Posting::auto("Assets:Bank"));
+        let result = engine.book_and_interpolate(&txn).expect("books");
+        assert_eq!(marked(&result.transaction), ["Assets:Bank -3.00 USD"]);
+        assert!(marked(&txn).is_empty());
+
+        let mut booked = result.transaction;
+        clear_interpolated_marks(&mut booked);
+        assert!(marked(&booked).is_empty());
+    }
+
+    /// A marked posting widens no tolerance, as in beancount's
+    /// `infer_tolerances`, which skips `__automatic__` postings: booking's
+    /// `40.0` gives USD no tolerance, the same `40.0` written gives 0.05.
+    #[test]
+    fn a_marked_posting_widens_no_tolerance() {
+        let policy = crate::TolerancePolicy::default();
+        let mut txn = Transaction::new(date(2024, 1, 5), "sale")
+            .with_synthesized_posting(Posting::new("Assets:Cash", usd(dec!(40.0))))
+            .with_synthesized_posting(Posting::new("Income:Gains", usd(dec!(-40))));
+        let usd_tolerance = |t: &Transaction| {
+            crate::transaction_tolerances(t, &policy.options())
+                .get(&rustledger_core::Currency::from("USD"))
+                .copied()
+        };
+        assert_eq!(usd_tolerance(&txn), Some(dec!(0.05)));
+        txn.postings[0].meta.insert(
+            rustledger_core::AUTOMATIC_META.to_string(),
+            rustledger_core::MetaValue::Bool(true),
+        );
+        assert_eq!(usd_tolerance(&txn), None);
     }
 }

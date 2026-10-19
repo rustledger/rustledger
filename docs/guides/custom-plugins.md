@@ -251,10 +251,30 @@ struct Price {
     metadata: Vec<(String, MetaValue)>,
 }
 
+// Fields in the host's order: the input is a MessagePack array, read by
+// position.
 #[derive(Deserialize, Serialize, Clone)]
 struct Options {
-    title: Option<String>,
     operating_currencies: Vec<String>,
+    title: Option<String>,
+    account_types: AccountTypes,
+    // The ledger's tolerance options: `(currency, number)` pairs sorted by
+    // currency (`*` is the default for every currency), the multiplier as
+    // a decimal string ("0.5" unless the ledger sets one), and whether
+    // costs and prices widen the tolerance.
+    inferred_tolerance_default: Vec<(String, String)>,
+    tolerance_multiplier: String,
+    infer_tolerance_from_cost: bool,
+}
+
+// The ledger's account root names (`option "name_assets"` etc.).
+#[derive(Deserialize, Serialize, Clone)]
+struct AccountTypes {
+    assets: String,
+    liabilities: String,
+    equity: String,
+    income: String,
+    expenses: String,
 }
 
 // Memory allocation for WASM
@@ -266,11 +286,11 @@ pub extern "C" fn alloc(size: u32) -> *mut u8 {
 
 // ABI version export. The host checks this right after instantiation and
 // refuses to run a plugin built against an incompatible rustledger-plugin-types.
-// Must return the host's current ABI version (2; version 1 notes had no
-// tags or links).
+// Must return the host's current ABI version (3; version 1 notes had no
+// tags or links, version 2 options no tolerance options).
 #[no_mangle]
 pub extern "C" fn __rustledger_abi_version() -> u32 {
-    2
+    3
 }
 
 // Main plugin entry point
@@ -516,8 +536,15 @@ fn process_directives(input: PluginInput) -> PluginOutput {
 | Field | Type | Description |
 |-------|------|-------------|
 | `directives` | `Vec<Directive>` | All directives from the ledger |
-| `options` | `Options` | Ledger options (title, operating_currency, etc.) |
+| `options` | `Options` | Ledger options: operating currencies, title, account roots, tolerance options |
 | `config` | `Option<String>` | Configuration string from plugin directive |
+
+A posting booking interpolated (its units, cost or price number solved
+from the rest of the transaction rather than written) carries the metadata
+key `__automatic__` with the value `true`, as in beancount. With
+`rustledger-plugin-types`, ask `posting.is_interpolated()`. The mark exists
+only while plugins run: rledger removes it before validating the ledger,
+so it never appears in queries or printed output.
 
 ### PluginOutput
 
@@ -567,8 +594,18 @@ mod tests {
                 postings: vec![],
             })],
             options: Options {
-                title: None,
                 operating_currencies: vec![],
+                title: None,
+                account_types: AccountTypes {
+                    assets: "Assets".to_string(),
+                    liabilities: "Liabilities".to_string(),
+                    equity: "Equity".to_string(),
+                    income: "Income".to_string(),
+                    expenses: "Expenses".to_string(),
+                },
+                inferred_tolerance_default: vec![],
+                tolerance_multiplier: "0.5".to_string(),
+                infer_tolerance_from_cost: false,
             },
             config: None,
         };

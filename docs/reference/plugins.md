@@ -72,12 +72,14 @@ plugin "beancount.plugins.split_expenses" "alice bob"
 ### Plugin Execution Order
 
 The loader splits plugin execution around booking. Synthesizer plugins
-that inject directives the Early validator depends on
+that inject directives the pre-booking stream needs
 (`auto_accounts`, `document_discovery`) run BEFORE Early validation
 and BEFORE booking. Every other plugin runs AFTER booking and BEFORE
 Late validation so cost-spec-reading plugins (`implicit_prices`,
 `sellgains`, `unrealized`, etc.) see filled-in `cost.number_per`
-values from the booker.
+values from the booker. Account checks run in Late validation, on what
+the plugins produced, so a directive a plugin renames or inserts is
+validated as beancount validates it.
 
 The full pipeline is:
 

@@ -787,6 +787,33 @@ mod tests {
     }
 
     #[test]
+    fn error_codes_documented_in_reference() {
+        // Every code has a `### <code>` section in the user-facing reference,
+        // `docs/reference/errors.md`, as well as in the spec (above). E4004
+        // was in the spec but not the reference, which mattered once
+        // `rledger check` started reporting it for booking overflows (#2631).
+        // Read at runtime and skipped when absent, for the same
+        // published-crate reason as the spec guard.
+        let path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../docs/reference/errors.md"
+        );
+        let Ok(doc) = std::fs::read_to_string(path) else {
+            eprintln!("skipping error_codes_documented_in_reference: {path} not present");
+            return;
+        };
+        let missing: Vec<&str> = ErrorCode::ALL
+            .iter()
+            .map(ErrorCode::code)
+            .filter(|code| !doc.lines().any(|l| l.starts_with(&format!("### {code}:"))))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "error codes without a section in docs/reference/errors.md: {missing:?}"
+        );
+    }
+
+    #[test]
     fn all_lists_distinct_codes() {
         // Cheap completeness/dup guard for `ALL`: every code string is unique.
         let mut codes: Vec<&str> = ErrorCode::ALL.iter().map(ErrorCode::code).collect();

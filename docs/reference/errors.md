@@ -249,6 +249,33 @@ Beancount has no `AVERAGE` booking to compare with
 
 **Fix**: Specify the exact lot using cost basis `{cost}` or date `{date}`.
 
+### E4004: Arithmetic Overflow
+
+**Cause**: An amount, or a running total built from amounts, exceeds the range
+of rledger's decimal type: about ±7.9×10²⁸, with at most 28-29 significant
+digits. Booking reports it when an account's inventory, a lot's cost basis or
+an interpolated posting amount cannot be represented. rledger reports the
+overflow rather than rounding or clamping the value, since a clamped figure
+would be printed as if it were exact. Python beancount has no such limit.
+
+**Example**:
+
+```beancount
+2024-01-01 open Assets:Stock
+2024-01-01 open Assets:Cash
+
+2024-01-02 * "buy"
+  Assets:Stock  50000000000000000000000000000 X {1 USD}
+  Assets:Cash
+
+2024-01-03 * "buy"
+  Assets:Stock  50000000000000000000000000000 X {1 USD}  ; the account would hold 1e29 X
+  Assets:Cash  -50000000000000000000000000000 USD
+```
+
+**Fix**: Split the transaction, denominate it in larger units (thousands,
+millions) so the numbers are smaller, or write fewer decimal places.
+
 ### BOOK: Cannot Infer Currency
 
 `BOOK` is the code for a transaction booking could not complete when no

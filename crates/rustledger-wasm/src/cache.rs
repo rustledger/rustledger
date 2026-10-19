@@ -256,11 +256,18 @@ use crate::types::{Error, LedgerOptions};
 /// a blank line or comment (#2628), and `\b` / `\f` in strings decode to
 /// U+0008 / U+000C (#2672). Parsed directives changed, so a v45 blob would
 /// serve the misplaced comment and the old strings.
-/// v47: a lot-matching booking failure carries its E4xxx code instead of
+/// v47: a per-unit number booking derives from a total (`{{T}}`,
+/// `{per # total}`, `@@`, an interpolated `{}` cost) is divided as Python's
+/// `decimal` divides it (#2652): `{{10 USD}}` over 4 units is `2.5`, not
+/// `2.50`, and over 3 is `3.333333333333333333333333333` (28 significant
+/// digits), not `3.3333333333333333333333333333`. Loader v40, unchanged --
+/// parsed directives did not move. `Ledger` archives booked directives, so a
+/// v46 blob would serve the old per-unit costs and prices.
+/// v48: a lot-matching booking failure carries its E4xxx code instead of
 /// `BOOK` (#2631). Loader v40, unchanged -- parsed directives did not move.
-/// `LedgerPayload.errors` is restored verbatim, so a v46 blob would serve
+/// `LedgerPayload.errors` is restored verbatim, so a v47 blob would serve
 /// `BOOK` where a fresh load gives E4001-E4004.
-pub const CACHE_VERSION: u32 = 47;
+pub const CACHE_VERSION: u32 = 48;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

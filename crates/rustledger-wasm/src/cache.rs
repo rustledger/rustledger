@@ -267,11 +267,17 @@ use crate::types::{Error, LedgerOptions};
 /// by, symlinks kept (#2635); `HostFs` no longer resolves them next to the
 /// `realpath`. A v47 blob of a ledger reached through a symlink would serve
 /// the directives of the files next to the link's target.
-/// v49: a lot-matching booking failure carries its E4xxx code instead of
+/// v49: `commodity`, `note`, `query` and `price` share the transaction
+/// `DirectivePriority`, so a same-date one keeps its file position among
+/// transactions (#2629). Loader v40, unchanged -- parsed directives did not
+/// move. `Ledger` archives the processed, sorted directives, so a v48 blob
+/// would serve the old order (a same-date `price` after the date's
+/// transactions, a `commodity` before its balances).
+/// v50: a lot-matching booking failure carries its E4xxx code instead of
 /// `BOOK` (#2631). Loader v41, unchanged -- parsed directives did not move.
-/// `LedgerPayload.errors` is restored verbatim, so a v48 blob would serve
+/// `LedgerPayload.errors` is restored verbatim, so a v49 blob would serve
 /// `BOOK` where a fresh load gives E4001-E4004.
-pub const CACHE_VERSION: u32 = 49;
+pub const CACHE_VERSION: u32 = 50;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -583,7 +589,8 @@ mod tests {
     /// that pair is the one whose relative order the priorities decide. With
     /// them on different dates the date component of the sort key settles it
     /// and a priority swap changes nothing here. For the same reason it puts
-    /// a `custom`, an `event` and a `note` on a transaction's date (#2576).
+    /// a `custom`, an `event` and a `note` on a transaction's date (#2576),
+    /// and a `price` before it and a `commodity` after it (#2629).
     #[test]
     fn processed_ledger_archived_form_is_pinned() {
         // Moved once so far: swapping `Pad` and `Balance` in
@@ -596,7 +603,12 @@ mod tests {
         // before the transaction and an `event` and `note` after it, whose
         // order the ranks decide (custom, transaction, event, note now;
         // transaction, note, event, custom before).
-        const PROCESSED_LAYOUT_HASH: u64 = 0x1dd9_f6a2_4d28_0afa;
+        //
+        // And for #2629, which ranks `commodity`, `note`, `query` and `price`
+        // with transactions: the fixture gained a same-date `price` written
+        // before the transaction and a `commodity` after it (price,
+        // transaction, commodity now; commodity first and price last before).
+        const PROCESSED_LAYOUT_HASH: u64 = 0xbe97_fc05_7eb2_8e1e;
 
         let src = "\
 2024-01-01 open Assets:Bank USD\n\
@@ -606,11 +618,13 @@ mod tests {
 2024-01-04 balance Assets:Bank  10.00 USD\n\
 \n\
 2024-01-05 custom \"fava-option\" \"locale\" \"en\"\n\
+2024-01-05 price USD 0.90 EUR\n\
 2024-01-05 * \"payee\" \"narration\"\n\
 \x20\x20Assets:Bank  5.00 USD\n\
 \x20\x20Equity:Opening-Balances\n\
 2024-01-05 event \"location\" \"Paris\"\n\
 2024-01-05 note Assets:Bank \"after the event\"\n\
+2024-01-05 commodity USD\n\
 \n\
 2024-01-06 balance Assets:Bank  15.00 USD\n";
 

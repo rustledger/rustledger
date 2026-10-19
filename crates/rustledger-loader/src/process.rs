@@ -620,7 +620,8 @@ fn resolve_effective_booking_method(
 // without changing their semantics — only the type-level sequencing
 // is new. See `phase.rs` for the phase markers and overall rationale.
 
-/// Canonical display-order sort key:
+/// Canonical display-order sort key.
+///
 /// `(date, priority, has_source_location, file_id, span.start)`.
 /// What BQL / JSON / format output expects. Used by `sort` (initial
 /// ordering) and `finalize` (re-sort after merging failed bookings and
@@ -647,7 +648,12 @@ fn resolve_effective_booking_method(
 /// book. Only a caller that hands [`process`] a hand-built `LoadResult`
 /// holding a synthesized cost-bearing transaction could see it book ahead of
 /// a same-date source transaction, which is where beancount books it too.
-type CanonicalSortKey = (
+///
+/// This is the ONE definition of the order. The LSP books its overlay of
+/// open buffers in it too (`rustledger-lsp`'s `run_ledger_validation`), so
+/// the editor books same-date entries in the order `rledger check` does; it
+/// used to keep a hand-synced copy (#2655).
+pub type CanonicalSortKey = (
     rustledger_core::NaiveDate,
     rustledger_core::DirectivePriority,
     bool,
@@ -655,8 +661,11 @@ type CanonicalSortKey = (
     usize,
 );
 
+/// The [`CanonicalSortKey`] of `d`: the order the loader sorts directives
+/// into before booking and for output.
 #[inline]
-const fn canonical_sort_key(d: &Spanned<Directive>) -> CanonicalSortKey {
+#[must_use]
+pub const fn canonical_sort_key(d: &Spanned<Directive>) -> CanonicalSortKey {
     (
         d.value.date(),
         d.value.priority(),

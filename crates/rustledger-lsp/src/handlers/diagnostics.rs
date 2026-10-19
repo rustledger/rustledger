@@ -283,29 +283,13 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
-/// The order `rledger check` books in: `booking_sort_key`, then, between
-/// directives it ties, the loader's canonical order (no location first, then
-/// file, then position), which the loader sorts by before booking. The
-/// overlay appends open buffers last, so sorting on `booking_sort_key` alone
-/// booked a same-date buy in an included file before a sale in the main
-/// file that `check` books first.
-fn booking_order(
-    d: &Spanned<Directive>,
-) -> (
-    (
-        rustledger_core::NaiveDate,
-        rustledger_core::DirectivePriority,
-    ),
-    bool,
-    u16,
-    usize,
-) {
-    (
-        rustledger_core::booking_sort_key(&d.value),
-        d.file_id != rustledger_parser::SYNTHESIZED_FILE_ID,
-        d.file_id,
-        d.span.start,
-    )
+/// Sort into the order `rledger check` books in: the loader's own key,
+/// shared so the two cannot drift (#2655). Its file and position tiebreak
+/// matters here: the overlay appends open buffers last, so sorting on date
+/// and type alone booked a same-date buy in an included file before a sale
+/// in the main file that `check` books first.
+fn sort_into_booking_order(directives: &mut [Spanned<Directive>]) {
+    directives.sort_by_cached_key(rustledger_loader::canonical_sort_key);
 }
 
 // Per-thread copy of the directives the last `run_ledger_validation` handed
@@ -326,12 +310,7 @@ pub(crate) fn run_ledger_validation(
     #[cfg(test)]
     LEDGER_VALIDATION_RUNS.with(|c| c.set(c.get() + 1));
 
-    // Booking order via the canonical comparator — the SINGLE source for
-    // (date, priority), shared with the loader and booking engine so the LSP
-    // cannot drift from `rledger check`'s order; ties broken by file and
-    // position, as the loader orders directives before booking (see
-    // [`booking_order`]).
-    booked_directives.sort_by_cached_key(booking_order);
+    sort_into_booking_order(&mut booked_directives);
 
     // The phases run in `rledger check`'s order, on the entry set `check`
     // gives each one: synth plugins and Early validation before booking, on
@@ -356,7 +335,7 @@ pub(crate) fn run_ledger_validation(
         None => true,
     };
     // What the synth pass inserted (opens, documents) back in booking order.
-    booked_directives.sort_by_cached_key(booking_order);
+    sort_into_booking_order(&mut booked_directives);
 
     // Early validation (account lifecycle, structure) on the directives as
     // written. See `rustledger_validate::Phase` for the architecture
@@ -3671,6 +3650,77 @@ plugin "auto_accounts"
                 .collect();
             assert_eq!(lsp, check, "{variant}: the LSP's diagnostic: {diags:?}");
         }
+    }
+
+    /// #2655: the LSP books in the loader's order, by the loader's own key
+    /// rather than a hand-synced copy. The loader's processed output is in
+    /// the order it booked in; reversed and sorted again the way the LSP
+    /// sorts before booking, it comes back in that order. The fixture puts every
+    /// directive type on one date across two files, with a transaction
+    /// booking refuses (the main file's sale books first, so the included
+    /// file's buy reduces too much) and opens a plugin synthesizes, so every component of
+    /// the key decides something.
+    #[test]
+    fn the_lsp_sorts_entries_as_the_loader_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main.beancount");
+        let day = "2024-01-05";
+        std::fs::write(
+            &main,
+            format!(
+                "plugin \"beancount.plugins.auto_accounts\"\n\
+                 2024-01-01 open Assets:Cash\n\
+                 {day} close Assets:Old\n\
+                 {day} * \"sell\"\n  Assets:Stock  -5 HOOL {{}}\n  Assets:Cash  500 USD\n\
+                 {day} price HOOL 100 USD\n\
+                 {day} note Assets:Cash \"n\"\n\
+                 {day} balance Assets:Cash  0 USD\n\
+                 include \"other.beancount\"\n\
+                 {day} document Assets:Cash \"/x.pdf\"\n\
+                 {day} commodity HOOL\n\
+                 {day} query \"q\" \"SELECT 1\"\n\
+                 {day} event \"location\" \"Paris\"\n\
+                 {day} custom \"budget\" Expenses:Food \"monthly\" 10 USD\n\
+                 {day} pad Assets:Cash Equity:Opening\n\
+                 {day} open Assets:Old\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("other.beancount"),
+            format!(
+                "{day} * \"buy\"\n  Assets:Stock  10 HOOL {{100 USD}}\n  Assets:Cash\n\
+                 {day} price HOOL 101 USD\n\
+                 {day} balance Assets:Stock  0 HOOL\n"
+            ),
+        )
+        .unwrap();
+        let ledger = rustledger_loader::load(&main, &lsp_load_options()).expect("load");
+        assert!(
+            ledger
+                .directives
+                .iter()
+                .any(|d| d.file_id == rustledger_parser::SYNTHESIZED_FILE_ID),
+            "auto_accounts must synthesize an entry: {:?}",
+            ledger.directives
+        );
+        assert!(
+            ledger
+                .errors
+                .iter()
+                .any(|e| e.message.contains("(2024-01-05, \"")),
+            "booking must refuse a transaction: {:?}",
+            ledger.errors
+        );
+        let identity =
+            |d: &Spanned<Directive>| (d.file_id, d.span.start, d.value.type_name(), d.value.date());
+        let loader: Vec<_> = ledger.directives.iter().map(identity).collect();
+
+        let mut lsp: Vec<Spanned<Directive>> = ledger.directives.clone();
+        lsp.reverse();
+        sort_into_booking_order(&mut lsp);
+        let lsp: Vec<_> = lsp.iter().map(identity).collect();
+        assert_eq!(lsp, loader);
     }
 
     /// Plugins run once on every file, open or not. Files without an open

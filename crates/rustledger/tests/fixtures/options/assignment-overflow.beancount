@@ -1,14 +1,22 @@
-; Numbers the core accepts but whose products leave Decimal's range: the
-; plugin must skip the assignment, not panic (#2661 review).
+; Numbers the core accepts but whose products leave Decimal's range. The
+; plugin must not panic, and must not pass them silently: the share count
+; is still checked (line 12), and an assignment whose basis cannot be
+; computed is reported as not checked (line 19).
 plugin "beancount_options.check_option_assignment"
-2026-01-01 open Assets:Cash
 2026-01-01 open Assets:Stock
 2026-01-01 open Assets:Opt
 2026-01-01 open Equity:X
 2026-09-03 * "STO"
   Assets:Opt  -1000000000000000000000000 AAPL261016P99999999 {1 USD}
   Equity:X
-2026-10-16 * "assigned"
+2026-10-16 * "assigned, 1 share delivered for 10^24 contracts"
   Assets:Opt 1000000000000000000000000 AAPL261016P99999999 {}
   Assets:Stock 1 AAPL {1 USD}
+  Equity:X
+2026-09-03 * "STO"
+  Assets:Opt  -1000000000000000000000000 MSFT261016P99999999 {1 USD}
+  Equity:X
+2026-10-16 * "assigned, strike x shares out of range"
+  Assets:Opt 1000000000000000000000000 MSFT261016P99999999 {}
+  Assets:Stock 100000000000000000000000000 MSFT {1 USD}
   Equity:X

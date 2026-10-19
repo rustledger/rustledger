@@ -1171,9 +1171,13 @@ impl Executor<'_> {
                     }
                 },
             };
-            let regex = self.require_regex(&pattern)?;
+            let regex = self.python_regex(&pattern, super::RegexMode::SearchIgnoreCase)?;
             return Ok(Value::Boolean(match row.get(accounts) {
-                Some(Value::StringSet(set)) => set.iter().any(|a| regex.is_match(a)),
+                Some(Value::StringSet(set)) => {
+                    regex
+                        .is_match_any(set.iter().map(String::as_str))
+                        .map_err(|e| super::word_boundary_error(&pattern, &e))?
+                }
                 _ => false,
             }));
         }
@@ -1294,6 +1298,9 @@ impl Executor<'_> {
             }
             Expr::BinaryOp(op) => {
                 let left = self.evaluate_subquery_expr(&op.left, row, column_map)?;
+                if let Some(value) = self.short_circuit(op.op, &left)? {
+                    return Ok(value);
+                }
                 let right = self.evaluate_subquery_expr(&op.right, row, column_map)?;
                 self.binary_op_on_values(op.op, &left, &right)
             }
@@ -1395,8 +1402,13 @@ impl Executor<'_> {
         // writes. Here it matches accounts containing `account`.
         let account_pattern = &query.account_pattern;
 
-        // Try to compile as regex (using cache)
-        let account_regex = self.get_or_compile_regex(account_pattern);
+        // bean-query's `transform_journal` makes it `account ~ "<pattern>"`,
+        // so it is a Python regex searched case-insensitively (#2656). A
+        // pattern rledger cannot use is an error, as it is for `~`: it used to
+        // fall back to a substring match, which answered a refused lookahead
+        // or a typo'd `(` with rows matching something else.
+        let account_regex =
+            self.python_regex(account_pattern, super::RegexMode::SearchIgnoreCase)?;
 
         let columns = vec![
             "date".to_string(),
@@ -1467,23 +1479,25 @@ impl Executor<'_> {
             });
 
             for (i, posting) in txn.postings.iter().enumerate() {
-                // Match account using regex or substring
-                let mut matches = if let Some(ref regex) = account_regex {
-                    regex.is_match(&posting.account)
-                } else {
-                    posting.account.contains(account_pattern)
-                };
-                if matches
-                    && row_filter
-                    && let Some(filter) = from_filter
-                {
-                    matches = self.evaluate_from_filter(
+                // The FROM filter first, then the account pattern, as
+                // beanquery's `EvalAnd([from, where])` evaluates them: a row
+                // the filter drops never has its account matched, so a word
+                // boundary cannot fail on it (#2656).
+                let mut matches = if row_filter && let Some(filter) = from_filter {
+                    self.evaluate_from_filter(
                         filter,
                         &txn,
                         i,
                         directive_index,
                         txn_accounts.as_ref(),
-                    )?;
+                    )?
+                } else {
+                    true
+                };
+                if matches {
+                    matches = account_regex
+                        .is_match(&posting.account)
+                        .map_err(|e| super::word_boundary_error(account_pattern, &e))?;
                 }
 
                 if matches {

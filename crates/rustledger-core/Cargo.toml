@@ -40,6 +40,9 @@ rkyv = { workspace = true, optional = true }
 rustc-hash.workspace = true
 smallvec.workspace = true
 imbl.workspace = true
+# Python `re` patterns read and rewritten for `regex` (`py_regex`), shared by
+# the native plugins and BQL (#2656).
+regex.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

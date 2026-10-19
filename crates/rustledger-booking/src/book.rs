@@ -165,13 +165,14 @@ impl BookingError {
 /// The diagnostic code of a booking failure that no validation code
 /// describes.
 ///
-/// `rledger check` (and every consumer of the loader's error stream: the
-/// WASM and FFI bindings, the report commands' refusal to run over an
-/// unbooked ledger) labels EVERY booking failure with it. The LSP gives a
-/// failure a validation code instead when one says exactly what went wrong
-/// (`rustledger_validate::ErrorCode::for_booking_failure`), and this label
-/// otherwise, so a failure no code describes reads the same in the editor
-/// as on the command line (#2510).
+/// Every surface labels a booking failure the same way, through
+/// `rustledger_validate::ErrorCode::for_booking_failure`: a lot-matching
+/// failure gets its E4xxx code, and a failure no code describes (an
+/// interpolation failure) gets this label. `rledger check` (and every
+/// consumer of the loader's error stream: the WASM and FFI bindings) and the
+/// LSP agree (#2510, #2631). To tell a booking failure from a validator
+/// error with the same code, use the loader's
+/// `LedgerError::is_booking_failure`.
 pub const BOOKING_FAILURE_CODE: &str = "BOOK";
 
 /// Result of booking a single transaction.

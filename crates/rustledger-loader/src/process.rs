@@ -339,6 +339,10 @@ pub struct LedgerError {
     /// A suggested fix, rendered as a `help:` line by `rledger check` and in
     /// its JSON `hint` field (e.g. E8001's documents-folder hint, #2650).
     pub hint: Option<String>,
+    /// Whether booking refused a transaction with this error, which leaves
+    /// that transaction out of the booked stream. See
+    /// [`Self::is_booking_failure`].
+    booking_failure: bool,
 }
 
 /// Error severity level.
@@ -373,6 +377,7 @@ impl LedgerError {
             file_id: None,
             phase: "validate".to_string(),
             hint: None,
+            booking_failure: false,
         }
     }
 
@@ -387,6 +392,7 @@ impl LedgerError {
             file_id: None,
             phase: "validate".to_string(),
             hint: None,
+            booking_failure: false,
         }
     }
 
@@ -396,6 +402,20 @@ impl LedgerError {
         self.source_span = Some(span);
         self.file_id = Some(file_id);
         self
+    }
+
+    /// Whether this is booking refusing a transaction, which leaves the
+    /// transaction unbooked: its lots did not resolve, so balances derived
+    /// from the ledger leave it out.
+    ///
+    /// Not readable from the code. A booking failure carries the code
+    /// [`rustledger_validate::ErrorCode::for_booking_failure`] gives it (an
+    /// E4xxx lot-matching code, the code the LSP shows), else `BOOK`
+    /// (#2631), and a validator can raise the same E4xxx codes without
+    /// booking having refused anything.
+    #[must_use]
+    pub const fn is_booking_failure(&self) -> bool {
+        self.booking_failure
     }
 
     /// Set the processing phase for this error.
@@ -964,6 +984,27 @@ impl crate::Directives<crate::LateValidated> {
     }
 }
 
+/// The code a booking failure is reported under: the E4xxx code of a
+/// lot-matching failure, else `BOOK`, through
+/// [`rustledger_validate::ErrorCode::booking_failure_code_str`], the
+/// classification the LSP labels the same failure with, so `rledger check`
+/// and the editor cannot give one failure two codes (#2631). `check` used to
+/// label every booking failure `BOOK`.
+///
+/// Without the `validation` feature the classification is not compiled in,
+/// and every failure is `BOOK`.
+const fn booking_failure_code(e: &rustledger_booking::BookingError) -> &'static str {
+    #[cfg(feature = "validation")]
+    {
+        rustledger_validate::ErrorCode::booking_failure_code_str(e)
+    }
+    #[cfg(not(feature = "validation"))]
+    {
+        let _ = e;
+        rustledger_booking::BOOKING_FAILURE_CODE
+    }
+}
+
 /// Run booking and interpolation on transactions, returning the
 /// directives partitioned into `(booked, failed)`.
 ///
@@ -1035,11 +1076,10 @@ fn run_booking(
                     // text renderer papered over it by appending the date and
                     // narration to the message, which is why it went unnoticed.
                     let span = e.posting_span(txn).unwrap_or(directive_span);
-                    let mut err = LedgerError::error(
-                        rustledger_booking::BOOKING_FAILURE_CODE,
-                        e.diagnostic_message(txn),
-                    )
-                    .with_source_span((span.start, span.end), file_id);
+                    let mut err =
+                        LedgerError::error(booking_failure_code(&e), e.diagnostic_message(txn))
+                            .with_source_span((span.start, span.end), file_id);
+                    err.booking_failure = true;
                     // Resolve to file/line/column the same way the validator
                     // does, so CLI and LSP consumers need no lookup of their
                     // own (the pattern from #901).
@@ -1834,6 +1874,7 @@ fn ledger_errors_extend(
             file_id: err.file_id,
             phase: phase.to_string(),
             hint: err.hint,
+            booking_failure: false,
         });
     }
 }

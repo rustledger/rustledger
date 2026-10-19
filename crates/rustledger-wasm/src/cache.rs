@@ -273,7 +273,11 @@ use crate::types::{Error, LedgerOptions};
 /// move. `Ledger` archives the processed, sorted directives, so a v48 blob
 /// would serve the old order (a same-date `price` after the date's
 /// transactions, a `commodity` before its balances).
-pub const CACHE_VERSION: u32 = 49;
+/// v50: a lot-matching booking failure carries its E4xxx code instead of
+/// `BOOK` (#2631). Loader v41, unchanged -- parsed directives did not move.
+/// `LedgerPayload.errors` is restored verbatim, so a v49 blob would serve
+/// `BOOK` where a fresh load gives E4001-E4004.
+pub const CACHE_VERSION: u32 = 50;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

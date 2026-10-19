@@ -8944,3 +8944,1307 @@ fn noduplicates_locates_the_later_copy() {
     assert_eq!(messages(&output), ["Duplicate entry: 2024-01-02 \"Lunch\""]);
     assert_eq!(output.errors[0].line_number, Some(8));
 }
+
+// ============================================================================
+// CheckOptionExpiryPlugin Tests
+// ============================================================================
+
+use rustledger_plugin::native::CheckOptionExpiryPlugin;
+
+const OPT_ACCT: &str = "Assets:Broker:Options";
+const CASH_ACCT: &str = "Assets:Broker:Cash";
+
+/// One option leg against cash. `units` is signed contracts: `-1` sells to
+/// open (or closes a long), `1` buys to open (or closes a short).
+fn option_txn(date: &str, account: &str, units: &str, symbol: &str) -> DirectiveWrapper {
+    make_transaction(
+        date,
+        "option leg",
+        vec![(account, units, symbol), (CASH_ACCT, "0", "USD")],
+    )
+}
+
+/// A transaction with no option postings, used to move the ledger's last
+/// date forward.
+fn later_entry(date: &str) -> DirectiveWrapper {
+    make_transaction(
+        date,
+        "unrelated",
+        vec![
+            (CASH_ACCT, "-1.00", "USD"),
+            ("Expenses:Fees", "1.00", "USD"),
+        ],
+    )
+}
+
+fn option_expiry_errors(directives: Vec<DirectiveWrapper>) -> Vec<PluginError> {
+    let plugin = CheckOptionExpiryPlugin;
+    let mut all = vec![
+        make_open("2026-01-01", OPT_ACCT),
+        make_open("2026-01-01", CASH_ACCT),
+        make_open("2026-01-01", "Expenses:Fees"),
+    ];
+    all.extend(directives);
+    let input = make_input(all);
+    let n = input.directives.len();
+    let output = process_and_materialize(&plugin, input);
+    // The plugin never inserts, deletes, or modifies directives.
+    assert_eq!(output.directives.len(), n);
+    output.errors
+}
+
+/// T01: a short closed before expiry is not reported.
+#[test]
+fn test_option_expiry_closed_before_expiry() {
+    let errors = option_expiry_errors(vec![
+        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+        option_txn("2026-09-20", OPT_ACCT, "1", "AAPL261016P00230000"),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// T02: a close dated on the expiry day itself is not reported.
+#[test]
+fn test_option_expiry_closed_on_expiry_day() {
+    let errors = option_expiry_errors(vec![
+        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+        option_txn("2026-10-16", OPT_ACCT, "1", "AAPL261016P00230000"),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// T03: a short left open past expiry is reported once, at the opening
+/// entry, naming the symbol, expiry date, quantity, and account.
+#[test]
+fn test_option_expiry_short_left_open() {
+    let mut open = option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000");
+    open.filename = Some("ledger.beancount".to_string());
+    open.lineno = Some(42);
+    let errors = option_expiry_errors(vec![open, later_entry("2026-10-17")]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    let e = &errors[0];
+    assert_eq!(e.severity, PluginErrorSeverity::Error);
+    assert_eq!(
+        e.message,
+        "AAPL261016P00230000 expired 2026-10-16 but -1 contract(s) remain open in Assets:Broker:Options"
+    );
+    assert_eq!(e.source_file.as_deref(), Some("ledger.beancount"));
+    assert_eq!(e.line_number, Some(42));
+}
+
+/// T04: a long left open past expiry is reported.
+#[test]
+fn test_option_expiry_long_left_open() {
+    let errors = option_expiry_errors(vec![
+        option_txn("2026-09-03", OPT_ACCT, "1", "SPXW261030C06800000"),
+        later_entry("2026-11-02"),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].message.contains(" but 1 contract(s) "),
+        "{errors:?}"
+    );
+}
+
+/// T05: an open contract is not reported when the ledger ends on or
+/// before its expiry date.
+#[test]
+fn test_option_expiry_ledger_ends_before_expiry() {
+    let on_expiry = option_expiry_errors(vec![
+        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+        later_entry("2026-10-16"),
+    ]);
+    assert_eq!(on_expiry.len(), 0, "{on_expiry:?}");
+
+    let before = option_expiry_errors(vec![option_txn(
+        "2026-09-02",
+        OPT_ACCT,
+        "-1",
+        "AAPL261016P00230000",
+    )]);
+    assert_eq!(before.len(), 0, "{before:?}");
+}
+
+/// T06: the same contract in two accounts is tracked per account.
+#[test]
+fn test_option_expiry_tracked_per_account() {
+    let ira = "Assets:IRA:Options";
+    let errors = option_expiry_errors(vec![
+        make_open("2026-01-01", ira),
+        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+        option_txn("2026-09-02", ira, "-1", "AAPL261016P00230000"),
+        option_txn("2026-09-20", OPT_ACCT, "1", "AAPL261016P00230000"),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].message.ends_with(ira), "{errors:?}");
+}
+
+/// T07: a partial close reports only the remaining quantity.
+#[test]
+fn test_option_expiry_partial_close() {
+    let errors = option_expiry_errors(vec![
+        option_txn("2026-09-02", OPT_ACCT, "-3", "AAPL261016P00232500"),
+        option_txn("2026-09-20", OPT_ACCT, "2", "AAPL261016P00232500"),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].message.contains(" but -1 contract(s) "),
+        "{errors:?}"
+    );
+}
+
+/// T08: commodities that are not valid OCC option symbols are ignored.
+#[test]
+fn test_option_expiry_ignores_non_option_commodities() {
+    let errors = option_expiry_errors(vec![
+        option_txn("2026-09-02", OPT_ACCT, "100", "AAPL"),
+        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261316P00230000"), // month 13
+        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261032P00230000"), // day 32
+        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016X00230000"), // not C/P
+        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P0023000"),  // 7 strike digits
+        option_txn("2026-09-02", OPT_ACCT, "-1", "TOOLONGX261016P00230000"), // root > 6
+        later_entry("2027-01-01"),
+    ]);
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// T09: a roll closes the old leg and opens a later one; neither is
+/// reported while the new leg has not expired.
+#[test]
+fn test_option_expiry_roll() {
+    let roll = make_transaction(
+        "2026-09-15",
+        "roll",
+        vec![
+            (OPT_ACCT, "1", "AAPL260918C00270000"),
+            (OPT_ACCT, "-1", "AAPL261016C00280000"),
+            (CASH_ACCT, "0", "USD"),
+        ],
+    );
+    let errors = option_expiry_errors(vec![
+        option_txn("2026-09-05", OPT_ACCT, "-1", "AAPL260918C00270000"),
+        roll,
+        later_entry("2026-10-01"),
+    ]);
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// T10: each expired open contract is reported separately.
+#[test]
+fn test_option_expiry_two_contracts() {
+    let errors = option_expiry_errors(vec![
+        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+        option_txn("2026-09-03", OPT_ACCT, "1", "SPY261016C00700000"),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(errors.len(), 2, "{errors:?}");
+}
+
+/// `w` with a line number, so a test can tell which entry an error names.
+fn at_line(mut w: DirectiveWrapper, line: u32) -> DirectiveWrapper {
+    w.filename = Some("ledger.beancount".to_string());
+    w.lineno = Some(line);
+    w
+}
+
+/// A short that a single larger buy turns long is a new position: the
+/// error names the entry that crossed zero, not the old sell-to-open.
+#[test]
+fn test_option_expiry_sign_change_reopens() {
+    let errors = option_expiry_errors(vec![
+        at_line(
+            option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+            7,
+        ),
+        at_line(
+            option_txn("2026-09-10", OPT_ACCT, "2", "AAPL261016P00230000"),
+            11,
+        ),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].message.contains(" but 1 contract(s) "),
+        "{errors:?}"
+    );
+    assert_eq!(errors[0].line_number, Some(11));
+
+    let errors = option_expiry_errors(vec![
+        at_line(
+            option_txn("2026-09-02", OPT_ACCT, "2", "AAPL261016P00230000"),
+            7,
+        ),
+        at_line(
+            option_txn("2026-09-10", OPT_ACCT, "-3", "AAPL261016P00230000"),
+            11,
+        ),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].message.contains(" but -1 contract(s) "),
+        "{errors:?}"
+    );
+    assert_eq!(errors[0].line_number, Some(11));
+}
+
+/// Each entry's legs are netted first, so posting order inside one entry
+/// doesn't move the error, and an entry whose legs cancel changes nothing.
+#[test]
+fn test_option_expiry_nets_each_entry() {
+    for (first, second) in [("1", "-1"), ("-1", "1")] {
+        let cancelling = make_transaction(
+            "2026-09-10",
+            "cancelling legs",
+            vec![
+                (OPT_ACCT, first, "AAPL261016P00230000"),
+                (OPT_ACCT, second, "AAPL261016P00230000"),
+            ],
+        );
+        let errors = option_expiry_errors(vec![
+            at_line(
+                option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+                7,
+            ),
+            at_line(cancelling, 11),
+            later_entry("2026-11-01"),
+        ]);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(errors[0].line_number, Some(7), "order {first}, {second}");
+    }
+}
+
+/// Two openers that stack without going flat: reported at the first.
+#[test]
+fn test_option_expiry_stacked_openers() {
+    let errors = option_expiry_errors(vec![
+        at_line(
+            option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+            7,
+        ),
+        at_line(
+            option_txn("2026-09-05", OPT_ACCT, "-1", "AAPL261016P00230000"),
+            11,
+        ),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(
+        errors[0].message.contains(" but -2 contract(s) "),
+        "{errors:?}"
+    );
+    assert_eq!(errors[0].line_number, Some(7));
+}
+
+/// Roots with digits and dots (adjusted contracts, share classes), and the
+/// shortest and longest root lengths, are all checked.
+#[test]
+fn test_option_expiry_root_shapes() {
+    let roots = ["XYZ1", "BRK.B", "ABCDEF", "F"];
+    let mut directives: Vec<DirectiveWrapper> = roots
+        .iter()
+        .map(|r| option_txn("2026-09-02", OPT_ACCT, "-1", &format!("{r}261016C00050000")))
+        .collect();
+    directives.push(later_entry("2026-11-01"));
+    let errors = option_expiry_errors(directives);
+    assert_eq!(errors.len(), 4, "{errors:?}");
+}
+
+/// A count of 100 prints as `100`, not `1E+2`.
+#[test]
+fn test_option_expiry_hundred_contracts_message() {
+    let errors = option_expiry_errors(vec![
+        option_txn("2026-09-02", OPT_ACCT, "100", "AAPL261016P00230000"),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016P00230000 expired 2026-10-16 but 100 contract(s) remain open in Assets:Broker:Options"
+    );
+}
+
+/// A directive from file `file` at line `line`.
+fn located_at(mut w: DirectiveWrapper, file: &str, line: u32) -> DirectiveWrapper {
+    w.filename = Some(file.to_string());
+    w.lineno = Some(line);
+    w
+}
+
+/// Same-day entries are walked in beancount's `entry_sortkey` order (date,
+/// type, line), not in file order, so a position opened by two same-day
+/// buys in two files is reported at the one with the lower line, as
+/// `bean-check` reports it. The input lists `main.beancount:16` first, as
+/// the loader does when `other.beancount` is included after it.
+#[test]
+fn test_option_expiry_same_day_entries_sorted_by_line() {
+    let errors = option_expiry_errors(vec![
+        located_at(
+            option_txn("2026-09-02", OPT_ACCT, "1", "AAPL261016P00230000"),
+            "main.beancount",
+            16,
+        ),
+        located_at(
+            option_txn("2026-09-02", OPT_ACCT, "1", "AAPL261016P00230000"),
+            "other.beancount",
+            1,
+        ),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016P00230000 expired 2026-10-16 but 2 contract(s) remain open in Assets:Broker:Options"
+    );
+    assert_eq!(errors[0].source_file.as_deref(), Some("other.beancount"));
+    assert_eq!(errors[0].line_number, Some(1));
+}
+
+/// A position whose net leaves `Decimal`'s range is not checked, and the
+/// plugin does not panic: across entries, and inside one entry's legs.
+#[test]
+fn test_option_expiry_overflow_is_skipped() {
+    let big = "-50000000000000000000000000000";
+    let across = option_expiry_errors(vec![
+        option_txn("2026-09-02", OPT_ACCT, big, "AAPL261016P00230000"),
+        option_txn("2026-09-03", OPT_ACCT, big, "AAPL261016P00230000"),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(across.len(), 0, "{across:?}");
+
+    let within = option_expiry_errors(vec![
+        make_transaction(
+            "2026-09-02",
+            "two huge legs",
+            vec![
+                (OPT_ACCT, big, "AAPL261016P00230000"),
+                (OPT_ACCT, big, "AAPL261016P00230000"),
+                (CASH_ACCT, "0", "USD"),
+            ],
+        ),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(within.len(), 0, "{within:?}");
+
+    // A position that overflowed stays unchecked even if a later entry
+    // brings the arithmetic back into range.
+    let after = option_expiry_errors(vec![
+        option_txn("2026-09-02", OPT_ACCT, big, "AAPL261016P00230000"),
+        option_txn("2026-09-03", OPT_ACCT, big, "AAPL261016P00230000"),
+        option_txn("2026-09-04", OPT_ACCT, "1", "AAPL261016P00230000"),
+        later_entry("2026-11-01"),
+    ]);
+    assert_eq!(after.len(), 0, "{after:?}");
+}
+
+fn option_expiry_with_config(config: Option<&str>) -> Vec<PluginError> {
+    let mut input = make_input(vec![
+        make_open("2026-01-01", OPT_ACCT),
+        make_open("2026-01-01", CASH_ACCT),
+        make_open("2026-01-01", "Expenses:Fees"),
+        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+        later_entry("2026-11-01"),
+    ]);
+    input.config = config.map(str::to_string);
+    process_and_materialize(&CheckOptionExpiryPlugin, input).errors
+}
+
+/// A config string is not read natively yet (`as_of` lives only in
+/// beancount-options), so it gives one warning instead of being ignored
+/// silently, and the default rules still apply.
+#[test]
+fn test_option_expiry_config_is_ignored_with_a_warning() {
+    let errors = option_expiry_with_config(Some("{'as_of': '2026-10-01'}"));
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    assert_eq!(errors[0].severity, PluginErrorSeverity::Warning);
+    assert_eq!(
+        errors[0].message,
+        "check_option_expiry: the config is ignored; rledger does not support as_of yet"
+    );
+    assert_eq!(errors[1].severity, PluginErrorSeverity::Error);
+
+    // A blank config (ASCII whitespace only, as beancount-options strips it)
+    // is no config at all.
+    for blank in [None, Some(""), Some(" \t\n\r\x0c\x0b")] {
+        let errors = option_expiry_with_config(blank);
+        assert_eq!(errors.len(), 1, "{blank:?}: {errors:?}");
+        assert_eq!(errors[0].severity, PluginErrorSeverity::Error);
+    }
+    // A non-ASCII space is not blank, as in Python's rule.
+    let errors = option_expiry_with_config(Some("\u{a0}"));
+    assert_eq!(errors.len(), 2, "{errors:?}");
+}
+
+/// The plugin is reachable by name through the registry.
+#[test]
+fn test_option_expiry_registered() {
+    assert!(NativePluginRegistry::global().has("check_option_expiry"));
+}
+
+// ============================================================================
+// CheckOptionAssignmentPlugin Tests
+// ============================================================================
+
+use rustledger_plugin::native::CheckOptionAssignmentPlugin;
+use rustledger_plugin_types::CostNumberData;
+
+const STOCK_ACCT: &str = "Assets:Broker:Stock";
+const GAINS_ACCT: &str = "Income:Trading:Gains";
+
+/// A booked posting, built up with cost and price annotations.
+fn leg(account: &str, units: &str, currency: &str) -> PostingData {
+    PostingData {
+        account: account.to_string(),
+        units: Some(AmountData {
+            number: units.to_string(),
+            currency: currency.to_string(),
+        }),
+        cost: None,
+        price: None,
+        flag: None,
+        metadata: vec![],
+        span: None,
+    }
+}
+
+fn with_cost(mut p: PostingData, number: CostNumberData) -> PostingData {
+    p.cost = Some(CostData {
+        number: Some(number),
+        currency: Some("USD".to_string()),
+        date: None,
+        label: None,
+        merge: false,
+    });
+    p
+}
+
+fn per_unit(p: PostingData, value: &str) -> PostingData {
+    with_cost(
+        p,
+        CostNumberData::PerUnit {
+            value: value.to_string(),
+        },
+    )
+}
+
+fn priced(mut p: PostingData, number: &str, is_total: bool) -> PostingData {
+    p.price = Some(PriceAnnotationData {
+        is_total,
+        amount: Some(AmountData {
+            number: number.to_string(),
+            currency: "USD".to_string(),
+        }),
+        number: None,
+        currency: None,
+    });
+    p
+}
+
+fn cash(number: &str) -> PostingData {
+    leg(CASH_ACCT, number, "USD")
+}
+
+fn txn_of(date: &str, postings: Vec<PostingData>) -> DirectiveWrapper {
+    DirectiveWrapper {
+        directive_type: "transaction".to_string(),
+        date: date.to_string(),
+        filename: Some("ledger.beancount".to_string()),
+        lineno: Some(7),
+        data: DirectiveData::Transaction(TransactionData {
+            flag: "*".to_string(),
+            payee: None,
+            narration: "test".to_string(),
+            tags: vec![],
+            links: vec![],
+            metadata: vec![],
+            postings,
+        }),
+    }
+}
+
+/// Sell to open `n` contracts of `symbol` at `cost` (premium × 100).
+fn sto(date: &str, n: &str, symbol: &str, cost: &str) -> DirectiveWrapper {
+    txn_of(
+        date,
+        vec![
+            per_unit(leg(OPT_ACCT, &format!("-{n}"), symbol), cost),
+            cash("0"),
+        ],
+    )
+}
+
+fn assignment_errors(directives: Vec<DirectiveWrapper>) -> Vec<PluginError> {
+    let plugin = CheckOptionAssignmentPlugin;
+    let mut all = vec![
+        make_open("2026-01-01", OPT_ACCT),
+        make_open("2026-01-01", CASH_ACCT),
+        make_open("2026-01-01", STOCK_ACCT),
+        make_open("2026-01-01", GAINS_ACCT),
+    ];
+    all.extend(directives);
+    let input = make_input(all);
+    let n = input.directives.len();
+    let output = process_and_materialize(&plugin, input);
+    assert_eq!(output.directives.len(), n);
+    output.errors
+}
+
+const PUT: &str = "AAPL261016P00225000";
+const CALL: &str = "AAPL261016C00280000";
+
+/// Short put assigned: close the option at cost, buy stock at `basis`.
+fn put_assignment(basis: &str) -> Vec<DirectiveWrapper> {
+    vec![
+        sto("2026-09-03", "1", PUT, "300.00"),
+        txn_of(
+            "2026-10-16",
+            vec![
+                per_unit(leg(OPT_ACCT, "1", PUT), "300.00"),
+                per_unit(leg(STOCK_ACCT, "100", "AAPL"), basis),
+                cash("-22500.00"),
+            ],
+        ),
+    ]
+}
+
+/// Covered call assigned: close the option at cost, sell the stock with
+/// `stock_leg` describing its price annotation.
+fn call_assignment(stock_leg: PostingData) -> Vec<DirectiveWrapper> {
+    vec![
+        txn_of(
+            "2026-01-02",
+            vec![
+                per_unit(leg(STOCK_ACCT, "100", "AAPL"), "200.00"),
+                cash("0"),
+            ],
+        ),
+        sto("2026-09-04", "1", CALL, "220.00"),
+        txn_of(
+            "2026-10-16",
+            vec![
+                per_unit(leg(OPT_ACCT, "1", CALL), "220.00"),
+                stock_leg,
+                cash("28000.00"),
+                leg(GAINS_ACCT, "-8220.00", "USD"),
+            ],
+        ),
+    ]
+}
+
+fn sold_aapl() -> PostingData {
+    per_unit(leg(STOCK_ACCT, "-100", "AAPL"), "200.00")
+}
+
+/// T11: short put assigned with basis = strike − premium.
+#[test]
+fn test_option_assignment_put_correct() {
+    let errors = assignment_errors(put_assignment("222.00"));
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// T12: short put assigned with stock at the full strike.
+#[test]
+fn test_option_assignment_put_basis_at_strike() {
+    let errors = assignment_errors(put_assignment("225.00"));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    let e = &errors[0];
+    assert_eq!(e.severity, PluginErrorSeverity::Error);
+    assert_eq!(
+        e.message,
+        "AAPL261016P00225000 assignment: AAPL basis 22500.00 USD, expected 22200.00 USD (strike 225 × 100 − premium 300.00)"
+    );
+    assert_eq!(e.source_file.as_deref(), Some("ledger.beancount"));
+    assert_eq!(e.line_number, Some(7));
+}
+
+/// T13: covered call assigned with `@` proceeds = strike + premium.
+#[test]
+fn test_option_assignment_call_correct_unit_price() {
+    let errors = assignment_errors(call_assignment(priced(sold_aapl(), "282.20", false)));
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// T14: covered call assigned with proceeds at the strike.
+#[test]
+fn test_option_assignment_call_proceeds_at_strike() {
+    let errors = assignment_errors(call_assignment(priced(sold_aapl(), "280.00", false)));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016C00280000 assignment: AAPL proceeds 28000.00 USD, expected 28220.00 USD (strike 280 × 100 + premium 220.00)"
+    );
+}
+
+/// T15: covered call assigned with `@@` total proceeds.
+#[test]
+fn test_option_assignment_call_correct_total_price() {
+    let errors = assignment_errors(call_assignment(priced(sold_aapl(), "28220.00", true)));
+    assert_eq!(errors.len(), 0, "{errors:?}");
+    let wrong = assignment_errors(call_assignment(priced(sold_aapl(), "28000.00", true)));
+    assert_eq!(wrong.len(), 1, "{wrong:?}");
+}
+
+/// T16: the premium is realized on the option leg and the stock is bought
+/// at the full strike. R2 is reported, not R3.
+#[test]
+fn test_option_assignment_premium_on_option_leg() {
+    let errors = assignment_errors(vec![
+        sto("2026-09-03", "1", PUT, "300.00"),
+        txn_of(
+            "2026-10-16",
+            vec![
+                priced(per_unit(leg(OPT_ACCT, "1", PUT), "300.00"), "0.00", false),
+                per_unit(leg(STOCK_ACCT, "100", "AAPL"), "225.00"),
+                cash("-22500.00"),
+                leg(GAINS_ACCT, "-300.00", "USD"),
+            ],
+        ),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016P00225000 assignment: option leg priced at 0.00 USD, not its cost 300.00 USD; close it at cost and fold the premium into the AAPL leg"
+    );
+}
+
+/// T16b: an option-leg price equal to its cost realizes no gain.
+#[test]
+fn test_option_assignment_option_leg_priced_at_cost() {
+    let errors = assignment_errors(vec![
+        sto("2026-09-03", "1", PUT, "300.00"),
+        txn_of(
+            "2026-10-16",
+            vec![
+                priced(per_unit(leg(OPT_ACCT, "1", PUT), "300.00"), "300.00", false),
+                per_unit(leg(STOCK_ACCT, "100", "AAPL"), "222.00"),
+                cash("-22500.00"),
+            ],
+        ),
+    ]);
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// T17: share count does not match 100 per contract. R1 is reported first.
+#[test]
+fn test_option_assignment_wrong_share_count() {
+    let errors = assignment_errors(vec![
+        sto("2026-09-03", "1", PUT, "300.00"),
+        txn_of(
+            "2026-10-16",
+            vec![
+                per_unit(leg(OPT_ACCT, "1", PUT), "300.00"),
+                per_unit(leg(STOCK_ACCT, "50", "AAPL"), "225.00"),
+                cash("-11250.00"),
+            ],
+        ),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016P00225000 assignment: 1 contract(s) but 50 AAPL; expected 100"
+    );
+}
+
+/// Two short puts opened at different premiums, both assigned.
+fn two_lot_assignment(stock: Vec<PostingData>) -> Vec<DirectiveWrapper> {
+    let mut assign = vec![
+        per_unit(leg(OPT_ACCT, "1", PUT), "300.00"),
+        per_unit(leg(OPT_ACCT, "1", PUT), "250.00"),
+    ];
+    assign.extend(stock);
+    assign.push(cash("-45000.00"));
+    vec![
+        sto("2026-09-03", "1", PUT, "300.00"),
+        sto("2026-09-10", "1", PUT, "250.00"),
+        txn_of("2026-10-16", assign),
+    ]
+}
+
+/// T18: two lots, basis correct as a total across two stock lots.
+#[test]
+fn test_option_assignment_two_lots_correct() {
+    let errors = assignment_errors(two_lot_assignment(vec![
+        per_unit(leg(STOCK_ACCT, "100", "AAPL"), "222.00"),
+        per_unit(leg(STOCK_ACCT, "100", "AAPL"), "222.50"),
+    ]));
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// T19: two lots, basis wrong.
+#[test]
+fn test_option_assignment_two_lots_wrong() {
+    let errors = assignment_errors(two_lot_assignment(vec![per_unit(
+        leg(STOCK_ACCT, "200", "AAPL"),
+        "225.00",
+    )]));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016P00225000 assignment: AAPL basis 45000.00 USD, expected 44450.00 USD (strike 225 × 200 − premium 550.00)"
+    );
+}
+
+/// T20: an ordinary buy-to-close with no stock leg is not an assignment.
+#[test]
+fn test_option_assignment_ordinary_close() {
+    let errors = assignment_errors(vec![
+        sto("2026-09-03", "1", PUT, "300.00"),
+        txn_of(
+            "2026-09-20",
+            vec![
+                priced(per_unit(leg(OPT_ACCT, "1", PUT), "300.00"), "100.00", false),
+                cash("-100.00"),
+                leg(GAINS_ACCT, "-200.00", "USD"),
+            ],
+        ),
+    ]);
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// T21: buying a long put together with stock (protective put) is not an
+/// assignment, even though stock units rise.
+#[test]
+fn test_option_assignment_protective_put() {
+    let errors = assignment_errors(vec![txn_of(
+        "2026-09-03",
+        vec![
+            per_unit(leg(OPT_ACCT, "1", PUT), "500.00"),
+            per_unit(leg(STOCK_ACCT, "100", "AAPL"), "230.00"),
+            cash("-23500.00"),
+        ],
+    )]);
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// T22: exercising a long put is out of scope and not checked.
+#[test]
+fn test_option_assignment_long_put_exercise_ignored() {
+    let errors = assignment_errors(vec![
+        txn_of(
+            "2026-01-02",
+            vec![
+                per_unit(leg(STOCK_ACCT, "100", "AAPL"), "200.00"),
+                cash("0"),
+            ],
+        ),
+        txn_of(
+            "2026-09-03",
+            vec![per_unit(leg(OPT_ACCT, "1", PUT), "500.00"), cash("-500.00")],
+        ),
+        txn_of(
+            "2026-10-16",
+            vec![
+                per_unit(leg(OPT_ACCT, "-1", PUT), "500.00"),
+                priced(sold_aapl(), "999.00", false),
+                cash("22500.00"),
+            ],
+        ),
+    ]);
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// T23: rounding tolerance is half a cent per share, inclusive.
+/// Premium 237.50 → expected basis 22262.50; 222.63 × 100 is 0.50 off
+/// (inside), 222.64 × 100 is 1.50 off (outside).
+#[test]
+fn test_option_assignment_tolerance() {
+    let case = |basis: &str| {
+        assignment_errors(vec![
+            sto("2026-09-03", "1", PUT, "237.50"),
+            txn_of(
+                "2026-10-16",
+                vec![
+                    per_unit(leg(OPT_ACCT, "1", PUT), "237.50"),
+                    per_unit(leg(STOCK_ACCT, "100", "AAPL"), basis),
+                    cash("-22500.00"),
+                ],
+            ),
+        ])
+    };
+    assert_eq!(case("222.63").len(), 0);
+    assert_eq!(case("222.62").len(), 0);
+    assert_eq!(case("222.64").len(), 1);
+    assert_eq!(case("222.61").len(), 1);
+}
+
+/// T23b: the call tolerance is also inclusive at exactly half a cent per
+/// share. Expected proceeds 28220.00; 28220.50 is 0.50 off (inside),
+/// 28220.51 is just outside.
+#[test]
+fn test_option_assignment_call_tolerance() {
+    let case = |total: &str| assignment_errors(call_assignment(priced(sold_aapl(), total, true)));
+    assert_eq!(case("28220.50").len(), 0);
+    assert_eq!(case("28219.50").len(), 0);
+    assert_eq!(case("28220.51").len(), 1);
+    assert_eq!(case("28219.49").len(), 1);
+}
+
+/// T24: cash-settled index option, no stock leg.
+#[test]
+fn test_option_assignment_cash_settled_index() {
+    let spxw = "SPXW261030C06800000";
+    let errors = assignment_errors(vec![
+        sto("2026-09-03", "1", spxw, "1240.00"),
+        txn_of(
+            "2026-10-30",
+            vec![
+                priced(
+                    per_unit(leg(OPT_ACCT, "1", spxw), "1240.00"),
+                    "2000.00",
+                    false,
+                ),
+                cash("-2000.00"),
+                leg(GAINS_ACCT, "760.00", "USD"),
+            ],
+        ),
+    ]);
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// T25: every stock cost form is read as its total.
+#[test]
+fn test_option_assignment_cost_forms() {
+    let case = |cost: CostNumberData| {
+        assignment_errors(vec![
+            sto("2026-09-03", "1", PUT, "300.00"),
+            txn_of(
+                "2026-10-16",
+                vec![
+                    per_unit(leg(OPT_ACCT, "1", PUT), "300.00"),
+                    with_cost(leg(STOCK_ACCT, "100", "AAPL"), cost),
+                    cash("-22500.00"),
+                ],
+            ),
+        ])
+    };
+    let total = |v: &str| CostNumberData::Total {
+        value: v.to_string(),
+    };
+    let from_total = |v: &str| CostNumberData::PerUnitFromTotal {
+        per_unit: "999".to_string(),
+        total: v.to_string(),
+    };
+    let compound = |per: &str, lump: &str| CostNumberData::Compound {
+        per_unit: per.to_string(),
+        total: lump.to_string(),
+    };
+    assert_eq!(case(total("22200.00")).len(), 0);
+    assert_eq!(case(total("22500.00")).len(), 1);
+    assert_eq!(case(from_total("22200.00")).len(), 0);
+    assert_eq!(case(from_total("22500.00")).len(), 1);
+    assert_eq!(case(compound("221.00", "100.00")).len(), 0);
+    assert_eq!(case(compound("222.00", "100.00")).len(), 1);
+}
+
+/// T26: a call assignment whose stock leg has no usable price.
+#[test]
+fn test_option_assignment_call_without_price() {
+    let errors = assignment_errors(call_assignment(sold_aapl()));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016C00280000 assignment: AAPL sale has no price; expected proceeds 28220.00 USD"
+    );
+
+    let mut incomplete = sold_aapl();
+    incomplete.price = Some(PriceAnnotationData {
+        is_total: false,
+        amount: None,
+        number: None,
+        currency: None,
+    });
+    let errors = assignment_errors(call_assignment(incomplete));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+}
+
+/// T27: an option position held without cost has no known premium and is
+/// not checked.
+#[test]
+fn test_option_assignment_without_option_cost() {
+    let errors = assignment_errors(vec![
+        txn_of("2026-09-03", vec![leg(OPT_ACCT, "-1", PUT), cash("300.00")]),
+        txn_of(
+            "2026-10-16",
+            vec![
+                leg(OPT_ACCT, "1", PUT),
+                per_unit(leg(STOCK_ACCT, "100", "AAPL"), "225.00"),
+                cash("-22500.00"),
+            ],
+        ),
+    ]);
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// T28: two strikes on the same underlying assigned in one transaction are
+/// checked together, and the message lists both contracts.
+#[test]
+fn test_option_assignment_two_strikes() {
+    let put230 = "AAPL261016P00230000";
+    let case = |basis: &str| {
+        assignment_errors(vec![
+            sto("2026-09-03", "1", PUT, "300.00"),
+            sto("2026-09-03", "1", put230, "400.00"),
+            txn_of(
+                "2026-10-16",
+                vec![
+                    per_unit(leg(OPT_ACCT, "1", PUT), "300.00"),
+                    per_unit(leg(OPT_ACCT, "1", put230), "400.00"),
+                    per_unit(leg(STOCK_ACCT, "200", "AAPL"), basis),
+                    cash("-45500.00"),
+                ],
+            ),
+        ])
+    };
+    // (225 + 230) × 100 − 700 = 44800 → 224.00 per share.
+    assert_eq!(case("224.00").len(), 0);
+    let errors = case("227.50");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016P00225000, AAPL261016P00230000 assignment: AAPL basis 45500.00 USD, expected 44800.00 USD (strike value 45500.00 − premium 700.00)"
+    );
+}
+
+/// T29: the stock leg must move in the assignment's direction; a short
+/// put closed alongside a stock sale is not an assignment.
+#[test]
+fn test_option_assignment_wrong_direction_ignored() {
+    let errors = assignment_errors(vec![
+        txn_of(
+            "2026-01-02",
+            vec![
+                per_unit(leg(STOCK_ACCT, "100", "AAPL"), "200.00"),
+                cash("0"),
+            ],
+        ),
+        sto("2026-09-03", "1", PUT, "300.00"),
+        txn_of(
+            "2026-10-16",
+            vec![
+                priced(per_unit(leg(OPT_ACCT, "1", PUT), "300.00"), "100.00", false),
+                priced(sold_aapl(), "230.00", false),
+                cash("22900.00"),
+            ],
+        ),
+    ]);
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// T31: an adjusted contract (numeric root suffix after a reverse split,
+/// 10-share deliverable) is not checked. Its root `XYZ1` names no stock
+/// commodity, so the `XYZ` leg is not read as an assignment, and the
+/// 100-share rule is never applied to it.
+#[test]
+fn test_option_assignment_adjusted_contract_skipped() {
+    let adjusted = "XYZ1261016P00005000";
+    let errors = assignment_errors(vec![
+        sto("2026-09-03", "1", adjusted, "50.00"),
+        txn_of(
+            "2026-10-16",
+            vec![
+                per_unit(leg(OPT_ACCT, "1", adjusted), "50.00"),
+                per_unit(leg(STOCK_ACCT, "10", "XYZ"), "45.00"),
+                cash("-500.00"),
+            ],
+        ),
+    ]);
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// Same-day entries are walked in beancount's `entry_sortkey` order: a
+/// sell-to-open at `other.beancount:1` comes before an assignment the same
+/// day at `main.beancount:16`, even though the loader lists `main` first.
+#[test]
+fn test_option_assignment_same_day_entries_sorted_by_line() {
+    let mut directives = put_assignment("225.00");
+    let assignment = directives.pop().expect("assignment");
+    let mut opening = directives.pop().expect("sell to open");
+    opening.date = "2026-10-16".to_string();
+    let errors = assignment_errors(vec![
+        located_at(assignment, "main.beancount", 16),
+        located_at(opening, "other.beancount", 1),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016P00225000 assignment: AAPL basis 22500.00 USD, expected 22200.00 USD (strike 225 × 100 − premium 300.00)"
+    );
+    assert_eq!(errors[0].source_file.as_deref(), Some("main.beancount"));
+    assert_eq!(errors[0].line_number, Some(16));
+}
+
+/// Numbers whose products leave `Decimal`'s range skip the assignment
+/// instead of panicking: the strike value (#2661 review), the stock's
+/// basis, and a call's proceeds. None of them is mistaken for a missing
+/// cost or price.
+#[test]
+fn test_option_assignment_overflow_is_skipped() {
+    let huge = "1000000000000000000000000";
+    let strike_value = assignment_errors(vec![
+        sto("2026-09-03", huge, "AAPL261016P99999999", "1"),
+        txn_of(
+            "2026-10-16",
+            vec![
+                per_unit(leg(OPT_ACCT, huge, "AAPL261016P99999999"), "1"),
+                per_unit(leg(STOCK_ACCT, "1", "AAPL"), "1"),
+                cash("0"),
+            ],
+        ),
+    ]);
+    assert_eq!(strike_value.len(), 0, "{strike_value:?}");
+
+    // 10^24 contracts of the 1.00 put: strike value 10^26 fits, but 10^26
+    // shares at 1000 each (10^29) do not.
+    let shares = "100000000000000000000000000";
+    let basis = assignment_errors(vec![
+        sto("2026-09-03", huge, "AAPL261016P00001000", "1"),
+        txn_of(
+            "2026-10-16",
+            vec![
+                per_unit(leg(OPT_ACCT, huge, "AAPL261016P00001000"), "1"),
+                per_unit(leg(STOCK_ACCT, shares, "AAPL"), "1000"),
+                cash("0"),
+            ],
+        ),
+    ]);
+    assert_eq!(basis.len(), 0, "{basis:?}");
+
+    let proceeds = assignment_errors(vec![
+        sto("2026-09-03", huge, "AAPL261016C00001000", "1"),
+        txn_of(
+            "2026-10-16",
+            vec![
+                per_unit(leg(OPT_ACCT, huge, "AAPL261016C00001000"), "1"),
+                priced(
+                    per_unit(leg(STOCK_ACCT, &format!("-{shares}"), "AAPL"), "1"),
+                    "1000",
+                    false,
+                ),
+                cash("0"),
+            ],
+        ),
+    ]);
+    assert_eq!(proceeds.len(), 0, "{proceeds:?}");
+
+    // Running positions that overflow are dropped, not panicked on.
+    let big = "50000000000000000000000000000";
+    let net = assignment_errors(vec![
+        sto("2026-09-03", big, PUT, "0"),
+        sto("2026-09-04", big, PUT, "0"),
+    ]);
+    assert_eq!(net.len(), 0, "{net:?}");
+}
+
+/// A put and a call on one root settled in one entry are checked
+/// separately: the put assignment is checked, and the call bought back at
+/// cost beside it is not an assignment (#2661 review).
+#[test]
+fn test_option_assignment_put_and_call_in_one_entry() {
+    let case = |basis: &str| {
+        assignment_errors(vec![
+            sto("2026-09-03", "1", PUT, "300.00"),
+            sto("2026-09-04", "1", CALL, "220.00"),
+            txn_of(
+                "2026-10-16",
+                vec![
+                    per_unit(leg(OPT_ACCT, "1", PUT), "300.00"),
+                    per_unit(leg(OPT_ACCT, "1", CALL), "220.00"),
+                    per_unit(leg(STOCK_ACCT, "100", "AAPL"), basis),
+                    cash("-22500.00"),
+                    leg(GAINS_ACCT, "-300.00", "USD"),
+                ],
+            ),
+        ])
+    };
+    let errors = case("225.00");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016P00225000 assignment: AAPL basis 22500.00 USD, expected 22200.00 USD (strike 225 × 100 − premium 300.00)"
+    );
+    assert_eq!(case("222.00").len(), 0);
+}
+
+/// A put assignment whose stock is bought with a price and no cost is an
+/// error, as a call's sale with no price is (#2661 review).
+#[test]
+fn test_option_assignment_put_without_stock_cost() {
+    let errors = assignment_errors(vec![
+        sto("2026-09-03", "1", PUT, "300.00"),
+        txn_of(
+            "2026-10-16",
+            vec![
+                per_unit(leg(OPT_ACCT, "1", PUT), "300.00"),
+                priced(leg(STOCK_ACCT, "100", "AAPL"), "225.00", false),
+                cash("-22500.00"),
+                leg(GAINS_ACCT, "-300.00", "USD"),
+            ],
+        ),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016P00225000 assignment: AAPL purchase has no cost; expected basis 22200.00 USD"
+    );
+}
+
+/// A naked call assigned opens a short stock lot. Its cost is the sale's
+/// proceeds, so a cost with no price is checked as proceeds instead of
+/// reported as a sale with no price. A covered call's sale of a long lot
+/// with no price is still an error (T26).
+#[test]
+fn test_option_assignment_naked_call_opens_short() {
+    let case = |cost: &str| {
+        assignment_errors(vec![
+            sto("2026-09-04", "1", CALL, "220.00"),
+            txn_of(
+                "2026-10-16",
+                vec![
+                    per_unit(leg(OPT_ACCT, "1", CALL), "220.00"),
+                    per_unit(leg(STOCK_ACCT, "-100", "AAPL"), cost),
+                    cash("28000.00"),
+                ],
+            ),
+        ])
+    };
+    assert_eq!(case("282.20").len(), 0);
+    let errors = case("280.00");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016C00280000 assignment: AAPL proceeds 28000.00 USD, expected 28220.00 USD (strike 280 × 100 + premium 220.00)"
+    );
+
+    // Long stock held in another account does not make this a sale of it.
+    let mut directives = vec![txn_of(
+        "2026-01-02",
+        vec![
+            per_unit(leg("Assets:Other:Stock", "100", "AAPL"), "200.00"),
+            cash("0"),
+        ],
+    )];
+    directives.extend([
+        sto("2026-09-04", "1", CALL, "220.00"),
+        txn_of(
+            "2026-10-16",
+            vec![
+                per_unit(leg(OPT_ACCT, "1", CALL), "220.00"),
+                per_unit(leg(STOCK_ACCT, "-100", "AAPL"), "282.20"),
+                cash("28000.00"),
+            ],
+        ),
+    ]);
+    let errors = assignment_errors(directives);
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// The plugin has no options, so a config string gives one warning
+/// instead of being ignored silently.
+#[test]
+fn test_option_assignment_config_is_ignored_with_a_warning() {
+    let mut all = vec![
+        make_open("2026-01-01", OPT_ACCT),
+        make_open("2026-01-01", CASH_ACCT),
+        make_open("2026-01-01", STOCK_ACCT),
+    ];
+    all.extend(put_assignment("222.00"));
+    let mut input = make_input(all);
+    input.config = Some("{'tolerance': 1}".to_string());
+    let errors = process_and_materialize(&CheckOptionAssignmentPlugin, input).errors;
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].severity, PluginErrorSeverity::Warning);
+    assert_eq!(
+        errors[0].message,
+        "check_option_assignment: the config is ignored; this plugin has no options"
+    );
+
+    let mut all = vec![make_open("2026-01-01", OPT_ACCT)];
+    all.extend(put_assignment("222.00"));
+    let mut input = make_input(all);
+    input.config = Some(" \t".to_string());
+    let errors = process_and_materialize(&CheckOptionAssignmentPlugin, input).errors;
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// The plugin is reachable by name through the registry.
+#[test]
+fn test_option_assignment_registered() {
+    assert!(NativePluginRegistry::global().has("check_option_assignment"));
+}
+
+// PT1: for any strike, premium, and contract count, a put assignment with
+// basis = strike × shares − premium passes, and one whose basis is off by
+// more than the half-cent-per-share tolerance fails exactly once. Same for
+// calls with proceeds = strike × shares + premium.
+proptest::proptest! {
+    #![proptest_config(proptest::prelude::ProptestConfig::with_cases(64))]
+
+    #[test]
+    fn prop_option_assignment_basis_invariant(
+        strike_halves in 2u32..2000,   // $1.00 .. $999.50 in $0.50 steps
+        premium_cents in 1u32..20_000, // $1 .. $19,999 per contract
+        contracts in 1u32..20,
+        is_call in proptest::bool::ANY,
+        off_cents in 1u32..500,        // error, in cents per share, beyond tolerance
+    ) {
+        use rust_decimal::Decimal;
+
+        let strike = Decimal::new(i64::from(strike_halves) * 5, 1);
+        let premium_per_contract = Decimal::new(i64::from(premium_cents), 0);
+        // A put's premium cannot exceed its strike value; keep inputs realistic.
+        proptest::prop_assume!(premium_per_contract < strike * Decimal::from(100));
+        let shares = Decimal::from(contracts * 100);
+        let premium_total = premium_per_contract * Decimal::from(contracts);
+        let strike_tag = format!("{:08}", (strike * Decimal::from(1000)).normalize());
+        let symbol = format!("AAPL261016{}{strike_tag}", if is_call { "C" } else { "P" });
+        let expected = if is_call {
+            strike * shares + premium_total
+        } else {
+            strike * shares - premium_total
+        };
+
+        let run = |total: Decimal| {
+            let n = contracts.to_string();
+            let mut ds = vec![];
+            if is_call {
+                ds.push(txn_of(
+                    "2026-01-02",
+                    vec![per_unit(leg(STOCK_ACCT, &shares.to_string(), "AAPL"), "1.00"), cash("0")],
+                ));
+            }
+            ds.push(sto("2026-09-03", &n, &symbol, &premium_per_contract.to_string()));
+            let stock = if is_call {
+                priced(
+                    per_unit(leg(STOCK_ACCT, &(-shares).to_string(), "AAPL"), "1.00"),
+                    &total.to_string(),
+                    true,
+                )
+            } else {
+                with_cost(
+                    leg(STOCK_ACCT, &shares.to_string(), "AAPL"),
+                    CostNumberData::Total { value: total.to_string() },
+                )
+            };
+            ds.push(txn_of(
+                "2026-10-16",
+                vec![
+                    per_unit(leg(OPT_ACCT, &n, &symbol), &premium_per_contract.to_string()),
+                    stock,
+                    cash("0"),
+                ],
+            ));
+            assignment_errors(ds)
+        };
+
+        let ok = run(expected);
+        proptest::prop_assert_eq!(ok.len(), 0, "{:?}", ok);
+
+        let off = Decimal::new(i64::from(off_cents), 2) * shares + Decimal::new(5, 3) * shares;
+        let bad = run(expected + off);
+        proptest::prop_assert_eq!(bad.len(), 1, "{:?}", bad);
+    }
+}

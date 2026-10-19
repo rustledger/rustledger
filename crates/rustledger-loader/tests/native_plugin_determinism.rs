@@ -223,6 +223,21 @@ fn fixture(name: &str, docs: &Path) -> Option<String> {
              2024-01-15 * \"Sell synthetic\"\n  synthetic_loan_expiry: 2026-06-30\n  \
              Assets:Broker  -500 USD\n  Income:Capital-Losses  500 USD\n"
             .to_string(),
+        "check_option_expiry" => "plugin \"beancount_options.check_option_expiry\"\n\
+             2026-01-01 open Assets:A\n2026-01-01 open Assets:B\n2026-01-01 open Assets:Cash\n\
+             2026-09-02 * \"x\"\n  Assets:B  -1 BBB261016P00010000 @ 1 USD\n  \
+             Assets:A  -1 AAA261016C00020000 @ 1 USD\n  Assets:Cash\n\
+             2026-11-01 * \"later\"\n  Assets:Cash  0 USD\n  Assets:A  0 USD\n"
+            .to_string(),
+        "check_option_assignment" => "plugin \"beancount_options.check_option_assignment\"\n\
+             2026-01-01 open Assets:Opt\n2026-01-01 open Assets:Stock\n2026-01-01 open Assets:Cash\n\
+             2026-01-01 open Income:Gains\n\
+             2026-09-03 * \"sell to open\"\n  Assets:Opt  -1 AAA261016P00225000 {300.00 USD}\n  \
+             Assets:Opt  -1 BBB261016P00100000 {100.00 USD}\n  Assets:Cash\n\
+             2026-10-16 * \"assigned at the strike\"\n  Assets:Opt  1 AAA261016P00225000 {}\n  \
+             Assets:Opt  1 BBB261016P00100000 {}\n  Assets:Stock  100 AAA {225.00 USD}\n  \
+             Assets:Stock  100 BBB {100.00 USD}\n  Income:Gains  -400.00 USD\n  Assets:Cash\n"
+            .to_string(),
         _ => return None,
     };
     Some(src)

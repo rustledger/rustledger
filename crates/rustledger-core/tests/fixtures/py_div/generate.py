@@ -60,8 +60,7 @@ def expected(a: str, b: str):
     q = CTX.divide(da, db)
     exp = q.as_tuple().exponent
     if q == 0:
-        # A zero has no sign in rustledger (`negate_python`).
-        q = abs(q)
+        # A zero has no sign in rustledger (`negate_python`): written unsigned.
         return (fmt(0, -exp) if exp < 0 else "0"), "zero"
     if exp > 0:
         # `2E+1`: same value at scale 0, or None past Decimal::MAX.
@@ -181,7 +180,6 @@ def expected_compound(per: str, total: str, units: str):
     q = CTX.divide(cost_total, n)
     exp = q.as_tuple().exponent
     if q == 0:
-        q = abs(q)
         return (fmt(0, min(-exp, MAX_SCALE)) if exp < 0 else "0"), "zero"
     if exp > 0:
         v = int(q)

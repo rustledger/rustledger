@@ -226,6 +226,16 @@ pub fn checked_sub_python_scale(a: Decimal, b: Decimal) -> Option<Decimal> {
 /// scale far past the ideal, so both steps are no-ops and it is returned as
 /// `rust_decimal` computed it.
 ///
+/// Python's SCALE, not Python's precision: an inexact quotient keeps
+/// `rust_decimal`'s up-to-29 digits (`10 / 3` has 28 places), where Python
+/// rounds to 28 significant digits. [`py_div`] is Python's division
+/// exactly; booking uses it for every per-unit number it derives from a
+/// total (#2652). This one stays where more digits are wanted on purpose (an
+/// interpolated `@` price, which must weigh back to its total, and
+/// `rustledger_booking::prorate`) and in BQL's `/` and `avg`, whose
+/// inexact quotients therefore still differ from bean-query's in the last
+/// digit.
+///
 /// Returns `None` on divide-by-zero or overflow, matching
 /// `Decimal::checked_div` — BQL maps that to NULL rather than panicking.
 #[must_use]
@@ -394,14 +404,18 @@ impl PyNum {
 
 fn pow10(n: u64) -> bigdecimal::num_bigint::BigUint {
     use bigdecimal::num_traits::Pow;
-    bigdecimal::num_bigint::BigUint::from(10u32).pow(n)
+    match u32::try_from(n).ok().and_then(|n| 10u128.checked_pow(n)) {
+        Some(small) => bigdecimal::num_bigint::BigUint::from(small),
+        None => bigdecimal::num_bigint::BigUint::from(10u32).pow(n),
+    }
 }
 
 fn digit_count(n: &bigdecimal::num_bigint::BigUint) -> usize {
-    if *n == bigdecimal::num_bigint::BigUint::ZERO {
-        1
-    } else {
-        n.to_str_radix(10).len()
+    use bigdecimal::num_traits::ToPrimitive;
+    match n.to_u128() {
+        Some(0) => 1,
+        Some(small) => small.ilog10() as usize + 1,
+        None => n.to_str_radix(10).len(),
     }
 }
 
@@ -570,8 +584,11 @@ fn py_to_decimal(q: &PyNum, a: &PyNum, b: &PyNum) -> Option<Decimal> {
 /// `ROUND_HALF_EVEN`): `{{T}}` and `{a # b}` in
 /// `booking_full.convert_costspec_to_cost`, `@@` in the parser's
 /// `Builder.posting`, an interpolated `{}` cost or `@` price in
-/// `booking_full.interpolate_group`. The General Decimal Arithmetic rule it
-/// follows:
+/// `booking_full.interpolate_group`. (rustledger diverges on purpose for the
+/// interpolated `@` price, whose inexact quotient keeps
+/// [`checked_div_python_scale`]'s extra digit so its posting still weighs
+/// back to the total it was solved from; see `rustledger_booking`'s
+/// `interpolate`.) The General Decimal Arithmetic rule it follows:
 ///
 /// * **Exact quotient:** the exponent closest to the ideal exponent
 ///   `exp(a) − exp(b)` — trailing zeros are kept down to it, never past it.

@@ -132,3 +132,43 @@ fn py_div_matches_beancount_on_the_issue_ledgers() {
         );
     }
 }
+
+fn any_decimal() -> impl proptest::strategy::Strategy<Value = Decimal> {
+    use proptest::prelude::*;
+    (
+        -(1i128 << 96) + 1..(1i128 << 96),
+        0u32..=28,
+        prop_oneof![Just(0u8), Just(1), Just(2)],
+    )
+        .prop_map(|(m, scale, shape)| match shape {
+            // Full-width mantissas, and small ones, where the edges live.
+            0 => Decimal::from_i128_with_scale(m, scale),
+            1 => Decimal::from_i128_with_scale(m % 1000, scale),
+            _ => Decimal::from_i128_with_scale(m % 10, scale),
+        })
+}
+
+proptest::proptest! {
+    /// Over the whole `Decimal` range `py_div` never panics, and whatever it
+    /// returns is within half a unit in its last place of the exact quotient
+    /// (Python's rounding, or the single 28-place rounding below `1e-28`).
+    #[test]
+    fn py_div_is_total_and_correctly_rounded(a in any_decimal(), b in any_decimal()) {
+        let got = py_div(a, b);
+        if b.is_zero() {
+            proptest::prop_assert!(got.is_none());
+        } else if let Some(q) = got {
+            let big = rustledger_core::to_bigdecimal;
+            let exact = big(a) / big(b);
+            // Python's last place: the `Decimal`'s, or, for a 29-digit
+            // integer (Python's positive exponent, written out), the tens.
+            let digits = q.mantissa().unsigned_abs().to_string().len() as i64;
+            let ulp_exp = (digits - 28).max(0) - i64::from(q.scale());
+            let ulp = bigdecimal::BigDecimal::new(1.into(), -ulp_exp);
+            let err = (big(q) - exact).abs();
+            // `BigDecimal` division is itself rounded (to 100 digits), far
+            // below any ulp a `Decimal` has.
+            proptest::prop_assert!(err * 2 <= ulp, "{a} / {b} = {q}");
+        }
+    }
+}

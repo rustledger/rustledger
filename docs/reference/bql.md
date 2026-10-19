@@ -292,8 +292,8 @@ When the selected postings cannot be realized on their own, because a `WHERE`
 keeps a sale but not enough of the purchases it sold from, the result is the
 plain sum of those postings: the sale appears as a negative lot at the cost
 it was booked at, beside the purchases that were kept. `balance` does the same
-for those rows. `BALANCES` over the same `FROM` subset reports an error
-instead. Python beancount has no `AVERAGE`
+for those rows, and so does `BALANCES` for an account partly selected by its
+`FROM` or `WHERE`. Python beancount has no `AVERAGE`
 booking, so there is no bean-query answer to compare with.
 
 ## Scalar Functions
@@ -371,7 +371,15 @@ works as an entry filter: `BALANCES FROM has_account('Assets')`.
 A posting column in a `FROM` filter (`account`, `number`, `position`, ...) is
 a row filter instead, as in beanquery: `FROM account ~ 'Bank'` keeps the bank
 postings only, the same as `WHERE account ~ 'Bank'`, applied after `OPEN ON`,
-`CLOSE` and `CLEAR`. `PRINT` prints whole entries, so it rejects a posting
+`CLOSE` and `CLEAR`. `BALANCES`' `WHERE` filters the postings before they are
+summed, as bean-query's does, so `BALANCES WHERE x` is `BALANCES FROM x`, and
+both are `SELECT account, sum(position) WHERE x GROUP BY account`:
+`BALANCES WHERE year = 2024` sums each account's 2024 postings, a sale in 2024
+of a lot bought earlier showing as a negative lot. An account every one of
+whose postings is selected shows its booked total. Because the `WHERE` reads
+postings, `balance` and `account_balance` are refused there: to filter
+accounts by their total, use `SELECT account, sum(position) ... GROUP BY
+account HAVING ...`. `PRINT` prints whole entries, so it rejects a posting
 column in its `FROM`; use `PRINT FROM has_account('Bank')`.
 
 ### Metadata Functions

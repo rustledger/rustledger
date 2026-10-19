@@ -6,9 +6,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, ValueEnum};
 use rustledger_loader::LoadError;
 #[cfg(feature = "python-plugin-wasm")]
-use rustledger_plugin::PluginManager;
+use rustledger_plugin::PluginInput;
 #[cfg(feature = "python-plugin-wasm")]
-use rustledger_plugin::{PluginInput, PluginOptions};
+use rustledger_plugin::PluginManager;
 // The canonical advisory-only predicate lives in `rustledger-validate` so that
 // `check` (which hides these, mirroring bean-check) and `lint` share one source
 // of truth for which codes are advisory.
@@ -846,20 +846,14 @@ pub fn run_with_writer<W: Write>(
 
         let current_input = PluginInput {
             directives: wrappers,
-            options: PluginOptions {
-                operating_currencies: ledger.options.operating_currency.clone(),
-                title: ledger.options.title.clone(),
-                // Same as the loader pipeline: CLI-specified WASM plugins must
-                // see the ledger's own root names, or they misclassify on a
-                // renamed ledger just as the native ones did (#1964).
-                account_types: rustledger_plugin::PluginAccountTypes {
-                    assets: ledger.options.name_assets.clone(),
-                    liabilities: ledger.options.name_liabilities.clone(),
-                    equity: ledger.options.name_equity.clone(),
-                    income: ledger.options.name_income.clone(),
-                    expenses: ledger.options.name_expenses.clone(),
-                },
-            },
+            // The options the loader pipeline gives its plugins: CLI-specified
+            // WASM plugins must see the ledger's own roots (#1964) and
+            // tolerance options (#2653) as well.
+            //
+            // They run on the finished ledger, after the loader has removed
+            // booking's interpolation marks, so no posting here reads as
+            // interpolated.
+            options: ledger.options.plugin_options(),
             config: None,
         };
 

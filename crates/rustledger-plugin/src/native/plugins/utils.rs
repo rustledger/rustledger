@@ -46,6 +46,31 @@ pub fn materialize_ops(input: &[DirectiveWrapper], output: &PluginOutput) -> Vec
     out
 }
 
+/// The ledger's tolerance options, from the [`crate::types::PluginOptions`]
+/// the host fills from its `option` directives (#2653), for
+/// [`rustledger_booking::transaction_tolerances`].
+///
+/// The host writes every number from a parsed `Decimal`, so each parses;
+/// one that does not (a hand-built input) falls back to beancount's default
+/// for it rather than to a zero, which would mean "no tolerance at all".
+pub fn tolerance_policy(
+    options: &crate::types::PluginOptions,
+) -> rustledger_booking::TolerancePolicy {
+    let fallback = rustledger_booking::TolerancePolicy::default();
+    rustledger_booking::TolerancePolicy {
+        multiplier: options
+            .tolerance_multiplier
+            .parse()
+            .unwrap_or(fallback.multiplier),
+        infer_from_cost: options.infer_tolerance_from_cost,
+        defaults: options
+            .inferred_tolerance_default
+            .iter()
+            .filter_map(|(currency, number)| Some((currency.clone(), number.parse().ok()?)))
+            .collect(),
+    }
+}
+
 /// Increment a date string by one day.
 /// Returns None if the date format is invalid.
 pub fn increment_date(date: &str) -> Option<String> {
@@ -116,6 +141,48 @@ pub fn python_match(regex: &regex::Regex, text: &str) -> bool {
 /// rledger cannot express.
 pub fn python_match_regex(pattern: &str) -> Result<regex::Regex, super::py_regex::PyRegexError> {
     super::py_regex::compile_match(pattern)
+}
+
+#[cfg(test)]
+mod tolerance_tests {
+    use super::tolerance_policy;
+    use crate::types::PluginOptions;
+    use rust_decimal_macros::dec;
+
+    /// The wire's mark is the one booking sets: two crates, one string.
+    #[test]
+    fn the_wire_mark_is_bookings() {
+        assert_eq!(
+            rustledger_plugin_types::AUTOMATIC_META,
+            rustledger_core::AUTOMATIC_META
+        );
+    }
+
+    /// The options become the policy booking's tolerance reads, and a
+    /// number that does not parse falls back to beancount's default.
+    #[test]
+    fn tolerance_policy_reads_the_options() {
+        let policy = tolerance_policy(&PluginOptions {
+            inferred_tolerance_default: vec![
+                ("*".to_string(), "0.5".to_string()),
+                ("USD".to_string(), "0.003".to_string()),
+                ("BAD".to_string(), "x".to_string()),
+            ],
+            tolerance_multiplier: "0.6".to_string(),
+            infer_tolerance_from_cost: true,
+            ..Default::default()
+        });
+        assert_eq!(policy.multiplier, dec!(0.6));
+        assert!(policy.infer_from_cost);
+        assert_eq!(policy.defaults.len(), 2);
+        assert_eq!(policy.defaults["USD"], dec!(0.003));
+
+        let fallback = tolerance_policy(&PluginOptions {
+            tolerance_multiplier: "nonsense".to_string(),
+            ..Default::default()
+        });
+        assert_eq!(fallback.multiplier, dec!(0.5));
+    }
 }
 
 #[cfg(test)]

@@ -55,6 +55,7 @@ pub mod intern;
 pub mod inventory;
 pub mod meta_json;
 pub mod position;
+pub mod py_regex;
 pub mod shift_spans_impls;
 pub mod sorted_set;
 pub mod span;

@@ -728,6 +728,9 @@ impl<'a> Executor<'a> {
             }
             Expr::BinaryOp(op) => {
                 let left = self.evaluate_aggregate_expr(&op.left, group)?;
+                if let Some(value) = self.short_circuit(op.op, &left)? {
+                    return Ok(value);
+                }
                 let right = self.evaluate_aggregate_expr(&op.right, group)?;
                 // Re-evaluate with computed values
                 self.binary_op_on_values(op.op, &left, &right)
@@ -843,6 +846,9 @@ impl<'a> Executor<'a> {
             }
             Expr::BinaryOp(op) => {
                 let left = self.evaluate_having_expr(&op.left, row, col_map, alias_map, group)?;
+                if let Some(value) = self.short_circuit(op.op, &left)? {
+                    return Ok(value);
+                }
                 let right = self.evaluate_having_expr(&op.right, row, col_map, alias_map, group)?;
                 self.binary_op_on_values(op.op, &left, &right)
             }
@@ -1214,6 +1220,9 @@ impl<'a> Executor<'a> {
             }
             Expr::BinaryOp(op) => {
                 let left = self.evaluate_aggregate_table_expr(&op.left, group, column_map)?;
+                if let Some(value) = self.short_circuit(op.op, &left)? {
+                    return Ok(value);
+                }
                 let right = self.evaluate_aggregate_table_expr(&op.right, group, column_map)?;
                 self.binary_op_on_values(op.op, &left, &right)
             }
@@ -1296,6 +1305,9 @@ impl<'a> Executor<'a> {
                 let left = self.evaluate_having_table_expr(
                     &op.left, row, col_map, alias_map, group, column_map,
                 )?;
+                if let Some(value) = self.short_circuit(op.op, &left)? {
+                    return Ok(value);
+                }
                 let right = self.evaluate_having_table_expr(
                     &op.right, row, col_map, alias_map, group, column_map,
                 )?;

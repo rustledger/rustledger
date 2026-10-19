@@ -1,0 +1,13 @@
+; A contract position past Decimal's range: booking rejects the inventory
+; before check_option_expiry runs, so the plugin's overflow skip is never
+; what decides the result (#2661 review).
+plugin "beancount_options.check_option_expiry"
+2026-01-01 open Assets:Opt
+2026-01-01 open Assets:Opt2
+2026-09-03 * "a"
+  Assets:Opt  50000000000000000000000000000 AAPL261016P00100000
+  Assets:Opt2  -50000000000000000000000000000 AAPL261016P00100000
+2026-09-04 * "b"
+  Assets:Opt  50000000000000000000000000000 AAPL261016P00100000
+  Assets:Opt2  -50000000000000000000000000000 AAPL261016P00100000
+2026-11-01 note Assets:Opt "x"

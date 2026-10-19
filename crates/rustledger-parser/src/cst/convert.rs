@@ -1372,11 +1372,14 @@ fn convert_transaction(
 /// shape; the CST lexer classifies `|` as `PIPE`, so we just
 /// scan the header directly.
 fn header_has_pipe(node: &AstTransaction) -> bool {
+    // Leading trivia (blank lines, comments) can precede the header inside the
+    // node; `HeaderEnd` skips it (#2628).
+    let mut header = HeaderEnd::default();
     for el in node.syntax().children_with_tokens() {
         let rowan::NodeOrToken::Token(t) = el else {
             continue;
         };
-        if t.kind() == crate::SyntaxKind::NEWLINE {
+        if !header.in_header(t.kind()) {
             return false;
         }
         if t.kind() == crate::SyntaxKind::PIPE {
@@ -1395,7 +1398,9 @@ fn header_has_pipe(node: &AstTransaction) -> bool {
 ///
 /// Tokens before the header-terminator NEWLINE belong to the
 /// transaction header (date/flag/strings/tags/links) and are
-/// skipped.
+/// skipped, as is any leading trivia before the header: a comment
+/// on the header line or on a line before the transaction never
+/// becomes a posting comment ([`HeaderEnd`], #2628).
 ///
 /// Returns `(postings, trailing_comments)`: the second element is
 /// any pending comments left over AFTER the final posting, which
@@ -1407,14 +1412,13 @@ fn collect_postings_with_comments(
 ) -> (Vec<Spanned<Posting>>, Vec<String>) {
     let mut out = Vec::new();
     let mut pending: Vec<String> = Vec::new();
-    let mut past_header = false;
+    // Leading trivia (blank lines, comment lines) sits inside the node before
+    // the header; only the NEWLINE after the header content ends it (#2628).
+    let mut header = HeaderEnd::default();
     for el in node.syntax().children_with_tokens() {
         match el {
             rowan::NodeOrToken::Token(t) => {
-                if !past_header {
-                    if t.kind() == crate::SyntaxKind::NEWLINE {
-                        past_header = true;
-                    }
+                if header.in_header(t.kind()) {
                     continue;
                 }
                 if is_comment_kind(t.kind()) {
@@ -1446,13 +1450,11 @@ fn collect_postings_with_comments(
                 }
             }
             rowan::NodeOrToken::Node(n) => {
-                if !past_header {
-                    // META_ENTRY or POSTING before the header
-                    // NEWLINE shouldn't happen in well-formed
-                    // input; treat any child node as "past the
-                    // header" if we somehow encounter one.
-                    past_header = true;
-                }
+                // META_ENTRY or POSTING before the header
+                // NEWLINE shouldn't happen in well-formed
+                // input; treat any child node as "past the
+                // header" if we somehow encounter one.
+                header.end();
                 if let Some(p) = ast::Posting::cast(n) {
                     if let Some(mut spanned) = convert_posting(&p, bom_offset, errors) {
                         if !pending.is_empty() {
@@ -3238,6 +3240,52 @@ pub(super) const fn body_tag_joins_transaction(posting_seen: bool) -> bool {
     !posting_seen
 }
 
+/// Tracks where a `TRANSACTION` node's header region ends, one direct-child
+/// token at a time.
+///
+/// A transaction node can open with leading trivia: blank lines and comment
+/// lines before it attach inside the node (the Directive-Terminator Rule,
+/// `cst::trivia`), so its first token may be a NEWLINE. The header line
+/// therefore ends at the first NEWLINE *after* the first non-trivia token, not
+/// at the first NEWLINE. Breaking on the first one made the same transaction
+/// convert differently depending on what preceded it (#2628): the header-line
+/// comment landed in the first posting's `comments` and the deprecated `|`
+/// warning was lost, but only after a blank line or a comment.
+///
+/// THE rule for every walk that splits a transaction into header and body:
+/// red `collect_postings_with_comments` and `header_has_pipe`, green
+/// `convert_transaction_header`. (The body checks keep their own
+/// `saw_header_content` flag, which is the same rule.) "Trivia" is
+/// [`is_trivia_kind`], the set `Transaction::header_tokens` skips.
+#[derive(Default)]
+pub(super) struct HeaderEnd {
+    started: bool,
+    ended: bool,
+}
+
+impl HeaderEnd {
+    /// Feed the next direct-child token. Returns `true` while the token is in
+    /// the header region (leading trivia, the header line and its terminating
+    /// NEWLINE), `false` for every token after it.
+    pub(super) fn in_header(&mut self, kind: crate::SyntaxKind) -> bool {
+        if self.ended {
+            return false;
+        }
+        if kind == crate::SyntaxKind::NEWLINE {
+            self.ended = self.started;
+        } else if !is_trivia_kind(kind) {
+            self.started = true;
+        }
+        true
+    }
+
+    /// A child node (`POSTING` / `META_ENTRY`) ends the header whatever came
+    /// before it.
+    pub(super) const fn end(&mut self) {
+        self.ended = true;
+    }
+}
+
 /// Reject transaction headers beancount's grammar refuses (#2008 cases 3, 4,
 /// 6, 7). The rule itself lives in [`super::txn_header`] so this and its green
 /// mirror (`green::tl_transaction_header_check`) cannot drift; here we only
@@ -3820,7 +3868,7 @@ fn parse_directive_date(
 
 /// Decode a `STRING` token's text (with surrounding quotes) into its semantic
 /// value: quotes stripped, escapes decoded (`\"`→`"`, `\\`→`\`, `\n`/`\t`/`\r`,
-/// unknown escape drops the backslash). `None` if not a well-formed quoted
+/// `\b`/`\f`, unknown escape drops the backslash). `None` if not a well-formed quoted
 /// string. Text-based so both the red ([`ast::StringLit::text_decoded`]) and
 /// green conversion paths share one source of truth.
 pub(super) fn decode_string_token(text: &str) -> Option<String> {
@@ -3845,6 +3893,11 @@ pub(super) fn decode_string_token(text: &str) -> Option<String> {
             Some('n') => out.push('\n'),
             Some('t') => out.push('\t'),
             Some('r') => out.push('\r'),
+            // Backspace and form feed, as beancount's lexer decodes them
+            // (#2672). Every other escape (`\a`, `\v`, `\0`, `\x`, `\u`, ...)
+            // drops the backslash there too, so the fallback below matches.
+            Some('b') => out.push('\u{8}'),
+            Some('f') => out.push('\u{c}'),
             Some(other) => out.push(other),
             None => {}
         }

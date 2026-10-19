@@ -252,11 +252,15 @@ use crate::types::{Error, LedgerOptions};
 /// and an AVERAGE one carries the pool's exact cost (#2647). Loader v39,
 /// unchanged -- parsed directives did not move. `Ledger` archives booked
 /// directives, so a v44 blob would serve the old, unmatched posting.
-/// v46: a lot-matching booking failure carries its E4xxx code instead of
-/// `BOOK` (#2631). Loader v39, unchanged -- parsed directives did not move.
-/// `LedgerPayload.errors` is restored verbatim, so a v45 blob would serve
+/// v46: loader v40, a header-line comment stays off the first posting after
+/// a blank line or comment (#2628), and `\b` / `\f` in strings decode to
+/// U+0008 / U+000C (#2672). Parsed directives changed, so a v45 blob would
+/// serve the misplaced comment and the old strings.
+/// v47: a lot-matching booking failure carries its E4xxx code instead of
+/// `BOOK` (#2631). Loader v40, unchanged -- parsed directives did not move.
+/// `LedgerPayload.errors` is restored verbatim, so a v46 blob would serve
 /// `BOOK` where a fresh load gives E4001-E4004.
-pub const CACHE_VERSION: u32 = 46;
+pub const CACHE_VERSION: u32 = 47;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -288,7 +292,7 @@ pub const CACHE_VERSION: u32 = 46;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 39;
+const LOADER_CACHE_VERSION_PIN: u32 = 40;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

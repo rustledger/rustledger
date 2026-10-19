@@ -76,7 +76,7 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Upload profiles
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: nightly-profile
           path: |
@@ -145,7 +145,7 @@ jobs:
             echo "Deterministic (machine-independent) total instructions for the load → process pipeline — diff night-over-night to catch regressions. \`cg_annotate cachegrind.out\` breaks it down by function."
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Upload cachegrind profile
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: cachegrind-instructions-${{ matrix.shape }}
           path: |

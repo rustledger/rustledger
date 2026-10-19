@@ -39,8 +39,7 @@ allow = [
   "Unicode-3.0",
   "MPL-2.0",
   "CDLA-Permissive-2.0",            # webpki-roots
-  "CC0-1.0",                        # ppmd-rust (zip dependency)
-  "bzip2-1.0.6",                    # libbz2-rs-sys (zip dependency)
+  "CC0-1.0",                        # edit (blake3/constant_time_eq dual-license it)
 ]
 confidence-threshold = 0.8
 

@@ -1,0 +1,17 @@
+; Same-day trades split across an include. beancount orders same-day
+; entries by line number whatever the file, so the position is opened by
+; includes-other.beancount:1, not by the buy below (#2661 review).
+plugin "beancount_options.check_option_expiry"
+
+2026-01-01 open Assets:Broker:Options
+2026-01-01 open Assets:Broker:Cash
+
+2026-11-01 * "A later entry moves today past the expiry"
+  Assets:Broker:Cash  0 USD
+  Assets:Broker:Options  0 USD
+
+2026-09-02 * "Buy 1"
+  Assets:Broker:Options  1 AAPL261016P00230000 @ 2.00 USD
+  Assets:Broker:Cash    -2.00 USD
+
+include "includes-other.beancount"

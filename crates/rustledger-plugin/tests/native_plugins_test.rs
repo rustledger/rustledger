@@ -10017,7 +10017,16 @@ fn test_option_assignment_overflow_is_reported() {
         )]
     );
 
-    // So is the option leg's price; it realizes a gain here.
+    // Not an assignment (no stock moves): nothing to check, so nothing to
+    // report, however large the numbers.
+    let ordinary_close = assignment(
+        big_put,
+        per_unit(leg(OPT_ACCT, huge, big_put), "1"),
+        cash("0"),
+    );
+    assert_eq!(messages(ordinary_close), Vec::<String>::new());
+
+    // The option leg's price is still checked too; it realizes a gain here.
     let realized = assignment(
         big_put,
         priced(per_unit(leg(OPT_ACCT, huge, big_put), "1"), "0", false),

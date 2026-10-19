@@ -89,16 +89,35 @@ impl NativePlugin for OneCommodityPlugin {
         };
 
         let mut skip: HashSet<&str> = HashSet::new();
+        // Accounts the pattern's word boundary cannot be evaluated on exactly
+        // (#2656): reported, and left unchecked, since whether beancount
+        // checks them is unknown.
+        let mut refused = Vec::new();
         for wrapper in &input.directives {
             if let DirectiveData::Open(open) = &wrapper.data {
                 let opted_out = open
                     .metadata
                     .iter()
                     .any(|(k, v)| k == "onecommodity" && falsy(v));
-                let unmatched = accounts_re
+                if opted_out || open.currencies.len() > 1 {
+                    skip.insert(&open.account);
+                    continue;
+                }
+                let unmatched = match accounts_re
                     .as_ref()
-                    .is_some_and(|re| !python_match(re, &open.account));
-                if opted_out || unmatched || open.currencies.len() > 1 {
+                    .map(|re| python_match(re, &open.account))
+                {
+                    None | Some(Ok(true)) => false,
+                    Some(Ok(false)) => true,
+                    Some(Err(error)) => {
+                        refused.push(PluginError::error(format!(
+                            "onecommodity: the pattern cannot be matched against {}: {error}",
+                            open.account
+                        )));
+                        true
+                    }
+                };
+                if unmatched {
                     skip.insert(&open.account);
                 }
             }
@@ -134,6 +153,7 @@ impl NativePlugin for OneCommodityPlugin {
         let mut errors = Vec::new();
         units.errors("currency", &skip, &mut errors);
         costs.errors("cost currency", &skip, &mut errors);
+        errors.extend(refused);
         PluginOutput { ops, errors }
     }
 }

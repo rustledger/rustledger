@@ -12,7 +12,7 @@ use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutp
 
 use super::super::{NativePlugin, RegularPlugin};
 use super::py_literal::{self, PyValue};
-use super::py_regex::PyRegexError;
+use super::py_regex::{PyRegex, PyRegexError};
 use super::utils::{python_match, python_match_regex};
 
 /// Context naming a currency that only a `price` directive uses.
@@ -26,7 +26,7 @@ pub struct CheckCommodityPlugin;
 /// skips, as beancount's does.
 fn ignore_patterns(
     config: Option<&str>,
-) -> Result<(Vec<(regex::Regex, regex::Regex)>, Vec<PluginError>), PluginError> {
+) -> Result<(Vec<(PyRegex, PyRegex)>, Vec<PluginError>), PluginError> {
     let Some(config) = config.filter(|c| !c.trim().is_empty()) else {
         return Ok((Vec::new(), Vec::new()));
     };
@@ -149,21 +149,47 @@ impl NativePlugin for CheckCommodityPlugin {
                 "Missing Commodity directive for '{currency}' in '{context}'"
             ))
         };
+        // A word boundary that cannot be evaluated exactly on a name
+        // (#2656) leaves the occurrence undecided: whether beancount would
+        // exempt it is unknown, so it is reported as that, never as missing
+        // or exempt.
+        let mut refused: BTreeSet<String> = BTreeSet::new();
+        let mut undecided: HashSet<&str> = HashSet::new();
         let mut issued: HashSet<&str> = HashSet::new();
         let mut ignored: HashSet<&str> = HashSet::new();
         for (context, currency) in occurrences {
             if declared.contains(currency) || issued.contains(currency) {
                 continue;
             }
-            if ignore
-                .iter()
-                .any(|(a, c)| python_match(a, context) && python_match(c, currency))
-            {
-                ignored.insert(currency);
-                continue;
+            let mut exempt = false;
+            let mut unknown = None;
+            for (account_re, currency_re) in &ignore {
+                match python_match(account_re, context)
+                    .and_then(|hit| Ok(hit && python_match(currency_re, currency)?))
+                {
+                    Ok(true) => {
+                        exempt = true;
+                        break;
+                    }
+                    Ok(false) => {}
+                    // Another pair may still exempt it, which settles it
+                    // whatever this one would answer.
+                    Err(error) => {
+                        unknown.get_or_insert(error);
+                    }
+                }
             }
-            errors.push(missing(currency, context));
-            issued.insert(currency);
+            if exempt {
+                ignored.insert(currency);
+            } else if let Some(error) = unknown {
+                refused.insert(format!(
+                    "check_commodity: a pattern cannot be matched against '{context}' / '{currency}': {error}"
+                ));
+                undecided.insert(currency);
+            } else {
+                errors.push(missing(currency, context));
+                issued.insert(currency);
+            }
         }
         // A currency only prices use, unless an account already reported or
         // exempted it.
@@ -171,11 +197,13 @@ impl NativePlugin for CheckCommodityPlugin {
             if declared.contains(currency)
                 || issued.contains(currency)
                 || ignored.contains(currency)
+                || undecided.contains(currency)
             {
                 continue;
             }
             errors.push(missing(currency, context));
         }
+        errors.extend(refused.into_iter().map(PluginError::error));
 
         PluginOutput { ops, errors }
     }

@@ -26,9 +26,20 @@
 //! Puts and calls on one root are separate assignments, so a put assigned
 //! beside a call bought back in the same entry is still checked. Same-day
 //! entries are taken in beancount's `entry_sortkey` order (date, type,
-//! line number). An assignment whose arithmetic leaves `Decimal`'s range
-//! is skipped, not reported. The plugin reads no config: a non-blank config
-//! string gives one warning.
+//! line number). The plugin reads no config: a non-blank config string
+//! gives one warning.
+//!
+//! Each rule runs whenever its own arithmetic fits in `Decimal`: the share
+//! count needs only contracts × 100, so it is still checked when strike ×
+//! shares is out of range. When a rule cannot run for that reason, the
+//! assignment gets an error, `… assignment not checked: amounts exceed the
+//! supported decimal range`, at the entry. It is an error, not a warning,
+//! for the same reason E4004 is: a check that did not run must not pass.
+//! Running positions cannot leave the range after booking, which rejects
+//! such an inventory first; unbooked input that does is not tracked.
+//!
+//! This plugin is native only: beancount-options has no Python counterpart
+//! for it yet, so there is no `bean-check` behavior to match.
 //!
 //! The plugin only reports: every directive is kept and nothing is inserted.
 
@@ -122,47 +133,86 @@ fn sum_totals(totals: impl Iterator<Item = Result<Decimal, Gap>>) -> Result<Deci
 }
 
 /// Option legs of one transaction that close short contracts of one right
-/// on one underlying.
-#[derive(Default)]
+/// on one underlying. Each sum is `None` once it leaves `Decimal`'s range,
+/// so the rules that need it are not run, and the others still are.
 struct Closing {
     symbols: Vec<String>,
-    contracts: Decimal,
+    contracts: Option<Decimal>,
     /// Σ strike × shares.
-    strike_value: Decimal,
-    premium: Decimal,
+    strike_value: Option<Decimal>,
+    premium: Option<Decimal>,
     /// Σ price and Σ cost of the option legs that carry a price.
-    priced: Decimal,
-    priced_cost: Decimal,
+    priced: Option<Decimal>,
+    priced_cost: Option<Decimal>,
     premium_realized: bool,
     /// Distinct strikes among the closed contracts.
     strikes: Vec<Decimal>,
     currency: Option<String>,
-    /// Some sum left `Decimal`'s range; the closing is not checked.
-    overflowed: bool,
+}
+
+impl Default for Closing {
+    fn default() -> Self {
+        Self {
+            symbols: Vec::new(),
+            contracts: Some(Decimal::ZERO),
+            strike_value: Some(Decimal::ZERO),
+            premium: Some(Decimal::ZERO),
+            priced: Some(Decimal::ZERO),
+            priced_cost: Some(Decimal::ZERO),
+            premium_realized: false,
+            strikes: Vec::new(),
+            currency: None,
+        }
+    }
+}
+
+/// Add `term` to `sum`; `None` (out of range) on either side stays `None`.
+fn accumulate(sum: &mut Option<Decimal>, term: Option<Decimal>) {
+    *sum = sum.zip(term).and_then(|(s, t)| s.checked_add(t));
 }
 
 impl Closing {
-    /// Add one option leg closing `units` contracts at `strike`.
+    /// Add one option leg closing `units` contracts at `strike`. `premium`
+    /// is `None` when out of range; `price` is the leg's total price.
     fn add(
         &mut self,
         units: Decimal,
         strike: Decimal,
-        premium: Decimal,
-        price: Option<Decimal>,
-    ) -> Option<()> {
+        premium: Option<Decimal>,
+        price: Result<Decimal, Gap>,
+    ) {
         let shares = Decimal::from(SHARES_PER_CONTRACT);
-        self.contracts = self.contracts.checked_add(units)?;
-        self.strike_value = self
-            .strike_value
-            .checked_add(strike.checked_mul(units)?.checked_mul(shares)?)?;
-        self.premium = self.premium.checked_add(premium)?;
-        if let Some(price) = price {
-            self.priced = self.priced.checked_add(price)?;
-            self.priced_cost = self.priced_cost.checked_add(premium)?;
-            self.premium_realized |= price != premium;
+        accumulate(&mut self.contracts, Some(units));
+        accumulate(
+            &mut self.strike_value,
+            strike
+                .checked_mul(units)
+                .and_then(|v| v.checked_mul(shares)),
+        );
+        accumulate(&mut self.premium, premium);
+        match price {
+            Err(Gap::Missing) => {}
+            Ok(price) => {
+                accumulate(&mut self.priced, Some(price));
+                accumulate(&mut self.priced_cost, premium);
+                self.premium_realized |= premium.is_some_and(|p| p != price);
+            }
+            Err(Gap::Overflow) => {
+                self.priced = None;
+                self.priced_cost = None;
+            }
         }
-        Some(())
     }
+}
+
+/// What [`check`] found for one closing group.
+#[derive(Debug, PartialEq, Eq)]
+enum Finding {
+    /// The assignment fails a rule.
+    Error(String),
+    /// The assignment's arithmetic leaves `Decimal`'s range before every
+    /// rule could run.
+    Unchecked,
 }
 
 /// Running net units per (account, commodity); `None` once a sum overflowed.
@@ -251,27 +301,11 @@ impl NativePlugin for CheckOptionAssignmentPlugin {
                     continue;
                 }
                 let premium = match cost_total(posting, units) {
-                    Ok(premium) => premium,
+                    Ok(premium) => Some(premium),
                     Err(Gap::Missing) => continue,
-                    Err(Gap::Overflow) => {
-                        closings
-                            .entry((occ.root.clone(), occ.right))
-                            .or_default()
-                            .overflowed = true;
-                        continue;
-                    }
+                    Err(Gap::Overflow) => None,
                 };
-                let price = match price_total(posting, units) {
-                    Ok(price) => Some(price),
-                    Err(Gap::Missing) => None,
-                    Err(Gap::Overflow) => {
-                        closings
-                            .entry((occ.root.clone(), occ.right))
-                            .or_default()
-                            .overflowed = true;
-                        continue;
-                    }
-                };
+                let price = price_total(posting, units);
                 let c = closings.entry((occ.root.clone(), occ.right)).or_default();
                 if !c.symbols.contains(symbol) {
                     c.symbols.push(symbol.clone());
@@ -283,18 +317,20 @@ impl NativePlugin for CheckOptionAssignmentPlugin {
                     .currency
                     .take()
                     .or_else(|| posting.cost.as_ref().and_then(|k| k.currency.clone()));
-                if c.add(units, occ.strike, premium, price).is_none() {
-                    c.overflowed = true;
-                }
+                c.add(units, occ.strike, premium, price);
             }
 
             for ((root, right), c) in &closings {
-                if c.overflowed {
-                    continue;
-                }
-                if let Some(message) =
+                if let Some(finding) =
                     check(root, *right, c, &txn.postings, &held, shares_per_contract)
                 {
+                    let message = match finding {
+                        Finding::Error(message) => message,
+                        Finding::Unchecked => format!(
+                            "{} assignment not checked: amounts exceed the supported decimal range",
+                            c.symbols.join(", ")
+                        ),
+                    };
                     let mut error = PluginError::error(message);
                     if let (Some(file), Some(line)) = (&wrapper.filename, wrapper.lineno) {
                         error = error.at(file.clone(), line);
@@ -322,8 +358,10 @@ impl NativePlugin for CheckOptionAssignmentPlugin {
     }
 }
 
-/// The error for one closing group, if it is an assignment that fails a
-/// rule. `None` when it is not an assignment, passes, or overflows.
+/// What one closing group gives, if it is an assignment: the error of the
+/// first rule that fails, or [`Finding::Unchecked`] when a rule's
+/// arithmetic leaves `Decimal`'s range before any rule failed. `None` when
+/// it is not an assignment or passes every rule.
 fn check(
     root: &str,
     right: OptionRight,
@@ -331,15 +369,21 @@ fn check(
     postings: &[PostingData],
     held: &impl Fn(&str, &str) -> Option<Decimal>,
     shares_per_contract: Decimal,
-) -> Option<String> {
+) -> Option<Finding> {
+    use Finding::{Error, Unchecked};
     let stock: Vec<(&PostingData, Decimal)> = postings
         .iter()
         .filter(|p| p.units.as_ref().is_some_and(|u| u.currency == root))
         .filter_map(|p| units_of(p).map(|u| (p, u)))
         .collect();
-    let stock_units = stock
+    // Out of range here means the direction is unknown, so whether this is
+    // an assignment is too: say so rather than pass it.
+    let Some(stock_units) = stock
         .iter()
-        .try_fold(Decimal::ZERO, |sum, (_, u)| sum.checked_add(*u))?;
+        .try_fold(Decimal::ZERO, |sum, (_, u)| sum.checked_add(*u))
+    else {
+        return Some(Unchecked);
+    };
     let assigned = match right {
         OptionRight::Put => stock_units > Decimal::ZERO,
         OptionRight::Call => stock_units < Decimal::ZERO,
@@ -351,49 +395,69 @@ fn check(
     let label = c.symbols.join(", ");
     let currency = c.currency.clone().unwrap_or_default();
     let shares = stock_units.abs();
-    let expected_shares = c.contracts.checked_mul(shares_per_contract)?;
+    // Rule 1 needs only contracts × 100, so it runs even when the strike
+    // value below is out of range.
+    let Some((contracts, expected_shares)) = c
+        .contracts
+        .and_then(|n| Some((n, n.checked_mul(shares_per_contract)?)))
+    else {
+        return Some(Unchecked);
+    };
     if shares != expected_shares {
-        return Some(format!(
+        return Some(Error(format!(
             "{label} assignment: {} contract(s) but {} {root}; expected {}",
-            c.contracts.normalize(),
+            contracts.normalize(),
             shares.normalize(),
             expected_shares.normalize()
-        ));
+        )));
     }
+    let (Some(priced), Some(priced_cost)) = (c.priced, c.priced_cost) else {
+        return Some(Unchecked);
+    };
     if c.premium_realized {
-        return Some(format!(
-            "{label} assignment: option leg priced at {:.2} {currency}, not its cost {:.2} {currency}; close it at cost and fold the premium into the {root} leg",
-            c.priced, c.priced_cost
-        ));
+        return Some(Error(format!(
+            "{label} assignment: option leg priced at {priced:.2} {currency}, not its cost {priced_cost:.2} {currency}; close it at cost and fold the premium into the {root} leg"
+        )));
     }
 
+    let (Some(strike_value), Some(premium)) = (c.strike_value, c.premium) else {
+        return Some(Unchecked);
+    };
     let breakdown_strike = if c.strikes.len() == 1 {
         format!("strike {} × {}", c.strikes[0], expected_shares.normalize())
     } else {
-        format!("strike value {:.2}", c.strike_value)
+        format!("strike value {strike_value:.2}")
     };
-    let tolerance = Decimal::new(5, 3).checked_mul(shares)?;
+    let Some(tolerance) = Decimal::new(5, 3).checked_mul(shares) else {
+        return Some(Unchecked);
+    };
     let off = |actual: Decimal, expected: Decimal| -> Option<bool> {
         Some(actual.checked_sub(expected)?.abs() > tolerance)
     };
     match right {
         OptionRight::Put => {
-            let expected = c.strike_value.checked_sub(c.premium)?;
+            let Some(expected) = strike_value.checked_sub(premium) else {
+                return Some(Unchecked);
+            };
             match sum_totals(stock.iter().map(|(p, u)| cost_total(p, *u))) {
-                Err(Gap::Overflow) => None,
-                Err(Gap::Missing) => Some(format!(
+                Err(Gap::Overflow) => Some(Unchecked),
+                Err(Gap::Missing) => Some(Error(format!(
                     "{label} assignment: {root} purchase has no cost; expected basis {expected:.2} {currency}"
-                )),
-                Ok(basis) => off(basis, expected)?.then(|| {
-                    format!(
-                        "{label} assignment: {root} basis {basis:.2} {currency}, expected {expected:.2} {currency} ({breakdown_strike} − premium {:.2})",
-                        c.premium
-                    )
-                }),
+                ))),
+                Ok(basis) => match off(basis, expected) {
+                    None => Some(Unchecked),
+                    Some(off) => off.then(|| {
+                        Error(format!(
+                            "{label} assignment: {root} basis {basis:.2} {currency}, expected {expected:.2} {currency} ({breakdown_strike} − premium {premium:.2})"
+                        ))
+                    }),
+                },
             }
         }
         OptionRight::Call => {
-            let expected = c.strike_value.checked_add(c.premium)?;
+            let Some(expected) = strike_value.checked_add(premium) else {
+                return Some(Unchecked);
+            };
             // A sale with no price that opens (or extends) a short position
             // gives its proceeds as the short lot's cost.
             let proceeds = stock.iter().map(|(p, u)| match price_total(p, *u) {
@@ -406,16 +470,18 @@ fn check(
                 total => total,
             });
             match sum_totals(proceeds) {
-                Err(Gap::Overflow) => None,
-                Err(Gap::Missing) => Some(format!(
+                Err(Gap::Overflow) => Some(Unchecked),
+                Err(Gap::Missing) => Some(Error(format!(
                     "{label} assignment: {root} sale has no price; expected proceeds {expected:.2} {currency}"
-                )),
-                Ok(proceeds) => off(proceeds, expected)?.then(|| {
-                    format!(
-                        "{label} assignment: {root} proceeds {proceeds:.2} {currency}, expected {expected:.2} {currency} ({breakdown_strike} + premium {:.2})",
-                        c.premium
-                    )
-                }),
+                ))),
+                Ok(proceeds) => match off(proceeds, expected) {
+                    None => Some(Unchecked),
+                    Some(off) => off.then(|| {
+                        Error(format!(
+                            "{label} assignment: {root} proceeds {proceeds:.2} {currency}, expected {expected:.2} {currency} ({breakdown_strike} + premium {premium:.2})"
+                        ))
+                    }),
+                },
             }
         }
     }

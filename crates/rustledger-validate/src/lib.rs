@@ -51,18 +51,32 @@ pub use validators::balance::balance_tolerance;
 
 /// Which phase of two-phase validation to run.
 ///
-/// The loader pipeline splits validation around booking. Checks that
-/// don't need filled-in amounts (account presence, account lifecycle,
-/// structural integrity, date ordering, document presence, commodity
-/// metadata) run as [`Phase::Early`] AFTER synthesizer plugins
-/// (`auto_accounts`, `document_discovery`) but BEFORE booking, so
-/// they see elided postings to unopened accounts (with any Opens
-/// plugins injected) before booking drops zero-value interpolations.
-/// Checks that need filled-in amounts (currency constraints, balance
-/// residuals, inventory updates, balance assertions) run as
-/// [`Phase::Late`] AFTER booking AND after the regular plugin pass
-/// (so cost-spec-reading plugins like `implicit_prices` see filled
-/// per-unit values on the `CostNumber::PerUnitFromTotal` variant).
+/// The loader pipeline splits validation around booking and the regular
+/// plugin pass.
+///
+/// [`Phase::Early`] runs AFTER synthesizer plugins (`auto_accounts`,
+/// `document_discovery`) but BEFORE booking, and holds only what must see
+/// the pre-booking stream: transaction structure (posting count, multiple
+/// elided amounts, negative costs), future-date warnings, and a provisional
+/// judgment of each transaction's posting accounts. Those posting errors
+/// are HELD, not reported: booking drops zero-value interpolations and the
+/// loader sets aside transactions booking refuses, so early is the only
+/// phase that sees those postings (the elided-zero-to-unopened-account case
+/// Python misses, #877).
+///
+/// [`Phase::Late`] runs AFTER booking AND after the regular plugin pass, on
+/// what the plugins produced — beancount's order (plugins, then
+/// validation). Everything that depends on account names or on directives
+/// a plugin may insert runs here: `open` (E1005, duplicate E1002), `close`,
+/// `commodity`, `pad`, `balance` (presence, currency constraint, the
+/// assertion itself), `note`, `document`, `custom "budget"`, and every
+/// posting's presence, open/close dates and currency constraint, then the
+/// balance residual and inventory updates. A `rename_accounts` or
+/// `close_tree` plugin is therefore validated under the names and closes it
+/// produced (#2648), and a plugin-inserted `balance` gets the open's
+/// currency check a written one gets (#2651). Late drops the held error of
+/// every posting it judges itself; [`ValidationSession::finalize`] reports
+/// the ones it never saw.
 ///
 /// The pipeline is therefore:
 ///     sort → synth-plugins → Early → book → regular-plugins → Late → finalize
@@ -76,20 +90,20 @@ pub use validators::balance::balance_tolerance;
 /// references that Python beancount silently accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Phase {
-    /// Pre-booking checks: account presence (E1001), account lifecycle,
-    /// structural integrity, date ordering, future-date warnings,
-    /// document presence, commodity metadata.
+    /// Pre-booking checks: transaction structure, future-date warnings,
+    /// and the held (provisional) posting-account judgments.
     Early,
-    /// Post-booking checks: currency constraints on filled postings,
-    /// transaction balance, balance assertions, inventory updates with
-    /// lot matching / capital gains, residual checks.
+    /// Post-booking, post-plugin checks: every account-name-dependent
+    /// directive check, posting presence / lifecycle / currency
+    /// constraints, transaction balance, balance assertions, inventory
+    /// updates with lot matching / capital gains.
     Late,
 }
 
 use validators::{
-    register_open_late, validate_balance_early, validate_balance_late, validate_close,
-    validate_close_late, validate_document, validate_note, validate_open, validate_pad,
-    validate_transaction_early, validate_transaction_late,
+    validate_balance_account, validate_balance_late, validate_close, validate_close_late,
+    validate_document, validate_note, validate_open, validate_pad, validate_transaction_early,
+    validate_transaction_late,
 };
 
 use rayon::prelude::*;
@@ -294,6 +308,23 @@ struct PendingPad {
     location: Option<(rustledger_parser::Span, u16)>,
 }
 
+/// One posting account error held by the early phase until late decides
+/// whether it still applies (see [`LedgerState::pending_posting_errors`]).
+#[derive(Debug, Clone)]
+pub(crate) struct PendingPostingError {
+    /// The posting's own source identity `(file_id, span)`.
+    pub(crate) posting: (u16, rustledger_core::Span),
+    /// The posting's account as early saw it.
+    pub(crate) account: Account,
+    /// Whether the posting's amount was incomplete before booking (no units,
+    /// or a currency with no number). Only such a posting can vanish from a
+    /// transaction booking kept (interpolated to zero and dropped), so only
+    /// its error can outlive late's check of that transaction.
+    pub(crate) elided: bool,
+    /// The error, already anchored to the transaction's location.
+    pub(crate) error: ValidationError,
+}
+
 /// The computed result of a `balance` assertion, recorded during Late
 /// validation (#1663).
 ///
@@ -339,7 +370,7 @@ pub struct LedgerState {
     inventories: FxHashMap<rustledger_core::Account, Inventory>,
     /// Lexically-sorted view of the `inventories` keys — the sub-account prefix
     /// index. Kept in lockstep with `inventories` (both gain a key only in
-    /// `validate_open`/`register_open_late`; keys are never removed). Lets
+    /// `validate_open`; keys are never removed). Lets
     /// [`sum_account_subtree`] answer a balance assertion with a range query over
     /// just the target's subtree, instead of an O(all-accounts) scan per
     /// assertion (`Account`'s `Ord`/`Borrow<str>` are lexical).
@@ -361,43 +392,46 @@ pub struct LedgerState {
     /// reopen-after-close is ever supported, a legitimate later close on
     /// the same account still runs the inventory check.
     pub(crate) late_close_processed: FxHashSet<(rustledger_core::Account, NaiveDate)>,
-    /// Per-posting identities `(file_id, span)` for which the early phase already
-    /// emitted `AccountNotOpen` (E1001) on an *elided* posting to an unopened
-    /// account. Elided postings must be checked early — booking interpolates
-    /// them, so the account has to exist before booking (the Python
-    /// #877-equivalent case). Explicit postings are deferred to the late phase
-    /// so account-rewriting regular plugins (e.g. `rename_accounts`,
-    /// `split_expenses`), which run after early, aren't falsely flagged on their
-    /// pre-rewrite account name. The late phase consults this set to skip the
-    /// *same* posting (a booked-from-elided one still unopened after plugins),
-    /// keyed by source identity so a different posting that merely shares an
-    /// account/date is still reported.
-    pub(crate) account_not_open_early: FxHashSet<(u16, rustledger_core::Span)>,
-    /// Per-posting identities `(file_id, span)` of *explicit* postings whose
-    /// account was absent from `accounts` during the early phase — i.e. the
-    /// deferred half of the account-presence check above. The late phase must
-    /// run the full lifecycle check (`validate_account_lifecycle`) on exactly
-    /// these: by late, `accounts` holds every open in the ledger regardless of
-    /// date, so a use-before-open posting's account IS found and the plain
-    /// presence check passes. Without this set the entire
-    /// use-before-open-by-date class was silently accepted (found by
-    /// `test_account_lifecycle_consistency`): the sorted stream guarantees
-    /// the `open` comes after the offending transaction, so early never saw
-    /// the account and late never re-checked the dates. Postings whose
-    /// account existed early already had their lifecycle checked there —
-    /// re-running it in late would double-report posting-after-close.
+    /// The PROVISIONAL account table the early phase builds from the
+    /// pre-booking, pre-regular-plugin stream: `account -> (open date, close
+    /// date)` (the first of each in booking order, as `validate_open` /
+    /// `validate_close` keep), with no diagnostics of its own.
     ///
-    /// Keyed by `(file_id, span, account)`. Synthesized postings (sentinel
-    /// `SYNTHESIZED_FILE_ID` + `Span::ZERO`) are never inserted — their
-    /// shared identity would make one deferred posting's key match every
-    /// synthesized posting to the same account across the ledger,
-    /// double-reporting posting-after-close in late (deep-review catch);
-    /// they stay lifecycle-unchecked like plugin-added postings. The
-    /// account in the key means a posting RENAMED by a regular plugin is
-    /// not re-checked against its new account's dates (pre-rename key ≠
-    /// post-rename key) — unchanged from the pre-fix behavior for that
-    /// edge.
-    pub(crate) lifecycle_deferred: FxHashSet<(u16, rustledger_core::Span, Account)>,
+    /// It exists only to judge the postings of transactions the late phase
+    /// may never see (see [`Self::pending_posting_errors`]). The authoritative
+    /// table is `accounts`, which the late phase builds from the stream the
+    /// regular plugins produced — beancount validates what its plugins
+    /// produce, so an `open`, `close`, `pad` or `balance` renamed or inserted
+    /// by a plugin is judged under its final name (#2648, #2651).
+    pub(crate) early_accounts: FxHashMap<Account, (NaiveDate, Option<NaiveDate>)>,
+    /// Account errors (E1001 / E1003 / E1005) the early phase found on a
+    /// transaction's postings, keyed by the transaction's source identity
+    /// `(file_id, span)`, HELD rather than reported.
+    ///
+    /// The late phase is the authority on every posting it sees: it checks
+    /// presence and the open/close dates against the post-plugin `accounts`,
+    /// so a posting a regular plugin renamed (`rename_accounts`) or whose
+    /// account a plugin closed (`close_tree`) is judged by what the plugin
+    /// produced. When late reaches a transaction it removes that
+    /// transaction's entry and drops it — except for an ELIDED posting that
+    /// booking removed (a zero-value interpolation: the Python
+    /// #877-equivalent case rustledger deliberately catches), which late
+    /// cannot see, so its held error is reported then.
+    ///
+    /// Whatever is still here at [`ValidationSession::finalize`] belongs to a
+    /// transaction late never saw — one booking refused (the loader and the
+    /// LSP set those aside before late), or one a plugin deleted — and is
+    /// reported there. Those transactions never went through the regular
+    /// plugins, so the pre-plugin table they were judged against is the
+    /// right one for them.
+    ///
+    /// Only transactions with a real source identity are held: synthesized
+    /// ones share the `(SYNTHESIZED_FILE_ID, Span::ZERO)` sentinel, and an
+    /// unspanned caller has no identity at all. Those callers (LSP-style
+    /// standalone use, tests, FFI) hand late the same list, so late's own
+    /// check covers them.
+    pub(crate) pending_posting_errors:
+        FxHashMap<(u16, rustledger_core::Span), Vec<PendingPostingError>>,
     /// Per-`balance`-assertion computed result recorded during Late validation:
     /// `diff = computed − asserted`. Lets consumers render per-assertion pass/fail
     /// without re-deriving the balance (#1663).
@@ -564,8 +598,8 @@ fn sum_account_subtree(
 /// reading from / writing to `state`.
 ///
 /// The same `state` is threaded through `Early` then `Late` so the
-/// account/commodity/pad bookkeeping accumulated by `Early` is visible
-/// to `Late`'s balance/inventory checks.
+/// posting errors `Early` holds reach `Late` (which drops the ones it
+/// judges itself) and `finalize` (which reports the rest).
 ///
 /// The future-date check runs only in `Early` (date is independent of
 /// booking), so callers running both phases don't get duplicate
@@ -576,9 +610,10 @@ fn validate_phase_inner<D: ValidatableDirective>(
     phase: Phase,
     today: NaiveDate,
 ) -> Vec<ValidationError> {
-    // Document existence is checked in the Early phase; skip the I/O
-    // pre-pass when we're running Late.
-    let document_exists_cache = if phase == Phase::Early {
+    // Document existence is checked in the Late phase (it is an
+    // account-dependent directive, and `document_discovery` output is
+    // already in the stream); skip the I/O pre-pass in Early.
+    let document_exists_cache = if phase == Phase::Late {
         build_document_exists_cache(directives, &state.options)
     } else {
         FxHashMap::default()
@@ -606,6 +641,44 @@ fn validate_phase_inner<D: ValidatableDirective>(
         keyed.par_sort_by_key(|k| k.0);
     } else {
         keyed.sort_by_key(|k| k.0);
+    }
+
+    // Register every `open`, `close` and `commodity` before the
+    // date-ordered walk, so the walk judges a posting's dates against the
+    // whole ledger's opens and closes ("used on D but not opened until O",
+    // not "never opened"), and the commodity check sees every declaration.
+    // These are a small fraction of the directives, and the loop reads only
+    // the enum tag of the rest, so this costs far less than the walk.
+    //
+    // Late registers into the authoritative table, with diagnostics, from
+    // the stream the regular plugins produced. This used to happen in
+    // Early, on the stream BEFORE the regular plugins, which validated a
+    // renamed `open`/`close` under its old name and never saw a
+    // plugin-inserted one (#2648). Early now builds only the provisional
+    // table its held posting judgments use, silently.
+    for (_, d) in &keyed {
+        let error_count_before = errors.len();
+        match (phase, d.directive()) {
+            (Phase::Early, Directive::Open(open)) => {
+                state
+                    .early_accounts
+                    .entry(open.account.clone())
+                    .or_insert((open.date, None));
+            }
+            (Phase::Early, Directive::Close(close)) => {
+                if let Some((_, closed @ None)) = state.early_accounts.get_mut(&close.account) {
+                    *closed = Some(close.date);
+                }
+            }
+            (Phase::Late, Directive::Open(open)) => validate_open(state, open, &mut errors),
+            (Phase::Late, Directive::Close(close)) => validate_close(state, close, &mut errors),
+            (Phase::Late, Directive::Commodity(comm)) => {
+                state.commodities.insert(comm.currency.clone());
+                validate_commodity_precision_meta(comm, &mut errors);
+            }
+            _ => continue,
+        }
+        anchor_errors(&mut errors, error_count_before, d.span_info());
     }
 
     for (_, d) in keyed {
@@ -637,81 +710,70 @@ fn validate_phase_inner<D: ValidatableDirective>(
         }
 
         match (phase, directive) {
-            // ── Early-only kinds (state setup, structural / presence checks) ──
-            (Phase::Early, Directive::Open(open)) => {
-                validate_open(state, open, &mut errors);
+            // ── Early: transaction structure and the held posting
+            //    judgments. No account diagnostics. ──
+            (Phase::Early, Directive::Transaction(txn)) => {
+                validate_transaction_early(state, txn, d.span_info(), &mut errors);
             }
-            // Late sees plugin-generated Opens (regular plugins run after early),
-            // so the deferred account-presence check on plugin-added postings
-            // recognizes them. No-op for originals already in state from early.
-            (Phase::Late, Directive::Open(open)) => {
-                register_open_late(state, open);
-            }
-            (Phase::Early, Directive::Close(close)) => {
-                validate_close(state, close, &mut errors);
-            }
+            // ── Late: everything account-dependent, on the post-plugin
+            //    stream. `open`/`close`/`commodity` registration ran above. ──
             (Phase::Late, Directive::Close(close)) => {
                 validate_close_late(state, close, &mut errors);
             }
-            (Phase::Early, Directive::Commodity(comm)) => {
-                state.commodities.insert(comm.currency.clone());
-                validate_commodity_precision_meta(comm, &mut errors);
-            }
-            (Phase::Early, Directive::Pad(pad)) => {
+            (Phase::Late, Directive::Pad(pad)) => {
                 validate_pad(state, pad, d.span_info(), &mut errors);
             }
-            (Phase::Early, Directive::Document(doc)) => {
+            (Phase::Late, Directive::Document(doc)) => {
                 let file_id = d.span_info().map(|(_, fid)| fid);
                 validate_document(state, doc, file_id, &document_exists_cache, &mut errors);
             }
-            (Phase::Early, Directive::Note(note)) => {
+            (Phase::Late, Directive::Note(note)) => {
                 validate_note(state, note, &mut errors);
             }
-            (Phase::Early, Directive::Custom(custom)) => {
+            (Phase::Late, Directive::Custom(custom)) => {
                 validate_budget_custom(custom, &mut errors);
             }
-            // ── Phase-split kinds ──
-            (Phase::Early, Directive::Transaction(txn)) => {
-                validate_transaction_early(state, txn, &mut errors);
-            }
             (Phase::Late, Directive::Transaction(txn)) => {
-                validate_transaction_late(state, txn, &mut errors);
-            }
-            (Phase::Early, Directive::Balance(bal)) => {
-                validate_balance_early(state, bal, &mut errors);
+                validate_transaction_late(state, txn, d.span_info(), &mut errors);
             }
             (Phase::Late, Directive::Balance(bal)) => {
+                validate_balance_account(state, bal, &mut errors);
                 validate_balance_late(state, bal, &mut errors);
             }
             // ── Everything else: skipped in this phase ──
             _ => {}
         }
 
-        // Patch any new errors with location info from the current directive,
-        // and tag plugin-synthesized directives with an advisory note so users
-        // can trace errors that don't correspond to anything in their source
-        // files back to a plugin (see issue #896). Only runs for the
-        // spanned-input path; `Directive`'s `span_info()` returns `None`
-        // so this whole block is a no-op for the CLI / unspanned callers.
-        if let Some((span, file_id)) = d.span_info() {
-            for error in errors.iter_mut().skip(error_count_before) {
-                if error.span.is_none() {
-                    error.span = Some(span);
-                    error.file_id = Some(file_id);
-                }
-                if error.note.is_none() && file_id == SYNTHESIZED_FILE_ID {
-                    error.note = Some(SYNTHESIZED_DIRECTIVE_NOTE.to_string());
-                }
-            }
-        }
+        anchor_errors(&mut errors, error_count_before, d.span_info());
     }
 
     errors
 }
 
-/// Collect unused-pad errors (E2003). Called once after both phases
-/// have run — pads can be marked `used` by either phase's balance
-/// applications.
+/// Anchor the errors pushed since `from` to their directive's location, and
+/// tag errors on a plugin-synthesized directive with an advisory note so
+/// users can trace errors that don't correspond to anything in their source
+/// files back to a plugin (see issue #896). A no-op for unspanned input
+/// (`span_info` is `None`), i.e. the CLI / unspanned callers.
+fn anchor_errors(
+    errors: &mut [ValidationError],
+    from: usize,
+    span_info: Option<(rustledger_parser::Span, u16)>,
+) {
+    let Some((span, file_id)) = span_info else {
+        return;
+    };
+    for error in errors.iter_mut().skip(from) {
+        if error.span.is_none() {
+            error.span = Some(span);
+            error.file_id = Some(file_id);
+        }
+        if error.note.is_none() && file_id == SYNTHESIZED_FILE_ID {
+            error.note = Some(SYNTHESIZED_DIRECTIVE_NOTE.to_string());
+        }
+    }
+}
+
 /// Advisory note attached to errors anchored to a plugin-synthesized directive
 /// (`file_id == SYNTHESIZED_FILE_ID`), so the user can trace an error that maps
 /// to nothing in their source files back to a plugin. Shared by the
@@ -722,6 +784,8 @@ const SYNTHESIZED_DIRECTIVE_NOTE: &str = "directive was synthesized by a plugin 
      discovery via `option \"documents\"`) or one of your \
      `plugin \"…\"` declarations";
 
+/// Collect unused-pad errors (E2003). Called once after both phases have
+/// run, from [`ValidationSession::finalize`].
 fn check_unused_pads(state: &LedgerState) -> Vec<ValidationError> {
     let mut errors = Vec::new();
     for (target_account, pads) in &state.pending_pads {
@@ -936,7 +1000,8 @@ pub use phase::{EarlyDone, LateDone, Pending, SessionPhase};
 /// 4. [`run_late`](Self::run_late) consumes `EarlyDone` and returns
 ///    `(ValidationSession<LateDone>, Vec<ValidationError>)`.
 /// 5. [`finalize`](Self::finalize) consumes `LateDone` and returns the
-///    deferred E2003 unused-pad warnings.
+///    deferred E2003 unused-pad warnings and the held posting errors of
+///    transactions late never saw.
 ///
 /// Standalone callers that don't run booking between phases (LSP,
 /// FFI, tests) run all four calls back-to-back against the same
@@ -988,7 +1053,7 @@ pub use phase::{EarlyDone, LateDone, Pending, SessionPhase};
 ///
 /// let session = ValidationSession::new(ValidationOptions::default());
 /// let (session, mut errors) = session.run_early(&directives, today);
-/// // ... booking runs here; plugins ran BEFORE Early ...
+/// // ... booking and the regular plugins run here ...
 /// let (session, late_errors) = session.run_late(&directives, today);
 /// errors.extend(late_errors);
 /// errors.extend(session.finalize());
@@ -1025,10 +1090,11 @@ impl ValidationSession<Pending> {
 
     /// Run [`Phase::Early`] over a slice of raw [`Directive`]s.
     ///
-    /// `Early` runs account/structural checks that don't need filled-in
-    /// amounts. The session's internal `LedgerState` is updated so
-    /// [`run_late`](ValidationSession::<EarlyDone>::run_late) sees the
-    /// accumulated state (open accounts, commodities, pending pads).
+    /// `Early` runs the structural checks that need the pre-booking shape
+    /// and holds its judgment of each transaction's posting accounts in the
+    /// session, for [`run_late`](ValidationSession::<EarlyDone>::run_late)
+    /// to drop and [`finalize`](ValidationSession::<LateDone>::finalize) to
+    /// report what late never saw (see [`Phase`]).
     ///
     /// Consumes the session and returns it bound to [`EarlyDone`]
     /// alongside the errors collected during the phase. The new phase
@@ -1081,9 +1147,11 @@ impl ValidationSession<Pending> {
 impl ValidationSession<EarlyDone> {
     /// Run [`Phase::Late`] over a slice of raw [`Directive`]s.
     ///
-    /// `Late` runs balance/inventory/currency checks that need
-    /// filled-in amounts. Must be called AFTER booking has run on the
-    /// directive list (and after the post-booking plugin pass, if any).
+    /// `Late` runs every account-dependent check, the currency
+    /// constraints and the balance / inventory checks that need filled-in
+    /// amounts. Must be called AFTER booking has run on the directive list
+    /// and after the post-booking plugin pass, if any: it validates what
+    /// the plugins produced (see [`Phase`]).
     ///
     /// Consumes the session and returns it bound to [`LateDone`]
     /// alongside the errors collected during the phase. The new phase
@@ -1133,9 +1201,22 @@ impl ValidationSession<LateDone> {
     /// Flush deferred end-of-validation checks. Currently emits unused
     /// pad warnings (E2003). Consumes the session because deferred
     /// state is per-session.
+    ///
+    /// Also reports the posting account errors the early phase held for a
+    /// transaction the late phase never saw — one booking refused (the
+    /// loader and the LSP keep those out of late), or one a plugin deleted.
+    /// See `LedgerState::pending_posting_errors`.
     #[must_use]
-    pub fn finalize(self) -> Vec<ValidationError> {
-        check_unused_pads(&self.state)
+    pub fn finalize(mut self) -> Vec<ValidationError> {
+        let mut errors = check_unused_pads(&self.state);
+        // Source order, so the output does not depend on hash order.
+        let mut held: Vec<_> = self.state.pending_posting_errors.drain().collect();
+        held.sort_by_key(|((file_id, span), _)| (*file_id, span.start, span.end));
+        errors.extend(
+            held.into_iter()
+                .flat_map(|(_, pending)| pending.into_iter().map(|p| p.error)),
+        );
+        errors
     }
 }
 
@@ -3266,32 +3347,454 @@ mod tests {
 
     // ─── Phase-split (refs #1115) ────────────────────────────────────────
 
-    /// `validate_early` must catch E1001 on a posting to an account that
-    /// was never opened — even when the posting is elided (no units), so
-    /// the loader's pre-booking validation can see it before booking
-    /// drops zero-value interpolations. This is the load-bearing test
-    /// for the rustledger#877 strictness deviation from Python beancount.
+    // ─── What crosses the booking / plugin boundary (#2648, #2651) ───────
+    //
+    // The loader runs early on the pre-booking stream and late on what
+    // booking and the regular plugins produced. These tests hand the two
+    // phases DIFFERENT lists, as the loader does, with real source spans
+    // (the held posting errors are keyed by them).
+
+    /// A spanned directive at `start`, in file 0.
+    fn at(start: usize, d: Directive) -> Spanned<Directive> {
+        Spanned::new(d, rustledger_parser::Span::new(start, start + 50)).with_file_id(0)
+    }
+
+    /// A posting with its own source span, in file 0.
+    fn posting_at(start: usize, p: Posting) -> rustledger_core::Spanned<Posting> {
+        rustledger_core::Spanned::new(p, rustledger_core::Span::new(start, start + 9))
+            .with_file_id(0)
+    }
+
+    /// Early on `early`, late on `late`, then finalize — the loader's shape.
+    fn across(early: &[Spanned<Directive>], late: &[Spanned<Directive>]) -> Vec<ValidationError> {
+        let session = ValidationSession::new(ValidationOptions::default());
+        let (session, mut errors) = session.run_early_spanned(early, test_today());
+        let (session, late_errors) = session.run_late_spanned(late, test_today());
+        errors.extend(late_errors);
+        errors.extend(session.finalize());
+        errors
+    }
+
+    fn count(errors: &[ValidationError], code: ErrorCode, needle: &str) -> usize {
+        errors
+            .iter()
+            .filter(|e| e.code == code && e.message.contains(needle))
+            .count()
+    }
+
+    /// The rustledger#877 strictness deviation from Python beancount: an
+    /// elided posting to an unopened account that booking DROPS (a
+    /// zero-value interpolation) is reported, even though late never sees
+    /// it. Early holds the error; late finds the posting gone and reports it.
     #[test]
-    fn test_validate_early_emits_e1001_on_elided_posting() {
-        let directives = vec![
+    fn elided_posting_dropped_by_booking_is_still_reported() {
+        let bank = posting_at(
+            110,
+            Posting::new("Assets:Bank", Amount::new(dec!(0.00), "USD")),
+        );
+        let elided = posting_at(130, Posting::auto("Expenses:NeverOpened"));
+        let open = at(
+            0,
             Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
-            Directive::Transaction(
-                Transaction::new(date(2024, 1, 15), "Zero to unopened")
-                    .with_synthesized_posting(Posting::new(
-                        "Assets:Bank",
-                        Amount::new(dec!(0.00), "USD"),
-                    ))
-                    .with_synthesized_posting(Posting::auto("Expenses:NeverOpened")),
+        );
+        let raw = Transaction::new(date(2024, 1, 15), "Zero to unopened")
+            .with_posting(bank.clone())
+            .with_posting(elided);
+        // Booking interpolated the elided leg to zero and dropped it.
+        let booked = Transaction::new(date(2024, 1, 15), "Zero to unopened").with_posting(bank);
+        let errors = across(
+            &[open.clone(), at(100, Directive::Transaction(raw))],
+            &[open, at(100, Directive::Transaction(booked))],
+        );
+        assert_eq!(
+            count(&errors, ErrorCode::AccountNotOpen, "Expenses:NeverOpened"),
+            1,
+            "a dropped elided posting to an unopened account is reported once: {errors:?}"
+        );
+        let e = errors
+            .iter()
+            .find(|e| e.code == ErrorCode::AccountNotOpen)
+            .expect("reported");
+        assert_eq!(
+            (e.span, e.file_id),
+            (Some(rustledger_parser::Span::new(100, 150)), Some(0)),
+            "the held error keeps the transaction's location"
+        );
+    }
+
+    /// The #877 case also covers a posting written as a bare currency
+    /// (`Expenses:X  USD`): booking interpolates its number and drops it
+    /// when that is zero, exactly like a fully elided one.
+    #[test]
+    fn currency_only_posting_dropped_by_booking_is_still_reported() {
+        let bank = posting_at(
+            110,
+            Posting::new("Assets:Bank", Amount::new(dec!(0.00), "USD")),
+        );
+        let currency_only = posting_at(
+            130,
+            Posting::with_incomplete(
+                "Expenses:NeverOpened",
+                rustledger_core::IncompleteAmount::CurrencyOnly("USD".into()),
+            ),
+        );
+        let open = at(
+            0,
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+        );
+        let raw = Transaction::new(date(2024, 1, 15), "x")
+            .with_posting(bank.clone())
+            .with_posting(currency_only);
+        let booked = Transaction::new(date(2024, 1, 15), "x").with_posting(bank);
+        let errors = across(
+            &[open.clone(), at(100, Directive::Transaction(raw))],
+            &[open, at(100, Directive::Transaction(booked))],
+        );
+        assert_eq!(
+            count(&errors, ErrorCode::AccountNotOpen, "Expenses:NeverOpened"),
+            1,
+            "{errors:?}"
+        );
+    }
+
+    /// The Python plugin bridge does not carry posting spans, so after a
+    /// Python plugin every posting is synthesized. A dropped elided posting
+    /// is still reported (its account is gone too), and one that survived
+    /// is reported once, by late, not a second time from the held error.
+    #[test]
+    fn held_errors_survive_a_plugin_that_drops_posting_identity() {
+        let open = at(
+            0,
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+        );
+        let raw = |amount| {
+            Transaction::new(date(2024, 1, 15), "x")
+                .with_posting(posting_at(
+                    110,
+                    Posting::new("Assets:Bank", Amount::new(amount, "USD")),
+                ))
+                .with_posting(posting_at(130, Posting::auto("Expenses:NeverOpened")))
+        };
+        // Dropped by booking (zero), then round-tripped through Python.
+        let dropped = Transaction::new(date(2024, 1, 15), "x")
+            .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(0), "USD")));
+        let errors = across(
+            &[open.clone(), at(100, Directive::Transaction(raw(dec!(0))))],
+            &[open.clone(), at(100, Directive::Transaction(dropped))],
+        );
+        assert_eq!(
+            count(&errors, ErrorCode::AccountNotOpen, "Expenses:NeverOpened"),
+            1,
+            "dropped: {errors:?}"
+        );
+        // Survived booking (non-zero), then round-tripped through Python.
+        let survived = Transaction::new(date(2024, 1, 15), "x")
+            .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(-5), "USD")))
+            .with_synthesized_posting(Posting::new(
+                "Expenses:NeverOpened",
+                Amount::new(dec!(5), "USD"),
+            ));
+        let errors = across(
+            &[open.clone(), at(100, Directive::Transaction(raw(dec!(-5))))],
+            &[open, at(100, Directive::Transaction(survived))],
+        );
+        assert_eq!(
+            count(&errors, ErrorCode::AccountNotOpen, "Expenses:NeverOpened"),
+            1,
+            "survived: {errors:?}"
+        );
+    }
+
+    /// A posting a regular plugin renamed (same source identity, new
+    /// account) is judged under its new name: no error for the old one,
+    /// whether the posting was written or elided (#2648).
+    #[test]
+    fn posting_renamed_by_a_plugin_is_judged_under_its_new_name() {
+        let opens = [
+            at(
+                0,
+                Directive::Open(Open::new(date(2024, 1, 1), "Assets:Money")),
+            ),
+            at(
+                60,
+                Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
             ),
         ];
+        let equity = posting_at(
+            110,
+            Posting::new("Equity:Opening", Amount::new(dec!(-100), "USD")),
+        );
+        for elided in [false, true] {
+            let cash = if elided {
+                Posting::auto("Assets:Cash")
+            } else {
+                Posting::new("Assets:Cash", Amount::new(dec!(100), "USD"))
+            };
+            let raw = Transaction::new(date(2024, 1, 15), "x")
+                .with_posting(equity.clone())
+                .with_posting(posting_at(130, cash));
+            // Booked, then renamed by the plugin: same posting identity.
+            let renamed = Transaction::new(date(2024, 1, 15), "x")
+                .with_posting(equity.clone())
+                .with_posting(posting_at(
+                    130,
+                    Posting::new("Assets:Money", Amount::new(dec!(100), "USD")),
+                ));
+            let mut early = opens.to_vec();
+            early.push(at(100, Directive::Transaction(raw)));
+            let mut late = opens.to_vec();
+            late.push(at(100, Directive::Transaction(renamed)));
+            let errors = across(&early, &late);
+            assert!(
+                errors.is_empty(),
+                "renamed posting (elided: {elided}) must be clean: {errors:?}"
+            );
+        }
+    }
 
-        let session = ValidationSession::new(ValidationOptions::default());
-        let (_session, errors) = session.run_early(&directives, date(2026, 1, 1));
+    /// A transaction booking refused never reaches late (the loader and the
+    /// LSP set it aside), so its postings' account errors are reported from
+    /// what early held: an unopened account and a posting after a close.
+    /// Before the held errors, the unopened account went unreported (early
+    /// deferred it to a late that never saw the transaction).
+    #[test]
+    fn transaction_booking_refused_keeps_its_account_errors() {
+        let opens = [
+            at(
+                0,
+                Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            ),
+            at(
+                60,
+                Directive::Close(Close::new(date(2024, 1, 10), "Assets:Bank")),
+            ),
+            at(
+                300,
+                Directive::Open(Open::new(date(2024, 2, 1), "Assets:Later")),
+            ),
+        ];
+        let failed = Transaction::new(date(2024, 1, 15), "refused")
+            .with_posting(posting_at(
+                110,
+                Posting::new("Assets:Bank", Amount::new(dec!(-5), "USD")),
+            ))
+            .with_posting(posting_at(
+                130,
+                Posting::new("Expenses:NeverOpened", Amount::new(dec!(5), "USD")),
+            ))
+            .with_posting(posting_at(
+                150,
+                Posting::new("Assets:Later", Amount::new(dec!(0), "USD")),
+            ));
+        let mut early = opens.to_vec();
+        early.push(at(100, Directive::Transaction(failed)));
+        let errors = across(&early, &opens);
+        assert_eq!(
+            count(&errors, ErrorCode::AccountNotOpen, "Expenses:NeverOpened"),
+            1,
+            "{errors:?}"
+        );
+        assert_eq!(
+            count(&errors, ErrorCode::AccountClosed, "Assets:Bank"),
+            1,
+            "{errors:?}"
+        );
+        // Judged against the whole ledger's opens, like late: an account
+        // opened after the posting is "not opened until", not "never opened".
+        assert_eq!(
+            count(
+                &errors,
+                ErrorCode::AccountNotOpen,
+                "Account Assets:Later used on 2024-01-15 but not opened until 2024-02-01"
+            ),
+            1,
+            "{errors:?}"
+        );
+        assert_eq!(errors.len(), 3, "{errors:?}");
+    }
 
-        assert!(
-            errors.iter().any(|e| e.code == ErrorCode::AccountNotOpen
-                && e.to_string().contains("Expenses:NeverOpened")),
-            "early phase must emit E1001 on elided posting to unopened account; got: {errors:?}"
+    /// Two `open`s a plugin renamed onto one account are a duplicate open,
+    /// and a `pad`/`balance`/`close` it renamed is judged under the new
+    /// name (#2648): late registers opens and closes from the post-plugin
+    /// stream, not early from the pre-plugin one.
+    #[test]
+    fn plugin_renamed_opens_and_closes_are_validated_after_the_plugin() {
+        let early = [
+            at(
+                0,
+                Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Groceries")),
+            ),
+            at(
+                60,
+                Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Dining")),
+            ),
+            at(
+                120,
+                Directive::Close(Close::new(date(2024, 6, 1), "Expenses:Groceries")),
+            ),
+        ];
+        let late = [
+            at(
+                0,
+                Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Dining")),
+            ),
+            at(
+                60,
+                Directive::Open(Open::new(date(2024, 1, 1), "Expenses:Dining")),
+            ),
+            at(
+                120,
+                Directive::Close(Close::new(date(2024, 6, 1), "Expenses:Dining")),
+            ),
+        ];
+        let errors = across(&early, &late);
+        assert_eq!(
+            count(&errors, ErrorCode::AccountAlreadyOpen, "Expenses:Dining"),
+            1,
+            "{errors:?}"
+        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+    }
+
+    /// A `balance` a plugin inserted (`check_drained`) gets the open's
+    /// currency-constraint check a written one gets (#2651), as do the
+    /// other directive kinds a plugin can insert: a `note` / `document` on
+    /// an unopened account, a `close` (which then closes the account for
+    /// later postings), and an `open` (name check).
+    #[test]
+    fn plugin_inserted_directives_get_the_same_checks() {
+        let mut open = Open::new(date(2024, 1, 1), "Assets:Cash");
+        open.currencies = vec!["USD".into()];
+        let early = [at(0, Directive::Open(open.clone()))];
+        let synth = |d: Directive| Spanned::synthesized(d);
+        let late = vec![
+            at(0, Directive::Open(open)),
+            synth(Directive::Balance(Balance::new(
+                date(2024, 2, 1),
+                "Assets:Cash",
+                Amount::new(dec!(0), "EUR"),
+            ))),
+            synth(Directive::Note(Note::new(
+                date(2024, 2, 1),
+                "Assets:Missing",
+                "hi",
+            ))),
+            synth(Directive::Open(Open::new(date(2024, 1, 1), "Bogus:Root"))),
+        ];
+        let options = ValidationOptions::default().with_check_documents(false);
+        let session = ValidationSession::new(options);
+        let (session, mut errors) = session.run_early_spanned(&early, test_today());
+        let (session, late_errors) = session.run_late_spanned(&late, test_today());
+        errors.extend(late_errors);
+        errors.extend(session.finalize());
+        assert_eq!(
+            count(&errors, ErrorCode::CurrencyNotAllowed, "Balance directive"),
+            1,
+            "{errors:?}"
+        );
+        assert_eq!(
+            count(&errors, ErrorCode::AccountNotOpen, "Assets:Missing"),
+            1,
+            "{errors:?}"
+        );
+        assert_eq!(
+            count(&errors, ErrorCode::InvalidAccountName, "Bogus:Root"),
+            1,
+            "{errors:?}"
+        );
+    }
+
+    /// A `close` a plugin inserted (`close_tree` closing a sub-account)
+    /// makes a later posting to that account an error, as in beancount.
+    #[test]
+    fn plugin_inserted_close_closes_the_account_for_later_postings() {
+        let opens = [
+            at(
+                0,
+                Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank:Checking")),
+            ),
+            at(
+                60,
+                Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
+            ),
+        ];
+        let txn = Transaction::new(date(2024, 3, 1), "after close")
+            .with_posting(posting_at(
+                210,
+                Posting::new("Assets:Bank:Checking", Amount::new(dec!(5), "USD")),
+            ))
+            .with_posting(posting_at(
+                230,
+                Posting::new("Equity:Opening", Amount::new(dec!(-5), "USD")),
+            ));
+        let mut early = opens.to_vec();
+        early.push(at(200, Directive::Transaction(txn)));
+        let mut late = early.clone();
+        late.push(Spanned::synthesized(Directive::Close(Close::new(
+            date(2024, 2, 1),
+            "Assets:Bank:Checking",
+        ))));
+        let errors = across(&early, &late);
+        assert_eq!(
+            count(&errors, ErrorCode::AccountClosed, "Assets:Bank:Checking"),
+            1,
+            "{errors:?}"
+        );
+    }
+
+    /// Booking can split one posting into several to the same account (a
+    /// reduction across two lots; an elided posting absorbing residuals in
+    /// two currencies). Presence and the open/close dates are judged once
+    /// per account per transaction, as beancount does, so the split does
+    /// not multiply the error; nor does a held error for a dropped elided
+    /// posting whose account another posting still names.
+    #[test]
+    fn account_errors_are_judged_once_per_account_per_transaction() {
+        let opens = [
+            at(
+                0,
+                Directive::Open(Open::new(date(2024, 1, 1), "Assets:Cash")),
+            ),
+            at(
+                20,
+                Directive::Open(Open::new(date(2024, 1, 1), "Assets:Stock")),
+            ),
+            at(
+                40,
+                Directive::Close(Close::new(date(2024, 1, 4), "Assets:Stock")),
+            ),
+        ];
+        // Booked: one `-2 HOOL {}` posting split across two lots (same
+        // posting identity), plus two postings to an unopened account.
+        let lot = |n| Posting::new("Assets:Stock", Amount::new(n, "HOOL"));
+        let raw = Transaction::new(date(2024, 1, 5), "sell")
+            .with_posting(posting_at(110, lot(dec!(-2))))
+            .with_posting(posting_at(
+                130,
+                Posting::new("Expenses:Unopened", Amount::new(dec!(1), "USD")),
+            ))
+            .with_posting(posting_at(150, Posting::auto("Expenses:Unopened")));
+        let booked = Transaction::new(date(2024, 1, 5), "sell")
+            .with_posting(posting_at(110, lot(dec!(-1))))
+            .with_posting(posting_at(110, lot(dec!(-1))))
+            .with_posting(posting_at(
+                130,
+                Posting::new("Expenses:Unopened", Amount::new(dec!(1), "USD")),
+            ));
+        let mut early = opens.to_vec();
+        early.push(at(100, Directive::Transaction(raw)));
+        let mut late = opens.to_vec();
+        late.push(at(100, Directive::Transaction(booked)));
+        let errors = across(&early, &late);
+        assert_eq!(
+            count(&errors, ErrorCode::AccountClosed, "Assets:Stock"),
+            1,
+            "{errors:?}"
+        );
+        assert_eq!(
+            count(&errors, ErrorCode::AccountNotOpen, "Expenses:Unopened"),
+            1,
+            "{errors:?}"
         );
     }
 
@@ -3679,15 +4182,12 @@ mod tests {
     }
 
     #[test]
-    fn synthesized_postings_are_not_lifecycle_deferred() {
-        // Synthesized postings share the sentinel (SYNTHESIZED_FILE_ID,
-        // Span::ZERO) identity; deferring them would make one key match
-        // every synthesized posting to the same account and double-report
-        // posting-after-close (deep-review catch). They are skipped
-        // instead — a programmatically built use-before-open posting is
-        // NOT reported (documented gap, same class as plugin-added
-        // postings). This test pins the no-error side so a future change
-        // to the deferral consciously revisits the trade-off.
+    fn synthesized_posting_used_before_open_is_reported() {
+        // Synthesized postings (sentinel identity) used to be skipped by the
+        // lifecycle deferral, so a programmatically built use-before-open
+        // posting went unreported (a documented gap, shared with
+        // plugin-added postings). Late now judges every posting it sees, so
+        // both are reported, once — as beancount reports them.
         let mut t = Transaction::new(date(2020, 1, 15), "synth");
         t = t.with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")));
         t = t.with_synthesized_posting(Posting::new(
@@ -3700,12 +4200,73 @@ mod tests {
             open_at(date(2020, 2, 1), "Assets:Bank"),
         ];
         let errors = validate(&directives);
+        let hits = errors
+            .iter()
+            .filter(|e| {
+                e.code == ErrorCode::AccountNotOpen && e.message.contains("not opened until")
+            })
+            .count();
+        assert_eq!(hits, 1, "{errors:?}");
+    }
+
+    #[test]
+    fn pad_balance_and_note_before_the_open_are_unopened() {
+        // Late registers every `open` before its walk, so a presence check
+        // must also compare dates: a `pad`, `balance` or `note` dated before
+        // its account's `open` refers to an account not yet open (E1001), as
+        // when opens were registered as the walk reached them. The pad is
+        // not registered and the balance is not currency-checked (no E5002);
+        // the balance IS still compared (E2001), as beancount compares it.
+        let mut open = Open::new(date(2020, 2, 1), "Assets:Bank");
+        open.currencies = vec!["USD".into()];
+        let directives = vec![
+            open_at(date(2020, 1, 1), "Equity:Opening"),
+            Directive::Pad(Pad::new(date(2020, 1, 5), "Assets:Bank", "Equity:Opening")),
+            Directive::Balance(Balance::new(
+                date(2020, 1, 10),
+                "Assets:Bank",
+                Amount::new(dec!(100), "EUR"),
+            )),
+            Directive::Note(Note::new(date(2020, 1, 12), "Assets:Bank", "early")),
+            Directive::Open(open),
+        ];
+        let errors = validate(&directives);
+        let codes: Vec<ErrorCode> = errors.iter().map(|e| e.code).collect();
+        assert_eq!(
+            codes,
+            [
+                ErrorCode::AccountNotOpen,
+                ErrorCode::AccountNotOpen,
+                ErrorCode::BalanceAssertionFailed,
+                ErrorCode::AccountNotOpen
+            ],
+            "{errors:?}"
+        );
+    }
+
+    #[test]
+    fn posting_on_the_close_date_is_clean() {
+        // beancount walks entries in booking order, where a `close` sorts
+        // after every transaction of its day, so a posting on the close date
+        // is to an active account. Written with the close FIRST in the file
+        // and the open last, so the close is registered before the walk
+        // reaches the transaction either way.
+        let directives = vec![
+            Directive::Close(Close::new(date(2010, 1, 1), "Assets:Before")),
+            txn_at(
+                date(2010, 1, 1),
+                vec![
+                    Posting::new("Assets:Before", Amount::new(dec!(100), "USD")),
+                    Posting::new("Equity:Opening", Amount::new(dec!(-100), "USD")),
+                ],
+            ),
+            open_at(date(2000, 1, 1), "Assets:Before"),
+            open_at(date(2000, 1, 1), "Equity:Opening"),
+        ];
+        let errors = validate(&directives);
         assert!(
-            !errors
-                .iter()
-                .any(|e| e.code == ErrorCode::AccountNotOpen
-                    && e.message.contains("not opened until")),
-            "synthesized postings must not arm the late lifecycle check: {errors:?}"
+            !errors.iter().any(|e| e.code == ErrorCode::AccountClosed),
+            "a posting on the close date must be clean: {errors:?}"
         );
     }
 

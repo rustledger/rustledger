@@ -1171,9 +1171,13 @@ impl Executor<'_> {
                     }
                 },
             };
-            let regex = self.require_regex(&pattern)?;
+            let regex = self.python_regex(&pattern, super::RegexMode::SearchIgnoreCase)?;
             return Ok(Value::Boolean(match row.get(accounts) {
-                Some(Value::StringSet(set)) => set.iter().any(|a| regex.is_match(a)),
+                Some(Value::StringSet(set)) => {
+                    regex
+                        .is_match_any(set.iter().map(String::as_str))
+                        .map_err(|e| super::word_boundary_error(&pattern, &e))?
+                }
                 _ => false,
             }));
         }
@@ -1294,6 +1298,9 @@ impl Executor<'_> {
             }
             Expr::BinaryOp(op) => {
                 let left = self.evaluate_subquery_expr(&op.left, row, column_map)?;
+                if let Some(value) = self.short_circuit(op.op, &left)? {
+                    return Ok(value);
+                }
                 let right = self.evaluate_subquery_expr(&op.right, row, column_map)?;
                 self.binary_op_on_values(op.op, &left, &right)
             }
@@ -1395,8 +1402,13 @@ impl Executor<'_> {
         // writes. Here it matches accounts containing `account`.
         let account_pattern = &query.account_pattern;
 
-        // Try to compile as regex (using cache)
-        let account_regex = self.get_or_compile_regex(account_pattern);
+        // bean-query's `transform_journal` makes it `account ~ "<pattern>"`,
+        // so it is a Python regex searched case-insensitively (#2656). A
+        // pattern rledger cannot use is an error, as it is for `~`: it used to
+        // fall back to a substring match, which answered a refused lookahead
+        // or a typo'd `(` with rows matching something else.
+        let account_regex =
+            self.python_regex(account_pattern, super::RegexMode::SearchIgnoreCase)?;
 
         let columns = vec![
             "date".to_string(),
@@ -1467,23 +1479,25 @@ impl Executor<'_> {
             });
 
             for (i, posting) in txn.postings.iter().enumerate() {
-                // Match account using regex or substring
-                let mut matches = if let Some(ref regex) = account_regex {
-                    regex.is_match(&posting.account)
-                } else {
-                    posting.account.contains(account_pattern)
-                };
-                if matches
-                    && row_filter
-                    && let Some(filter) = from_filter
-                {
-                    matches = self.evaluate_from_filter(
+                // The FROM filter first, then the account pattern, as
+                // beanquery's `EvalAnd([from, where])` evaluates them: a row
+                // the filter drops never has its account matched, so a word
+                // boundary cannot fail on it (#2656).
+                let mut matches = if row_filter && let Some(filter) = from_filter {
+                    self.evaluate_from_filter(
                         filter,
                         &txn,
                         i,
                         directive_index,
                         txn_accounts.as_ref(),
-                    )?;
+                    )?
+                } else {
+                    true
+                };
+                if matches {
+                    matches = account_regex
+                        .is_match(&posting.account)
+                        .map_err(|e| super::word_boundary_error(account_pattern, &e))?;
                 }
 
                 if matches {
@@ -1653,20 +1667,27 @@ impl Executor<'_> {
             return self.execute_balances(&resolved);
         }
 
+        // The WHERE filters POSTINGS before they are summed, as in bean-query,
+        // whose BALANCES is `SELECT account, SUM(position) ... GROUP BY
+        // account` with the WHERE on the postings (`transform_balances`), and
+        // whose compiler joins the FROM expression to it with AND
+        // (`c_where = EvalAnd([c_from_expr, c_where])`). So the WHERE is
+        // folded into the FROM filter, which the scan already evaluates per
+        // posting when it reads a posting column (#2414): `BALANCES WHERE x`
+        // and `BALANCES FROM x` are one query, as they are in bean-query. It
+        // used to filter the result rows, so it could only see `account` and
+        // the total: `WHERE year = 2024` or `WHERE narration ~ 'x'` matched
+        // nothing or everything (#2630).
+        if let Some(where_clause) = &query.where_clause {
+            return self.execute_balances(&fold_balances_where(query, where_clause)?);
+        }
+
         // Build up balances by processing all transactions (with FROM filtering).
         // Local map rather than struct state — see issue #958.
         let balances = self.build_balances_with_filter(query.from.as_ref())?;
 
         let columns = vec!["account".to_string(), "balance".to_string()];
-        let mut result = QueryResult::new(columns.clone());
-
-        // Build column map for WHERE clause evaluation (lowercase keys for
-        // consistent lookup with evaluate_subquery_filter)
-        let column_map: FxHashMap<String, usize> = columns
-            .iter()
-            .enumerate()
-            .map(|(i, c)| (c.to_lowercase(), i))
-            .collect();
+        let mut result = QueryResult::new(columns);
 
         // Order rows by `account_sortkey`: account type first (Assets,
         // Liabilities, Equity, Income, Expenses, honoring `name_*` renames),
@@ -1705,16 +1726,7 @@ impl Executor<'_> {
                 Value::Inventory(std::sync::Arc::new(balance.clone()))
             };
 
-            let row = vec![Value::String(account.to_string()), balance_value];
-
-            // Apply WHERE clause filter if present
-            if let Some(where_expr) = &query.where_clause
-                && !self.evaluate_subquery_filter(where_expr, &row, &column_map)?
-            {
-                continue;
-            }
-
-            result.add_row(row);
+            result.add_row(vec![Value::String(account.to_string()), balance_value]);
         }
 
         Ok(result)
@@ -2204,5 +2216,76 @@ impl Executor<'_> {
         }
 
         Ok(Value::Null)
+    }
+}
+
+/// `query` with its `WHERE` folded into its `FROM` filter, joined with AND,
+/// as bean-query's compiler joins the two (#2630). The scan then evaluates it
+/// on each posting when it reads a posting column and on each entry when it
+/// reads only entry columns, which answer the same for every posting.
+///
+/// # Errors
+///
+/// A `WHERE` that reads `balance` or `account_balance`. Before #2630 a
+/// `BALANCES WHERE` filtered the result rows, so `balance` there was the
+/// account's total (`WHERE NOT empty(balance)` hid empty accounts); filtering
+/// postings, it would be the running balance of the postings being filtered,
+/// which bean-query computes over every posting it has tested so far,
+/// rejected ones included. Neither is a total, and silently changing what an
+/// existing query means is worse than refusing it. bean-query has no
+/// `account_balance` column at all. Deliberately unlike bean-query, which
+/// accepts `balance` here.
+fn fold_balances_where(
+    query: &crate::ast::BalancesQuery,
+    where_clause: &Expr,
+) -> Result<crate::ast::BalancesQuery, QueryError> {
+    for column in ["balance", "account_balance"] {
+        if super::expr_references_column(where_clause, column) {
+            return Err(QueryError::Evaluation(format!(
+                "BALANCES' WHERE filters the postings before they are summed, \
+                 as bean-query's does, so column \"{column}\" there is not an \
+                 account's total: to filter accounts by their total, use \
+                 SELECT account, sum(position) ... GROUP BY account HAVING ..."
+            )));
+        }
+    }
+    let mut folded = query.clone();
+    folded.where_clause = None;
+    let from = folded.from.get_or_insert(crate::ast::FromClause {
+        open_on: None,
+        close_on: None,
+        close: false,
+        clear: false,
+        filter: None,
+        subquery: None,
+        table_name: None,
+    });
+    from.filter = Some(match from.filter.take() {
+        None => where_clause.clone(),
+        Some(filter) => Expr::BinaryOp(Box::new(crate::ast::BinaryOp {
+            left: Expr::Paren(Box::new(bare_has_account_as_string(filter))),
+            op: crate::ast::BinaryOperator::And,
+            right: Expr::Paren(Box::new(where_clause.clone())),
+        })),
+    });
+    Ok(folded)
+}
+
+/// A `FROM has_account(Bank)` filter with its bare-word pattern made a
+/// string. `evaluate_from_filter` reads a bare word there as the pattern only
+/// when the call is the whole filter; joined to a WHERE it would be read as a
+/// column.
+fn bare_has_account_as_string(filter: Expr) -> Expr {
+    match filter {
+        Expr::Function(mut func)
+            if func.name.eq_ignore_ascii_case("HAS_ACCOUNT")
+                && matches!(func.args.as_slice(), [Expr::Column(_)]) =>
+        {
+            if let Some(Expr::Column(name)) = func.args.pop() {
+                func.args.push(Expr::string(name));
+            }
+            Expr::Function(func)
+        }
+        other => other,
     }
 }

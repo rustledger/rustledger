@@ -5,7 +5,7 @@
 
 use parking_lot::RwLock;
 use rustledger_core::{Directive, PriceAnnotation};
-use rustledger_loader::{Ledger, LoadOptions, load};
+use rustledger_loader::{Ledger, LoadOptions, Loader, process};
 use rustledger_parser::Spanned;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -156,6 +156,12 @@ mod amount_colors_config {
 pub struct LedgerState {
     /// The loaded ledger (if a journal file is configured).
     ledger: Option<Ledger>,
+    /// The ledger's directives as the loader read them: unsorted, unbooked,
+    /// and before any plugin ran. The LSP's validation runs its own sort,
+    /// plugin, booking and validation phases, so it must start from these;
+    /// starting from `ledger.directives` ran every plugin a second time on
+    /// files without an open buffer (#2654).
+    raw_directives: Vec<Spanned<Directive>>,
     /// All files that are part of this ledger (main + includes).
     included_files: HashSet<PathBuf>,
     /// Accounts extracted from the full ledger.
@@ -183,6 +189,7 @@ impl LedgerState {
     pub fn new() -> Self {
         Self {
             ledger: None,
+            raw_directives: Vec::new(),
             included_files: HashSet::new(),
             accounts: Vec::new(),
             currencies: Vec::new(),
@@ -208,8 +215,21 @@ impl LedgerState {
             validate: false,
             ..crate::handlers::diagnostics::lsp_load_options()
         };
-        match load(journal_path, &options) {
-            Ok(ledger) => {
+        // `load` is `Loader::load` then `process`; split here to keep a copy
+        // of the raw directives for validation (see `raw_directives`).
+        let mut loader = Loader::new();
+        if options.path_security {
+            loader = loader.with_path_security(true);
+        }
+        let loaded = loader
+            .load(journal_path)
+            .map_err(rustledger_loader::ProcessError::from)
+            .and_then(|raw| {
+                let raw_directives = raw.directives.clone();
+                process(raw, &options).map(|ledger| (ledger, raw_directives))
+            });
+        match loaded {
+            Ok((ledger, raw_directives)) => {
                 // Extract included files from source map. Canonicalize
                 // each path at insert time so the symmetric lookup in
                 // `contains_file` matches editor-supplied URIs whose
@@ -236,6 +256,7 @@ impl LedgerState {
 
                 let files = self.included_files.clone();
                 self.ledger = Some(ledger);
+                self.raw_directives = raw_directives;
 
                 tracing::info!(
                     "Loaded {} files, {} accounts, {} currencies",
@@ -295,9 +316,18 @@ impl LedgerState {
         &self.links
     }
 
-    /// Get all directives from the full ledger.
+    /// Get all directives from the full ledger, processed: sorted, booked
+    /// and plugin-rewritten.
     pub fn directives(&self) -> Option<&[Spanned<Directive>]> {
         self.ledger.as_ref().map(|l| l.directives.as_slice())
+    }
+
+    /// Get all directives from the full ledger as the loader read them,
+    /// before sorting, booking or plugins: the input LSP validation runs its
+    /// own pipeline on. Feeding it [`Self::directives`] instead runs the
+    /// plugins twice (#2654).
+    pub fn raw_directives(&self) -> Option<&[Spanned<Directive>]> {
+        self.ledger.as_ref().map(|_| self.raw_directives.as_slice())
     }
 
     /// Get the loaded ledger.

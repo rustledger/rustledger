@@ -55,6 +55,7 @@ pub mod intern;
 pub mod inventory;
 pub mod meta_json;
 pub mod position;
+pub mod py_regex;
 pub mod shift_spans_impls;
 pub mod sorted_set;
 pub mod span;
@@ -75,9 +76,10 @@ pub use decimal::{
     sub_python_scale, to_bigdecimal, with_ideal_scale,
 };
 pub use directive::{
-    Balance, Close, Commodity, Custom, Directive, DirectivePriority, Document, Event, MetaValue,
-    Metadata, Note, Open, Pad, Posting, Price, PriceAnnotation, PriceKind, Query, Transaction,
-    booking_sort_key, meta_value_as_bool, parse_bool_word, parse_precision_meta, sort_directives,
+    AUTOMATIC_META, Balance, Close, Commodity, Custom, Directive, DirectivePriority, Document,
+    Event, MetaValue, Metadata, Note, Open, Pad, Posting, Price, PriceAnnotation, PriceKind, Query,
+    Transaction, booking_sort_key, meta_value_as_bool, parse_bool_word, parse_precision_meta,
+    sort_directives,
 };
 pub use display_context::{DEFAULT_CURRENCY, DisplayContext, OutputSurface, Precision};
 pub use extract::{

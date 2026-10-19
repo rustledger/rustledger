@@ -174,11 +174,13 @@ fn option_warning_severity(warning: &rustledger_loader::OptionWarning) -> Diagno
 /// is not `rustledger_loader::process` itself, which is the canonical
 /// behavior.
 ///
-/// Two inputs differ from `check`'s. In multi-file mode the directives of
-/// files without an open buffer come from the loader's processed output,
-/// already booked and plugin-processed, so for them the LSP's phases run a
-/// second time (that predates #2626). And `finalize` does not run here, as
-/// the next paragraph explains.
+/// The input is raw directives for every file: open buffers from their fresh
+/// parse, every other file from [`LedgerState::raw_directives`], the
+/// loader's output before sorting, booking or plugins. Feeding the other
+/// files from the processed ledger instead ran their plugins a second time
+/// (an inserting plugin's entries appeared twice) and booked their
+/// transactions twice (#2654). `finalize` does not run here, as the next
+/// paragraph explains.
 ///
 /// Reviewed 2026-07 (duplication sweep, "finalize consumers" family):
 /// keeping this separate pipeline is deliberate — the overlay model swaps
@@ -306,6 +308,16 @@ fn booking_order(
     )
 }
 
+// Per-thread copy of the directives the last `run_ledger_validation` handed
+// Late validation (after both plugin passes), for the #2654 regression test
+// that counts a plugin-inserted entry. Thread-local for the same reason as
+// `LEDGER_VALIDATION_RUNS`.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LAST_LATE_DIRECTIVES: std::cell::RefCell<Vec<Spanned<Directive>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
 pub(crate) fn run_ledger_validation(
     mut booked_directives: Vec<Spanned<Directive>>,
     validation_options: ValidationOptions,
@@ -375,7 +387,11 @@ pub(crate) fn run_ledger_validation(
             multiplier: validation_options.tolerance_multiplier,
             infer_from_cost: validation_options.infer_tolerance_from_cost,
             defaults: validation_options.inferred_tolerance_default.clone(),
-        });
+        })
+        // Mark the postings booking interpolates for the regular plugins, as
+        // the loader does (#2653), when they will run; their pass removes
+        // the marks before Late validation.
+        .with_interpolated_marks(plugin_ctx.is_some() && plugins_ok);
     booking_engine.register_account_methods(booked_directives.iter().map(|s| &s.value));
     // Booking failures, surfaced as diagnostics below.
     //
@@ -460,6 +476,8 @@ pub(crate) fn run_ledger_validation(
             plugin_errors_out.push((severity, err.code.clone(), err.message.clone()));
         }
     }
+    #[cfg(test)]
+    LAST_LATE_DIRECTIVES.with(|c| c.borrow_mut().clone_from(&booked_directives));
     let (session, late_errs) = session.run_late_spanned(&booked_directives, today);
     errors.extend(late_errs);
     errors.extend(session.finalize());
@@ -916,7 +934,9 @@ pub fn all_diagnostics(
         // in. The current file is always first so that a caller
         // passing duplicate entries in `other_buffer_overlays`
         // (shouldn't happen, but is harmless) doesn't shadow it.
-        let full_directives_raw = ledger_state.and_then(|ls| ls.directives());
+        // Raw, not processed: this function runs the plugins and booking
+        // itself (#2654).
+        let full_directives_raw = ledger_state.and_then(LedgerState::raw_directives);
 
         // Build the list of overlays to apply to the ledger snapshot.
         // Always include the current file's fresh parse first, then
@@ -1227,7 +1247,8 @@ pub(crate) fn ledger_diagnostics_multi(
         .iter()
         .any(|t| validation_would_run(t.source, t.parse));
     let validation = if any_target_validates {
-        let full_directives_raw = ledger_state.directives();
+        // Raw, not processed, as in `all_diagnostics` (#2654).
+        let full_directives_raw = ledger_state.raw_directives();
         let booked_directives: Vec<Spanned<Directive>> =
             if let Some(owned) = build_live_directive_overlay(overlay, full_directives_raw) {
                 owned
@@ -3492,5 +3513,72 @@ plugin "auto_accounts"
         let (lsp, check) = multi_file_vs_check(&files, 0, &[0]);
         assert!(!check.is_empty(), "check refuses the sale");
         assert_eq!(lsp, check);
+    }
+
+    /// Plugins run once on every file, open or not. Files without an open
+    /// buffer used to come from the loader's processed output, which the
+    /// plugins had already rewritten, and the LSP ran them again: an
+    /// inserting plugin's entry appeared twice (#2654).
+    #[test]
+    fn plugins_run_once_on_files_without_an_open_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main.beancount");
+        std::fs::write(
+            &main,
+            "plugin \"beancount.plugins.implicit_prices\"\n\
+             include \"other.beancount\"\n\
+             2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("other.beancount"),
+            "2024-01-02 * \"buy\"\n  Assets:Stock  10 HOOL @ 100 USD\n  Assets:Cash\n",
+        )
+        .unwrap();
+        // `check` inserts one price.
+        let ledger = rustledger_loader::load(&main, &lsp_load_options()).expect("load");
+        let count_prices = |directives: &[Spanned<Directive>]| {
+            directives
+                .iter()
+                .filter(|d| matches!(d.value, Directive::Price(_)))
+                .count()
+        };
+        assert_eq!(count_prices(&ledger.directives), 1, "{:?}", ledger.errors);
+
+        let mut state = LedgerState::new();
+        state.load(&main).expect("load");
+        let ledger = state.ledger().unwrap();
+        let main_fid = 0u16;
+        let main_source = ledger.source_map.files()[0].source.clone();
+        let main_parse = parse(&main_source);
+        let late_prices = || LAST_LATE_DIRECTIVES.with(|c| count_prices(&c.borrow()));
+
+        // The current-file path, the main file open.
+        let _ = all_diagnostics(
+            &main_parse,
+            &main_source,
+            Some(&state),
+            Some(main_fid),
+            Some(&main),
+            &[],
+            PositionEncoding::Utf16,
+        );
+        assert_eq!(late_prices(), 1, "all_diagnostics");
+
+        // The multi-file path, the main file open.
+        let targets = [FileDiagTarget {
+            file_id: main_fid,
+            source: &main_source,
+            parse: &main_parse,
+        }];
+        let _ = ledger_diagnostics_multi(
+            &state,
+            Some(main_fid),
+            &main_parse,
+            &[(main_fid, main_parse.directives.as_slice())],
+            &targets,
+            PositionEncoding::Utf16,
+        );
+        assert_eq!(late_prices(), 1, "ledger_diagnostics_multi");
     }
 }

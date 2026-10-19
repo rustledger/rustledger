@@ -114,6 +114,8 @@ Two seams remain, both deliberate:
   sold from) keeps the plain sum of its postings. `BALANCES` over the same
   `FROM` subset errors; erroring here would fail queries that answered
   before, and the plain sum is exactly what the selected postings add up to.
+  (Since #2630 `BALANCES` replays the whole window and realizes a partly
+  selected account as `sum(position)` does, so it keeps the plain sum too.)
 - Booking keeps an AVERAGE account's purchases as separate lots until a sale
   merges them, so before the first sale `BALANCES` and `report balances`
   list them while `sum(position)` shows the pool. The Decision above says

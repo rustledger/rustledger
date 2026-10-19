@@ -153,7 +153,7 @@ ORDER BY date DESC
 LIMIT 10
 
 /* Built-in reports */
-BALANCES [FROM ...]
+BALANCES [AT ...] [FROM ...] [WHERE ...]
 JOURNAL 'Account:Name'
 ```
 

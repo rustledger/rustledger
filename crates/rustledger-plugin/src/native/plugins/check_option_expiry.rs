@@ -16,7 +16,8 @@
 //! Same-day entries are taken in beancount's `entry_sortkey` order (date,
 //! type, line number), so the entry named is the one `bean-check` names
 //! even when same-day trades are split across included files. A position
-//! whose net leaves `Decimal`'s range is not checked.
+//! whose net leaves `Decimal`'s range is not checked; booking rejects such
+//! an inventory before the plugin runs, so only unbooked input gets there.
 //!
 //! The plugin reads no config yet: a non-blank config string (`as_of` is
 //! beancount-options only for now) gives one warning, and the default
@@ -111,6 +112,13 @@ impl NativePlugin for CheckOptionExpiryPlugin {
                         opened_at: i,
                         overflowed: false,
                     });
+                // Silent on purpose, unlike check_option_assignment's "not
+                // checked" error: this net is the account's inventory of the
+                // contract, and booking rejects an inventory past
+                // `Decimal`'s range before plugins run, so through the loader
+                // the check has already failed (see
+                // `check_option_expiry_overflow_is_rejected_by_booking`).
+                // Only unbooked input reaches this branch.
                 let Some(new_net) = delta.and_then(|d| pos.net.checked_add(d)) else {
                     pos.overflowed = true;
                     continue;

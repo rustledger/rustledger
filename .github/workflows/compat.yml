@@ -1702,7 +1702,7 @@ jobs:
           # Every gated suite prints a recognizable marker when it skips;
           # any of them appearing means an availability probe drifted
           # despite the assert step above.
-          if grep -Eq "Skipping: Python beancount not available|bean-check not found, skipping|skipping bean-price compat|Skipping: CPython WASI runtime unavailable|Skipping: conformance WASM guests unavailable|Skipping: beancount-options not installed" /tmp/gated-tests.log; then
+          if grep -Eq "Skipping: Python beancount not available|bean-check not found, skipping|skipping bean-price compat|Skipping: CPython WASI runtime unavailable|Skipping: conformance WASM guests unavailable|Skipping: beancount-options not installed|Skipping: BEANCOUNT_OPTIONS_DIR not set" /tmp/gated-tests.log; then
             echo "::error::python-gated tests skipped despite the tools being installed — availability probe drifted"
             exit 1
           fi

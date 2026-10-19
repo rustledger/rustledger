@@ -10070,61 +10070,142 @@ fn test_option_assignment_same_day_entries_sorted_by_line() {
     assert_eq!(errors[0].line_number, Some(16));
 }
 
-/// Numbers whose products leave `Decimal`'s range skip the assignment
-/// instead of panicking: the strike value (#2661 review), the stock's
-/// basis, and a call's proceeds. None of them is mistaken for a missing
-/// cost or price.
+/// Numbers whose products leave `Decimal`'s range do not panic, and do not
+/// pass silently: each rule whose arithmetic fits still runs, and an
+/// assignment whose remaining rules cannot run gets a "not checked" error
+/// at the entry. None of them is mistaken for a missing cost or price.
 #[test]
-fn test_option_assignment_overflow_is_skipped() {
+fn test_option_assignment_overflow_is_reported() {
     let huge = "1000000000000000000000000";
-    let strike_value = assignment_errors(vec![
-        sto("2026-09-03", huge, "AAPL261016P99999999", "1"),
-        txn_of(
-            "2026-10-16",
-            vec![
-                per_unit(leg(OPT_ACCT, huge, "AAPL261016P99999999"), "1"),
-                per_unit(leg(STOCK_ACCT, "1", "AAPL"), "1"),
-                cash("0"),
-            ],
-        ),
-    ]);
-    assert_eq!(strike_value.len(), 0, "{strike_value:?}");
+    let shares = "100000000000000000000000000";
+    let big_put = "AAPL261016P99999999";
+    let unchecked = |label: &str| {
+        format!("{label} assignment not checked: amounts exceed the supported decimal range")
+    };
+    let messages =
+        |errors: Vec<PluginError>| errors.into_iter().map(|e| e.message).collect::<Vec<_>>();
+    let assignment = |symbol: &str, option_leg: PostingData, stock_leg: PostingData| {
+        assignment_errors(vec![
+            sto("2026-09-03", huge, symbol, "1"),
+            txn_of("2026-10-16", vec![option_leg, stock_leg, cash("0")]),
+        ])
+    };
+
+    // Strike × shares (about 10^31) is out of range, but contracts × 100
+    // is not: the share count is still checked (#2661 review).
+    let share_count = assignment(
+        big_put,
+        per_unit(leg(OPT_ACCT, huge, big_put), "1"),
+        per_unit(leg(STOCK_ACCT, "1", "AAPL"), "1"),
+    );
+    assert_eq!(
+        share_count[0].source_file.as_deref(),
+        Some("ledger.beancount")
+    );
+    assert_eq!(share_count[0].line_number, Some(7));
+    assert_eq!(
+        messages(share_count),
+        [format!(
+            "{big_put} assignment: {huge} contract(s) but 1 AAPL; expected {shares}"
+        )]
+    );
+
+    // Not an assignment (no stock moves): nothing to check, so nothing to
+    // report, however large the numbers.
+    let ordinary_close = assignment(
+        big_put,
+        per_unit(leg(OPT_ACCT, huge, big_put), "1"),
+        cash("0"),
+    );
+    assert_eq!(messages(ordinary_close), Vec::<String>::new());
+
+    // The option leg's price is still checked too; it realizes a gain here.
+    let realized = assignment(
+        big_put,
+        priced(per_unit(leg(OPT_ACCT, huge, big_put), "1"), "0", false),
+        per_unit(leg(STOCK_ACCT, shares, "AAPL"), "1"),
+    );
+    assert_eq!(
+        messages(realized),
+        [format!(
+            "{big_put} assignment: option leg priced at 0.00 USD, not its cost {huge}.00 USD; close it at cost and fold the premium into the AAPL leg"
+        )]
+    );
+
+    // The share count is right, so only the basis is left, and it needs the
+    // strike value: not checked.
+    let strike_value = assignment(
+        big_put,
+        per_unit(leg(OPT_ACCT, huge, big_put), "1"),
+        per_unit(leg(STOCK_ACCT, shares, "AAPL"), "1"),
+    );
+    assert_eq!(messages(strike_value), [unchecked(big_put)]);
 
     // 10^24 contracts of the 1.00 put: strike value 10^26 fits, but 10^26
     // shares at 1000 each (10^29) do not.
-    let shares = "100000000000000000000000000";
-    let basis = assignment_errors(vec![
-        sto("2026-09-03", huge, "AAPL261016P00001000", "1"),
-        txn_of(
-            "2026-10-16",
-            vec![
-                per_unit(leg(OPT_ACCT, huge, "AAPL261016P00001000"), "1"),
-                per_unit(leg(STOCK_ACCT, shares, "AAPL"), "1000"),
-                cash("0"),
-            ],
-        ),
-    ]);
-    assert_eq!(basis.len(), 0, "{basis:?}");
+    let basis = assignment(
+        "AAPL261016P00001000",
+        per_unit(leg(OPT_ACCT, huge, "AAPL261016P00001000"), "1"),
+        per_unit(leg(STOCK_ACCT, shares, "AAPL"), "1000"),
+    );
+    assert_eq!(messages(basis), [unchecked("AAPL261016P00001000")]);
 
-    let proceeds = assignment_errors(vec![
-        sto("2026-09-03", huge, "AAPL261016C00001000", "1"),
-        txn_of(
-            "2026-10-16",
-            vec![
-                per_unit(leg(OPT_ACCT, huge, "AAPL261016C00001000"), "1"),
-                priced(
-                    per_unit(leg(STOCK_ACCT, &format!("-{shares}"), "AAPL"), "1"),
-                    "1000",
-                    false,
-                ),
-                cash("0"),
-            ],
+    let proceeds = assignment(
+        "AAPL261016C00001000",
+        per_unit(leg(OPT_ACCT, huge, "AAPL261016C00001000"), "1"),
+        priced(
+            per_unit(leg(STOCK_ACCT, &format!("-{shares}"), "AAPL"), "1"),
+            "1000",
+            false,
         ),
-    ]);
-    assert_eq!(proceeds.len(), 0, "{proceeds:?}");
+    );
+    assert_eq!(messages(proceeds), [unchecked("AAPL261016C00001000")]);
 
-    // Running positions that overflow are dropped, not panicked on.
+    // The option leg's own cost out of range: its contracts still count.
+    let premium = assignment(
+        PUT,
+        per_unit(leg(OPT_ACCT, huge, PUT), "100000000"),
+        per_unit(leg(STOCK_ACCT, "1", "AAPL"), "1"),
+    );
+    assert_eq!(
+        messages(premium),
+        [format!(
+            "{PUT} assignment: {huge} contract(s) but 1 AAPL; expected {shares}"
+        )]
+    );
+
+    // Contracts, or stock units, summed across accounts out of range: no
+    // rule can run, so the assignment is not checked.
     let big = "50000000000000000000000000000";
+    let two_accounts = |stock: Vec<PostingData>| {
+        let mut postings = vec![
+            per_unit(leg(OPT_ACCT, big, PUT), "0"),
+            per_unit(leg(GAINS_ACCT, big, PUT), "0"),
+        ];
+        postings.extend(stock);
+        postings.push(cash("0"));
+        assignment_errors(vec![
+            sto("2026-09-03", big, PUT, "0"),
+            txn_of(
+                "2026-09-03",
+                vec![
+                    per_unit(leg(GAINS_ACCT, &format!("-{big}"), PUT), "0"),
+                    cash("0"),
+                ],
+            ),
+            txn_of("2026-10-16", postings),
+        ])
+    };
+    let contracts = two_accounts(vec![per_unit(leg(STOCK_ACCT, "100", "AAPL"), "1")]);
+    assert_eq!(messages(contracts), [unchecked(PUT)]);
+    let stock_units = two_accounts(vec![
+        per_unit(leg(STOCK_ACCT, big, "AAPL"), "0"),
+        per_unit(leg(CASH_ACCT, big, "AAPL"), "0"),
+    ]);
+    assert_eq!(messages(stock_units), [unchecked(PUT)]);
+
+    // Running positions that overflow are dropped, not panicked on. Only
+    // unbooked input reaches this: booking rejects such an inventory.
     let net = assignment_errors(vec![
         sto("2026-09-03", big, PUT, "0"),
         sto("2026-09-04", big, PUT, "0"),

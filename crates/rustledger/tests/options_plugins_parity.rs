@@ -17,8 +17,10 @@
 //!
 //! Tool-gated: the parity tests need `bean-check` with beancount-options
 //! installed, and the shared cases need `BEANCOUNT_OPTIONS_DIR`. Where
-//! either is missing they print [`SKIP_MARKER`] and pass; the
-//! `python-gated-cargo-tests` CI job provides both and fails on the marker.
+//! the first is missing they print [`SKIP_MARKER`], and where the second
+//! is unset [`NO_CASES_DIR_MARKER`]; either way they pass. The
+//! `python-gated-cargo-tests` CI job provides both and fails on either
+//! marker.
 //!
 //! To run them locally, install beancount-options into the environment
 //! whose `bean-check` is first on `PATH` (`pip install -e
@@ -35,6 +37,11 @@ use std::process::Command;
 /// Printed when `bean-check` or beancount-options is unavailable; CI
 /// fails on it.
 const SKIP_MARKER: &str = "Skipping: beancount-options not installed";
+
+/// Printed when `BEANCOUNT_OPTIONS_DIR` (the beancount-options checkout
+/// holding the shared cases) is unset; CI fails on it.
+const NO_CASES_DIR_MARKER: &str =
+    "Skipping: BEANCOUNT_OPTIONS_DIR not set (the beancount-options checkout with tests/cases/)";
 
 /// What a run that started the Python runtime prints. The native plugin
 /// must handle these lines, never the sandboxed Python one.
@@ -157,7 +164,7 @@ fn check_option_expiry_clean_ledger_matches() {
 }
 
 /// Same-day trades split across an `include`: both tools take beancount's
-/// order (date, then line, whatever the file), so both report the position
+/// order (date, type, then line, whatever the file), so both report the position
 /// at `includes-other.beancount:1`, not at the buy in the including file.
 #[test]
 fn check_option_expiry_same_day_across_include_matches() {
@@ -179,7 +186,7 @@ fn check_option_expiry_same_day_across_include_matches() {
 #[test]
 fn check_option_expiry_shared_cases_match() {
     let Some(dir) = std::env::var_os("BEANCOUNT_OPTIONS_DIR") else {
-        eprintln!("{SKIP_MARKER}");
+        eprintln!("{NO_CASES_DIR_MARKER}");
         return;
     };
     let cases = PathBuf::from(dir).join("tests/cases/expiry");
@@ -217,16 +224,40 @@ fn check_option_assignment_end_to_end() {
     );
 }
 
-/// Products past `Decimal`'s range skip the assignment; `rledger check`
-/// does not panic on a ledger the core accepts (#2661 review).
+/// Products past `Decimal`'s range neither panic nor pass silently: the
+/// share count still runs, and an assignment whose basis cannot be
+/// computed is reported as not checked (#2661 review).
 #[test]
-fn check_option_assignment_overflow_does_not_panic() {
+fn check_option_assignment_overflow_is_reported() {
     let rledger = require_rledger!();
     let path = fixture("assignment-overflow.beancount");
     let (ok, text) = run(&rledger, &["check"], &path);
     assert!(!text.contains("panicked"), "{text}");
-    assert!(ok, "{text}");
-    assert_eq!(errors(&text, &[&path]), Vec::<String>::new(), "{text}");
+    assert!(!ok, "{text}");
+    assert_eq!(
+        errors(&text, &[&path]),
+        [
+            "12: AAPL261016P99999999 assignment: 1000000000000000000000000 contract(s) but 1 AAPL; expected 100000000000000000000000000",
+            "19: MSFT261016P99999999 assignment not checked: amounts exceed the supported decimal range",
+        ],
+        "{text}"
+    );
+}
+
+/// `check_option_expiry` skips a position whose net leaves `Decimal`'s
+/// range, but through the loader that position never reaches it: booking
+/// rejects the inventory first, so `rledger check` still fails.
+#[test]
+fn check_option_expiry_overflow_is_rejected_by_booking() {
+    let rledger = require_rledger!();
+    let path = fixture("expiry-overflow.beancount");
+    let (ok, text) = run(&rledger, &["check"], &path);
+    assert!(!text.contains("panicked"), "{text}");
+    assert!(!ok, "{text}");
+    assert!(
+        text.contains("AAPL261016P00100000 amount exceeds the representable range"),
+        "{text}"
+    );
 }
 
 /// The line parser reads both tools' formats, and names the file when

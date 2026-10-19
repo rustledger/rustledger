@@ -18,8 +18,8 @@ use parking_lot::RwLock;
 
 use rustc_hash::FxHashMap;
 
-use regex::{Regex, RegexBuilder};
 use rust_decimal::Decimal;
+use rustledger_core::py_regex::{self, PyRegex, PyRegexError, WordBoundaryError};
 use rustledger_core::{Amount, Directive, Inventory, NaiveDate, Position};
 #[cfg(test)]
 use rustledger_core::{MetaValue, Transaction};
@@ -283,12 +283,20 @@ pub struct Executor<'a> {
     /// [`Executor::set_summary_accounts`].
     summary_accounts: SummaryAccounts,
     /// Cache for compiled regex patterns (`RwLock` for thread-safe parallel execution).
-    // `Arc<Regex>`, not `Regex`: the `~`/`!~` operators look the regex up per
+    // `Arc<PyRegex>`, not `PyRegex`: the `~`/`!~` operators look the regex up per
     // row, and cloning a `Regex` gives the clone a fresh, empty lazy-DFA cache
     // pool — so every row rebuilt the DFA from scratch (`Lazy::init_cache` was
     // ~18% of a regex-filter query). Cloning the `Arc` shares the one regex (and
     // its cache), so the DFA is built once per query, not once per row.
-    regex_cache: RwLock<FxHashMap<String, Option<Arc<Regex>>>>,
+    //
+    // One map per [`RegexMode`]: the same pattern compiles differently for
+    // `~` (case-insensitive search) and `findfirst` (case-sensitive match).
+    // A pattern rledger refuses is cached as its error, so a bad pattern is
+    // read once per query rather than once per row.
+    regex_cache: [RwLock<FxHashMap<String, Result<Arc<PyRegex>, PyRegexError>>>; RegexMode::COUNT],
+    /// `subst()`'s compiled patterns and their translated replacements, keyed
+    /// by pattern and replacement (see [`Executor::python_sub`]).
+    sub_cache: SubCache,
     /// Account info cache from Open/Close directives.
     account_info: FxHashMap<String, AccountInfo>,
     /// Metadata of each `commodity` directive, keyed by currency.
@@ -575,6 +583,40 @@ struct RowSelection {
     last_txn: Option<usize>,
 }
 
+/// How bean-query applies a BQL regular expression, which decides how
+/// [`Executor::python_regex`] compiles it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum RegexMode {
+    /// `re.search(pattern, s, re.IGNORECASE)`: `~`, `!~`, `has_account()` and
+    /// `JOURNAL`'s account pattern.
+    SearchIgnoreCase,
+    /// `re.search(pattern, s)`: `grep()` and `grepn()`.
+    Search,
+    /// `re.match(pattern, s)`, anchored at the start: `findfirst()`.
+    Match,
+}
+
+impl RegexMode {
+    const COUNT: usize = 3;
+}
+
+/// A compiled `subst()` pattern with its replacement in `regex` syntax, or
+/// why it cannot be used.
+type SubEntry = Result<Arc<(PyRegex, String)>, String>;
+/// [`SubEntry`]s by pattern, then replacement.
+type SubCache = RwLock<FxHashMap<String, FxHashMap<String, SubEntry>>>;
+
+/// A pattern rledger cannot use, as a query error naming it.
+pub(super) fn regex_error(pattern: &str, error: &PyRegexError) -> QueryError {
+    QueryError::Type(format!("invalid regex '{pattern}': {error}"))
+}
+
+/// A match on text a pattern's word boundary cannot be answered exactly on
+/// (#2656), as a query error naming the pattern.
+pub(super) fn word_boundary_error(pattern: &str, error: &WordBoundaryError) -> QueryError {
+    QueryError::Evaluation(format!("regex '{pattern}': {error}"))
+}
+
 pub(crate) struct PostingScan<'a> {
     pub(crate) postings: Vec<PostingContext<'a>>,
     pub(crate) account_balances: FxHashMap<rustledger_core::Account, Inventory>,
@@ -629,7 +671,8 @@ impl<'a> Executor<'a> {
             account_types: rustledger_core::AccountTypes::default(),
             booking_method: rustledger_core::BookingMethod::Strict,
             summary_accounts: SummaryAccounts::default(),
-            regex_cache: RwLock::new(FxHashMap::default()),
+            regex_cache: Default::default(),
+            sub_cache: RwLock::default(),
             account_info,
             commodity_meta,
             source_locations: None,
@@ -794,7 +837,8 @@ impl<'a> Executor<'a> {
             account_types: rustledger_core::AccountTypes::default(),
             booking_method: rustledger_core::BookingMethod::Strict,
             summary_accounts: SummaryAccounts::default(),
-            regex_cache: RwLock::new(FxHashMap::default()),
+            regex_cache: Default::default(),
+            sub_cache: RwLock::default(),
             account_info,
             commodity_meta,
             source_locations: Some(source_locations),
@@ -874,38 +918,85 @@ impl<'a> Executor<'a> {
             .chain(self.directives.iter())
     }
 
-    /// Get or compile a regex pattern from the cache.
+    /// `pattern`, a Python regular expression, compiled as bean-query's
+    /// `mode` reads it, from the cache (#2656). bean-query matches with
+    /// Python's `re`, so the pattern is read with Python's grammar
+    /// ([`py_regex`]): it means what it means there, or is refused, naming
+    /// the construct rledger cannot express (lookaround, backreferences,
+    /// `\b`, ...).
     ///
-    /// Returns `Some(Arc<Regex>)` if the pattern is valid, `None` if it's invalid.
-    /// Invalid patterns are cached as `None` to avoid repeated compilation attempts.
-    fn get_or_compile_regex(&self, pattern: &str) -> Option<Arc<Regex>> {
-        // Fast path: check read lock first
-        {
-            // parking_lot's RwLock does not poison, so the read guard is
-            // returned directly (this matches the previous std behavior,
-            // which recovered from poisoning via into_inner()).
-            let cache = self.regex_cache.read();
-            if let Some(cached) = cache.get(pattern) {
-                return cached.clone();
+    /// # Errors
+    ///
+    /// A pattern Python's `re` rejects, or one rledger cannot express.
+    pub(super) fn python_regex(
+        &self,
+        pattern: &str,
+        mode: RegexMode,
+    ) -> Result<Arc<PyRegex>, QueryError> {
+        let cache = &self.regex_cache[mode as usize];
+        // parking_lot's RwLock does not poison, so the read guard is
+        // returned directly.
+        let cached = cache.read().get(pattern).cloned();
+        let compiled = cached.unwrap_or_else(|| {
+            let compiled = match mode {
+                RegexMode::SearchIgnoreCase => py_regex::compile_search_ignore_case(pattern),
+                RegexMode::Search => py_regex::compile_search(pattern),
+                RegexMode::Match => py_regex::compile_match(pattern),
             }
-        }
-        // Slow path: compile and insert with write lock
-        // Use case-insensitive matching to match Python beancount behavior
-        let compiled = RegexBuilder::new(pattern)
-            .case_insensitive(true)
-            .build()
-            .ok()
             .map(Arc::new);
-        let mut cache = self.regex_cache.write();
-        // Double-check in case another thread inserted while we waited
-        if let Some(cached) = cache.get(pattern) {
-            return cached.clone();
-        }
-        cache.insert(pattern.to_string(), compiled.clone());
-        compiled
+            cache
+                .write()
+                .entry(pattern.to_string())
+                .or_insert(compiled)
+                .clone()
+        });
+        compiled.map_err(|e| regex_error(pattern, &e))
     }
 
-    /// Get or compile a regex pattern, returning an error if invalid.
+    /// `subst(pattern, replacement, s)`'s compiled pattern and replacement, as
+    /// Python's `re.sub` reads them (#2656), from the cache.
+    ///
+    /// # Errors
+    ///
+    /// A pattern or replacement Python's `re` rejects, or one rledger cannot
+    /// express, which includes a pattern that can match the empty string
+    /// (`re.sub` replaces empty matches differently, see
+    /// [`py_regex::compile_sub`]).
+    fn python_sub(
+        &self,
+        pattern: &str,
+        replacement: &str,
+    ) -> Result<Arc<(PyRegex, String)>, QueryError> {
+        if let Some(cached) = self
+            .sub_cache
+            .read()
+            .get(pattern)
+            .and_then(|by_replacement| by_replacement.get(replacement))
+        {
+            return cached.clone().map_err(QueryError::Type);
+        }
+        let compiled: SubEntry = py_regex::compile_sub(pattern)
+            .map_err(|e| format!("invalid regex '{pattern}': {e}"))
+            .and_then(|sub| {
+                let template = py_regex::translate_replacement(replacement, &sub).map_err(|e| {
+                    let why = match e {
+                        PyRegexError::Invalid(why) => {
+                            format!("it is not a valid replacement: {why}")
+                        }
+                        other @ PyRegexError::Unsupported(_) => other.to_string(),
+                    };
+                    format!("invalid replacement '{replacement}': {why}")
+                })?;
+                Ok(Arc::new((sub.regex, template)))
+            });
+        self.sub_cache
+            .write()
+            .entry(pattern.to_string())
+            .or_default()
+            .insert(replacement.to_string(), compiled.clone());
+        compiled.map_err(QueryError::Type)
+    }
+
     /// Does any posting on this entry have an account matching `pattern`?
     ///
     /// ONE implementation for both spellings of `HAS_ACCOUNT`: the FROM
@@ -918,13 +1009,12 @@ impl<'a> Executor<'a> {
         txn: &rustledger_core::Transaction,
         pattern: &str,
     ) -> Result<bool, QueryError> {
-        let regex = self.require_regex(pattern)?;
-        Ok(txn.postings.iter().any(|p| regex.is_match(&p.account)))
-    }
-
-    fn require_regex(&self, pattern: &str) -> Result<Arc<Regex>, QueryError> {
-        self.get_or_compile_regex(pattern)
-            .ok_or_else(|| QueryError::Type(format!("invalid regex: {pattern}")))
+        // beanquery: `('(?i)' + regex) ?~ any(accounts)`, a case-insensitive
+        // `re.search` (`compiler.py`, `has_account`).
+        let regex = self.python_regex(pattern, RegexMode::SearchIgnoreCase)?;
+        regex
+            .is_match_any(txn.postings.iter().map(|p| p.account.as_str()))
+            .map_err(|e| word_boundary_error(pattern, &e))
     }
 
     /// Set the target currency for `VALUE()` conversions.
@@ -2720,15 +2810,18 @@ impl<'a> Executor<'a> {
                     _ => Err(QueryError::Type("DATE_DIFF expects two dates".to_string())),
                 }
             }
-            // String: regex functions for wrapping aggregates
+            // String: regex functions for wrapping aggregates. Each reads
+            // its pattern as bean-query's `re` call does (#2656): `grep` and
+            // `grepn` are `re.search`, case-sensitive; `subst` is `re.sub`,
+            // with Python's replacement syntax (`\1`, `\g<name>`; `$1` is
+            // literal text). A NULL argument gives NULL, as bean-query's
+            // functions do.
             "GREP" => {
                 Self::require_args_count(&name_upper, args, 2)?;
                 match (&args[0], &args[1]) {
                     (Value::String(pattern), Value::String(s)) => {
-                        let re = regex::Regex::new(pattern).map_err(|e| {
-                            QueryError::Type(format!("GREP: invalid regex '{pattern}': {e}"))
-                        })?;
-                        match re.find(s) {
+                        let re = self.python_regex(pattern, RegexMode::Search)?;
+                        match re.find(s).map_err(|e| word_boundary_error(pattern, &e))? {
                             Some(m) => Ok(Value::String(m.as_str().to_string())),
                             None => Ok(Value::Null),
                         }
@@ -2741,10 +2834,10 @@ impl<'a> Executor<'a> {
             "GREPN" => {
                 Self::require_args_count(&name_upper, args, 3)?;
                 let n = match &args[2] {
-                    Value::Integer(i) => (*i).max(0) as usize,
+                    Value::Integer(i) => Some(*i),
                     Value::Number(n) => {
                         use rust_decimal::prelude::ToPrimitive;
-                        n.to_usize().unwrap_or(0)
+                        n.to_i64()
                     }
                     _ => {
                         return Err(QueryError::Type(
@@ -2754,10 +2847,23 @@ impl<'a> Executor<'a> {
                 };
                 match (&args[0], &args[1]) {
                     (Value::String(pattern), Value::String(s)) => {
-                        let re = regex::Regex::new(pattern).map_err(|e| {
-                            QueryError::Type(format!("GREPN: invalid regex '{pattern}': {e}"))
-                        })?;
-                        match re.captures(s) {
+                        let re = self.python_regex(pattern, RegexMode::Search)?;
+                        // Python's `match.group(n)` refuses a group the
+                        // pattern does not have, negative included, where
+                        // this answered NULL (or group 0 for a negative n).
+                        let Some(n) = n
+                            .and_then(|n| usize::try_from(n).ok())
+                            .filter(|&n| n < re.captures_len())
+                        else {
+                            return Err(QueryError::Evaluation(format!(
+                                "GREPN: no such group {} in '{pattern}'",
+                                n.map_or_else(|| "out of range".to_string(), |n| n.to_string())
+                            )));
+                        };
+                        match re
+                            .captures(s)
+                            .map_err(|e| word_boundary_error(pattern, &e))?
+                        {
                             Some(caps) => match caps.get(n) {
                                 Some(m) => Ok(Value::String(m.as_str().to_string())),
                                 None => Ok(Value::Null),
@@ -2775,12 +2881,16 @@ impl<'a> Executor<'a> {
                 Self::require_args_count(&name_upper, args, 3)?;
                 match (&args[0], &args[1], &args[2]) {
                     (Value::String(pattern), Value::String(replacement), Value::String(s)) => {
-                        let re = regex::Regex::new(pattern).map_err(|e| {
-                            QueryError::Type(format!("SUBST: invalid regex '{pattern}': {e}"))
-                        })?;
+                        let sub = self.python_sub(pattern, replacement)?;
+                        let (re, template) = &*sub;
                         Ok(Value::String(
-                            re.replace_all(s, replacement.as_str()).to_string(),
+                            re.replace_all(s, template.as_str())
+                                .map_err(|e| word_boundary_error(pattern, &e))?
+                                .into_owned(),
                         ))
+                    }
+                    (Value::Null, _, _) | (_, Value::Null, _) | (_, _, Value::Null) => {
+                        Ok(Value::Null)
                     }
                     _ => Err(QueryError::Type(
                         "SUBST expects (pattern, replacement, string)".to_string(),
@@ -2936,10 +3046,8 @@ impl<'a> Executor<'a> {
                     ))),
                 }
             }
-            // First element of a string set matching a regex. The set is
-            // scanned in its stored order, which for `tags`/`links` is the
-            // order the directive declares them, so the answer is stable
-            // rather than dependent on set iteration.
+            // First element of a string set, in sorted order, that a regex
+            // matches from its start (see below).
             "FINDFIRST" => {
                 Self::require_args_count(&name_upper, args, 2)?;
                 let (Value::String(pattern), haystack) = (&args[0], &args[1]) else {
@@ -2962,11 +3070,24 @@ impl<'a> Executor<'a> {
                         ));
                     }
                 };
-                let regex = self.require_regex(pattern)?;
-                Ok(candidates
-                    .iter()
-                    .find(|c| regex.is_match(c))
-                    .map_or(Value::Null, |c| Value::String(c.clone())))
+                // bean-query: the first of `sorted(values)` that
+                // `re.match(pattern, value)` matches: anchored at the start,
+                // case-sensitive, in sorted order (#2656). This searched
+                // anywhere, ignoring case, in the set's stored order.
+                let regex = self.python_regex(pattern, RegexMode::Match)?;
+                let mut sorted: Vec<&String> = candidates.iter().collect();
+                sorted.sort_unstable();
+                // Each tried in turn, as Python tries them: an element after
+                // the first match is never matched, so it cannot be refused.
+                for candidate in sorted {
+                    if regex
+                        .is_match(candidate)
+                        .map_err(|e| word_boundary_error(pattern, &e))?
+                    {
+                        return Ok(Value::String(candidate.clone()));
+                    }
+                }
+                Ok(Value::Null)
             }
             // Truncate a date to the first of its month. beanquery returns a
             // date here, not a string, so `yearmonth(date)` stays orderable

@@ -1,0 +1,107 @@
+; check_option_assignment end to end: booking fills each closing `{}` leg
+; with the cost of the lot it closed, which is the premium the plugin reads.
+; Native only until beancount-options has check_option_assignment; the
+; expected errors are in assignment.expected.
+plugin "beancount_options.check_option_assignment"
+
+2026-01-01 open Assets:Broker:Options
+2026-01-01 open Assets:Broker:Stock
+2026-01-01 open Assets:Broker:Cash
+2026-01-01 open Income:Trading:Gains
+
+; Put assigned with the premium folded into the basis: fine.
+2026-09-03 * "Sell to open AAPL 225 put"
+  Assets:Broker:Options  -1 AAPL261016P00225000 {300.00 USD}
+  Assets:Broker:Cash     300.00 USD
+
+2026-10-16 * "AAPL 225 put assigned"
+  Assets:Broker:Options   1 AAPL261016P00225000 {}
+  Assets:Broker:Stock   100 AAPL {222.00 USD}
+  Assets:Broker:Cash  -22500.00 USD
+
+; Put sold in two lots and assigned in one entry: `{}` takes both lots
+; (FIFO), premium 250 + 350, basis (230 × 200 − 600) / 200 = 227.00.
+2026-09-03 * "Sell to open MSFT 230 put"
+  Assets:Broker:Options  -1 MSFT261016P00230000 {250.00 USD}
+  Assets:Broker:Cash     250.00 USD
+
+2026-09-10 * "Sell to open another MSFT 230 put"
+  Assets:Broker:Options  -1 MSFT261016P00230000 {350.00 USD}
+  Assets:Broker:Cash     350.00 USD
+
+2026-10-16 * "MSFT 230 puts assigned"
+  Assets:Broker:Options   2 MSFT261016P00230000 {}
+  Assets:Broker:Stock   200 MSFT {227.00 USD}
+  Assets:Broker:Cash  -46000.00 USD
+
+; Put assigned with the premium booked as income: error.
+2026-09-03 * "Sell to open NVDA 150 put"
+  Assets:Broker:Options  -1 NVDA261016P00150000 {400.00 USD}
+  Assets:Broker:Cash     400.00 USD
+
+2026-10-16 * "NVDA 150 put assigned, premium to income"
+  Assets:Broker:Options   1 NVDA261016P00150000 {}
+  Assets:Broker:Stock   100 NVDA {150.00 USD}
+  Assets:Broker:Cash  -15000.00 USD
+  Income:Trading:Gains   -400.00 USD
+
+; Covered call assigned with proceeds = strike + premium: fine.
+2026-01-02 * "Buy TSLA"
+  Assets:Broker:Stock   100 TSLA {200.00 USD}
+  Assets:Broker:Cash  -20000.00 USD
+
+2026-09-04 * "Sell to open TSLA 280 call"
+  Assets:Broker:Options  -1 TSLA261016C00280000 {220.00 USD}
+  Assets:Broker:Cash     220.00 USD
+
+2026-10-16 * "TSLA 280 call assigned"
+  Assets:Broker:Options    1 TSLA261016C00280000 {}
+  Assets:Broker:Stock   -100 TSLA {} @ 282.20 USD
+  Assets:Broker:Cash   28000.00 USD
+  Income:Trading:Gains
+
+; Option leg closed at 0.00 instead of its cost: error.
+2026-09-03 * "Sell to open AMD 100 put"
+  Assets:Broker:Options  -1 AMD261016P00100000 {150.00 USD}
+  Assets:Broker:Cash     150.00 USD
+
+2026-10-16 * "AMD 100 put assigned, option closed at 0.00"
+  Assets:Broker:Options   1 AMD261016P00100000 {} @ 0.00 USD
+  Assets:Broker:Stock   100 AMD {98.50 USD}
+  Assets:Broker:Cash  -10000.00 USD
+  Income:Trading:Gains
+
+; Stock bought with a price and no cost: error.
+2026-09-03 * "Sell to open META 500 put"
+  Assets:Broker:Options  -1 META261016P00500000 {800.00 USD}
+  Assets:Broker:Cash     800.00 USD
+
+2026-10-16 * "META 500 put assigned, stock without cost"
+  Assets:Broker:Options   1 META261016P00500000 {}
+  Assets:Broker:Stock   100 META @ 500.00 USD
+  Assets:Broker:Cash  -50000.00 USD
+  Income:Trading:Gains   -800.00 USD
+
+; Strangle settled in one entry: the put is assigned at the strike (error),
+; the call beside it is bought back at cost (not an assignment).
+2026-09-03 * "Sell to open SPY strangle"
+  Assets:Broker:Options  -1 SPY261016P00550000 {500.00 USD}
+  Assets:Broker:Options  -1 SPY261016C00650000 {300.00 USD}
+  Assets:Broker:Cash     800.00 USD
+
+2026-10-16 * "SPY put assigned, call expired"
+  Assets:Broker:Options   1 SPY261016P00550000 {}
+  Assets:Broker:Options   1 SPY261016C00650000 {}
+  Assets:Broker:Stock   100 SPY {550.00 USD}
+  Assets:Broker:Cash  -55000.00 USD
+  Income:Trading:Gains
+
+; Naked call assigned: the short stock lot's cost is the proceeds: fine.
+2026-09-04 * "Sell to open GOOG 180 call"
+  Assets:Broker:Options  -1 GOOG261016C00180000 {150.00 USD}
+  Assets:Broker:Cash     150.00 USD
+
+2026-10-16 * "GOOG 180 call assigned, no stock held"
+  Assets:Broker:Options    1 GOOG261016C00180000 {}
+  Assets:Broker:Stock   -100 GOOG {181.50 USD}
+  Assets:Broker:Cash   18000.00 USD

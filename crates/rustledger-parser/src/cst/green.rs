@@ -18,9 +18,10 @@
 
 use super::ast::AstNode as _; // brings `Directive::can_cast` into scope
 use super::convert::{
-    DescendantsWalkResult, TopLevelWalkResult, body_tag_joins_transaction, classify_recovery_error,
-    cost_spec_from_tokens, decode_string_token, is_comment_kind, is_trivia_kind,
-    meta_value_from_tokens, parse_date_token, parse_decimal_token, tags_after_posting_error,
+    DescendantsWalkResult, HeaderEnd, TopLevelWalkResult, body_tag_joins_transaction,
+    classify_recovery_error, cost_spec_from_tokens, decode_string_token, is_comment_kind,
+    is_trivia_kind, meta_value_from_tokens, parse_date_token, parse_decimal_token,
+    tags_after_posting_error,
 };
 use rowan::{Language, NodeOrToken};
 use rustledger_core::cost::CostSpec;
@@ -99,7 +100,8 @@ pub(super) fn convert_transaction_header(
     let mut strings: Vec<String> = Vec::new();
     let mut tags = rustledger_core::TagSet::new();
     let mut links = rustledger_core::LinkSet::new();
-    let mut past_header = false;
+    // Leading trivia before the header stays in the header region (#2628).
+    let mut header = HeaderEnd::default();
     // Body tags join only before the first posting (#2575); mirrors red
     // `convert_transaction` via the shared `body_tag_joins_transaction`.
     let mut posting_seen = false;
@@ -115,24 +117,10 @@ pub(super) fn convert_transaction_header(
         };
         let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
         let text = t.text();
-        if past_header {
-            if !body_tag_joins_transaction(posting_seen) {
-                continue;
-            }
-            // Body-level flat TAG/LINK tokens (before the first posting) join
-            // the set, deduped against what the header already contributed.
+        if header.in_header(kind) {
             match kind {
-                K::TAG => {
-                    tags.insert(Tag::new(text.trim_start_matches('#')));
-                }
-                K::LINK => {
-                    links.insert(Link::new(text.trim_start_matches('^')));
-                }
-                _ => {}
-            }
-        } else {
-            match kind {
-                K::NEWLINE => past_header = true,
+                // Leading trivia and the header's terminating newline.
+                K::NEWLINE => {}
                 // Latch on the FIRST date token (like red's `node.date()`): if it
                 // fails to parse, `date` stays None and the directive bails to red
                 // — don't scan ahead to a later valid-looking date in junk input.
@@ -160,6 +148,21 @@ pub(super) fn convert_transaction_header(
                         flag = c;
                         seen_flag = true;
                     }
+                }
+                _ => {}
+            }
+        } else {
+            if !body_tag_joins_transaction(posting_seen) {
+                continue;
+            }
+            // Body-level flat TAG/LINK tokens (before the first posting) join
+            // the set, deduped against what the header already contributed.
+            match kind {
+                K::TAG => {
+                    tags.insert(Tag::new(text.trim_start_matches('#')));
+                }
+                K::LINK => {
+                    links.insert(Link::new(text.trim_start_matches('^')));
                 }
                 _ => {}
             }
@@ -1383,6 +1386,53 @@ mod tests {
         }
     }
 
+    /// A transaction after a blank line converts on green (#2628).
+    ///
+    /// The blank line attaches inside the transaction node, so the node opens
+    /// with a NEWLINE. The green header walk took that as the end of the
+    /// header, skipped the date, and bailed to red for every such transaction,
+    /// i.e. most transactions of a normally formatted ledger. Bailing kept the
+    /// output right, so only this test can see it.
+    #[test]
+    fn green_converts_a_transaction_after_leading_trivia() {
+        for prefix in ["\n", "\n\n", "  \n"] {
+            let src = format!(
+                "2020-01-01 open Assets:A\n{prefix}2020-01-02 * \"p\" \"n\" #t\n  Assets:A 1 USD\n  Assets:B\n"
+            );
+            let root = parse_structured(&src);
+            let green = root.green();
+            let mut offset = 0usize;
+            let mut txn = None;
+            for child in green.children() {
+                let len = match &child {
+                    NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
+                    NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
+                };
+                if let NodeOrToken::Node(n) = child
+                    && crate::BeancountLanguage::kind_from_raw(n.kind()) == SyntaxKind::TRANSACTION
+                {
+                    txn = Some(convert_transaction(n, offset));
+                    break;
+                }
+                offset += len;
+            }
+            let g = txn
+                .expect("transaction node")
+                .unwrap_or_else(|| panic!("green bailed on {src:?}"));
+            let red = crate::cst::parse_red_only(&src);
+            // Values only: the whole parse fixes spans up afterwards, which the
+            // corpus test below covers.
+            assert_eq!(
+                format!("{:?}", g.value),
+                format!(
+                    "{:?}",
+                    red.directives.last().expect("red transaction").value
+                ),
+                "{src:?}"
+            );
+        }
+    }
+
     /// Field oracle: green simple-posting conversion must equal the red path's,
     /// for simple postings (account + non-arithmetic units + trailing comment +
     /// elided units). No BOM in these cases.
@@ -1539,6 +1589,16 @@ mod tests {
             // Valid shapes that must stay clean on BOTH paths.
             "2012-12-17 P \"Payee\" \"Narration\"\n  A 1 USD\n  B\n", // 1-char CURRENCY flag
             "2020-01-01 * \"p\" \"n\" ; trailing comment\n  A 1 USD\n  B\n",
+            // #2628: leading trivia (a blank line, a comment line) sits inside
+            // the transaction node once a directive precedes it. The header
+            // ends at the newline after its content, not at the first one.
+            "2020-01-01 open A\n\n2020-01-02 * \"p\" \"n\" #t\n  A 1 USD\n  B\n",
+            "2020-01-01 open A\n\n2020-01-02 * \"p\" ; header comment\n  A 1 USD\n  B\n",
+            "2020-01-01 open A\n; lead\n2020-01-02 * \"p\" ; header comment\n  A 1 USD\n  B\n",
+            "2020-01-01 open A\n\n2020-01-02 * \"p\" | \"n\"\n  A 1 USD\n  B\n",
+            "2020-01-01 open A\n\n2020-01-02 * \"p\"\n  meta: \"x\"\n  A 1 USD\n  B\n",
+            // #2672: `\b` / `\f` decode on both paths.
+            "2020-01-01 * \"p\\bq\" \"x\\fy\"\n  A 1 USD\n  B\n",
         ];
         for src in corpus {
             let g = crate::parse(src);

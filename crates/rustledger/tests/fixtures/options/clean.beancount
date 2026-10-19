@@ -1,0 +1,17 @@
+; check_option_expiry parity fixture with nothing to report: both tools
+; must pass it.
+plugin "beancount_options.check_option_expiry"
+
+2026-01-01 open Assets:Broker:Options
+2026-01-01 open Assets:Broker:Cash
+2026-01-01 open Income:Options
+
+2026-09-02 * "sell to open"
+  Assets:Broker:Options  -1 AAPL261016P00230000 {250.00 USD}
+  Assets:Broker:Cash  250.00 USD
+
+2026-10-16 * "expired worthless"
+  Assets:Broker:Options  1 AAPL261016P00230000 {} @ 0.00 USD
+  Income:Options
+
+2026-11-01 price AAPL 200.00 USD

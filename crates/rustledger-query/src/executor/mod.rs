@@ -560,14 +560,19 @@ pub const POSTING_COLUMNS: &[ColumnInfo] = &[
 /// when the scan was asked for it (`needs_account_balance`); it honors the same
 /// `FROM` window (`open_on`/`close_on`) as the rest of the scan, so consumers
 /// like `BALANCES` get the windowed per-account totals for free.
-/// One account's rows under a posting-level `FROM` filter, in a scan
-/// (#2414): whether any of its postings was selected, whether any was not,
-/// and the plain sum of the selected ones.
+/// One account's rows under a filter, in a `BALANCES` scan (#2414, #2630):
+/// whether any of its postings was selected, whether any was not, the plain
+/// sum of the selected ones and, for an AVERAGE account, the selected
+/// postings themselves, each transaction's as one transaction, to realize
+/// as `SUM(position)` does.
 #[derive(Default)]
 struct RowSelection {
     selected: bool,
     rejected: bool,
     sum: Inventory,
+    average_subsets: Vec<rustledger_core::Transaction>,
+    /// The scan's index of the transaction the last subset came from.
+    last_txn: Option<usize>,
 }
 
 pub(crate) struct PostingScan<'a> {
@@ -971,8 +976,8 @@ impl<'a> Executor<'a> {
         // and applied only `from.filter`, silently ignoring `OPEN ON`/`CLOSE ON`.
         //
         // `needs_balance = false` (no cumulative needed); `where_clause = None`
-        // — `BALANCES` applies its own `WHERE` to the result afterward, and
-        // `account_balances` is WHERE-independent by construction anyway.
+        // — `BALANCES` has folded its `WHERE` into the `FROM` filter
+        // (`fold_balances_where`, #2630).
         Ok(self
             .scan_postings(
                 from,
@@ -1300,12 +1305,25 @@ impl<'a> Executor<'a> {
         // per evaluation, that was a sort of every account for every posting,
         // quadratic in a large transaction (#2580).
         let filter_reads_accounts = row_filter.is_some_and(filter_reads_txn_accounts);
-        // BALANCES' per-account totals under a row filter, where the engine's
-        // whole-transaction replay above is not the answer for every account.
+        // BALANCES' per-account totals under a filter, where the engine's
+        // replay is not the answer for every account. Under any filter,
+        // entry-level or posting-level, BALANCES replays EVERY transaction of
+        // the window, so booking reads each sale against the lots it sold
+        // from, and records which postings the filter selected. Replaying
+        // only the selected transactions booked a sale without its lots:
+        // `BALANCES FROM year = 2024` failed with "No matching lot" on a
+        // ledger that sells in 2024 what it bought in 2023, where bean-query
+        // sums the selected postings (#2630).
+        let balances_selection = !collect_contexts && from_filter.is_some();
         let mut selection: FxHashMap<rustledger_core::Account, RowSelection> = FxHashMap::default();
+        // Per posting, whether the filter selected it; empty when no filter
+        // decides per posting (no filter, or an entry-level one outside
+        // BALANCES, which keeps or drops the transaction whole).
         let mut passes: Vec<bool> = Vec::new();
 
-        for (directive_index, txn) in self.window_transactions(from, directive_iter)? {
+        for (txn_number, (directive_index, txn)) in
+            self.window_transactions(from, directive_iter)?.enumerate()
+        {
             passes.clear();
             // One account set per transaction, shared by the row filter and
             // the rows (#2504, #2580). Built before the filter only when the
@@ -1323,16 +1341,19 @@ impl<'a> Executor<'a> {
                         txn_accounts.as_ref(),
                     )?);
                 }
-                if !passes.contains(&true) {
+                if !passes.contains(&true) && !balances_selection {
                     continue;
                 }
-            } else if let Some(filter) = from_filter
+            } else if let Some(filter) = from_filter {
                 // A transaction without postings has no row for the filter
                 // to keep, and no posting for a column to read.
-                && (txn.postings.is_empty()
-                    || !self.evaluate_from_filter(filter, &txn, 0, directive_index, None)?)
-            {
-                continue;
+                let keep = !txn.postings.is_empty()
+                    && self.evaluate_from_filter(filter, &txn, 0, directive_index, None)?;
+                if balances_selection {
+                    passes.resize(txn.postings.len(), keep);
+                } else if !keep {
+                    continue;
+                }
             }
             if txn_accounts.is_none() && needs_txn_accounts && collect_contexts {
                 txn_accounts = Some(account_set());
@@ -1393,16 +1414,30 @@ impl<'a> Executor<'a> {
                         .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                 }
 
-                // The row half of a posting-level FROM filter: the posting
+                // The row half of a filter decided per posting: the posting
                 // was replayed above, since the account's running balance is
                 // the ledger's, but it is no row.
                 // The per-account record is BALANCES' (`collect_contexts`
                 // false), the only reader of `account_balances`.
-                if row_filter.is_some() {
-                    if !collect_contexts {
+                if !passes.is_empty() {
+                    if balances_selection {
                         let chosen = selection.entry(posting.account.clone()).or_default();
                         if passes[i] {
                             chosen.selected = true;
+                            if self.account_is_average(&posting.account) {
+                                if chosen.last_txn != Some(txn_number) {
+                                    chosen.last_txn = Some(txn_number);
+                                    chosen
+                                        .average_subsets
+                                        .push(rustledger_core::Transaction::new(
+                                            txn.date,
+                                            txn.narration.clone(),
+                                        ));
+                                }
+                                if let Some(subset) = chosen.average_subsets.last_mut() {
+                                    subset.postings.push(posting.clone());
+                                }
+                            }
                             if let Some(units) = posting.amount() {
                                 chosen
                                     .sum
@@ -1560,26 +1595,29 @@ impl<'a> Executor<'a> {
         let mut account_balances = engine
             .into_presented_inventories()
             .map_err(|e| QueryError::Evaluation(e.to_string()))?;
-        if row_filter.is_some() {
-            // Under a row filter an account's total is the sum of its
-            // selected postings (beanquery's BALANCES is `SUM(position)`
-            // over the rows). Where every posting of the account that the
-            // replay saw was selected, the engine's booked inventory is that
-            // sum, realized as booking realizes it (#1985); where some were
-            // not, it is the plain sum of the selected ones, as
-            // `SUM(position)` computes it, AVERAGE pools merged; an account
+        if balances_selection {
+            // Under a filter an account's total is the sum of its selected
+            // postings (beanquery's BALANCES is `SUM(position)` over the
+            // rows). Where every posting of the account in the window was
+            // selected, the engine's booked inventory is that sum, realized
+            // as booking realizes it (#1985); where some were not, it is the
+            // sum of the selected ones as `SUM(position)` computes it (an
+            // AVERAGE account's realized on their own, below); an account
             // with none is no row.
             account_balances
                 .retain(|account, _| selection.get(account).is_some_and(|s| s.selected));
             for (account, mut chosen) in selection {
                 if chosen.selected && chosen.rejected {
-                    // As `SUM(position)` presents an AVERAGE account.
-                    if self.account_is_average(&account) {
-                        rustledger_booking::present_inventory(
-                            rustledger_core::BookingMethod::Average,
-                            &mut chosen.sum,
-                        )
-                        .map_err(|e| QueryError::Evaluation(e.to_string()))?;
+                    // As `SUM(position)` realizes an AVERAGE account's
+                    // selected postings: replayed through booking on their
+                    // own, so a sale in the subset reduces its pool rather
+                    // than standing beside it as a short; the plain sum,
+                    // unmerged, when booking cannot realize them.
+                    if self.account_is_average(&account)
+                        && let Some(realized) =
+                            aggregation::realize_average_subsets(&chosen.average_subsets)?
+                    {
+                        chosen.sum = realized;
                     }
                     account_balances.insert(account, chosen.sum);
                 }

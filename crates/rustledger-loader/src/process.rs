@@ -1201,13 +1201,13 @@ fn dispatch_plugins(
 ) -> Result<(), ProcessError> {
     use rustledger_plugin::NativePluginRegistry;
 
-    // Resolve document directories relative to the main file's directory.
-    // Used to build doc_discovery's per-call config in the synth pass.
+    // Resolve document directories relative to the main file's directory,
+    // as opened (symlinks kept, #2635). Used to build doc_discovery's
+    // per-call config in the synth pass.
     let base_dir = source_map
         .files()
         .first()
-        .and_then(|f| f.path.parent())
-        .unwrap_or_else(|| std::path::Path::new("."));
+        .map_or_else(|| std::path::Path::new("."), crate::SourceFile::dir);
 
     // Access the process-wide registry singleton. The registry is
     // immutable and stateless, so the same instance services every
@@ -1762,19 +1762,15 @@ pub fn document_root_warnings(
 /// Per-`file_id` source-file directories, parallel to `source_map.files()`.
 ///
 /// Lets the validator resolve a relative `document` path against its own
-/// directive's file (matching Beancount and `include`) instead of the CWD.
+/// directive's file (matching Beancount and `include`) instead of the CWD:
+/// the directory the file was opened from, symlinks kept (#2635).
 #[cfg(feature = "validation")]
 #[must_use]
 pub fn document_source_dirs(source_map: &SourceMap) -> Vec<std::path::PathBuf> {
     source_map
         .files()
         .iter()
-        .map(|f| {
-            f.path.parent().map_or_else(
-                || std::path::PathBuf::from("."),
-                std::path::Path::to_path_buf,
-            )
-        })
+        .map(|f| f.dir().to_path_buf())
         .collect()
 }
 
@@ -1795,8 +1791,7 @@ fn build_validation_options(
     let base_dir = source_map
         .files()
         .first()
-        .and_then(|f| f.path.parent())
-        .unwrap_or_else(|| std::path::Path::new("."));
+        .map_or_else(|| std::path::Path::new("."), crate::SourceFile::dir);
 
     validation_options_from_options(file_options)
         .with_document_dirs(resolve_document_dirs(

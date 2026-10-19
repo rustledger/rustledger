@@ -974,12 +974,10 @@ pub fn all_diagnostics(
         let validation_options = if let Some(ls) = ledger_state
             && let Some(ledger) = ls.ledger()
         {
-            let base_dir = ledger
-                .source_map
-                .files()
-                .first()
-                .and_then(|f| f.path.parent())
-                .unwrap_or_else(|| std::path::Path::new("."));
+            let base_dir = ledger.source_map.files().first().map_or_else(
+                || std::path::Path::new("."),
+                rustledger_loader::SourceFile::dir,
+            );
             build_validation_options_from_loader(&ledger.options, &ledger.source_map, base_dir)
         } else {
             // Single-file: resolve relative document dirs against the
@@ -1259,12 +1257,10 @@ pub(crate) fn ledger_diagnostics_multi(
             } else {
                 Vec::new()
             };
-        let base_dir = ledger
-            .source_map
-            .files()
-            .first()
-            .and_then(|f| f.path.parent())
-            .unwrap_or_else(|| std::path::Path::new("."));
+        let base_dir = ledger.source_map.files().first().map_or_else(
+            || std::path::Path::new("."),
+            rustledger_loader::SourceFile::dir,
+        );
         let validation_options =
             build_validation_options_from_loader(&ledger.options, &ledger.source_map, base_dir);
         run_ledger_validation(booked_directives, validation_options, plugin_ctx.as_ref())

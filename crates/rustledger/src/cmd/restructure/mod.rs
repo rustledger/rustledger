@@ -149,6 +149,33 @@ fn show(path: &Path) -> String {
         .to_string()
 }
 
+/// Refuse FILE when it is a symlink to a file in another directory.
+///
+/// rledger, beancount and fava all read such a file's includes next to the
+/// LINK (#2635), but `split` and `merge` work on the canonical file: `split`
+/// would write the period files next to the target, where nothing opening
+/// the link looks for them, and `merge` would inline the target's
+/// neighbors, not the files the link's ledger includes. The equivalence
+/// check cannot see either, because it loads the canonical file too. A link
+/// beside its target reads the same files either way, so it is allowed.
+fn refuse_link_elsewhere(given: &Path, file: &Path, operation: &str) -> Result<()> {
+    if !std::fs::symlink_metadata(given).is_ok_and(|m| m.file_type().is_symlink()) {
+        return Ok(());
+    }
+    let link_dir = overlay::normalize(given.parent().unwrap_or_else(|| Path::new(".")));
+    if file.parent() == Some(link_dir.as_path()) {
+        return Ok(());
+    }
+    bail!(
+        "{} is a symlink to a file in another directory; refusing to {operation} it: \
+         its includes are read next to the link, but {operation} would work on {} and \
+         the files next to it. Run it on that file instead if nothing opens the \
+         ledger through the link",
+        given.display(),
+        file.display()
+    );
+}
+
 /// Resolve the file argument to the canonical path of an existing file.
 fn existing_file(path: &Path) -> Result<PathBuf> {
     if !path.is_file() {

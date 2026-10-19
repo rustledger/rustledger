@@ -796,7 +796,10 @@ fn permissions_carry_over() {
 }
 
 /// A file kept because it is reached through a symlink keeps its children
-/// too: removing them would leave it with a dangling include.
+/// too: removing them would leave it with a dangling include. Its children
+/// are the files next to the LINK, where every tool resolves them (#2635):
+/// `child.beancount` for `link.beancount`, `sub/child.beancount` for
+/// `other.beancount`'s `include "sub/real.beancount"`.
 #[cfg(unix)]
 #[test]
 fn merge_keeps_the_children_of_a_kept_file() {
@@ -806,11 +809,12 @@ fn merge_keeps_the_children_of_a_kept_file() {
         "sub/real.beancount",
         "2020-01-01 open Assets:A\ninclude \"child.beancount\"\n",
     );
-    let child = write(
+    write(
         dir.path(),
         "sub/child.beancount",
         "2020-01-01 open Assets:B\n",
     );
+    let child = write(dir.path(), "child.beancount", "2020-01-01 open Assets:C\n");
     std::os::unix::fs::symlink(
         dir.path().join("sub/real.beancount"),
         dir.path().join("link.beancount"),
@@ -1326,11 +1330,11 @@ fn a_failed_restore_names_a_complete_backup() {
     assert!(manifest.contains("ledger/2023.beancount"), "{manifest}");
 }
 
-/// A symlinked FILE is refused. rledger resolves its includes next to the
-/// file it points to, beancount and fava next to the link, so the period
-/// files written next to the target (as they used to be) were not found by
-/// beancount: `bean-check link.beancount` failed with `File glob
-/// "main/2023.beancount" does not match any files`.
+/// A symlinked FILE is refused. rledger (since #2635), beancount and fava
+/// all resolve its includes next to the link, so the period files written
+/// next to the target (as they used to be) were not found through the link:
+/// `bean-check link.beancount` failed with `File glob "main/2023.beancount"
+/// does not match any files`, and `rledger check` now fails the same way.
 #[cfg(unix)]
 #[test]
 fn a_symlinked_file_is_not_split() {
@@ -1354,4 +1358,80 @@ fn a_symlinked_file_is_not_split() {
     let (code, _, err) = run_split(&split_args(&beside, Period::Year));
     assert_eq!(code, ExitCode::SUCCESS, "{err}");
     assert!(dir.path().join("real/main/2024.beancount").is_file());
+}
+
+/// `merge` refuses a FILE symlinked into another directory too (#2635).
+/// Through the link, every tool reads the includes next to the LINK, but
+/// merge works on the target and would inline the target's neighbors (here
+/// `real/2024.beancount`), changing what the link's ledger holds while its
+/// own equivalence check, which loads the target, passed.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_file_is_not_merged() {
+    let dir = tmp();
+    write(
+        dir.path(),
+        "real/2024.beancount",
+        "2024-01-01 open Assets:Real\n",
+    );
+    write(
+        dir.path(),
+        "view/2024.beancount",
+        "2024-01-01 open Assets:View\n",
+    );
+    let target = write(
+        dir.path(),
+        "real/main.beancount",
+        "include \"2024.beancount\"\n",
+    );
+    let link = dir.path().join("view/main.beancount");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+    let before = tree(dir.path());
+    let e =
+        merge::run_with_writer(&merge_args(&link), &mut Vec::new(), &mut Vec::new()).unwrap_err();
+    assert!(format!("{e:#}").contains("is a symlink"), "{e:#}");
+    assert_eq!(tree(dir.path()), before);
+}
+
+/// A symlinked include's own includes are the files next to the LINK, as
+/// the loader and beancount read them (#2635): here `ledger/acc.beancount`,
+/// not `lib/acc.beancount` next to the target (`bean-check` opens
+/// `Assets:A`). `merge` resolved them next to the target, so it inlined the
+/// wrong file and its own equivalence check refused the merge.
+#[cfg(unix)]
+#[test]
+fn merge_resolves_a_symlinked_includes_includes_next_to_the_link() {
+    let dir = tmp();
+    write(
+        dir.path(),
+        "lib/shared.beancount",
+        "include \"acc.beancount\"\n",
+    );
+    write(
+        dir.path(),
+        "lib/acc.beancount",
+        "2024-01-01 open Assets:L\n",
+    );
+    write(
+        dir.path(),
+        "ledger/acc.beancount",
+        "2024-01-01 open Assets:A\n",
+    );
+    std::os::unix::fs::symlink(
+        dir.path().join("lib/shared.beancount"),
+        dir.path().join("ledger/shared.beancount"),
+    )
+    .unwrap();
+    let root = write(
+        dir.path(),
+        "ledger/main.beancount",
+        "include \"shared.beancount\"\n",
+    );
+    let original = fingerprint(&root);
+    let (code, out, err) = run_merge(&merge_args(&root));
+    assert_eq!(code, ExitCode::SUCCESS, "{out}{err}");
+    assert_eq!(fingerprint(&root), original);
+    let merged = fs::read_to_string(&root).unwrap();
+    assert!(merged.contains("Assets:A"), "{merged}");
+    assert!(!merged.contains("Assets:L"), "{merged}");
 }

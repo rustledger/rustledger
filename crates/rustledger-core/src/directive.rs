@@ -82,6 +82,19 @@ impl fmt::Display for MetaValue {
 /// Metadata is a key-value map attached to directives and postings.
 pub type Metadata = FxHashMap<String, MetaValue>;
 
+/// The posting metadata key that marks a posting booking interpolated.
+///
+/// An interpolated posting is one whose units, cost or price number was
+/// solved from the transaction's residual rather than written. beancount's
+/// `interpolate.AUTOMATIC_META`, set to `True` by its booking.
+///
+/// rledger sets it only while plugins run (see the booking engine's
+/// `with_interpolated_marks`), so plugins can ask which postings were
+/// interpolated (#2653); the loader removes it again before validation,
+/// so no other surface (queries, printing, `meta.hash`) sees it. A ledger
+/// cannot write it: a metadata key starts with a lowercase letter.
+pub const AUTOMATIC_META: &str = "__automatic__";
+
 /// The spellings of a boolean accepted in ledger source.
 ///
 /// Stated ONCE because a boolean can arrive two ways — `option "x" "TRUE"` and

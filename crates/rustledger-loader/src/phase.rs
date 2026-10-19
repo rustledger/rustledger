@@ -22,7 +22,7 @@
 //! | [`Raw`] | Straight from the parser. No ordering / synth / booking guarantees. |
 //! | [`Sorted`] | Sorted into canonical display order `(date, priority, has_source_location, file_id, span.start)`. |
 //! | [`Synthed`] | Synth-only plugins (`auto_accounts`, `document_discovery`) applied. |
-//! | [`EarlyValidated`] | Early-phase validators ran. Account presence / lifecycle / structural errors collected. |
+//! | [`EarlyValidated`] | Early-phase validators ran. Structural errors collected; posting account errors held for Late / finalize. |
 //! | [`Booked`] | Cost-spec interpolation done. Failed transactions partitioned out. |
 //! | [`RegularPluginsApplied`] | Post-booking plugins (cost-reading) applied to the successfully-booked directives. |
 //! | [`LateValidated`] | Late-phase validators ran on booked + plugin-processed directives. |
@@ -104,7 +104,7 @@ define_phase!(
 );
 define_phase!(
     EarlyValidated,
-    "Early validators ran; account-presence / lifecycle / structural errors collected."
+    "Early validators ran; structural errors collected, posting account errors held for Late / finalize."
 );
 define_phase!(
     Booked,

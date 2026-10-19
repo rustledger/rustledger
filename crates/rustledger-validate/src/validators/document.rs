@@ -4,7 +4,7 @@ use rustc_hash::FxHashMap;
 use rustledger_core::{Document, Note};
 use std::path::Path;
 
-use super::helpers::push_unknown_account;
+use super::helpers::{is_opened_by, push_unknown_account};
 use crate::LedgerState;
 use crate::error::{ErrorCode, ValidationError};
 
@@ -13,7 +13,7 @@ use crate::error::{ErrorCode, ValidationError};
 /// Checks that the referenced account has been opened.
 pub fn validate_note(state: &LedgerState, note: &Note, errors: &mut Vec<ValidationError>) {
     // Check account exists
-    if !state.accounts.contains_key(&note.account) {
+    if !is_opened_by(state, &note.account, note.date) {
         push_unknown_account(
             state,
             &note.account,
@@ -56,7 +56,7 @@ pub fn validate_document(
     errors: &mut Vec<ValidationError>,
 ) {
     // Check account exists
-    if !state.accounts.contains_key(&doc.account) {
+    if !is_opened_by(state, &doc.account, doc.date) {
         push_unknown_account(
             state,
             &doc.account,

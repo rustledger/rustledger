@@ -54,7 +54,7 @@ Rustledger does not execute Python plugins. Files using `plugin "some_python_plu
 - Report error E8001 "Plugin not found" for unknown plugins
 - This matches Python beancount's behavior of failing on missing plugins
 
-Rustledger supports 31 native plugins that match Python beancount behavior:
+Rustledger has 33 native plugins. These 30 match Python beancount behavior:
 
 - `auto_accounts`, `auto_tag`, `box_accrual`, `gain_loss`
 - `long_short`, `check_average_cost`, `check_closing`, `check_commodity`
@@ -64,6 +64,8 @@ Rustledger supports 31 native plugins that match Python beancount behavior:
 - `onecommodity`, `pedantic`, `rename_accounts`, `rx_txn_plugin`
 - `sellgains`, `split_expenses`, `unique_prices`, `unrealized`
 - `valuation`, `zerosum`
+
+`check_option_expiry` matches `beancount_options.check_option_expiry` from [beancount-options](https://github.com/rustledger/beancount-options), the Python package that holds the counterparts of rustledger's option plugins; `check_option_assignment`'s counterpart is not released yet.
 
 Additionally, `document_discovery` auto-discovers documents from `option "documents"` directories.
 

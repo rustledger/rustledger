@@ -520,12 +520,19 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     A v38 blob of such a file holds the late tags on the transaction and
 ///     no error, because the file used to parse clean and was cacheable.
 ///
+/// v40: two parser-output fixes. A transaction's header-line comment no longer
+///     lands in its first posting's `comments` when a blank line or a comment
+///     precedes the transaction (#2628), and that transaction's deprecated
+///     `|` is diagnosed again. And `\b` / `\f` in a quoted string decode to
+///     U+0008 / U+000C, as in beancount, instead of `b` / `f` (#2672). A v39
+///     blob holds the misplaced comment, no `|` warning, and the old strings.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 39;
+pub const CACHE_VERSION: u32 = 40;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1283,7 +1290,9 @@ mod tests {
         // same archived `CostNumber` encoding.
         // v39 (#2575) drops tags written after a transaction's first posting
         // and adds an error; no `CostNumber` is involved.
-        const FIXTURE_VERSION: u32 = 39;
+        // v40 (#2628, #2672) moves a posting comment and decodes `\b` / `\f`
+        // in strings; no `CostNumber` is involved.
+        const FIXTURE_VERSION: u32 = 40;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1401,7 +1410,9 @@ mod tests {
         // no `MetaValue`; the hash below is unchanged.
         // v39 (#2575) drops late transaction tags, which are not `MetaValue`s;
         // the hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 39;
+        // v40 (#2628, #2672) changes a posting's comments and string VALUES,
+        // not how a `MetaValue` is archived; the hash below is unchanged.
+        const FIXTURE_VERSION: u32 = 40;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

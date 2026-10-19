@@ -256,7 +256,14 @@ use crate::types::{Error, LedgerOptions};
 /// a blank line or comment (#2628), and `\b` / `\f` in strings decode to
 /// U+0008 / U+000C (#2672). Parsed directives changed, so a v45 blob would
 /// serve the misplaced comment and the old strings.
-pub const CACHE_VERSION: u32 = 46;
+/// v47: a per-unit number booking derives from a total (`{{T}}`,
+/// `{per # total}`, `@@`, an interpolated `{}` cost) is divided as Python's
+/// `decimal` divides it (#2652): `{{10 USD}}` over 4 units is `2.5`, not
+/// `2.50`, and over 3 is `3.333333333333333333333333333` (28 significant
+/// digits), not `3.3333333333333333333333333333`. Loader v40, unchanged --
+/// parsed directives did not move. `Ledger` archives booked directives, so a
+/// v46 blob would serve the old per-unit costs and prices.
+pub const CACHE_VERSION: u32 = 47;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

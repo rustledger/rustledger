@@ -2772,21 +2772,19 @@ impl<'a> Executor<'a> {
                         }
                     }
                     Value::Amount(a) => Ok(Value::Amount(a.clone())),
-                    Value::Inventory(inv) => {
-                        let mut result = Inventory::new();
-                        for pos in inv.positions() {
-                            if let Some(cost) = &pos.cost {
-                                result
-                                    .add(Position::simple(position_cost_total(&pos.units, cost)?))
-                                    .map_err(|e| QueryError::Evaluation(e.to_string()))?;
-                            } else {
-                                result
-                                    .add(Position::simple(pos.units.clone()))
-                                    .map_err(|e| QueryError::Evaluation(e.to_string()))?;
-                            }
-                        }
-                        Ok(Value::Inventory(std::sync::Arc::new(result)))
-                    }
+                    // An inventory carries no prices, so its weight is what
+                    // its lots cost: `at_cost`, which reads each lot's EXACT
+                    // total where the inventory keeps one (#2425), as
+                    // `COST()` does. Re-deriving `units × per-unit` here
+                    // multiplied a rounded per-unit cost back up: `3 HOOL
+                    // {{100.00 USD}}` weighed `99.99999999999999999999999999`
+                    // once the per-unit became beancount's 28-significant-digit
+                    // `33.33333333333333333333333333` (#2652), and only rounded
+                    // back to 100 by luck before.
+                    Value::Inventory(inv) => Ok(Value::Inventory(std::sync::Arc::new(
+                        inv.at_cost()
+                            .map_err(|e| QueryError::Evaluation(e.to_string()))?,
+                    ))),
                     Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type(
                         "WEIGHT expects a position, amount, or inventory".to_string(),

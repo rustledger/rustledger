@@ -1923,26 +1923,24 @@ fn interpolate_inner(
         // `total = -residual * signum(units)` and `per_unit = total / |units|`.
         let signum = units_number.signum();
         let total = -residual * signum;
-        // `normalize()` strips trailing zeros the DIVISION invented.
-        // `rust_decimal` picks a non-minimal scale for an exact quotient —
-        // `900 / 1000` yields `0.90` (scale 2), not `0.9` — where Python's
-        // decimal follows the spec's "ideal exponent" rule and reduces an
-        // exact result. Those zeros are an artifact of the algorithm, and a
-        // cost of `0.90` claims a significant digit the quotient does not
-        // have; the solved cost is then rendered with it (`cost_number`).
-        // The VALUE is untouched, so `BookedCost`'s
-        // `per_unit x |units| == total` invariant still holds.
+        // Divided as beancount's `interpolate_group` divides it
+        // (`(weight - total) / units.number`, `py_div`, #2652): Python's
+        // ideal exponent, so `900 / 1000` is `0.9` (not `rust_decimal`'s
+        // `0.90`) and `25.00 / 10` is `2.50` (the `normalize()` this used
+        // before stripped it to `2.5`), and 28 significant digits for an
+        // inexact quotient. The solved cost is rendered with that scale
+        // (`cost_number`). The VALUE is beancount's, within the rounding
+        // `BookedCost`'s `per_unit x |units| == total` invariant allows.
         // Checked, like the six divisions in `book.rs` and `cost.rs` (#2327).
         // This one was MISSED by that sweep: it grepped those two files for
         // `/ units...abs()` and this path is in a third, so the pattern could
         // not have found it. The widened booking fuzzer (#2340) reached it on
         // its first run, which is the whole argument for widening it.
-        let per_unit = total
-            .checked_div(units_number.abs())
-            .ok_or_else(|| InterpolationError::Unrepresentable {
+        let per_unit = rustledger_core::py_div(total, units_number.abs()).ok_or_else(|| {
+            InterpolationError::Unrepresentable {
                 currency: currency.clone(),
-            })?
-            .normalize();
+            }
+        })?;
         if per_unit < Decimal::ZERO {
             // Beancount: "Cost is negative" — a lot cannot be acquired at a
             // negative cost (#1705 edge e14).
@@ -2039,7 +2037,23 @@ fn interpolate_inner(
 
         let (solved, weight) = match kind {
             rustledger_core::PriceKind::Unit => {
-                let Some(price) = (-residual).checked_div(units.number) else {
+                // beancount's `abs(weight / units.number)` at Python's scale
+                // when the quotient is exact (`10` over 4 units is `2.5`, not
+                // `rust_decimal`'s `2.50`, #2652), but NOT at its precision
+                // when it is inexact. A deliberate divergence: this price,
+                // unlike a `{{T}}` cost or an `@@` total, is the only figure
+                // the posting's weight is computed from, and Python's 28
+                // significant digits are too few for it to balance the
+                // transaction it was solved from. `3 X @ USD` against
+                // `-10 USD` gives beancount `3.333333333333333333333333333`,
+                // whose weight leaves a residual of `1E-27` that beancount
+                // then reports as an unbalanced transaction of its own making.
+                // `rust_decimal`'s extra digit keeps the residual within
+                // tolerance. The sign is kept so a negative price is reported
+                // below. (`interpolate_group` in beancount's `booking_full`.)
+                let Some(price) =
+                    rustledger_core::checked_div_python_scale(-residual, units.number)
+                else {
                     return Err(InterpolationError::Unrepresentable { currency });
                 };
                 let Some(weight) = crate::price_weight(units.number, price, kind) else {

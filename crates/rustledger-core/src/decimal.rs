@@ -356,6 +356,276 @@ pub fn round_dp_python(number: Decimal, dp: u32) -> Decimal {
     rounded
 }
 
+/// The precision of the `decimal` context beancount computes in.
+///
+/// beancount never installs a context of its own for booking — the only
+/// `localcontext` calls in beancount 3.2.3 are in `display_context` and the
+/// example generator — so every division booking does runs under Python's
+/// default: `prec=28`, `rounding=ROUND_HALF_EVEN`, `Emin=-999999`,
+/// `Emax=999999`. beanquery does not change it either.
+const PY_PREC: usize = 28;
+
+/// A finite Python `decimal` number: `(-1)^neg × coeff × 10^exp`.
+///
+/// Python's representation, not `rust_decimal`'s: the exponent is unbounded in
+/// both directions (`Emin`/`Emax` are ±999999, which nothing here reaches), so
+/// an intermediate like `1e-11 × 1e-18 = 1E-29` is held exactly where a
+/// `Decimal` would round it to zero (#2351).
+#[derive(Debug, Clone)]
+struct PyNum {
+    neg: bool,
+    coeff: bigdecimal::num_bigint::BigUint,
+    exp: i64,
+}
+
+impl PyNum {
+    fn from_decimal(d: Decimal) -> Self {
+        Self {
+            neg: d.is_sign_negative(),
+            coeff: bigdecimal::num_bigint::BigUint::from(d.mantissa().unsigned_abs()),
+            exp: -i64::from(d.scale()),
+        }
+    }
+
+    fn is_zero(&self) -> bool {
+        self.coeff == bigdecimal::num_bigint::BigUint::ZERO
+    }
+}
+
+fn pow10(n: u64) -> bigdecimal::num_bigint::BigUint {
+    use bigdecimal::num_traits::Pow;
+    bigdecimal::num_bigint::BigUint::from(10u32).pow(n)
+}
+
+fn digit_count(n: &bigdecimal::num_bigint::BigUint) -> usize {
+    if *n == bigdecimal::num_bigint::BigUint::ZERO {
+        1
+    } else {
+        n.to_str_radix(10).len()
+    }
+}
+
+/// Python's `Decimal._fix` for this context: round `coeff` to [`PY_PREC`]
+/// significant digits, half to even, moving the exponent up by the digits
+/// dropped. A carry that grows the coefficient to `PY_PREC + 1` digits
+/// (`9.99…95` → `10.00…0`) drops one more, exactly as `_fix` does.
+fn py_fix(mut n: PyNum) -> PyNum {
+    let digits = digit_count(&n.coeff);
+    if n.is_zero() || digits <= PY_PREC {
+        return n;
+    }
+    let drop = (digits - PY_PREC) as u64;
+    let unit = pow10(drop);
+    let mut kept = &n.coeff / &unit;
+    let rest = &n.coeff % &unit;
+    let half = &unit / 2u32;
+    let kept_is_odd = (&kept % 2u32) == bigdecimal::num_bigint::BigUint::from(1u32);
+    if rest > half || (rest == half && kept_is_odd) {
+        kept += 1u32;
+    }
+    n.exp += i64::try_from(drop).unwrap_or(i64::MAX);
+    if digit_count(&kept) > PY_PREC {
+        kept /= 10u32;
+        n.exp += 1;
+    }
+    n.coeff = kept;
+    n
+}
+
+/// `a × b` as Python computes it: exact, then rounded to the context.
+fn py_mul(a: &PyNum, b: &PyNum) -> PyNum {
+    py_fix(PyNum {
+        neg: a.neg != b.neg,
+        coeff: &a.coeff * &b.coeff,
+        exp: a.exp + b.exp,
+    })
+}
+
+/// `a + b` as Python computes it: exact at the smaller exponent, then rounded
+/// to the context. (Python's zero-operand shortcut pads the other operand to
+/// at most `prec + 1` extra digits before rounding; the rounded result is the
+/// same, so it needs no case of its own.)
+fn py_add(a: &PyNum, b: &PyNum) -> PyNum {
+    use bigdecimal::num_bigint::{BigInt, Sign};
+    let exp = a.exp.min(b.exp);
+    let scaled = |n: &PyNum| {
+        let magnitude = &n.coeff * pow10(u64::try_from(n.exp - exp).unwrap_or(0));
+        BigInt::from_biguint(if n.neg { Sign::Minus } else { Sign::Plus }, magnitude)
+    };
+    let sum = scaled(a) + scaled(b);
+    py_fix(PyNum {
+        neg: sum.sign() == Sign::Minus,
+        coeff: sum.magnitude().clone(),
+        exp,
+    })
+}
+
+/// `a / b` as Python computes it — `Decimal.__truediv__`, line for line.
+///
+/// `None` when `b` is zero (Python raises: `DivisionByZero`, or
+/// `InvalidOperation` for `0 / 0`, both trapped by the default context).
+fn py_div_num(a: &PyNum, b: &PyNum) -> Option<PyNum> {
+    if b.is_zero() {
+        return None;
+    }
+    let neg = a.neg != b.neg;
+    let ideal_exp = a.exp - b.exp;
+    if a.is_zero() {
+        // `exp = self._exp - other._exp`, coefficient 0.
+        return Some(PyNum {
+            neg,
+            coeff: bigdecimal::num_bigint::BigUint::ZERO,
+            exp: ideal_exp,
+        });
+    }
+    // Scale the dividend so the integer quotient has PY_PREC + 1 or + 2
+    // digits: enough to round from.
+    let shift = digit_count(&b.coeff) as i64 - digit_count(&a.coeff) as i64 + PY_PREC as i64 + 1;
+    let mut exp = ideal_exp - shift;
+    let (mut coeff, remainder) = if shift >= 0 {
+        let num = &a.coeff * pow10(shift.unsigned_abs());
+        (&num / &b.coeff, &num % &b.coeff)
+    } else {
+        let den = &b.coeff * pow10(shift.unsigned_abs());
+        (&a.coeff / &den, &a.coeff % &den)
+    };
+    if remainder == bigdecimal::num_bigint::BigUint::ZERO {
+        // Exact: strip the zeros the shift invented, but only down to the
+        // ideal exponent. `10.00 / 4` stops at `2.50`; `10 / 4` at `2.5`.
+        while exp < ideal_exp && (&coeff % 10u32) == bigdecimal::num_bigint::BigUint::ZERO {
+            coeff /= 10u32;
+            exp += 1;
+        }
+    } else if (&coeff % 5u32) == bigdecimal::num_bigint::BigUint::ZERO {
+        // Inexact: a sticky digit, so a quotient just above a tie (or just
+        // above an exact truncation) cannot round as if it were one.
+        coeff += 1u32;
+    }
+    Some(py_fix(PyNum { neg, coeff, exp }))
+}
+
+/// `round(a / b)` to `Decimal::MAX_SCALE` places, half to even, exactly.
+///
+/// The fallback for a quotient Python carries further down than a `Decimal`
+/// can: the EXACT quotient rounded once, never Python's already-rounded
+/// result rounded a second time.
+fn quotient_at_max_scale(a: &PyNum, b: &PyNum) -> Option<Decimal> {
+    let k = a.exp - b.exp + i64::from(Decimal::MAX_SCALE);
+    let (num, den) = if k >= 0 {
+        (&a.coeff * pow10(k.unsigned_abs()), b.coeff.clone())
+    } else {
+        (a.coeff.clone(), &b.coeff * pow10(k.unsigned_abs()))
+    };
+    let mut q = &num / &den;
+    let twice_rest = (&num % &den) * 2u32;
+    let q_is_odd = (&q % 2u32) == bigdecimal::num_bigint::BigUint::from(1u32);
+    if twice_rest > den || (twice_rest == den && q_is_odd) {
+        q += 1u32;
+    }
+    if q == bigdecimal::num_bigint::BigUint::ZERO {
+        // A nonzero quotient below half of `1e-28`: the only `Decimal` it
+        // rounds to is zero, a number nobody wrote. Refuse it.
+        return None;
+    }
+    to_decimal_parts(a.neg != b.neg, &q, Decimal::MAX_SCALE)
+}
+
+fn to_decimal_parts(
+    neg: bool,
+    magnitude: &bigdecimal::num_bigint::BigUint,
+    scale: u32,
+) -> Option<Decimal> {
+    let m = i128::try_from(magnitude).ok()?;
+    let d = Decimal::try_from_i128_with_scale(if neg { -m } else { m }, scale).ok()?;
+    // A zero has no sign in bookkeeping (see `negate_python`).
+    Some(if d.is_zero() { d.abs() } else { d })
+}
+
+/// Turn a Python result into the `Decimal` with the same value and digits.
+///
+/// Exact for every result whose exponent is in `-28..=0` — the
+/// `to_string()` of the `Decimal` is then Python's `format(q, "f")`. Two
+/// shapes have no such `Decimal`, and are documented on [`py_div`].
+fn py_to_decimal(q: &PyNum, a: &PyNum, b: &PyNum) -> Option<Decimal> {
+    if q.exp > 0 {
+        // Python writes `2E+1`; `rust_decimal` has no negative scale, so the
+        // same value is the integer `20`. `None` past `Decimal::MAX`.
+        let value = &q.coeff * pow10(q.exp.unsigned_abs());
+        return to_decimal_parts(q.neg, &value, 0);
+    }
+    let scale = u32::try_from(q.exp.unsigned_abs()).unwrap_or(u32::MAX);
+    if scale <= Decimal::MAX_SCALE {
+        return to_decimal_parts(q.neg, &q.coeff, scale);
+    }
+    if q.is_zero() {
+        return Some(Decimal::new(0, Decimal::MAX_SCALE));
+    }
+    quotient_at_max_scale(a, b)
+}
+
+/// Divide exactly as Python's `decimal` does under beancount's context.
+///
+/// beancount derives every per-unit number it books from a total with a bare
+/// `Decimal` division in Python's default context (`prec=28`,
+/// `ROUND_HALF_EVEN`): `{{T}}` and `{a # b}` in
+/// `booking_full.convert_costspec_to_cost`, `@@` in the parser's
+/// `Builder.posting`, an interpolated `{}` cost or `@` price in
+/// `booking_full.interpolate_group`. The General Decimal Arithmetic rule it
+/// follows:
+///
+/// * **Exact quotient:** the exponent closest to the ideal exponent
+///   `exp(a) − exp(b)` — trailing zeros are kept down to it, never past it.
+///   `10 / 4` is `2.5`, `10.00 / 4` is `2.50`, `7.5 / 3` is `2.5`.
+/// * **Inexact quotient:** rounded half-even to 28 SIGNIFICANT digits.
+///   `10 / 3` is `3.333333333333333333333333333` (27 places), where
+///   `rust_decimal`'s own division keeps 28 places and lands on a different
+///   value in the last digit (#2652).
+///
+/// # Where a `Decimal` cannot hold Python's answer
+///
+/// * **A positive exponent** (`10 / 0.5` is `2E+1`): returned as the
+///   same value at scale 0 (`20`). `rust_decimal` has no negative scale;
+///   the value is identical and only the notation differs. `None` past
+///   `Decimal::MAX`, as `checked_div` does.
+/// * **An exponent below −28** (`1 / 30000000000` is
+///   `3.333333333333333333333333333E-11`): Python keeps 28 significant
+///   digits that need 38 places. The exact quotient is rounded ONCE,
+///   half-even, to 28 places (`0.0000000000333333333333333333`) — the
+///   nearest `Decimal`, which is what `checked_div` returned before this
+///   helper. When that nearest `Decimal` is zero for a nonzero quotient the
+///   result is `None`, not a zero nobody wrote (the underflow class of
+///   #2344).
+/// * **A negative zero** (`0.00 / -4` is `-0.00` in Python) comes back
+///   unsigned, the crate's rule for zero (see [`negate_python`]).
+///
+/// `None` on division by zero.
+#[must_use]
+pub fn py_div(a: Decimal, b: Decimal) -> Option<Decimal> {
+    let (a, b) = (PyNum::from_decimal(a), PyNum::from_decimal(b));
+    let q = py_div_num(&a, &b)?;
+    py_to_decimal(&q, &a, &b)
+}
+
+/// The per-unit number of a compound cost `{per # total}` over `units`, as
+/// beancount computes it.
+///
+/// That is `(total + per × |units|) / |units|`, each step rounded to Python's
+/// 28-digit context in turn (`booking_full.convert_costspec_to_cost`).
+///
+/// The intermediates are held as Python holds them, with an unbounded
+/// exponent, so a product too small for a `Decimal` (`1e-11 × 1e-18`) is
+/// carried exactly instead of rounding to zero (#2351). The final quotient
+/// leaves through the same conversion as [`py_div`], with the same `None`
+/// cases; zero `units` is `None`.
+#[must_use]
+pub fn py_compound_per_unit(per_unit: Decimal, total: Decimal, units: Decimal) -> Option<Decimal> {
+    let n = PyNum::from_decimal(units.abs());
+    let product = py_mul(&PyNum::from_decimal(per_unit), &n);
+    let cost_total = py_add(&PyNum::from_decimal(total), &product);
+    let q = py_div_num(&cost_total, &n)?;
+    py_to_decimal(&q, &cost_total, &n)
+}
+
 #[cfg(test)]
 mod tests {
     /// `with_ideal_scale` must never produce a `Decimal` above

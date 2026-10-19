@@ -3256,6 +3256,7 @@ version = "0.24.0"
 dependencies = [
  "bigdecimal",
  "criterion",
+ "flate2",
  "imbl",
  "jiff",
  "proptest",

@@ -897,14 +897,17 @@ impl BookingEngine {
                             Some(rustledger_core::CostNumber::Total { value: total })
                                 if !units.number.is_zero() =>
                             {
-                                let per_unit =
-                                    total.checked_div(units.number.abs()).ok_or_else(|| {
-                                        cost_overflow(
-                                            &posting.account,
-                                            cost_spec.currency.as_ref(),
-                                            units,
-                                        )
-                                    })?;
+                                // Divided as the augmentation below divides
+                                // it (`py_div`, #2652), so the filter names
+                                // the per-unit the lot was booked at.
+                                let per_unit = rustledger_core::py_div(total, units.number.abs())
+                                    .ok_or_else(|| {
+                                    cost_overflow(
+                                        &posting.account,
+                                        cost_spec.currency.as_ref(),
+                                        units,
+                                    )
+                                })?;
                                 // `try_new`, not `new` (#2340).
                                 let booked = rustledger_core::BookedCost::try_new(
                                     per_unit,
@@ -1335,9 +1338,14 @@ impl BookingEngine {
                     if let Some(currency) = &cost_spec.currency
                         && !units.number.is_zero()
                     {
-                        let per_unit = total.checked_div(units.number.abs()).ok_or_else(|| {
-                            cost_overflow(&posting.account, Some(currency), units)
-                        })?;
+                        // beancount's `total / |units|` to the digit
+                        // (`py_div`, #2652): `{{10 USD}}` over 4 is `2.5`,
+                        // over 3 is `3.333333333333333333333333333`. The total
+                        // itself is kept exactly, beside it.
+                        let per_unit = rustledger_core::py_div(total, units.number.abs())
+                            .ok_or_else(|| {
+                                cost_overflow(&posting.account, Some(currency), units)
+                            })?;
                         // `try_new`, not `new` (#2340).
                         let booked =
                             rustledger_core::BookedCost::try_new(per_unit, total, units.number)
@@ -5420,6 +5428,12 @@ mod tests {
     /// account with no inventory safe. So `apply` ran without its undo log,
     /// the second add failed, and the "guard is unsound" `assert!` aborted --
     /// in release too. It must be an error.
+    ///
+    /// The lot's total is `MAX × 1e-28`, so its per-unit cost is exactly
+    /// `1e-28`. It was `1e-28`, whose per-unit (`1e-28 / MAX`, about
+    /// `1.3e-57`) rounded to a zero the booker accepted; `py_div` now refuses
+    /// that zero (#2652), which would stop this transaction in booking before
+    /// `apply` is reached.
     #[test]
     fn apply_near_the_ceiling_fails_cleanly() {
         use rustledger_core::{Amount, CostNumber, CostSpec, IncompleteAmount};
@@ -5429,7 +5443,7 @@ mod tests {
                 Posting::new("Assets:Stock", Amount::new(Decimal::MAX, "CORP")).with_cost(
                     CostSpec::empty()
                         .with_number(CostNumber::Total {
-                            value: Decimal::new(1, 28),
+                            value: Decimal::from_i128_with_scale(Decimal::MAX.mantissa(), 28),
                         })
                         .with_currency("USD"),
                 ),

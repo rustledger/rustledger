@@ -313,7 +313,7 @@ impl<'a> Executor<'a> {
     ///
     /// A pool outside `Decimal`'s range.
     fn realize_average_group(group: &[&PostingContext]) -> Result<Option<Inventory>, QueryError> {
-        let mut engine = rustledger_booking::BookingEngine::with_method(BookingMethod::Average);
+        let mut subsets = Vec::new();
         let mut rest = group;
         while let Some(first) = rest.first() {
             let txn: &Transaction = &first.transaction;
@@ -330,19 +330,10 @@ impl<'a> Executor<'a> {
                 .iter()
                 .map(|ctx| txn.postings[ctx.posting_index].clone())
                 .collect();
-            if engine.replay_transaction(&subset).is_err() {
-                return Ok(None);
-            }
+            subsets.push(subset);
             rest = &rest[run..];
         }
-        let mut realized = engine
-            .into_inventories()
-            .into_values()
-            .next()
-            .unwrap_or_default();
-        rustledger_booking::present_inventory(BookingMethod::Average, &mut realized)
-            .map_err(|e| QueryError::Evaluation(e.to_string()))?;
-        Ok(Some(realized))
+        realize_average_subsets(&subsets)
     }
 
     pub(super) fn evaluate_aggregate_expr(
@@ -1375,4 +1366,35 @@ impl<'a> Executor<'a> {
             }
         }
     }
+}
+
+/// One AVERAGE account's selected postings, each transaction's as one
+/// transaction of only those postings, in order, realized through booking and
+/// presented as one pool per side: what `SUM(position)` shows for them
+/// ([`Executor::realize_average_group`]), and what a filtered `BALANCES`
+/// shows for a partly selected account (`scan_postings`, #2630).
+///
+/// `None` when booking cannot realize the subset, such as a sale of more
+/// units than it holds; the caller then keeps the plain sum.
+///
+/// # Errors
+///
+/// A pool outside `Decimal`'s range.
+pub(super) fn realize_average_subsets(
+    subsets: &[Transaction],
+) -> Result<Option<Inventory>, QueryError> {
+    let mut engine = rustledger_booking::BookingEngine::with_method(BookingMethod::Average);
+    for subset in subsets {
+        if engine.replay_transaction(subset).is_err() {
+            return Ok(None);
+        }
+    }
+    let mut realized = engine
+        .into_inventories()
+        .into_values()
+        .next()
+        .unwrap_or_default();
+    rustledger_booking::present_inventory(BookingMethod::Average, &mut realized)
+        .map_err(|e| QueryError::Evaluation(e.to_string()))?;
+    Ok(Some(realized))
 }

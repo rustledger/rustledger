@@ -32,11 +32,10 @@ fn build_validation_options_from_loader(
 ) -> ValidationOptions {
     // `option "documents"` roots feed only E8001's hint (#2650), resolved
     // against the main file as the loader resolves them.
-    let base_dir = source_map
-        .files()
-        .first()
-        .and_then(|f| f.path.parent())
-        .unwrap_or_else(|| std::path::Path::new("."));
+    let base_dir = source_map.files().first().map_or_else(
+        || std::path::Path::new("."),
+        rustledger_loader::SourceFile::dir,
+    );
     rustledger_loader::validation_options_from_options(loader_options)
         .with_document_source_dirs(rustledger_loader::document_source_dirs(source_map))
         .with_document_roots(rustledger_loader::resolve_document_dirs(

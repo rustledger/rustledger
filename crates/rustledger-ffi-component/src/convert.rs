@@ -1002,6 +1002,10 @@ impl rustledger_loader::FileSystem for HostDecryptFs {
         self.0.normalize(path)
     }
 
+    fn normalize_lexical(&self, path: &std::path::Path) -> std::path::PathBuf {
+        self.0.normalize_lexical(path)
+    }
+
     fn supports_parallel_read(&self) -> bool {
         self.0.supports_parallel_read()
     }

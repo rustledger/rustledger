@@ -211,6 +211,13 @@ impl FileSystem for HostFs {
         }
     }
 
+    fn normalize_lexical(&self, path: &Path) -> PathBuf {
+        // The path as opened, without `realpath`: includes resolve next to a
+        // symlink, as beancount resolves them (#2635). `normalize` above
+        // stays the file's identity.
+        textual_normalize(&path.display().to_string())
+    }
+
     fn supports_parallel_read(&self) -> bool {
         // Never: the callbacks are JS, wasm is single-threaded, and the
         // `Send + Sync` bound this would exercise is satisfied only because

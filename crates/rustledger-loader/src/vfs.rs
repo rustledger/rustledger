@@ -47,6 +47,22 @@ pub trait FileSystem: Send + Sync + std::fmt::Debug {
     /// For virtual filesystems, this just cleans up the path.
     fn normalize(&self, path: &Path) -> PathBuf;
 
+    /// The path as opened: absolute where this filesystem has a working
+    /// directory, `.` and `..` collapsed textually, symlinks NOT resolved.
+    ///
+    /// Relative paths inside a file resolve against the parent of THIS path,
+    /// not of [`Self::normalize`]'s: beancount builds every path with
+    /// `abspath`/`normpath` and never `realpath`, so an entry file reached
+    /// through a symlink reads its includes next to the link (#2635).
+    /// [`Self::normalize`] stays the file's identity (cycle and duplicate
+    /// detection, path security).
+    ///
+    /// The default is [`Self::normalize`], right for a backend without
+    /// symlinks.
+    fn normalize_lexical(&self, path: &Path) -> PathBuf {
+        self.normalize(path)
+    }
+
     /// Whether this filesystem supports parallel file reads.
     ///
     /// Disk filesystems return `true` — multiple files can be read
@@ -141,35 +157,12 @@ impl FileSystem for DiskFileSystem {
         if let Ok(canonical) = path.canonicalize() {
             return canonical;
         }
-
         // Fallback: make absolute without resolving symlinks (WASI-compatible)
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else if let Ok(cwd) = std::env::current_dir() {
-            // Join with current directory and clean up the path
-            let mut result = cwd;
-            for component in path.components() {
-                match component {
-                    std::path::Component::ParentDir => {
-                        result.pop();
-                    }
-                    std::path::Component::Normal(s) => {
-                        result.push(s);
-                    }
-                    std::path::Component::CurDir => {}
-                    std::path::Component::RootDir => {
-                        result = PathBuf::from("/");
-                    }
-                    std::path::Component::Prefix(p) => {
-                        result = PathBuf::from(p.as_os_str());
-                    }
-                }
-            }
-            result
-        } else {
-            // Last resort: just return the path as-is
-            path.to_path_buf()
-        }
+        lexical_absolute(path)
+    }
+
+    fn normalize_lexical(&self, path: &Path) -> PathBuf {
+        lexical_absolute(path)
     }
 
     fn glob(&self, pattern: &str) -> Result<Vec<PathBuf>, String> {
@@ -185,6 +178,39 @@ impl FileSystem for DiskFileSystem {
     fn supports_parallel_read(&self) -> bool {
         true
     }
+}
+
+/// `path` made absolute against the current directory, with `.` dropped and
+/// `..` popping the previous component textually — Python's
+/// `path.normpath(path.join(os.getcwd(), p))`, which is how beancount spells
+/// every file it opens. Symlinks are not consulted.
+fn lexical_absolute(path: &Path) -> PathBuf {
+    let mut result = if path.is_absolute() {
+        PathBuf::new()
+    } else if let Ok(cwd) = std::env::current_dir() {
+        cwd
+    } else {
+        // Last resort: no working directory to anchor a relative path.
+        PathBuf::new()
+    };
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                result.pop();
+            }
+            std::path::Component::Normal(s) => {
+                result.push(s);
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::RootDir => {
+                result.push(component.as_os_str());
+            }
+            std::path::Component::Prefix(p) => {
+                result = PathBuf::from(p.as_os_str());
+            }
+        }
+    }
+    result
 }
 
 /// In-memory virtual filesystem for WASM and testing.

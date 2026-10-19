@@ -933,7 +933,7 @@ mod plugin_budget {
             r#"(module
                 (memory (export "memory") 1)
                 (func (export "alloc") (param i32) (result i32) i32.const 0)
-                (func (export "__rustledger_abi_version") (result i32) i32.const 2)
+                (func (export "__rustledger_abi_version") (result i32) i32.const 3)
                 (func (export "process") (param i32 i32) (result i64) (local $n i32)
                     {process_body}))"#
         );

@@ -603,6 +603,10 @@ pub struct ValidationError {
     /// by a plugin"). Unlike [`Self::context`], which describes data tied
     /// to the error, the note describes something about its *origin*.
     pub note: Option<String>,
+    /// A suggested fix, shown as a help line by `rledger check` and the LSP
+    /// (e.g. E8001's "write `documents/stmt.pdf`" when the file is under an
+    /// `option "documents"` root, #2650).
+    pub hint: Option<String>,
     /// Source span (byte offsets within the file).
     pub span: Option<Span>,
     /// Source file ID (index into `SourceMap`).
@@ -620,6 +624,7 @@ impl ValidationError {
             date,
             context: None,
             note: None,
+            hint: None,
             span: None,
             file_id: None,
         }
@@ -639,6 +644,7 @@ impl ValidationError {
             date,
             context: None,
             note: None,
+            hint: None,
             span: Some(spanned.span),
             file_id: Some(spanned.file_id),
         }
@@ -648,6 +654,13 @@ impl ValidationError {
     #[must_use]
     pub fn with_context(mut self, context: impl Into<String>) -> Self {
         self.context = Some(context.into());
+        self
+    }
+
+    /// Attach a suggested fix to this error (builder pattern).
+    #[must_use]
+    pub fn with_hint(mut self, hint: impl Into<String>) -> Self {
+        self.hint = Some(hint.into());
         self
     }
 

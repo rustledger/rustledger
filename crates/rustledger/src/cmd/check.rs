@@ -796,7 +796,7 @@ pub fn run_with_writer<W: Write>(
                 phase: err.phase.clone(),
                 code: err.code.clone(),
                 message: err.message.clone(),
-                hint: None,
+                hint: err.hint.clone(),
                 context: None,
             });
 

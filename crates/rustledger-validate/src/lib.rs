@@ -142,8 +142,12 @@ pub struct ValidationOptions {
     /// by `Spanned<Directive>`). A relative `document` path is resolved against
     /// its own directive's source-file directory — matching Beancount, which
     /// normalizes the path at parse time, and `include`, which resolves
-    /// relative to the including file. Empty for callers that don't supply
-    /// source locations (the resolution then falls back to the process CWD).
+    /// relative to the including file.
+    ///
+    /// There is no working-directory fallback: a relative path whose
+    /// directive has no known file (no entry here and no
+    /// [`Self::document_base`]) cannot be resolved, and is reported missing
+    /// (E8001) rather than looked up wherever the process happens to run.
     ///
     /// `option "documents"` plays NO part in this. Beancount uses those
     /// roots only to discover documents, never to resolve a `document`
@@ -153,6 +157,11 @@ pub struct ValidationOptions {
     /// path that resolved next to its file as missing whenever the option
     /// was set (#2650).
     pub document_source_dirs: Vec<std::path::PathBuf>,
+    /// The resolved `option "documents"` roots. Used ONLY to suggest a fix:
+    /// when a relative `document` path is missing next to its file but
+    /// exists under one of these roots, E8001 carries a hint naming the path
+    /// to write instead (#2650). Never consulted to resolve a path.
+    pub document_roots: Vec<std::path::PathBuf>,
     /// Valid account type prefixes (from options like `name_assets`, `name_liabilities`, etc.).
     /// Defaults to `["Assets", "Liabilities", "Equity", "Income", "Expenses"]`.
     pub account_types: Vec<String>,
@@ -185,6 +194,7 @@ impl Default for ValidationOptions {
             warn_future_dates: false,
             document_base: None,
             document_source_dirs: Vec::new(),
+            document_roots: Vec::new(),
             account_types: vec![
                 "Assets".to_string(),
                 "Liabilities".to_string(),
@@ -235,6 +245,14 @@ impl ValidationOptions {
     #[must_use]
     pub fn with_document_base(mut self, base: impl Into<std::path::PathBuf>) -> Self {
         self.document_base = Some(base.into());
+        self
+    }
+
+    /// Set the resolved `option "documents"` roots, used only for E8001's
+    /// hint (see [`ValidationOptions::document_roots`]).
+    #[must_use]
+    pub fn with_document_roots(mut self, roots: Vec<std::path::PathBuf>) -> Self {
+        self.document_roots = roots;
         self
     }
 
@@ -812,36 +830,112 @@ fn build_document_exists_cache<'a, D: ValidatableDirective>(
 
 /// Resolve whether a `document` directive's file exists, using one rule
 /// shared by the pre-pass cache and the validator (see
-/// [`resolve_document_path`]).
+/// [`resolve_document_path`]). A path that cannot be resolved does not exist.
 fn document_file_exists(path: &str, file_id: Option<u16>, options: &ValidationOptions) -> bool {
-    resolve_document_path(path, file_id, options).exists()
+    resolve_document_path(path, file_id, options).is_some_and(|p| p.exists())
+}
+
+/// The directory a relative `document` path in `file_id`'s file resolves
+/// against: `document_base` when set, else that file's own directory.
+fn document_dir(file_id: Option<u16>, options: &ValidationOptions) -> Option<&std::path::Path> {
+    options.document_base.as_deref().or_else(|| {
+        file_id
+            .and_then(|id| options.document_source_dirs.get(id as usize))
+            .map(std::path::PathBuf::as_path)
+    })
 }
 
 /// Where a `document` directive's path points:
 ///   1. absolute path → as-is;
 ///   2. `document_base` set → joined onto it;
 ///   3. otherwise → joined onto the directive's own source-file directory
-///      (matching Beancount, which normalizes at parse time, and `include`),
-///      falling back to the process CWD only when the source directory is
-///      unknown (unspanned directives, or no source map supplied).
+///      (matching Beancount, which normalizes at parse time, and `include`).
 ///
-/// `option "documents"` is deliberately absent: beancount never resolves a
-/// `document` path against a documents root (#2650).
+/// `None` for a relative path whose directive has no known file: there is
+/// nothing to resolve it against, and the process's working directory is
+/// deliberately not used (#2650). `option "documents"` is deliberately absent
+/// too: beancount never resolves a `document` path against a documents root.
 pub(crate) fn resolve_document_path(
     path: &str,
     file_id: Option<u16>,
     options: &ValidationOptions,
-) -> std::path::PathBuf {
+) -> Option<std::path::PathBuf> {
     let doc_path = std::path::Path::new(path);
     if doc_path.is_absolute() {
-        doc_path.to_path_buf()
-    } else if let Some(base) = &options.document_base {
-        base.join(doc_path)
-    } else if let Some(dir) = file_id.and_then(|id| options.document_source_dirs.get(id as usize)) {
-        dir.join(doc_path)
+        Some(doc_path.to_path_buf())
     } else {
-        doc_path.to_path_buf()
+        document_dir(file_id, options).map(|dir| dir.join(doc_path))
     }
+}
+
+/// E8001's hint for a relative `document` path missing next to its file: the
+/// first `option "documents"` root holding a file at that relative path, as
+/// the path to write instead, relative to the directive's own file (#2650).
+///
+/// The suggestion is relative whenever the documents root and the file share
+/// a directory below the filesystem root (`../receipts/x.pdf` for a root
+/// beside the ledger's folder), because a relative path keeps working when
+/// the ledger and its documents move together, which is the usual reason to
+/// keep them side by side. When the only common ancestor is the filesystem
+/// root itself (or, on Windows, the two are on different drives), it is the
+/// absolute path: a chain of `../` up to `/` is longer, breaks on any move,
+/// and says nothing an absolute path does not.
+pub(crate) fn document_hint(
+    path: &str,
+    file_id: Option<u16>,
+    options: &ValidationOptions,
+) -> Option<String> {
+    let doc_path = std::path::Path::new(path);
+    if doc_path.is_absolute() {
+        return None;
+    }
+    let dir = lexical(document_dir(file_id, options)?);
+    let found = options
+        .document_roots
+        .iter()
+        .map(|root| lexical(&root.join(doc_path)))
+        .find(|candidate| candidate.is_file())?;
+    let suggested = relative_from(&dir, &found);
+    Some(format!(
+        "a file with that name is in {suggested}; document paths are relative to the file \
+         they are written in, not to the documents folder, so write \"{suggested}\""
+    ))
+}
+
+/// `path` with `.` dropped and `..` popping the previous component, textually.
+fn lexical(path: &std::path::Path) -> std::path::PathBuf {
+    let mut out = std::path::PathBuf::new();
+    for c in path.components() {
+        match c {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// `target` as written from `dir` (both lexically normalized): a `/`-joined
+/// relative path when the two share a directory below the filesystem root,
+/// else `target` itself. See [`document_hint`] for why.
+fn relative_from(dir: &std::path::Path, target: &std::path::Path) -> String {
+    use std::path::Component;
+    let a: Vec<Component<'_>> = dir.components().collect();
+    let b: Vec<Component<'_>> = target.components().collect();
+    let common = a.iter().zip(&b).take_while(|(x, y)| x == y).count();
+    let shares_a_directory = a[..common]
+        .iter()
+        .any(|c| matches!(c, Component::Normal(_)));
+    if !shares_a_directory {
+        return target.display().to_string();
+    }
+    let ups = std::iter::repeat_n("..".to_string(), a.len() - common);
+    let downs = b[common..]
+        .iter()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned());
+    ups.chain(downs).collect::<Vec<_>>().join("/")
 }
 
 // ── Validation entry: [`ValidationSession`] ──────────────────────────────
@@ -1864,6 +1958,63 @@ mod tests {
         assert!(
             !errors.iter().any(|e| e.code == ErrorCode::DocumentNotFound),
             "Should find document against document_base: {errors:?}"
+        );
+    }
+
+    /// #2650: a relative path with no source file to resolve against is
+    /// reported missing; the process's working directory is never consulted,
+    /// even when the file is sitting right there.
+    #[test]
+    fn test_validate_document_relative_path_ignores_the_working_directory() {
+        let filename = "rustledger_test_2650_cwd_only.pdf";
+        let in_cwd = std::env::current_dir().unwrap().join(filename);
+        std::fs::write(&in_cwd, "x").unwrap();
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+            Directive::Document(Document {
+                date: date(2024, 1, 15),
+                account: "Assets:Bank".into(),
+                path: filename.to_string(),
+                tags: Default::default(),
+                links: Default::default(),
+                meta: Default::default(),
+            }),
+        ];
+        let errors = validate(&directives);
+        std::fs::remove_file(&in_cwd).unwrap();
+        let err = errors
+            .iter()
+            .find(|e| e.code == ErrorCode::DocumentNotFound)
+            .expect("a file only in the working directory is not found");
+        assert_eq!(
+            err.context.as_deref(),
+            Some("relative path, and no source file to resolve it against")
+        );
+    }
+
+    /// #2650's hint path: relative when the two share a directory below the
+    /// filesystem root, absolute when only the root is shared.
+    #[cfg(unix)]
+    #[test]
+    fn test_document_hint_relative_from() {
+        use std::path::Path;
+        assert_eq!(
+            relative_from(
+                Path::new("/home/u/books"),
+                Path::new("/home/u/books/documents/x.pdf")
+            ),
+            "documents/x.pdf"
+        );
+        assert_eq!(
+            relative_from(
+                Path::new("/home/u/books/2024"),
+                Path::new("/home/u/receipts/x.pdf")
+            ),
+            "../../receipts/x.pdf"
+        );
+        assert_eq!(
+            relative_from(Path::new("/home/u/books"), Path::new("/srv/receipts/x.pdf")),
+            "/srv/receipts/x.pdf"
         );
     }
 

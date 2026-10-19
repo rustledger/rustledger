@@ -408,6 +408,8 @@ has no leaf form: these options can only name accounts under equity.
 
 **Fix**: Ensure the document file exists at the specified path; for plugins, check the name against the [Plugins Reference](plugins.md).
 
+A relative document path is resolved next to the file the `document` directive is written in, as beancount resolves it, never inside an `option "documents"` folder. If the file is missing there but exists under a documents folder, the error carries a hint with the path to write, relative to that file (for example `write "documents/statement.pdf"`). See [documents](options.md#documents).
+
 ### E8002: Plugin Execution Failed
 
 **Cause**: A plugin file was found but failed to load or run (e.g. a Python plugin raised, or its runtime could not be initialized). The message carries the underlying error.

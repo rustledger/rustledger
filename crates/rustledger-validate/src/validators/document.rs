@@ -28,7 +28,8 @@ pub fn validate_note(state: &LedgerState, note: &Note, errors: &mut Vec<Validati
 /// When `options.check_documents` is enabled, the referenced file must exist.
 /// A relative path resolves against the directive's own source file, or
 /// `options.document_base` when set; see `resolve_document_path` in `lib.rs`.
-/// `option "documents"` roots are not consulted, as in beancount (#2650).
+/// `option "documents"` roots are not consulted, as in beancount (#2650); a
+/// file found under one only adds a hint to the error.
 ///
 /// The `exists_cache` is consulted instead of calling `Path::exists()`
 /// directly. The caller (see `build_document_exists_cache` in `lib.rs`)
@@ -76,16 +77,23 @@ pub fn validate_document(
             });
 
         if !file_was_found {
-            // The context names the one path we looked at.
-            let resolved = crate::resolve_document_path(&doc.path, file_id, &state.options);
-            errors.push(
-                ValidationError::new(
-                    ErrorCode::DocumentNotFound,
-                    format!("Document file not found: {}", doc.path),
-                    doc.date,
-                )
-                .with_context(format!("resolved path: {}", resolved.display())),
-            );
+            // The context names the one path we looked at, or says there was
+            // none to look at.
+            let context = crate::resolve_document_path(&doc.path, file_id, &state.options)
+                .map_or_else(
+                    || "relative path, and no source file to resolve it against".to_string(),
+                    |resolved| format!("resolved path: {}", resolved.display()),
+                );
+            let mut error = ValidationError::new(
+                ErrorCode::DocumentNotFound,
+                format!("Document file not found: {}", doc.path),
+                doc.date,
+            )
+            .with_context(context);
+            if let Some(hint) = crate::document_hint(&doc.path, file_id, &state.options) {
+                error = error.with_hint(hint);
+            }
+            errors.push(error);
         }
     }
 }

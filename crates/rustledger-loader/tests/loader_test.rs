@@ -2922,3 +2922,166 @@ fn discovered_document_on_unopened_named_account_is_reported_like_beancount() {
         "the receipt is discovered"
     );
 }
+
+// ============================================================================
+// E8001's documents-folder hint (#2650, robcohen's decision)
+// ============================================================================
+
+/// The E8001 errors of loading `path`, as `(message, hint)`.
+fn document_not_found(path: &std::path::Path) -> Vec<(String, Option<String>)> {
+    let ledger =
+        rustledger_loader::load(path, &rustledger_loader::LoadOptions::default()).expect("load");
+    ledger
+        .errors
+        .iter()
+        .filter(|e| e.code == "E8001")
+        .map(|e| (e.message.clone(), e.hint.clone()))
+        .collect()
+}
+
+/// Write `files` (path, text) under `root`.
+fn write_tree(root: &std::path::Path, files: &[(&str, &str)]) {
+    for (path, text) in files {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+}
+
+fn hint_for(suggested: &str) -> String {
+    format!(
+        "a file with that name is in {suggested}; document paths are relative to the file \
+         they are written in, not to the documents folder, so write \"{suggested}\""
+    )
+}
+
+/// The #889 layout: the statement is only under `documents/`. Beancount and
+/// rledger both report it missing next to the ledger; rledger's error also
+/// says the path to write.
+#[test]
+fn e8001_hints_the_documents_folder_path() {
+    let dir = tempfile::tempdir().unwrap();
+    write_tree(
+        dir.path(),
+        &[
+            ("documents/credit-card-statement.pdf", "x"),
+            (
+                "main.beancount",
+                "option \"documents\" \"documents\"\n\
+                 1970-01-01 open Assets:Bank:BofA USD\n\
+                 2026-04-22 document Assets:Bank:BofA \"./credit-card-statement.pdf\"\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        document_not_found(&dir.path().join("main.beancount")),
+        [(
+            "Document file not found: ./credit-card-statement.pdf".to_string(),
+            Some(hint_for("documents/credit-card-statement.pdf"))
+        )]
+    );
+}
+
+/// A file next to the ledger resolves and gets no error, with a documents
+/// root set that does not hold it (before #2650 the root replaced the
+/// ledger's directory, and this was a false E8001).
+#[test]
+fn e8001_not_raised_for_a_file_next_to_the_ledger() {
+    let dir = tempfile::tempdir().unwrap();
+    write_tree(
+        dir.path(),
+        &[
+            ("stmt.pdf", "x"),
+            ("documents/other.pdf", "x"),
+            (
+                "main.beancount",
+                "option \"documents\" \"documents\"\n\
+                 2020-01-01 open Assets:Bank\n\
+                 2024-01-01 document Assets:Bank \"stmt.pdf\"\n",
+            ),
+        ],
+    );
+    assert_eq!(document_not_found(&dir.path().join("main.beancount")), []);
+}
+
+/// A file in neither place is E8001 with no hint.
+#[test]
+fn e8001_without_a_documents_folder_match_has_no_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    write_tree(
+        dir.path(),
+        &[
+            ("documents/other.pdf", "x"),
+            (
+                "main.beancount",
+                "option \"documents\" \"documents\"\n\
+                 2020-01-01 open Assets:Bank\n\
+                 2024-01-01 document Assets:Bank \"stmt.pdf\"\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        document_not_found(&dir.path().join("main.beancount")),
+        [("Document file not found: stmt.pdf".to_string(), None)]
+    );
+}
+
+/// A documents root given as an absolute path beside the ledger's folder:
+/// the suggestion climbs out with `../`, relative to the ledger file.
+#[test]
+fn e8001_hint_for_an_absolute_documents_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("receipts");
+    write_tree(
+        dir.path(),
+        &[
+            ("receipts/2024/stmt.pdf", "x"),
+            (
+                "books/main.beancount",
+                &format!(
+                    "option \"documents\" \"{}\"\n\
+                     2020-01-01 open Assets:Bank\n\
+                     2024-01-01 document Assets:Bank \"2024/stmt.pdf\"\n",
+                    root.display()
+                ),
+            ),
+        ],
+    );
+    assert_eq!(
+        document_not_found(&dir.path().join("books/main.beancount")),
+        [(
+            "Document file not found: 2024/stmt.pdf".to_string(),
+            Some(hint_for("../receipts/2024/stmt.pdf"))
+        )]
+    );
+}
+
+/// A directive in an included file in a subdirectory: the suggestion is
+/// relative to THAT file, since that is what its path resolves against.
+#[test]
+fn e8001_hint_is_relative_to_the_including_file() {
+    let dir = tempfile::tempdir().unwrap();
+    write_tree(
+        dir.path(),
+        &[
+            ("documents/stmt.pdf", "x"),
+            (
+                "main.beancount",
+                "option \"documents\" \"documents\"\n\
+                 2020-01-01 open Assets:Bank\n\
+                 include \"years/2024.beancount\"\n",
+            ),
+            (
+                "years/2024.beancount",
+                "2024-01-01 document Assets:Bank \"stmt.pdf\"\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        document_not_found(&dir.path().join("main.beancount")),
+        [(
+            "Document file not found: stmt.pdf".to_string(),
+            Some(hint_for("../documents/stmt.pdf"))
+        )]
+    );
+}

@@ -30,8 +30,19 @@ fn build_validation_options_from_loader(
     loader_options: &LoaderOptions,
     source_map: &SourceMap,
 ) -> ValidationOptions {
+    // `option "documents"` roots feed only E8001's hint (#2650), resolved
+    // against the main file as the loader resolves them.
+    let base_dir = source_map
+        .files()
+        .first()
+        .and_then(|f| f.path.parent())
+        .unwrap_or_else(|| std::path::Path::new("."));
     rustledger_loader::validation_options_from_options(loader_options)
         .with_document_source_dirs(rustledger_loader::document_source_dirs(source_map))
+        .with_document_roots(rustledger_loader::resolve_document_dirs(
+            &loader_options.documents,
+            Some(base_dir),
+        ))
 }
 
 /// Build `ValidationOptions` for single-file validation (no loaded ledger).
@@ -45,7 +56,8 @@ fn build_validation_options_from_loader(
 ///
 /// Relative `document` paths resolve against `base_dir`, the buffer's own
 /// directory, as the loader resolves them against their file (#2650); when
-/// `None` (a buffer without an on-disk path), against the process CWD.
+/// `None` (a buffer without an on-disk path), they cannot be resolved and
+/// are reported missing; the process CWD is never used.
 ///
 /// See issues #572 and #1648.
 fn build_validation_options_from_file(
@@ -62,7 +74,9 @@ fn build_validation_options_from_file(
         options.set(key, value);
     }
 
-    let vo = rustledger_loader::validation_options_from_options(&options);
+    let vo = rustledger_loader::validation_options_from_options(&options).with_document_roots(
+        rustledger_loader::resolve_document_dirs(&options.documents, base_dir),
+    );
     match base_dir {
         Some(dir) => vo.with_document_base(dir),
         None => vo,
@@ -718,6 +732,12 @@ pub(crate) fn validation_error_to_diagnostic(
         format!("{} ({})", error.message, error.date)
     };
 
+    // A suggested fix (e.g. E8001's documents-folder hint, #2650).
+    if let Some(hint) = &error.hint {
+        message.push_str("\n  hint: ");
+        message.push_str(hint);
+    }
+
     // Add note if location is unknown
     if !has_location {
         message.push_str("\n  (source location unknown)");
@@ -1344,6 +1364,39 @@ mod tests {
         assert_eq!(
             vo.inferred_tolerance_default.get("CLP"),
             Some(&rust_decimal::Decimal::new(5, 1))
+        );
+    }
+
+    /// #2650: a standalone buffer's E8001 resolves next to the buffer and
+    /// carries the documents-folder hint into the diagnostic's message.
+    #[test]
+    fn single_file_document_diagnostic_carries_the_documents_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("documents")).unwrap();
+        std::fs::write(dir.path().join("documents/stmt.pdf"), "x").unwrap();
+        let source = "option \"documents\" \"documents\"\n\
+                      2020-01-01 open Assets:Bank\n\
+                      2024-01-01 document Assets:Bank \"stmt.pdf\"\n";
+        let result = parse(source);
+        let vo = build_validation_options_from_file(&result.options, Some(dir.path()));
+        let today = rustledger_core::naive_date(2999, 12, 31).unwrap();
+        let session = ValidationSession::new(vo);
+        let (session, mut errors) = session.run_early_spanned(&result.directives, today);
+        let (session, late) = session.run_late_spanned(&result.directives, today);
+        errors.extend(late);
+        errors.extend(session.finalize());
+        let error = errors
+            .iter()
+            .find(|e| e.code.code() == "E8001")
+            .expect("stmt.pdf is not next to the buffer");
+        let line_index = LineIndex::new(source, PositionEncoding::Utf8);
+        let diagnostic = validation_error_to_diagnostic(error, source, &line_index);
+        assert!(
+            diagnostic
+                .message
+                .contains("hint: a file with that name is in documents/stmt.pdf"),
+            "{}",
+            diagnostic.message
         );
     }
 

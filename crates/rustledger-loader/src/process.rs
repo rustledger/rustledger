@@ -336,6 +336,9 @@ pub struct LedgerError {
     pub file_id: Option<u16>,
     /// Processing phase that produced this error: "parse", "validate", or "plugin".
     pub phase: String,
+    /// A suggested fix, rendered as a `help:` line by `rledger check` and in
+    /// its JSON `hint` field (e.g. E8001's documents-folder hint, #2650).
+    pub hint: Option<String>,
 }
 
 /// Error severity level.
@@ -369,6 +372,7 @@ impl LedgerError {
             source_span: None,
             file_id: None,
             phase: "validate".to_string(),
+            hint: None,
         }
     }
 
@@ -382,6 +386,7 @@ impl LedgerError {
             source_span: None,
             file_id: None,
             phase: "validate".to_string(),
+            hint: None,
         }
     }
 
@@ -1716,9 +1721,19 @@ fn build_validation_options(
     default_booking_method: BookingMethod,
 ) -> rustledger_validate::ValidationOptions {
     // A relative `document` path resolves against its own directive's file,
-    // never against an `option "documents"` root (#2650).
+    // never against an `option "documents"` root (#2650); the roots only feed
+    // E8001's hint, resolved as discovery resolves them.
+    let base_dir = source_map
+        .files()
+        .first()
+        .and_then(|f| f.path.parent())
+        .unwrap_or_else(|| std::path::Path::new("."));
     validation_options_from_options(file_options)
         .with_document_source_dirs(document_source_dirs(source_map))
+        .with_document_roots(resolve_document_dirs(
+            &file_options.documents,
+            Some(base_dir),
+        ))
         .with_default_booking_method(default_booking_method)
 }
 
@@ -1773,6 +1788,7 @@ fn ledger_errors_extend(
             source_span: err.span.map(|s| (s.start, s.end)),
             file_id: err.file_id,
             phase: phase.to_string(),
+            hint: err.hint,
         });
     }
 }

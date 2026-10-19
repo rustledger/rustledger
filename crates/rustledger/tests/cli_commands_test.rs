@@ -2362,3 +2362,49 @@ fn release_build_names_the_wasm_importers_it_did_not_try() {
         "{text}"
     );
 }
+
+/// #2650: E8001's documents-folder hint reaches `rledger check`'s text output
+/// (as a `help:` line) and its JSON `hint` field.
+#[test]
+fn test_check_shows_document_folder_hint() {
+    let rledger = require_rledger!();
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("documents")).unwrap();
+    std::fs::write(dir.path().join("documents/stmt.pdf"), "x").unwrap();
+    let ledger = dir.path().join("main.beancount");
+    std::fs::write(
+        &ledger,
+        "option \"documents\" \"documents\"\n\
+         2020-01-01 open Assets:Bank\n\
+         2024-01-01 document Assets:Bank \"stmt.pdf\"\n",
+    )
+    .unwrap();
+    let want = "so write \"documents/stmt.pdf\"";
+
+    let text = Command::new(&rledger)
+        .args(["check", "--no-cache"])
+        .env("NO_COLOR", "1")
+        .arg(&ledger)
+        .output()
+        .expect("run rledger check");
+    let stdout = String::from_utf8_lossy(&text.stdout);
+    assert!(stdout.contains("E8001"), "{stdout}");
+    assert!(
+        stdout.contains("help:") && stdout.contains(want),
+        "{stdout}"
+    );
+
+    let json = Command::new(&rledger)
+        .args(["check", "--no-cache", "--format", "json"])
+        .arg(&ledger)
+        .output()
+        .expect("run rledger check --format json");
+    let value: serde_json::Value = serde_json::from_slice(&json.stdout).expect("check emits JSON");
+    let hint = value["diagnostics"]
+        .as_array()
+        .and_then(|d| d.iter().find(|d| d["code"] == "E8001"))
+        .and_then(|d| d["hint"].as_str())
+        .unwrap_or_default()
+        .to_string();
+    assert!(hint.contains(want), "{value}");
+}

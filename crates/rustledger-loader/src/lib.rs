@@ -91,8 +91,8 @@ pub fn is_glob_pattern(path: &str) -> bool {
     path.contains(['*', '?', '['])
 }
 pub use process::{
-    ErrorLocation, ErrorSeverity, ExtraPlugin, Ledger, LedgerError, LoadOptions, ProcessError,
-    load, load_raw, load_with_fs, process,
+    CanonicalSortKey, ErrorLocation, ErrorSeverity, ExtraPlugin, Ledger, LedgerError, LoadOptions,
+    ProcessError, canonical_sort_key, load, load_raw, load_with_fs, process,
 };
 #[cfg(feature = "plugins")]
 pub use process::{PluginPass, run_plugins};

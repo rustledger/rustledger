@@ -1,0 +1,14 @@
+; Numbers the core accepts but whose products leave Decimal's range: the
+; plugin must skip the assignment, not panic (#2661 review).
+plugin "beancount_options.check_option_assignment"
+2026-01-01 open Assets:Cash
+2026-01-01 open Assets:Stock
+2026-01-01 open Assets:Opt
+2026-01-01 open Equity:X
+2026-09-03 * "STO"
+  Assets:Opt  -1000000000000000000000000 AAPL261016P99999999 {1 USD}
+  Equity:X
+2026-10-16 * "assigned"
+  Assets:Opt 1000000000000000000000000 AAPL261016P99999999 {}
+  Assets:Stock 1 AAPL {1 USD}
+  Equity:X

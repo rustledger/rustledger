@@ -61,46 +61,16 @@ pub fn validate_open(state: &mut LedgerState, open: &Open, errors: &mut Vec<Vali
     state.inventory_accounts.insert(open.account.clone());
 }
 
-/// Late-phase: reflect an `Open` in account/inventory state without re-running
-/// the early-phase name/duplicate checks. Regular plugins (e.g.
-/// `currency_accounts`) run *after* the early phase and may generate both an
-/// Open and a posting for the same account; this lets the late-phase
-/// account-presence check on plugin-added postings see those generated Opens
-/// (originals are already in state from early, so this is a no-op for them).
-pub fn register_open_late(state: &mut LedgerState, open: &Open) {
-    if state.accounts.contains_key(&open.account) {
-        return;
-    }
-    let booking = open
-        .booking
-        .as_ref()
-        .and_then(|b| b.parse::<BookingMethod>().ok())
-        .unwrap_or(state.options.default_booking_method);
-    state.accounts.insert(
-        open.account.clone(),
-        AccountState {
-            opened: open.date,
-            closed: None,
-            currencies: open.currencies.iter().cloned().collect(),
-            booking,
-        },
-    );
-    state
-        .inventories
-        .insert(open.account.clone(), Inventory::new());
-    // Keep the sub-account prefix index in lockstep with `inventories`.
-    state.inventory_accounts.insert(open.account.clone());
-}
-
-/// Early-phase Close validation — runs on pre-booking directives.
+/// Close registration — runs in the late phase's open/close pre-pass, on
+/// the post-plugin stream (so a renamed or plugin-inserted close counts).
 ///
 /// Checks that the account being closed exists and isn't already
-/// closed, then marks it as closed in the ledger state so subsequent
-/// transactions (in date-sorted order) correctly see it as inactive.
+/// closed, then marks it as closed in the ledger state so the
+/// date-ordered walk judges postings against it.
 ///
-/// The "is the closing account balance non-zero?" check is deferred to
-/// [`validate_close_late`] because it depends on inventory state the
-/// late phase builds up.
+/// The "is the closing account balance non-zero?" check is
+/// [`validate_close_late`], in the walk itself, because it depends on the
+/// inventory state the walk builds up.
 pub fn validate_close(state: &mut LedgerState, close: &Close, errors: &mut Vec<ValidationError>) {
     match state.accounts.get_mut(&close.account) {
         Some(account_state) => {
@@ -118,7 +88,7 @@ pub fn validate_close(state: &mut LedgerState, close: &Close, errors: &mut Vec<V
     }
 }
 
-/// Late-phase Close validation — runs after booking + plugins.
+/// Close balance check — runs in the late phase's date-ordered walk.
 ///
 /// Reads `state.inventories[account]` (populated by late-phase
 /// `validate_transaction_late`'s `update_inventories` step in
@@ -130,8 +100,8 @@ pub fn validate_close_late(
     errors: &mut Vec<ValidationError>,
 ) {
     // Only check accounts that actually got closed (i.e., not those
-    // the early phase already flagged with E1001 or AccountClosed).
-    // The early phase sets `account_state.closed = Some(close.date)`
+    // the pre-pass already flagged with E1001 or AccountClosed).
+    // `validate_close` sets `account_state.closed = Some(close.date)`
     // on a successful close.
     let Some(account_state) = state.accounts.get(&close.account) else {
         return;
@@ -139,7 +109,7 @@ pub fn validate_close_late(
     if account_state.closed != Some(close.date) {
         return;
     }
-    // Skip the duplicate Close that the early phase already rejected
+    // Skip the duplicate Close that `validate_close` already rejected
     // with `AccountClosed`. Without this guard, two same-day closes
     // for the same account would both pass the `closed == Some(close.date)`
     // check and double-emit `AccountCloseNotEmpty`. Keyed by

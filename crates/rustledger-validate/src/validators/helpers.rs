@@ -74,11 +74,24 @@ pub fn push_account_not_open(
     );
 }
 
-/// Account-presence check for E1001. `state.accounts` is populated in date
-/// order, so an account absent from it has not been opened on or before `date`.
-/// Returns `true` when the account is open; otherwise pushes the E1001 error
-/// (via [`push_account_not_open`]) and returns `false`. Callers that need to
-/// bail out on an unopened account branch on the returned `bool`.
+/// Whether `account` has been opened on or before `date`.
+///
+/// `state.accounts` holds every `open` in the ledger, registered before the
+/// late phase's date-ordered walk, so presence alone does not mean "open
+/// yet": the date has to be compared. (An `open` sorts first on its day, so
+/// a directive on the open date counts as after it.)
+pub fn is_opened_by(state: &LedgerState, account: &Account, date: NaiveDate) -> bool {
+    state
+        .accounts
+        .get(account)
+        .is_some_and(|a| a.opened <= date)
+}
+
+/// Account-presence check for E1001: whether `account` was opened on or
+/// before `date` (see [`is_opened_by`]). Returns `true` when it was;
+/// otherwise pushes the E1001 error (via [`push_account_not_open`]) and
+/// returns `false`. Callers that need to bail out on an unopened account
+/// branch on the returned `bool`.
 pub fn require_account_open(
     state: &LedgerState,
     account: &Account,
@@ -86,7 +99,7 @@ pub fn require_account_open(
     subject: &str,
     errors: &mut Vec<ValidationError>,
 ) -> bool {
-    if state.accounts.contains_key(account) {
+    if is_opened_by(state, account, date) {
         return true;
     }
     push_account_not_open(state, account, date, subject, errors);

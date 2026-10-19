@@ -22,7 +22,9 @@ use rust_decimal::Decimal;
 
 /// The per-unit price of a total price `total` paid for `units` (`@@` → `@`).
 ///
-/// `total / |units|`, rounded once. The one rule behind every `@@` → `@`
+/// `total / |units|`, divided as beancount's parser divides it
+/// ([`crate::py_div`], #2652): `10 @@` over 4 units is `2.5`, over 3 is
+/// `3.333333333333333333333333333`. The one rule behind every `@@` → `@`
 /// conversion: [`extract_per_unit_price`], the booking crate's
 /// `normalize_prices`, and booking's split of a multi-lot reduction, where
 /// each split posting carries the per-unit price of the WHOLE sale (#2569).
@@ -31,17 +33,15 @@ use rust_decimal::Decimal;
 ///
 /// `None` when the units are zero, when the quotient leaves `Decimal`'s range
 /// (where a bare `/` panics, #2340), and when a nonzero total divides to zero:
-/// a quotient below `Decimal`'s `1e-28` floor rounds to `0` without failing,
-/// and a price of zero for money actually paid is a fabricated number, not a
-/// rounding. Each caller keeps what it had instead.
+/// a quotient below half of `Decimal`'s `1e-28` floor has no `Decimal` but
+/// zero, and a price of zero for money actually paid is a fabricated number,
+/// not a rounding (`py_div` refuses it). Each caller keeps what it had instead.
 #[must_use]
 pub fn per_unit_price(total: Decimal, units: Decimal) -> Option<Decimal> {
     if units.is_zero() {
         return None;
     }
-    total
-        .checked_div(units.abs())
-        .filter(|per_unit| !per_unit.is_zero() || total.is_zero())
+    crate::py_div(total, units.abs())
 }
 
 /// Decide the per-unit price implied by a posting and the quote
@@ -129,8 +129,10 @@ pub fn extract_per_unit_price<T>(
                 return Some((b.per_unit, currency));
             }
             Some(crate::CostNumber::Total { value: total }) if !units_number.is_zero() => {
-                // Checked for the same reason as the annotation above (#2340).
-                if let Some(per_unit) = total.checked_div(units_number.abs()) {
+                // Checked for the same reason as the annotation above (#2340),
+                // and divided as booking divides a `{{T}}` (#2652), so the price
+                // matches the lot's booked cost.
+                if let Some(per_unit) = crate::py_div(total, units_number.abs()) {
                     return Some((per_unit, currency));
                 }
             }

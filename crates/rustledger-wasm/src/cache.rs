@@ -256,11 +256,18 @@ use crate::types::{Error, LedgerOptions};
 /// a blank line or comment (#2628), and `\b` / `\f` in strings decode to
 /// U+0008 / U+000C (#2672). Parsed directives changed, so a v45 blob would
 /// serve the misplaced comment and the old strings.
-/// v47: loader v41, a file's includes resolve next to the path it was opened
+/// v47: a per-unit number booking derives from a total (`{{T}}`,
+/// `{per # total}`, `@@`, an interpolated `{}` cost) is divided as Python's
+/// `decimal` divides it (#2652): `{{10 USD}}` over 4 units is `2.5`, not
+/// `2.50`, and over 3 is `3.333333333333333333333333333` (28 significant
+/// digits), not `3.3333333333333333333333333333`. Loader v40, unchanged --
+/// parsed directives did not move. `Ledger` archives booked directives, so a
+/// v46 blob would serve the old per-unit costs and prices.
+/// v48: loader v41, a file's includes resolve next to the path it was opened
 /// by, symlinks kept (#2635); `HostFs` no longer resolves them next to the
-/// `realpath`. A v46 blob of a ledger reached through a symlink would serve
+/// `realpath`. A v47 blob of a ledger reached through a symlink would serve
 /// the directives of the files next to the link's target.
-pub const CACHE_VERSION: u32 = 47;
+pub const CACHE_VERSION: u32 = 48;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

@@ -41,6 +41,7 @@ fn cell(value: &Value) -> String {
         Value::Amount(a) => a.to_string(),
         Value::Position(p) => p.to_string(),
         Value::Inventory(inv) => inv.to_string(),
+        Value::Boolean(b) => if *b { "TRUE" } else { "FALSE" }.to_string(),
         Value::Null => String::new(),
         other => format!("{other:?}"),
     }
@@ -145,7 +146,6 @@ fn constructs_rledger_cannot_express_are_refused() {
         ("SELECT account WHERE account ~ 'Bank(?!-)'", "lookahead"),
         ("SELECT account WHERE account ~ '(?<=:)Bank'", "lookbehind"),
         (r"SELECT account WHERE account ~ '(a)\1'", "backreference"),
-        (r"SELECT account WHERE account ~ 'Bank\b'", r"\b"),
         ("SELECT account FROM has_account('Bank(?=-)')", "lookahead"),
         ("JOURNAL 'Bank(?!-)'", "lookahead"),
         ("SELECT grep('a(?=t)', narration)", "lookahead"),
@@ -236,4 +236,163 @@ fn has_account_and_journal_ignore_case() {
             .collect::<Vec<_>>(),
         ["Assets:Bank-Card"]
     );
+}
+
+/// Narrations with each kind of character the two engines' word definitions
+/// disagree on (a decomposed accent, a Devanagari vowel sign, an emoji
+/// zero-width joiner, a superscript) on the `!` transactions; the `*` ones
+/// hold none.
+const WORDS: &str = "2024-01-01 open Assets:Cash USD
+2024-01-01 open Expenses:Coffee USD
+2024-01-02 * \"black coffee\" #t0
+  Expenses:Coffee  1.00 USD
+  Assets:Cash  -1.00 USD
+2024-01-03 * \"th\u{e9} coffee\" #t1
+  Expenses:Coffee  1.00 USD
+  Assets:Cash  -1.00 USD
+2024-01-04 ! \"cafe\u{301} coffee\" #t2
+  Expenses:Coffee  1.00 USD
+  Assets:Cash  -1.00 USD
+2024-01-05 ! \"\u{91a}\u{93e}\u{92f} coffee\" #t3
+  Expenses:Coffee  1.00 USD
+  Assets:Cash  -1.00 USD
+2024-01-06 ! \"\u{1f468}\u{200d}\u{1f469} coffee\" #t4
+  Expenses:Coffee  1.00 USD
+  Assets:Cash  -1.00 USD
+2024-01-07 ! \"x\u{b2} coffee\" #t5
+  Expenses:Coffee  1.00 USD
+  Assets:Cash  -1.00 USD
+2024-01-08 * \"coffeehouse\" #t6
+  Expenses:Coffee  1.00 USD
+  Assets:Cash  -1.00 USD
+";
+
+/// An account with a decomposed accent, which beancount accepts.
+const ACCENTED_ACCOUNT: &str = "2024-01-01 open Assets:Cash USD
+2024-01-01 open Expenses:Cafe\u{301} USD
+2024-01-02 * \"x\"
+  Expenses:Cafe\u{301}  1.00 USD
+  Assets:Cash  -1.00 USD
+";
+
+/// `\b` and `\B` answer as bean-query does where the text lets them answer
+/// exactly, and are refused, naming the character, where it does not
+/// (#2656). Expected rows are bean-query's.
+#[test]
+fn word_boundaries_answer_exactly_or_refuse() {
+    // `*` rows: ASCII and a precomposed `é`, a word character to both.
+    assert_eq!(
+        rows(
+            WORDS,
+            r"SELECT date, narration ~ '\bcoffee\b' WHERE flag = '*'"
+        ),
+        table(&[
+            &["2024-01-02", "TRUE"],
+            &["2024-01-02", "TRUE"],
+            &["2024-01-03", "TRUE"],
+            &["2024-01-03", "TRUE"],
+            &["2024-01-08", "FALSE"],
+            &["2024-01-08", "FALSE"],
+        ])
+    );
+    assert_eq!(
+        rows(
+            WORDS,
+            r"SELECT date, narration !~ '\bcoffee\b' WHERE flag = '*'"
+        )
+        .iter()
+        .map(|r| r[1].clone())
+        .collect::<Vec<_>>(),
+        ["FALSE", "FALSE", "FALSE", "FALSE", "TRUE", "TRUE"]
+    );
+    assert_eq!(
+        rows(
+            WORDS,
+            r"SELECT date, narration ~ '\Bfee\b' WHERE flag = '*'"
+        )
+        .iter()
+        .map(|r| r[1].clone())
+        .collect::<Vec<_>>(),
+        ["TRUE", "TRUE", "TRUE", "TRUE", "FALSE", "FALSE"]
+    );
+    assert_eq!(
+        rows(
+            WORDS,
+            r"SELECT grep('\bcof\w+', narration), grepn('(\w+) (coffee)\b', narration, 1), subst('\bcoffee\b', 'tea', narration) WHERE flag = '*'"
+        ),
+        table(&[
+            &["coffee", "black", "black tea"],
+            &["coffee", "black", "black tea"],
+            &["coffee", "th\u{e9}", "th\u{e9} tea"],
+            &["coffee", "th\u{e9}", "th\u{e9} tea"],
+            &["coffeehouse", "", "coffeehouse"],
+            &["coffeehouse", "", "coffeehouse"],
+        ])
+    );
+    // `AND` stops at a false left operand, as bean-query's does, so the `!`
+    // rows' narrations are never matched.
+    assert_eq!(
+        rows(
+            WORDS,
+            r"SELECT date WHERE flag = '*' AND narration ~ '\bcoffee\b'"
+        )
+        .len(),
+        4
+    );
+    // `(?a)`: ASCII word boundaries, exact on any text.
+    assert_eq!(
+        rows(WORDS, r"SELECT narration ~ '(?a)\bcoffee\b'")
+            .iter()
+            .filter(|r| r[0] == "TRUE")
+            .count(),
+        12
+    );
+    // Each site refuses a text holding a character it cannot classify the
+    // way Python does, naming it.
+    for (query, character) in [
+        (r"SELECT date WHERE narration ~ '\bcoffee\b'", "U+0301"),
+        (
+            r"SELECT date WHERE narration !~ '\bcoffee\b' AND flag = '!'",
+            "U+0301",
+        ),
+        (
+            r"SELECT grep('\bcof', narration) WHERE date = 2024-01-05",
+            "U+093E",
+        ),
+        (
+            r"SELECT grepn('(\bcof)', narration, 1) WHERE date = 2024-01-06",
+            "U+200D",
+        ),
+        (
+            r"SELECT subst('\bcoffee', 'tea', narration) WHERE date = 2024-01-07",
+            "U+00B2",
+        ),
+        (
+            r"SELECT findfirst('\bx', narration) WHERE date = 2024-01-07",
+            "U+00B2",
+        ),
+    ] {
+        let err = run(WORDS, query).expect_err(query);
+        assert!(
+            err.contains(character) && err.contains(r"(?a)\b"),
+            "{query}: {err}"
+        );
+    }
+    // has_account answers when an account it can match exactly matches,
+    // as Python's `any` does whatever order it tries them in.
+    assert_eq!(
+        rows(
+            ACCENTED_ACCOUNT,
+            r"SELECT account FROM has_account('\bCash\b')"
+        )
+        .len(),
+        2
+    );
+    for query in [
+        r"SELECT account FROM has_account('\bCafe\b')",
+        r"JOURNAL '\bCash\b'",
+    ] {
+        let err = run(ACCENTED_ACCOUNT, query).expect_err(query);
+        assert!(err.contains("U+0301"), "{query}: {err}");
+    }
 }

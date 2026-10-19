@@ -159,14 +159,28 @@ them in sorted order.
 A construct Python has and rledger's regex engine cannot express is an error
 naming it, never a different match: lookahead and lookbehind,
 backreferences, conditional and atomic groups, possessive quantifiers,
-`\N{...}`, the `(?a)` and `(?x)` flags, and the word boundaries `\b` and `\B`
-(Python defines a word character differently from rledger's engine on some
-non-ASCII characters, so `\b` cannot be given Python's meaning). `subst`
+`\N{...}`, and the `(?x)` flag. `subst`
 also refuses a pattern that can match the empty string, which `re.sub`
 replaces differently. Two divergences remain, on non-ASCII or multi-line
 text only: case folding is Unicode simple case folding (Python also matches
 `i` with the dotless `ı`), and `$` matches only at the very end, where
 Python's also matches before a final newline.
+
+`\b` and `\B` match where Python's do wherever that can be decided exactly.
+Python and rledger's regex engine disagree on whether some 13,000
+non-ASCII characters are word characters (combining accents written
+separately, vowel signs, emoji joiners, superscripts, and characters newer
+than an older Python's Unicode), so a pattern with `\b` or `\B` refuses a
+text holding one of them, naming it (`the text contains U+0301 ...`), rather
+than answering differently. On any other text the answer is Python's, in
+every Python from 3.9 to 3.14. `(?a)\b` is the ASCII word boundary, which
+both agree on everywhere: it never refuses. `(?a)` also makes `\d`, `\s` and
+`\w` ASCII, and folds only ASCII letters when ignoring case. `\B` alone on an
+empty text is refused too, since Python 3.14 matches it there and earlier
+Pythons do not.
+In a query, `AND` and `OR` stop at a left operand that decides them, as
+bean-query's do, so `flag = '*' AND narration ~ '\bx'` only matches the
+narrations of the rows it keeps.
 
 ### Logical Operators
 

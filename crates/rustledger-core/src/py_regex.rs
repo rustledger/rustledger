@@ -19,7 +19,7 @@
 //! - a construct Python has and `regex` cannot express is
 //!   [`PyRegexError::Unsupported`], naming it (lookahead, lookbehind,
 //!   backreferences, conditionals, atomic groups, possessive quantifiers,
-//!   `\N{...}`, the ASCII flag, `\b`/`\B`);
+//!   `\N{...}`, the verbose flag);
 //! - a pattern Python itself rejects is [`PyRegexError::Invalid`].
 //!
 //! Two exceptions, reported as unsupported rather than invalid: a lookbehind
@@ -29,9 +29,21 @@
 //!
 //! `\d`, `\s` and `\w` are written as the classes Python means by them
 //! (`\w` is `str.isalnum()` or `_`, `\s` is `str.isspace()`), not `regex`'s,
-//! which differ on some non-ASCII characters. `\b` and `\B` are refused
-//! rather than approximated: a word boundary is defined by `\w`, and `regex`
-//! cannot be given Python's definition of it.
+//! which differ on some non-ASCII characters.
+//!
+//! `\b` and `\B` are `regex`'s word boundaries, and exact where they are
+//! answered (#2656): a word boundary is defined by the word characters, and
+//! `regex`'s (`\w`: alphabetic, marks, decimal digits, connector
+//! punctuation, joiners) are not Python's (`str.isalnum()` or `_`) on a few
+//! thousand code points, nor are Python's the same from one Unicode version
+//! to the next. The code points where any of Python 3.9 to 3.14 and `regex`
+//! disagree are checked in ([`word_disagrees`]), and a pattern with a word
+//! boundary refuses to match a text holding one ([`WordBoundaryError`]);
+//! anywhere else the two agree on every character, so the match is Python's.
+//! Under `(?a)` (`re.ASCII`) the word characters are `[0-9A-Za-z_]` for both,
+//! so `(?a)\b` is exact on any text, with nothing to check. `re.ASCII` also
+//! makes `\d`, `\s` and `\w` ASCII and folds only ASCII letters under
+//! `(?i)`, which is written out letter by letter.
 //!
 //! Deliberate divergences, both on non-ASCII input only: with `(?i)`, the
 //! case folding is `regex`'s Unicode simple case folding, which differs from
@@ -83,6 +95,12 @@ const SPACE: &str = r"\s\x1C-\x1F";
 /// Python's `\w` for a `str` pattern: `str.isalnum()` (letters and numbers)
 /// or `_`.
 const WORD: &str = r"\p{L}\p{N}_";
+/// `\d` under `re.ASCII`.
+const ASCII_DIGIT: &str = "0-9";
+/// `\s` under `re.ASCII`: space, `\t`, `\n`, `\r`, `\v`, `\f`.
+const ASCII_SPACE: &str = r" \t\n\r\x0B\x0C";
+/// `\w` under `re.ASCII`, which is also `regex`'s ASCII word class.
+const ASCII_WORD: &str = "0-9A-Za-z_";
 
 /// `pattern`, a Python regular expression, written in `regex` syntax with the
 /// same meaning.
@@ -93,10 +111,22 @@ const WORD: &str = r"\p{L}\p{N}_";
 /// regex engine cannot express, [`PyRegexError::Invalid`] when Python's `re`
 /// would reject it too.
 pub fn translate(pattern: &str) -> Result<String, PyRegexError> {
-    Ok(parse(pattern)?.out)
+    Ok(parse(pattern, Options::default())?.out)
 }
 
-fn parse(pattern: &str) -> Result<Parser, PyRegexError> {
+/// How [`parse`] reads a pattern beyond its own text.
+#[derive(Clone, Copy, Default)]
+struct Options {
+    /// The pattern is compiled with `re.IGNORECASE`, as bean-query's `~` is.
+    ignore_case: bool,
+    /// Write `\b` and `\B` as nothing: an assertion dropped, so the pattern
+    /// matches at least where it did. `compile_sub` uses it to ask whether a
+    /// pattern can match the empty string anywhere, word boundaries
+    /// included.
+    boundaries_as_empty: bool,
+}
+
+fn parse(pattern: &str, options: Options) -> Result<Parser, PyRegexError> {
     let mut parser = Parser {
         chars: pattern.chars().collect(),
         pos: 0,
@@ -106,6 +136,11 @@ fn parse(pattern: &str) -> Result<Parser, PyRegexError> {
         loops: Vec::new(),
         max_condition_ref: 0,
         lookbehind: None,
+        ascii: false,
+        ignore_case: options.ignore_case,
+        word_check: false,
+        boundaries_as_empty: options.boundaries_as_empty,
+        non_boundary: false,
     };
     parser.global_flags()?;
     parser.alternation(0, false)?;
@@ -125,12 +160,212 @@ fn parse(pattern: &str) -> Result<Parser, PyRegexError> {
     Ok(parser)
 }
 
+/// A pattern compiled for Python's `re`, matched only through methods that
+/// keep the answer Python's.
+///
+/// A pattern with a Unicode word boundary (`\b` or `\B`) is written with
+/// `regex`'s `\b`, whose word characters are not Python's on a few thousand
+/// code points (combining marks, `²`, emoji joiners, ...). Before such a
+/// pattern is matched, the text is scanned for those code points
+/// ([`word_disagrees`]); where none occurs the two definitions agree on
+/// every character, so every boundary, and the match, is Python's. Where one
+/// occurs the match is refused ([`WordBoundaryError`]) rather than answered
+/// differently (#2656). A pattern without one, or with `(?a)`'s ASCII
+/// boundary, matches as written.
+#[derive(Debug, Clone)]
+pub struct PyRegex {
+    regex: regex::Regex,
+    word_check: bool,
+    non_boundary: bool,
+}
+
+/// A match refused because the text holds a character whose word-ness
+/// Python and rledger's regex engine disagree on, which a Unicode word
+/// boundary in the pattern depends on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WordBoundaryError {
+    /// The text holds `character`, the first character in it whose word-ness
+    /// Python and rledger disagree on.
+    Character(char),
+    /// `\B` on an empty text: Python 3.14 matches it, as rledger would, and
+    /// Pythons before 3.14 never do.
+    EmptyText,
+}
+
+impl fmt::Display for WordBoundaryError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let Self::Character(character) = self else {
+            return write!(
+                f,
+                "`\\B` cannot be evaluated on an empty text: Python 3.14 matches it there \
+                 and earlier Pythons do not"
+            );
+        };
+        write!(
+            f,
+            "a word boundary (`\\b` or `\\B`) cannot be evaluated exactly: the text contains \
+             U+{:04X}, which Python's `re` and rledger classify differently as a word character; \
+             use `(?a)\\b` for ASCII word boundaries",
+            u32::from(*character)
+        )
+    }
+}
+
+impl std::error::Error for WordBoundaryError {}
+
+impl PyRegex {
+    const fn new(regex: regex::Regex, parser: &Parser) -> Self {
+        Self {
+            regex,
+            word_check: parser.word_check,
+            non_boundary: parser.non_boundary,
+        }
+    }
+
+    /// Whether the pattern holds a Unicode word boundary, so matching it
+    /// scans the text first.
+    #[must_use]
+    pub const fn needs_word_check(&self) -> bool {
+        self.word_check
+    }
+
+    /// Refuse `haystack` when the pattern's word boundaries cannot be
+    /// evaluated on it exactly.
+    ///
+    /// # Errors
+    ///
+    /// [`WordBoundaryError`], naming the first character Python and rledger
+    /// classify differently, when the pattern has a Unicode word boundary;
+    /// or when it has a `\B` and the text is empty, where Pythons disagree.
+    pub fn check(&self, haystack: &str) -> Result<(), WordBoundaryError> {
+        if self.non_boundary && haystack.is_empty() {
+            return Err(WordBoundaryError::EmptyText);
+        }
+        if !self.word_check {
+            return Ok(());
+        }
+        match haystack.chars().find(|&c| word_disagrees(c)) {
+            Some(character) => Err(WordBoundaryError::Character(character)),
+            None => Ok(()),
+        }
+    }
+
+    /// Whether the pattern matches `haystack`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::check`].
+    pub fn is_match(&self, haystack: &str) -> Result<bool, WordBoundaryError> {
+        self.check(haystack)?;
+        Ok(self.regex.is_match(haystack))
+    }
+
+    /// The leftmost match in `haystack`.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::check`].
+    pub fn find<'h>(
+        &self,
+        haystack: &'h str,
+    ) -> Result<Option<regex::Match<'h>>, WordBoundaryError> {
+        self.check(haystack)?;
+        Ok(self.regex.find(haystack))
+    }
+
+    /// The leftmost match in `haystack`, with its groups.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::check`].
+    pub fn captures<'h>(
+        &self,
+        haystack: &'h str,
+    ) -> Result<Option<regex::Captures<'h>>, WordBoundaryError> {
+        self.check(haystack)?;
+        Ok(self.regex.captures(haystack))
+    }
+
+    /// Every match in `haystack` replaced by `replacement`, in `regex`'s
+    /// replacement syntax ([`translate_replacement`]).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::check`].
+    pub fn replace_all<'h>(
+        &self,
+        haystack: &'h str,
+        replacement: &str,
+    ) -> Result<std::borrow::Cow<'h, str>, WordBoundaryError> {
+        self.check(haystack)?;
+        Ok(self.regex.replace_all(haystack, replacement))
+    }
+
+    /// Whether the pattern matches any of `haystacks`, as Python's
+    /// `any(re.search(...) for h in haystacks)` answers whatever order it
+    /// tries them in: true when it matches one it can answer exactly,
+    /// otherwise refused when one could not be answered.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::check`], for a haystack the answer depends on.
+    pub fn is_match_any<'h>(
+        &self,
+        haystacks: impl IntoIterator<Item = &'h str>,
+    ) -> Result<bool, WordBoundaryError> {
+        let mut refused = None;
+        for haystack in haystacks {
+            match self.is_match(haystack) {
+                Ok(true) => return Ok(true),
+                Ok(false) => {}
+                Err(error) => {
+                    refused.get_or_insert(error);
+                }
+            }
+        }
+        refused.map_or(Ok(false), Err)
+    }
+
+    /// The number of groups, the whole match included, as Python counts
+    /// them plus one.
+    #[must_use]
+    pub fn captures_len(&self) -> usize {
+        self.regex.captures_len()
+    }
+}
+
+/// Whether Python's `re` and the `regex` crate disagree on whether `c` is a
+/// word character, in any Python from 3.9 to 3.14
+/// (a table generated by `scripts/gen-py-regex-word-tables.py`). ASCII never
+/// is.
+#[must_use]
+pub fn word_disagrees(c: char) -> bool {
+    !c.is_ascii() && in_ranges(word_tables::WORD_DISAGREE, u32::from(c))
+}
+
+fn in_ranges(ranges: &[(u32, u32)], code: u32) -> bool {
+    ranges
+        .binary_search_by(|&(lo, hi)| {
+            if hi < code {
+                std::cmp::Ordering::Less
+            } else if lo > code {
+                std::cmp::Ordering::Greater
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .is_ok()
+}
+
+#[path = "py_regex_word_tables.rs"]
+mod word_tables;
+
 /// A pattern compiled for Python's `re.sub`, with what a replacement
 /// template needs to know about its groups.
 #[derive(Debug)]
 pub struct SubPattern {
     /// The compiled pattern.
-    pub regex: regex::Regex,
+    pub regex: PyRegex,
     /// Capturing groups, by number (1-based), as Python numbers them: a
     /// group inside a `{0}` repetition still counts.
     groups: Vec<GroupInfo>,
@@ -148,12 +383,21 @@ pub struct SubPattern {
 ///
 /// As [`compile_match`], and the empty-match case above.
 pub fn compile_sub(pattern: &str) -> Result<SubPattern, PyRegexError> {
-    let parser = parse(pattern)?;
+    let parser = parse(pattern, Options::default())?;
     let regex = compile(&parser.out)?;
-    // With lookaround and word boundaries refused, every assertion left
-    // (`^`, `$`, `\A`, `\z`) holds in the empty string, so a pattern that
-    // can match empty anywhere matches the empty string itself.
-    if regex.is_match("") {
+    // The same pattern with its word boundaries dropped matches at least
+    // where the pattern does. With lookaround refused, every assertion left
+    // in it (`^`, `$`, `\A`, `\z`) holds in the empty string, so if it can
+    // match empty anywhere it matches the empty string itself: `\bx*`
+    // matches empty after a word, where `x*` matches "".
+    let probe = parse(
+        pattern,
+        Options {
+            boundaries_as_empty: true,
+            ..Options::default()
+        },
+    )?;
+    if compile(&probe.out)?.is_match("") {
         return unsupported(
             "a pattern that can match an empty string (Python's `re.sub` replaces empty matches differently)",
         );
@@ -163,8 +407,8 @@ pub fn compile_sub(pattern: &str) -> Result<SubPattern, PyRegexError> {
     // `regex` drops the empty iteration and takes a branch that consumes
     // text (`b(?:a?|c)*` on `bac` stops after `a` in Python and runs to the end here), and a
     // group in it keeps a different last value.
-    for &(start, end) in &parser.loops {
-        let body = &parser.out[start..end];
+    for &(start, end) in &probe.loops {
+        let body = &probe.out[start..end];
         if compile(&format!("^(?:{body})$"))?.is_match("") {
             return unsupported(
                 "a repetition whose body can match an empty string (Python's engine ends such a loop where rledger's goes on)",
@@ -172,7 +416,7 @@ pub fn compile_sub(pattern: &str) -> Result<SubPattern, PyRegexError> {
         }
     }
     Ok(SubPattern {
-        regex,
+        regex: PyRegex::new(regex, &parser),
         groups: parser.groups,
     })
 }
@@ -184,8 +428,12 @@ pub fn compile_sub(pattern: &str) -> Result<SubPattern, PyRegexError> {
 ///
 /// As [`translate`], or [`PyRegexError::Unsupported`] when the translation is
 /// too large for rledger's regex engine.
-pub fn compile_match(pattern: &str) -> Result<regex::Regex, PyRegexError> {
-    compile(&format!("^(?:{})", translate(pattern)?))
+pub fn compile_match(pattern: &str) -> Result<PyRegex, PyRegexError> {
+    let parser = parse(pattern, Options::default())?;
+    Ok(PyRegex::new(
+        compile(&format!("^(?:{})", parser.out))?,
+        &parser,
+    ))
 }
 
 /// Compile `pattern` for Python's `re.search` / `re.sub`: matches anywhere.
@@ -193,8 +441,9 @@ pub fn compile_match(pattern: &str) -> Result<regex::Regex, PyRegexError> {
 /// # Errors
 ///
 /// As [`compile_match`].
-pub fn compile_search(pattern: &str) -> Result<regex::Regex, PyRegexError> {
-    compile(&translate(pattern)?)
+pub fn compile_search(pattern: &str) -> Result<PyRegex, PyRegexError> {
+    let parser = parse(pattern, Options::default())?;
+    Ok(PyRegex::new(compile(&parser.out)?, &parser))
 }
 
 /// Compile `pattern` for Python's `re.search(pattern, s, re.IGNORECASE)`.
@@ -205,11 +454,19 @@ pub fn compile_search(pattern: &str) -> Result<regex::Regex, PyRegexError> {
 /// # Errors
 ///
 /// As [`compile_match`].
-pub fn compile_search_ignore_case(pattern: &str) -> Result<regex::Regex, PyRegexError> {
-    regex::RegexBuilder::new(&translate(pattern)?)
+pub fn compile_search_ignore_case(pattern: &str) -> Result<PyRegex, PyRegexError> {
+    let parser = parse(
+        pattern,
+        Options {
+            ignore_case: true,
+            ..Options::default()
+        },
+    )?;
+    let regex = regex::RegexBuilder::new(&parser.out)
         .case_insensitive(true)
         .build()
-        .map_err(|e| too_large(&e))
+        .map_err(|e| too_large(&e))?;
+    Ok(PyRegex::new(regex, &parser))
 }
 
 fn compile(translated: &str) -> Result<regex::Regex, PyRegexError> {
@@ -387,6 +644,18 @@ struct Parser {
     max_condition_ref: usize,
     /// Inside a lookbehind: the number of groups opened before it.
     lookbehind: Option<usize>,
+    /// `re.ASCII` is in effect here (`(?a)`, or a scoped `(?a:...)`).
+    ascii: bool,
+    /// `re.IGNORECASE` is in effect here.
+    ignore_case: bool,
+    /// A Unicode word boundary was written: matching scans the text
+    /// ([`PyRegex::check`]).
+    word_check: bool,
+    /// See [`Options::boundaries_as_empty`].
+    boundaries_as_empty: bool,
+    /// A `\B` was written, whose answer on an empty text depends on the
+    /// Python version ([`WordBoundaryError::EmptyText`]).
+    non_boundary: bool,
 }
 
 /// What the parser learned about one capturing group.
@@ -427,8 +696,38 @@ impl Parser {
     }
 
     fn push_literal(&mut self, c: char) {
-        self.out
-            .push_str(&regex::escape(c.encode_utf8(&mut [0; 4])));
+        let escaped = regex::escape(c.encode_utf8(&mut [0; 4]));
+        if self.ascii && self.ignore_case {
+            // `re.ASCII | re.IGNORECASE` folds ASCII letters only; `regex`'s
+            // Unicode folding would also match `k` with the Kelvin sign and
+            // `é` with `É`. So the case is spelled out, and folding is off.
+            if c.is_ascii_alphabetic() {
+                write!(
+                    self.out,
+                    "(?-i:[{}{}])",
+                    c.to_ascii_lowercase(),
+                    c.to_ascii_uppercase()
+                )
+            } else {
+                write!(self.out, "(?-i:{escaped})")
+            }
+            .expect("writing to a String cannot fail");
+        } else {
+            self.out.push_str(&escaped);
+        }
+    }
+
+    /// One of Python's classes (`\d`, `\s`, `\w`) as written in this scope:
+    /// its ASCII form under `re.ASCII`, whose case folding is ASCII too.
+    fn push_class_escape(&mut self, unicode: &str, ascii: &str, negated: bool) {
+        let caret = if negated { "^" } else { "" };
+        if self.ascii {
+            // A class `regex` folds would gain the Kelvin sign and `ſ`.
+            write!(self.out, "(?-i:[{caret}{ascii}])")
+        } else {
+            write!(self.out, "[{caret}{unicode}]")
+        }
+        .expect("writing to a String cannot fail");
     }
 
     /// Global inline flags, `(?i)` and the like, which Python accepts only at
@@ -449,6 +748,12 @@ impl Parser {
             }
             let flags: String = self.chars[self.pos + 2..end].iter().collect();
             let rust = self.flags(&flags)?;
+            if flags.contains('a') {
+                self.ascii = true;
+            }
+            if flags.contains('i') {
+                self.ignore_case = true;
+            }
             if !rust.is_empty() {
                 write!(self.out, "(?{rust})").expect("writing to a String cannot fail");
             }
@@ -458,7 +763,7 @@ impl Parser {
     }
 
     /// Python flag letters as `regex` flags, or why they cannot be.
-    fn flags(&mut self, letters: &str) -> Result<String, PyRegexError> {
+    fn flags(&self, letters: &str) -> Result<String, PyRegexError> {
         if letters.contains('a') && letters.contains('u') {
             return invalid("bad inline flags: flags 'a', 'u' and 'L' are incompatible");
         }
@@ -468,9 +773,9 @@ impl Parser {
                 // A repeated letter is accepted, as Python accepts `(?ii)`.
                 'i' | 'm' | 's' if rust.contains(c) => {}
                 'i' | 'm' | 's' => rust.push(c),
-                // Unicode matching is already the default for `str` patterns.
-                'u' => {}
-                'a' => self.defer("the ASCII flag `(?a)`"),
+                // Unicode matching is already the default for `str` patterns;
+                // the ASCII flag is a state of the parser (`self.ascii`).
+                'u' | 'a' => {}
                 'x' => return unsupported("the verbose flag `(?x)`"),
                 'L' => return invalid("bad inline flags: cannot use 'L' flag with a str pattern"),
                 c => return invalid(format!("unknown flag '{c}'")),
@@ -843,14 +1148,29 @@ impl Parser {
         }
         // Turning verbose mode off is a no-op here.
         let off: String = off.chars().filter(|&c| c != 'x').collect();
-        let on = self.flags(&on)?;
-        let off = self.flags(&off)?;
-        if off.is_empty() {
-            write!(self.out, "(?{on}:").expect("writing to a String cannot fail");
-        } else {
-            write!(self.out, "(?{on}-{off}:").expect("writing to a String cannot fail");
+        let saved = (self.ascii, self.ignore_case);
+        if on.contains('a') {
+            self.ascii = true;
         }
-        self.group_body(depth).map(|_| ())
+        if on.contains('u') {
+            self.ascii = false;
+        }
+        if on.contains('i') {
+            self.ignore_case = true;
+        }
+        if off.contains('i') {
+            self.ignore_case = false;
+        }
+        let rust_on = self.flags(&on)?;
+        let rust_off = self.flags(&off)?;
+        if rust_off.is_empty() {
+            write!(self.out, "(?{rust_on}:").expect("writing to a String cannot fail");
+        } else {
+            write!(self.out, "(?{rust_on}-{rust_off}:").expect("writing to a String cannot fail");
+        }
+        let result = self.group_body(depth).map(|_| ());
+        (self.ascii, self.ignore_case) = saved;
+        result
     }
 
     /// The body of a group through its `)`; returns its branch count.
@@ -920,17 +1240,36 @@ impl Parser {
                 return Ok(Last::Nothing);
             }
             'b' | 'B' => {
-                self.defer(&format!(
-                    "a word boundary `\\{c}` (Python defines words by its `\\w`, which rledger's engine cannot use for boundaries)"
-                ));
+                if c == 'B' {
+                    self.non_boundary = true;
+                }
+                if self.boundaries_as_empty {
+                    // Nothing written: see `Options::boundaries_as_empty`.
+                } else if self.ascii {
+                    // `re.ASCII`'s word characters are `[0-9A-Za-z_]`, which
+                    // are `regex`'s ASCII ones: exact, nothing to check.
+                    write!(self.out, "(?-u:\\{c})").expect("writing to a String cannot fail");
+                } else {
+                    // Exact wherever the text has no character the two
+                    // definitions of a word character disagree on, which
+                    // `PyRegex::check` makes sure of before each match.
+                    write!(self.out, "\\{c}").expect("writing to a String cannot fail");
+                    self.word_check = true;
+                }
                 return Ok(Last::Nothing);
             }
-            'd' => write!(self.out, "[{DIGIT}]"),
-            'D' => write!(self.out, "[^{DIGIT}]"),
-            's' => write!(self.out, "[{SPACE}]"),
-            'S' => write!(self.out, "[^{SPACE}]"),
-            'w' => write!(self.out, "[{WORD}]"),
-            'W' => write!(self.out, "[^{WORD}]"),
+            'd' | 'D' => {
+                self.push_class_escape(DIGIT, ASCII_DIGIT, c == 'D');
+                Ok::<(), fmt::Error>(())
+            }
+            's' | 'S' => {
+                self.push_class_escape(SPACE, ASCII_SPACE, c == 'S');
+                Ok::<(), fmt::Error>(())
+            }
+            'w' | 'W' => {
+                self.push_class_escape(WORD, ASCII_WORD, c == 'W');
+                Ok::<(), fmt::Error>(())
+            }
             '1'..='9' => {
                 // Three octal digits are an octal escape; anything else is a
                 // group reference.
@@ -1050,6 +1389,7 @@ impl Parser {
     /// POSIX classes or set operations.
     fn class(&mut self) -> Result<(), PyRegexError> {
         self.pos += 1; // `[`
+        let fold_ascii = self.ascii && self.ignore_case;
         let mut out = String::from("[");
         if self.peek() == Some('^') {
             self.pos += 1;
@@ -1079,12 +1419,26 @@ impl Parser {
                         out.push_str(&escape_class_char(lo));
                         out.push('-');
                         out.push_str(&escape_class_char(hi));
+                        if fold_ascii {
+                            // The other case of each ASCII letter in the
+                            // range, as `re.ASCII | re.IGNORECASE` matches.
+                            for letter in ('A'..='Z').chain('a'..='z') {
+                                if (lo..=hi).contains(&letter) {
+                                    out.push(swap_ascii_case(letter));
+                                }
+                            }
+                        }
                     }
                     _ => return invalid("bad character range"),
                 }
             } else {
                 match lo {
-                    Member::Char(c) => out.push_str(&escape_class_char(c)),
+                    Member::Char(c) => {
+                        out.push_str(&escape_class_char(c));
+                        if fold_ascii && c.is_ascii_alphabetic() {
+                            out.push(swap_ascii_case(c));
+                        }
+                    }
                     Member::Set(set) => out.push_str(set),
                     Member::NegatedSet(set) => {
                         write!(out, "[^{set}]").expect("writing to a String cannot fail");
@@ -1093,7 +1447,14 @@ impl Parser {
             }
         }
         out.push(']');
-        self.out.push_str(&out);
+        if fold_ascii {
+            // The class with both cases of its ASCII letters spelled out,
+            // matched without `regex`'s Unicode folding (see `push_literal`).
+            // A negated class negates the folded set, as `sre` does.
+            write!(self.out, "(?-i:{out})").expect("writing to a String cannot fail");
+        } else {
+            self.out.push_str(&out);
+        }
         Ok(())
     }
 
@@ -1109,13 +1470,14 @@ impl Parser {
             return invalid("unterminated character set");
         };
         self.pos += 1;
+        let pick = |unicode, ascii| if self.ascii { ascii } else { unicode };
         Ok(match e {
-            'd' => Member::Set(DIGIT),
-            'D' => Member::NegatedSet(DIGIT),
-            's' => Member::Set(SPACE),
-            'S' => Member::NegatedSet(SPACE),
-            'w' => Member::Set(WORD),
-            'W' => Member::NegatedSet(WORD),
+            'd' => Member::Set(pick(DIGIT, ASCII_DIGIT)),
+            'D' => Member::NegatedSet(pick(DIGIT, ASCII_DIGIT)),
+            's' => Member::Set(pick(SPACE, ASCII_SPACE)),
+            'S' => Member::NegatedSet(pick(SPACE, ASCII_SPACE)),
+            'w' => Member::Set(pick(WORD, ASCII_WORD)),
+            'W' => Member::NegatedSet(pick(WORD, ASCII_WORD)),
             // In a class an octal digit starts an octal escape of up to three
             // digits; it is never a backreference.
             '0'..='7' => {
@@ -1155,6 +1517,15 @@ enum Member {
     NegatedSet(&'static str),
 }
 
+/// The other case of an ASCII letter.
+const fn swap_ascii_case(c: char) -> char {
+    if c.is_ascii_lowercase() {
+        c.to_ascii_uppercase()
+    } else {
+        c.to_ascii_lowercase()
+    }
+}
+
 /// `c` as a `regex` class member, escaped when it is punctuation `regex`
 /// treats specially in a class (`[`, `]`, `-`, `^`, `&`, `~`, `\`, ...).
 fn escape_class_char(c: char) -> String {
@@ -1171,6 +1542,7 @@ mod tests {
         compile_match(pattern)
             .unwrap_or_else(|e| panic!("{pattern:?}: {e}"))
             .is_match(text)
+            .unwrap_or_else(|e| panic!("{pattern:?} on {text:?}: {e}"))
     }
 
     /// Each row's expected value is what Python 3.12's
@@ -1274,10 +1646,7 @@ mod tests {
             ("a*+", "possessive"),
             ("a{1,2}+", "possessive"),
             (r"\N{DIGIT ONE}", "named character escape"),
-            ("(?a)x", "ASCII flag"),
             ("(?x)x", "verbose flag"),
-            (r"\bx", "word boundary"),
-            (r"\Bx", "word boundary"),
         ] {
             match translate(pattern) {
                 Err(PyRegexError::Unsupported(what)) => {
@@ -1394,7 +1763,7 @@ mod tests {
             let re = compile_sub(pattern).unwrap();
             let rust = translate_replacement(template, &re).unwrap();
             assert_eq!(
-                re.regex.replace_all(text, rust.as_str()),
+                re.regex.replace_all(text, rust.as_str()).unwrap(),
                 want,
                 "{pattern:?} {template:?}"
             );
@@ -1479,7 +1848,11 @@ mod tests {
         ] {
             let regex =
                 compile_search_ignore_case(pattern).unwrap_or_else(|e| panic!("{pattern:?}: {e}"));
-            assert_eq!(regex.is_match(text), expected, "{pattern:?} on {text:?}");
+            assert_eq!(
+                regex.is_match(text).unwrap(),
+                expected,
+                "{pattern:?} on {text:?}"
+            );
         }
         assert!(matches!(
             compile_search_ignore_case("Bank(?!-)"),
@@ -1531,5 +1904,191 @@ mod tests {
                 "{pattern:?}"
             );
         }
+    }
+
+    /// Every code point the `regex` crate's `\w` matches, as sorted ranges:
+    /// each run of word characters in one string of all code points.
+    fn regex_word_ranges() -> Vec<(u32, u32)> {
+        let all: String = (0..=0x10_FFFF_u32).filter_map(char::from_u32).collect();
+        let word = regex::Regex::new(r"\w+").expect("a valid pattern");
+        word.find_iter(&all)
+            .map(|m| {
+                let mut chars = m.as_str().chars();
+                let first = u32::from(chars.next().expect("a non-empty match"));
+                let last = chars.next_back().map_or(first, u32::from);
+                (first, last)
+            })
+            .collect()
+    }
+
+    /// The code points where `table` disagrees with what the word-boundary
+    /// check needs: `regex`'s `\w` against the checked-in Python word set,
+    /// plus every code point whose word-ness varies between the Pythons.
+    fn word_table_mismatches(table: &[(u32, u32)]) -> Vec<u32> {
+        let regex_word = regex_word_ranges();
+        (0..=0x10_FFFF_u32)
+            .filter(|&c| char::from_u32(c).is_some())
+            .filter(|&c| {
+                let differs = in_ranges(&regex_word, c) != in_ranges(word_tables::PY_WORD, c)
+                    || in_ranges(word_tables::PY_WORD_VARIES, c);
+                in_ranges(table, c) != differs
+            })
+            .collect()
+    }
+
+    fn assert_sorted_disjoint(name: &str, ranges: &[(u32, u32)]) {
+        for pair in ranges.windows(2) {
+            assert!(
+                pair[0].0 <= pair[0].1 && pair[0].1 + 1 < pair[1].0,
+                "{name}: {pair:x?} is not sorted, disjoint and merged"
+            );
+        }
+    }
+
+    /// The guarantee behind every answered `\b`: walking all code points,
+    /// `WORD_DISAGREE` is exactly the set where `regex`'s `\w` and Python's
+    /// differ, in the checked-in Python 3.14 table or across Pythons 3.9 to
+    /// 3.14. A code point it missed would let a word boundary answer
+    /// differently from Python with no error.
+    #[test]
+    fn word_disagreement_table_is_exact() {
+        assert_sorted_disjoint("PY_WORD", word_tables::PY_WORD);
+        assert_sorted_disjoint("PY_WORD_VARIES", word_tables::PY_WORD_VARIES);
+        assert_sorted_disjoint("WORD_DISAGREE", word_tables::WORD_DISAGREE);
+        // A generated table, not an empty placeholder.
+        assert!(word_tables::PY_WORD.len() > 500);
+        assert!(word_tables::WORD_DISAGREE.len() > 100);
+        let mismatches = word_table_mismatches(word_tables::WORD_DISAGREE);
+        assert!(
+            mismatches.is_empty(),
+            "{} code points disagree with WORD_DISAGREE, first {:x?}; \
+             rerun scripts/gen-py-regex-word-tables.py",
+            mismatches.len(),
+            &mismatches[..mismatches.len().min(10)]
+        );
+        // ASCII agrees, so the check may skip it.
+        assert!(!word_tables::WORD_DISAGREE.iter().any(|&(lo, _)| lo < 0x80));
+    }
+
+    /// The exhaustive comparison cannot pass vacuously: dropping one code
+    /// point from the table, at either end of a range or alone, is found.
+    #[test]
+    fn word_disagreement_check_finds_a_missing_code_point() {
+        let table = word_tables::WORD_DISAGREE;
+        for index in [0, table.len() / 2, table.len() - 1] {
+            let (lo, hi) = table[index];
+            let mut shrunk = table.to_vec();
+            if lo == hi {
+                shrunk.remove(index);
+            } else {
+                shrunk[index] = (lo + 1, hi);
+            }
+            assert_eq!(
+                word_table_mismatches(&shrunk),
+                vec![lo],
+                "dropping U+{lo:04X}"
+            );
+        }
+    }
+
+    /// Writes `regex`'s `\w` ranges as JSON to `$PY_REGEX_DUMP`, for
+    /// `scripts/gen-py-regex-word-tables.py`.
+    #[test]
+    #[ignore = "run by scripts/gen-py-regex-word-tables.py"]
+    fn dump_regex_word_set() {
+        let path = std::env::var("PY_REGEX_DUMP").expect("PY_REGEX_DUMP names the output file");
+        let json: Vec<String> = regex_word_ranges()
+            .iter()
+            .map(|(lo, hi)| format!("[{lo},{hi}]"))
+            .collect();
+        std::fs::write(path, format!("[{}]", json.join(","))).expect("writes the dump");
+    }
+
+    /// Word boundaries answer as Python's `re.search` does (each expected
+    /// value checked with `CPython` 3.9 and 3.14, which agree on every row),
+    /// and refuse a text holding a character the two engines classify
+    /// differently (#2656).
+    #[test]
+    fn word_boundaries_are_exact_or_refused() {
+        let search = |pattern: &str, text: &str| {
+            compile_search(pattern)
+                .unwrap_or_else(|e| panic!("{pattern:?}: {e}"))
+                .is_match(text)
+        };
+        for (pattern, text, want) in [
+            (r"\bcoffee\b", "black coffee", true),
+            (r"\bcoffee\b", "coffeehouse", false),
+            // A precomposed `é` is a word character to both.
+            (r"\bcoffee\b", "th\u{e9} coffee", true),
+            (r"\bth\u00e9\b", "un th\u{e9} noir", true),
+            (r"\bthe", "\u{e9}the", false),
+            (r"\Bfee\b", "coffee", true),
+            (r"\Bcof", "coffee", false),
+            (r"\b", "", false),
+            // ASCII boundaries: `[0-9A-Za-z_]` for both, any text.
+            (r"(?a)\bcoffee\b", "cafe\u{301} coffee", true),
+            (r"(?a)\bcoffee\b", "cafe\u{301}coffee", true),
+            (r"(?a)\bthe", "\u{e9}the", true),
+            (r"(?a)x\B", "x\u{e9}", false),
+            (r"(?a)\Bx", "\u{e9}x", false),
+            // The rest of `re.ASCII`.
+            (r"(?a)\w", "\u{e9}", false),
+            (r"(?a)\W", "\u{e9}", true),
+            (r"(?a)\d", "\u{663}", false),
+            (r"(?a)\s", "\u{a0}", false),
+            (r"(?a:\w)(?u:\w)", "a\u{e9}", true),
+            (r"(?u)(?a:\w)", "\u{e9}", false),
+            // `re.ASCII | re.IGNORECASE` folds ASCII letters only.
+            (r"(?ai)k", "\u{212a}", false),
+            (r"(?i)k", "\u{212a}", true),
+            (r"(?ai)\u00e9", "\u{c9}", false),
+            (r"(?ai)[a-z]", "\u{17f}", false),
+            (r"(?ai)[^a]", "A", false),
+            (r"(?ai)[Z-a]", "z", true),
+            (r"(?ai)[Z-a]", "A", true),
+            (r"(?ai)\W", "\u{212a}", true),
+            (r"(?a)(?i:K)", "k", true),
+        ] {
+            assert_eq!(search(pattern, text), Ok(want), "{pattern:?} on {text:?}");
+        }
+        // bean-query's `~` is a case-insensitive search.
+        let tilde = compile_search_ignore_case(r"(?a)\bCOFFEE\b").unwrap();
+        assert_eq!(tilde.is_match("cafe\u{301} coffee"), Ok(true));
+        assert!(!tilde.needs_word_check());
+        for (text, character) in [
+            ("cafe\u{301} coffee", '\u{301}'),
+            ("\u{91a}\u{93e}\u{92f} coffee", '\u{93e}'),
+            ("\u{1f468}\u{200d}\u{1f469} coffee", '\u{200d}'),
+            ("x\u{b2} coffee", '\u{b2}'),
+        ] {
+            let error = search(r"\bcoffee\b", text).expect_err(text);
+            assert_eq!(error, WordBoundaryError::Character(character), "{text:?}");
+            let message = error.to_string();
+            assert!(
+                message.contains(&format!("U+{:04X}", u32::from(character)))
+                    && message.contains("(?a)"),
+                "{message}"
+            );
+        }
+        // `\B` alone on an empty text: Python 3.14 matches, 3.9 to 3.13 do not.
+        assert_eq!(search(r"\B", ""), Err(WordBoundaryError::EmptyText));
+        assert_eq!(search(r"(?a)\B", ""), Err(WordBoundaryError::EmptyText));
+        assert_eq!(search(r"\B", "ab"), Ok(true));
+        // `re.sub` and `re.match` check too.
+        let sub = compile_sub(r"\bx\b").unwrap();
+        assert_eq!(
+            sub.regex.replace_all("x y\u{301}", "z"),
+            Err(WordBoundaryError::Character('\u{301}'))
+        );
+        assert_eq!(
+            compile_match(r"x\b").unwrap().is_match("x\u{301}"),
+            Err(WordBoundaryError::Character('\u{301}'))
+        );
+        // A pattern that matches empty only at a word boundary is still one
+        // `re.sub` replaces differently.
+        assert!(matches!(
+            compile_sub(r"\bx*"),
+            Err(PyRegexError::Unsupported(_))
+        ));
     }
 }

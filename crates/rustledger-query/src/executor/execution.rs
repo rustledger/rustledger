@@ -1173,7 +1173,11 @@ impl Executor<'_> {
             };
             let regex = self.python_regex(&pattern, super::RegexMode::SearchIgnoreCase)?;
             return Ok(Value::Boolean(match row.get(accounts) {
-                Some(Value::StringSet(set)) => set.iter().any(|a| regex.is_match(a)),
+                Some(Value::StringSet(set)) => {
+                    regex
+                        .is_match_any(set.iter().map(String::as_str))
+                        .map_err(|e| super::word_boundary_error(&pattern, &e))?
+                }
                 _ => false,
             }));
         }
@@ -1294,6 +1298,9 @@ impl Executor<'_> {
             }
             Expr::BinaryOp(op) => {
                 let left = self.evaluate_subquery_expr(&op.left, row, column_map)?;
+                if let Some(value) = self.short_circuit(op.op, &left)? {
+                    return Ok(value);
+                }
                 let right = self.evaluate_subquery_expr(&op.right, row, column_map)?;
                 self.binary_op_on_values(op.op, &left, &right)
             }
@@ -1472,18 +1479,25 @@ impl Executor<'_> {
             });
 
             for (i, posting) in txn.postings.iter().enumerate() {
-                let mut matches = account_regex.is_match(&posting.account);
-                if matches
-                    && row_filter
-                    && let Some(filter) = from_filter
-                {
-                    matches = self.evaluate_from_filter(
+                // The FROM filter first, then the account pattern, as
+                // beanquery's `EvalAnd([from, where])` evaluates them: a row
+                // the filter drops never has its account matched, so a word
+                // boundary cannot fail on it (#2656).
+                let mut matches = if row_filter && let Some(filter) = from_filter {
+                    self.evaluate_from_filter(
                         filter,
                         &txn,
                         i,
                         directive_index,
                         txn_accounts.as_ref(),
-                    )?;
+                    )?
+                } else {
+                    true
+                };
+                if matches {
+                    matches = account_regex
+                        .is_match(&posting.account)
+                        .map_err(|e| super::word_boundary_error(account_pattern, &e))?;
                 }
 
                 if matches {

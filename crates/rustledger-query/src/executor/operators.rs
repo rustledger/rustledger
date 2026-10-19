@@ -88,6 +88,9 @@ impl Executor<'_> {
         ctx: &PostingContext,
     ) -> Result<Value, QueryError> {
         let left = self.evaluate_expr(&op.left, ctx)?;
+        if let Some(value) = self.short_circuit(op.op, &left)? {
+            return Ok(value);
+        }
         // `'x' IN other_accounts` asks the transaction's account set directly
         // rather than building the row's set to search it (#2597).
         if let (
@@ -378,6 +381,27 @@ impl Executor<'_> {
     }
 
     /// Apply a binary operator to pre-evaluated values (for subquery context).
+    /// `AND` and `OR`'s answer when the left operand decides it, so the
+    /// right one is not evaluated, as bean-query's `EvalAnd` / `EvalOr` stop:
+    /// `flag = 'P' AND narration ~ '\bx'` never matches the narration of a
+    /// row whose flag is not `P`, and so cannot fail on it (#2656). The
+    /// value is the one [`Self::binary_op_on_values`] would give.
+    ///
+    /// # Errors
+    ///
+    /// The left operand cannot be read as a truth value.
+    pub(super) fn short_circuit(
+        &self,
+        op: BinaryOperator,
+        left: &Value,
+    ) -> Result<Option<Value>, QueryError> {
+        Ok(match op {
+            BinaryOperator::And if !self.to_bool(left)? => Some(Value::Boolean(false)),
+            BinaryOperator::Or if self.to_bool(left)? => Some(Value::Boolean(true)),
+            _ => None,
+        })
+    }
+
     pub(super) fn binary_op_on_values(
         &self,
         op: BinaryOperator,
@@ -434,7 +458,10 @@ impl Executor<'_> {
                 // bean-query: `re.search(pattern, s, re.IGNORECASE)`, the
                 // pattern read with Python's grammar (#2656).
                 let re = self.python_regex(pattern, super::RegexMode::SearchIgnoreCase)?;
-                Ok(Value::Boolean(re.is_match(s)))
+                Ok(Value::Boolean(
+                    re.is_match(s)
+                        .map_err(|e| super::word_boundary_error(pattern, &e))?,
+                ))
             }
             BinaryOperator::In => {
                 // Check if left value is in right set
@@ -480,7 +507,10 @@ impl Executor<'_> {
                     }
                 };
                 let re = self.python_regex(pattern, super::RegexMode::SearchIgnoreCase)?;
-                Ok(Value::Boolean(!re.is_match(s)))
+                Ok(Value::Boolean(
+                    !re.is_match(s)
+                        .map_err(|e| super::word_boundary_error(pattern, &e))?,
+                ))
             }
             BinaryOperator::NotIn => {
                 // NOT IN: check if left value is not in right set

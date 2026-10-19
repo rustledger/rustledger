@@ -99,9 +99,16 @@ pub fn at_entry(
 
 /// Whether `regex` matches at the start of `text`, as Python's
 /// `re.match` does (it need not match to the end).
-#[must_use]
-pub fn python_match(regex: &regex::Regex, text: &str) -> bool {
-    regex.find(text).is_some_and(|m| m.start() == 0)
+///
+/// # Errors
+///
+/// The pattern has a word boundary that cannot be evaluated exactly on
+/// `text` (see [`super::py_regex::PyRegex`]).
+pub fn python_match(
+    regex: &super::py_regex::PyRegex,
+    text: &str,
+) -> Result<bool, super::py_regex::WordBoundaryError> {
+    Ok(regex.find(text)?.is_some_and(|m| m.start() == 0))
 }
 
 /// Compile `pattern`, a Python regular expression, for [`python_match`].
@@ -114,7 +121,9 @@ pub fn python_match(regex: &regex::Regex, text: &str) -> bool {
 ///
 /// The pattern is not a valid Python regular expression, or uses a construct
 /// rledger cannot express.
-pub fn python_match_regex(pattern: &str) -> Result<regex::Regex, super::py_regex::PyRegexError> {
+pub fn python_match_regex(
+    pattern: &str,
+) -> Result<super::py_regex::PyRegex, super::py_regex::PyRegexError> {
     super::py_regex::compile_match(pattern)
 }
 

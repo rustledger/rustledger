@@ -18,9 +18,8 @@ use parking_lot::RwLock;
 
 use rustc_hash::FxHashMap;
 
-use regex::Regex;
 use rust_decimal::Decimal;
-use rustledger_core::py_regex::{self, PyRegexError};
+use rustledger_core::py_regex::{self, PyRegex, PyRegexError, WordBoundaryError};
 use rustledger_core::{Amount, Directive, Inventory, NaiveDate, Position};
 #[cfg(test)]
 use rustledger_core::{MetaValue, Transaction};
@@ -284,7 +283,7 @@ pub struct Executor<'a> {
     /// [`Executor::set_summary_accounts`].
     summary_accounts: SummaryAccounts,
     /// Cache for compiled regex patterns (`RwLock` for thread-safe parallel execution).
-    // `Arc<Regex>`, not `Regex`: the `~`/`!~` operators look the regex up per
+    // `Arc<PyRegex>`, not `PyRegex`: the `~`/`!~` operators look the regex up per
     // row, and cloning a `Regex` gives the clone a fresh, empty lazy-DFA cache
     // pool — so every row rebuilt the DFA from scratch (`Lazy::init_cache` was
     // ~18% of a regex-filter query). Cloning the `Arc` shares the one regex (and
@@ -294,7 +293,7 @@ pub struct Executor<'a> {
     // `~` (case-insensitive search) and `findfirst` (case-sensitive match).
     // A pattern rledger refuses is cached as its error, so a bad pattern is
     // read once per query rather than once per row.
-    regex_cache: [RwLock<FxHashMap<String, Result<Arc<Regex>, PyRegexError>>>; RegexMode::COUNT],
+    regex_cache: [RwLock<FxHashMap<String, Result<Arc<PyRegex>, PyRegexError>>>; RegexMode::COUNT],
     /// `subst()`'s compiled patterns and their translated replacements, keyed
     /// by pattern and replacement (see [`Executor::python_sub`]).
     sub_cache: SubCache,
@@ -598,13 +597,19 @@ impl RegexMode {
 
 /// A compiled `subst()` pattern with its replacement in `regex` syntax, or
 /// why it cannot be used.
-type SubEntry = Result<Arc<(Regex, String)>, String>;
+type SubEntry = Result<Arc<(PyRegex, String)>, String>;
 /// [`SubEntry`]s by pattern, then replacement.
 type SubCache = RwLock<FxHashMap<String, FxHashMap<String, SubEntry>>>;
 
 /// A pattern rledger cannot use, as a query error naming it.
 pub(super) fn regex_error(pattern: &str, error: &PyRegexError) -> QueryError {
     QueryError::Type(format!("invalid regex '{pattern}': {error}"))
+}
+
+/// A match on text a pattern's word boundary cannot be answered exactly on
+/// (#2656), as a query error naming the pattern.
+pub(super) fn word_boundary_error(pattern: &str, error: &WordBoundaryError) -> QueryError {
+    QueryError::Evaluation(format!("regex '{pattern}': {error}"))
 }
 
 pub(crate) struct PostingScan<'a> {
@@ -922,7 +927,7 @@ impl<'a> Executor<'a> {
         &self,
         pattern: &str,
         mode: RegexMode,
-    ) -> Result<Arc<Regex>, QueryError> {
+    ) -> Result<Arc<PyRegex>, QueryError> {
         let cache = &self.regex_cache[mode as usize];
         // parking_lot's RwLock does not poison, so the read guard is
         // returned directly.
@@ -956,7 +961,7 @@ impl<'a> Executor<'a> {
         &self,
         pattern: &str,
         replacement: &str,
-    ) -> Result<Arc<(Regex, String)>, QueryError> {
+    ) -> Result<Arc<(PyRegex, String)>, QueryError> {
         if let Some(cached) = self
             .sub_cache
             .read()
@@ -1002,7 +1007,9 @@ impl<'a> Executor<'a> {
         // beanquery: `('(?i)' + regex) ?~ any(accounts)`, a case-insensitive
         // `re.search` (`compiler.py`, `has_account`).
         let regex = self.python_regex(pattern, RegexMode::SearchIgnoreCase)?;
-        Ok(txn.postings.iter().any(|p| regex.is_match(&p.account)))
+        regex
+            .is_match_any(txn.postings.iter().map(|p| p.account.as_str()))
+            .map_err(|e| word_boundary_error(pattern, &e))
     }
 
     /// Set the target currency for `VALUE()` conversions.
@@ -2776,7 +2783,7 @@ impl<'a> Executor<'a> {
                 match (&args[0], &args[1]) {
                     (Value::String(pattern), Value::String(s)) => {
                         let re = self.python_regex(pattern, RegexMode::Search)?;
-                        match re.find(s) {
+                        match re.find(s).map_err(|e| word_boundary_error(pattern, &e))? {
                             Some(m) => Ok(Value::String(m.as_str().to_string())),
                             None => Ok(Value::Null),
                         }
@@ -2815,7 +2822,10 @@ impl<'a> Executor<'a> {
                                 n.map_or_else(|| "out of range".to_string(), |n| n.to_string())
                             )));
                         };
-                        match re.captures(s) {
+                        match re
+                            .captures(s)
+                            .map_err(|e| word_boundary_error(pattern, &e))?
+                        {
                             Some(caps) => match caps.get(n) {
                                 Some(m) => Ok(Value::String(m.as_str().to_string())),
                                 None => Ok(Value::Null),
@@ -2836,7 +2846,9 @@ impl<'a> Executor<'a> {
                         let sub = self.python_sub(pattern, replacement)?;
                         let (re, template) = &*sub;
                         Ok(Value::String(
-                            re.replace_all(s, template.as_str()).into_owned(),
+                            re.replace_all(s, template.as_str())
+                                .map_err(|e| word_boundary_error(pattern, &e))?
+                                .into_owned(),
                         ))
                     }
                     (Value::Null, _, _) | (_, Value::Null, _) | (_, _, Value::Null) => {
@@ -3027,10 +3039,17 @@ impl<'a> Executor<'a> {
                 let regex = self.python_regex(pattern, RegexMode::Match)?;
                 let mut sorted: Vec<&String> = candidates.iter().collect();
                 sorted.sort_unstable();
-                Ok(sorted
-                    .into_iter()
-                    .find(|c| regex.is_match(c))
-                    .map_or(Value::Null, |c| Value::String(c.clone())))
+                // Each tried in turn, as Python tries them: an element after
+                // the first match is never matched, so it cannot be refused.
+                for candidate in sorted {
+                    if regex
+                        .is_match(candidate)
+                        .map_err(|e| word_boundary_error(pattern, &e))?
+                    {
+                        return Ok(Value::String(candidate.clone()));
+                    }
+                }
+                Ok(Value::Null)
             }
             // Truncate a date to the first of its month. beanquery returns a
             // date here, not a string, so `yearmonth(date)` stays orderable

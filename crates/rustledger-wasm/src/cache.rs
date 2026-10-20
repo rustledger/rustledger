@@ -277,7 +277,12 @@ use crate::types::{Error, LedgerOptions};
 /// `BOOK` (#2631). Loader v41, unchanged -- parsed directives did not move.
 /// `LedgerPayload.errors` is restored verbatim, so a v49 blob would serve
 /// `BOOK` where a fresh load gives E4001-E4004.
-pub const CACHE_VERSION: u32 = 50;
+/// v51: a `{{total}}` cost over so many units that its per-unit needs more
+/// than 28 decimal places books, with its exact total, instead of failing as
+/// out of range (#2689). Loader v41, unchanged -- parsed directives did not
+/// move. `Ledger` archives booked directives and errors, so a v50 blob would
+/// serve the refusal and the posting left unbooked.
+pub const CACHE_VERSION: u32 = 51;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

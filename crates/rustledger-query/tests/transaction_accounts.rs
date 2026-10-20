@@ -178,7 +178,8 @@ fn test_synthesized_account_sets_do_not_survive_between_queries() {
         .execute(&parse("SELECT account, accounts, other_accounts").unwrap())
         .unwrap();
     // By February every balance nets to zero, so only a January date has rows.
-    for date in ["2024-01-02"] {
+    {
+        let date = "2024-01-02";
         let result = executor
             .execute(
                 &parse(&format!(

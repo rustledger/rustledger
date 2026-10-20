@@ -477,6 +477,18 @@ SELECT account WHERE meta('receipt-id') = 'R-12345'
 This mirrors Python `bean-query`'s `meta` / `entry_meta` / `any_meta`
 exactly, so queries are portable between the two engines.
 
+To ask whether a key is set at all, test the map for the key with `IN`. Like
+bean-query, `IN` on a metadata map looks at its keys, on the posting's `meta`,
+on `entry.meta`, and on the `meta` columns of the system tables:
+
+```sql
+/* Postings that carry a receipt-id, whatever its value. */
+SELECT account WHERE 'receipt-id' IN meta
+
+/* Transactions with no budget-category on the header. */
+SELECT DISTINCT narration WHERE 'budget-category' NOT IN entry.meta
+```
+
 ### Examples
 
 ```sql

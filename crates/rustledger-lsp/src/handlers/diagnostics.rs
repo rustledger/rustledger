@@ -352,7 +352,7 @@ pub(crate) fn run_ledger_validation(
     // rationale.
     let today = jiff::Zoned::now().date();
     let session = ValidationSession::new(validation_options.clone());
-    let (session, mut errors) = session.run_early_spanned(&booked_directives, today);
+    let (mut session, mut errors) = session.run_early_spanned(&booked_directives, today);
 
     // Run booking/interpolation on transactions before validation.
     // This fills in missing amounts (auto-balancing) so validation sees the complete picture.
@@ -435,7 +435,19 @@ pub(crate) fn run_ledger_validation(
     // resolved: a bare-price posting whose price could not be computed drew
     // three E3001 "does not balance" diagnostics beside its `BOOK` (#2510),
     // and its units still moved the balance an assertion checks.
+    //
+    // The session reports the account errors early held for each refused
+    // transaction, which late never sees, and only for those: a
+    // transaction a regular plugin deleted or replaced is not reported
+    // (#2686).
     if failed.contains(&true) {
+        for (refused, _) in booked_directives
+            .iter()
+            .zip(&failed)
+            .filter(|(_, failed)| **failed)
+        {
+            session.note_refused_by_booking(refused);
+        }
         let mut index = 0;
         booked_directives.retain(|_| {
             index += 1;
@@ -1364,6 +1376,35 @@ mod tests {
             vo.inferred_tolerance_default.get("CLP"),
             Some(&rust_decimal::Decimal::new(5, 1))
         );
+    }
+
+    /// #2686: the LSP records the transactions booking refused, so their
+    /// account errors are still reported beside the booking error: late never
+    /// sees them, and the validator now reports held errors only for the
+    /// transactions it was told were refused.
+    #[test]
+    fn a_refused_transaction_keeps_its_account_error() {
+        let source = "2024-01-01 open Assets:Stock\n\
+                      2024-01-01 open Assets:Cash\n\
+                      2024-01-02 * \"buy\"\n  Assets:Stock  1 HOOL {10 USD}\n  Assets:Cash  -10 USD\n\
+                      2024-01-03 * \"sell unmatched lot\"\n  Assets:Stock  -1 HOOL {20 USD}\n  \
+                      Assets:Cash  20 USD\n  Expenses:NeverOpened  -10 USD\n";
+        let result = parse(source);
+        assert!(result.errors.is_empty());
+        let diagnostics = all_diagnostics(
+            &result,
+            source,
+            None,
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
+        let never_opened = diagnostics
+            .iter()
+            .filter(|d| get_code(d) == "E1001" && d.message.contains("Expenses:NeverOpened"))
+            .count();
+        assert_eq!(never_opened, 1, "{diagnostics:?}");
     }
 
     /// #2650: a standalone buffer's E8001 resolves next to the buffer and

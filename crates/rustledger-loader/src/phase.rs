@@ -223,6 +223,14 @@ impl FailedBookings {
         Self { inner }
     }
 
+    /// The refused transactions, as early validation saw them. The
+    /// validation session reports the account errors it held for these
+    /// and no others (#2686).
+    #[cfg(feature = "validation")]
+    pub fn as_slice(&self) -> &[Spanned<Directive>] {
+        &self.inner
+    }
+
     /// Consume and return the underlying directives.
     /// Used by `finalize` to merge them back into the display order.
     //

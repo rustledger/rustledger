@@ -76,7 +76,8 @@ pub use validators::balance::balance_tolerance;
 /// produced (#2648), and a plugin-inserted `balance` gets the open's
 /// currency check a written one gets (#2651). Late drops the held error of
 /// every posting it judges itself; [`ValidationSession::finalize`] reports
-/// the ones it never saw.
+/// the ones of transactions booking refused, which it never saw, and drops
+/// the ones of transactions a plugin deleted or replaced (#2686).
 ///
 /// The pipeline is therefore:
 ///     sort → synth-plugins → Early → book → regular-plugins → Late → finalize
@@ -442,11 +443,16 @@ pub struct LedgerState {
     /// cannot see, so its held error is reported then.
     ///
     /// Whatever is still here at [`ValidationSession::finalize`] belongs to a
-    /// transaction late never saw — one booking refused (the loader and the
-    /// LSP set those aside before late), or one a plugin deleted — and is
-    /// reported there. Those transactions never went through the regular
-    /// plugins, so the pre-plugin table they were judged against is the
-    /// right one for them.
+    /// transaction late never saw. That is either one booking refused (the
+    /// loader and the LSP set those aside before late), or one a regular
+    /// plugin deleted or replaced with copies at another location
+    /// (`forecast`'s templates, a Python filter plugin). `finalize` reports
+    /// the first kind only, the ones listed in [`Self::refused_by_booking`]:
+    /// those transactions never went through the regular plugins, so the
+    /// pre-plugin table they were judged against is the right one for them,
+    /// and reporting their account errors beside the booking error lets a
+    /// user fix both in one pass. The second kind is dropped, because
+    /// beancount validates only what its plugins return (#2686).
     ///
     /// Only transactions with a real source identity are held: synthesized
     /// ones share the `(SYNTHESIZED_FILE_ID, Span::ZERO)` sentinel, and an
@@ -455,6 +461,11 @@ pub struct LedgerState {
     /// check covers them.
     pub(crate) pending_posting_errors:
         FxHashMap<(u16, rustledger_core::Span), Vec<PendingPostingError>>,
+    /// The transactions booking refused, by source identity `(file_id,
+    /// span)`, as the caller that ran booking recorded them with
+    /// [`ValidationSession::note_refused_by_booking`]. The only transactions
+    /// whose [held errors](Self::pending_posting_errors) `finalize` reports.
+    pub(crate) refused_by_booking: FxHashSet<(u16, rustledger_core::Span)>,
     /// Per-`balance`-assertion computed result recorded during Late validation:
     /// `diff = computed − asserted`. Lets consumers render per-assertion pass/fail
     /// without re-deriving the balance (#1663).
@@ -1097,7 +1108,9 @@ pub use phase::{EarlyDone, LateDone, Pending, SessionPhase};
 ///    `(ValidationSession<LateDone>, Vec<ValidationError>)`.
 /// 5. [`finalize`](Self::finalize) consumes `LateDone` and returns the
 ///    deferred E2003 unused-pad warnings and the held posting errors of
-///    transactions late never saw.
+///    the transactions booking refused (recorded with
+///    [`note_refused_by_booking`](ValidationSession::<EarlyDone>::note_refused_by_booking)),
+///    which late never saw.
 ///
 /// Standalone callers that don't run booking between phases (LSP,
 /// FFI, tests) run all four calls back-to-back against the same
@@ -1241,6 +1254,24 @@ impl ValidationSession<Pending> {
 }
 
 impl ValidationSession<EarlyDone> {
+    /// Record that booking refused `transaction`, so [`finalize`] reports the
+    /// posting account errors the early phase held for it.
+    ///
+    /// A caller that runs booking between the phases and sets aside the
+    /// transactions it refuses (the loader, the LSP) calls this once per
+    /// refused transaction, with the directive as early saw it. Late never
+    /// sees those transactions, so without this their account errors would
+    /// be lost. Every other transaction late does not see was deleted or
+    /// replaced by a plugin, and its held errors are dropped, because
+    /// beancount validates only what its plugins return (#2686).
+    ///
+    /// [`finalize`]: ValidationSession::<LateDone>::finalize
+    pub fn note_refused_by_booking(&mut self, transaction: &Spanned<Directive>) {
+        self.state
+            .refused_by_booking
+            .insert((transaction.file_id, transaction.span));
+    }
+
     /// Run [`Phase::Late`] over a slice of raw [`Directive`]s.
     ///
     /// `Late` runs every account-dependent check, the currency
@@ -1299,14 +1330,24 @@ impl ValidationSession<LateDone> {
     /// state is per-session.
     ///
     /// Also reports the posting account errors the early phase held for a
-    /// transaction the late phase never saw — one booking refused (the
-    /// loader and the LSP keep those out of late), or one a plugin deleted.
-    /// See `LedgerState::pending_posting_errors`.
+    /// transaction booking refused, which the late phase never saw (the
+    /// loader and the LSP keep those out of late and record them with
+    /// [`note_refused_by_booking`]). The held errors of a transaction a
+    /// plugin deleted or replaced are dropped (#2686). See
+    /// `LedgerState::pending_posting_errors`.
+    ///
+    /// [`note_refused_by_booking`]: ValidationSession::<EarlyDone>::note_refused_by_booking
     #[must_use]
     pub fn finalize(mut self) -> Vec<ValidationError> {
         let mut errors = check_unused_pads(&self.state);
+        let refused = &self.state.refused_by_booking;
         // Source order, so the output does not depend on hash order.
-        let mut held: Vec<_> = self.state.pending_posting_errors.drain().collect();
+        let mut held: Vec<_> = self
+            .state
+            .pending_posting_errors
+            .drain()
+            .filter(|(key, _)| refused.contains(key))
+            .collect();
         held.sort_by_key(|((file_id, span), _)| (*file_id, span.start, span.end));
         errors.extend(
             held.into_iter()
@@ -3518,6 +3559,87 @@ mod tests {
         errors
     }
 
+    /// [`across`], with booking having refused `refused` (each one is in
+    /// `early` and not in `late`, as the loader sets refused transactions
+    /// aside).
+    fn across_refusing(
+        early: &[Spanned<Directive>],
+        refused: &[Spanned<Directive>],
+        late: &[Spanned<Directive>],
+    ) -> Vec<ValidationError> {
+        let session = ValidationSession::new(ValidationOptions::default());
+        let (mut session, mut errors) = session.run_early_spanned(early, test_today());
+        for transaction in refused {
+            session.note_refused_by_booking(transaction);
+        }
+        let (session, late_errors) = session.run_late_spanned(late, test_today());
+        errors.extend(late_errors);
+        errors.extend(session.finalize());
+        errors
+    }
+
+    /// #2686: a transaction late never sees was either refused by booking or
+    /// deleted (or replaced) by a regular plugin. Only a refused one keeps
+    /// its account errors; beancount validates only what the plugins
+    /// return, so a deleted one is not reported.
+    #[test]
+    fn held_errors_are_reported_only_for_transactions_booking_refused() {
+        let open = at(
+            0,
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
+        );
+        let txn = at(
+            100,
+            Directive::Transaction(
+                Transaction::new(date(2024, 1, 15), "x")
+                    .with_posting(posting_at(
+                        110,
+                        Posting::new("Assets:Bank", Amount::new(dec!(-5), "USD")),
+                    ))
+                    .with_posting(posting_at(
+                        130,
+                        Posting::new("Expenses:NeverOpened", Amount::new(dec!(5), "USD")),
+                    )),
+            ),
+        );
+        let early = [open.clone(), txn.clone()];
+        let late = [open];
+
+        // A plugin deleted it.
+        let deleted = across(&early, &late);
+        assert_eq!(
+            count(&deleted, ErrorCode::AccountNotOpen, "Expenses:NeverOpened"),
+            0,
+            "a plugin-deleted transaction is not reported: {deleted:?}"
+        );
+
+        // Booking refused it.
+        let refused = across_refusing(&early, std::slice::from_ref(&txn), &late);
+        assert_eq!(
+            count(&refused, ErrorCode::AccountNotOpen, "Expenses:NeverOpened"),
+            1,
+            "a refused transaction keeps its account error: {refused:?}"
+        );
+        let e = refused
+            .iter()
+            .find(|e| e.code == ErrorCode::AccountNotOpen)
+            .expect("reported");
+        assert_eq!(
+            (e.span, e.file_id),
+            (Some(txn.span), Some(0)),
+            "at the refused transaction"
+        );
+
+        // Recording a refusal never reports one late saw: late judged it and
+        // dropped its held errors, so it is reported once, by late.
+        let seen = across_refusing(&early, std::slice::from_ref(&txn), &early);
+        assert_eq!(
+            count(&seen, ErrorCode::AccountNotOpen, "Expenses:NeverOpened"),
+            1,
+            "{seen:?}"
+        );
+    }
+
     fn count(errors: &[ValidationError], code: ErrorCode, needle: &str) -> usize {
         errors
             .iter()
@@ -3729,9 +3851,10 @@ mod tests {
                 150,
                 Posting::new("Assets:Later", Amount::new(dec!(0), "USD")),
             ));
+        let refused = at(100, Directive::Transaction(failed));
         let mut early = opens.to_vec();
-        early.push(at(100, Directive::Transaction(failed)));
-        let errors = across(&early, &opens);
+        early.push(refused.clone());
+        let errors = across_refusing(&early, &[refused], &opens);
         assert_eq!(
             count(&errors, ErrorCode::AccountNotOpen, "Expenses:NeverOpened"),
             1,

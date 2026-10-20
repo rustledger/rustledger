@@ -98,7 +98,9 @@ fn interpolation_rounds_with_the_wildcard_only_where_nothing_else_applies() {
     let ledger = load_source(&format!(
         "{STAR}\n{OPENS}\
          2026-01-02 * \"cents\"\n  Assets:A  10.00 USD\n  Assets:Eur  3 EUR @ 1.1111 USD\n  Assets:B\n\
-         2026-01-02 * \"whole\"\n  Assets:A  10 USD\n  Assets:Eur  3 EUR @ 1.1111 USD\n  Assets:B\n"
+         2026-01-02 * \"whole\"\n  Assets:A  10 USD\n  Assets:Eur  3 EUR @ 1.1111 USD\n  Assets:B\n\
+         2026-01-02 * \"price only\"\n  Assets:Eur  -5 EUR @ 1.1111 USD\n  Assets:B\n\
+         2026-01-02 * \"cost only\"\n  Assets:Stock  3 HOOL {{1.1111 USD}}\n  Assets:B\n"
     ));
     assert!(ledger.errors.is_empty(), "{:#?}", ledger.errors);
     let filled: Vec<(String, Decimal)> = ledger
@@ -123,7 +125,11 @@ fn interpolation_rounds_with_the_wildcard_only_where_nothing_else_applies() {
         filled,
         [
             ("cents".to_string(), d("-13.33")),
-            ("whole".to_string(), d("-13.3"))
+            ("whole".to_string(), d("-13.3")),
+            // USD is only a price or cost currency here, and gets the
+            // wildcard too (the floor skipped it: `5.5555`, `-3.3333`).
+            ("price only".to_string(), d("5.6")),
+            ("cost only".to_string(), d("-3.3")),
         ]
     );
     // The scale too: beancount prints `-13.33` and `-13.3`.

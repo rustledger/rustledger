@@ -283,7 +283,12 @@ use crate::types::{Error, LedgerOptions};
 /// with that tolerance and validation checks the balance against it, so a
 /// v50 blob of a ledger setting `*` would serve the old interpolated amounts
 /// and miss the imbalance errors a fresh load reports.
-pub const CACHE_VERSION: u32 = 51;
+/// v52: a `{{total}}` cost over so many units that its per-unit needs more
+/// than 28 decimal places books, with its exact total, instead of failing as
+/// out of range (#2689). Loader v41, unchanged -- parsed directives did not
+/// move. `Ledger` archives booked directives and errors, so a v51 blob would
+/// serve the refusal and the posting left unbooked.
+pub const CACHE_VERSION: u32 = 52;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

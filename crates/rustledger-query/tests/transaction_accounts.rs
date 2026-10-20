@@ -81,6 +81,46 @@ fn test_other_accounts_excludes_only_the_current_posting() {
 }
 
 #[test]
+fn test_account_set_membership_reads_the_current_posting() {
+    let directives = fixture();
+    let mut executor = Executor::new(&directives);
+    for (sql, want) in [
+        (
+            "SELECT account WHERE 'Expenses:Food' NOT IN other_accounts",
+            &["Assets:Bank", "Income:Salary"][..],
+        ),
+        (
+            "SELECT account WHERE 'Assets:Bank' IN other_accounts",
+            &["Expenses:Food", "Expenses:Food", "Income:Salary"][..],
+        ),
+    ] {
+        assert_eq!(
+            executor.execute(&parse(sql).unwrap()).unwrap().rows,
+            strings(want),
+            "{sql}"
+        );
+    }
+}
+
+#[test]
+fn test_journal_and_entry_filters_read_each_transactions_own_set() {
+    let directives = fixture();
+    let mut executor = Executor::new(&directives);
+    let journal = executor
+        .execute(&parse("JOURNAL 'Assets' FROM 'Expenses:Food' IN other_accounts").unwrap())
+        .unwrap();
+    assert_eq!(journal.rows.len(), 1);
+    assert_eq!(journal.rows[0][3], Value::String("repeat".into()));
+    assert_eq!(
+        executor
+            .execute(&parse("SELECT account FROM 'Income:Salary' IN accounts").unwrap())
+            .unwrap()
+            .rows,
+        strings(&["Assets:Bank", "Income:Salary"])
+    );
+}
+
+#[test]
 fn test_account_sets_in_grouping_having_and_hidden_ordering() {
     let directives = fixture();
     let mut executor = Executor::new(&directives);
@@ -177,7 +217,8 @@ fn test_synthesized_account_sets_do_not_survive_between_queries() {
     let original = executor
         .execute(&parse("SELECT account, accounts, other_accounts").unwrap())
         .unwrap();
-    // By February every balance nets to zero, so only a January date has rows.
+    // On a January date, so the OPEN summary has rows (by February every
+    // balance nets to zero).
     {
         let date = "2024-01-02";
         let result = executor

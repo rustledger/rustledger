@@ -581,8 +581,13 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     )?;
 
     #[cfg(feature = "validation")]
-    let (late_validated, balance_discrepancies) =
-        regular_applied.late_validate(validation_session, today, &raw.source_map, &mut errors);
+    let (late_validated, balance_discrepancies) = regular_applied.late_validate(
+        validation_session,
+        &failed,
+        today,
+        &raw.source_map,
+        &mut errors,
+    );
     #[cfg(not(feature = "validation"))]
     let (late_validated, balance_discrepancies) =
         regular_applied.late_validate(&raw.source_map, &mut errors);
@@ -880,12 +885,17 @@ impl crate::Directives<crate::RegularPluginsApplied> {
     /// directives. Reuses the `ValidationSession` from
     /// `early_validate` so account / commodity / pad bookkeeping
     /// carries forward.
+    ///
+    /// `failed` is what booking refused: the session reports the account
+    /// errors early held for those transactions, which late never sees, and
+    /// drops the ones of transactions a regular plugin deleted (#2686).
     #[cfg(feature = "validation")]
     pub(crate) fn late_validate(
         mut self,
         validation_session: Option<
             rustledger_validate::ValidationSession<rustledger_validate::EarlyDone>,
         >,
+        failed: &crate::phase::FailedBookings,
         today: rustledger_core::NaiveDate,
         source_map: &SourceMap,
         errors: &mut Vec<LedgerError>,
@@ -900,7 +910,10 @@ impl crate::Directives<crate::RegularPluginsApplied> {
         // must have routed the session through `early_validate` first
         // (#1236).
         let mut discrepancies = Vec::new();
-        if let Some(session) = validation_session {
+        if let Some(mut session) = validation_session {
+            for refused in failed.as_slice() {
+                session.note_refused_by_booking(refused);
+            }
             let (session, phase_errors) = session.run_late_spanned(self.as_slice(), today);
             ledger_errors_extend(errors, phase_errors, source_map);
             // Harvested BEFORE `finalize()` consumes the session. Only the

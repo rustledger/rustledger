@@ -2389,7 +2389,7 @@ impl<'a> Executor<'a> {
                     Value::Null => return Ok(Value::Null),
                     _ => {
                         return Err(QueryError::Type(
-                            "FILTER_CURRENCY expects (inventory, string)".to_string(),
+                            "FILTER_CURRENCY expects (position or inventory, string)".to_string(),
                         ));
                     }
                 };
@@ -2408,9 +2408,16 @@ impl<'a> Executor<'a> {
                         }
                         Ok(Value::Inventory(std::sync::Arc::new(new_inv)))
                     }
+                    // bean-query's `filter_currency_position`: the position
+                    // itself when its units are in `currency`, else NULL.
+                    Value::Position(p) => Ok(if p.units.currency.as_str() == currency {
+                        Value::Position(p.clone())
+                    } else {
+                        Value::Null
+                    }),
                     Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type(
-                        "FILTER_CURRENCY expects (inventory, string)".to_string(),
+                        "FILTER_CURRENCY expects (position or inventory, string)".to_string(),
                     )),
                 }
             }
@@ -2421,7 +2428,8 @@ impl<'a> Executor<'a> {
                     Value::Null => return Ok(Value::Null),
                     _ => {
                         return Err(QueryError::Type(
-                            "POSSIGN expects (amount, account_string)".to_string(),
+                            "POSSIGN expects (number, amount, position or inventory, account_string)"
+                                .to_string(),
                         ));
                     }
                 };
@@ -2447,9 +2455,19 @@ impl<'a> Executor<'a> {
                         let adjusted = if is_credit_normal { -n } else { n };
                         Ok(Value::Number(adjusted))
                     }
+                    // bean-query takes a position and an inventory too, and
+                    // negates them as `neg()` does.
+                    Value::Position(p) if is_credit_normal => {
+                        Ok(Value::Position(Box::new(p.neg())))
+                    }
+                    Value::Inventory(inv) if is_credit_normal => {
+                        Self::map_inventory(inv, Position::neg)
+                    }
+                    Value::Position(_) | Value::Inventory(_) => Ok(args[0].clone()),
                     Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type(
-                        "POSSIGN expects (amount, account_string)".to_string(),
+                        "POSSIGN expects (number, amount, position or inventory, account_string)"
+                            .to_string(),
                     )),
                 }
             }

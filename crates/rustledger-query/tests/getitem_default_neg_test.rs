@@ -1,5 +1,6 @@
 //! `getitem()`'s default argument (#2699), and `neg()` / `abs()` over
-//! positions and inventories (#2703), as bean-query defines them in
+//! positions and inventories (#2703), with the other functions bean-query
+//! defines over them (`possign()`, `filter_currency()`), as it does in
 //! `beanquery/query_env.py`. Expected values are bean-query's (beanquery
 //! 0.2.0 on beancount 3.2.3) on the same ledger.
 
@@ -213,6 +214,41 @@ fn neg_and_abs_of_scalars() {
             Value::Amount(amount(dec!(10.00), "EUR")),
             Value::Number(dec!(10.00)),
             Value::Null,
+            Value::Null,
+        ]]
+    );
+}
+
+/// `possign()` takes a position and an inventory too, as bean-query does:
+/// negated for a credit-normal account, unchanged otherwise.
+#[test]
+fn possign_of_positions_and_inventories() {
+    let mad = |n| Position::simple(amount(n, "MAD"));
+    assert_eq!(
+        rows(
+            "SELECT possign(position, 'Income:X'), possign(position, account), \
+             possign(balance, 'Liabilities:X') \
+             WHERE account = 'Expenses:Food' AND narration = 'Fruit'"
+        ),
+        vec![vec![
+            Value::Position(Box::new(mad(dec!(-100)))),
+            Value::Position(Box::new(mad(dec!(100)))),
+            inventory(vec![mad(dec!(-100))]),
+        ]]
+    );
+}
+
+/// `filter_currency()` of a position is the position when its units are in
+/// that currency, else NULL.
+#[test]
+fn filter_currency_of_a_position() {
+    assert_eq!(
+        rows(
+            "SELECT filter_currency(position, 'MAD'), filter_currency(position, 'EUR') \
+             WHERE account = 'Expenses:Food' AND narration = 'Fruit'"
+        ),
+        vec![vec![
+            Value::Position(Box::new(Position::simple(amount(dec!(100), "MAD")))),
             Value::Null,
         ]]
     );

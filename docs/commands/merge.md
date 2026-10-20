@@ -74,6 +74,12 @@ copied, group access is dropped instead.
 With `--output`, `FILE` is also loaded with the new file in place, so an output
 path that one of `FILE`'s include globs would pick up is refused.
 
+A `FILE` that is a symlink to a file in another directory is refused, as in
+[split](split.md): opened through the link, its includes are the files next to
+the link, while `merge` would work on the file it points to and inline that
+file's neighbors instead. Merge the file it points to if nothing opens the
+ledger through the link.
+
 ## The equivalence check
 
 `merge` runs the same check as [split](split.md#the-equivalence-check). Typical

@@ -82,6 +82,19 @@ impl fmt::Display for MetaValue {
 /// Metadata is a key-value map attached to directives and postings.
 pub type Metadata = FxHashMap<String, MetaValue>;
 
+/// The posting metadata key that marks a posting booking interpolated.
+///
+/// An interpolated posting is one whose units, cost or price number was
+/// solved from the transaction's residual rather than written. beancount's
+/// `interpolate.AUTOMATIC_META`, set to `True` by its booking.
+///
+/// rledger sets it only while plugins run (see the booking engine's
+/// `with_interpolated_marks`), so plugins can ask which postings were
+/// interpolated (#2653); the loader removes it again before validation,
+/// so no other surface (queries, printing, `meta.hash`) sees it. A ledger
+/// cannot write it: a metadata key starts with a lowercase letter.
+pub const AUTOMATIC_META: &str = "__automatic__";
+
 /// The spellings of a boolean accepted in ledger source.
 ///
 /// Stated ONCE because a boolean can arrive two ways — `option "x" "TRUE"` and
@@ -481,12 +494,16 @@ impl fmt::Display for PriceAnnotation {
 ///
 /// When directives have the same date, they are sorted by type priority
 /// to ensure proper processing order.
+///
+/// Beancount's `entry_sortkey` is `(date, SORT_ORDER, lineno)` with
+/// `SORT_ORDER = {Open: -2, Balance: -1, Document: 1, Close: 2}` and every
+/// other type `0`. These ranks follow it, with one difference: `pad` keeps a
+/// rank of its own, between `balance` and the transactions (see
+/// [`Self::Pad`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DirectivePriority {
     /// Open accounts first so they exist before use
     Open = 0,
-    /// Commodities declared before use
-    Commodity = 1,
     /// Balance assertions are checked at the START of the day, so they
     /// precede a same-date pad -- which is what makes such a pad UNUSED
     /// rather than applied (#2150).
@@ -497,31 +514,30 @@ pub enum DirectivePriority {
     /// it targets on the same date synthesized a padding transaction
     /// beancount does not, leaving the account richer by the difference
     /// while our own validator reported the pad as unused in the same run.
-    Balance = 2,
+    Balance = 1,
     /// Padding, after the same-date balance that would have consumed it.
-    Pad = 3,
-    /// Main entries: transactions, and the `event` and `custom` entries
-    /// written among them, which keep the order they were written in.
     ///
-    /// `event` and `custom` had ranks of their own, after notes and
-    /// documents (and `custom` after `close`), so a same-date `custom` moved
-    /// below the transactions written after it. Beancount ranks both with
-    /// transactions (`SORT_ORDER` gives every type but open, balance,
-    /// document and close the default `0`, and `lineno` breaks the tie).
-    /// Neither books, so nothing but the order they are shown in follows
-    /// from the rank, and the author's order is the one fact there is about
-    /// which comes first (#2576).
-    Transaction = 4,
-    /// Annotations after transactions
-    Note = 5,
+    /// Beancount ranks a pad with the transactions (`0`). Pad placement
+    /// (where the synthesized padding transaction lands, #2188) is built on
+    /// this rank, so it is a separate decision from the other types'.
+    Pad = 2,
+    /// Main entries: transactions, and every other entry beancount ranks
+    /// with them (`commodity`, `note`, `query`, `price`, `event`, `custom`),
+    /// which keep the order they were written in.
+    ///
+    /// Those types had ranks of their own: `commodity` before the date's
+    /// balances, `note`, `query` and `price` after its transactions (and
+    /// `event` and `custom` until #2576), so same-date entries grouped by
+    /// type rather than keeping their place among the transactions written
+    /// around them. Beancount ranks all of them `0` and `lineno` breaks the
+    /// tie. None of them books, so nothing but the order they are shown in
+    /// follows from the rank, and the author's order is the one fact there is
+    /// about which comes first (#2629).
+    Transaction = 3,
     /// Attachments after transactions
-    Document = 6,
-    /// Queries defined after data
-    Query = 7,
-    /// Prices at end of day
-    Price = 8,
+    Document = 4,
     /// Accounts closed after all activity
-    Close = 9,
+    Close = 5,
 }
 
 /// All directive types in beancount.
@@ -637,18 +653,19 @@ impl Directive {
     pub const fn priority(&self) -> DirectivePriority {
         match self {
             Self::Open(_) => DirectivePriority::Open,
-            Self::Commodity(_) => DirectivePriority::Commodity,
             Self::Pad(_) => DirectivePriority::Pad,
             Self::Balance(_) => DirectivePriority::Balance,
-            // `event` and `custom` share the transaction rank, so they keep
-            // the order they were written in among transactions (#2576).
-            Self::Transaction(_) | Self::Event(_) | Self::Custom(_) => {
-                DirectivePriority::Transaction
-            }
-            Self::Note(_) => DirectivePriority::Note,
+            // Every type beancount ranks `0` shares the transaction rank, so
+            // it keeps the order it was written in among transactions
+            // (#2576, #2629).
+            Self::Transaction(_)
+            | Self::Commodity(_)
+            | Self::Note(_)
+            | Self::Query(_)
+            | Self::Price(_)
+            | Self::Event(_)
+            | Self::Custom(_) => DirectivePriority::Transaction,
             Self::Document(_) => DirectivePriority::Document,
-            Self::Query(_) => DirectivePriority::Query,
-            Self::Price(_) => DirectivePriority::Price,
             Self::Close(_) => DirectivePriority::Close,
         }
     }
@@ -1810,8 +1827,8 @@ mod tests {
         // (#2150). This assertion previously ran the other way.
         assert!(DirectivePriority::Balance < DirectivePriority::Pad);
         assert!(DirectivePriority::Balance < DirectivePriority::Transaction);
-        assert!(DirectivePriority::Transaction < DirectivePriority::Close);
-        assert!(DirectivePriority::Price < DirectivePriority::Close);
+        assert!(DirectivePriority::Transaction < DirectivePriority::Document);
+        assert!(DirectivePriority::Document < DirectivePriority::Close);
     }
 
     #[test]
@@ -1883,6 +1900,49 @@ mod tests {
             ],
             "event and custom keep their file position among same-date \
              transactions, ahead of document and close, as in beancount"
+        );
+    }
+
+    #[test]
+    fn same_date_commodity_note_query_and_price_keep_file_order_among_transactions() {
+        // #2629: beancount ranks `commodity`, `note`, `query` and `price`
+        // with transactions (`SORT_ORDER` default 0), so `lineno` decides.
+        // `commodity` used to rank ahead of the date's balances, and `note`,
+        // `query` and `price` after its transactions.
+        let d = date(2024, 1, 1);
+        let mut directives = vec![
+            Directive::Price(Price::new(d, "AAPL", Amount::new(dec!(100), "USD"))),
+            Directive::Transaction(Transaction::new(d, "first")),
+            Directive::Commodity(Commodity::new(d, "AAPL")),
+            Directive::Close(Close::new(d, "Assets:Bank")),
+            Directive::Note(Note::new(d, "Assets:Bank", "n")),
+            Directive::Balance(Balance::new(d, "Assets:Bank", Amount::new(dec!(0), "USD"))),
+            Directive::Transaction(Transaction::new(d, "second")),
+            Directive::Document(Document::new(d, "Assets:Bank", "/x.pdf")),
+            Directive::Query(Query::new(d, "q", "SELECT 1")),
+            Directive::Open(Open::new(d, "Assets:Bank")),
+        ];
+
+        sort_directives(&mut directives);
+
+        let order: Vec<&str> = directives.iter().map(Directive::type_name).collect();
+        assert_eq!(
+            order,
+            [
+                "open",
+                "balance",
+                "price",
+                "transaction",
+                "commodity",
+                "note",
+                "transaction",
+                "query",
+                "document",
+                "close"
+            ],
+            "commodity, note, query and price keep their file position among \
+             same-date transactions, after open and balance and ahead of \
+             document and close, as in beancount"
         );
     }
 

@@ -22,21 +22,26 @@ use crate::ledger_state::LedgerState;
 /// stay in lockstep with `rledger check`. Issue #1648 was exactly the drift from
 /// a hand-maintained copy that dropped the tolerance options.
 ///
-/// Relative document directories are resolved against `base_dir` to match the
-/// loader's `run_plugins` behavior.
+/// A relative `document` path resolves against its own directive's file, as
+/// in the loader (never against an `option "documents"` root, #2650).
 ///
 /// See issues #572 and #1648.
 fn build_validation_options_from_loader(
     loader_options: &LoaderOptions,
     source_map: &SourceMap,
-    base_dir: &std::path::Path,
 ) -> ValidationOptions {
+    // `option "documents"` roots feed only E8001's hint (#2650), resolved
+    // against the main file as the loader resolves them.
+    let base_dir = source_map.files().first().map_or_else(
+        || std::path::Path::new("."),
+        rustledger_loader::SourceFile::dir,
+    );
     rustledger_loader::validation_options_from_options(loader_options)
-        .with_document_dirs(rustledger_loader::resolve_document_dirs(
+        .with_document_source_dirs(rustledger_loader::document_source_dirs(source_map))
+        .with_document_roots(rustledger_loader::resolve_document_dirs(
             &loader_options.documents,
             Some(base_dir),
         ))
-        .with_document_source_dirs(rustledger_loader::document_source_dirs(source_map))
 }
 
 /// Build `ValidationOptions` for single-file validation (no loaded ledger).
@@ -48,9 +53,10 @@ fn build_validation_options_from_loader(
 /// the tolerance options (`inferred_tolerance_default`, …) alike — instead of a
 /// hand-maintained subset (issue #1648).
 ///
-/// Relative `documents` directories are resolved against `base_dir` when
-/// provided; when `None`, they are kept as-is (tests and single-file buffers
-/// without an on-disk path rely on this fallback).
+/// Relative `document` paths resolve against `base_dir`, the buffer's own
+/// directory, as the loader resolves them against their file (#2650); when
+/// `None` (a buffer without an on-disk path), they cannot be resolved and
+/// are reported missing; the process CWD is never used.
 ///
 /// See issues #572 and #1648.
 fn build_validation_options_from_file(
@@ -67,9 +73,13 @@ fn build_validation_options_from_file(
         options.set(key, value);
     }
 
-    rustledger_loader::validation_options_from_options(&options).with_document_dirs(
+    let vo = rustledger_loader::validation_options_from_options(&options).with_document_roots(
         rustledger_loader::resolve_document_dirs(&options.documents, base_dir),
-    )
+    );
+    match base_dir {
+        Some(dir) => vo.with_document_base(dir),
+        None => vo,
+    }
 }
 
 /// Convert parse errors to LSP diagnostics.
@@ -174,11 +184,13 @@ fn option_warning_severity(warning: &rustledger_loader::OptionWarning) -> Diagno
 /// is not `rustledger_loader::process` itself, which is the canonical
 /// behavior.
 ///
-/// Two inputs differ from `check`'s. In multi-file mode the directives of
-/// files without an open buffer come from the loader's processed output,
-/// already booked and plugin-processed, so for them the LSP's phases run a
-/// second time (that predates #2626). And `finalize` does not run here, as
-/// the next paragraph explains.
+/// The input is raw directives for every file: open buffers from their fresh
+/// parse, every other file from [`LedgerState::raw_directives`], the
+/// loader's output before sorting, booking or plugins. Feeding the other
+/// files from the processed ledger instead ran their plugins a second time
+/// (an inserting plugin's entries appeared twice) and booked their
+/// transactions twice (#2654). `finalize` does not run here, as the next
+/// paragraph explains.
 ///
 /// Reviewed 2026-07 (duplication sweep, "finalize consumers" family):
 /// keeping this separate pipeline is deliberate — the overlay model swaps
@@ -252,8 +264,8 @@ pub(crate) struct LedgerValidation {
 /// A booking failure, ready to show.
 ///
 /// Not a [`ValidationError`]: that type's code is an [`ErrorCode`], and a
-/// failure no validation code describes is labeled `BOOK`, as `rledger check`
-/// labels it (#2510).
+/// failure no validation code describes is labeled `BOOK`. `rledger check`
+/// labels every failure with the same code (#2510, #2631).
 ///
 /// [`ErrorCode`]: rustledger_validate::ErrorCode
 struct BookingDiagnostic {
@@ -281,29 +293,23 @@ thread_local! {
         const { std::cell::Cell::new(0) };
 }
 
-/// The order `rledger check` books in: `booking_sort_key`, then, between
-/// directives it ties, the loader's canonical order (no location first, then
-/// file, then position), which the loader sorts by before booking. The
-/// overlay appends open buffers last, so sorting on `booking_sort_key` alone
-/// booked a same-date buy in an included file before a sale in the main
-/// file that `check` books first.
-fn booking_order(
-    d: &Spanned<Directive>,
-) -> (
-    (
-        rustledger_core::NaiveDate,
-        rustledger_core::DirectivePriority,
-    ),
-    bool,
-    u16,
-    usize,
-) {
-    (
-        rustledger_core::booking_sort_key(&d.value),
-        d.file_id != rustledger_parser::SYNTHESIZED_FILE_ID,
-        d.file_id,
-        d.span.start,
-    )
+/// Sort into the order `rledger check` books in: the loader's own key,
+/// shared so the two cannot drift (#2655). Its file and position tiebreak
+/// matters here: the overlay appends open buffers last, so sorting on date
+/// and type alone booked a same-date buy in an included file before a sale
+/// in the main file that `check` books first.
+fn sort_into_booking_order(directives: &mut [Spanned<Directive>]) {
+    directives.sort_by_cached_key(rustledger_loader::canonical_sort_key);
+}
+
+// Per-thread copy of the directives the last `run_ledger_validation` handed
+// Late validation (after both plugin passes), for the #2654 regression test
+// that counts a plugin-inserted entry. Thread-local for the same reason as
+// `LEDGER_VALIDATION_RUNS`.
+#[cfg(test)]
+thread_local! {
+    pub(crate) static LAST_LATE_DIRECTIVES: std::cell::RefCell<Vec<Spanned<Directive>>> =
+        const { std::cell::RefCell::new(Vec::new()) };
 }
 
 pub(crate) fn run_ledger_validation(
@@ -314,12 +320,7 @@ pub(crate) fn run_ledger_validation(
     #[cfg(test)]
     LEDGER_VALIDATION_RUNS.with(|c| c.set(c.get() + 1));
 
-    // Booking order via the canonical comparator — the SINGLE source for
-    // (date, priority), shared with the loader and booking engine so the LSP
-    // cannot drift from `rledger check`'s order; ties broken by file and
-    // position, as the loader orders directives before booking (see
-    // [`booking_order`]).
-    booked_directives.sort_by_cached_key(booking_order);
+    sort_into_booking_order(&mut booked_directives);
 
     // The phases run in `rledger check`'s order, on the entry set `check`
     // gives each one: synth plugins and Early validation before booking, on
@@ -344,7 +345,7 @@ pub(crate) fn run_ledger_validation(
         None => true,
     };
     // What the synth pass inserted (opens, documents) back in booking order.
-    booked_directives.sort_by_cached_key(booking_order);
+    sort_into_booking_order(&mut booked_directives);
 
     // Early validation (account lifecycle, structure) on the directives as
     // written. See `rustledger_validate::Phase` for the architecture
@@ -375,11 +376,15 @@ pub(crate) fn run_ledger_validation(
             multiplier: validation_options.tolerance_multiplier,
             infer_from_cost: validation_options.infer_tolerance_from_cost,
             defaults: validation_options.inferred_tolerance_default.clone(),
-        });
+        })
+        // Mark the postings booking interpolates for the regular plugins, as
+        // the loader does (#2653), when they will run; their pass removes
+        // the marks before Late validation.
+        .with_interpolated_marks(plugin_ctx.is_some() && plugins_ok);
     booking_engine.register_account_methods(booked_directives.iter().map(|s| &s.value));
     // Booking failures, surfaced as diagnostics below.
     //
-    // `rledger check` reports these itself (`run_booking` pushes a BOOK error
+    // `rledger check` reports these itself (`run_booking` pushes the error
     // and drops the transaction before Late validation). The LSP used to drop
     // the error on the floor and let validation re-derive something from the
     // un-interpolated transaction, which produced a DIFFERENT and misleading
@@ -460,6 +465,8 @@ pub(crate) fn run_ledger_validation(
             plugin_errors_out.push((severity, err.code.clone(), err.message.clone()));
         }
     }
+    #[cfg(test)]
+    LAST_LATE_DIRECTIVES.with(|c| c.borrow_mut().clone_from(&booked_directives));
     let (session, late_errs) = session.run_late_spanned(&booked_directives, today);
     errors.extend(late_errs);
     errors.extend(session.finalize());
@@ -721,6 +728,12 @@ pub(crate) fn validation_error_to_diagnostic(
         format!("{} ({})", error.message, error.date)
     };
 
+    // A suggested fix (e.g. E8001's documents-folder hint, #2650).
+    if let Some(hint) = &error.hint {
+        message.push_str("\n  hint: ");
+        message.push_str(hint);
+    }
+
     // Add note if location is unknown
     if !has_location {
         message.push_str("\n  (source location unknown)");
@@ -916,7 +929,9 @@ pub fn all_diagnostics(
         // in. The current file is always first so that a caller
         // passing duplicate entries in `other_buffer_overlays`
         // (shouldn't happen, but is harmless) doesn't shadow it.
-        let full_directives_raw = ledger_state.and_then(|ls| ls.directives());
+        // Raw, not processed: this function runs the plugins and booking
+        // itself (#2654).
+        let full_directives_raw = ledger_state.and_then(LedgerState::raw_directives);
 
         // Build the list of overlays to apply to the ledger snapshot.
         // Always include the current file's fresh parse first, then
@@ -954,15 +969,9 @@ pub fn all_diagnostics(
         let validation_options = if let Some(ls) = ledger_state
             && let Some(ledger) = ls.ledger()
         {
-            let base_dir = ledger
-                .source_map
-                .files()
-                .first()
-                .and_then(|f| f.path.parent())
-                .unwrap_or_else(|| std::path::Path::new("."));
-            build_validation_options_from_loader(&ledger.options, &ledger.source_map, base_dir)
+            build_validation_options_from_loader(&ledger.options, &ledger.source_map)
         } else {
-            // Single-file: resolve relative document dirs against the
+            // Single-file: resolve relative document paths against the
             // current file's parent directory so they don't end up being
             // interpreted relative to the LSP process CWD.
             let base_dir = current_file_path.and_then(|p| p.parent());
@@ -1229,7 +1238,8 @@ pub(crate) fn ledger_diagnostics_multi(
         .iter()
         .any(|t| validation_would_run(t.source, t.parse));
     let validation = if any_target_validates {
-        let full_directives_raw = ledger_state.directives();
+        // Raw, not processed, as in `all_diagnostics` (#2654).
+        let full_directives_raw = ledger_state.raw_directives();
         let booked_directives: Vec<Spanned<Directive>> =
             if let Some(owned) = build_live_directive_overlay(overlay, full_directives_raw) {
                 owned
@@ -1238,14 +1248,8 @@ pub(crate) fn ledger_diagnostics_multi(
             } else {
                 Vec::new()
             };
-        let base_dir = ledger
-            .source_map
-            .files()
-            .first()
-            .and_then(|f| f.path.parent())
-            .unwrap_or_else(|| std::path::Path::new("."));
         let validation_options =
-            build_validation_options_from_loader(&ledger.options, &ledger.source_map, base_dir);
+            build_validation_options_from_loader(&ledger.options, &ledger.source_map);
         run_ledger_validation(booked_directives, validation_options, plugin_ctx.as_ref())
     } else {
         LedgerValidation {
@@ -1323,11 +1327,7 @@ mod tests {
     fn from_loader_carries_inferred_tolerance_default() {
         let mut opts = LoaderOptions::new();
         opts.set("inferred_tolerance_default", "CLP:0.5");
-        let vo = build_validation_options_from_loader(
-            &opts,
-            &SourceMap::new(),
-            std::path::Path::new("/tmp"),
-        );
+        let vo = build_validation_options_from_loader(&opts, &SourceMap::new());
         assert_eq!(
             vo.inferred_tolerance_default.get("CLP"),
             Some(&rust_decimal::Decimal::new(5, 1))
@@ -1342,11 +1342,7 @@ mod tests {
 
         let mut opts = LoaderOptions::new();
         opts.set("booking_method", "FIFO");
-        let vo = build_validation_options_from_loader(
-            &opts,
-            &SourceMap::new(),
-            std::path::Path::new("/"),
-        );
+        let vo = build_validation_options_from_loader(&opts, &SourceMap::new());
         assert_eq!(vo.default_booking_method, BookingMethod::Fifo);
 
         let file_options = vec![("booking_method".to_string(), "FIFO".to_string(), Span::ZERO)];
@@ -1367,6 +1363,39 @@ mod tests {
         assert_eq!(
             vo.inferred_tolerance_default.get("CLP"),
             Some(&rust_decimal::Decimal::new(5, 1))
+        );
+    }
+
+    /// #2650: a standalone buffer's E8001 resolves next to the buffer and
+    /// carries the documents-folder hint into the diagnostic's message.
+    #[test]
+    fn single_file_document_diagnostic_carries_the_documents_hint() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("documents")).unwrap();
+        std::fs::write(dir.path().join("documents/stmt.pdf"), "x").unwrap();
+        let source = "option \"documents\" \"documents\"\n\
+                      2020-01-01 open Assets:Bank\n\
+                      2024-01-01 document Assets:Bank \"stmt.pdf\"\n";
+        let result = parse(source);
+        let vo = build_validation_options_from_file(&result.options, Some(dir.path()));
+        let today = rustledger_core::naive_date(2999, 12, 31).unwrap();
+        let session = ValidationSession::new(vo);
+        let (session, mut errors) = session.run_early_spanned(&result.directives, today);
+        let (session, late) = session.run_late_spanned(&result.directives, today);
+        errors.extend(late);
+        errors.extend(session.finalize());
+        let error = errors
+            .iter()
+            .find(|e| e.code.code() == "E8001")
+            .expect("stmt.pdf is not next to the buffer");
+        let line_index = LineIndex::new(source, PositionEncoding::Utf8);
+        let diagnostic = validation_error_to_diagnostic(error, source, &line_index);
+        assert!(
+            diagnostic
+                .message
+                .contains("hint: a file with that name is in documents/stmt.pdf"),
+            "{}",
+            diagnostic.message
         );
     }
 
@@ -3436,17 +3465,11 @@ plugin "auto_accounts"
             .enumerate()
             .flat_map(|(i, diags)| {
                 let name = sources[i].1.clone();
-                // An inventory failure keeps its E4xxx code in the LSP where
-                // `check` labels it `BOOK` (the #2510 mapping).
-                diags.iter().map(move |d| {
-                    let code = get_code(d);
-                    let code = if code.starts_with("E4") {
-                        "BOOK".to_string()
-                    } else {
-                        code
-                    };
-                    (code, name.clone(), d.range.start.line + 1)
-                })
+                // Codes compared as they are: a lot-matching failure is E4xxx
+                // on both surfaces (#2631).
+                diags
+                    .iter()
+                    .map(move |d| (get_code(d), name.clone(), d.range.start.line + 1))
             })
             .collect();
         lsp.sort();
@@ -3496,5 +3519,307 @@ plugin "auto_accounts"
         let (lsp, check) = multi_file_vs_check(&files, 0, &[0]);
         assert!(!check.is_empty(), "check refuses the sale");
         assert_eq!(lsp, check);
+    }
+
+    /// #2631: a booking failure carries one code on both surfaces. `rledger
+    /// check` labeled every one `BOOK` while the LSP gave a lot-matching
+    /// failure its E4xxx code; both now label through
+    /// `ErrorCode::booking_failure_code_str`. Every booking failure a ledger
+    /// can reach, by variant, is compared field by field (code, message,
+    /// line) between the loader and the LSP, and its code pinned. The
+    /// interpolation variants are covered one by one in
+    /// `interpolation_failures_match_check_code_message_and_line`; one stands
+    /// for them here. (`NotBooked` needs an unbooked ledger handed to
+    /// validation, which no file can produce; its code is pinned in
+    /// rustledger-validate.)
+    #[test]
+    fn every_booking_failure_has_one_code_on_both_surfaces() {
+        let head = "2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n\
+                    2024-01-01 open Assets:Strict AAPL \"STRICT\"\n\
+                    2024-01-01 open Assets:Avg X \"AVERAGE\"\n\
+                    2024-01-01 open Income:Gains\n";
+        let buy = "2024-01-02 * \"buy\"\n  Assets:Stock  10 AAPL {100 USD}\n  Assets:Cash\n\
+                   2024-01-03 * \"buy\"\n  Assets:Stock  10 AAPL {110 USD}\n  Assets:Cash\n";
+        let cases: [(&str, String, &str, &str); 11] = [
+            (
+                "NoMatchingLot",
+                format!(
+                    "{buy}2024-02-01 * \"sell\"\n  Assets:Stock  -5 AAPL {{200 USD}}\n  Assets:Cash\n"
+                ),
+                "No matching lot for AAPL in Assets:Stock (",
+                "E4001",
+            ),
+            (
+                "InsufficientUnits",
+                format!(
+                    "{buy}2024-02-01 * \"sell\"\n  Assets:Stock  -15 AAPL {{100 USD}}\n  Assets:Cash\n"
+                ),
+                "Not enough units",
+                "E4002",
+            ),
+            (
+                "AmbiguousMatch",
+                "2024-01-02 * \"buy\"\n  Assets:Strict  10 AAPL {100 USD}\n  Assets:Cash\n\
+                 2024-01-03 * \"buy\"\n  Assets:Strict  10 AAPL {110 USD}\n  Assets:Cash\n\
+                 2024-02-01 * \"sell\"\n  Assets:Strict  -5 AAPL {}\n  Assets:Cash  550 USD\n  Income:Gains\n"
+                    .to_string(),
+                "Ambiguous lot match",
+                "E4003",
+            ),
+            (
+                "Overflow",
+                "2024-01-02 * \"buy\"\n  Assets:Stock  50000000000000000000000000000 X {1 USD}\n  \
+                 Assets:Cash\n\
+                 2024-01-03 * \"buy\"\n  Assets:Stock  50000000000000000000000000000 X {1 USD}\n  \
+                 Assets:Cash  -50000000000000000000000000000 USD\n"
+                    .to_string(),
+                "exceeds the representable range",
+                "E4004",
+            ),
+            (
+                "MergeSpecMismatch",
+                format!(
+                    "{buy}2024-02-01 * \"sell\"\n  Assets:Stock  -5 AAPL {{*, 50 USD}}\n  Assets:Cash\n"
+                ),
+                "not the 50 USD the cost spec states",
+                "E4001",
+            ),
+            (
+                "MergeOnNoReduction",
+                "2024-02-01 * \"buy\"\n  Assets:Stock  5 AAPL {*}\n  Assets:Cash  -500 USD\n"
+                    .to_string(),
+                "reduces no lot",
+                "E4001",
+            ),
+            (
+                "AverageSpecMismatch",
+                "2024-01-02 * \"buy\"\n  Assets:Avg  10 X {11 EUR}\n  Assets:Cash\n\
+                 2024-02-01 * \"sell\"\n  Assets:Avg  -1 X {99.00 EUR}\n  Assets:Cash\n"
+                    .to_string(),
+                "not the 99.00 EUR the cost spec states",
+                "E4001",
+            ),
+            (
+                "AverageSpecDateOrLabel",
+                "2024-01-02 * \"buy\"\n  Assets:Avg  10 X {11 EUR}\n  Assets:Cash\n\
+                 2024-02-01 * \"sell\"\n  Assets:Avg  -1 X {2024-01-02}\n  Assets:Cash\n"
+                    .to_string(),
+                "describes no lot",
+                "E4001",
+            ),
+            (
+                "CostPriceCurrencyMismatch",
+                format!(
+                    "{buy}2024-02-01 * \"sell\"\n  Assets:Stock  -5 AAPL {{100 USD}} @ 90 EUR\n  \
+                     Assets:Cash  450 EUR\n  Income:Gains\n"
+                ),
+                "Cost and price currencies must match",
+                "E4001",
+            ),
+            (
+                "NoLotInInferredCostCurrency",
+                "2024-01-02 * \"buy\"\n  Assets:Stock  10 AAPL {100 USD}\n  Assets:Cash\n\
+                 2024-02-01 * \"sell\"\n  Assets:Stock  -5 AAPL {}\n  \
+                 Assets:Cash  450 EUR\n  Income:Gains\n"
+                    .to_string(),
+                "held at a cost in EUR",
+                "E4001",
+            ),
+            (
+                "Interpolation",
+                "2024-02-01 * \"x\"\n  Assets:Stock  12.50\n  Assets:Cash\n".to_string(),
+                "cannot infer currency",
+                "BOOK",
+            ),
+        ];
+        for (variant, body, needle, expected) in cases {
+            let source = format!("{head}{body}");
+            let dir = tempfile::tempdir().expect("temp dir");
+            let path = dir.path().join("main.beancount");
+            std::fs::write(&path, &source).unwrap();
+            let ledger = rustledger_loader::load(&path, &rustledger_loader::LoadOptions::default())
+                .expect("load");
+            let check: Vec<(String, String, usize)> = ledger
+                .errors
+                .iter()
+                .filter(|e| e.is_booking_failure())
+                .map(|e| {
+                    let line = e.location.as_ref().expect("check locates it").line;
+                    (e.code.clone(), e.message.clone(), line)
+                })
+                .collect();
+            assert_eq!(
+                check.len(),
+                1,
+                "{variant}: check must refuse one transaction: {:?}",
+                ledger.errors
+            );
+            assert_eq!(check[0].0, expected, "{variant}: check's code: {check:?}");
+            assert!(
+                check[0].1.contains(needle),
+                "{variant}: the fixture no longer reaches this failure: {check:?}"
+            );
+
+            let parsed = parse(&source);
+            let diags = all_diagnostics(
+                &parsed,
+                &source,
+                None,
+                None,
+                None,
+                &[],
+                PositionEncoding::Utf16,
+            );
+            let lsp: Vec<(String, String, usize)> = diags
+                .iter()
+                .filter(|d| d.message == check[0].1)
+                .map(|d| {
+                    (
+                        get_code(d),
+                        d.message.clone(),
+                        d.range.start.line as usize + 1,
+                    )
+                })
+                .collect();
+            assert_eq!(lsp, check, "{variant}: the LSP's diagnostic: {diags:?}");
+        }
+    }
+
+    /// #2655: the LSP books in the loader's order, by the loader's own key
+    /// rather than a hand-synced copy. The loader's processed output is in
+    /// the order it booked in; reversed and sorted again the way the LSP
+    /// sorts before booking, it comes back in that order. The fixture puts every
+    /// directive type on one date across two files, with a transaction
+    /// booking refuses (the main file's sale books first, so the included
+    /// file's buy reduces too much) and opens a plugin synthesizes, so every component of
+    /// the key decides something.
+    #[test]
+    fn the_lsp_sorts_entries_as_the_loader_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main.beancount");
+        let day = "2024-01-05";
+        std::fs::write(
+            &main,
+            format!(
+                "plugin \"beancount.plugins.auto_accounts\"\n\
+                 2024-01-01 open Assets:Cash\n\
+                 {day} close Assets:Old\n\
+                 {day} * \"sell\"\n  Assets:Stock  -5 HOOL {{}}\n  Assets:Cash  500 USD\n\
+                 {day} price HOOL 100 USD\n\
+                 {day} note Assets:Cash \"n\"\n\
+                 {day} balance Assets:Cash  0 USD\n\
+                 include \"other.beancount\"\n\
+                 {day} document Assets:Cash \"/x.pdf\"\n\
+                 {day} commodity HOOL\n\
+                 {day} query \"q\" \"SELECT 1\"\n\
+                 {day} event \"location\" \"Paris\"\n\
+                 {day} custom \"budget\" Expenses:Food \"monthly\" 10 USD\n\
+                 {day} pad Assets:Cash Equity:Opening\n\
+                 {day} open Assets:Old\n"
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("other.beancount"),
+            format!(
+                "{day} * \"buy\"\n  Assets:Stock  10 HOOL {{100 USD}}\n  Assets:Cash\n\
+                 {day} price HOOL 101 USD\n\
+                 {day} balance Assets:Stock  0 HOOL\n"
+            ),
+        )
+        .unwrap();
+        let ledger = rustledger_loader::load(&main, &lsp_load_options()).expect("load");
+        assert!(
+            ledger
+                .directives
+                .iter()
+                .any(|d| d.file_id == rustledger_parser::SYNTHESIZED_FILE_ID),
+            "auto_accounts must synthesize an entry: {:?}",
+            ledger.directives
+        );
+        assert!(
+            ledger
+                .errors
+                .iter()
+                .any(|e| e.message.contains("(2024-01-05, \"")),
+            "booking must refuse a transaction: {:?}",
+            ledger.errors
+        );
+        let identity =
+            |d: &Spanned<Directive>| (d.file_id, d.span.start, d.value.type_name(), d.value.date());
+        let loader: Vec<_> = ledger.directives.iter().map(identity).collect();
+
+        let mut lsp: Vec<Spanned<Directive>> = ledger.directives.clone();
+        lsp.reverse();
+        sort_into_booking_order(&mut lsp);
+        let lsp: Vec<_> = lsp.iter().map(identity).collect();
+        assert_eq!(lsp, loader);
+    }
+
+    /// Plugins run once on every file, open or not. Files without an open
+    /// buffer used to come from the loader's processed output, which the
+    /// plugins had already rewritten, and the LSP ran them again: an
+    /// inserting plugin's entry appeared twice (#2654).
+    #[test]
+    fn plugins_run_once_on_files_without_an_open_buffer() {
+        let dir = tempfile::tempdir().unwrap();
+        let main = dir.path().join("main.beancount");
+        std::fs::write(
+            &main,
+            "plugin \"beancount.plugins.implicit_prices\"\n\
+             include \"other.beancount\"\n\
+             2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("other.beancount"),
+            "2024-01-02 * \"buy\"\n  Assets:Stock  10 HOOL @ 100 USD\n  Assets:Cash\n",
+        )
+        .unwrap();
+        // `check` inserts one price.
+        let ledger = rustledger_loader::load(&main, &lsp_load_options()).expect("load");
+        let count_prices = |directives: &[Spanned<Directive>]| {
+            directives
+                .iter()
+                .filter(|d| matches!(d.value, Directive::Price(_)))
+                .count()
+        };
+        assert_eq!(count_prices(&ledger.directives), 1, "{:?}", ledger.errors);
+
+        let mut state = LedgerState::new();
+        state.load(&main).expect("load");
+        let ledger = state.ledger().unwrap();
+        let main_fid = 0u16;
+        let main_source = ledger.source_map.files()[0].source.clone();
+        let main_parse = parse(&main_source);
+        let late_prices = || LAST_LATE_DIRECTIVES.with(|c| count_prices(&c.borrow()));
+
+        // The current-file path, the main file open.
+        let _ = all_diagnostics(
+            &main_parse,
+            &main_source,
+            Some(&state),
+            Some(main_fid),
+            Some(&main),
+            &[],
+            PositionEncoding::Utf16,
+        );
+        assert_eq!(late_prices(), 1, "all_diagnostics");
+
+        // The multi-file path, the main file open.
+        let targets = [FileDiagTarget {
+            file_id: main_fid,
+            source: &main_source,
+            parse: &main_parse,
+        }];
+        let _ = ledger_diagnostics_multi(
+            &state,
+            Some(main_fid),
+            &main_parse,
+            &[(main_fid, main_parse.directives.as_slice())],
+            &targets,
+            PositionEncoding::Utf16,
+        );
+        assert_eq!(late_prices(), 1, "ledger_diagnostics_multi");
     }
 }

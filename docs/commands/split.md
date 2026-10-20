@@ -118,10 +118,11 @@ temporaries named `.<name>.rledger-tmp-...` and new period files, which the
 manifest lists as created and which are safe to delete.
 
 Files that are encrypted, not valid UTF-8, or have parse errors are refused. So
-is a `FILE` that is a symlink to a file in another directory: rledger resolves
-its includes next to the file the link points to, but beancount and fava resolve
-them next to the link, so no include line works for both. Split the file it points to if nothing opens the
-ledger through the link.
+is a `FILE` that is a symlink to a file in another directory: rledger, beancount
+and fava resolve its includes next to the link, but `split` works on the file
+the link points to and would write the period files next to that file, where
+the ledger opened through the link does not look. Split the file it points to
+if nothing opens the ledger through the link.
 
 ## Exit Codes
 

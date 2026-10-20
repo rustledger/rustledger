@@ -336,6 +336,13 @@ pub struct LedgerError {
     pub file_id: Option<u16>,
     /// Processing phase that produced this error: "parse", "validate", or "plugin".
     pub phase: String,
+    /// A suggested fix, rendered as a `help:` line by `rledger check` and in
+    /// its JSON `hint` field (e.g. E8001's documents-folder hint, #2650).
+    pub hint: Option<String>,
+    /// Whether booking refused a transaction with this error, which leaves
+    /// that transaction out of the booked stream. See
+    /// [`Self::is_booking_failure`].
+    booking_failure: bool,
 }
 
 /// Error severity level.
@@ -369,6 +376,8 @@ impl LedgerError {
             source_span: None,
             file_id: None,
             phase: "validate".to_string(),
+            hint: None,
+            booking_failure: false,
         }
     }
 
@@ -382,6 +391,8 @@ impl LedgerError {
             source_span: None,
             file_id: None,
             phase: "validate".to_string(),
+            hint: None,
+            booking_failure: false,
         }
     }
 
@@ -391,6 +402,20 @@ impl LedgerError {
         self.source_span = Some(span);
         self.file_id = Some(file_id);
         self
+    }
+
+    /// Whether this is booking refusing a transaction, which leaves the
+    /// transaction unbooked: its lots did not resolve, so balances derived
+    /// from the ledger leave it out.
+    ///
+    /// Not readable from the code. A booking failure carries the code
+    /// [`rustledger_validate::ErrorCode::for_booking_failure`] gives it (an
+    /// E4xxx lot-matching code, the code the LSP shows), else `BOOK`
+    /// (#2631), and a validator can raise the same E4xxx codes without
+    /// booking having refused anything.
+    #[must_use]
+    pub const fn is_booking_failure(&self) -> bool {
+        self.booking_failure
     }
 
     /// Set the processing phase for this error.
@@ -415,12 +440,13 @@ impl LedgerError {
 /// ```text
 ///   1. sort                         (canonical display order)
 ///   2. synth plugins                (auto_accounts, document_discovery)
-///   3. Early validation             (account presence, structural, lifecycle)
+///   3. Early validation             (structural; posting account errors held)
 ///   4. booking                      (cost spec resolution, interpolation)
 ///   5. partition                    (set aside failed-booking txns)
 ///   6. regular plugins              (file plugins + extras, on booked only)
-///   7. Late validation              (balance, currency, inventory, on booked only)
-///   8. finalize                     (unused-pad warnings)
+///   7. Late validation              (accounts, balance, currency, inventory, on
+///                                    what the regular plugins produced)
+///   8. finalize                     (unused pads; held errors late never saw)
 ///   9. re-merge                     (booked + failed → final Ledger.directives)
 /// ```
 pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, ProcessError> {
@@ -529,9 +555,18 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
         infer_from_cost: raw.options.infer_tolerance_from_cost,
         defaults: raw.options.inferred_tolerance_default.clone(),
     };
+    // Booking marks the postings it interpolates for the regular plugins
+    // (#2653), which `run_plugins` removes once they have run; when no
+    // plugin can run there is nothing to mark for.
+    #[cfg(feature = "plugins")]
+    let mark_interpolated =
+        (options.run_plugins && !raw.plugins.is_empty()) || !options.extra_plugins.is_empty();
+    #[cfg(not(feature = "plugins"))]
+    let mark_interpolated = false;
     let (booked, failed) = directives.book(
         effective_booking_method,
         tolerance_policy,
+        mark_interpolated,
         &mut errors,
         options.collect_capital_gains.then_some(&mut capital_gains),
         &raw.source_map,
@@ -590,7 +625,8 @@ fn resolve_effective_booking_method(
 // without changing their semantics — only the type-level sequencing
 // is new. See `phase.rs` for the phase markers and overall rationale.
 
-/// Canonical display-order sort key:
+/// Canonical display-order sort key.
+///
 /// `(date, priority, has_source_location, file_id, span.start)`.
 /// What BQL / JSON / format output expects. Used by `sort` (initial
 /// ordering) and `finalize` (re-sort after merging failed bookings and
@@ -617,7 +653,12 @@ fn resolve_effective_booking_method(
 /// book. Only a caller that hands [`process`] a hand-built `LoadResult`
 /// holding a synthesized cost-bearing transaction could see it book ahead of
 /// a same-date source transaction, which is where beancount books it too.
-type CanonicalSortKey = (
+///
+/// This is the ONE definition of the order. The LSP books its overlay of
+/// open buffers in it too (`rustledger-lsp`'s `run_ledger_validation`), so
+/// the editor books same-date entries in the order `rledger check` does; it
+/// used to keep a hand-synced copy (#2655).
+pub type CanonicalSortKey = (
     rustledger_core::NaiveDate,
     rustledger_core::DirectivePriority,
     bool,
@@ -625,8 +666,11 @@ type CanonicalSortKey = (
     usize,
 );
 
+/// The [`CanonicalSortKey`] of `d`: the order the loader sorts directives
+/// into before booking and for output.
 #[inline]
-const fn canonical_sort_key(d: &Spanned<Directive>) -> CanonicalSortKey {
+#[must_use]
+pub const fn canonical_sort_key(d: &Spanned<Directive>) -> CanonicalSortKey {
     (
         d.value.date(),
         d.value.priority(),
@@ -655,9 +699,9 @@ impl crate::Directives<crate::Raw> {
 
 impl crate::Directives<crate::Sorted> {
     /// Run synth-only plugins (`auto_accounts`, `document_discovery`)
-    /// BEFORE early validation so the synthesizers inject Opens /
-    /// Documents that Early checks depend on (E1001 account
-    /// presence, E5001 missing-document file).
+    /// BEFORE early validation and booking so the synthesizers' Opens /
+    /// Documents are in the stream from the start (Early judges posting
+    /// accounts against the Opens it sees).
     ///
     /// Only this narrow synth subset runs here; everything else
     /// waits until after booking (post-booking plugin pass) so
@@ -699,17 +743,17 @@ impl crate::Directives<crate::Sorted> {
 }
 
 impl crate::Directives<crate::Synthed> {
-    /// Run the early-phase validators. Account-presence /
-    /// lifecycle / structural errors are collected into `errors`
-    /// (via the `LedgerError` stream); the directive list itself is
-    /// unchanged by validation.
+    /// Run the early-phase validators. Structural errors are collected
+    /// into `errors` (via the `LedgerError` stream); posting account
+    /// errors are held in the session for late / finalize (account-name
+    /// checks run on what the regular plugins produce, #2648). The
+    /// directive list itself is unchanged by validation.
     ///
-    /// Runs on pre-booking directives, AFTER synth plugins so
-    /// account-presence checks (E1001) see any Opens that plugins
-    /// like `auto_accounts` injected. This is what lets booking
-    /// match Python's "prune zero-interp postings" behavior without
-    /// losing E1001 on the elided-zero-to-unopened-account case
-    /// (rustledger#877).
+    /// Runs on pre-booking directives, AFTER synth plugins so the held
+    /// account judgments see any Opens that plugins like `auto_accounts`
+    /// injected. This is what lets booking match Python's "prune
+    /// zero-interp postings" behavior without losing E1001 on the
+    /// elided-zero-to-unopened-account case (rustledger#877).
     #[cfg(feature = "validation")]
     pub(crate) fn early_validate(
         mut self,
@@ -765,6 +809,7 @@ impl crate::Directives<crate::EarlyValidated> {
         mut self,
         effective_method: rustledger_core::BookingMethod,
         tolerance_policy: rustledger_booking::TolerancePolicy,
+        mark_interpolated: bool,
         errors: &mut Vec<LedgerError>,
         gains: Option<&mut Vec<rustledger_booking::CapitalGain>>,
         source_map: &SourceMap,
@@ -776,6 +821,7 @@ impl crate::Directives<crate::EarlyValidated> {
             std::mem::take(self.as_vec_mut()),
             effective_method,
             tolerance_policy,
+            mark_interpolated,
             errors,
             gains,
             source_map,
@@ -938,6 +984,27 @@ impl crate::Directives<crate::LateValidated> {
     }
 }
 
+/// The code a booking failure is reported under: the E4xxx code of a
+/// lot-matching failure, else `BOOK`, through
+/// [`rustledger_validate::ErrorCode::booking_failure_code_str`], the
+/// classification the LSP labels the same failure with, so `rledger check`
+/// and the editor cannot give one failure two codes (#2631). `check` used to
+/// label every booking failure `BOOK`.
+///
+/// Without the `validation` feature the classification is not compiled in,
+/// and every failure is `BOOK`.
+const fn booking_failure_code(e: &rustledger_booking::BookingError) -> &'static str {
+    #[cfg(feature = "validation")]
+    {
+        rustledger_validate::ErrorCode::booking_failure_code_str(e)
+    }
+    #[cfg(not(feature = "validation"))]
+    {
+        let _ = e;
+        rustledger_booking::BOOKING_FAILURE_CODE
+    }
+}
+
 /// Run booking and interpolation on transactions, returning the
 /// directives partitioned into `(booked, failed)`.
 ///
@@ -961,14 +1028,16 @@ fn run_booking(
     mut directives: Vec<Spanned<Directive>>,
     booking_method: BookingMethod,
     tolerance_policy: rustledger_booking::TolerancePolicy,
+    mark_interpolated: bool,
     errors: &mut Vec<LedgerError>,
     mut gains: Option<&mut Vec<rustledger_booking::CapitalGain>>,
     source_map: &SourceMap,
 ) -> (Vec<Spanned<Directive>>, Vec<Spanned<Directive>>) {
     use rustledger_booking::BookingEngine;
 
-    let mut engine =
-        BookingEngine::with_method(booking_method).with_tolerance_policy(tolerance_policy);
+    let mut engine = BookingEngine::with_method(booking_method)
+        .with_tolerance_policy(tolerance_policy)
+        .with_interpolated_marks(mark_interpolated);
     engine.register_account_methods(directives.iter().map(|s| &s.value));
 
     // Build an index ordered for booking. `directives` is already in
@@ -1007,11 +1076,10 @@ fn run_booking(
                     // text renderer papered over it by appending the date and
                     // narration to the message, which is why it went unnoticed.
                     let span = e.posting_span(txn).unwrap_or(directive_span);
-                    let mut err = LedgerError::error(
-                        rustledger_booking::BOOKING_FAILURE_CODE,
-                        e.diagnostic_message(txn),
-                    )
-                    .with_source_span((span.start, span.end), file_id);
+                    let mut err =
+                        LedgerError::error(booking_failure_code(&e), e.diagnostic_message(txn))
+                            .with_source_span((span.start, span.end), file_id);
+                    err.booking_failure = true;
                     // Resolve to file/line/column the same way the validator
                     // does, so CLI and LSP consumers need no lookup of their
                     // own (the pattern from #901).
@@ -1052,8 +1120,8 @@ fn run_booking(
 ///
 /// The loader pipeline calls `run_plugins` twice: once with
 /// [`PluginPass::PreBookingSynth`] before the Early validation phase
-/// (so synthesizers can inject Opens / Documents that early checks
-/// depend on), and once with [`PluginPass::PostBooking`] after booking
+/// (so synthesizers can inject Opens / Documents before booking), and
+/// once with [`PluginPass::PostBooking`] after booking
 /// (so cost-spec-reading plugins like `implicit_prices`,
 /// `capital_gains_classifier`, `check_average_cost`, `sell_gains`,
 /// `unrealized`, and `valuation` see filled-in per-unit values on the
@@ -1067,10 +1135,10 @@ fn run_booking(
 #[cfg(feature = "plugins")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PluginPass {
-    /// Only plugins that synthesize directives the Early validator
-    /// depends on: `auto_accounts` (synthesizes Open directives) and
-    /// the built-in document discovery walker (synthesizes Document
-    /// directives the early phase checks for missing files).
+    /// Only plugins that synthesize directives the pre-booking stream
+    /// needs: `auto_accounts` (synthesizes Open directives the Early
+    /// validator judges posting accounts against) and the built-in
+    /// document discovery walker (synthesizes Document directives).
     PreBookingSynth,
     /// All file-declared plugins and CLI `extra_plugins`, EXCLUDING
     /// `auto_accounts` and `document_discovery` (those ran pre-booking).
@@ -1098,6 +1166,13 @@ struct PluginInvocation {
 /// `pass` selects which subset of plugins to run — see [`PluginPass`].
 /// The loader pipeline calls this twice (synth pass before Early,
 /// regular pass after booking).
+///
+/// The [`PluginPass::PostBooking`] pass ends by removing the interpolation
+/// marks booking puts on postings for plugins to read
+/// ([`rustledger_booking::BookingEngine::with_interpolated_marks`], #2653),
+/// whether or not a plugin ran, so Late validation and everything after it
+/// see the ledger as before. That includes a mark a plugin set itself
+/// (`split_expenses` marks the postings it adds, as beancount's does).
 #[cfg(feature = "plugins")]
 pub fn run_plugins(
     directives: &mut Vec<Spanned<Directive>>,
@@ -1108,40 +1183,62 @@ pub fn run_plugins(
     errors: &mut Vec<LedgerError>,
     pass: PluginPass,
 ) -> Result<(), ProcessError> {
-    use rustledger_plugin::{NativePluginRegistry, PluginOptions};
+    let result = dispatch_plugins(
+        directives,
+        file_plugins,
+        file_options,
+        options,
+        source_map,
+        errors,
+        pass,
+    );
+    if pass == PluginPass::PostBooking {
+        for directive in directives.iter_mut() {
+            if let Directive::Transaction(txn) = &mut directive.value {
+                rustledger_booking::clear_interpolated_marks(txn);
+            }
+        }
+    }
+    result
+}
 
-    // Resolve document directories relative to the main file's directory.
-    // Used to build doc_discovery's per-call config in the synth pass.
+/// [`run_plugins`] without the removal of the interpolation marks.
+#[cfg(feature = "plugins")]
+fn dispatch_plugins(
+    directives: &mut Vec<Spanned<Directive>>,
+    file_plugins: &[Plugin],
+    file_options: &Options,
+    options: &LoadOptions,
+    source_map: &SourceMap,
+    errors: &mut Vec<LedgerError>,
+    pass: PluginPass,
+) -> Result<(), ProcessError> {
+    use rustledger_plugin::NativePluginRegistry;
+
+    // Resolve document directories relative to the main file's directory,
+    // as opened (symlinks kept, #2635). Used to build doc_discovery's
+    // per-call config in the synth pass.
     let base_dir = source_map
         .files()
         .first()
-        .and_then(|f| f.path.parent())
-        .unwrap_or_else(|| std::path::Path::new("."));
+        .map_or_else(|| std::path::Path::new("."), crate::SourceFile::dir);
 
     // Access the process-wide registry singleton. The registry is
     // immutable and stateless, so the same instance services every
     // call.
     let registry = NativePluginRegistry::global();
 
-    // Build the unified list of plugins to invoke for this pass:
-    //   1. Implicit synth plugins triggered by `LoadOptions` /
-    //      `file_options` (auto_accounts via `options.auto_accounts`;
-    //      document_discovery via non-empty `file_options.documents`).
+    // Build the unified list of plugins to invoke for this pass, in
+    // beancount's order (`PLUGINS_PRE`, file plugins, `PLUGINS_AUTO`):
+    //   1. document_discovery, via non-empty `file_options.documents`.
     //   2. File-declared plugins from `plugin "..."` directives.
     //   3. CLI `--plugin` extras.
+    //   4. auto_accounts, via `options.auto_accounts`.
     // Pass classification happens here — once — via `registry.find_synth`.
     // A plugin enters the list iff its pass matches the requested `pass`.
     let mut entries: Vec<PluginInvocation> = Vec::new();
 
     if matches!(pass, PluginPass::PreBookingSynth) {
-        // Implicit synth: API-level auto_accounts flag.
-        if options.auto_accounts {
-            entries.push(PluginInvocation {
-                name: rustledger_plugin::AUTO_ACCOUNTS_NAME.to_string(),
-                config: None,
-                force_python: false,
-            });
-        }
         // Implicit synth: document_discovery, driven by `option "documents"`.
         // The plugin sits in the registry as a ZST; we hand it the
         // resolved directories + base_dir via its config JSON.
@@ -1198,23 +1295,27 @@ pub fn run_plugins(
         }
     }
 
+    // Implicit synth: API-level auto_accounts flag (`check --auto`). It goes
+    // LAST, where beancount puts its `--auto` plugins (`PLUGINS_AUTO`, after
+    // the file's plugins), and in any case after document discovery, which
+    // beancount runs first (`PLUGINS_PRE`): a discovered document can name an
+    // account first, and `auto_accounts` must see it to open the account on
+    // that date (#2649).
+    if matches!(pass, PluginPass::PreBookingSynth) && options.auto_accounts {
+        entries.push(PluginInvocation {
+            name: rustledger_plugin::AUTO_ACCOUNTS_NAME.to_string(),
+            config: None,
+            force_python: false,
+        });
+    }
+
     if entries.is_empty() {
         return Ok(());
     }
 
-    let plugin_options = PluginOptions {
-        operating_currencies: file_options.operating_currency.clone(),
-        title: file_options.title.clone(),
-        // Without these a plugin can only hardcode `Expenses:` etc., which
-        // silently matches nothing on a renamed ledger (#1964).
-        account_types: rustledger_plugin::PluginAccountTypes {
-            assets: file_options.name_assets.clone(),
-            liabilities: file_options.name_liabilities.clone(),
-            equity: file_options.name_equity.clone(),
-            income: file_options.name_income.clone(),
-            expenses: file_options.name_expenses.clone(),
-        },
-    };
+    // The ledger's roots (#1964) and tolerance options (#2653): without them
+    // a plugin silently judges by beancount's defaults.
+    let plugin_options = file_options.plugin_options();
 
     // Dispatch each entry: resolve it to a concrete runtime, then run + apply
     // uniformly. Resolution (classification, path-security, feature-gating, the
@@ -1681,25 +1782,21 @@ pub fn document_root_warnings(
 /// Per-`file_id` source-file directories, parallel to `source_map.files()`.
 ///
 /// Lets the validator resolve a relative `document` path against its own
-/// directive's file (matching Beancount and `include`) instead of the CWD.
+/// directive's file (matching Beancount and `include`) instead of the CWD:
+/// the directory the file was opened from, symlinks kept (#2635).
 #[cfg(feature = "validation")]
 #[must_use]
 pub fn document_source_dirs(source_map: &SourceMap) -> Vec<std::path::PathBuf> {
     source_map
         .files()
         .iter()
-        .map(|f| {
-            f.path.parent().map_or_else(
-                || std::path::PathBuf::from("."),
-                std::path::Path::to_path_buf,
-            )
-        })
+        .map(|f| f.dir().to_path_buf())
         .collect()
 }
 
 /// Build a [`rustledger_validate::ValidationOptions`] from loader-level file options.
 ///
-/// Layers the path-relative document directories and the *effective* booking
+/// Layers the per-file document source directories and the *effective* booking
 /// method onto [`validation_options_from_options`] (the shared option-derived
 /// core). Factored out of the old `run_validation` so both the early and late
 /// phases in `process()` share the same `ValidationSession` configuration.
@@ -1709,20 +1806,19 @@ fn build_validation_options(
     source_map: &SourceMap,
     default_booking_method: BookingMethod,
 ) -> rustledger_validate::ValidationOptions {
-    // Document dirs resolve against the main file's parent directory (CWD as a
-    // fallback when the source map is empty — matches the pre-refactor behavior).
+    // A relative `document` path resolves against its own directive's file,
+    // never against an `option "documents"` root (#2650); the roots only feed
+    // E8001's hint, resolved as discovery resolves them.
     let base_dir = source_map
         .files()
         .first()
-        .and_then(|f| f.path.parent())
-        .unwrap_or_else(|| std::path::Path::new("."));
-
+        .map_or_else(|| std::path::Path::new("."), crate::SourceFile::dir);
     validation_options_from_options(file_options)
-        .with_document_dirs(resolve_document_dirs(
+        .with_document_source_dirs(document_source_dirs(source_map))
+        .with_document_roots(resolve_document_dirs(
             &file_options.documents,
             Some(base_dir),
         ))
-        .with_document_source_dirs(document_source_dirs(source_map))
         .with_default_booking_method(default_booking_method)
 }
 
@@ -1777,6 +1873,8 @@ fn ledger_errors_extend(
             source_span: err.span.map(|s| (s.start, s.end)),
             file_id: err.file_id,
             phase: phase.to_string(),
+            hint: err.hint,
+            booking_failure: false,
         });
     }
 }

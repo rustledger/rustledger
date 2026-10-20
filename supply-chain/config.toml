@@ -76,10 +76,6 @@ audit-as-crates-io = false
 [policy.rustledger-wasm]
 audit-as-crates-io = false
 
-[[exemptions.aes]]
-version = "0.9.3"
-criteria = "safe-to-deploy"
-
 [[exemptions.agcli]]
 version = "0.17.0"
 criteria = "safe-to-deploy"
@@ -148,10 +144,6 @@ criteria = "safe-to-deploy"
 version = "1.25.2"
 criteria = "safe-to-deploy"
 
-[[exemptions.bzip2]]
-version = "0.6.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.cc]]
 version = "1.4.6"
 criteria = "safe-to-deploy"
@@ -164,16 +156,8 @@ criteria = "safe-to-deploy"
 version = "1.0.0-alpha.8"
 criteria = "safe-to-deploy"
 
-[[exemptions.cipher]]
-version = "0.5.2"
-criteria = "safe-to-deploy"
-
 [[exemptions.clipboard-win]]
 version = "5.4.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.cmov]]
-version = "0.5.4"
 criteria = "safe-to-deploy"
 
 [[exemptions.console]]
@@ -208,10 +192,6 @@ criteria = "safe-to-deploy"
 version = "0.4.5"
 criteria = "safe-to-deploy"
 
-[[exemptions.cpubits]]
-version = "0.1.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.cpufeatures]]
 version = "0.2.17"
 criteria = "safe-to-deploy"
@@ -234,14 +214,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.crypto-common]]
 version = "0.2.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.ctutils]]
-version = "0.4.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.deflate64]]
-version = "0.1.12"
 criteria = "safe-to-deploy"
 
 [[exemptions.defmt]]
@@ -348,10 +320,6 @@ criteria = "safe-to-run"
 version = "0.5.3"
 criteria = "safe-to-deploy"
 
-[[exemptions.hmac]]
-version = "0.13.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.home]]
 version = "0.5.12"
 criteria = "safe-to-deploy"
@@ -377,7 +345,7 @@ version = "0.11.21"
 criteria = "safe-to-deploy"
 
 [[exemptions.insta]]
-version = "1.48.0"
+version = "1.49.0"
 criteria = "safe-to-run"
 
 [[exemptions.ipnet]]
@@ -398,10 +366,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.js-sys]]
 version = "0.3.105"
-criteria = "safe-to-deploy"
-
-[[exemptions.libbz2-rs-sys]]
-version = "0.2.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.libmimalloc-sys]]
@@ -434,10 +398,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.lsp-types]]
 version = "0.97.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.lzma-rust2]]
-version = "0.16.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.maybe-owned]]
@@ -528,10 +488,6 @@ criteria = "safe-to-deploy"
 version = "4.4.0"
 criteria = "safe-to-deploy"
 
-[[exemptions.pbkdf2]]
-version = "0.13.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.petgraph]]
 version = "0.6.5"
 criteria = "safe-to-deploy"
@@ -550,10 +506,6 @@ criteria = "safe-to-run"
 
 [[exemptions.portable-atomic-util]]
 version = "0.2.8"
-criteria = "safe-to-deploy"
-
-[[exemptions.ppmd-rust]]
-version = "1.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.pprof]]
@@ -732,10 +684,6 @@ criteria = "safe-to-deploy"
 version = "1.0.229"
 criteria = "safe-to-deploy"
 
-[[exemptions.sha1]]
-version = "0.11.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.sha2]]
 version = "0.11.0"
 criteria = "safe-to-deploy"
@@ -757,7 +705,7 @@ version = "3.2.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.smallvec]]
-version = "1.16.2"
+version = "1.16.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.spin]]
@@ -965,15 +913,11 @@ version = "1.9.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zip]]
-version = "8.6.0"
+version = "9.0.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.zlib-rs]]
 version = "0.6.7"
-criteria = "safe-to-deploy"
-
-[[exemptions.zopfli]]
-version = "0.8.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.zstd]]

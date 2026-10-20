@@ -526,6 +526,21 @@ pub fn apply_plugins(
                     income: options.name_income.clone(),
                     expenses: options.name_expenses.clone(),
                 },
+                // And the tolerance options, for the same reason (#2653).
+                // Sorted: the map's order is not stable. (The input is a
+                // loaded ledger, so no posting carries booking's
+                // interpolation mark: the loader removed it.)
+                inferred_tolerance_default: {
+                    let mut defaults: Vec<(String, String)> = options
+                        .inferred_tolerance_default
+                        .iter()
+                        .map(|(currency, number)| (currency.clone(), number.clone()))
+                        .collect();
+                    defaults.sort();
+                    defaults
+                },
+                tolerance_multiplier: options.inferred_tolerance_multiplier.clone(),
+                infer_tolerance_from_cost: options.infer_tolerance_from_cost,
             },
             config: None,
         };
@@ -811,6 +826,55 @@ mod plugin_options_tests {
              `Actifs:` account; unchanged output means the renamed root was \
              not recognized as balance-sheet, so the ledger's names never \
              reached the plugin",
+        );
+    }
+
+    /// `apply_plugins` must hand plugins the ledger's tolerance options too
+    /// (#2653): `sellgains` passes proceeds 4 cents off under a
+    /// `tolerance_multiplier` of 5 and fails them under the default 0.5, as
+    /// bean-check does.
+    #[test]
+    fn apply_plugins_passes_the_ledgers_tolerance_options() {
+        let source = "\
+2024-01-01 open Assets:Cash
+2024-01-01 open Assets:Stock
+2024-01-01 open Income:Gains
+
+2024-01-05 * \"off by 4 cents\"
+  Assets:Stock  -2 AAA {100 USD} @ 150 USD
+  Assets:Cash  300.04 USD
+  Income:Gains  -100.04 USD
+";
+        let run = |options: &crate::types::output::LedgerOptions| {
+            let parsed = rustledger_parser::parse(source);
+            let directives: Vec<rustledger_core::Directive> =
+                parsed.directives.iter().map(|d| (**d).clone()).collect();
+            let n = directives.len();
+            let mut errors = Vec::new();
+            let _ = apply_plugins(
+                &["sellgains"],
+                directives,
+                vec![0; n],
+                vec!["<test>".to_string(); n],
+                &mut errors,
+                options,
+            );
+            errors.len()
+        };
+        assert_eq!(
+            run(&crate::types::output::LedgerOptions::default()),
+            1,
+            "the default tolerance must report the 4 cents"
+        );
+        let options = crate::types::output::LedgerOptions {
+            inferred_tolerance_multiplier: "5".to_string(),
+            ..crate::types::output::LedgerOptions::default()
+        };
+        assert_eq!(
+            run(&options),
+            0,
+            "a tolerance_multiplier of 5 allows the 4 cents; an error means \
+             the ledger's option never reached the plugin"
         );
     }
 }

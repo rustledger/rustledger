@@ -123,7 +123,7 @@ wasmtime = "49.0.0"
 wasmtime-wasi = "49.0.0"
 wat = "1"
 # WIT / Component Model guest bindings (rustledger-ffi-component, #1384)
-wit-bindgen = "0.62"
+wit-bindgen = "0.63"
 
 # Parallelization
 rayon = "1.12"
@@ -168,7 +168,10 @@ ureq = { version = "3", features = ["json"] }
 
 # Compression/Archive (for Python WASI download)
 flate2 = "1"
-zip = "8"
+# Only stored + deflate entries are read: the one archive is the SHA-256-pinned
+# CPython WASI build (python/download.rs). Default features would pull aes,
+# bzip2, lzma, ppmd, zopfli and a second zstd (wasmtime-internal-cache has 0.13).
+zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 sha2 = "0.11"
 
 # Serialization (for cache)

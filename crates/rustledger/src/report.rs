@@ -244,7 +244,7 @@ impl LedgerErrorRenderer {
                 message: err.message.clone(),
                 code: Some(err.code.clone()),
                 severity: Some(miette_severity),
-                help: None,
+                help: err.hint.clone(),
                 url: None,
                 labels: Some(vec![LabeledSpan::at(span_start..span_end, "here")]),
             };
@@ -281,6 +281,9 @@ impl LedgerErrorRenderer {
                 "<unknown>: {}[{}]: {}",
                 severity_label, err.code, err.message,
             )?;
+        }
+        if let Some(hint) = &err.hint {
+            writeln!(writer, "  help: {hint}")?;
         }
         Ok(())
     }

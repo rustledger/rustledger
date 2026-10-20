@@ -5,7 +5,7 @@
 // Component Model. Plugins implementing this interface can be written in
 // any language that supports WIT/Component Model.
 
-package beancount:plugin@0.2.0;
+package beancount:plugin@0.3.0;
 
 /// Core types used throughout the plugin interface.
 interface types {
@@ -212,6 +212,13 @@ interface types {
         operating-currencies: list<string>,
         /// Ledger title.
         title: option<string>,
+        /// Per-currency tolerance floors, `(currency, number)` sorted by
+        /// currency; `*` is the default. Added in 0.3.0 (#2653).
+        inferred-tolerance-default: list<tuple<string, string>>,
+        /// Tolerance multiplier, as a decimal string. Added in 0.3.0.
+        tolerance-multiplier: string,
+        /// Whether costs and prices widen the tolerance. Added in 0.3.0.
+        infer-tolerance-from-cost: bool,
     }
 }
 

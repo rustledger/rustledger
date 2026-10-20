@@ -52,7 +52,12 @@ pub fn validation_error_to_wasm(
     let mut out = base
         .with_code(e.code.code())
         .with_phase("validate")
-        .with_hint(e.note.clone().or_else(|| e.context.clone()))
+        .with_hint(
+            e.hint
+                .clone()
+                .or_else(|| e.note.clone())
+                .or_else(|| e.context.clone()),
+        )
         .with_file(file);
     if let Some(span) = e.span {
         out = out.with_span(

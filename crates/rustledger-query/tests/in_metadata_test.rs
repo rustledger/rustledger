@@ -163,3 +163,34 @@ fn non_string_and_null_keys() {
     assert!(strings("SELECT narration WHERE NULL IN meta").is_empty());
     assert!(strings("SELECT narration WHERE NULL NOT IN meta").is_empty());
 }
+
+/// A key written with no value (`empty:`) is present, with a NULL value, so
+/// `IN` finds it, as bean-query does: membership asks about the key, never
+/// about the value.
+#[test]
+fn key_with_no_value_is_present() {
+    let mut txn = Transaction::new(date(1, 5), "Blank")
+        .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(-1), "EUR")))
+        .with_synthesized_posting(Posting::new("Expenses:Food", Amount::new(dec!(1), "EUR")));
+    txn.meta.insert("empty".into(), MetaValue::None);
+    txn.postings[0].meta.insert("blank".into(), MetaValue::None);
+    let directives = vec![Directive::Transaction(txn)];
+    let mut executor = Executor::new(&directives);
+    let mut flags = |query: &str| -> Vec<Value> {
+        executor
+            .execute(&parse(query).unwrap())
+            .unwrap()
+            .rows
+            .into_iter()
+            .map(|row| row[0].clone())
+            .collect()
+    };
+    assert_eq!(
+        flags("SELECT 'empty' IN entry.meta"),
+        [true, true].map(Value::Boolean).to_vec()
+    );
+    assert_eq!(
+        flags("SELECT 'blank' IN meta"),
+        [true, false].map(Value::Boolean).to_vec()
+    );
+}

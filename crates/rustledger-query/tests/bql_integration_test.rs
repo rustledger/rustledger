@@ -7687,17 +7687,32 @@ fn test_accounts_table_select_all() {
     assert_eq!(result.len(), 4);
 }
 
+/// `open` and `close` are the directives, as bean-query's `Open` / `Close`
+/// structures are, so their dates are `open.date` / `close.date` (#2700).
 #[test]
 fn test_accounts_table_open_close_dates() {
     let directives = make_accounts_test_directives();
     let result = execute_query(
-        "SELECT account, open, close FROM #accounts WHERE account = 'Assets:Bank:Savings'",
+        "SELECT account, open.date, close.date FROM #accounts WHERE account = 'Assets:Bank:Savings'",
         &directives,
     );
 
     assert_eq!(result.len(), 1);
     assert_eq!(result.rows[0][1], Value::Date(date(2024, 1, 1)));
     assert_eq!(result.rows[0][2], Value::Date(date(2024, 12, 31)));
+
+    let result = execute_query(
+        "SELECT open, close FROM #accounts WHERE account = 'Assets:Bank:Savings'",
+        &directives,
+    );
+    let Value::Object(open) = &result.rows[0][0] else {
+        panic!("open must be structured, got {:?}", result.rows[0][0]);
+    };
+    assert_eq!(open.get("date"), Some(&Value::Date(date(2024, 1, 1))));
+    let Value::Object(close) = &result.rows[0][1] else {
+        panic!("close must be structured, got {:?}", result.rows[0][1]);
+    };
+    assert_eq!(close.get("date"), Some(&Value::Date(date(2024, 12, 31))));
 }
 
 #[test]

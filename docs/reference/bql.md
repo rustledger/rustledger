@@ -67,7 +67,7 @@ Each row in a default `SELECT` is one posting from one transaction. The columns 
 | `year`, `month`, `day` | Integer | Date parts (shortcuts for `year(date)` etc.) |
 | `id` | Integer? | Stable directive index (matches Python beancount's `id`) |
 | `type` | String | Always `"transaction"` for default `SELECT` |
-| `entry` | Object | Whole transaction as a structured object (`date`, `flag`, `payee`, `narration`, `tags`, `links`, `meta`) |
+| `entry` | Object | Whole transaction as a structured object (`date`, `flag`, `payee`, `narration`, `tags`, `links`, `meta`, `accounts`) |
 
 **Posting columns**
 
@@ -108,6 +108,27 @@ An `AVERAGE` account is shown as its pool on every surface, before a sale and af
 | `filename` | String? | Source file the directive came from |
 | `lineno` | Integer? | Line number in that file |
 | `location` | String? | `"filename:lineno"` shortcut |
+
+#### Attribute access
+
+A structured value takes `.name` to read one of its fields, as in bean-query. Attributes chain, so `position.units.number` is the number of the posting's units.
+
+| Value | Attributes |
+|-------|------------|
+| amount (`price`, `weight`, `units(...)`, `cost(...)`, `#balances.amount`, ...) | `number`, `currency` |
+| position (`position`) | `units` (an amount), `cost` (a cost, `NULL` without one) |
+| cost (`position.cost`) | `number` (per unit), `currency`, `date`, `label` |
+| transaction (`entry`) | `date`, `flag`, `payee`, `narration`, `tags`, `links`, `meta`, `accounts` |
+| `open` on `#accounts` | `date`, `account`, `currencies`, `booking`, `meta` |
+| `close` on `#accounts` | `date`, `account`, `meta` |
+
+```sql
+SELECT date, position.units.number, position.cost.date WHERE position.cost IS NOT NULL
+
+SELECT account, open.date, close.date FROM #accounts
+```
+
+An attribute an amount, position or cost does not have is an error. On a structured object (`entry`, a cost, `open`, `close`) a missing field is `NULL`, as an absent payee is, and so is a misspelled one. An attribute of `NULL` is `NULL`.
 
 ### Column Aliases
 

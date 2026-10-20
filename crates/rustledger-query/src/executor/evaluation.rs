@@ -247,6 +247,13 @@ impl Executor<'_> {
             meta_obj.insert(k.clone(), Self::meta_value_to_value(Some(v)));
         }
         obj.insert("meta".to_string(), Value::Object(Box::new(meta_obj)));
+        // bean-query's `Transaction` structure adds `accounts`, the set of
+        // the postings' accounts; without it `entry.accounts` was NULL
+        // (#2702).
+        obj.insert(
+            "accounts".to_string(),
+            Value::StringSet(super::system_tables::TxnAccounts::of(txn).accounts()),
+        );
         Value::Object(Box::new(obj))
     }
 
@@ -262,14 +269,73 @@ impl Executor<'_> {
     /// absent payee), so the two cases are indistinguishable at runtime —
     /// NULL reproduces upstream for the common case and is lenient for
     /// typos. Pinned in `attribute_subscript_test.rs`.
+    ///
+    /// An amount and a position are structured too, as in bean-query, whose
+    /// `Amount`, `Position` and `Cost` structures expose the fields of
+    /// beancount's namedtuples (#2702):
+    ///
+    /// | operand  | attributes                            |
+    /// |----------|---------------------------------------|
+    /// | amount   | `number`, `currency`                  |
+    /// | position | `units` (amount), `cost`              |
+    /// | cost     | `number`, `currency`, `date`, `label` |
+    ///
+    /// These are typed values with a fixed set of fields, so an attribute
+    /// outside it is an error here, as upstream's compile error is. A
+    /// position without a cost has a NULL `cost`, and so a NULL
+    /// `cost.number`. A cost is returned as an object of its four fields
+    /// (see [`Self::cost_object`]), the one structured cost value there is.
     pub(super) fn eval_attribute(value: Value, name: &str) -> Result<Value, QueryError> {
         match value {
             Value::Object(obj) => Ok(obj.get(name).cloned().unwrap_or(Value::Null)),
             Value::Null => Ok(Value::Null),
+            Value::Amount(amount) => match name {
+                "number" => Ok(Value::Number(amount.number)),
+                "currency" => Ok(Value::String(amount.currency.to_string())),
+                _ => Err(Self::no_such_attribute("amount", name)),
+            },
+            Value::Position(position) => match name {
+                "units" => Ok(Value::Amount(position.units)),
+                "cost" => Ok(position
+                    .cost
+                    .as_ref()
+                    .map_or(Value::Null, Self::cost_object)),
+                _ => Err(Self::no_such_attribute("position", name)),
+            },
             other => Err(QueryError::Type(format!(
                 "cannot access attribute '{name}': operand {other:?} is not structured"
             ))),
         }
+    }
+
+    /// bean-query's compile error for an attribute its structure lacks.
+    fn no_such_attribute(type_name: &str, name: &str) -> QueryError {
+        QueryError::Type(format!(
+            "structured type {type_name} has no attribute '{name}'"
+        ))
+    }
+
+    /// A lot's cost as a structured value: bean-query's `Cost` structure,
+    /// the fields of beancount's `Cost` namedtuple. A cost with no date or
+    /// label has NULL in that field, as there.
+    pub(super) fn cost_object(cost: &rustledger_core::Cost) -> Value {
+        let mut obj = BTreeMap::new();
+        obj.insert("number".to_string(), Value::Number(cost.number));
+        obj.insert(
+            "currency".to_string(),
+            Value::String(cost.currency.to_string()),
+        );
+        obj.insert(
+            "date".to_string(),
+            cost.date.map_or(Value::Null, Value::Date),
+        );
+        obj.insert(
+            "label".to_string(),
+            cost.label
+                .as_ref()
+                .map_or(Value::Null, |label| Value::String(label.clone())),
+        );
+        Value::Object(Box::new(obj))
     }
 
     /// String-keyed subscript access (`meta['key']`, #1796). Delegates to

@@ -478,7 +478,7 @@ pub fn run_with_writer<W: Write>(
                 if args.verbose {
                     let _ = writeln!(err_out, "{symbol}: cached (source: {})", cached.source);
                 }
-                write_price(out, symbol, &cached, args.beancount, args.source_meta)?;
+                emit_price(out, err_out, args, symbol, &cached)?;
                 continue;
             }
 
@@ -556,7 +556,7 @@ pub fn run_with_writer<W: Write>(
                         }
                         continue;
                     }
-                    write_price(out, symbol, &response, args.beancount, args.source_meta)?;
+                    emit_price(out, err_out, args, symbol, &response)?;
                 }
                 Err(e) => fetch_failed(err_out, args.verbose, symbol, &e),
             }
@@ -817,6 +817,50 @@ fn describe_attempts(
     }
 }
 
+/// Refuse a response whose currency `rledger price -b` cannot write as a
+/// beancount commodity, naming the source that returned it (#2715).
+///
+/// A source's currency goes into ledger text verbatim, so one with a space,
+/// a quote, a newline, a control character or lower case would write a line
+/// that does not parse, or that parses as something else (`USD\n2024-01-01
+/// open ...`). It is checked against the parser's own commodity rule. The
+/// number needs no check: it is a `Decimal`, whose `Display` is always a
+/// plain decimal the grammar reads (no exponent, no grouping).
+///
+/// Only the beancount form is checked: the plain `SYMBOL: price CURRENCY`
+/// form is display, not ledger text.
+fn check_beancount_currency(response: &crate::cmd::price::PriceResponse) -> Result<()> {
+    if !rustledger_parser::is_valid_currency(&response.currency) {
+        anyhow::bail!(
+            "price source `{}` returned the currency {:?}, which is not a valid \
+             beancount commodity (commodities are upper-case, like `USD` or `EUR`); \
+             no price directive was written",
+            response.source,
+            response.currency
+        );
+    }
+    Ok(())
+}
+
+/// Write `response` as `rledger price` prints it, or report why it cannot
+/// be written as a beancount `price` directive (see
+/// [`check_beancount_currency`]) the way a failed fetch is reported.
+fn emit_price(
+    handle: &mut impl Write,
+    err_out: &mut Messages<'_>,
+    args: &PriceArgs,
+    symbol: &str,
+    response: &crate::cmd::price::PriceResponse,
+) -> Result<()> {
+    if args.beancount
+        && let Err(e) = check_beancount_currency(response)
+    {
+        fetch_failed(err_out, args.verbose, symbol, &e);
+        return Ok(());
+    }
+    write_price(handle, symbol, response, args.beancount, args.source_meta)
+}
+
 /// Write a price response to the output.
 fn write_price(
     handle: &mut impl Write,
@@ -843,7 +887,13 @@ fn write_price(
         // source as beancount metadata on the directive. Off by default so the
         // bare bean-price line shape is preserved.
         if source_meta {
-            writeln!(handle, "  source: \"{}\"", response.source)?;
+            // Escaped: a `--source-cmd` source is named after its program,
+            // whose file name may hold a quote or a backslash.
+            writeln!(
+                handle,
+                "  source: \"{}\"",
+                rustledger_core::format::escape_string(&response.source)
+            )?;
         }
     } else {
         writeln!(handle, "{symbol}: {} {}", response.price, response.currency)?;
@@ -978,7 +1028,7 @@ fn run_with_external_command<W: Write>(
                         }
                         continue;
                     }
-                    write_price(handle, symbol, &response, args.beancount, args.source_meta)?;
+                    emit_price(handle, err_out, args, symbol, &response)?;
                 }
                 Err(e) => fetch_failed(err_out, args.verbose, symbol, &e),
             }
@@ -1507,6 +1557,22 @@ mod tests {
         let mut out = Vec::new();
         write_price(&mut out, "EURUSD", &resp, false, true).unwrap();
         assert!(!String::from_utf8(out).unwrap().contains("source:"));
+    }
+
+    /// #2715: the source's name is written inside a string, escaped, so a
+    /// quote in it (a `--source-cmd` program's file name) cannot end it.
+    #[test]
+    fn write_price_source_meta_escapes_the_source_name() {
+        let resp = crate::cmd::price::PriceResponse {
+            price: "1".parse().unwrap(),
+            currency: "USD".to_string(),
+            date: "2024-05-02".parse::<NaiveDate>().unwrap(),
+            source: "my\"src\\x".to_string(),
+        };
+        let mut out = Vec::new();
+        write_price(&mut out, "EURUSD", &resp, true, true).unwrap();
+        let s = String::from_utf8(out).unwrap();
+        assert!(s.contains("  source: \"my\\\"src\\\\x\"\n"), "{s}");
     }
 
     #[test]

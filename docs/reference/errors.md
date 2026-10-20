@@ -316,6 +316,20 @@ The currency the transaction is out of balance in is not used either.
 (`-5 {300 USD}`) can only take its commodity from the account, because the cost
 or price names its own currency, not the commodity being counted.
 
+### BOOK: Per-Unit Cost Below 1e-28
+
+**Cause**: A total cost spread over so many units that its per-unit cost is
+below `1e-28`, the smallest positive number rustledger's decimal holds. The
+per-unit would round to zero, a cost nobody wrote, so the posting is refused:
+`Assets:Broker: the per-unit cost of 1 USD over 50000000000000000000000000000
+units is below 1e-28, the smallest number a decimal holds, so the lot cannot
+record it`. A cost solved from the transaction's balance (`{USD}`) gives the
+same message, after `interpolation failed:`. A per-unit that is merely tiny
+(a total cost of 1 USD over 30000000000 units) books.
+
+**Fix**: Denominate the commodity in larger units (thousands, millions), so
+there are fewer of them.
+
 ### E4005: Negative Cost
 
 **Cause**: A cost specification resolves to a negative amount.

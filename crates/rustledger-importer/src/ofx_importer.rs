@@ -74,7 +74,7 @@ impl OfxImporter {
 
         // Bank and credit-card transactions are imported identically: every
         // transaction posts to `config.account`.
-        for txn in &transactions {
+        for (index, txn) in transactions.iter().enumerate() {
             let statement_currency = txn.statement_currency.as_deref().unwrap_or("");
             match Self::build_transaction(
                 txn,
@@ -82,7 +82,24 @@ impl OfxImporter {
                 &config.account,
                 default_currency,
             ) {
-                Ok(t) => directives.push(Directive::Transaction(t)),
+                Ok(t) => {
+                    let mut directive = Directive::Transaction(t);
+                    // `<NAME>` / `<MEMO>` control characters, neutralized
+                    // before they reach the ledger (#2538).
+                    let fields = crate::imported_text::neutralize_directive(&mut directive);
+                    if !fields.is_empty() {
+                        let row = match txn.fitid.as_deref() {
+                            Some(fitid) => format!(
+                                "Transaction {} (FITID {})",
+                                index + 1,
+                                fitid.escape_debug()
+                            ),
+                            None => format!("Transaction {}", index + 1),
+                        };
+                        warnings.push(crate::imported_text::warning(&row, &fields));
+                    }
+                    directives.push(directive);
+                }
                 Err(e) => warnings.push(format!("Skipped transaction: {e}")),
             }
         }

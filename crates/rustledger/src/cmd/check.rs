@@ -340,11 +340,13 @@ pub fn run_with_writer<W: Write>(
                 let errors = &errors[..];
 
                 if json_mode {
+                    // One line-start table per file: `line_col_in` per span
+                    // rescanned the file from byte 0, so a file with
+                    // thousands of parse errors took seconds (#2632).
+                    let index = rustledger_loader::LineIndex::new(&source);
                     for error in errors {
-                        let (start_line, start_col) =
-                            rustledger_loader::line_col_in(&source, error.span.start);
-                        let (end_line, end_col) =
-                            rustledger_loader::line_col_in(&source, error.span.end);
+                        let (start_line, start_col) = index.line_col(error.span.start);
+                        let (end_line, end_col) = index.line_col(error.span.end);
                         diagnostics.push(JsonDiagnostic {
                             file: path_str.clone(),
                             line: start_line,
@@ -391,10 +393,8 @@ pub fn run_with_writer<W: Write>(
                                 // Character columns, as everywhere else: since
                                 // #2341 `line_col_in` and `SourceFile::line_col`
                                 // are two surfaces of one rule, pinned to agree.
-                                let (sl, sc) =
-                                    rustledger_loader::line_col_in(&src.source, site.span.start);
-                                let (el, ec) =
-                                    rustledger_loader::line_col_in(&src.source, site.span.end);
+                                let (sl, sc) = src.line_col(site.span.start);
+                                let (el, ec) = src.line_col(site.span.end);
                                 (site.file.display().to_string(), sl, sc, el, ec)
                             } else {
                                 (site.file.display().to_string(), 1, 1, 1, 1)

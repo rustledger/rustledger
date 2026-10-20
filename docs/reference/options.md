@@ -205,11 +205,14 @@ formatter must never emit text its own parser rejects.
 
 ### inferred_tolerance_default
 
-Default tolerance for balance checking.
+Default tolerance for a transaction's balance check, per currency. Repeat the option for several currencies.
 
 ```beancount
+option "inferred_tolerance_default" "USD:0.01"
 option "inferred_tolerance_default" "*:0.005"
 ```
+
+A named currency's value is a minimum: a transaction mentioning `USD` balances within at least 0.01 USD, or more if its amounts' precision allows more. The `*` value is a fallback, as in beancount: it applies only to a currency the transaction gives no tolerance at all, for example one whose amounts are all integers. It does not loosen a currency whose tolerance is inferred from its amounts.
 
 ### inferred_tolerance_multiplier
 

@@ -2541,6 +2541,41 @@ fn test_refused_transaction_keeps_its_account_errors() {
     );
 }
 
+/// #2687 + #2686: `forecast` replaces a `#` template with copies, which
+/// keep the template's location as beancount's copies keep its meta. An
+/// unopened account is reported once per copy, at the template's line, as
+/// `bean-check` reports it. The template itself, deleted by the plugin, is
+/// not reported a third time from the early phase's held judgment.
+#[test]
+fn test_forecast_copies_report_at_the_template() {
+    use rustledger_loader::{LoadOptions, load};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("ledger.beancount");
+    std::fs::write(
+        &path,
+        "plugin \"beancount.plugins.forecast\"\n\
+         2026-01-01 open Assets:Cash\n\
+         2026-01-05 # \"Rent [MONTHLY REPEAT 2 TIMES]\"\n  \
+         Expenses:Rent  100 USD\n  Assets:Cash\n",
+    )
+    .expect("write ledger");
+    let ledger = load(&path, &LoadOptions::default()).expect("load ledger");
+    let unopened: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.code == "E1001" && e.message.contains("Expenses:Rent"))
+        .collect();
+    assert_eq!(unopened.len(), 2, "{:?}", ledger.errors);
+    for e in unopened {
+        let loc = e
+            .location
+            .as_ref()
+            .unwrap_or_else(|| panic!("a copy's error has a location: {e:?}"));
+        assert_eq!(loc.line, 3, "at the template: {e:?}");
+    }
+}
+
 /// The deferred E1001 dedup is keyed per-posting (`file_id`, span), not per
 /// (account, date): two transactions on the SAME date posting to the SAME
 /// unopened account — one elided (reported early), one explicit (reported

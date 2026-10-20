@@ -94,7 +94,10 @@ pub fn load_result_cached(
             .source_map
             .files()
             .iter()
-            .map(|f| f.path.to_string_lossy().into_owned())
+            // The opened spelling: a hit rebuilds each file's identity from
+            // it, while its own includes and documents resolve against it
+            // (#2635); the normalized path alone would lose a symlink.
+            .map(|f| f.opened_path.to_string_lossy().into_owned())
             .collect();
         let files = if files.is_empty() {
             vec![file.to_string_lossy().into_owned()]
@@ -211,13 +214,15 @@ pub fn bail_on_parse_errors(raw: &rustledger_loader::LoadResult, file: &Path) ->
 ///
 /// When any directive failed to book.
 pub fn bail_on_booking_errors(ledger: &rustledger_loader::Ledger, file: &Path) -> Result<()> {
-    // Counting the BOOK-coded errors specifically. `ledger.errors` also carries
+    // Counting booking failures specifically. `ledger.errors` also carries
     // validation diagnostics, which do NOT leave the stream unbooked and must
-    // not gate a report — `rledger check` is where those are read.
+    // not gate a report — `rledger check` is where those are read. Not by
+    // code: a lot-matching failure carries its E4xxx code (#2631), which a
+    // validator can raise too.
     let failures: Vec<&str> = ledger
         .errors
         .iter()
-        .filter(|e| e.code == rustledger_booking::BOOKING_FAILURE_CODE)
+        .filter(|e| e.is_booking_failure())
         .map(|e| e.message.as_str())
         .collect();
     if failures.is_empty() {

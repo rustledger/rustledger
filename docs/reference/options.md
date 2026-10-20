@@ -244,6 +244,25 @@ Root directory for documents.
 option "documents" "/home/user/finances/documents"
 ```
 
+A relative root is relative to the ledger file. The roots are only searched
+for dated files (`Account/Sub/YYYY-MM-DD.name.ext`) to turn into `document`
+entries, for every account the ledger names, as in beancount; a `document`
+directive's own relative path is always relative to the file it is written
+in, never to a documents root. When such a path is missing but a file with
+that path exists under a documents root, the E8001 error says so and names the
+path to write:
+
+```text
+error[E8001]: Document file not found: ./stmt.pdf
+  help: a file with that name is in documents/stmt.pdf; document paths are
+        relative to the file they are written in, not to the documents
+        folder, so write "documents/stmt.pdf"
+```
+
+The suggested path is relative to the file holding the directive (with `../`
+when the root is outside its directory), or absolute when the two share no
+directory below the filesystem root.
+
 ## All Options
 
 | Option | Type | Default | Description |

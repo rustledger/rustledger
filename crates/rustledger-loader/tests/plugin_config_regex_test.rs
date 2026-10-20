@@ -295,3 +295,69 @@ fn check_commodity_repeated_key_replaces_a_value_of_the_wrong_type() {
         ["Missing Commodity directive for 'FOO' in 'Equity:Opening'"]
     );
 }
+
+/// beancount: `\b` in a `rename_accounts` pattern is a word boundary, so
+/// `\bFood\b` renames `Expenses:Food:Lunch` to `Expenses:Dining:Lunch`.
+/// rledger refused `\b` (#2601); it now answers exactly where the account
+/// names let it (#2656).
+#[test]
+fn rename_accounts_word_boundary_matches_as_beancount() {
+    let ledger = load_source(
+        "plugin \"beancount_reds_plugins.rename_accounts.rename_accounts\" \
+         \"{'\\\\\\\\bFood\\\\\\\\b': 'Dining'}\"\n\
+         2024-01-01 open Assets:Cash\n2024-01-01 open Expenses:Food:Lunch\n\
+         2024-01-02 * \"x\"\n  Expenses:Food:Lunch  1 USD\n  Assets:Cash\n",
+    );
+    assert_eq!(
+        posting_accounts(&ledger),
+        ["Expenses:Dining:Lunch", "Assets:Cash"],
+        "{:?}",
+        messages(&ledger)
+    );
+    assert!(ledger.errors.is_empty(), "{:?}", messages(&ledger));
+}
+
+/// An account holding a decomposed accent (U+0301, a word character to
+/// rledger's regex engine and not to Python's): the word boundary cannot be
+/// evaluated on it exactly, so the plugin reports it, naming the character,
+/// and renames nothing, rather than renaming differently from beancount.
+#[test]
+fn rename_accounts_word_boundary_refuses_an_account_it_cannot_classify() {
+    let ledger = load_source(
+        "plugin \"beancount_reds_plugins.rename_accounts.rename_accounts\" \
+         \"{'\\\\\\\\bFood\\\\\\\\b': 'Dining'}\"\n\
+         2024-01-01 open Assets:Cash\n2024-01-01 open Expenses:Food:Lunch\n\
+         2024-01-01 open Expenses:Cafe\u{301}\n\
+         2024-01-02 * \"x\"\n  Expenses:Food:Lunch  1 USD\n  Assets:Cash\n\
+         2024-01-03 * \"y\"\n  Expenses:Cafe\u{301}  1 USD\n  Assets:Cash\n",
+    );
+    let errors = messages(&ledger);
+    assert!(
+        errors
+            .iter()
+            .any(|m| m.contains("rename_accounts") && m.contains("U+0301")),
+        "{errors:?}"
+    );
+    assert!(
+        posting_accounts(&ledger).contains(&"Expenses:Food:Lunch".to_string()),
+        "renamed nothing"
+    );
+}
+
+/// `onecommodity` with a word-boundary pattern: an account it cannot
+/// classify exactly is reported and left unchecked.
+#[test]
+fn onecommodity_word_boundary_refuses_an_account_it_cannot_classify() {
+    let ledger = load_source(
+        "plugin \"beancount.plugins.onecommodity\" \"Expenses:\\\\bCafe\"\n\
+         2024-01-01 open Assets:Cash\n2024-01-01 open Expenses:Cafe\u{301}\n\
+         2024-01-02 * \"y\"\n  Expenses:Cafe\u{301}  1 USD\n  Assets:Cash\n",
+    );
+    let errors = messages(&ledger);
+    assert!(
+        errors
+            .iter()
+            .any(|m| m.contains("onecommodity") && m.contains("U+0301")),
+        "{errors:?}"
+    );
+}

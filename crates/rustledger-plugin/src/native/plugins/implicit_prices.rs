@@ -51,7 +51,9 @@ fn cost_fingerprint(cost: &CostData, units_number: Decimal) -> Option<String> {
         if units_number.is_zero() {
             return None;
         }
-        total / units_number.abs()
+        // As booking derives a `{{T}}` lot's per-unit cost (`py_div`,
+        // #2652), so the key names the same number the lot carries.
+        rustledger_core::py_div(total, units_number.abs())?
     };
     let per_unit = per_unit_decimal.normalize().to_string();
     let date = cost.date.as_deref().unwrap_or("");

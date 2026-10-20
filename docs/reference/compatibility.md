@@ -54,7 +54,7 @@ Rustledger does not execute Python plugins. Files using `plugin "some_python_plu
 - Report error E8001 "Plugin not found" for unknown plugins
 - This matches Python beancount's behavior of failing on missing plugins
 
-Rustledger supports 31 native plugins that match Python beancount behavior:
+Rustledger has 33 native plugins. These 30 match Python beancount behavior:
 
 - `auto_accounts`, `auto_tag`, `box_accrual`, `gain_loss`
 - `long_short`, `check_average_cost`, `check_closing`, `check_commodity`
@@ -64,6 +64,8 @@ Rustledger supports 31 native plugins that match Python beancount behavior:
 - `onecommodity`, `pedantic`, `rename_accounts`, `rx_txn_plugin`
 - `sellgains`, `split_expenses`, `unique_prices`, `unrealized`
 - `valuation`, `zerosum`
+
+`check_option_expiry` matches `beancount_options.check_option_expiry` from [beancount-options](https://github.com/rustledger/beancount-options), the Python package that holds the counterparts of rustledger's option plugins; `check_option_assignment`'s counterpart is not released yet.
 
 Additionally, `document_discovery` auto-discovers documents from `option "documents"` directories.
 
@@ -188,13 +190,12 @@ Fixture: `tests/fixtures/cross-file-order/`. Pinned by
 
 beancount sorts entries by `(date, type_priority, lineno)`, and its priorities
 put Transaction, Pad, Note, Price, Event, Query, Commodity and Custom in ONE
-bucket, tie-broken by line number. We give most of those types a priority of
-their own, so same-date directives group by type rather than interleaving by
-line. `event` and `custom` are the exception: they share the transaction
-priority, so a same-date `event` or `custom` keeps its place among the
-transactions written around it, as in beancount (issue #2576). Before that a
-same-date `custom` came out after every transaction, note, document, price and
-`close` of its date.
+bucket, tie-broken by line number. We do too, except for `pad`, which keeps a
+priority of its own between `balance` and that bucket. `event` and `custom`
+joined the transaction priority in issue #2576, and `commodity`, `note`,
+`query` and `price` in issue #2629: before, a same-date `commodity` came out
+ahead of the date's balances, and a `note`, `query` or `price` after every
+transaction of its date, whatever line it was written on.
 
 Visible when a `pad` shares its date with a `note`, `price` or `close`:
 

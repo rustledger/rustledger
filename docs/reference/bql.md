@@ -145,6 +145,43 @@ WHERE narration ~ "coffee"
 WHERE payee ~ "Amazon"
 ```
 
+### Regular Expressions
+
+Patterns are Python regular expressions, read as bean-query's Python `re`
+reads them: `x ~ p` is `re.search(p, x, re.IGNORECASE)`, so it matches
+anywhere in `x`, ignoring case (anchor it with `^` or `$`), and `x !~ p` is its
+negation. `has_account(p)` and `JOURNAL 'p'` match accounts the same way.
+`grep` and `grepn` search case-sensitively, `subst` is `re.sub` (groups are
+`\1` or `\g<name>` in the replacement; `$1` is literal text), and
+`findfirst` matches from the start of each element, case-sensitively, trying
+them in sorted order.
+
+A construct Python has and rledger's regex engine cannot express is an error
+naming it, never a different match: lookahead and lookbehind,
+backreferences, conditional and atomic groups, possessive quantifiers,
+`\N{...}`, and the `(?x)` flag. `subst`
+also refuses a pattern that can match the empty string, which `re.sub`
+replaces differently. Two divergences remain, on non-ASCII or multi-line
+text only: case folding is Unicode simple case folding (Python also matches
+`i` with the dotless `ı`), and `$` matches only at the very end, where
+Python's also matches before a final newline.
+
+`\b` and `\B` match where Python's do wherever that can be decided exactly.
+Python and rledger's regex engine disagree on whether some 13,000
+non-ASCII characters are word characters (combining accents written
+separately, vowel signs, emoji joiners, superscripts, and characters newer
+than an older Python's Unicode), so a pattern with `\b` or `\B` refuses a
+text holding one of them, naming it (`the text contains U+0301 ...`), rather
+than answering differently. On any other text the answer is Python's, in
+every Python from 3.9 to 3.14. `(?a)\b` is the ASCII word boundary, which
+both agree on everywhere: it never refuses. `(?a)` also makes `\d`, `\s` and
+`\w` ASCII, and folds only ASCII letters when ignoring case. `\B` alone on an
+empty text is refused too, since Python 3.14 matches it there and earlier
+Pythons do not.
+In a query, `AND` and `OR` stop at a left operand that decides them, as
+bean-query's do, so `flag = '*' AND narration ~ '\bx'` only matches the
+narrations of the rows it keeps.
+
 ### Logical Operators
 
 ```sql
@@ -292,8 +329,8 @@ When the selected postings cannot be realized on their own, because a `WHERE`
 keeps a sale but not enough of the purchases it sold from, the result is the
 plain sum of those postings: the sale appears as a negative lot at the cost
 it was booked at, beside the purchases that were kept. `balance` does the same
-for those rows. `BALANCES` over the same `FROM` subset reports an error
-instead. Python beancount has no `AVERAGE`
+for those rows, and so does `BALANCES` for an account partly selected by its
+`FROM` or `WHERE`. Python beancount has no `AVERAGE`
 booking, so there is no bean-query answer to compare with.
 
 ## Scalar Functions
@@ -361,7 +398,10 @@ and NULL when there are several.
 | `root(account, n)` | First n account segments |
 | `leaf(account)` | Last account segment |
 | `parent(account)` | All but last segment |
-| `findfirst(regex, set)` | First element of a set matching a regex, else `NULL` |
+| `findfirst(regex, set)` | First element, in sorted order, that the regex matches from its start, else `NULL` |
+| `grep(regex, str)` | The part of `str` the regex matches, else `NULL` |
+| `grepn(regex, str, n)` | Group `n` of the regex's match in `str`, else `NULL` |
+| `subst(regex, replacement, str)` | `str` with every match replaced, as Python's `re.sub` |
 | `has_account(regex)` | True if **any** posting on the entry has a matching account |
 
 `has_account()` asks about the whole entry, not the current posting, so it is
@@ -371,7 +411,15 @@ works as an entry filter: `BALANCES FROM has_account('Assets')`.
 A posting column in a `FROM` filter (`account`, `number`, `position`, ...) is
 a row filter instead, as in beanquery: `FROM account ~ 'Bank'` keeps the bank
 postings only, the same as `WHERE account ~ 'Bank'`, applied after `OPEN ON`,
-`CLOSE` and `CLEAR`. `PRINT` prints whole entries, so it rejects a posting
+`CLOSE` and `CLEAR`. `BALANCES`' `WHERE` filters the postings before they are
+summed, as bean-query's does, so `BALANCES WHERE x` is `BALANCES FROM x`, and
+both are `SELECT account, sum(position) WHERE x GROUP BY account`:
+`BALANCES WHERE year = 2024` sums each account's 2024 postings, a sale in 2024
+of a lot bought earlier showing as a negative lot. An account every one of
+whose postings is selected shows its booked total. Because the `WHERE` reads
+postings, `balance` and `account_balance` are refused there: to filter
+accounts by their total, use `SELECT account, sum(position) ... GROUP BY
+account HAVING ...`. `PRINT` prints whole entries, so it rejects a posting
 column in its `FROM`; use `PRINT FROM has_account('Bank')`.
 
 ### Metadata Functions

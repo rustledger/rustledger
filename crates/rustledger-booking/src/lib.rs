@@ -28,8 +28,8 @@ mod pad;
 
 pub use book::{
     BOOKING_FAILURE_CODE, BookedTransaction, BookingEngine, BookingError, CapitalGain,
-    LedgerBookResult, TransactionReplay, book, book_transactions, posting_lot_total,
-    present_inventory,
+    LedgerBookResult, TransactionReplay, book, book_transactions, clear_interpolated_marks,
+    posting_lot_total, present_inventory,
 };
 pub use interpolate::{
     InterpolationError, InterpolationResult, Rollback, UnknownGroup, elided_unknown_groups,
@@ -189,6 +189,13 @@ enum ToleranceRounding {
     Nearest,
 }
 
+/// Whether `posting` carries booking's interpolation mark
+/// ([`rustledger_core::AUTOMATIC_META`]). Presence is what counts, as in
+/// beancount.
+fn is_interpolated(posting: &rustledger_core::Posting) -> bool {
+    posting.meta.contains_key(rustledger_core::AUTOMATIC_META)
+}
+
 fn tolerances_rounded(
     txn: &Transaction,
     opts: &ToleranceOptions<'_>,
@@ -205,6 +212,14 @@ fn tolerances_rounded(
     // Integer amounts (scale=0) don't contribute — if all amounts for a currency
     // are integers, the tolerance for that currency stays at 0 (exact balance required).
     for posting in &txn.postings {
+        // A posting booking interpolated carries no precision of its own,
+        // so it widens nothing, as in beancount's `infer_tolerances`, which
+        // skips a posting marked `__automatic__`. Only a plugin's view of a
+        // booked transaction has the mark (#2653): booking and validation
+        // never see it.
+        if is_interpolated(posting) {
+            continue;
+        }
         if let Some(units) = posting.amount()
             && units.number.scale() > 0
         {
@@ -236,6 +251,9 @@ fn tolerances_rounded(
             FxHashMap::with_capacity_and_hasher(txn.postings.len().min(4), Default::default());
 
         for posting in &txn.postings {
+            if is_interpolated(posting) {
+                continue;
+            }
             // A units number written without its currency counts here too
             // (#2465): beancount's `infer_tolerances` reads `units.number`
             // whatever the currency, and only the units tolerance lands under

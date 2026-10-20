@@ -182,6 +182,8 @@ fn build_global_registry() -> NativePluginRegistry {
         Box::new(UnrealizedPlugin::new()),
         Box::new(NoUnusedPlugin),
         Box::new(CheckDrainedPlugin),
+        Box::new(CheckOptionExpiryPlugin),
+        Box::new(CheckOptionAssignmentPlugin),
         Box::new(CommodityAttrPlugin::new()),
         Box::new(CheckAverageCostPlugin::new()),
         Box::new(CurrencyAccountsPlugin::new()),

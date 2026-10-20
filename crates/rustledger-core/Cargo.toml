@@ -40,11 +40,16 @@ rkyv = { workspace = true, optional = true }
 rustc-hash.workspace = true
 smallvec.workspace = true
 imbl.workspace = true
+# Python `re` patterns read and rewritten for `regex` (`py_regex`), shared by
+# the native plugins and BQL (#2656).
+regex.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true
 criterion.workspace = true
 tempfile.workspace = true
+# Reads the gzipped Python-generated fixture of `py_div_differential` (#2652).
+flate2.workspace = true
 
 [[bench]]
 name = "inventory_bench"

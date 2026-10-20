@@ -18,7 +18,6 @@
 //! }"
 //! ```
 
-use regex::Regex;
 use rust_decimal::Decimal;
 use rustledger_core::NaiveDate;
 use std::collections::{BTreeSet, HashSet};
@@ -74,7 +73,7 @@ impl RegularPlugin for CapitalGainsGainLossPlugin {}
 /// Configuration for `long_short` classification.
 struct LongShortConfig {
     /// Matched as Python's `re.match` matches: at the start of the account.
-    pattern: Regex,
+    pattern: py_regex::PyRegex,
     account_to_replace: String,
     short_replacement: String,
     long_replacement: String,
@@ -83,7 +82,7 @@ struct LongShortConfig {
 /// One `gain_loss` rewrite.
 struct GainLossConfig {
     /// Matched as Python's `re.match` matches: at the start of the account.
-    pattern: Regex,
+    pattern: py_regex::PyRegex,
     account_to_replace: String,
     gains_replacement: String,
     losses_replacement: String,
@@ -91,7 +90,7 @@ struct GainLossConfig {
 
 /// One config entry, `'pattern': ['to_replace', 'first', 'second']`.
 struct Rule {
-    pattern: Regex,
+    pattern: py_regex::PyRegex,
     to_replace: String,
     first: String,
     second: String,
@@ -200,6 +199,26 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
         })
         .collect();
 
+    // Every account the pattern is matched against, first: one its word
+    // boundary cannot be evaluated on exactly (#2656) stops the plugin with
+    // an error, so the loop below only matches accounts that answer.
+    for directive in &input.directives {
+        if let DirectiveData::Transaction(txn) = &directive.data {
+            for posting in &txn.postings {
+                if let Err(error) = python_match(&config.pattern, &posting.account) {
+                    return unchanged(
+                        &input,
+                        Some(PluginError::error(format!(
+                            "long_short: the pattern cannot be matched against {}: {error}",
+                            posting.account
+                        ))),
+                    );
+                }
+            }
+        }
+    }
+    let matches = |account: &str| matches!(python_match(&config.pattern, account), Ok(true));
+
     for (i, directive) in input.directives.into_iter().enumerate() {
         if directive.directive_type != "transaction" {
             ops.push(PluginOp::Keep(i));
@@ -208,10 +227,7 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
 
         if let DirectiveData::Transaction(txn) = &directive.data {
             // Check if transaction has matching capital gains postings
-            let has_generic = txn
-                .postings
-                .iter()
-                .any(|p| python_match(&config.pattern, &p.account));
+            let has_generic = txn.postings.iter().any(|p| matches(&p.account));
             let has_specific = txn.postings.iter().any(|p| {
                 p.account.contains(&config.short_replacement)
                     || p.account.contains(&config.long_replacement)
@@ -315,7 +331,7 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
             let orig_postings: Vec<&PostingData> = txn
                 .postings
                 .iter()
-                .filter(|p| python_match(&config.pattern, &p.account))
+                .filter(|p| matches(&p.account))
                 .collect();
 
             if orig_postings.is_empty() {
@@ -343,7 +359,7 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
             let mut new_postings: Vec<PostingData> = txn
                 .postings
                 .iter()
-                .filter(|p| !python_match(&config.pattern, &p.account))
+                .filter(|p| !matches(&p.account))
                 .cloned()
                 .collect();
 
@@ -465,7 +481,21 @@ fn process_gain_loss(input: PluginInput) -> PluginOutput {
             let mut account = posting.account.clone();
             let mut changed = false;
             for rule in &rules {
-                if python_match(&rule.pattern, &account) {
+                let matched = match python_match(&rule.pattern, &account) {
+                    Ok(matched) => matched,
+                    // A word boundary that cannot be evaluated exactly on
+                    // the account (#2656). This pass makes every match the
+                    // rewrite below makes, so it is reported here, first.
+                    Err(error) => {
+                        return unchanged(
+                            &input,
+                            Some(PluginError::error(format!(
+                                "gain_loss: the pattern cannot be matched against {account}: {error}"
+                            ))),
+                        );
+                    }
+                };
+                if matched {
                     if changed {
                         return unchanged(
                             &input,
@@ -533,7 +563,9 @@ fn process_gain_loss(input: PluginInput) -> PluginOutput {
                 let mut rewritten = false;
                 if let Some(number) = number {
                     for config in &rules {
-                        if python_match(&config.pattern, &new_account) {
+                        // Each of these matches was made, and answered, in
+                        // the first pass above.
+                        if matches!(python_match(&config.pattern, &new_account), Ok(true)) {
                             new_account = if number < Decimal::ZERO {
                                 // Negative = gains (income is negative)
                                 new_account

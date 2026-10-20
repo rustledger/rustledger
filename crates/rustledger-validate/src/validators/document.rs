@@ -2,9 +2,8 @@
 
 use rustc_hash::FxHashMap;
 use rustledger_core::{Document, Note};
-use std::path::Path;
 
-use super::helpers::push_unknown_account;
+use super::helpers::{is_opened_by, push_unknown_account};
 use crate::LedgerState;
 use crate::error::{ErrorCode, ValidationError};
 
@@ -13,7 +12,7 @@ use crate::error::{ErrorCode, ValidationError};
 /// Checks that the referenced account has been opened.
 pub fn validate_note(state: &LedgerState, note: &Note, errors: &mut Vec<ValidationError>) {
     // Check account exists
-    if !state.accounts.contains_key(&note.account) {
+    if !is_opened_by(state, &note.account, note.date) {
         push_unknown_account(
             state,
             &note.account,
@@ -27,25 +26,14 @@ pub fn validate_note(state: &LedgerState, note: &Note, errors: &mut Vec<Validati
 /// Validate a Document directive.
 ///
 /// When `options.check_documents` is enabled, the referenced file must exist.
-/// Relative paths are resolved in this order:
-///
-/// 1. Absolute path: used as-is.
-/// 2. `options.document_base`: joined with the document path.
-/// 3. `options.document_dirs`: tried in order; first existing match wins.
-/// 4. Fallback: resolved against the directive's own source-file directory
-///    (`file_id` → `options.document_source_dirs`), matching Beancount and
-///    `include`. When the source directory is unknown (unspanned directive or
-///    no source map) it falls back to the process CWD.
-///
-/// `document_base` takes precedence over `document_dirs` because it
-/// represents an explicit base set by the caller (e.g. the main ledger
-/// directory), whereas `document_dirs` is a search path derived from
-/// `option "documents"` declarations.
+/// A relative path resolves against the directive's own source file, or
+/// `options.document_base` when set; see `resolve_document_path` in `lib.rs`.
+/// `option "documents"` roots are not consulted, as in beancount (#2650); a
+/// file found under one only adds a hint to the error.
 ///
 /// The `exists_cache` is consulted instead of calling `Path::exists()`
 /// directly. The caller (see `build_document_exists_cache` in `lib.rs`)
-/// resolves each unique `(doc.path, file_id)` once via the same priority chain
-/// above, with rayon parallelism across Documents. The cache is empty
+/// resolves each unique `(doc.path, file_id)` once via the same rule, with rayon parallelism across Documents. The cache is empty
 /// when `check_documents` is disabled — fine, because the lookups in
 /// this function are gated by the same flag.
 pub fn validate_document(
@@ -56,7 +44,7 @@ pub fn validate_document(
     errors: &mut Vec<ValidationError>,
 ) {
     // Check account exists
-    if !state.accounts.contains_key(&doc.account) {
+    if !is_opened_by(state, &doc.account, doc.date) {
         push_unknown_account(
             state,
             &doc.account,
@@ -89,44 +77,22 @@ pub fn validate_document(
             });
 
         if !file_was_found {
-            let doc_path = Path::new(&doc.path);
+            // The context names the one path we looked at, or says there was
+            // none to look at.
+            let context = crate::resolve_document_path(&doc.path, file_id, &state.options)
+                .map_or_else(
+                    || "relative path, and no source file to resolve it against".to_string(),
+                    |resolved| format!("resolved path: {}", resolved.display()),
+                );
             let mut error = ValidationError::new(
                 ErrorCode::DocumentNotFound,
                 format!("Document file not found: {}", doc.path),
                 doc.date,
-            );
-
-            // The error-context message mirrors the resolution chain so the
-            // user sees where we actually looked.
-            if doc_path.is_relative()
-                && state.options.document_base.is_none()
-                && !state.options.document_dirs.is_empty()
-            {
-                let searched: Vec<String> = state
-                    .options
-                    .document_dirs
-                    .iter()
-                    .map(|d| d.join(doc_path).display().to_string())
-                    .collect();
-                error = error.with_context(format!("searched: {}", searched.join(", ")));
-            } else {
-                // Reconstruct the single resolved path: absolute as-is,
-                // document_base join, else the directive's source-file dir
-                // (the same fallback `document_file_exists` uses).
-                let source_dir =
-                    file_id.and_then(|id| state.options.document_source_dirs.get(id as usize));
-                let resolved = if doc_path.is_absolute() {
-                    doc_path.to_path_buf()
-                } else if let Some(base) = &state.options.document_base {
-                    base.join(doc_path)
-                } else if let Some(dir) = source_dir {
-                    dir.join(doc_path)
-                } else {
-                    doc_path.to_path_buf()
-                };
-                error = error.with_context(format!("resolved path: {}", resolved.display()));
+            )
+            .with_context(context);
+            if let Some(hint) = crate::document_hint(&doc.path, file_id, &state.options) {
+                error = error.with_hint(hint);
             }
-
             errors.push(error);
         }
     }

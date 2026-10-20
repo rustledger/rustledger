@@ -696,10 +696,14 @@ fn test_file_level_booking_method_applied() {
     let ledger = load(&path, &options).expect("should load and process");
 
     // No booking errors — FIFO resolves the ambiguity.
-    let booking_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    let booking_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert!(
         booking_errors.is_empty(),
-        "expected no BOOK errors under file-level FIFO, got: {booking_errors:?}"
+        "expected no booking failures under file-level FIFO, got: {booking_errors:?}"
     );
     // And the ledger reports the method it booked with, so consumers that
     // realize balances again default to it too (#2386).
@@ -750,10 +754,14 @@ fn test_booking_method_lifo() {
 
     let ledger = load(&path, &options).expect("should load and process");
 
-    let booking_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    let booking_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert!(
         booking_errors.is_empty(),
-        "expected no BOOK errors under LIFO, got: {booking_errors:?}"
+        "expected no booking failures under LIFO, got: {booking_errors:?}"
     );
 }
 
@@ -764,10 +772,14 @@ fn test_booking_method_hifo() {
 
     let ledger = load(&path, &options).expect("should load and process");
 
-    let booking_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    let booking_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert!(
         booking_errors.is_empty(),
-        "expected no BOOK errors under HIFO, got: {booking_errors:?}"
+        "expected no booking failures under HIFO, got: {booking_errors:?}"
     );
 }
 
@@ -781,10 +793,14 @@ fn test_booking_method_average() {
 
     let ledger = load(&path, &options).expect("should load and process");
 
-    let booking_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    let booking_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert!(
         booking_errors.is_empty(),
-        "expected no BOOK errors under AVERAGE, got: {booking_errors:?}"
+        "expected no booking failures under AVERAGE, got: {booking_errors:?}"
     );
 }
 
@@ -795,10 +811,14 @@ fn test_booking_method_none() {
 
     let ledger = load(&path, &options).expect("should load and process");
 
-    let booking_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    let booking_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert!(
         booking_errors.is_empty(),
-        "expected no BOOK errors under NONE, got: {booking_errors:?}"
+        "expected no booking failures under NONE, got: {booking_errors:?}"
     );
 }
 
@@ -845,10 +865,14 @@ fn test_booking_method_strict_with_size() {
 
     let ledger = load(&path, &options).expect("should load and process");
 
-    let booking_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    let booking_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert!(
         booking_errors.is_empty(),
-        "expected no BOOK errors under STRICT_WITH_SIZE, got: {booking_errors:?}"
+        "expected no booking failures under STRICT_WITH_SIZE, got: {booking_errors:?}"
     );
 }
 
@@ -859,10 +883,14 @@ fn test_booking_method_strict_ambiguous_errors() {
 
     let ledger = load(&path, &options).expect("should load and process");
 
-    let booking_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    let booking_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert!(
         !booking_errors.is_empty(),
-        "expected BOOK errors under STRICT with ambiguous lots, got: {booking_errors:?}"
+        "expected booking failures under STRICT with ambiguous lots, got: {booking_errors:?}"
     );
 }
 
@@ -897,10 +925,14 @@ option "booking_method" "STRICT"
     let options = LoadOptions::default(); // default = Strict
     let ledger = load(&path, &options).expect("should load and process");
 
-    let booking_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    let booking_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert!(
         booking_errors.is_empty(),
-        "expected no BOOK errors with per-account FIFO override, got: {booking_errors:?}"
+        "expected no booking failures with per-account FIFO override, got: {booking_errors:?}"
     );
 }
 
@@ -916,10 +948,14 @@ fn test_booking_method_api_override() {
     let ledger = load(&path, &options).expect("should load and process");
 
     // File-level option takes precedence when explicitly set
-    let booking_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    let booking_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert!(
         booking_errors.is_empty(),
-        "expected no BOOK errors (file FIFO overrides API LIFO), got: {booking_errors:?}"
+        "expected no booking failures (file FIFO overrides API LIFO), got: {booking_errors:?}"
     );
 }
 
@@ -2248,19 +2284,25 @@ fn test_booking_failure_partitioned_from_late_validation() {
     let path = fixtures_path("booking_failure_partition.beancount");
     let ledger = load(&path, &LoadOptions::default()).expect("should load");
 
-    // Exactly one BOOK error for the failed txn.
-    let book_errors: Vec<_> = ledger.errors.iter().filter(|e| e.code == "BOOK").collect();
+    // Exactly one booking failure for the failed txn.
+    let book_errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.is_booking_failure())
+        .collect();
     assert_eq!(
         book_errors.len(),
         1,
-        "expected exactly one BOOK error on the failing txn; got: {book_errors:?}"
+        "expected exactly one booking failure on the failing txn; got: {book_errors:?}"
     );
 
     // No cascading validation errors — partition keeps the failed txn
-    // out of Late's iteration.
+    // out of Late's iteration. The booking failure itself carries an
+    // E4xxx code (#2631), so it is excluded by origin, not by code.
     let cascading: Vec<_> = ledger
         .errors
         .iter()
+        .filter(|e| !e.is_booking_failure())
         .filter(|e| e.code.starts_with('E') || e.code.starts_with('W'))
         .collect();
     assert!(
@@ -2323,6 +2365,179 @@ fn test_open_check_deferred_past_account_rewriting_plugins() {
         ledger2.errors.iter().any(|e| e.code == "E1001"),
         "a genuine unopened account must still be flagged E1001; got: {:?}",
         ledger2.errors
+    );
+}
+
+/// Load `source` from a temp file and return its diagnostics' codes and
+/// messages, minus the advisory-only E1004 (close with a non-zero balance:
+/// rledger-only, not shown by `rledger check`, and not a beancount error).
+fn load_codes(source: &str) -> Vec<(String, String)> {
+    use rustledger_loader::{LoadOptions, load};
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("ledger.beancount");
+    std::fs::write(&path, source).expect("write ledger");
+    let ledger = load(&path, &LoadOptions::default()).expect("load ledger");
+    ledger
+        .errors
+        .iter()
+        .filter(|e| e.code != "E1004")
+        .map(|e| (e.code.clone(), e.message.clone()))
+        .collect()
+}
+
+/// #2648: validation runs on what the regular plugins produced, as in
+/// beancount (plugins, then validation). Each ledger below is what
+/// `bean-check` reports for it.
+#[test]
+fn test_renaming_plugin_is_validated_under_the_new_names() {
+    // A renamed pad + balance: the pad fills the renamed account. Was a
+    // false E2001 + E2003 (the pad was registered under the old name).
+    let errors = load_codes(
+        "plugin \"rename_accounts\" \"{'Cash': 'Money'}\"\n\
+         2020-01-01 open Assets:Cash\n\
+         2020-01-01 open Equity:Opening\n\
+         2020-01-02 pad Assets:Cash Equity:Opening\n\
+         2020-01-05 balance Assets:Cash 100 USD\n",
+    );
+    assert!(errors.is_empty(), "renamed pad + balance: {errors:?}");
+
+    // A balance and close on the old name, only the new name opened. Was a
+    // false E1001 twice.
+    let errors = load_codes(
+        "plugin \"rename_accounts\" \"{'Assets:Cash': 'Assets:Money'}\"\n\
+         2020-01-01 open Assets:Money\n\
+         2020-01-01 open Equity:Opening\n\
+         2020-01-03 * \"x\"\n  Assets:Cash 100 USD\n  Equity:Opening\n\
+         2020-01-04 balance Assets:Cash 100 USD\n\
+         2020-01-05 close Assets:Cash\n",
+    );
+    assert!(errors.is_empty(), "renamed balance + close: {errors:?}");
+
+    // An ELIDED posting on the old name, only the new name opened. Was a
+    // false E1001 (elided postings were judged before the plugin ran).
+    let errors = load_codes(
+        "plugin \"rename_accounts\" \"{'Expenses:Old': 'Expenses:New'}\"\n\
+         2020-01-01 open Assets:Cash\n\
+         2020-01-01 open Expenses:New\n\
+         2020-01-02 * \"x\"\n  Assets:Cash  -10.00 USD\n  Expenses:Old\n",
+    );
+    assert!(errors.is_empty(), "renamed elided posting: {errors:?}");
+
+    // Two opens renamed onto one account: a duplicate open. Was missed.
+    let errors = load_codes(
+        "plugin \"rename_accounts\" \"{'Expenses:Food:Groceries': 'Expenses:Dining'}\"\n\
+         2020-01-01 open Assets:Cash\n\
+         2020-01-01 open Expenses:Food:Groceries\n\
+         2020-01-01 open Expenses:Dining\n\
+         2020-01-01 open Equity:Opening\n\
+         2020-01-02 pad Assets:Cash Equity:Opening\n\
+         2020-01-05 balance Assets:Cash 100 USD\n\
+         2020-01-06 * \"x\"\n  Expenses:Food:Groceries 10 USD\n  Assets:Cash\n\
+         2020-01-07 note Expenses:Food:Groceries \"hi\"\n\
+         2020-12-31 close Expenses:Food:Groceries\n",
+    );
+    let codes: Vec<&str> = errors.iter().map(|(c, _)| c.as_str()).collect();
+    assert_eq!(codes, ["E1002"], "duplicate open from a rename: {errors:?}");
+}
+
+/// #2648: a `close` a plugin inserted (`close_tree` closing a sub-account
+/// with its parent) closes that account for later postings, as in beancount
+/// ("Invalid reference to inactive account").
+#[test]
+fn test_close_tree_inserted_close_is_validated() {
+    let errors = load_codes(
+        "plugin \"close_tree\"\n\
+         2020-01-01 open Assets:Bank\n\
+         2020-01-01 open Assets:Bank:Checking\n\
+         2020-01-01 open Equity:Opening\n\
+         2020-02-01 close Assets:Bank\n\
+         2020-03-01 * \"after close\"\n  Assets:Bank:Checking 5 USD\n  Equity:Opening\n",
+    );
+    let closed = errors
+        .iter()
+        .filter(|(c, m)| c == "E1003" && m.contains("Assets:Bank:Checking"))
+        .count();
+    assert_eq!(
+        closed, 1,
+        "posting after a plugin-inserted close: {errors:?}"
+    );
+}
+
+/// #2651: a `balance` a plugin inserted (`check_drained`) gets the open's
+/// currency-constraint check a written one gets. beancount reports the
+/// transaction's currency, the inserted balance's currency, and its failure.
+#[test]
+fn test_plugin_inserted_balance_gets_currency_check() {
+    let errors = load_codes(
+        "plugin \"check_drained\"\n\
+         2020-01-01 open Assets:Cash USD\n\
+         2020-01-01 open Equity:Opening\n\
+         2020-01-03 * \"x\"\n  Assets:Cash 10 EUR\n  Equity:Opening\n\
+         2020-01-05 close Assets:Cash\n",
+    );
+    assert!(
+        errors
+            .iter()
+            .any(|(c, m)| c == "E5002" && m.contains("Balance directive")),
+        "inserted balance in a disallowed currency: {errors:?}"
+    );
+    let codes: Vec<&str> = errors.iter().map(|(c, _)| c.as_str()).collect();
+    assert_eq!(
+        codes.iter().filter(|c| **c == "E5002").count(),
+        2,
+        "{errors:?}"
+    );
+    assert_eq!(
+        codes.iter().filter(|c| **c == "E2001").count(),
+        1,
+        "{errors:?}"
+    );
+}
+
+/// The rustledger#877 strictness (an incomplete posting to an unopened
+/// account that booking interpolates to zero and drops is still reported;
+/// beancount misses it) covers a bare-currency posting as well as a fully
+/// elided one.
+#[test]
+fn test_zero_interpolated_posting_to_unopened_account_is_reported() {
+    for leg in ["Expenses:Unopened", "Expenses:Unopened USD"] {
+        let errors = load_codes(&format!(
+            "2020-01-01 open Assets:Cash\n\
+             2020-01-03 * \"zero\"\n  Assets:Cash 0 USD\n  {leg}\n"
+        ));
+        assert_eq!(
+            errors
+                .iter()
+                .filter(|(c, m)| c == "E1001" && m.contains("Expenses:Unopened"))
+                .count(),
+            1,
+            "{leg}: {errors:?}"
+        );
+    }
+}
+
+/// A transaction booking refused never reaches the late phase, but its
+/// postings' account errors are still reported (from the early phase's
+/// held judgment). Stricter than beancount, which drops the refused entry
+/// and reports only the booking error; the unopened account is a real,
+/// separate problem, and the posting-after-close half was already reported
+/// this way before #2648.
+#[test]
+fn test_refused_transaction_keeps_its_account_errors() {
+    let errors = load_codes(
+        "2020-01-01 open Assets:Stock\n\
+         2020-01-01 open Assets:Cash\n\
+         2020-01-02 * \"buy\"\n  Assets:Stock 1 HOOL {10 USD}\n  Assets:Cash -10 USD\n\
+         2020-01-03 * \"sell unmatched lot\"\n  Assets:Stock -1 HOOL {20 USD}\n  \
+         Assets:Cash 20 USD\n  Expenses:NeverOpened -10 USD\n",
+    );
+    assert_eq!(
+        errors
+            .iter()
+            .filter(|(c, m)| c == "E1001" && m.contains("Expenses:NeverOpened"))
+            .count(),
+        1,
+        "{errors:?}"
     );
 }
 
@@ -2615,7 +2830,10 @@ fn test_total_cost_reduction_with_a_wrong_total_is_reported() {
     let ledger = load(&path, &LoadOptions::default()).expect("should load and process");
 
     assert!(
-        ledger.errors.iter().any(|e| e.code == "BOOK"),
+        ledger
+            .errors
+            .iter()
+            .any(rustledger_loader::LedgerError::is_booking_failure),
         "two lots at 50.00 do not cost 90.00 together; beancount reports \
          \"No position matches\" and so must we -- got errors: {:?}",
         ledger.errors,
@@ -2647,7 +2865,7 @@ fn test_booking_error_points_at_the_failing_posting() {
     let booking_error = ledger
         .errors
         .iter()
-        .find(|e| e.code == "BOOK")
+        .find(|e| e.is_booking_failure())
         .expect("the wrong total must be reported");
 
     let location = booking_error
@@ -2732,5 +2950,603 @@ fn native_plugins_only_skips_wasm_and_python_plugins_2486() {
             .any(|e| e.phase == "plugin" && e.message.contains("bad.wasm")),
         "by default the WASM plugin is resolved and reported: {:?}",
         ledger.errors
+    );
+}
+
+// ============================================================================
+// Relative paths in a file reached through a symlink (#2635)
+// ============================================================================
+
+/// `real/` holds the ledger, `view/main.beancount` links to it, and both
+/// directories hold a `2024.beancount`, an `up.beancount`, a `docs/` tree and
+/// (only `view/`) a `receipt.pdf`, each naming its own directory.
+/// `view/plain.beancount` links to `real/plain.beancount`, whose `document`
+/// names `receipt.pdf`.
+#[cfg(unix)]
+fn symlinked_entry_layout() -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let files: &[(&str, &str)] = &[
+        ("real/2024.beancount", "2024-01-01 open Assets:Real\n"),
+        (
+            "view/2024.beancount",
+            "2024-01-01 open Assets:View\n2024-01-01 open Assets:Real\n",
+        ),
+        ("real/up.beancount", "2024-01-01 open Assets:RealUp\n"),
+        ("view/up.beancount", "2024-01-01 open Assets:ViewUp\n"),
+        (
+            "real/elsewhere/up.beancount",
+            "2024-01-01 open Assets:ElsewhereUp\n",
+        ),
+        ("real/docs/Assets/Real/2024-02-02.b.pdf", "x"),
+        ("view/docs/Assets/View/2024-02-01.a.pdf", "x"),
+        ("view/receipt.pdf", "x"),
+        (
+            "real/main.beancount",
+            "option \"documents\" \"docs\"\n\
+             include \"2024.beancount\"\n\
+             include \"deep/../up.beancount\"\n",
+        ),
+        // Apart from the `documents` option, which (until #2650) changed how
+        // a relative `document` path resolves.
+        (
+            "real/plain.beancount",
+            "2020-01-01 open Assets:View\n\
+             2024-03-01 document Assets:View \"receipt.pdf\"\n",
+        ),
+    ];
+    for (path, text) in files {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+    std::fs::create_dir_all(root.join("real/elsewhere/deeper")).unwrap();
+    // `view/deep` links into `real/`, so `deep/../up.beancount` is
+    // `view/up.beancount` read lexically and `real/elsewhere/up.beancount`
+    // read physically. Beancount READS the lexical one (it `normpath`s the
+    // include), but its `glob` checks that the physical one exists first, so
+    // the physical file has to exist here for bean-check to load at all;
+    // rledger does not repeat that existence check.
+    std::os::unix::fs::symlink(root.join("real/elsewhere/deeper"), root.join("view/deep")).unwrap();
+    std::os::unix::fs::symlink(
+        root.join("real/plain.beancount"),
+        root.join("view/plain.beancount"),
+    )
+    .unwrap();
+    let link = root.join("view/main.beancount");
+    std::os::unix::fs::symlink(root.join("real/main.beancount"), &link).unwrap();
+    (dir, link)
+}
+
+/// #2635: an entry file reached through a symlink resolves its includes,
+/// its relative `document` paths and its `option "documents"` roots next to
+/// the LINK, as beancount does, and a `..` lexically. `bean-check
+/// view/main.beancount` on this layout: exit 0, opens `Assets:View`,
+/// `Assets:ViewUp` and `Assets:Real` (from `view/2024.beancount`), and
+/// discovers `view/docs/.../2024-02-01.a.pdf`; `bean-check
+/// view/plain.beancount`: exit 0, its document is `view/receipt.pdf`. rledger
+/// used to read every one of them next to the link's target.
+#[cfg(unix)]
+#[test]
+fn symlinked_entry_resolves_relative_paths_next_to_the_link() {
+    use rustledger_core::Directive;
+    use rustledger_loader::{LoadOptions, load};
+
+    let (dir, link) = symlinked_entry_layout();
+    let ledger = load(&link, &LoadOptions::default()).expect("load");
+    let errors: Vec<_> = ledger
+        .errors
+        .iter()
+        .map(|e| (&e.code, &e.message))
+        .collect();
+    assert!(errors.is_empty(), "bean-check reports nothing: {errors:?}");
+
+    let mut opens: Vec<String> = Vec::new();
+    let mut documents: Vec<std::path::PathBuf> = Vec::new();
+    for d in &ledger.directives {
+        match &d.value {
+            Directive::Open(o) => opens.push(o.account.to_string()),
+            Directive::Document(doc) => documents.push(doc.path.clone().into()),
+            _ => {}
+        }
+    }
+    opens.sort();
+    assert_eq!(opens, ["Assets:Real", "Assets:View", "Assets:ViewUp"]);
+    let discovered = dir.path().join("view/docs/Assets/View/2024-02-01.a.pdf");
+    assert!(
+        documents
+            .iter()
+            .any(|p| p.ends_with("view/docs/Assets/View/2024-02-01.a.pdf")),
+        "discovered under view/docs ({}): {documents:?}",
+        discovered.display()
+    );
+    assert!(
+        !documents
+            .iter()
+            .any(|p| p.to_string_lossy().contains("real/docs")),
+        "nothing discovered under the target's docs: {documents:?}"
+    );
+
+    // The source map keeps each file's identity normalized (the target) and
+    // its opened spelling (the link).
+    let main = &ledger.source_map.files()[0];
+    assert_eq!(
+        main.path,
+        dir.path()
+            .join("real/main.beancount")
+            .canonicalize()
+            .unwrap()
+    );
+    assert!(main.opened_path.ends_with("view/main.beancount"));
+
+    let plain = load(
+        &dir.path().join("view/plain.beancount"),
+        &LoadOptions::default(),
+    )
+    .expect("load");
+    let errors: Vec<_> = plain.errors.iter().map(|e| (&e.code, &e.message)).collect();
+    assert!(
+        errors.is_empty(),
+        "receipt.pdf is next to the link: {errors:?}"
+    );
+}
+
+/// Identity stays the normalized path (#2635 keeps it for cycle and
+/// duplicate detection): a cycle closed through a symlink is still a cycle.
+#[cfg(unix)]
+#[test]
+fn include_cycle_through_a_symlink_is_still_detected() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("a.beancount"), "include \"b.beancount\"\n").unwrap();
+    std::fs::write(
+        dir.path().join("b.beancount"),
+        "include \"a-link.beancount\"\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        dir.path().join("a.beancount"),
+        dir.path().join("a-link.beancount"),
+    )
+    .unwrap();
+    let cycle = match Loader::new().load(&dir.path().join("a.beancount")) {
+        Err(e @ LoadError::IncludeCycle { .. }) => Some(e),
+        Err(e) => panic!("expected a cycle, got {e}"),
+        Ok(r) => r
+            .errors
+            .into_iter()
+            .find(|e| matches!(e, LoadError::IncludeCycle { .. })),
+    };
+    assert!(
+        cycle.is_some(),
+        "the link back to a.beancount closes a cycle"
+    );
+}
+
+/// Path security guards the directory the entry file was OPENED from: the
+/// link's includes next to it load, and an include that is itself a symlink
+/// out of that directory is still refused (#2635 must not open a way out).
+#[cfg(unix)]
+#[test]
+fn path_security_follows_the_link_directory() {
+    let (dir, link) = symlinked_entry_layout();
+    let result = Loader::new()
+        .with_path_security(true)
+        .load(&link)
+        .expect("load");
+    assert!(
+        !result
+            .errors
+            .iter()
+            .any(|e| matches!(e, LoadError::PathTraversal { .. })),
+        "includes next to the link are inside the root: {:?}",
+        result.errors
+    );
+
+    std::fs::write(
+        dir.path().join("secret.beancount"),
+        "2024-01-01 open Assets:Secret\n",
+    )
+    .unwrap();
+    std::os::unix::fs::symlink(
+        dir.path().join("secret.beancount"),
+        dir.path().join("view/escape.beancount"),
+    )
+    .unwrap();
+    std::fs::write(
+        dir.path().join("view/entry.beancount"),
+        "include \"escape.beancount\"\n",
+    )
+    .unwrap();
+    let result = Loader::new()
+        .with_path_security(true)
+        .load(&dir.path().join("view/entry.beancount"))
+        .expect("load");
+    assert!(
+        result
+            .errors
+            .iter()
+            .any(|e| matches!(e, LoadError::PathTraversal { .. })),
+        "a symlinked include pointing out of the root is refused: {:?}",
+        result.errors
+    );
+    // A glob's directory prefix is checked in the spelling the include is
+    // read in, lexically: `deep/../` is `view/`, inside the root, although
+    // `view/deep` links out of it. Beancount reads the same file: its glob
+    // lists the physical directory, then `normpath` names
+    // `view/up.beancount`.
+    std::fs::write(
+        dir.path().join("view/globber.beancount"),
+        "include \"deep/../up*.beancount\"\n",
+    )
+    .unwrap();
+    let result = Loader::new()
+        .with_path_security(true)
+        .load(&dir.path().join("view/globber.beancount"))
+        .expect("load");
+    assert!(
+        result.errors.is_empty(),
+        "the lexical prefix is inside the root: {:?}",
+        result.errors
+    );
+    let opened: Vec<_> = result
+        .source_map
+        .files()
+        .iter()
+        .map(|f| f.opened_path.clone())
+        .collect();
+    assert!(
+        opened.iter().any(|p| p.ends_with("view/up.beancount")),
+        "{opened:?}"
+    );
+}
+
+// ============================================================================
+// `document` path resolution and discovery vs `option "documents"`
+// ============================================================================
+
+/// Messages of the errors of `code` in a processed ledger.
+fn ledger_errors_with_code(ledger: &rustledger_loader::Ledger, code: &str) -> Vec<String> {
+    ledger
+        .errors
+        .iter()
+        .filter(|e| e.code == code)
+        .map(|e| e.message.clone())
+        .collect()
+}
+
+/// #2650: a relative `document` path resolves next to the file that holds
+/// the directive, whether or not `option "documents"` is set. Beancount
+/// joins it onto the directive's file directory at parse time and never
+/// consults the documents roots (checked with bean-check, both ways: only
+/// `only-in-docs.pdf`, which exists solely under the documents root, is
+/// "File does not exist"). A documents root used to replace the file's
+/// directory, so every path that resolved next to its file was a false
+/// E8001 once the option was set.
+#[test]
+fn relative_document_resolves_next_to_its_file_with_or_without_documents_option() {
+    use rustledger_loader::{LoadOptions, load};
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    for p in [
+        "docs/only-in-docs.pdf",
+        "sub/files/a.pdf",
+        "sub/docs2/in-sub.pdf",
+    ] {
+        let p = root.join(p);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, "x").unwrap();
+    }
+    std::fs::write(
+        root.join("sub/inc.beancount"),
+        "2024-01-07 document Assets:Cash \"files/a.pdf\"\n\
+         2024-01-08 document Assets:Cash \"docs2/in-sub.pdf\"\n",
+    )
+    .unwrap();
+    let body = "2020-01-01 open Assets:Cash\n\
+                2024-01-05 document Assets:Cash \"sub/files/a.pdf\"\n\
+                2024-01-06 document Assets:Cash \"only-in-docs.pdf\"\n\
+                include \"sub/inc.beancount\"\n";
+    for (name, header) in [
+        ("with.beancount", "option \"documents\" \"docs\"\n"),
+        ("without.beancount", ""),
+    ] {
+        let path = root.join(name);
+        std::fs::write(&path, format!("{header}{body}")).unwrap();
+        let ledger = load(&path, &LoadOptions::default()).expect("load");
+        assert_eq!(
+            ledger_errors_with_code(&ledger, "E8001"),
+            ["Document file not found: only-in-docs.pdf"],
+            "{name}: only the path that exists solely under the documents \
+             root is missing, as in bean-check"
+        );
+    }
+}
+
+/// The ledger of the #2649 tests: `docs/` holds a file for `Expenses:Food`
+/// (named only by a posting), one for `Expenses:Rent` (named by nothing) and
+/// one for `Assets:Cash`.
+fn discovery_ledger(header: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    for p in [
+        "docs/Expenses/Food/2024-01-01.receipt.pdf",
+        "docs/Expenses/Rent/2024-01-02.lease.pdf",
+        "docs/Assets/Cash/2024-03-01.stmt.pdf",
+    ] {
+        let p = dir.path().join(p);
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, "x").unwrap();
+    }
+    let path = dir.path().join("main.beancount");
+    std::fs::write(
+        &path,
+        format!(
+            "option \"documents\" \"docs\"\n{header}\
+             2024-02-01 * \"x\"\n  Expenses:Food  10 USD\n  Assets:Cash  -10 USD\n"
+        ),
+    )
+    .unwrap();
+    (dir, path)
+}
+
+/// `(date, kind, account)` of every `open` and `document`, in order.
+fn opens_and_documents(ledger: &rustledger_loader::Ledger) -> Vec<(String, &'static str, String)> {
+    use rustledger_core::Directive;
+    ledger
+        .directives
+        .iter()
+        .filter_map(|d| match &d.value {
+            Directive::Open(o) => Some((o.date.to_string(), "open", o.account.to_string())),
+            Directive::Document(doc) => {
+                Some((doc.date.to_string(), "document", doc.account.to_string()))
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// #2649: beancount discovers documents (`PLUGINS_PRE`) for every account
+/// the ledger names, then `auto_accounts` opens each account on its first
+/// use, a discovered document included. `bean-check` on this ledger: no
+/// errors, `Expenses:Food` opened 2024-01-01 (the receipt's date, before the
+/// posting), `Expenses:Rent` (named by nothing) not discovered. The
+/// discovery used to keep only accounts with an `open`, so the receipt was
+/// dropped and the account opened at the posting.
+#[test]
+fn discovered_document_counts_for_auto_accounts() {
+    use rustledger_loader::{LoadOptions, load};
+
+    let expected = vec![
+        (
+            "2024-01-01".to_string(),
+            "open",
+            "Expenses:Food".to_string(),
+        ),
+        (
+            "2024-01-01".to_string(),
+            "document",
+            "Expenses:Food".to_string(),
+        ),
+        ("2024-02-01".to_string(), "open", "Assets:Cash".to_string()),
+        (
+            "2024-03-01".to_string(),
+            "document",
+            "Assets:Cash".to_string(),
+        ),
+    ];
+
+    // Declared in the file, and enabled by the caller (`check --auto`):
+    // both run after discovery, as beancount's `PLUGINS_AUTO` does.
+    let (_dir, declared) = discovery_ledger("plugin \"beancount.plugins.auto_accounts\"\n");
+    let (_dir2, plain) = discovery_ledger("");
+    let auto = LoadOptions {
+        auto_accounts: true,
+        ..LoadOptions::default()
+    };
+    for (what, path, options) in [
+        ("declared", &declared, LoadOptions::default()),
+        ("--auto", &plain, auto),
+    ] {
+        let ledger = load(path, &options).expect("load");
+        assert_eq!(opens_and_documents(&ledger), expected, "{what}");
+        let errors: Vec<_> = ledger
+            .errors
+            .iter()
+            .filter(|e| matches!(e.severity, rustledger_loader::ErrorSeverity::Error))
+            .map(|e| (&e.code, &e.message))
+            .collect();
+        assert!(errors.is_empty(), "{what}: {errors:?}");
+    }
+}
+
+/// #2649, without `auto_accounts`: a document for an account that only a
+/// posting names is still discovered, and reported as an unknown account
+/// next to the posting. `bean-check` reports exactly these two errors (the
+/// document's and the posting's).
+#[test]
+fn discovered_document_on_unopened_named_account_is_reported_like_beancount() {
+    use rustledger_loader::{LoadOptions, load};
+
+    let (_dir, path) = discovery_ledger("2020-01-01 open Assets:Cash\n");
+    let ledger = load(&path, &LoadOptions::default()).expect("load");
+    let unknown: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.code == "E1001")
+        .map(|e| e.message.as_str())
+        .collect();
+    assert_eq!(
+        unknown.len(),
+        2,
+        "the discovered document and the posting: {unknown:?}"
+    );
+    assert!(
+        opens_and_documents(&ledger)
+            .iter()
+            .any(|(_, kind, account)| *kind == "document" && account == "Expenses:Food"),
+        "the receipt is discovered"
+    );
+}
+
+// ============================================================================
+// E8001's documents-folder hint (#2650, robcohen's decision)
+// ============================================================================
+
+/// The E8001 errors of loading `path`, as `(message, hint)`.
+fn document_not_found(path: &std::path::Path) -> Vec<(String, Option<String>)> {
+    let ledger =
+        rustledger_loader::load(path, &rustledger_loader::LoadOptions::default()).expect("load");
+    ledger
+        .errors
+        .iter()
+        .filter(|e| e.code == "E8001")
+        .map(|e| (e.message.clone(), e.hint.clone()))
+        .collect()
+}
+
+/// Write `files` (path, text) under `root`.
+fn write_tree(root: &std::path::Path, files: &[(&str, &str)]) {
+    for (path, text) in files {
+        let path = root.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, text).unwrap();
+    }
+}
+
+fn hint_for(suggested: &str) -> String {
+    format!(
+        "a file with that name is in {suggested}; document paths are relative to the file \
+         they are written in, not to the documents folder, so write \"{suggested}\""
+    )
+}
+
+/// The #889 layout: the statement is only under `documents/`. Beancount and
+/// rledger both report it missing next to the ledger; rledger's error also
+/// says the path to write.
+#[test]
+fn e8001_hints_the_documents_folder_path() {
+    let dir = tempfile::tempdir().unwrap();
+    write_tree(
+        dir.path(),
+        &[
+            ("documents/credit-card-statement.pdf", "x"),
+            (
+                "main.beancount",
+                "option \"documents\" \"documents\"\n\
+                 1970-01-01 open Assets:Bank:BofA USD\n\
+                 2026-04-22 document Assets:Bank:BofA \"./credit-card-statement.pdf\"\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        document_not_found(&dir.path().join("main.beancount")),
+        [(
+            "Document file not found: ./credit-card-statement.pdf".to_string(),
+            Some(hint_for("documents/credit-card-statement.pdf"))
+        )]
+    );
+}
+
+/// A file next to the ledger resolves and gets no error, with a documents
+/// root set that does not hold it (before #2650 the root replaced the
+/// ledger's directory, and this was a false E8001).
+#[test]
+fn e8001_not_raised_for_a_file_next_to_the_ledger() {
+    let dir = tempfile::tempdir().unwrap();
+    write_tree(
+        dir.path(),
+        &[
+            ("stmt.pdf", "x"),
+            ("documents/other.pdf", "x"),
+            (
+                "main.beancount",
+                "option \"documents\" \"documents\"\n\
+                 2020-01-01 open Assets:Bank\n\
+                 2024-01-01 document Assets:Bank \"stmt.pdf\"\n",
+            ),
+        ],
+    );
+    assert_eq!(document_not_found(&dir.path().join("main.beancount")), []);
+}
+
+/// A file in neither place is E8001 with no hint.
+#[test]
+fn e8001_without_a_documents_folder_match_has_no_hint() {
+    let dir = tempfile::tempdir().unwrap();
+    write_tree(
+        dir.path(),
+        &[
+            ("documents/other.pdf", "x"),
+            (
+                "main.beancount",
+                "option \"documents\" \"documents\"\n\
+                 2020-01-01 open Assets:Bank\n\
+                 2024-01-01 document Assets:Bank \"stmt.pdf\"\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        document_not_found(&dir.path().join("main.beancount")),
+        [("Document file not found: stmt.pdf".to_string(), None)]
+    );
+}
+
+/// A documents root given as an absolute path beside the ledger's folder:
+/// the suggestion climbs out with `../`, relative to the ledger file.
+#[test]
+fn e8001_hint_for_an_absolute_documents_root() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("receipts");
+    write_tree(
+        dir.path(),
+        &[
+            ("receipts/2024/stmt.pdf", "x"),
+            (
+                "books/main.beancount",
+                &format!(
+                    "option \"documents\" \"{}\"\n\
+                     2020-01-01 open Assets:Bank\n\
+                     2024-01-01 document Assets:Bank \"2024/stmt.pdf\"\n",
+                    root.display()
+                ),
+            ),
+        ],
+    );
+    assert_eq!(
+        document_not_found(&dir.path().join("books/main.beancount")),
+        [(
+            "Document file not found: 2024/stmt.pdf".to_string(),
+            Some(hint_for("../receipts/2024/stmt.pdf"))
+        )]
+    );
+}
+
+/// A directive in an included file in a subdirectory: the suggestion is
+/// relative to THAT file, since that is what its path resolves against.
+#[test]
+fn e8001_hint_is_relative_to_the_including_file() {
+    let dir = tempfile::tempdir().unwrap();
+    write_tree(
+        dir.path(),
+        &[
+            ("documents/stmt.pdf", "x"),
+            (
+                "main.beancount",
+                "option \"documents\" \"documents\"\n\
+                 2020-01-01 open Assets:Bank\n\
+                 include \"years/2024.beancount\"\n",
+            ),
+            (
+                "years/2024.beancount",
+                "2024-01-01 document Assets:Bank \"stmt.pdf\"\n",
+            ),
+        ],
+    );
+    assert_eq!(
+        document_not_found(&dir.path().join("main.beancount")),
+        [(
+            "Document file not found: stmt.pdf".to_string(),
+            Some(hint_for("../documents/stmt.pdf"))
+        )]
     );
 }

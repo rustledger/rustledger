@@ -113,8 +113,10 @@ impl NativePlugin for DocumentDiscoveryPlugin {
         let mut new_directives = Vec::new();
         let mut errors = Vec::new();
 
-        // Collect existing document paths to avoid duplicates.
-        // Normalize paths by resolving relative paths against base_dir, then canonicalizing.
+        // Collect existing document paths to avoid duplicates. A relative
+        // path resolves against its own directive's file, as the validator
+        // and beancount resolve it (#2650); the ledger's base dir is only the
+        // fallback for a directive with no file. Then canonicalized.
         let mut existing_docs: std::collections::HashSet<String> = std::collections::HashSet::new();
         for wrapper in &input.directives {
             if let DirectiveData::Document(doc) = &wrapper.data {
@@ -122,7 +124,12 @@ impl NativePlugin for DocumentDiscoveryPlugin {
                 let resolved = if doc_path.is_absolute() {
                     doc_path.to_path_buf()
                 } else {
-                    config.base_dir.join(doc_path)
+                    wrapper
+                        .filename
+                        .as_deref()
+                        .and_then(|f| Path::new(f).parent())
+                        .unwrap_or(&config.base_dir)
+                        .join(doc_path)
                 };
                 let normalized = resolved
                     .canonicalize()
@@ -131,33 +138,24 @@ impl NativePlugin for DocumentDiscoveryPlugin {
             }
         }
 
-        // Accounts opened in the ledger. This is exactly the set the validator
-        // treats as known (`validate_document` checks `state.accounts`, which
-        // is populated only by `open`), so a document we skip here is precisely
-        // one that would otherwise hard-fail `E1001 AccountNotOpen`.
+        // Accounts the ledger names anywhere, the set beancount restricts
+        // discovery to (`getters.get_accounts`): `open`, `close`, `balance`,
+        // `note`, `document`, both accounts of a `pad`, and every posting.
+        // NOT only the opened ones (#2649): a document for an account that
+        // only a posting names is discovered, so a later `auto_accounts`
+        // opens the account at the document's date when that is earlier,
+        // and without `auto_accounts` the document is reported as an
+        // unknown account (E1001) next to the posting, as in `bean-check`.
         //
-        // Like beancount, we don't synthesize documents for unknown accounts
-        // (so `check` passes, matching `bean-check`). Unlike beancount — which
-        // drops them silently — we surface a *warning* per unknown account, to
-        // catch the common footgun of a stale `documents/` path after an
-        // account rename (a deliberate, more-helpful deviation; #1434). Warnings
-        // don't affect the exit code, so compatibility is preserved.
-        //
-        // Note the asymmetry (intentional — do not "fix" it): an *explicit*
-        // `document` directive to an unopened account still hard-errors via the
-        // validator, matching beancount's `validate_active_accounts`. Only
-        // auto-discovery is lenient, because beancount's discovery never emits
-        // the directive in the first place.
-        let opened: std::collections::HashSet<String> = input
-            .directives
-            .iter()
-            .filter_map(|w| match &w.data {
-                DirectiveData::Open(o) => Some(o.account.clone()),
-                _ => None,
-            })
-            .collect();
+        // A file under an account nothing names is skipped, as beancount
+        // skips it. Unlike beancount — which drops them silently — we surface
+        // a *warning* per such account, to catch the common footgun of a
+        // stale `documents/` path after an account rename (a deliberate,
+        // more-helpful deviation; #1434). Warnings don't affect the exit
+        // code, so compatibility is preserved.
+        let known = referenced_accounts(&input.directives);
 
-        // Files found under directories that map to an unopened account,
+        // Files found under directories that map to an account nothing names,
         // grouped by account (BTreeMap → deterministic, one warning per
         // account instead of one per file).
         let mut unknown: std::collections::BTreeMap<String, Vec<String>> =
@@ -180,7 +178,7 @@ impl NativePlugin for DocumentDiscoveryPlugin {
                 dir_path,
                 dir,
                 &existing_docs,
-                &opened,
+                &known,
                 &mut new_directives,
                 &mut unknown,
                 &mut errors,
@@ -196,7 +194,7 @@ impl NativePlugin for DocumentDiscoveryPlugin {
         // One aggregated warning per unknown account.
         for (account, paths) in &unknown {
             errors.push(PluginError::warning(unknown_account_warning(
-                account, paths, &opened,
+                account, paths, &known,
             )));
         }
 
@@ -212,6 +210,40 @@ impl NativePlugin for DocumentDiscoveryPlugin {
     }
 }
 
+/// Every account a directive names, as beancount's `getters.get_accounts`
+/// collects them; see the note in `process`.
+fn referenced_accounts(directives: &[DirectiveWrapper]) -> std::collections::HashSet<String> {
+    let mut accounts = std::collections::HashSet::new();
+    for wrapper in directives {
+        match &wrapper.data {
+            DirectiveData::Open(d) => {
+                accounts.insert(d.account.clone());
+            }
+            DirectiveData::Close(d) => {
+                accounts.insert(d.account.clone());
+            }
+            DirectiveData::Balance(d) => {
+                accounts.insert(d.account.clone());
+            }
+            DirectiveData::Note(d) => {
+                accounts.insert(d.account.clone());
+            }
+            DirectiveData::Document(d) => {
+                accounts.insert(d.account.clone());
+            }
+            DirectiveData::Pad(d) => {
+                accounts.insert(d.account.clone());
+                accounts.insert(d.source_account.clone());
+            }
+            DirectiveData::Transaction(t) => {
+                accounts.extend(t.postings.iter().map(|p| p.account.clone()));
+            }
+            _ => {}
+        }
+    }
+    accounts
+}
+
 /// Synthesizes `Document` directives that downstream consumers expect
 /// alongside user-written ones — runs in the synth pass so the early
 /// validator sees them.
@@ -220,14 +252,14 @@ impl SynthPlugin for DocumentDiscoveryPlugin {}
 /// Max "did you mean" suggestions to list in a warning.
 const MAX_SUGGESTIONS: usize = 3;
 
-/// Opened accounts that plausibly match `account` — sharing both the root
+/// Known accounts that plausibly match `account` — sharing both the root
 /// (first segment) and the leaf (last segment). This finds the sibling-rename
 /// case (`Expenses:Electricity` → `Expenses:Home:Electricity`) without the
 /// false positives of a leaf-only match (e.g. `Income:Refunds:Electricity`).
-fn suggested_accounts(account: &str, opened: &std::collections::HashSet<String>) -> Vec<String> {
+fn suggested_accounts(account: &str, known: &std::collections::HashSet<String>) -> Vec<String> {
     let root = account.split(':').next();
     let leaf = account.rsplit(':').next();
-    let mut hits: Vec<String> = opened
+    let mut hits: Vec<String> = known
         .iter()
         .filter(|a| a.split(':').next() == root && a.rsplit(':').next() == leaf)
         .filter(|a| a.as_str() != account)
@@ -239,13 +271,13 @@ fn suggested_accounts(account: &str, opened: &std::collections::HashSet<String>)
 }
 
 /// Build the (aggregated) warning for documents discovered under a directory
-/// that maps to an account that is not open. Names the account, how many files
-/// were skipped (with an example), and suggests likely-intended opened
+/// that maps to an account no directive names. Names the account, how many
+/// files were skipped (with an example), and suggests likely-intended known
 /// accounts (the account-rename case).
 fn unknown_account_warning(
     account: &str,
     paths: &[String],
-    opened: &std::collections::HashSet<String>,
+    known: &std::collections::HashSet<String>,
 ) -> String {
     let example = paths.first().map_or("", String::as_str);
     let more = paths.len().saturating_sub(1);
@@ -254,7 +286,7 @@ fn unknown_account_warning(
     } else {
         format!("{example} (+{more} more)")
     };
-    let suggestions = suggested_accounts(account, opened);
+    let suggestions = suggested_accounts(account, known);
     let hint = if suggestions.is_empty() {
         String::new()
     } else {
@@ -262,7 +294,7 @@ fn unknown_account_warning(
     };
     format!(
         "{n} document(s) reference unknown account '{account}' and were skipped \
-         (no such account is open): {files}{hint}",
+         (no directive names that account): {files}{hint}",
         n = paths.len()
     )
 }
@@ -305,7 +337,7 @@ fn scan_documents(
     path: &std::path::Path,
     base_dir: &str,
     existing: &std::collections::HashSet<String>,
-    opened: &std::collections::HashSet<String>,
+    known: &std::collections::HashSet<String>,
     directives: &mut Vec<DirectiveWrapper>,
     unknown: &mut std::collections::BTreeMap<String, Vec<String>>,
     errors: &mut Vec<PluginError>,
@@ -371,7 +403,7 @@ fn scan_documents(
                 &entry_path,
                 base_dir,
                 existing,
-                opened,
+                known,
                 directives,
                 unknown,
                 errors,
@@ -417,13 +449,12 @@ fn scan_documents(
                                 continue;
                             }
 
-                            // Only synthesize documents for opened accounts
-                            // (see the note in `process`). A file under an
-                            // unopened account — e.g. a stale path after an
-                            // account rename — is collected for an aggregated
-                            // warning and skipped, never synthesized into a
-                            // hard `E1001`. (#1434)
-                            if !opened.contains(&account) {
+                            // Only synthesize documents for accounts the
+                            // ledger names (see the note in `process`). A
+                            // file under any other account — e.g. a stale
+                            // path after an account rename — is collected for
+                            // an aggregated warning and skipped. (#1434)
+                            if !known.contains(&account) {
                                 unknown.entry(account).or_default().push(full_path);
                                 continue;
                             }

@@ -329,16 +329,29 @@ pub fn load(source: &str, filename: &str, expand_pads: bool) -> out::LoadResult 
 /// beancount's `loader.load_file` — not only `validate`. Embedders that load via
 /// `load` (rustfava) would otherwise see a failing `balance` as `errors: []`
 /// (#1663).
+///
+/// `filename` is the name the embedder gave the source, if any: a relative
+/// `document` path resolves next to it, as beancount resolves it against the
+/// filename handed to its parser. Without one there is nothing to resolve a
+/// relative path against, so it is reported missing; the process's working
+/// directory is never used (#2650).
 fn semantic_validation_errors(
     loaded: &ffi::helpers::LoadResult,
+    filename: Option<&str>,
 ) -> (Vec<ffi::Error>, Vec<rustledger_validate::BalanceActual>) {
     if loaded.errors.iter().any(|e| e.phase == "parse") {
         return (Vec::new(), Vec::new());
     }
     let today = jiff::Zoned::now().date();
-    let session = rustledger_validate::ValidationSession::new(
-        rustledger_validate::ValidationOptions::default(),
-    );
+    let mut validation_options = rustledger_validate::ValidationOptions::default();
+    if let Some(dir) = filename
+        .map(std::path::Path::new)
+        .and_then(std::path::Path::parent)
+        .filter(|d| !d.as_os_str().is_empty())
+    {
+        validation_options = validation_options.with_document_base(dir);
+    }
+    let session = rustledger_validate::ValidationSession::new(validation_options);
     let (session, mut verrs) = session.run_early_spanned(&loaded.spanned_directives, today);
     let (session, late) = session.run_late_spanned(&loaded.spanned_directives, today);
     verrs.extend(late);
@@ -463,7 +476,7 @@ fn load_result(
     // checks) so `load`/`load_file` report them like beancount's
     // `loader.load_file` — not only `validate`. Computed before `loaded` is
     // consumed below.
-    let (validation_errs, balance_actuals) = semantic_validation_errors(&loaded);
+    let (validation_errs, balance_actuals) = semantic_validation_errors(&loaded, Some(filename));
 
     // Synthesized pad transactions have no source line (tagged 0).
     let (directives, directive_lines) = if expand_pads {
@@ -670,7 +683,7 @@ fn simple_error(message: String) -> wit::Error {
 pub fn validate(source: &str) -> out::ValidateResult {
     let load = ffi::helpers::load_source(source);
     let parse_error_count = load.errors.iter().filter(|e| e.phase == "parse").count();
-    let (validation_errs, _actuals) = semantic_validation_errors(&load);
+    let (validation_errs, _actuals) = semantic_validation_errors(&load, None);
     let mut errors = load.errors;
     errors.extend(validation_errs);
 
@@ -987,6 +1000,10 @@ impl rustledger_loader::FileSystem for HostDecryptFs {
 
     fn normalize(&self, path: &std::path::Path) -> std::path::PathBuf {
         self.0.normalize(path)
+    }
+
+    fn normalize_lexical(&self, path: &std::path::Path) -> std::path::PathBuf {
+        self.0.normalize_lexical(path)
     }
 
     fn supports_parallel_read(&self) -> bool {

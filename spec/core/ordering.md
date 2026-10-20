@@ -23,19 +23,16 @@ When dates are equal, directives are ordered by type priority:
 | Priority | Directive Type | Rationale |
 |----------|---------------|-----------|
 | 0 | `open` | Accounts must exist before use |
-| 1 | `commodity` | Commodities declared before use |
-| 2 | `balance` | Assertions checked at start of day |
-| 3 | `pad` | Padding after the same-date balance it cannot satisfy |
-| 4 | `transaction`, `event`, `custom` | Main entries, in file order |
-| 5 | `note` | Annotations after transactions |
-| 6 | `document` | Attachments after transactions |
-| 7 | `query` | Queries defined after data |
-| 8 | `price` | Prices at end of day |
-| 9 | `close` | Accounts closed after all activity |
+| 1 | `balance` | Assertions checked at start of day |
+| 2 | `pad` | Padding after the same-date balance it cannot satisfy |
+| 3 | `transaction`, `commodity`, `note`, `query`, `price`, `event`, `custom` | Main entries, in file order |
+| 4 | `document` | Attachments after transactions |
+| 5 | `close` | Accounts closed after all activity |
 
-`event` and `custom` share the transaction priority, so they keep their file
-position among same-date transactions, as in beancount, whose `SORT_ORDER`
-ranks every type except `open`, `balance`, `document` and `close` the same.
+Every type in priority 3 keeps its file position among same-date
+transactions, as in beancount, whose `SORT_ORDER` ranks every type except
+`open`, `balance`, `document` and `close` the same. `pad` is the one
+difference: beancount ranks it with the transactions.
 
 ## Tertiary Sort: File Order
 
@@ -83,7 +80,7 @@ Pad directives must come before their corresponding balance assertion:
 2024-01-01 balance Assets:Checking  1000 USD
 ```
 
-The pad is processed first (priority 2), then the balance assertion (priority 3).
+On the same date the balance assertion is processed first (priority 1), then the pad (priority 2), so this pad has nothing left to satisfy and is unused, as in beancount (#2150). Date the pad before the balance.
 
 ## Open and Close Timing
 
@@ -110,31 +107,27 @@ The pad is processed first (priority 2), then the balance assertion (priority 3)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum DirectivePriority {
     Open = 0,
-    Commodity = 1,
-    Balance = 2,
-    Pad = 3,
-    Transaction = 4, // also event and custom
-    Note = 5,
-    Document = 6,
-    Query = 7,
-    Price = 8,
-    Close = 9,
+    Balance = 1,
+    Pad = 2,
+    Transaction = 3, // also commodity, note, query, price, event and custom
+    Document = 4,
+    Close = 5,
 }
 
 impl Directive {
     pub fn priority(&self) -> DirectivePriority {
         match self {
             Directive::Open(_) => DirectivePriority::Open,
-            Directive::Commodity(_) => DirectivePriority::Commodity,
             Directive::Pad(_) => DirectivePriority::Pad,
             Directive::Balance(_) => DirectivePriority::Balance,
-            Directive::Transaction(_) | Directive::Event(_) | Directive::Custom(_) => {
-                DirectivePriority::Transaction
-            }
-            Directive::Note(_) => DirectivePriority::Note,
+            Directive::Transaction(_)
+            | Directive::Commodity(_)
+            | Directive::Note(_)
+            | Directive::Query(_)
+            | Directive::Price(_)
+            | Directive::Event(_)
+            | Directive::Custom(_) => DirectivePriority::Transaction,
             Directive::Document(_) => DirectivePriority::Document,
-            Directive::Query(_) => DirectivePriority::Query,
-            Directive::Price(_) => DirectivePriority::Price,
             Directive::Close(_) => DirectivePriority::Close,
         }
     }
@@ -181,7 +174,7 @@ include "2024-02.beancount"
 
 There's no sub-day ordering. Transactions on the same date are ordered by:
 
-1. Type priority (transactions are all priority 4)
+1. Type priority (transactions are all priority 3)
 1. File line number
 
 ```beancount

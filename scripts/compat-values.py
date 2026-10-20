@@ -780,9 +780,9 @@ RLEDGER_CODE_FAMILIES: list[tuple[str, str]] = [
     (r"^E200[34]$", "pad"),
     (r"^E3\d{3}$", "transaction_balance"),
     (r"^E4\d{3}$", "booking"),
-    # The booking phase's own code, which is a WORD not a number
-    # (`LedgerError::error("BOOK", ...)`). Every booking failure in the corpus
-    # carries this and no numeric code at all.
+    # The booking phase's own code, which is a WORD not a number: what a
+    # booking failure carries when no E4xxx code describes it (interpolation
+    # failures). A lot-matching failure carries its E4xxx code (#2631).
     (r"^BOOK$", "booking"),
     (r"^E5\d{3}$", "currency"),
     (r"^E7\d{3}$", "option"),

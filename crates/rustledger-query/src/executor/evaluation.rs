@@ -279,6 +279,10 @@ impl Executor<'_> {
     /// | amount   | `number`, `currency`                  |
     /// | position | `units` (amount), `cost`              |
     /// | cost     | `number`, `currency`, `date`, `label` |
+    /// | date     | `year`, `month`, `day`                |
+    ///
+    /// A date is bean-query's `Date` structure (`beanquery/query_env.py`), so
+    /// `open.date.year` reads the year, as `year(open.date)` does.
     ///
     /// These are typed values with a fixed set of fields, so an attribute
     /// outside it is an error here, as upstream's compile error is. A
@@ -293,6 +297,12 @@ impl Executor<'_> {
                 "number" => Ok(Value::Number(amount.number)),
                 "currency" => Ok(Value::String(amount.currency.to_string())),
                 _ => Err(Self::no_such_attribute("amount", name)),
+            },
+            Value::Date(date) => match name {
+                "year" => Ok(Value::Integer(i64::from(date.year()))),
+                "month" => Ok(Value::Integer(i64::from(date.month()))),
+                "day" => Ok(Value::Integer(i64::from(date.day()))),
+                _ => Err(Self::no_such_attribute("date", name)),
             },
             Value::Position(position) => match name {
                 "units" => Ok(Value::Amount(position.units)),

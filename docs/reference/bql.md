@@ -121,6 +121,7 @@ A structured value takes `.name` to read one of its fields, as in bean-query. At
 | transaction (`entry`) | `date`, `flag`, `payee`, `narration`, `tags`, `links`, `meta`, `accounts` |
 | `open` on `#accounts` | `date`, `account`, `currencies`, `booking`, `meta` |
 | `close` on `#accounts` | `date`, `account`, `meta` |
+| date (`date`, `open.date`, `position.cost.date`, ...) | `year`, `month`, `day` |
 
 ```sql
 SELECT date, position.units.number, position.cost.date WHERE position.cost IS NOT NULL
@@ -128,7 +129,7 @@ SELECT date, position.units.number, position.cost.date WHERE position.cost IS NO
 SELECT account, open.date, close.date FROM #accounts
 ```
 
-An attribute an amount, position or cost does not have is an error. On a structured object (`entry`, a cost, `open`, `close`) a missing field is `NULL`, as an absent payee is, and so is a misspelled one. An attribute of `NULL` is `NULL`.
+An attribute an amount, position, cost or date does not have is an error. On a structured object (`entry`, a cost, `open`, `close`) a missing field is `NULL`, as an absent payee is, and so is a misspelled one. An attribute of `NULL` is `NULL`.
 
 ### Column Aliases
 

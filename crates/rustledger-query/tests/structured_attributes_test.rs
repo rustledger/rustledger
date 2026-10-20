@@ -301,3 +301,24 @@ fn entry_accounts() {
         ])]]
     );
 }
+
+/// A date is bean-query's `Date` structure: `year`, `month` and `day`, at
+/// any depth (`position.cost.date.year`, `open.date.year`), and nothing else.
+#[test]
+fn date_attributes() {
+    assert_eq!(
+        rows(
+            "SELECT date.year, date.month, date.day, position.cost.date.year, entry.date.month \
+             WHERE account = 'Assets:Stock'"
+        ),
+        vec![
+            [2020, 1, 3, 2020, 1].map(Value::Integer).to_vec(),
+            [2020, 1, 9, 2020, 1].map(Value::Integer).to_vec(),
+        ]
+    );
+    assert_eq!(
+        rows("SELECT open.date.year, year(open.date) FROM #accounts LIMIT 1"),
+        vec![vec![Value::Integer(2020), Value::Integer(2020)]]
+    );
+    assert!(error("SELECT date.weekday").contains("date has no attribute 'weekday'"));
+}

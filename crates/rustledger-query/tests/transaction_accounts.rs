@@ -1,4 +1,4 @@
-//! Transaction account sets across filtering, grouping and synthesised rows.
+//! Transaction account sets across filtering, grouping and synthesized rows.
 
 use rust_decimal_macros::dec;
 use rustledger_core::{Amount, Directive, Posting, Transaction};
@@ -55,6 +55,29 @@ fn test_account_sets_in_from_and_where_exclude_only_the_current_posting() {
             "{sql}"
         );
     }
+}
+
+#[test]
+fn test_other_accounts_excludes_only_the_current_posting() {
+    let directives = fixture();
+    let mut executor = Executor::new(&directives);
+    let set = |names: &[&str]| Value::StringSet(names.iter().map(|n| (*n).to_string()).collect());
+    let row = |account: &str, others: &[&str]| vec![Value::String(account.into()), set(others)];
+    // A repeated account stays in the set of its other posting; a posting's
+    // own account drops out only once.
+    assert_eq!(
+        executor
+            .execute(&parse("SELECT account, other_accounts").unwrap())
+            .unwrap()
+            .rows,
+        vec![
+            row("Expenses:Food", &["Assets:Bank", "Expenses:Food"]),
+            row("Expenses:Food", &["Assets:Bank", "Expenses:Food"]),
+            row("Assets:Bank", &["Expenses:Food"]),
+            row("Assets:Bank", &["Income:Salary"]),
+            row("Income:Salary", &["Assets:Bank"]),
+        ]
+    );
 }
 
 #[test]
@@ -154,7 +177,8 @@ fn test_synthesized_account_sets_do_not_survive_between_queries() {
     let original = executor
         .execute(&parse("SELECT account, accounts, other_accounts").unwrap())
         .unwrap();
-    for date in ["2024-01-02", "2024-02-01"] {
+    // By February every balance nets to zero, so only a January date has rows.
+    for date in ["2024-01-02"] {
         let result = executor
             .execute(
                 &parse(&format!(
@@ -164,9 +188,7 @@ fn test_synthesized_account_sets_do_not_survive_between_queries() {
                 .unwrap(),
             )
             .unwrap();
-        if date == "2024-01-02" {
-            assert!(!result.rows.is_empty());
-        }
+        assert!(!result.rows.is_empty(), "OPEN ON {date}");
         let unfiltered = executor
             .execute(
                 &parse(&format!(

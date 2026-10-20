@@ -243,6 +243,17 @@ fn accounts_open_and_close_are_structured() {
             ],
         ]
     );
+    // beancount stores None for an `open` naming no currencies, so
+    // `open.currencies` is NULL there, not an empty set.
+    assert_eq!(
+        rows("SELECT account, open.currencies IS NULL FROM #accounts ORDER BY 1"),
+        vec![
+            vec![s("Assets:Bank"), Value::Boolean(false)],
+            vec![s("Assets:Stock"), Value::Boolean(false)],
+            vec![s("Equity:Open"), Value::Boolean(true)],
+            vec![s("Income:Gains"), Value::Boolean(true)],
+        ]
+    );
     assert_eq!(
         rows("SELECT close.account FROM #accounts WHERE close IS NOT NULL"),
         vec![vec![s("Equity:Open")]]

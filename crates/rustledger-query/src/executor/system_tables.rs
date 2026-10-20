@@ -533,13 +533,21 @@ impl Executor<'_> {
 
     /// An `open` directive as bean-query's `Open` structure: the fields of
     /// beancount's `Open` namedtuple, `meta`, `date`, `account`, `currencies`
-    /// and `booking` (NULL when the directive names none). `meta` carries
+    /// and `booking` (each of the last two NULL when the directive names
+    /// none). `meta` carries
     /// the source location, as `entry.meta` does.
     fn open_object(open: &rustledger_core::Open, loc: Option<&SourceLocation>) -> Value {
         let mut obj = Self::directive_object(&open.meta, loc, open.date, &open.account);
+        // NULL for an `open` that names no currencies: beancount stores None
+        // there, not an empty list, so bean-query's `open.currencies IS NULL`
+        // is TRUE for it. (The legacy `currencies` column keeps its empty set.)
         obj.insert(
             "currencies".to_string(),
-            Value::StringSet(open.currencies.iter().map(ToString::to_string).collect()),
+            if open.currencies.is_empty() {
+                Value::Null
+            } else {
+                Value::StringSet(open.currencies.iter().map(ToString::to_string).collect())
+            },
         );
         obj.insert(
             "booking".to_string(),

@@ -19,9 +19,14 @@
 //! whose net leaves `Decimal`'s range is not checked; booking rejects such
 //! an inventory before the plugin runs, so only unbooked input gets there.
 //!
-//! The plugin reads no config yet: a non-blank config string (`as_of` is
-//! beancount-options only for now) gives one warning, and the default
-//! rules apply.
+//! The optional config `"{'as_of': 'YYYY-MM-DD'}"` sets "today" instead.
+//! Entries dated after it are ignored, so a forecast or scheduled
+//! transaction neither moves "today" forward nor closes a position early,
+//! and a contract that expired before it is reported even when the ledger
+//! has no later entry. The config is read by beancount-options' rules
+//! (rustledger/beancount-options#2) so both report the same thing: see
+//! [`parse_config`]. An invalid config gives one error and the plugin
+//! skips.
 //!
 //! The plugin only reports: every directive is kept unchanged and nothing is
 //! inserted, so a ledger stays complete without it.
@@ -35,6 +40,114 @@ use crate::types::{DirectiveData, PluginError, PluginInput, PluginOp, PluginOutp
 
 use super::super::{NativePlugin, RegularPlugin};
 use super::option_symbol::parse_occ;
+use super::py_literal::{self, PyValue};
+
+/// The whitespace stripped from around the config, spelled out as
+/// beancount-options spells it: Rust's `trim()` and Python's `str.strip()`
+/// both strip more (non-ASCII spaces; `\x1c`–`\x1f` in Python).
+const BLANK: [char; 6] = [' ', '\t', '\n', '\r', '\x0c', '\x0b'];
+
+/// The problem when the config is not a dict of the right shape.
+const NOT_A_DICT: &str = "expected a dict such as {'as_of': '2026-10-16'}";
+
+/// ` 'text'` when `text` is plain enough to quote back the same way in
+/// every implementation (1–40 printable ASCII characters other than `'`,
+/// `"` and `\`, beancount-options' `_QUOTABLE`), else nothing.
+fn quoted(text: &str) -> String {
+    let plain = (1..=40).contains(&text.len())
+        && text
+            .bytes()
+            .all(|b| (b' '..=b'~').contains(&b) && !matches!(b, b'\'' | b'"' | b'\\'));
+    if plain {
+        format!(" '{text}'")
+    } else {
+        String::new()
+    }
+}
+
+/// `text` as a date when it is exactly `[0-9]{4}-[0-9]{2}-[0-9]{2}` and a
+/// real date in years 1 to 9999, as Python's `date.fromisoformat` reads it
+/// after beancount-options' pattern check. jiff accepts year 0; Python
+/// does not.
+fn iso_date(text: &str) -> Option<String> {
+    let [y1, y2, y3, y4, b'-', m1, m2, b'-', d1, d2] = text.as_bytes() else {
+        return None;
+    };
+    if ![y1, y2, y3, y4, m1, m2, d1, d2]
+        .iter()
+        .all(|b| b.is_ascii_digit())
+        || text.starts_with("0000")
+    {
+        return None;
+    }
+    text.parse::<jiff::civil::Date>().ok()?;
+    Some(text.to_string())
+}
+
+/// Read the config the way beancount-options' `_parse_config` does.
+///
+/// `Ok(None)` is the default rule (no config, a blank one, or no `as_of`
+/// key), `Ok(Some(date))` an `as_of` date as `YYYY-MM-DD`, and `Err` the
+/// problem, checked in beancount-options' order: not a dict, a non-str
+/// key, the first unknown key as written, a non-str `as_of`, then a bad
+/// date. A repeated key keeps its first position and takes its last
+/// value, as in a Python dict. Only `as_of`'s value is read, and a str key
+/// equals only a str key, so taking its last value and scanning the keys
+/// as written is that merge.
+///
+/// Deliberate divergences, all from what `py_literal` can read, on
+/// configs nobody writes (listed in beancount-options'
+/// `expiry_config.json` as `native_differs`): `literal_eval` fails on an
+/// unhashable key or set element anywhere (`{[1]: 2}`, `{{}: 1}`), which
+/// Python reports as not a dict, and `py_literal` has one kind for lists,
+/// tuples and sets, so such a key is "keys must be strings" here and a
+/// nested one is not noticed; and `py_literal` rejects `\N{...}` escapes
+/// and complex numbers, which Python reads.
+fn parse_config(config: Option<&str>) -> Result<Option<String>, String> {
+    let Some(config) = config.map(|c| c.trim_matches(BLANK)) else {
+        return Ok(None);
+    };
+    if config.is_empty() {
+        return Ok(None);
+    }
+    let Ok(PyValue::Dict(entries)) = py_literal::parse(config) else {
+        return Err(NOT_A_DICT.to_string());
+    };
+    let mut keys = Vec::with_capacity(entries.len());
+    let mut as_of = None;
+    for (key, value) in &entries {
+        let PyValue::Str(key) = key else {
+            return Err("keys must be strings".to_string());
+        };
+        keys.push(key.as_str());
+        if key == "as_of" {
+            as_of = Some(value);
+        }
+    }
+    if let Some(unknown) = keys.into_iter().find(|k| *k != "as_of") {
+        let quoted = quoted(unknown);
+        return Err(if quoted.is_empty() {
+            "an unknown key".to_string()
+        } else {
+            format!("unknown key{quoted}")
+        });
+    }
+    let Some(value) = as_of else {
+        return Ok(None);
+    };
+    let PyValue::Str(text) = value else {
+        return Err("as_of must be a string".to_string());
+    };
+    iso_date(text).map(Some).ok_or_else(|| {
+        format!(
+            "as_of must be a date written YYYY-MM-DD{}",
+            match quoted(text) {
+                q if q.is_empty() => q,
+                q => format!(", not{q}"),
+            }
+        )
+    })
+}
 
 /// Net position of one contract in one account.
 struct Position {
@@ -61,16 +174,36 @@ impl NativePlugin for CheckOptionExpiryPlugin {
 
     fn process(&self, input: PluginInput) -> PluginOutput {
         let mut errors = Vec::new();
-        if super::option_symbol::config_is_set(input.config.as_deref()) {
-            errors.push(PluginError::warning(
-                "check_option_expiry: the config is ignored; rledger does not support as_of yet",
-            ));
-        }
+        let as_of = match parse_config(input.config.as_deref()) {
+            Ok(as_of) => as_of,
+            Err(problem) => {
+                // Located as beancount's `check_commodity` locates its
+                // config errors (`<check_option_expiry>:0`), as
+                // beancount-options does.
+                errors.push(
+                    PluginError::error(format!(
+                        "Invalid configuration for check_option_expiry plugin: {problem}; skipping."
+                    ))
+                    .at("<check_option_expiry>", 0),
+                );
+                return PluginOutput {
+                    ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
+                    errors,
+                };
+            }
+        };
 
         // Walk directives in beancount's `entry_sortkey` order (date, type,
         // line) without assuming the input is sorted. The loader keeps file
         // order for same-day entries; beancount does not.
-        let mut order: Vec<usize> = (0..input.directives.len()).collect();
+        // With `as_of`, entries dated after it are not seen at all.
+        let mut order: Vec<usize> = (0..input.directives.len())
+            .filter(|&i| {
+                as_of
+                    .as_deref()
+                    .is_none_or(|as_of| input.directives[i].date.as_str() <= as_of)
+            })
+            .collect();
         order.sort_by(|&a, &b| {
             input.directives[a]
                 .sort_key()
@@ -133,12 +266,15 @@ impl NativePlugin for CheckOptionExpiryPlugin {
             }
         }
 
-        // ISO dates compare correctly as strings.
-        let last_date = input.directives.iter().map(|d| d.date.as_str()).max();
+        // "Today": `as_of`, or the last directive's date. ISO dates compare
+        // correctly as strings.
+        let today = as_of
+            .as_deref()
+            .or_else(|| input.directives.iter().map(|d| d.date.as_str()).max());
 
-        if let Some(last_date) = last_date {
+        if let Some(today) = today {
             for ((account, symbol), pos) in &positions {
-                if pos.overflowed || pos.net.is_zero() || pos.expiry.as_str() >= last_date {
+                if pos.overflowed || pos.net.is_zero() || pos.expiry.as_str() >= today {
                     continue;
                 }
                 let mut error = PluginError::error(format!(

@@ -121,6 +121,54 @@ def shout(entries, options_map):
     assert!(q.out.contains(r#"SALARY "QUOTED" BACK\SLASH"#), "{}", q.out);
 }
 
+/// #2686: a transaction a plugin deletes is not validated, as in beancount,
+/// which validates only what its plugins return. Its unopened account was
+/// reported anyway, from the early phase's held judgment, which was meant
+/// only for transactions booking refuses. A refused one keeps its account
+/// error (decided on #2683).
+#[test]
+fn a_transaction_a_plugin_deletes_is_not_validated() {
+    let Some(bin) = rledger_with_python() else {
+        return;
+    };
+    let plugin = "\
+__plugins__ = ['drop_tagged']
+
+def drop_tagged(entries, options_map):
+    return [e for e in entries if 'drop' not in getattr(e, 'tags', ())], []
+";
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("plugin.py"), plugin).unwrap();
+    let ledger = dir.path().join("ledger.beancount");
+    std::fs::write(
+        &ledger,
+        "plugin \"plugin.py\"\n\n\
+         2024-01-01 open Assets:Bank USD\n\
+         2024-01-01 open Assets:Stock\n\n\
+         2024-01-02 * \"Dropped\" #drop\n  \
+           Assets:Bank   -10 USD\n  \
+           Expenses:Deleted   10 USD\n\n\
+         2024-01-03 * \"Buy\"\n  \
+           Assets:Stock   1 HOOL {10 USD}\n  \
+           Assets:Bank   -10 USD\n\n\
+         2024-01-04 * \"Refused: no lot at 20\"\n  \
+           Assets:Stock   -1 HOOL {20 USD}\n  \
+           Expenses:Refused   20 USD\n",
+    )
+    .unwrap();
+    let r = run(&bin, dir.path(), &["check", ledger.to_str().unwrap()]);
+    assert!(
+        !r.out.contains("Expenses:Deleted"),
+        "the deleted transaction was validated:\n{}",
+        r.out
+    );
+    assert!(
+        r.out.contains("Expenses:Refused"),
+        "the refused transaction keeps its account error:\n{}",
+        r.out
+    );
+}
+
 /// Every item of `__plugins__` runs, in order, each on the previous one's
 /// output; a string names a function, anything else is the callable.
 #[test]

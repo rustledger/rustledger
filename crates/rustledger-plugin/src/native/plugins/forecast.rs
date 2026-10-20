@@ -121,10 +121,12 @@ impl NativePlugin for ForecastPlugin {
                     // Drop the template (Delete) and Insert one transaction per date.
                     ops.push(PluginOp::Delete(i));
                     for date in dates {
+                        // Each copy keeps the template's location, as
+                        // beancount's `entry._replace(date=...)` keeps its
+                        // meta: an error on a copy points at the template
+                        // instead of `<unknown>` (#2687).
                         let mut new_directive = directive.clone();
                         new_directive.date = date.to_string();
-                        new_directive.filename = None;
-                        new_directive.lineno = None;
 
                         if let DirectiveData::Transaction(ref mut new_txn) = new_directive.data {
                             new_txn.narration = narration_prefix.to_string();
@@ -289,6 +291,29 @@ mod tests {
         // Check narration is cleaned
         if let DirectiveData::Transaction(txn) = &directives[0].data {
             assert_eq!(txn.narration, "Electric bill");
+        }
+    }
+
+    /// #2687: every copy keeps the template's location, as beancount's
+    /// copies keep its meta, so an error on one points at the template.
+    #[test]
+    fn test_forecast_copies_keep_the_template_location() {
+        let mut template =
+            create_forecast_transaction("2024-01-15", "Rent [MONTHLY REPEAT 2 TIMES]");
+        template.filename = Some("ledger.beancount".to_string());
+        template.lineno = Some(4);
+        let input = PluginInput {
+            directives: vec![template],
+            options: PluginOptions::default(),
+            config: None,
+        };
+        let input_dirs = input.directives.clone();
+        let output = ForecastPlugin.process(input);
+        let directives = materialize_ops(&input_dirs, &output);
+        assert_eq!(directives.len(), 2);
+        for d in &directives {
+            assert_eq!(d.filename.as_deref(), Some("ledger.beancount"));
+            assert_eq!(d.lineno, Some(4));
         }
     }
 

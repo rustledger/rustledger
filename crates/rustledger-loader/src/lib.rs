@@ -66,7 +66,7 @@ pub use discover::{
     discover_journal_upward,
 };
 pub use options::{DEFAULT_CURRENT_CONVERSIONS, OptionWarning, Options, resolve_leaf_account};
-pub use source_map::{SourceFile, SourceMap, line_col_in};
+pub use source_map::{LineIndex, SourceFile, SourceMap, line_col_in};
 pub use vfs::{DiskFileSystem, FileSystem, VirtualFileSystem};
 
 // Re-export processing API when features are enabled

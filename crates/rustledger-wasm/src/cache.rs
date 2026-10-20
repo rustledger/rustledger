@@ -277,7 +277,13 @@ use crate::types::{Error, LedgerOptions};
 /// `BOOK` (#2631). Loader v41, unchanged -- parsed directives did not move.
 /// `LedgerPayload.errors` is restored verbatim, so a v49 blob would serve
 /// `BOOK` where a fresh load gives E4001-E4004.
-pub const CACHE_VERSION: u32 = 50;
+/// v51: `inferred_tolerance_default "*"` is the tolerance of a currency left
+/// with none, not a floor on every currency (#2685). Loader v41, unchanged --
+/// parsed directives did not move. Booking quantizes interpolated amounts
+/// with that tolerance and validation checks the balance against it, so a
+/// v50 blob of a ledger setting `*` would serve the old interpolated amounts
+/// and miss the imbalance errors a fresh load reports.
+pub const CACHE_VERSION: u32 = 51;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

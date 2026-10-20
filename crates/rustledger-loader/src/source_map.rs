@@ -35,8 +35,10 @@ pub struct SourceFile {
 /// Line and column (1-based, the column in CHARACTERS) for a byte offset in
 /// `source`.
 ///
-/// For callers holding only a `&str`. Parse errors are reported before a
-/// `SourceMap` exists, so they cannot use [`SourceFile::line_col`]; before
+/// The definition of the rule, for a one-off lookup in a `&str`. For many
+/// lookups in one text use [`LineIndex`], which answers identically. Parse
+/// errors are reported before a `SourceMap` exists, so they cannot use
+/// [`SourceFile::line_col`]; before
 /// #2341 `check.rs` carried its own copy of this and the two conventions
 /// disagreed on every non-ASCII line.
 ///
@@ -60,6 +62,70 @@ pub fn line_col_in(source: &str, offset: usize) -> (usize, usize) {
         }
     }
     (line, col)
+}
+
+/// Byte offsets at which each line of `source` starts (entry 0 is always 0).
+fn line_starts_of(source: &str) -> Vec<usize> {
+    std::iter::once(0)
+        .chain(source.match_indices('\n').map(|(i, _)| i + 1))
+        .collect()
+}
+
+/// [`line_col_in`]'s answer, found through a line-start table: the line by
+/// `partition_point`, then only that one line is walked.
+fn line_col_indexed(source: &str, starts: &[usize], offset: usize) -> (usize, usize) {
+    // `partition_point`, not `rposition`: the table is sorted ascending,
+    // so a linear scan would be O(lines) per lookup — fine for one
+    // diagnostic, quadratic for a file that reports thousands. The
+    // predicate is monotone over a sorted slice, so the count of entries
+    // satisfying it is one past the last that does; entry 0 is always 0,
+    // so the count is never zero and the subtraction cannot underflow.
+    let line = starts.partition_point(|&start| start <= offset) - 1;
+
+    // Characters on this line that START before the offset -- the same
+    // rule `line_col_in` applies, and the reason this counts rather than
+    // slices. Slicing needs `offset` to be a character boundary, and an
+    // offset landing INSIDE a multi-byte character made `get` return
+    // `None`: the drift guard caught that answering column 1, which would
+    // have put a caret at the start of the line. Counting also handles an
+    // offset past the end without a panic.
+    let line_start = starts[line];
+    let col = source[line_start..]
+        .char_indices()
+        .take_while(|(i, _)| line_start + i < offset)
+        .count();
+
+    (line + 1, col + 1)
+}
+
+/// [`line_col_in`] for many lookups in one `&str`: the line-start table is
+/// built once, so each lookup walks one line instead of the file.
+///
+/// For callers that have the text but no [`SourceFile`] — parse errors are
+/// reported before a [`SourceMap`] exists. Rescanning from byte 0 per lookup
+/// made `check --format json` quadratic in the number of parse errors (#2632).
+#[derive(Debug, Clone)]
+pub struct LineIndex<'a> {
+    source: &'a str,
+    starts: Vec<usize>,
+}
+
+impl<'a> LineIndex<'a> {
+    /// Index `source`.
+    #[must_use]
+    pub fn new(source: &'a str) -> Self {
+        Self {
+            source,
+            starts: line_starts_of(source),
+        }
+    }
+
+    /// Line and column (1-based, the column in CHARACTERS) for a byte offset,
+    /// exactly as [`line_col_in`] answers it.
+    #[must_use]
+    pub fn line_col(&self, offset: usize) -> (usize, usize) {
+        line_col_indexed(self.source, &self.starts, offset)
+    }
 }
 
 impl SourceFile {
@@ -90,11 +156,8 @@ impl SourceFile {
 
     /// The line-start table, built on first use.
     fn line_starts(&self) -> &[usize] {
-        self.line_starts.get_or_init(|| {
-            std::iter::once(0)
-                .chain(self.source.match_indices('\n').map(|(i, _)| i + 1))
-                .collect()
-        })
+        self.line_starts
+            .get_or_init(|| line_starts_of(&self.source))
     }
 
     /// Get the line and column (1-based) for a byte offset.
@@ -112,29 +175,7 @@ impl SourceFile {
     /// replaced rescanned from byte 0 on every call.
     #[must_use]
     pub fn line_col(&self, offset: usize) -> (usize, usize) {
-        // `partition_point`, not `rposition`: the table is sorted ascending,
-        // so the linear scan this replaces was O(lines) per lookup — fine for
-        // one diagnostic, quadratic for a file that reports thousands. The
-        // predicate is monotone over a sorted slice, so the count of entries
-        // satisfying it is one past the last that does; entry 0 is always 0,
-        // so the count is never zero and the subtraction cannot underflow.
-        let starts = self.line_starts();
-        let line = starts.partition_point(|&start| start <= offset) - 1;
-
-        // Characters on this line that START before the offset -- the same
-        // rule `line_col_in` applies, and the reason this counts rather than
-        // slices. Slicing needs `offset` to be a character boundary, and an
-        // offset landing INSIDE a multi-byte character made `get` return
-        // `None`: the drift guard caught that answering column 1, which would
-        // have put a caret at the start of the line. Counting also handles an
-        // offset past the end without a panic.
-        let line_start = starts[line];
-        let col = self.source[line_start..]
-            .char_indices()
-            .take_while(|(i, _)| line_start + i < offset)
-            .count();
-
-        (line + 1, col + 1)
+        line_col_indexed(&self.source, self.line_starts(), offset)
     }
 
     /// Get the source text for a span.
@@ -297,11 +338,18 @@ mod tests {
             "",
         ] {
             let file = SourceFile::new(0, std::path::PathBuf::from("t.beancount"), source.into());
+            let index = LineIndex::new(source);
             for offset in 0..=source.len() + 2 {
+                let expected = line_col_in(source, offset);
                 assert_eq!(
                     file.line_col(offset),
-                    line_col_in(source, offset),
-                    "offset {offset} in {source:?}",
+                    expected,
+                    "offset {offset} in {source:?}"
+                );
+                assert_eq!(
+                    index.line_col(offset),
+                    expected,
+                    "LineIndex: offset {offset} in {source:?}"
                 );
             }
         }

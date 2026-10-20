@@ -807,11 +807,20 @@ mod tolerance_tests {
         assert_eq!(t.len(), 1, "only the USD currency should appear");
     }
 
+    /// #2685: `*` is beancount's fallback for a currency with no tolerance,
+    /// not a floor: it reaches integer-only USD but leaves cents-written USD
+    /// at its inferred 0.005.
     #[test]
-    fn tolerance_wildcard_default_applies_to_all_currencies() {
+    fn tolerance_wildcard_default_is_the_fallback_for_currencies_without_one() {
         let mut opts = ValidationOptions::default();
         opts.inferred_tolerance_default
             .insert("*".to_string(), dec!(0.2));
+        let t = calculate_tolerances(
+            &mk_txn(vec![Posting::new("Assets:A", Amount::new(dec!(10), "USD"))]),
+            &opts,
+        );
+        assert_eq!(t.get(&cur("USD")), Some(&dec!(0.2)));
+        assert_eq!(t.len(), 1, "only the USD currency should appear");
         let t = calculate_tolerances(
             &mk_txn(vec![Posting::new(
                 "Assets:A",
@@ -819,8 +828,7 @@ mod tolerance_tests {
             )]),
             &opts,
         );
-        assert_eq!(t.get(&cur("USD")), Some(&dec!(0.2)));
-        assert_eq!(t.len(), 1, "only the USD currency should appear");
+        assert_eq!(t.get(&cur("USD")), Some(&dec!(0.005)));
     }
 
     /// #2554 (robcohen's decision): a cost/price tolerance past

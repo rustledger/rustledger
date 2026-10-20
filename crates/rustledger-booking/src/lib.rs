@@ -56,12 +56,11 @@ pub struct ToleranceOptions<'a> {
     /// Whether per-unit costs and prices feed the tolerance (accumulated,
     /// then max'd per currency), per `option "infer_tolerance_from_cost"`.
     pub infer_from_cost: bool,
-    /// Per-currency tolerance floors from `option "inferred_tolerance_default"`;
-    /// the key `"*"` is a wildcard floor applied to every currency that
-    /// appears as a posting UNIT currency in the transaction (a currency
-    /// present only via cost/price inference gets no wildcard floor,
-    /// though a named per-currency default still reaches it) — behavior
-    /// inherited verbatim from the validator.
+    /// Per-currency tolerances from `option "inferred_tolerance_default"`,
+    /// as beancount applies them (#2685): a named currency's default is a
+    /// floor for that currency wherever the transaction mentions it (units,
+    /// cost or price); the key `"*"` is not a floor but the fallback for a
+    /// mentioned currency left with no tolerance at all.
     pub defaults: &'a FxHashMap<String, Decimal>,
 }
 
@@ -317,35 +316,58 @@ fn tolerances_rounded(
         }
     }
 
-    // Apply per-currency default tolerances from `inferred_tolerance_default` option.
-    // These act as a floor: if the computed tolerance for a currency is less than the
-    // default, the default is used. The special key "*" floors every currency that
-    // appears as a posting UNIT currency (not currencies present only via
-    // cost/price inference — named defaults below reach those too).
+    // Apply `inferred_tolerance_default`, by beancount's rule
+    // (`interpolate.infer_tolerances`, #2685):
+    //
+    // * A NAMED currency's default is a floor, and only for a currency the
+    //   transaction mentions (as units, cost or price currency): beancount
+    //   seeds its dict with the defaults of the currencies it has seen, then
+    //   `max`es every inferred tolerance into it.
+    // * `*` is NOT a floor. Beancount pops it at the end and makes it the
+    //   dict's default value, so it reaches only a currency left with no
+    //   tolerance at all (its amounts all integers, say). Flooring every
+    //   currency with it let `*:0.05` pass a two-decimal transaction off by
+    //   0.04, which beancount rejects. Every consumer of this map looks up a
+    //   currency the transaction mentions and treats a missing one as zero,
+    //   so `*` is written under each mentioned currency still missing here.
     if !opts.defaults.is_empty() {
-        // Apply the wildcard default first (if any)
-        if let Some(wildcard_default) = opts.defaults.get("*") {
-            // Apply wildcard to all currencies that appear in the transaction
-            for posting in &txn.postings {
-                if let Some(units) = posting.amount() {
-                    tolerances
-                        .entry(units.currency.clone())
-                        .and_modify(|t| *t = (*t).max(*wildcard_default))
-                        .or_insert(*wildcard_default);
-                }
+        let mut seen: smallvec::SmallVec<[Currency; 4]> = smallvec::SmallVec::new();
+        let mut see = |currency: &Currency| {
+            if !seen.contains(currency) {
+                seen.push(currency.clone());
+            }
+        };
+        for posting in &txn.postings {
+            match &posting.units {
+                Some(IncompleteAmount::Complete(units)) => see(&units.currency),
+                Some(IncompleteAmount::CurrencyOnly(currency)) => see(currency),
+                _ => {}
+            }
+            if let Some(currency) = posting.cost.as_ref().and_then(|c| c.currency.as_ref()) {
+                see(currency);
+            }
+            match posting.price.as_ref().and_then(|p| p.amount.as_ref()) {
+                Some(IncompleteAmount::Complete(price)) => see(&price.currency),
+                Some(IncompleteAmount::CurrencyOnly(currency)) => see(currency),
+                _ => {}
             }
         }
-
-        // Apply per-currency defaults (overrides wildcard for specific currencies)
-        for (currency_str, default_tol) in opts.defaults {
-            if currency_str == "*" {
-                continue;
+        let wildcard = opts.defaults.get("*");
+        for currency in seen {
+            let named = opts.defaults.get(currency.as_str());
+            match tolerances.entry(currency) {
+                std::collections::hash_map::Entry::Occupied(mut entry) => {
+                    if let Some(named) = named {
+                        let t = entry.get_mut();
+                        *t = (*t).max(*named);
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(entry) => {
+                    if let Some(default) = named.or(wildcard) {
+                        entry.insert(*default);
+                    }
+                }
             }
-            let currency = rustledger_core::Currency::from(currency_str.as_str());
-            tolerances
-                .entry(currency)
-                .and_modify(|t| *t = (*t).max(*default_tol))
-                .or_insert(*default_tol);
         }
     }
 
@@ -2167,6 +2189,71 @@ mod tests {
             transaction_tolerances(&many, &opts(dec!(0.5)))[&usd],
             Decimal::MAX
         );
+    }
+
+    /// #2685: `inferred_tolerance_default "*"` is beancount's FALLBACK, not a
+    /// floor. `*:0.05` leaves a currency written to cents at 0.005 (so a
+    /// 0.04 residual fails, as bean-check reports it), reaches a currency
+    /// written only in integers, and loses to a named default; a currency
+    /// mentioned only as a price or cost currency gets it too.
+    #[test]
+    fn the_wildcard_default_is_a_fallback_not_a_floor() {
+        let usd = Currency::from("USD");
+        let eur = Currency::from("EUR");
+        let tolerances = |defaults: &[(&str, Decimal)], txn: &Transaction| {
+            let defaults: FxHashMap<String, Decimal> = defaults
+                .iter()
+                .map(|(c, d)| ((*c).to_string(), *d))
+                .collect();
+            transaction_tolerances(
+                txn,
+                &ToleranceOptions {
+                    multiplier: dec!(0.5),
+                    infer_from_cost: false,
+                    defaults: &defaults,
+                },
+            )
+        };
+        let txn = |a: Amount, b: Amount| {
+            Transaction::new(NaiveDate::default(), "t")
+                .with_synthesized_posting(Posting::new("Assets:A", a))
+                .with_synthesized_posting(Posting::new("Assets:B", b))
+        };
+        let cents = txn(
+            Amount::new(dec!(10.00), "USD"),
+            Amount::new(dec!(-9.96), "USD"),
+        );
+        let whole = txn(Amount::new(dec!(10), "USD"), Amount::new(dec!(-10), "USD"));
+
+        // Inferred 0.005 stands; the wildcard does not raise it.
+        assert_eq!(tolerances(&[("*", dec!(0.05))], &cents)[&usd], dec!(0.005));
+        // Nothing inferred: the wildcard is the tolerance.
+        assert_eq!(tolerances(&[("*", dec!(0.05))], &whole)[&usd], dec!(0.05));
+        // A named default floors, and beats the wildcard where nothing is inferred.
+        assert_eq!(
+            tolerances(&[("*", dec!(0.05)), ("USD", dec!(0.02))], &cents)[&usd],
+            dec!(0.02)
+        );
+        assert_eq!(
+            tolerances(&[("*", dec!(0.05)), ("USD", dec!(0.001))], &whole)[&usd],
+            dec!(0.001)
+        );
+        // A named default for a currency the transaction never mentions is
+        // not in the map (beancount seeds only the currencies it has seen).
+        assert!(!tolerances(&[("EUR", dec!(0.02))], &cents).contains_key(&eur));
+
+        // A currency mentioned only as a price currency gets the wildcard.
+        let priced = Transaction::new(NaiveDate::default(), "p")
+            .with_synthesized_posting(
+                Posting::new("Assets:Eur", Amount::new(dec!(-5), "EUR")).with_price(
+                    PriceAnnotation {
+                        kind: rustledger_core::PriceKind::Unit,
+                        amount: Some(IncompleteAmount::Complete(Amount::new(dec!(2), "USD"))),
+                    },
+                ),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Stock", Amount::new(dec!(1), "GGG")));
+        assert_eq!(tolerances(&[("*", dec!(0.05))], &priced)[&usd], dec!(0.05));
     }
 
     /// The product alone: `0.1 x 1,000,000 x 9e23` is `9e28`, past `MAX`.

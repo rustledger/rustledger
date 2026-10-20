@@ -1,4 +1,8 @@
 //! Window function support.
+//!
+//! `OVER (...)` is a rustledger extension: bean-query has no window functions
+//! (beanquery 0.2.0 rejects `OVER` as a syntax error), so nothing here has a
+//! compatibility target.
 
 use rustc_hash::FxHashMap as HashMap;
 
@@ -8,84 +12,147 @@ use crate::error::QueryError;
 use super::Executor;
 use super::types::{PostingContext, Value, WindowContext};
 
+/// A window function rustledger implements.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum WindowKind {
+    RowNumber,
+    Rank,
+    DenseRank,
+    Min,
+    Max,
+}
+
+impl WindowKind {
+    fn of(wf: &WindowFunction) -> Result<Self, QueryError> {
+        let name = wf.name.to_uppercase();
+        let kind = match name.as_str() {
+            "ROW_NUMBER" => Self::RowNumber,
+            "RANK" => Self::Rank,
+            "DENSE_RANK" => Self::DenseRank,
+            "MIN" => Self::Min,
+            "MAX" => Self::Max,
+            _ => {
+                return Err(QueryError::Evaluation(format!(
+                    "Window function '{}' not yet implemented",
+                    wf.name
+                )));
+            }
+        };
+        if matches!(kind, Self::Min | Self::Max)
+            && (wf.args.len() != 1 || matches!(wf.args[0], Expr::Wildcard))
+        {
+            return Err(QueryError::InvalidArguments(
+                name,
+                "expected 1 argument".to_string(),
+            ));
+        }
+        Ok(kind)
+    }
+}
+
 impl Executor<'_> {
     pub(super) fn has_window_functions(targets: &[Target]) -> bool {
         targets.iter().any(|t| Self::is_window_expr(&t.expr))
     }
-    pub(super) fn evaluate_window_function(
-        &self,
-        wf: &WindowFunction,
-        window_ctx: Option<&WindowContext>,
-    ) -> Result<Value, QueryError> {
-        let ctx = window_ctx.ok_or_else(|| {
-            QueryError::Evaluation("Window function requires window context".to_string())
-        })?;
 
-        match wf.name.to_uppercase().as_str() {
-            "ROW_NUMBER" => Ok(Value::Integer(ctx.row_number as i64)),
-            "RANK" => Ok(Value::Integer(ctx.rank as i64)),
-            "DENSE_RANK" => Ok(Value::Integer(ctx.dense_rank as i64)),
-            _ => Err(QueryError::Evaluation(format!(
-                "Window function '{}' not yet implemented",
-                wf.name
-            ))),
-        }
+    /// The value of the `index`-th window function of the row's targets.
+    pub(super) fn evaluate_window_function(
+        window_ctx: Option<&WindowContext>,
+        index: usize,
+    ) -> Result<Value, QueryError> {
+        window_ctx
+            .and_then(|ctx| ctx.values.get(index))
+            .cloned()
+            .ok_or_else(|| {
+                QueryError::Evaluation("Window function requires window context".to_string())
+            })
     }
+
+    /// Every window function's value on every posting: `postings[i]`'s
+    /// context holds the value of each window target of `targets`, in target
+    /// order.
+    ///
+    /// Each window function is computed over its OWN `OVER` clause. They were
+    /// all computed over the first one's, so in
+    /// `ROW_NUMBER() OVER (PARTITION BY account), ROW_NUMBER() OVER ()` the
+    /// second numbered rows within accounts too.
     pub(super) fn compute_window_contexts(
         &self,
         postings: &[PostingContext],
-        wf: &WindowFunction,
+        targets: &[Target],
     ) -> Result<Vec<WindowContext>, QueryError> {
+        let mut contexts = vec![WindowContext::default(); postings.len()];
+        for target in targets {
+            if let Expr::Window(wf) = &target.expr {
+                let column = self.compute_window_column(postings, wf)?;
+                for (ctx, value) in contexts.iter_mut().zip(column) {
+                    ctx.values.push(value);
+                }
+            }
+        }
+        Ok(contexts)
+    }
+
+    /// One window function's value on every posting, in posting order.
+    ///
+    /// `MIN` and `MAX` follow SQL's default frame. With no `ORDER BY` in the
+    /// `OVER` clause the frame is the whole partition. With one, it runs from
+    /// the partition's first row through the current row AND its peers (the
+    /// rows whose `ORDER BY` values tie with it, the same ties `RANK` gives),
+    /// so the result is a running minimum or maximum. Values compare as the
+    /// aggregate `MIN`/`MAX` compare them (#2447): NULLs are skipped, a frame
+    /// with no other value is NULL, amounts, positions and inventories order
+    /// as `ORDER BY` orders them (an amount by currency, then number), and of
+    /// values that compare equal the first in the frame is kept.
+    fn compute_window_column(
+        &self,
+        postings: &[PostingContext],
+        wf: &WindowFunction,
+    ) -> Result<Vec<Value>, QueryError> {
+        let kind = WindowKind::of(wf)?;
         let spec = &wf.over;
 
-        // Compute partition keys for each posting
-        let mut partition_keys: Vec<String> = Vec::with_capacity(postings.len());
-        for ctx in postings {
-            if let Some(partition_exprs) = &spec.partition_by {
-                let mut key_values = Vec::new();
+        // Group posting indices by partition key, each partition in posting
+        // order.
+        let mut partitions: HashMap<String, Vec<usize>> = HashMap::default();
+        for (idx, ctx) in postings.iter().enumerate() {
+            let key = if let Some(partition_exprs) = &spec.partition_by {
+                let mut key_values = Vec::with_capacity(partition_exprs.len());
                 for expr in partition_exprs {
                     key_values.push(self.evaluate_expr(expr, ctx)?);
                 }
-                partition_keys.push(Self::make_group_key(&key_values));
+                Self::make_group_key(&key_values)
             } else {
-                // No partition - all rows in one partition
-                partition_keys.push(String::new());
-            }
-        }
-
-        // Group posting indices by partition key
-        let mut partitions: HashMap<String, Vec<usize>> = HashMap::default();
-        for (idx, key) in partition_keys.iter().enumerate() {
-            partitions.entry(key.clone()).or_default().push(idx);
+                String::new()
+            };
+            partitions.entry(key).or_default().push(idx);
         }
 
         // Compute order values for sorting within partitions
         let mut order_values: Vec<Vec<Value>> = Vec::with_capacity(postings.len());
         for ctx in postings {
-            if let Some(order_specs) = &spec.order_by {
-                let mut values = Vec::new();
-                for order_spec in order_specs {
-                    values.push(self.evaluate_expr(&order_spec.expr, ctx)?);
-                }
-                order_values.push(values);
-            } else {
-                order_values.push(Vec::new());
+            let mut values = Vec::new();
+            for order_spec in spec.order_by.iter().flatten() {
+                values.push(self.evaluate_expr(&order_spec.expr, ctx)?);
             }
+            order_values.push(values);
         }
 
-        // Initialize window contexts
-        let mut window_contexts: Vec<WindowContext> = vec![
-            WindowContext {
-                row_number: 0,
-                rank: 0,
-                dense_rank: 0,
-            };
-            postings.len()
-        ];
+        // The argument of MIN / MAX on every posting.
+        let args: Vec<Value> = if matches!(kind, WindowKind::Min | WindowKind::Max) {
+            postings
+                .iter()
+                .map(|ctx| self.evaluate_expr(&wf.args[0], ctx))
+                .collect::<Result<_, _>>()?
+        } else {
+            Vec::new()
+        };
 
-        // Process each partition
+        let mut column = vec![Value::Null; postings.len()];
+
         for indices in partitions.values() {
-            // Sort indices within partition by order values
+            // Sort indices within partition by order values (stable, so
+            // ties keep posting order).
             let mut sorted_indices: Vec<usize> = indices.clone();
             if let Some(order_specs) = &spec.order_by {
                 sorted_indices.sort_by(|&a, &b| {
@@ -108,42 +175,69 @@ impl Executor<'_> {
                 });
             }
 
-            // Assign ranks within the partition
-            let mut rank = 1;
-            let mut dense_rank = 1;
-            let mut prev_values: Option<&Vec<Value>> = None;
-
-            for (position, &original_idx) in sorted_indices.iter().enumerate() {
-                let current_values = &order_values[original_idx];
-
-                let is_tie = if let Some(prev) = prev_values {
-                    current_values == prev
-                } else {
-                    false
-                };
-
-                if !is_tie && position > 0 {
-                    rank = position + 1;
-                    dense_rank += 1;
+            // Peer groups: runs of consecutive rows whose order values tie.
+            // With no ORDER BY every row ties, and the partition is one group.
+            let mut groups: Vec<&[usize]> = Vec::new();
+            let mut start = 0;
+            for end in 1..=sorted_indices.len() {
+                if end == sorted_indices.len()
+                    || order_values[sorted_indices[end]] != order_values[sorted_indices[start]]
+                {
+                    groups.push(&sorted_indices[start..end]);
+                    start = end;
                 }
-                window_contexts[original_idx] = WindowContext {
-                    row_number: position + 1,
-                    rank,
-                    dense_rank,
-                };
+            }
 
-                prev_values = Some(current_values);
+            let mut position: usize = 0;
+            let mut dense_rank: usize = 0;
+            let mut running: Option<Value> = None;
+            for group in groups {
+                dense_rank += 1;
+                let rank = position + 1;
+                if matches!(kind, WindowKind::Min | WindowKind::Max) {
+                    for &idx in group {
+                        running =
+                            self.min_max_step(running, args[idx].clone(), kind == WindowKind::Max)?;
+                    }
+                }
+                for &idx in group {
+                    position += 1;
+                    column[idx] = match kind {
+                        WindowKind::RowNumber => Value::Integer(position as i64),
+                        WindowKind::Rank => Value::Integer(rank as i64),
+                        WindowKind::DenseRank => Value::Integer(dense_rank as i64),
+                        WindowKind::Min | WindowKind::Max => running.clone().unwrap_or(Value::Null),
+                    };
+                }
             }
         }
 
-        Ok(window_contexts)
+        Ok(column)
     }
-    pub(super) fn find_window_function(targets: &[Target]) -> Option<&WindowFunction> {
-        for target in targets {
-            if let Expr::Window(wf) = &target.expr {
-                return Some(wf);
-            }
+
+    /// Fold `value` into a running `MIN` (or `MAX`, when `max`), exactly as
+    /// the aggregate `MIN` / `MAX` arms do: a NULL is skipped, and the
+    /// current value is replaced only by a STRICTLY smaller (larger) one, so
+    /// of values that compare equal the first is kept.
+    fn min_max_step(
+        &self,
+        current: Option<Value>,
+        value: Value,
+        max: bool,
+    ) -> Result<Option<Value>, QueryError> {
+        if matches!(value, Value::Null) {
+            return Ok(current);
         }
-        None
+        Ok(Some(match current {
+            None => value,
+            Some(current) => {
+                let replace = if max {
+                    self.value_less_than(&current, &value)?
+                } else {
+                    self.value_less_than(&value, &current)?
+                };
+                if replace { value } else { current }
+            }
+        }))
     }
 }

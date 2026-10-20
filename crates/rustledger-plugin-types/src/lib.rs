@@ -404,7 +404,8 @@ pub struct PluginOptions {
     pub account_types: PluginAccountTypes,
     /// Per-currency tolerance floors (`option "inferred_tolerance_default"
     /// "USD:0.005"`), as `(currency, number)` pairs sorted by currency; the
-    /// currency `*` is the default for every currency. Empty when the
+    /// currency `*` is the tolerance of a currency left with none (not a
+    /// floor on every currency, issue #2685). Empty when the
     /// ledger sets none. Added in ABI version 3 (issue #2653).
     #[serde(default)]
     pub inferred_tolerance_default: Vec<(String, String)>,

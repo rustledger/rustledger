@@ -1273,7 +1273,7 @@ fn dispatch_plugins(
                 .collect();
             entries.push(PluginInvocation {
                 name: rustledger_plugin::DOCUMENT_DISCOVERY_NAME.to_string(),
-                config: Some(rustledger_plugin::document_discovery_config(
+                config: Some(rustledger_plugin::document_discovery_config_with_main_file(
                     base_dir, main_file, &resolved,
                 )),
                 force_python: false,
@@ -1848,13 +1848,6 @@ fn build_validation_options(
         .with_default_booking_method(default_booking_method)
 }
 
-/// Convert a batch of [`rustledger_validate::ValidationError`]s into
-/// loader-level [`LedgerError`]s (with resolved `file:line:column`
-/// locations) and append to the existing list.
-///
-/// Factored out so both validation phases in `process()` share the
-/// same conversion path.
-#[cfg(feature = "validation")]
 /// Where an error at byte `offset` of `file_id` is: the file, line and column
 /// of a source file, or the name and line of a placeholder location (such as
 /// `<check_closing>:0`, #2713), which has no column (0) because no text is
@@ -1876,6 +1869,13 @@ fn error_location(source_map: &SourceMap, file_id: u16, offset: usize) -> Option
     })
 }
 
+/// Convert a batch of [`rustledger_validate::ValidationError`]s into
+/// loader-level [`LedgerError`]s (with resolved `file:line:column`
+/// locations) and append to the existing list.
+///
+/// Factored out so both validation phases in `process()` share the
+/// same conversion path.
+#[cfg(feature = "validation")]
 fn ledger_errors_extend(
     errors: &mut Vec<LedgerError>,
     validation_errors: Vec<rustledger_validate::ValidationError>,

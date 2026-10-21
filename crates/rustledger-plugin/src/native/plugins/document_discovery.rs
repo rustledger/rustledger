@@ -67,11 +67,22 @@ struct DocumentDiscoveryConfig {
 /// Centralized here so callers (the loader) don't need to know the
 /// schema — the plugin owns its own config shape.
 ///
-/// `main_file` is the ledger's main file, the location (at line 0) of each
-/// document the plugin finds, as beancount's `find_documents` gives it
-/// (#2713); `None` leaves the documents without a location.
+/// This is the original two-argument form: the documents it finds carry
+/// no location. Callers that know the ledger's main file use
+/// [`document_discovery_config_with_main_file`] so each document is placed
+/// at the location beancount gives it (#2713).
 #[must_use]
-pub fn document_discovery_config(
+pub fn document_discovery_config(base_dir: &std::path::Path, directories: &[String]) -> String {
+    document_discovery_config_with_main_file(base_dir, None, directories)
+}
+
+/// [`document_discovery_config`] with the ledger's main file.
+///
+/// `main_file` is the location (at line 0) of each document the plugin
+/// finds, as beancount's `find_documents` gives it (#2713); `None` leaves
+/// the documents without a location.
+#[must_use]
+pub fn document_discovery_config_with_main_file(
     base_dir: &std::path::Path,
     main_file: Option<&std::path::Path>,
     directories: &[String],

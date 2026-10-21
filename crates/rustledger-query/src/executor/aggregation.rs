@@ -9,7 +9,7 @@ use crate::ast::{Expr, Literal, Target, UnaryOperator};
 use crate::error::QueryError;
 
 use super::Executor;
-use super::types::{PostingContext, Row, Value};
+use super::types::{PostingContext, Row, TableRow, Value};
 
 impl<'a> Executor<'a> {
     /// Whether `query` aggregates: a target holds an aggregate, or it has a
@@ -908,12 +908,12 @@ impl<'a> Executor<'a> {
 
     /// Evaluate an aggregate expression against a group of generic table rows.
     ///
-    /// This mirrors [`Self::evaluate_aggregate_expr`] but operates on `&[&Row]` (table rows)
+    /// This mirrors [`Self::evaluate_aggregate_expr`] but operates on `&[TableRow]` (table rows)
     /// rather than `&[&PostingContext]`. Column values are resolved by name via `column_map`.
     pub(super) fn evaluate_aggregate_table_expr(
         &self,
         expr: &Expr,
-        group: &[&Row],
+        group: &[TableRow<'_>],
         column_map: &rustc_hash::FxHashMap<String, usize>,
     ) -> Result<Value, QueryError> {
         match expr {
@@ -941,7 +941,7 @@ impl<'a> Executor<'a> {
                             None | Some(Expr::Wildcard) => group.len(),
                             Some(arg) => {
                                 let mut c = 0usize;
-                                for row in group {
+                                for &row in group {
                                     let v = self.evaluate_subquery_expr(arg, row, column_map)?;
                                     if !matches!(v, Value::Null) {
                                         c += 1;
@@ -965,19 +965,17 @@ impl<'a> Executor<'a> {
                         let mut has_numbers = false;
                         let mut has_booleans = false;
 
-                        // A table built from postings carries each row's lot
-                        // total in a hidden column beside the posting column,
-                        // which `sum()` of that column records as the default
-                        // FROM does (#2430, #2432). A column with none adds the
+                        // A row read from a posting keeps it (`RowOrigin`,
+                        // #2442), so `sum()` of a column holding the posting's
+                        // `position` records the lot's exact total as the
+                        // default FROM does (#2430). Any other column adds the
                         // value alone.
-                        let lot_total_idx = match func.args.as_slice() {
-                            [Expr::Column(column)] => {
-                                super::hidden_index(column_map, "lot total", column, "")
-                            }
+                        let column = match func.args.as_slice() {
+                            [Expr::Column(column)] => Some(column.as_str()),
                             _ => None,
                         };
 
-                        for row in group {
+                        for &row in group {
                             let val =
                                 self.evaluate_subquery_expr(&func.args[0], row, column_map)?;
                             match val {
@@ -988,10 +986,13 @@ impl<'a> Executor<'a> {
                                     has_positions = true;
                                 }
                                 Value::Position(pos) => {
-                                    let total = match lot_total_idx.and_then(|i| row.get(i)) {
-                                        Some(Value::Number(total)) => Some(*total),
-                                        _ => None,
-                                    };
+                                    let total = column
+                                        .and_then(|c| self.row_posting(row, column_map, c))
+                                        .and_then(|posting| {
+                                            rustledger_booking::posting_lot_total(
+                                                posting, &pos.units,
+                                            )
+                                        });
                                     total_inventory
                                         .add_with_total(*pos, total)
                                         .map_err(|e| QueryError::Evaluation(e.to_string()))?;
@@ -1071,7 +1072,7 @@ impl<'a> Executor<'a> {
                                 "expected 1 argument".to_string(),
                             ));
                         }
-                        if let Some(row) = group.first() {
+                        if let Some(&row) = group.first() {
                             self.evaluate_subquery_expr(&func.args[0], row, column_map)
                         } else {
                             Ok(Value::Null)
@@ -1084,7 +1085,7 @@ impl<'a> Executor<'a> {
                                 "expected 1 argument".to_string(),
                             ));
                         }
-                        if let Some(row) = group.last() {
+                        if let Some(&row) = group.last() {
                             self.evaluate_subquery_expr(&func.args[0], row, column_map)
                         } else {
                             Ok(Value::Null)
@@ -1098,7 +1099,7 @@ impl<'a> Executor<'a> {
                             ));
                         }
                         let mut min_val: Option<Value> = None;
-                        for row in group {
+                        for &row in group {
                             let val =
                                 self.evaluate_subquery_expr(&func.args[0], row, column_map)?;
                             if matches!(val, Value::Null) {
@@ -1125,7 +1126,7 @@ impl<'a> Executor<'a> {
                             ));
                         }
                         let mut max_val: Option<Value> = None;
-                        for row in group {
+                        for &row in group {
                             let val =
                                 self.evaluate_subquery_expr(&func.args[0], row, column_map)?;
                             if matches!(val, Value::Null) {
@@ -1153,7 +1154,7 @@ impl<'a> Executor<'a> {
                         }
                         let mut sum = Decimal::ZERO;
                         let mut count = 0i64;
-                        for row in group {
+                        for &row in group {
                             let val =
                                 self.evaluate_subquery_expr(&func.args[0], row, column_map)?;
                             match val {
@@ -1249,7 +1250,7 @@ impl<'a> Executor<'a> {
                 // evaluate on the first row of the group. This matches the behavior of
                 // evaluate_aggregate_expr: GROUP BY correctness ensures all rows in a group
                 // have the same value for the GROUP BY key columns.
-                if let Some(row) = group.first() {
+                if let Some(&row) = group.first() {
                     self.evaluate_subquery_expr(expr, row, column_map)
                 } else {
                     Ok(Value::Null)
@@ -1268,7 +1269,7 @@ impl<'a> Executor<'a> {
         row: &[Value],
         col_map: &HashMap<String, usize>,
         alias_map: &HashMap<String, usize>,
-        group: &[&Row],
+        group: &[TableRow<'_>],
         column_map: &rustc_hash::FxHashMap<String, usize>,
     ) -> Result<Value, QueryError> {
         match expr {

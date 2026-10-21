@@ -534,8 +534,7 @@ mod tests {
             "{listing}"
         );
 
-        // Types from the values, in bean-query's names. The posting-derived
-        // values a table keeps under NUL-named columns are not shown.
+        // Types from the values, in bean-query's names.
         assert_eq!(
             describe_table(&executor, "foo").as_deref(),
             Ok(

@@ -854,15 +854,16 @@ impl Executor<'_> {
             // Hidden metadata columns for META/ENTRY_META functions
             "_entry_meta".to_string(),
             "_posting_meta".to_string(),
-            // Hidden: each row's `weight(position)` and `cost(position)`
-            // (#2429) and its lot's exact total (#2430), computed from the
-            // posting, which the row evaluator cannot see. NUL-named, so
-            // `SELECT *` omits them (see `hidden_weight_column`).
-            super::hidden_weight_column("position"),
-            super::hidden_cost_column("position"),
-            super::hidden_cost_error_column("position"),
-            super::hidden_lot_total_column("position"),
         ];
+        // Each row keeps its posting, which `weight(position)`,
+        // `cost(position)` (#2429) and `sum(position)` (#2430) answer from
+        // when a query reads them (#2442, `RowOrigin`).
+        let position_column: std::sync::Arc<[usize]> = std::sync::Arc::from(vec![
+            columns
+                .iter()
+                .position(|c| c == "position")
+                .expect("#postings has a position column"),
+        ]);
         let mut table = Table::new(columns);
 
         // Single posting-source scan, shared with the default `SELECT` path
@@ -976,6 +977,7 @@ impl Executor<'_> {
         let mut last_entry: Option<(usize, Value)> = None;
 
         for ctx in contexts {
+            let source = Self::context_source(&ctx);
             let txn: &rustledger_core::Transaction = &ctx.transaction;
             let posting = &txn.postings[ctx.posting_index];
             // `scan_postings` always sets a real directive index on every context.
@@ -1078,32 +1080,6 @@ impl Executor<'_> {
             // table and the default-FROM `weight` accessor stay in lockstep
             // (issue #1052).
             let weight_val = compute_posting_weight(posting);
-            let weight_of_position = weight_val.clone();
-            // `cost(position)` as the default FROM gives it (#2428): the
-            // posting's booked cost, else the value path's `COST` of the
-            // position, which is what it falls back to there too.
-            let cost_of_position = match super::compute_posting_cost(posting) {
-                Some(cost) => cost,
-                None => {
-                    self.evaluate_function_on_values("COST", std::slice::from_ref(&position_val))
-                }
-            };
-            // An overflow is raised when a query reads this row's
-            // `cost(position)`, not here (see `hidden_cost_error_column`).
-            // It is the only error either path raises for a posting; anything
-            // else still fails the table.
-            let (cost_of_position, cost_error) = match cost_of_position {
-                Ok(cost) => (cost, Value::Null),
-                Err(crate::QueryError::Evaluation(message)) => {
-                    (Value::Null, Value::String(message))
-                }
-                Err(other) => return Err(other),
-            };
-            // The lot's exact total, for `sum(position)` (#2430).
-            let lot_total = posting
-                .amount()
-                .and_then(|units| rustledger_booking::posting_lot_total(posting, units))
-                .map_or(Value::Null, Value::Number);
 
             // The running balances come straight from the shared scan
             // (`needs_balance`/`needs_account_balance` both `true` above), so they
@@ -1179,12 +1155,14 @@ impl Executor<'_> {
                 } else {
                     Value::Null
                 },
-                weight_of_position,
-                cost_of_position,
-                cost_error,
-                lot_total,
             ];
-            table.add_row(row);
+            table.add_row_with_origin(
+                row,
+                Some(super::types::RowOrigin {
+                    posting: source,
+                    columns: std::sync::Arc::clone(&position_column),
+                }),
+            );
         }
 
         Ok(table)

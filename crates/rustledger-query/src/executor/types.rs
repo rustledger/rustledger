@@ -278,6 +278,105 @@ impl Value {
 /// A row of query results.
 pub type Row = Vec<Value>;
 
+/// The posting a table row was read from, kept beside the row (#2442).
+///
+/// `weight`, `cost` and `sum` of the posting column need the POSTING, and a
+/// row holds only values: a `Position` has no price, which `weight` ranks
+/// second, and not the exact total a `{{T}}` cost carries. So a row built
+/// from a posting (a row of `#postings`, of a subquery over postings, or of a
+/// table `CREATE TABLE ... AS SELECT` or `INSERT ... SELECT` filled) keeps
+/// that posting, and which of its columns hold the posting's `position`
+/// unchanged. The row evaluator then calls the same functions the default
+/// FROM does on the posting, lazily: once per value, only for the rows and
+/// columns a query reads, so an error is raised only by a query that reads
+/// it.
+///
+/// A row with no single posting behind it (grouped, DISTINCT, from `VALUES`)
+/// has no origin, and a column that is any other expression is not one of its
+/// `columns`: both answer from the value, as the default FROM does for an
+/// expression other than the bare `position`.
+#[derive(Debug, Clone)]
+pub struct RowOrigin {
+    /// The posting.
+    pub posting: PostingSource,
+    /// The row's columns holding the posting's `position` as it is, by
+    /// index. Shared by the rows a query produces with the same layout.
+    pub columns: std::sync::Arc<[usize]>,
+}
+
+impl RowOrigin {
+    /// Whether the row's column `index` holds the posting's `position`.
+    pub fn holds_position(&self, index: usize) -> bool {
+        self.columns.contains(&index)
+    }
+}
+
+/// Where a [`RowOrigin`]'s posting lives.
+#[derive(Debug, Clone)]
+pub enum PostingSource {
+    /// Posting `posting` of the transaction at index `directive` of the
+    /// executor's ledger. Only for rows that never leave the executor that
+    /// read them (`#postings`, a subquery): a table that outlives it keeps
+    /// [`Self::Detached`] instead (see `CreatedTables`).
+    Ledger {
+        /// The directive's index in the executor's ledger.
+        directive: usize,
+        /// The posting's index in the transaction.
+        posting: usize,
+    },
+    /// Posting `posting` of a transaction the query synthesized (`OPEN ON`,
+    /// `CLOSE`, `CLEAR`), which has no place in the ledger.
+    Shared {
+        /// The transaction.
+        transaction: std::sync::Arc<Transaction>,
+        /// The posting's index in the transaction.
+        posting: usize,
+    },
+    /// A copy of a ledger posting, kept by a table that outlives the
+    /// executor that read it. It keeps what `weight`, `cost` and `sum` read
+    /// (units, cost, price) and drops the metadata and comments, which none
+    /// of them reads (see `Executor::detach_source`).
+    Detached(std::sync::Arc<rustledger_core::Posting>),
+}
+
+/// A table row and the posting it was read from, if any (see [`RowOrigin`]):
+/// what the table-row evaluators take. Dereferences to the row's values.
+#[derive(Debug, Clone, Copy)]
+pub struct TableRow<'r> {
+    /// The row's values.
+    pub values: &'r [Value],
+    /// The posting the row was read from.
+    pub origin: Option<&'r RowOrigin>,
+}
+
+impl<'r> TableRow<'r> {
+    /// A row with no posting behind it.
+    pub const fn plain(values: &'r [Value]) -> Self {
+        Self {
+            values,
+            origin: None,
+        }
+    }
+
+    /// Row `i` of `rows`, with its origin from `origins`: the sidecar
+    /// [`QueryResult::row_origins`] and [`Table::origins`] keep, empty when
+    /// no row has one.
+    pub fn at(rows: &'r [Row], origins: &'r [Option<RowOrigin>], i: usize) -> Self {
+        Self {
+            values: &rows[i],
+            origin: origins.get(i).and_then(Option::as_ref),
+        }
+    }
+}
+
+impl std::ops::Deref for TableRow<'_> {
+    type Target = [Value];
+
+    fn deref(&self) -> &[Value] {
+        self.values
+    }
+}
+
 /// Compute a hash for a row (for DISTINCT deduplication).
 ///
 /// Uses `FxHasher` (the same non-cryptographic hash backing every
@@ -322,6 +421,10 @@ pub struct QueryResult {
     /// and only with extreme care. External access goes through
     /// [`Self::group_key`].
     pub(crate) row_group_keys: Vec<Option<Vec<Value>>>,
+    /// Per-row [`RowOrigin`]s, parallel to `rows`, or empty when no row has
+    /// one: only a query asked to keep them does (#2442). Kept in lockstep
+    /// by the same helpers as `row_group_keys`.
+    pub(crate) row_origins: Vec<Option<RowOrigin>>,
 }
 
 impl QueryResult {
@@ -331,7 +434,21 @@ impl QueryResult {
             columns,
             rows: Vec::new(),
             row_group_keys: Vec::new(),
+            row_origins: Vec::new(),
         }
+    }
+
+    /// Add a row with no GROUP BY context, read from the posting `origin`
+    /// names (see [`RowOrigin`]).
+    pub(crate) fn add_row_with_origin(&mut self, row: Row, origin: Option<RowOrigin>) {
+        if origin.is_some() && self.row_origins.len() < self.rows.len() {
+            self.row_origins.resize(self.rows.len(), None);
+        }
+        if origin.is_some() || !self.row_origins.is_empty() {
+            self.row_origins.push(origin);
+        }
+        self.rows.push(row);
+        self.row_group_keys.push(None);
     }
 
     /// Add a row to the result with no GROUP BY context (non-aggregate path).
@@ -339,8 +456,7 @@ impl QueryResult {
     /// text renderer applies no per-currency quantization (issue #988).
     /// Aggregate paths must use [`Self::add_aggregate_row`] instead.
     pub fn add_row(&mut self, row: Row) {
-        self.rows.push(row);
-        self.row_group_keys.push(None);
+        self.add_row_with_origin(row, None);
     }
 
     /// Add a row produced by aggregation, recording the GROUP BY key values
@@ -355,6 +471,9 @@ impl QueryResult {
     /// column first if both are currency-shaped, which is rare in
     /// practice but possible.
     pub fn add_aggregate_row(&mut self, row: Row, group_key: Vec<Value>) {
+        if !self.row_origins.is_empty() {
+            self.row_origins.push(None);
+        }
         self.rows.push(row);
         self.row_group_keys.push(if group_key.is_empty() {
             None
@@ -399,52 +518,72 @@ impl QueryResult {
     pub fn truncate(&mut self, len: usize) {
         self.rows.truncate(len);
         self.row_group_keys.truncate(len);
+        self.row_origins.truncate(len);
     }
 
-    /// Sort rows by a comparator, keeping `row_group_keys` in lockstep.
+    /// Sort rows by a comparator, keeping `row_group_keys` and
+    /// `row_origins` in lockstep.
     /// Pair-sort prevents the sidecar from desynchronizing after ORDER BY
     /// (otherwise text rendering would apply the wrong currency hint to
-    /// a row).
+    /// a row, and a row would read another row's posting).
     pub fn sort_by<F>(&mut self, mut compare: F)
     where
         F: FnMut(&Row, &Row) -> std::cmp::Ordering,
     {
-        // Hard assert (not debug_assert!): the invariant is load-bearing
-        // for correctness; a release-mode mismatch would silently apply
-        // the wrong currency hint to rows after sort.
-        assert_eq!(
-            self.rows.len(),
-            self.row_group_keys.len(),
-            "QueryResult invariant violated: rows.len() must equal row_group_keys.len()"
-        );
+        self.assert_lockstep();
         let n = self.rows.len();
-        let mut paired: Vec<(Row, Option<Vec<Value>>)> = std::mem::take(&mut self.rows)
+        let has_origins = !self.row_origins.is_empty();
+        let origins = std::mem::take(&mut self.row_origins)
             .into_iter()
-            .zip(std::mem::take(&mut self.row_group_keys))
-            .collect();
-        paired.sort_by(|(a, _), (b, _)| compare(a, b));
+            .chain(std::iter::repeat_with(|| None));
+        let mut paired: Vec<(Row, Option<Vec<Value>>, Option<RowOrigin>)> =
+            std::mem::take(&mut self.rows)
+                .into_iter()
+                .zip(std::mem::take(&mut self.row_group_keys))
+                .zip(origins)
+                .map(|((row, key), origin)| (row, key, origin))
+                .collect();
+        paired.sort_by(|(a, _, _), (b, _, _)| compare(a, b));
         // Pre-allocate the now-empty Vecs back to known capacity to skip
         // the incremental-grow allocations during push-back.
         self.rows.reserve_exact(n);
         self.row_group_keys.reserve_exact(n);
-        for (row, key) in paired {
+        if has_origins {
+            self.row_origins.reserve_exact(n);
+        }
+        for (row, key, origin) in paired {
             self.rows.push(row);
             self.row_group_keys.push(key);
+            if has_origins {
+                self.row_origins.push(origin);
+            }
         }
     }
 
-    /// Sort the rows by comparing their indices, keeping `row_group_keys` in
-    /// lockstep as [`Self::sort_by`] does. For a comparison that reads keys
-    /// prepared per row ahead of the sort rather than the rows themselves.
-    pub(crate) fn sort_by_row_index<F>(&mut self, mut compare: F)
-    where
-        F: FnMut(usize, usize) -> std::cmp::Ordering,
-    {
+    /// Hard assert (not `debug_assert!`): the invariant is load-bearing
+    /// for correctness; a release-mode mismatch would silently apply the
+    /// wrong currency hint, or the wrong posting, to rows after a sort.
+    fn assert_lockstep(&self) {
         assert_eq!(
             self.rows.len(),
             self.row_group_keys.len(),
             "QueryResult invariant violated: rows.len() must equal row_group_keys.len()"
         );
+        assert!(
+            self.row_origins.is_empty() || self.row_origins.len() == self.rows.len(),
+            "QueryResult invariant violated: row_origins must be empty or as long as rows"
+        );
+    }
+
+    /// Sort the rows by comparing their indices, keeping `row_group_keys`
+    /// and `row_origins` in lockstep as [`Self::sort_by`] does. For a
+    /// comparison that reads keys prepared per row ahead of the sort rather
+    /// than the rows themselves.
+    pub(crate) fn sort_by_row_index<F>(&mut self, mut compare: F)
+    where
+        F: FnMut(usize, usize) -> std::cmp::Ordering,
+    {
+        self.assert_lockstep();
         let mut order: Vec<usize> = (0..self.rows.len()).collect();
         order.sort_by(|&i, &j| compare(i, j));
         let mut rows: Vec<Option<Row>> = std::mem::take(&mut self.rows)
@@ -455,14 +594,19 @@ impl QueryResult {
             .into_iter()
             .map(Some)
             .collect();
+        let mut origins = std::mem::take(&mut self.row_origins);
         self.rows.reserve_exact(order.len());
         self.row_group_keys.reserve_exact(order.len());
+        self.row_origins.reserve_exact(origins.len());
         for i in order {
             // `order` is a permutation of `0..n`, so each slot is taken once.
             self.rows
                 .push(rows[i].take().expect("each row is taken once"));
             self.row_group_keys
                 .push(keys[i].take().expect("each key is taken once"));
+            if !origins.is_empty() {
+                self.row_origins.push(origins[i].take());
+            }
         }
     }
 
@@ -607,6 +751,10 @@ pub struct Table {
     /// rule cannot express that split. Empty for every table that hides
     /// nothing beyond the name-based rule in `Executor::wildcard_hidden`.
     pub hidden: Vec<String>,
+    /// Per-row [`RowOrigin`]s, parallel to `rows`, or empty when no row has
+    /// one (#2442). A table that outlives its executor (`CreatedTables`)
+    /// keeps no [`PostingSource::Ledger`] ones.
+    pub(crate) origins: Vec<Option<RowOrigin>>,
 }
 
 impl Table {
@@ -617,7 +765,24 @@ impl Table {
             columns,
             rows: Vec::new(),
             hidden: Vec::new(),
+            origins: Vec::new(),
         }
+    }
+
+    /// The `i`th row, with its origin.
+    pub(crate) fn row(&self, i: usize) -> TableRow<'_> {
+        TableRow::at(&self.rows, &self.origins, i)
+    }
+
+    /// Add a row read from the posting `origin` names.
+    pub(crate) fn add_row_with_origin(&mut self, row: Vec<Value>, origin: Option<RowOrigin>) {
+        if origin.is_some() && self.origins.len() < self.rows.len() {
+            self.origins.resize(self.rows.len(), None);
+        }
+        if origin.is_some() || !self.origins.is_empty() {
+            self.origins.push(origin);
+        }
+        self.rows.push(row);
     }
 
     /// Mark columns as omitted from `SELECT *` expansion.
@@ -648,7 +813,7 @@ impl Table {
 
     /// Add a row to the table.
     pub fn add_row(&mut self, row: Vec<Value>) {
-        self.rows.push(row);
+        self.add_row_with_origin(row, None);
     }
 }
 
@@ -661,7 +826,8 @@ impl Table {
 /// session that builds an executor per query (the WASM `ParsedLedger`, the
 /// component's `session`) keeps a table one query made for the next (#2579).
 /// A table holds values, not references into the ledger, so it outlives the
-/// executor that made it.
+/// executor that made it: the postings its rows were read from are kept as
+/// copies, never as indices into the ledger.
 #[derive(Debug, Clone, Default)]
 pub struct CreatedTables {
     /// By upper-cased name: table names are case-insensitive.
@@ -706,8 +872,7 @@ impl CreatedTables {
     /// type, for `.describe`: the type it was declared with, else the type
     /// of its first non-NULL value, in the names bean-query's `.describe`
     /// uses (`str`, `decimal`, `amount`, ...), `object` when every value is
-    /// NULL. The NUL-named columns a table keeps for posting-derived values
-    /// are left out; no query names them.
+    /// NULL.
     #[must_use]
     pub fn describe(&self, name: &str) -> Option<Vec<(&str, String)>> {
         let created = self.tables.get(&name.to_uppercase())?;
@@ -717,7 +882,6 @@ impl CreatedTables {
                 .columns
                 .iter()
                 .enumerate()
-                .filter(|(_, column)| !column.starts_with('\u{0}'))
                 .map(|(i, column)| {
                     let type_name = created
                         .declared
@@ -916,6 +1080,60 @@ mod tests {
         r.rows.push(vec![Value::Integer(1)]);
         // Deliberately skip pushing to `row_group_keys`.
         r.sort_by(|_, _| std::cmp::Ordering::Equal);
+    }
+
+    /// A row's origin follows it through `sort_by`, `sort_by_row_index` and
+    /// `truncate` (#2442): ORDER BY and LIMIT must not hand one row
+    /// another's posting.
+    #[test]
+    fn row_origins_stay_with_their_rows() {
+        let origin = |posting: usize| RowOrigin {
+            posting: PostingSource::Ledger {
+                directive: 0,
+                posting,
+            },
+            columns: std::sync::Arc::from(vec![0]),
+        };
+        let posting_of = |r: &QueryResult, i: usize| match &r.row_origins[i] {
+            Some(RowOrigin {
+                posting: PostingSource::Ledger { posting, .. },
+                ..
+            }) => Some(*posting),
+            _ => None,
+        };
+        let mut r = QueryResult::new(vec!["x".into()]);
+        r.add_row(vec![Value::Integer(5)]);
+        r.add_row_with_origin(vec![Value::Integer(3)], Some(origin(3)));
+        r.add_row_with_origin(vec![Value::Integer(9)], Some(origin(9)));
+        r.add_row(vec![Value::Integer(1)]);
+        // The row added before any origin is backfilled with none.
+        assert_eq!(r.row_origins.len(), 4);
+        assert_eq!(posting_of(&r, 0), None);
+
+        r.sort_by(|a, b| match (&a[0], &b[0]) {
+            (Value::Integer(a), Value::Integer(b)) => a.cmp(b),
+            _ => std::cmp::Ordering::Equal,
+        });
+        let order: Vec<Value> = r.rows.iter().map(|row| row[0].clone()).collect();
+        assert_eq!(
+            order,
+            [1, 3, 5, 9].map(Value::Integer).to_vec(),
+            "sorted ascending"
+        );
+        assert_eq!(
+            (0..4).map(|i| posting_of(&r, i)).collect::<Vec<_>>(),
+            [None, Some(3), None, Some(9)]
+        );
+
+        r.sort_by_row_index(|i, j| j.cmp(&i));
+        assert_eq!(
+            (0..4).map(|i| posting_of(&r, i)).collect::<Vec<_>>(),
+            [Some(9), None, Some(3), None]
+        );
+
+        r.truncate(1);
+        assert_eq!(r.row_origins.len(), 1);
+        assert_eq!(posting_of(&r, 0), Some(9));
     }
 
     /// Direct test for `add_row`: the non-aggregate path records `None`

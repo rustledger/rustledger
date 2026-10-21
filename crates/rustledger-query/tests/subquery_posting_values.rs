@@ -6,8 +6,8 @@
 //! subquery's rows are values, so over one `weight(position)` of
 //! `10 EUR @ 1.10 USD` gave `10 EUR` where the query without the subquery
 //! gives `11.00 USD`, and a `{{500 USD}}` lot weighed and cost
-//! 500.00…01. The subquery now computes them where it can reach the
-//! posting and carries them in hidden columns.
+//! 500.00…01. Each subquery row now keeps the posting it was read from, and
+//! the outer query answers from it (#2442).
 
 use rustledger_booking::BookingEngine;
 use rustledger_core::{BookingMethod, Directive};
@@ -161,8 +161,8 @@ fn a_distinct_or_grouped_inner_query_keeps_the_value_path() {
     }
 }
 
-/// A column the subquery does not return is still missing: the hidden values
-/// ride beside a column, never in place of one.
+/// A column the subquery does not return is still missing: a row's posting
+/// rides beside its columns, never in place of one.
 #[test]
 fn a_column_the_subquery_does_not_return_is_still_unknown() {
     let directives = booked(LEDGER);
@@ -213,7 +213,7 @@ fn cost_of_the_sum_is_exact_through_nested_subqueries_and_postings() {
     }
 }
 
-/// The hidden columns stay out of an outer `SELECT *`.
+/// An outer `SELECT *` shows the subquery's columns and nothing else.
 #[test]
 fn select_star_over_a_subquery_does_not_show_them() {
     let directives = booked(LEDGER);
@@ -265,8 +265,7 @@ fn an_overflowing_cost_fails_only_the_query_that_reads_it() {
     }
 }
 
-/// The subquery computes each value for every row, but whether it fails is
-/// the outer query's business: `weight` or `cost` of a column that is no
+/// Whether a value fails is the outer query's business: `weight` or `cost` of a column that is no
 /// position fails only for a row the outer query reads, and with the error
 /// it gives without a subquery, not for rows its WHERE drops.
 #[test]

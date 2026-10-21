@@ -2768,55 +2768,6 @@ fn postings_table_reports_a_refused_replay_as_an_error() {
     }
 }
 
-/// Every hidden-column lookup finds the name the producers write (#2432):
-/// the static `position` keys, the ASCII buffer and the allocating path must
-/// all agree with `hidden_name`, or a table carrying the value is read as
-/// one that does not, silently, through the value path.
-#[test]
-fn position_hidden_keys_are_hidden_names() {
-    let kinds = [
-        ("weight", ""),
-        ("weight", " error"),
-        ("cost", ""),
-        ("cost", " error"),
-        ("lot total", ""),
-    ];
-    for (kind, suffix) in kinds {
-        assert_eq!(
-            position_hidden_key(kind, suffix),
-            Some(hidden_name(kind, "position", suffix).as_str()),
-            "{kind}{suffix}"
-        );
-    }
-    assert_eq!(hidden_weight_column("P"), hidden_name("weight", "p", ""));
-    assert_eq!(hidden_cost_column("P"), hidden_name("cost", "p", ""));
-    assert_eq!(
-        hidden_cost_error_column("P"),
-        hidden_name("cost", "p", " error")
-    );
-    assert_eq!(
-        hidden_weight_error_column("P"),
-        hidden_name("weight", "p", " error")
-    );
-    assert_eq!(
-        hidden_lot_total_column("P"),
-        hidden_name("lot total", "p", "")
-    );
-    // Column maps key on the lowercased name; each path finds it however the
-    // query spells the column.
-    for column in ["position", "POSITION", "Pos_2", "prénom", "ΣΑΣ"] {
-        for (kind, suffix) in kinds {
-            let name = hidden_name(kind, column, suffix).to_lowercase();
-            let map: rustc_hash::FxHashMap<String, usize> = std::iter::once((name, 7)).collect();
-            assert_eq!(
-                hidden_index(&map, kind, column, suffix),
-                Some(7),
-                "{column}: {kind}{suffix}"
-            );
-        }
-    }
-}
-
 /// ORDER BY and every other sort (PIVOT BY, window ORDER BY) order
 /// inventories alike (#2445): `sort_results` prepares each row's sorted
 /// positions once, `compare_values_for_sort` sorts them per comparison, and
@@ -3327,7 +3278,7 @@ fn posting_columns_match_the_evaluator() {
     );
 
     // Every listed column runs, and `#postings` has no visible column the
-    // default table lacks (its hidden ones are `_`- or NUL-prefixed).
+    // default table lacks (its hidden ones are `_`-prefixed).
     let directives = sample_directives();
     for name in &listed {
         let mut executor = Executor::new(&directives);
@@ -3341,7 +3292,7 @@ fn posting_columns_match_the_evaluator() {
         .execute(&parse("SELECT * FROM #postings").expect("parses"))
         .expect("#postings");
     for column in &postings.columns {
-        if column.starts_with('_') || column.starts_with('\0') {
+        if column.starts_with('_') {
             continue;
         }
         assert!(

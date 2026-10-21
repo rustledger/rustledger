@@ -2091,6 +2091,11 @@ fn a_path_flag_without_a_value_is_refused() {
         vec!["split", file, "--by", "year", "--yes", "--dir"],
         vec!["split", file, "--by", "year", "--dir", "--yes"],
         vec!["split", file, "--by", "year", "--ledger", "--yes"],
+        // Another flag's `=true`, or a positional named `true`, is not
+        // this flag's value (review round 2).
+        vec!["merge", parent, "--yes=true", "-o"],
+        vec!["split", file, "--by", "year", "--dry-run=true", "--dir"],
+        vec!["merge", "true", "-o", "--yes"],
     ] {
         let (code, env, stderr) = run_in(dir, &args);
         assert!(stderr.is_empty(), "{stderr}");
@@ -2102,13 +2107,15 @@ fn a_path_flag_without_a_value_is_refused() {
     // Typed, `true` is a directory name like any other.
     let (code, env, _) = run_in(dir, &["split", file, "--by", "year", "--dir", "true", "-n"]);
     assert_eq!(code, 0, "{env}");
-    let created = env["result"]["plan"]["steps"][0]["path"]
-        .as_str()
-        .unwrap_or_default();
-    assert!(
-        created.contains("/true/") || created.contains("\\true\\"),
+    let base = std::path::Path::new(file).canonicalize().unwrap();
+    let expected = base.parent().unwrap().join("true").join("2023.beancount");
+    assert_eq!(
+        env["result"]["plan"]["steps"][0]["path"].as_str(),
+        expected.to_str(),
         "{env}"
     );
+    let (code, env, _) = run_in(dir, &["split", file, "--by", "year", "--dir=true", "-n"]);
+    assert_eq!(code, 0, "{env}");
 }
 
 /// `--keep-included=false` does not keep the inlined files, as agcli reads

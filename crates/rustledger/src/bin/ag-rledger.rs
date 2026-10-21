@@ -921,13 +921,21 @@ fn path_value(
     let Some(value) = flag(req, long, short) else {
         return Ok(None);
     };
-    let typed = |value: &str| {
-        req.invocation()
-            .raw_args()
-            .iter()
-            .any(|arg| arg == value || arg.ends_with(&format!("={value}")))
+    // The spelling the value came from (the long one wins, see [`flag`]),
+    // and whether `true` was typed as ITS value: `--dir=true`, or `--dir`
+    // followed by `true`. Another flag's `--yes=true`, or a positional
+    // named `true`, says nothing about this one.
+    let spelling = if req.invocation().flag(long).is_some() {
+        format!("--{long}")
+    } else {
+        format!("-{}", short.unwrap_or_default())
     };
-    if value.is_empty() || (value == "true" && !typed("true")) {
+    let raw = req.invocation().raw_args();
+    let typed = raw.iter().enumerate().any(|(i, arg)| {
+        *arg == format!("{spelling}=true")
+            || (*arg == spelling && raw.get(i + 1).is_some_and(|next| next == "true"))
+    });
+    if value.is_empty() || (value == "true" && !typed) {
         return Err(CommandError::new(
             format!("--{long} needs a value"),
             "MISSING_VALUE",

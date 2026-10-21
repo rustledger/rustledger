@@ -7,6 +7,7 @@ mod summarize;
 mod types;
 
 pub use summarize::SummaryAccounts;
+pub use system_tables::system_table_columns;
 use types::AccountInfo;
 use types::EntryRef;
 pub use types::{
@@ -362,16 +363,18 @@ const DETACH_ACCOUNT_BALANCE_AT: usize = 4;
 pub const WILDCARD_COLUMNS: &[&str] =
     &["date", "flag", "payee", "narration", "account", "position"];
 
-/// One column of the default posting row source (a `SELECT` with no `FROM`
-/// table): its name, its value type, and a one-line description.
+/// One column of a table: its name, its value type, and a one-line description.
+///
+/// The table is the default posting row source (a `SELECT` with no `FROM`
+/// table, [`POSTING_COLUMNS`]) or a system table ([`system_table_columns`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ColumnInfo {
     /// The column's name, as a query writes it.
     pub name: &'static str,
-    /// The column's value type, as bean-query's `.describe postings` names
-    /// it (`str`, `set`, `amount`, ...), except `id`, which is an `int` here
-    /// where bean-query's is a `str` hash. Most columns can be NULL.
+    /// The column's value type, as bean-query's `.describe` names it (`str`,
+    /// `set`, `amount`, ...), except `id`, which is an `int` here where
+    /// bean-query's is a `str` hash. Most columns can be NULL.
     pub type_name: &'static str,
     /// What the column holds.
     pub description: &'static str,

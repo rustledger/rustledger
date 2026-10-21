@@ -198,6 +198,7 @@ fn tables_listing(executor: &rustledger_query::Executor<'_>) -> String {
 ///
 /// A table `CREATE TABLE` made is looked up first, in any case, as a query's
 /// `FROM` looks it up, so one named `entries` is the one described (#2579).
+/// Then the system tables, `#accounts` or `accounts` alike (#2634).
 fn describe_table(executor: &rustledger_query::Executor<'_>, name: &str) -> Result<String, String> {
     use std::fmt::Write as _;
     let mut out = String::new();
@@ -208,30 +209,19 @@ fn describe_table(executor: &rustledger_query::Executor<'_>, name: &str) -> Resu
         }
         return Ok(out);
     }
-    match name {
-        "entries" => {
-            out.push_str("table entries:\n");
-            for (column, type_name) in [
-                ("date", "date"),
-                ("flag", "str"),
-                ("payee", "str"),
-                ("narration", "str"),
-                ("tags", "set"),
-                ("links", "set"),
-                ("meta", "object"),
-            ] {
-                let _ = writeln!(out, "  {column} ({type_name})");
-            }
-        }
-        "postings" => {
-            // The executor's own column list, so this cannot drift from what
-            // a query accepts (#2505).
-            out.push_str("table postings:\n");
-            for column in rustledger_query::executor::POSTING_COLUMNS {
-                let _ = writeln!(out, "  {} ({})", column.name, column.type_name);
-            }
-        }
-        _ => return Err(format!("unknown table \"{name}\"")),
+    // `postings` with no `#` is the default table, a `SELECT` with no
+    // `FROM`; every other name is a system table, with or without its `#`, as
+    // a query's `FROM` finds it. Both lists are the executor's own, so this
+    // cannot drift from what a query accepts (#2505, #2634).
+    let columns = if name.eq_ignore_ascii_case("postings") {
+        rustledger_query::executor::POSTING_COLUMNS
+    } else {
+        rustledger_query::executor::system_table_columns(name)
+            .ok_or_else(|| format!("unknown table \"{name}\""))?
+    };
+    let _ = writeln!(out, "table {name}:");
+    for column in columns {
+        let _ = writeln!(out, "  {} ({})", column.name, column.type_name);
     }
     Ok(out)
 }
@@ -480,7 +470,7 @@ fn handle_dot_command(
 
 #[cfg(test)]
 mod tests {
-    use super::{describe_table, tables_listing};
+    use super::{SYSTEM_TABLES, describe_table, tables_listing};
     use rustledger_core::{Amount, Directive, Open, Posting, Transaction, naive_date};
     use rustledger_query::{Executor, parse};
 
@@ -564,5 +554,167 @@ mod tests {
             describe_table(&executor, "postings")
                 .is_ok_and(|d| d.starts_with("table postings:\n  type (str)\n"))
         );
+    }
+
+    /// `.describe` covers every system table `.tables` lists, by its `#`
+    /// name or bean-query's bare one (#2634), with the columns the executor
+    /// builds the table from. It covered only `postings` and a hand-written
+    /// `entries` that had drifted to 7 of the table's 16 columns.
+    #[test]
+    fn system_tables_are_described() {
+        let directives = ledger();
+        let executor = Executor::new(&directives);
+        for table in SYSTEM_TABLES {
+            let columns = rustledger_query::executor::system_table_columns(table)
+                .unwrap_or_else(|| panic!("{table} has no columns"));
+            let mut expected = format!("table {table}:\n");
+            for column in columns {
+                expected.push_str(&format!("  {} ({})\n", column.name, column.type_name));
+            }
+            assert_eq!(describe_table(&executor, table), Ok(expected.clone()));
+            let bare = &table[1..];
+            // Bare `postings` stays the default table (a `SELECT` with no
+            // `FROM`), whose columns `created_tables_are_listed_and_described`
+            // checks.
+            if bare == "postings" {
+                continue;
+            }
+            assert_eq!(
+                describe_table(&executor, bare),
+                Ok(expected.replacen(table, bare, 1)),
+                "{bare}"
+            );
+        }
+        assert_eq!(
+            describe_table(&executor, "#nope"),
+            Err("unknown table \"#nope\"".to_string())
+        );
+
+        // bean-query 0.2.0's `.describe` of each table (beancount 3.2.3),
+        // verbatim. Every column it has, rledger has with the same type,
+        // except the ones in `divergent`.
+        //
+        // `entries.id` is an integer here, a hash string there, as on
+        // `postings`; `#accounts`' `open` and `close` are dates here and
+        // directives there.
+        let divergent = [
+            ("entries", "id", "int"),
+            ("accounts", "open", "date"),
+            ("accounts", "close", "date"),
+        ];
+        let bean_query: &[(&str, &[(&str, &str)])] = &[
+            (
+                "entries",
+                &[
+                    ("id", "str"),
+                    ("type", "str"),
+                    ("filename", "str"),
+                    ("lineno", "int"),
+                    ("date", "date"),
+                    ("year", "int"),
+                    ("month", "int"),
+                    ("day", "int"),
+                    ("flag", "str"),
+                    ("payee", "str"),
+                    ("narration", "str"),
+                    ("description", "str"),
+                    ("tags", "set"),
+                    ("links", "set"),
+                    ("meta", "dict"),
+                    ("accounts", "set[str]"),
+                ],
+            ),
+            (
+                "accounts",
+                &[("account", "str"), ("open", "open"), ("close", "close")],
+            ),
+            (
+                "prices",
+                &[
+                    ("meta", "metadata"),
+                    ("date", "date"),
+                    ("currency", "str"),
+                    ("amount", "amount"),
+                ],
+            ),
+            (
+                "balances",
+                &[
+                    ("meta", "metadata"),
+                    ("date", "date"),
+                    ("account", "str"),
+                    ("amount", "amount"),
+                    ("tolerance", "decimal"),
+                    ("discrepancy", "amount"),
+                ],
+            ),
+            (
+                "commodities",
+                &[("meta", "metadata"), ("date", "date"), ("name", "str")],
+            ),
+            (
+                "events",
+                &[
+                    ("meta", "metadata"),
+                    ("date", "date"),
+                    ("type", "str"),
+                    ("description", "str"),
+                ],
+            ),
+            (
+                "notes",
+                &[
+                    ("meta", "metadata"),
+                    ("date", "date"),
+                    ("account", "str"),
+                    ("comment", "str"),
+                    ("tags", "frozenset"),
+                    ("links", "frozenset"),
+                ],
+            ),
+            (
+                "documents",
+                &[
+                    ("meta", "metadata"),
+                    ("date", "date"),
+                    ("account", "str"),
+                    ("filename", "str"),
+                    ("tags", "frozenset"),
+                    ("links", "frozenset"),
+                ],
+            ),
+            (
+                "transactions",
+                &[
+                    ("meta", "metadata"),
+                    ("date", "date"),
+                    ("flag", "str"),
+                    ("payee", "str"),
+                    ("narration", "str"),
+                    ("tags", "set"),
+                    ("links", "set"),
+                    ("accounts", "set[str]"),
+                ],
+            ),
+        ];
+        for (table, theirs) in bean_query {
+            let ours = rustledger_query::executor::system_table_columns(table).expect("a table");
+            for (name, type_name) in *theirs {
+                // `#prices` has no `meta`: the price database does not keep it.
+                if *table == "prices" && *name == "meta" {
+                    assert!(ours.iter().all(|c| c.name != "meta"));
+                    continue;
+                }
+                let column = ours
+                    .iter()
+                    .find(|c| c.name == *name)
+                    .unwrap_or_else(|| panic!("{table} lacks bean-query's {name}"));
+                let expected = divergent
+                    .iter()
+                    .find(|(t, c, _)| t == table && c == name)
+                    .map_or(*type_name, |(.., ours)| *ours);
+                assert_eq!(column.type_name, expected, "{table}.{name}");
+            }
+        }
     }
 }

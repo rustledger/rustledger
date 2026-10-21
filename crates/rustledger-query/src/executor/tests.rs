@@ -3485,3 +3485,169 @@ fn from_filter_column_lists_match_the_executor() {
         "narration".into()
     )));
 }
+
+/// Every system table's described columns ([`system_table_columns`], what the
+/// REPL's `.describe` prints, #2634) are the columns its builder creates, in
+/// order, and each column's type is the type of the values the builder puts
+/// there. The builders create their tables from those same definitions, so
+/// this guards the types and the name lookup; the hidden `_`- and NUL-named
+/// columns `#postings` keeps for functions are the only extras allowed.
+#[test]
+fn system_tables_describe_their_real_columns() {
+    use rustledger_loader::{LoadOptions, Loader, VirtualFileSystem, process};
+
+    const LEDGER: &str = r#"option "operating_currency" "USD"
+2024-01-01 commodity HOOL
+  name: "Hooli"
+2024-01-01 open Assets:Bank USD "STRICT"
+2024-01-01 open Assets:Stock
+2024-01-01 open Equity:Opening
+2024-01-01 open Expenses:Food
+2024-01-02 pad Assets:Bank Equity:Opening
+2024-01-03 balance Assets:Bank 1000 USD
+2024-01-04 * "Shop" "lunch" #food ^trip
+  note: "x"
+  ! Expenses:Food   10 USD
+    flag: "y"
+  Assets:Bank
+2024-01-05 * "Broker" "buy"
+  Assets:Stock    2 HOOL {100 USD, 2024-01-05, "lot"} @ 101 USD
+  Assets:Bank  -200 USD
+2024-01-06 price HOOL 110 USD
+2024-01-07 event "location" "Paris"
+  k: "v"
+2024-01-08 note Assets:Bank "called" #call ^ref
+2024-01-09 document Assets:Bank "statement.pdf" #doc ^ref
+2024-01-10 balance Assets:Bank 700 ~ 1 USD
+2024-01-11 query "q" "SELECT 1"
+2024-01-12 custom "budget" "x"
+2024-12-31 close Expenses:Food
+"#;
+
+    let mut vfs = VirtualFileSystem::new();
+    vfs.add_file("main.beancount", LEDGER);
+    let raw = Loader::new()
+        .with_filesystem(Box::new(vfs))
+        .load(std::path::Path::new("main.beancount"))
+        .expect("loads");
+    let ledger = process(raw, &LoadOptions::default()).expect("processes");
+    let mut executor = Executor::new_with_sources(&ledger.directives, &ledger.source_map);
+    executor.set_balance_discrepancies([(
+        date(2024, 1, 10),
+        "Assets:Bank".to_string(),
+        "USD".to_string(),
+        dec!(700),
+        Amount::new(dec!(90), "USD"),
+    )]);
+
+    // A value of `value`'s kind can sit in a column `.describe` calls
+    // `declared`. NULL fits anywhere; the structured and set kinds answer to
+    // the several names bean-query uses for them.
+    let fits = |declared: &str, value: &Value| match value {
+        Value::Null => true,
+        Value::Object(_) => {
+            matches!(
+                declared,
+                "metadata" | "dict" | "transaction" | "open" | "close"
+            )
+        }
+        Value::Metadata(_) => matches!(declared, "metadata" | "dict"),
+        Value::StringSet(_) | Value::Set(_) => matches!(declared, "set" | "frozenset" | "set[str]"),
+        other => other.type_name() == declared,
+    };
+
+    let tables = [
+        "#prices",
+        "#balances",
+        "#commodities",
+        "#events",
+        "#notes",
+        "#documents",
+        "#accounts",
+        "#transactions",
+        "#entries",
+        "#postings",
+    ];
+    for name in tables {
+        let described = system_table_columns(name).unwrap_or_else(|| panic!("{name} undescribed"));
+        // A query naming every column, so `#postings` fills the ones it
+        // builds only on demand (`balance`, `meta`, `entry`, ...).
+        let all: Vec<&str> = described.iter().map(|c| c.name).collect();
+        let sql = format!("SELECT {} FROM {name}", all.join(", "));
+        let Query::Select(query) = parse(&sql).expect("parses") else {
+            unreachable!()
+        };
+        let table = executor
+            .get_builtin_table(name, &query)
+            .expect("builds")
+            .unwrap_or_else(|| panic!("{name} is not a table"));
+        // Without the `#` and in any case, as a query's FROM finds it.
+        assert_eq!(
+            system_table_columns(&name[1..].to_uppercase()),
+            Some(described)
+        );
+
+        let names: Vec<&str> = described.iter().map(|c| c.name).collect();
+        let (real, internal) = table.columns.split_at(names.len().min(table.columns.len()));
+        assert_eq!(real, names.as_slice(), "{name}: described columns differ");
+        assert!(
+            internal
+                .iter()
+                .all(|c| c.starts_with('_') || c.starts_with('\0')),
+            "{name}: undescribed columns {internal:?}"
+        );
+        assert!(
+            !table.rows.is_empty(),
+            "{name}: the ledger gives it no rows"
+        );
+        // The builder's rows have one value per column, so a column dropped
+        // from (or added to) the definition without its value is caught.
+        assert!(
+            table
+                .rows
+                .iter()
+                .all(|row| row.len() == table.columns.len()),
+            "{name}: rows and columns differ in width"
+        );
+
+        for (i, column) in described.iter().enumerate() {
+            let values: Vec<&Value> = table.rows.iter().map(|row| &row[i]).collect();
+            for value in &values {
+                assert!(
+                    fits(column.type_name, value),
+                    "{name}.{}: described as {} but holds {value:?}",
+                    column.name,
+                    column.type_name,
+                );
+            }
+            // Not vacuous: every column holds a real value somewhere.
+            assert!(
+                values.iter().any(|v| !matches!(v, Value::Null)),
+                "{name}.{} is NULL on every row of the test ledger",
+                column.name
+            );
+        }
+
+        // Every described column is one a query can name.
+        for column in described {
+            let query = parse(&format!("SELECT {} FROM {name}", column.name)).expect("parses");
+            if let Err(e) = executor.execute(&query) {
+                panic!(
+                    "{name}.{} is described but cannot be selected: {e}",
+                    column.name
+                );
+            }
+        }
+    }
+    assert_eq!(system_table_columns("#nope"), None);
+    assert_eq!(system_table_columns("nope"), None);
+    let Query::Select(query) = parse("SELECT * FROM #nope").expect("parses") else {
+        unreachable!()
+    };
+    assert!(
+        executor
+            .get_builtin_table("#nope", &query)
+            .expect("no error")
+            .is_none()
+    );
+}

@@ -1299,18 +1299,22 @@ fn refusal_fix(code: &str) -> (i32, &'static str) {
         ),
         c::BACKUP_INCLUDED => (
             error,
-            "Nothing was changed. An include pattern matches the backup directory \
-             (.rledger-backup/); narrow the pattern, then retry.",
+            "Nothing was changed. With the backup in place the ledger no longer loaded \
+             the same: usually an include pattern matches .rledger-backup/ (narrow it); \
+             otherwise the ledger loads differently from run to run (see LEDGER_UNSTABLE).",
         ),
         c::WRITE_ROLLED_BACK => (
             error,
-            "The originals were restored. Report this: the written files passed the check \
-             in memory but not on disk.",
+            "The originals were restored; the backup is in backup_dir. The written files \
+             passed the check in memory but reloaded differently from disk, usually a \
+             ledger that loads differently from run to run (a plugin) or a file edited \
+             meanwhile. Retry with --dry-run; if it recurs, treat it as LEDGER_UNSTABLE.",
         ),
         c::RESTORE_FAILED => (
             error,
-            "Restoring failed: copy the originals back from the backup directory named in \
-             the message (its manifest.txt lists each file).",
+            "Restoring failed. If backup_dir is set, copy the originals back from it (its \
+             manifest.txt lists each file and the files the run created); with merge \
+             --output nothing original was replaced, and only the output file may be left.",
         ),
         _ => (
             error,

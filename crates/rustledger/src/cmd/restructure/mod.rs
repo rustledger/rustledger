@@ -240,8 +240,9 @@ pub enum Step {
         path: PathBuf,
         /// Whether it is removed once the merged file is in place.
         remove: bool,
-        /// Whether it is kept because it is outside FILE's directory or
-        /// reached through a symlink (it may belong to another ledger).
+        /// Whether it is kept because it may belong to another ledger: it is
+        /// outside FILE's directory, reached through a symlink, or included
+        /// by a file that is itself kept.
         shared: bool,
     },
 }

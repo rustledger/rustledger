@@ -75,4 +75,6 @@ pub use types::{
     DirectiveWrapper, PluginAccountTypes, PluginError, PluginErrorSeverity, PluginInput, PluginOp,
     PluginOptions, PluginOutput, validate_op_coverage,
 };
-pub use untrusted::{escape_untrusted_line, escape_untrusted_text};
+pub use untrusted::{
+    EscapedSource, escape_untrusted_line, escape_untrusted_source, escape_untrusted_text,
+};

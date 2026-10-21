@@ -86,7 +86,7 @@ pub use validators::balance::balance_tolerance;
 /// phases typically chain `Early` → `Late` → [`ValidationSession::finalize`]
 /// through a single session — there is no shortcut entry point anymore.
 ///
-/// See the "Python Compatibility Policy" section in `CLAUDE.md` for the
+/// See the "Python Compatibility Policy" section in `AGENTS.md` for the
 /// rationale on why we deliberately catch elided-zero-to-unopened-account
 /// references that Python beancount silently accepts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

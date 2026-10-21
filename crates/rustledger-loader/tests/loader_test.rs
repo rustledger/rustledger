@@ -2137,7 +2137,7 @@ fn same_date_reordering_does_not_change_which_lot_hifo_selects() {
 // Then booking runs and prunes zero-value interpolated postings (to
 // match Python's user-facing display). Then `validate_late` runs for
 // balance/inventory checks. See `rustledger_validate::Phase` and the
-// "Python Compatibility Policy" section in CLAUDE.md.
+// "Python Compatibility Policy" section in AGENTS.md.
 
 #[test]
 fn test_zero_interpolated_posting_pruned_on_opened_account() {

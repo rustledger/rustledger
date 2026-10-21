@@ -2324,7 +2324,7 @@ fn interpolate_inner(
     // postings to unopened accounts. The loader pipeline now runs an
     // EARLY validation phase before booking (see
     // `rustledger_validate::Phase::Early` and the "Python Compatibility
-    // Policy" section in CLAUDE.md), so account-presence checks fire
+    // Policy" section in AGENTS.md), so account-presence checks fire
     // BEFORE we reach this prune step. That's a deliberate divergence
     // from Python — Python silently accepts these references; rledger
     // catches them. Tested by `test_zero_interpolated_posting_keeps_e1001_*`

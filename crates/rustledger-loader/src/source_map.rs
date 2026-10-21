@@ -334,12 +334,11 @@ impl SourceMap {
             return id;
         }
         let id = usize::from(rustledger_parser::FIRST_PLACEHOLDER_FILE_ID) + table.locations.len();
-        let Ok(id) = u16::try_from(id) else {
-            return rustledger_parser::SYNTHESIZED_FILE_ID;
+        // The sentinel and above are not placeholders.
+        let id = match u16::try_from(id) {
+            Ok(id) if id != rustledger_parser::SYNTHESIZED_FILE_ID => id,
+            _ => return rustledger_parser::SYNTHESIZED_FILE_ID,
         };
-        if id >= rustledger_parser::SYNTHESIZED_FILE_ID {
-            return rustledger_parser::SYNTHESIZED_FILE_ID;
-        }
         table.locations.push(key.clone());
         table.ids.insert(key, id);
         id

@@ -3636,5 +3636,5 @@ fn test_plugin_created_directives_have_placeholder_locations() {
         ("<beancount.plugins.close_tree>".into(), 0, 0)
     );
     // Dated before the account opens.
-    assert_eq!(located("Assets:Cash"), (path.clone(), 0, 0));
+    assert_eq!(located("Assets:Cash"), (path, 0, 0));
 }

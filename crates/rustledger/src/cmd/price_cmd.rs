@@ -896,7 +896,14 @@ fn write_price(
             )?;
         }
     } else {
-        writeln!(handle, "{symbol}: {} {}", response.price, response.currency)?;
+        // Display, not ledger text: the currency is the price source's word,
+        // so it is escaped like any untrusted text on a terminal (#2538).
+        writeln!(
+            handle,
+            "{symbol}: {} {}",
+            response.price,
+            rustledger_plugin::escape_untrusted_line(&response.currency)
+        )?;
     }
     Ok(())
 }

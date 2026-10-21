@@ -5,6 +5,7 @@ use anyhow::{Context, Result};
 use rustledger_core::format::escape_csv;
 use rustledger_core::{Directive, DisplayContext, Spanned};
 use rustledger_loader::SourceMap;
+use rustledger_plugin::escape_untrusted_line;
 use rustledger_query::{Executor, Value, parse as parse_query};
 use std::io::Write;
 
@@ -154,19 +155,41 @@ fn write_text<W: Write>(
     // and `5.000` in the SAME pivoted column, per cell, which is the clearest
     // statement that the column has no shared precision to impose.
 
+    // Every cell and header as shown: a table is read on a terminal, so a
+    // control character in a ledger string (a narration, a metadata value)
+    // is escaped, `\u{1b}` rather than the escape sequence itself, and so are
+    // a newline and a tab, which would break the row (#2538). CSV and JSON
+    // keep the value as it is.
+    let headers: Vec<String> = result
+        .columns
+        .iter()
+        .map(|c| escape_untrusted_line(c).into_owned())
+        .collect();
+    let cells: Vec<Vec<String>> = result
+        .rows
+        .iter()
+        .map(|row| {
+            row.iter()
+                .enumerate()
+                .map(|(i, value)| {
+                    let col_ctx = col_contexts.get(i).unwrap_or(ctx);
+                    escape_untrusted_line(&format_value(value, numberify, col_ctx)).into_owned()
+                })
+                .collect()
+        })
+        .collect();
+
     // Calculate column widths using per-column contexts. Each column is
     // clamped to `MAX_COLUMN_WIDTH` to keep the dynamic width passed to
     // `write!` below within the stdlib's `u16::MAX` cap — see the constant.
-    let mut widths: Vec<usize> = result
-        .columns
+    let mut widths: Vec<usize> = headers
         .iter()
         .map(|c| c.len().min(MAX_COLUMN_WIDTH))
         .collect();
 
-    for row in &result.rows {
-        for (i, value) in row.iter().enumerate() {
-            let col_ctx = col_contexts.get(i).unwrap_or(ctx);
-            let len = format_value(value, numberify, col_ctx).len();
+    for row in &cells {
+        for (i, cell) in row.iter().enumerate() {
+            let len = cell.len();
             if i < widths.len() && len > widths[i] {
                 widths[i] = len.min(MAX_COLUMN_WIDTH);
             }
@@ -184,7 +207,7 @@ fn write_text<W: Write>(
         .collect();
 
     // Print header (right-align numeric column headers to match Python)
-    for (i, col) in result.columns.iter().enumerate() {
+    for (i, col) in headers.iter().enumerate() {
         if i > 0 {
             write!(writer, "  ")?;
         }
@@ -206,13 +229,11 @@ fn write_text<W: Write>(
     writeln!(writer)?;
 
     // Print rows using per-column display contexts
-    for row in &result.rows {
-        for (i, value) in row.iter().enumerate() {
+    for row in &cells {
+        for (i, formatted) in row.iter().enumerate() {
             if i > 0 {
                 write!(writer, "  ")?;
             }
-            let col_ctx = col_contexts.get(i).unwrap_or(ctx);
-            let formatted = format_value(value, numberify, col_ctx);
             if i < widths.len() {
                 // Right-align numeric columns to match Python beancount
                 if i < is_numeric_col.len() && is_numeric_col[i] {
@@ -294,7 +315,7 @@ fn write_json<W: Write>(result: &rustledger_query::QueryResult, writer: &mut W) 
         "row_count": result.rows.len(),
     });
 
-    writeln!(writer, "{}", serde_json::to_string_pretty(&output)?)?;
+    writeln!(writer, "{}", crate::cmd::to_json_pretty(&output)?)?;
     Ok(())
 }
 

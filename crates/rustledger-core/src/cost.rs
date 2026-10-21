@@ -401,9 +401,12 @@ impl BookedCost {
     /// The booker derives `per_unit = total / |units|` at 28 significant
     /// digits; back-multiplying truncates similarly. The residual can
     /// reach a few ULP, which scales with `|total|`. Tolerance is
-    /// `max(1e-20, |total| * 1e-24)` — `1e-24` is ~10000x larger than
-    /// one ULP for typical magnitudes, while the absolute floor
-    /// guarantees a sane window for near-zero totals.
+    /// `max(1e-20, |total| * 1e-24) + |units| * 1e-28` — `1e-24` is
+    /// ~10000x larger than one ULP for typical magnitudes, the absolute
+    /// floor guarantees a sane window for near-zero totals, and the last
+    /// term is the per-unit's quantization where 28 significant digits do
+    /// not fit in 28 decimal places (a tiny per-unit over very many
+    /// units, #2689). A zero `per_unit` gets no quantization term.
     ///
     /// **`units == 0` is rejected**: the post-booking shape implies the
     /// booker derived `per_unit` from `total / |units|`, which is
@@ -468,11 +471,39 @@ impl BookedCost {
         // tolerance scales with the magnitude of `total`; the absolute
         // floor (`1e-20`) keeps the window sane for near-zero totals.
         let relative = total.abs() * Decimal::new(1, 24);
-        let tolerance = if relative > Decimal::new(1, 20) {
+        let floor = if relative > Decimal::new(1, 20) {
             relative
         } else {
             Decimal::new(1, 20)
         };
+        // Plus the per-unit's own quantization, `|units|` units in the 28th
+        // place (#2689). A quotient keeps 28 significant digits only while
+        // they fit in 28 decimal places: `1.00 / 30000000000` is
+        // `3.333…E-11` to beancount but `0.0000000000333333333333333333`
+        // here, 17 significant digits, so `per_unit * |units|` misses the
+        // total by up to half a unit in the 28th place per unit, 1.5e-18
+        // for these 3e10 units. That is the limit of the representation, not
+        // an inconsistency, and the booked cost keeps the exact total beside
+        // it; the relative term above covers a per-unit long in significant
+        // digits instead. A full unit, not half, so the term also absorbs the
+        // rounding of the product and of this bound itself. Cannot overflow:
+        // `|units| <= Decimal::MAX`, so it is at most ~7.92.
+        //
+        // Deliberate divergence from beancount, which keeps no total:
+        // `{{1 USD}}` over those units against `-1 USD` balances here (the
+        // total is exactly 1) where bean-check reports `(-1E-28 USD)` from its
+        // 28-digit per-unit times the units. The booking site that relies on
+        // this is the `{{T}}` augmentation in rustledger-booking's `book.rs`.
+        //
+        // Not for a zero per-unit: no nonzero total divides to zero (`py_div`
+        // refuses that underflow rather than round to it), so a zero beside a
+        // nonzero total is an inconsistent pair whatever the units.
+        let quantization = if per_unit.is_zero() {
+            Decimal::ZERO
+        } else {
+            units_abs * Decimal::new(1, 28)
+        };
+        let tolerance = floor + quantization;
         if abs_diff <= tolerance {
             Ok(())
         } else {
@@ -492,7 +523,7 @@ impl BookedCost {
     ///
     /// In debug builds, asserts that `per_unit * |units| ≈ total` to
     /// the limits of `rust_decimal` precision (tolerance:
-    /// `max(1e-20, |total| * 1e-24)`, derived from the booker's
+    /// `max(1e-20, |total| * 1e-24) + |units| * 1e-28`, derived from the booker's
     /// `total / |units|` divisor truncating at 28 significant digits;
     /// see the private `check_invariant` helper for the exact
     /// computation). Callers are the booker (which derives
@@ -527,7 +558,8 @@ impl BookedCost {
     ///   undefined for zero units; callers should send `PerUnit` or
     ///   `Total` instead).
     /// - `per_unit * |units|` differs from `total` by more than
-    ///   `max(1e-20, |total| * 1e-24)`.
+    ///   `max(1e-20, |total| * 1e-24) + |units| * 1e-28` (no last term
+    ///   for a zero `per_unit`).
     pub fn try_new(
         per_unit: Decimal,
         total: Decimal,
@@ -1487,6 +1519,32 @@ mod tests {
         let per_unit = total / units;
         // This must NOT panic.
         let _ = BookedCost::new(per_unit, total, units);
+    }
+
+    /// #2689: a tiny per-unit over very many units is as close as a
+    /// `Decimal` can get (`1.00 / 3e10` keeps 17 significant digits in 28
+    /// places), so `per_unit * |units|` misses the total by ~1e-18. That is
+    /// the representation's limit, not an inconsistency: accepted. One unit
+    /// in the 28th place further off is not, and neither is a zero per-unit
+    /// beside a nonzero total, however many units.
+    #[test]
+    fn booked_cost_invariant_allows_the_per_units_quantization() {
+        let units = dec!(30000000000);
+        let total = dec!(1.00);
+        let per_unit = crate::py_div(total, units).expect("representable");
+        assert_eq!(per_unit, dec!(0.0000000000333333333333333333));
+        let booked = BookedCost::try_new(per_unit, total, units).expect("the nearest Decimal");
+        assert_eq!(booked.total, total);
+        // Negative units too: the check reads `|units|`.
+        assert!(BookedCost::try_new(per_unit, total, -units).is_ok());
+
+        let off = per_unit + Decimal::new(2, 28);
+        let err = BookedCost::try_new(off, total, units).expect_err("two units off");
+        assert!(err.tolerance.is_some());
+
+        let err = BookedCost::try_new(Decimal::ZERO, dec!(1), dec!(50000000000000000000000000000))
+            .expect_err("a zero per-unit for a nonzero total");
+        assert_eq!(err.abs_diff, dec!(1));
     }
 
     #[test]

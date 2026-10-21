@@ -368,7 +368,9 @@ impl Diagnostic {
             out.push_str(&date.to_string());
             out.push_str(": ");
         }
-        out.push_str(&self.message);
+        // A message can quote the ledger's text; a terminal reads this line
+        // (#2538). The record keeps the message as it is.
+        out.push_str(&rustledger_plugin::escape_untrusted_text(&self.message));
         out
     }
 }
@@ -913,25 +915,22 @@ pub(super) fn account_balances(
 pub(super) use rustledger_core::format::escape_csv as csv_escape;
 pub(super) use rustledger_core::format::escape_json as json_escape;
 
-/// Replace control characters (and the Unicode line/paragraph separators) with
-/// spaces so a value cannot break out of a fixed-width text row.
+/// A ledger string as text output shows it: every control character (newline
+/// and tab included), bidi control and line separator escaped as `\u{..}`,
+/// with [`rustledger_plugin::escape_untrusted_line`].
 ///
 /// The text renderers lay rows out by column width, with no quoting of their
 /// own — CSV and JSON escape their fields, but text does not. A label carrying a
 /// raw newline therefore splits its row and can forge a convincing extra line in
-/// the table, including a fake `TOTAL`. Ledger-derived labels reach these
-/// renderers from places that accept arbitrary strings (metadata, and the budget
-/// report's quoted-account form), so sanitizing is the renderer's job.
+/// the table, including a fake `TOTAL`, and an escape sequence acts on the
+/// reader's terminal (#2538). Ledger-derived text reaches these renderers from
+/// places that accept arbitrary strings (narrations, metadata, the budget
+/// report's quoted-account form), so escaping is the renderer's job. The escape
+/// is visible, so `\u{1b}` in the output says what the ledger holds.
+///
+/// Text output only: CSV and JSON keep the value as it is.
 pub(super) fn sanitize_display(s: &str) -> String {
-    s.chars()
-        .map(|c| {
-            if c.is_control() || c == '\u{2028}' || c == '\u{2029}' {
-                ' '
-            } else {
-                c
-            }
-        })
-        .collect()
+    rustledger_plugin::escape_untrusted_line(s).into_owned()
 }
 
 /// Truncate a label to fit a text column, keeping the informative **tail**.

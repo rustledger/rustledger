@@ -189,6 +189,19 @@ pub fn run(command: Command) -> Result<()> {
 /// `rledger`, a capture buffer for `ag-rledger`). Behavior is otherwise
 /// identical to the original `run()`.
 pub fn run_with_writer<W: io::Write>(command: Command, stdout: &mut W) -> Result<()> {
+    // Every subcommand writes text for a person to read, and much of it is
+    // the ledger's: source lines, narrations, parse errors quoting the
+    // source, paths. It all goes through one escaping sink, so a control
+    // character in it cannot act on the reader's terminal, whichever
+    // subcommand printed it (#2714), as `check` and `report` escape ledger
+    // text (#2538).
+    let mut escaped = EscapingWriter::new(stdout);
+    let result = dispatch(command, &mut escaped);
+    escaped.finish()?;
+    result
+}
+
+fn dispatch<W: io::Write>(command: Command, stdout: &mut W) -> Result<()> {
     match command {
         Command::Lex { file } => lex::cmd_lex(&file, stdout),
         Command::Parse { file, verbose } => parse::cmd_parse(&file, verbose, stdout),
@@ -223,5 +236,107 @@ pub fn run_with_writer<W: io::Write>(command: Command, stdout: &mut W) -> Result
             edge_cases_only,
             stdout,
         ),
+    }
+}
+
+/// A writer that escapes, with [`rustledger_plugin::escape_untrusted_text`],
+/// the text written through it: every control character but newline and
+/// tab, the bidi controls and the line separators, as `\u{..}`.
+///
+/// A character split across two writes is held until its last byte comes;
+/// bytes that are not UTF-8 pass through as they are.
+struct EscapingWriter<'a, W: io::Write> {
+    inner: &'a mut W,
+    /// The start of a character whose remaining bytes have not come yet.
+    pending: Vec<u8>,
+}
+
+impl<'a, W: io::Write> EscapingWriter<'a, W> {
+    const fn new(inner: &'a mut W) -> Self {
+        Self {
+            inner,
+            pending: Vec::new(),
+        }
+    }
+
+    /// Write out what `pending` holds, up to an unfinished character.
+    fn drain(&mut self) -> io::Result<()> {
+        let mut rest: &[u8] = &self.pending;
+        loop {
+            match std::str::from_utf8(rest) {
+                Ok(text) => {
+                    self.inner
+                        .write_all(rustledger_plugin::escape_untrusted_text(text).as_bytes())?;
+                    rest = &[];
+                    break;
+                }
+                Err(e) => {
+                    let (valid, after) = rest.split_at(e.valid_up_to());
+                    // The first `valid_up_to` bytes are UTF-8.
+                    let text = std::str::from_utf8(valid).unwrap_or_default();
+                    self.inner
+                        .write_all(rustledger_plugin::escape_untrusted_text(text).as_bytes())?;
+                    if let Some(bad) = e.error_len() {
+                        self.inner.write_all(&after[..bad])?;
+                        rest = &after[bad..];
+                    } else {
+                        rest = after;
+                        break;
+                    }
+                }
+            }
+        }
+        let kept = rest.len();
+        let start = self.pending.len() - kept;
+        self.pending.drain(..start);
+        Ok(())
+    }
+}
+
+impl<W: io::Write> io::Write for EscapingWriter<'_, W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.pending.extend_from_slice(buf);
+        self.drain()?;
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        // An unfinished character stays held: written now, it could not be
+        // escaped once its last byte came.
+        self.inner.flush()
+    }
+}
+
+impl<W: io::Write> EscapingWriter<'_, W> {
+    /// The end of the output: an unfinished character left is not one, and
+    /// its bytes are written as they are.
+    fn finish(mut self) -> io::Result<()> {
+        self.inner.write_all(&self.pending)?;
+        self.pending.clear();
+        self.inner.flush()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::EscapingWriter;
+    use std::io::Write;
+
+    #[test]
+    fn escaping_writer_escapes_controls_across_split_writes() {
+        let mut out = Vec::new();
+        let mut w = EscapingWriter::new(&mut out);
+        let text = "a\u{1b}[2Jb\tc\n\u{9b}d\u{202e}é\n";
+        // One byte at a time: every multi-byte character arrives split.
+        for byte in text.as_bytes() {
+            w.write_all(std::slice::from_ref(byte)).unwrap();
+        }
+        w.write_all(b"\xff!\xc3").unwrap();
+        w.flush().unwrap();
+        w.finish().unwrap();
+        assert_eq!(
+            out,
+            b"a\\u{1b}[2Jb\tc\n\\u{9b}d\\u{202e}\xc3\xa9\n\xff!\xc3".to_vec()
+        );
     }
 }

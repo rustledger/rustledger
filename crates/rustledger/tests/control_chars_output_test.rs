@@ -225,3 +225,117 @@ fn lint_control_chars_finds_them() {
         );
     }
 }
+
+/// #2714: every `rledger doctor` subcommand's text is escaped: the source
+/// lines `context` shows and the narrations `region` prints.
+#[test]
+fn doctor_text_escapes() {
+    let bin = require_rledger!();
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_ledger(dir.path());
+    for args in [
+        vec!["doctor", "context", &path, "2"],
+        vec!["doctor", "region", &path, "1", "6"],
+    ] {
+        let (out, err) = run(&bin, &args);
+        let all = format!("{out}{err}");
+        assert!(all.contains("lunch"), "{args:?}: {all}");
+        assert!(!has_raw_control(&all), "{args:?}: raw control in:\n{all:?}");
+        assert!(all.contains("\\u{1b}]52;c;aGk=\\u{7}"), "{args:?}: {all}");
+    }
+}
+
+/// #2714: a narration carrying a newline prints as one line in `doctor`:
+/// the newline is escaped too, where the doctor's writer keeps line breaks.
+#[test]
+fn doctor_narrations_stay_one_line() {
+    let bin = require_rledger!();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.beancount");
+    // The `\\n` in the source decodes to a newline in the narration.
+    std::fs::write(
+        &path,
+        format!(
+            "2024-01-01 open Assets:Cash\n\
+             2024-01-01 open Expenses:Food\n\
+             2024-01-02 * \"lunch\\n{HOSTILE}\" ^trip\n  \
+               Assets:Cash  -5.00 USD\n  \
+               Expenses:Food\n"
+        ),
+    )
+    .unwrap();
+    let path = path.to_str().unwrap();
+    for args in [
+        vec!["doctor", "region", path, "1", "20"],
+        vec!["doctor", "linked", path, "^trip"],
+    ] {
+        let (out, err) = run(&bin, &args);
+        let all = format!("{out}{err}");
+        assert!(all.contains("lunch"), "{args:?}: {all}");
+        assert!(all.contains("lunch\\u{a}"), "{args:?}: {all}");
+        assert!(
+            !all.contains("lunch\n"),
+            "{args:?}: the narration split the line:\n{all:?}"
+        );
+        assert!(!has_raw_control(&all), "{args:?}: raw control in:\n{all:?}");
+    }
+}
+
+/// #2714: `rledger explain` echoes an unknown code escaped.
+#[test]
+fn explain_escapes_the_code_it_echoes() {
+    let bin = require_rledger!();
+    let (out, err) = run(&bin, &["explain", HOSTILE]);
+    let all = format!("{out}{err}");
+    assert!(all.contains("unknown error code"), "{all}");
+    assert!(!has_raw_control(&all), "raw control in:\n{all:?}");
+    assert!(all.contains("\\u{9b}2J\\u{7f}\\u{202e}x"), "{all}");
+}
+
+/// #2714: `rledger add` escapes the preview it shows, and `--dry-run`, which
+/// prints the transaction as it would be written, keeps it as it is.
+#[test]
+fn add_preview_escapes_and_dry_run_keeps_the_value() {
+    let bin = require_rledger!();
+    let dir = tempfile::tempdir().unwrap();
+    let path = write_ledger(dir.path());
+    let quick = [
+        "--quick",
+        HOSTILE,
+        "lunch",
+        "Expenses:Food",
+        "5.00 USD",
+        "Assets:Cash",
+    ];
+    // The preview, answered "no".
+    let mut child = Command::new(&bin)
+        .args(["add", &path, "--no-completion"])
+        .args(quick)
+        .env("NO_COLOR", "1")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("run rledger add");
+    {
+        use std::io::Write;
+        child.stdin.take().unwrap().write_all(b"n\n").unwrap();
+    }
+    let output = child.wait_with_output().unwrap();
+    let out = String::from_utf8(output.stdout).unwrap();
+    assert!(
+        out.contains("Preview:") && out.contains("Cancelled."),
+        "{out}"
+    );
+    assert!(!has_raw_control(&out), "raw control in:\n{out:?}");
+    assert!(out.contains("\\u{1b}]52;c;aGk=\\u{7}"), "{out}");
+    // The ledger is untouched.
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), ledger());
+
+    // `--dry-run` is the text `add` would append: the payee as it is.
+    let (out, _) = run(
+        &bin,
+        &[&["add", &path, "--dry-run"][..], &quick[..]].concat(),
+    );
+    assert!(out.contains(HOSTILE), "{out:?}");
+}

@@ -93,6 +93,19 @@ impl Executor<'_> {
         Ok(contexts)
     }
 
+    /// Whether two `ORDER BY` key lists tie in the sort's own ordering — the
+    /// relation `RANK` gives and the running frame's peers are defined by.
+    /// `Value` equality is a different relation: `Number(1)` ties `Integer(1)`,
+    /// and positions that differ only in a cost date tie in the position
+    /// order. Grouping peers with `!=` split one tied run into several ranks
+    /// and shrank the running `MIN` / `MAX` frame at each split.
+    fn order_values_tie(&self, a: &[Value], b: &[Value]) -> bool {
+        a.len() == b.len()
+            && a.iter()
+                .zip(b)
+                .all(|(va, vb)| self.compare_values_for_sort(va, vb) == std::cmp::Ordering::Equal)
+    }
+
     /// One window function's value on every posting, in posting order.
     ///
     /// `MIN` and `MAX` follow SQL's default frame. With no `ORDER BY` in the
@@ -181,7 +194,10 @@ impl Executor<'_> {
             let mut start = 0;
             for end in 1..=sorted_indices.len() {
                 if end == sorted_indices.len()
-                    || order_values[sorted_indices[end]] != order_values[sorted_indices[start]]
+                    || !self.order_values_tie(
+                        &order_values[sorted_indices[end]],
+                        &order_values[sorted_indices[start]],
+                    )
                 {
                     groups.push(&sorted_indices[start..end]);
                     start = end;

@@ -52,8 +52,12 @@ fn cell(value: &Value) -> String {
 }
 
 fn execute(query: &str) -> Result<Vec<Vec<String>>, QueryError> {
+    execute_ledger(LEDGER, query)
+}
+
+fn execute_ledger(ledger_src: &str, query: &str) -> Result<Vec<Vec<String>>, QueryError> {
     let mut vfs = VirtualFileSystem::new();
-    vfs.add_file("main.beancount", LEDGER);
+    vfs.add_file("main.beancount", ledger_src);
     let raw = Loader::new()
         .with_filesystem(Box::new(vfs))
         .load(Path::new("main.beancount"))
@@ -350,4 +354,67 @@ fn every_frame_equals_the_aggregate_over_its_rows() {
         }
     }
     assert_eq!(checked, 8 * 10);
+}
+
+/// Rows the window `ORDER BY` ties are peers even when the key values are
+/// not `==`: `position_order` ties two lots that differ only in a cost date,
+/// while `Value` equality sees the dates. Grouping peers with `!=` split the
+/// tied run — the first row got its own rank and a frame that stopped before
+/// its peers, against the "through the current row AND its peers" rule.
+#[test]
+fn positions_that_tie_in_the_sort_are_peers() {
+    const LOTS: &str = r#"2024-01-01 open Assets:Broker
+2024-01-01 open Assets:Cash
+
+2024-01-02 * "buy one"
+  Assets:Broker   1 HOOL {1 USD, 2024-01-02}
+  Assets:Cash    -1 USD
+
+2024-01-03 * "buy two"
+  Assets:Broker   1 HOOL {1 USD, 2024-01-03}
+  Assets:Cash    -1 USD
+"#;
+    assert_eq!(
+        execute_ledger(
+            LOTS,
+            "SELECT date, RANK() OVER (ORDER BY position), \
+             MAX(date) OVER (ORDER BY position) \
+             WHERE account = 'Assets:Broker' ORDER BY date"
+        )
+        .unwrap(),
+        table(&[
+            &["2024-01-02", "1", "2024-01-03"],
+            &["2024-01-03", "1", "2024-01-03"],
+        ])
+    );
+}
+
+/// `GROUP BY` keys group by value, and the sort ties `Number(1.00)` with
+/// `Integer(1)` while `Value` equality does not. `coalesce(cost_number, 1)`
+/// mixes exactly those: the literal `1` where a posting has no cost, the
+/// lot's `Decimal` where it has one. `make_group_key`'s `N` / `I` tags split
+/// the one logical group in two (the window `PARTITION BY` key has the same
+/// shape, and shares this function).
+#[test]
+fn number_and_integer_keys_that_tie_form_one_group() {
+    const COSTS: &str = r#"2024-01-01 open Assets:Broker
+2024-01-01 open Assets:Cash
+
+2024-01-02 * "buy one"
+  Assets:Broker   2 HOOL {1.00 USD}
+  Assets:Cash    -2.00 USD
+
+2024-01-03 * "swap"
+  Assets:Broker   1 HOOL
+  Assets:Cash    -1 HOOL
+"#;
+    assert_eq!(
+        execute_ledger(
+            COSTS,
+            "SELECT MIN(number), MAX(number) WHERE account = 'Assets:Broker' \
+             GROUP BY coalesce(cost_number, 1)"
+        )
+        .unwrap(),
+        table(&[&["1", "2"]])
+    );
 }

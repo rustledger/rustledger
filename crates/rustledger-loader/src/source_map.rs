@@ -225,6 +225,22 @@ impl SourceFile {
 #[derive(Debug, Default)]
 pub struct SourceMap {
     files: Vec<SourceFile>,
+    /// The placeholder locations handed out by
+    /// [`Self::placeholder_file_id`], in id order from
+    /// [`rustledger_parser::FIRST_PLACEHOLDER_FILE_ID`]. Behind a lock
+    /// because plugins run with a shared `&SourceMap` (the loader and the
+    /// LSP hand one to [`crate::run_plugins`]); placeholders are only added,
+    /// never changed, so an id stays valid for the map's life.
+    placeholders: std::sync::Mutex<Placeholders>,
+}
+
+/// See [`SourceMap::placeholder_file_id`].
+#[derive(Debug, Default)]
+struct Placeholders {
+    /// `(name, line)` of each placeholder, by `id - FIRST_PLACEHOLDER_FILE_ID`.
+    locations: Vec<(PathBuf, u32)>,
+    /// The id of each `(name, line)`, so one location gets one id.
+    ids: rustc_hash::FxHashMap<(PathBuf, u32), u16>,
 }
 
 impl SourceMap {
@@ -240,11 +256,12 @@ impl SourceMap {
     ///
     /// # Panics
     ///
-    /// Panics if adding this file would produce an ID that collides with
-    /// [`rustledger_parser::SYNTHESIZED_FILE_ID`] (i.e., with more than
-    /// `u16::MAX - 1` = 65,534 loaded files). Directives stored in
-    /// `Spanned<T>` use a `u16` for `file_id`, and the topmost value is
-    /// reserved as a sentinel for plugin-synthesized directives.
+    /// Panics if adding this file would produce an ID at or above
+    /// [`rustledger_parser::FIRST_PLACEHOLDER_FILE_ID`] (i.e., with more than
+    /// 61,440 loaded files). Directives stored in `Spanned<T>` use a `u16`
+    /// for `file_id`, and the ids from there up are reserved for placeholder
+    /// locations and the plugin-synthesized sentinel
+    /// [`rustledger_parser::SYNTHESIZED_FILE_ID`].
     pub fn add_file(&mut self, path: PathBuf, source: Arc<str>) -> usize {
         let opened_path = path.clone();
         self.add_opened_file(path, opened_path, source)
@@ -266,9 +283,9 @@ impl SourceMap {
     ) -> usize {
         let id = self.files.len();
         assert!(
-            id < rustledger_parser::SYNTHESIZED_FILE_ID as usize,
-            "SourceMap exceeded {} files; file_id {id} collides with SYNTHESIZED_FILE_ID sentinel",
-            rustledger_parser::SYNTHESIZED_FILE_ID,
+            id < rustledger_parser::FIRST_PLACEHOLDER_FILE_ID as usize,
+            "SourceMap exceeded {} files; file_id {id} collides with the reserved placeholder ids",
+            rustledger_parser::FIRST_PLACEHOLDER_FILE_ID,
         );
         self.files
             .push(SourceFile::new_opened(id, path, opened_path, source));
@@ -293,6 +310,60 @@ impl SourceMap {
         &self.files
     }
 
+    /// The `file_id` of the placeholder location `name`, line `line`: a
+    /// location with no source text, such as beancount's `<check_closing>:0`
+    /// or the main file at line 0 (#2713).
+    ///
+    /// A plugin gives a directive it creates such a location; the loader
+    /// turns it into this id, so an error on the directive is reported at
+    /// `name:line`, as `bean-check` reports it, instead of with no location.
+    /// The id is in [`rustledger_parser::FIRST_PLACEHOLDER_FILE_ID`]'s range,
+    /// so nothing mistakes it for a source file: [`Self::get`] does not find
+    /// it, and the directive has no source identity, as a synthesized one
+    /// has none. One `(name, line)` gets one id.
+    ///
+    /// Returns [`rustledger_parser::SYNTHESIZED_FILE_ID`] (no location) once
+    /// the range's 4,095 ids are taken.
+    pub fn placeholder_file_id(&self, name: &Path, line: u32) -> u16 {
+        let mut table = self
+            .placeholders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let key = (name.to_path_buf(), line);
+        if let Some(&id) = table.ids.get(&key) {
+            return id;
+        }
+        let id = usize::from(rustledger_parser::FIRST_PLACEHOLDER_FILE_ID) + table.locations.len();
+        let Ok(id) = u16::try_from(id) else {
+            return rustledger_parser::SYNTHESIZED_FILE_ID;
+        };
+        if id >= rustledger_parser::SYNTHESIZED_FILE_ID {
+            return rustledger_parser::SYNTHESIZED_FILE_ID;
+        }
+        table.locations.push(key.clone());
+        table.ids.insert(key, id);
+        id
+    }
+
+    /// The name and line of the placeholder location `file_id` (see
+    /// [`Self::placeholder_file_id`]), or `None` when `file_id` is not one.
+    #[must_use]
+    pub fn placeholder(&self, file_id: u16) -> Option<(PathBuf, u32)> {
+        if rustledger_parser::is_source_file_id(file_id)
+            || file_id == rustledger_parser::SYNTHESIZED_FILE_ID
+        {
+            // Without taking the lock: callers ask for every directive a
+            // file does not hold, most of them synthesized.
+            return None;
+        }
+        let index = file_id - rustledger_parser::FIRST_PLACEHOLDER_FILE_ID;
+        let table = self
+            .placeholders
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        table.locations.get(usize::from(index)).cloned()
+    }
+
     /// Format a span for display.
     #[must_use]
     pub fn format_span(&self, file_id: usize, span: &Span) -> String {
@@ -308,6 +379,58 @@ impl SourceMap {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// #2713: a placeholder location gets an id in the reserved range, one
+    /// id per `(name, line)`, that resolves back to its name and line and is
+    /// never a source file.
+    #[test]
+    fn placeholder_ids_resolve_and_are_not_source_files() {
+        let mut map = SourceMap::new();
+        map.add_file(PathBuf::from("main.beancount"), Arc::from("x"));
+        let a = map.placeholder_file_id(Path::new("<check_closing>"), 0);
+        let b = map.placeholder_file_id(Path::new("main.beancount"), 0);
+        assert_eq!(a, rustledger_parser::FIRST_PLACEHOLDER_FILE_ID);
+        assert_eq!(b, a + 1);
+        assert_eq!(map.placeholder_file_id(Path::new("<check_closing>"), 0), a);
+        assert_ne!(map.placeholder_file_id(Path::new("<check_closing>"), 1), a);
+        assert_eq!(
+            map.placeholder(a),
+            Some((PathBuf::from("<check_closing>"), 0))
+        );
+        assert_eq!(
+            map.placeholder(b),
+            Some((PathBuf::from("main.beancount"), 0))
+        );
+        assert!(!rustledger_parser::is_source_file_id(a));
+        assert!(map.get(a as usize).is_none());
+        assert_eq!(map.placeholder(0), None);
+        assert_eq!(
+            map.placeholder(rustledger_parser::SYNTHESIZED_FILE_ID),
+            None
+        );
+    }
+
+    /// Once the range is used up, a location is given no id, rather than one
+    /// that collides with the synthesized sentinel.
+    #[test]
+    fn placeholder_ids_stop_below_the_sentinel() {
+        let map = SourceMap::new();
+        let room =
+            rustledger_parser::SYNTHESIZED_FILE_ID - rustledger_parser::FIRST_PLACEHOLDER_FILE_ID;
+        for line in 0..u32::from(room) {
+            let id = map.placeholder_file_id(Path::new("<p>"), line);
+            assert!(id < rustledger_parser::SYNTHESIZED_FILE_ID);
+        }
+        assert_eq!(
+            map.placeholder_file_id(Path::new("<p>"), u32::from(room)),
+            rustledger_parser::SYNTHESIZED_FILE_ID
+        );
+        // A location already given an id keeps it.
+        assert_eq!(
+            map.placeholder_file_id(Path::new("<p>"), 0),
+            rustledger_parser::FIRST_PLACEHOLDER_FILE_ID
+        );
+    }
 
     #[test]
     fn test_line_col() {

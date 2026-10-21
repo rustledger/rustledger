@@ -26,8 +26,12 @@ const MAX_SCAN_DEPTH: usize = 32;
 /// [`PluginInput::config`] as a JSON object:
 ///
 /// ```json
-/// {"base_dir": "/path/to/ledger", "directories": ["/abs/path/docs"]}
+/// {"base_dir": "/path/to/ledger", "main_file": "/path/to/ledger/main.beancount",
+///  "directories": ["/abs/path/docs"]}
 /// ```
+///
+/// `main_file` is the location each found document is given, at line 0, as
+/// beancount gives it (#2713); without it a document has no location.
 ///
 /// The loader constructs this config when populating the synth pass; if
 /// `config` is `None` or `directories` is empty, the plugin returns a
@@ -53,6 +57,8 @@ pub const DOCUMENT_DISCOVERY_NAME: &str = "document_discovery";
 #[derive(Debug, Deserialize)]
 struct DocumentDiscoveryConfig {
     base_dir: std::path::PathBuf,
+    #[serde(default)]
+    main_file: Option<String>,
     directories: Vec<String>,
 }
 
@@ -60,10 +66,19 @@ struct DocumentDiscoveryConfig {
 ///
 /// Centralized here so callers (the loader) don't need to know the
 /// schema — the plugin owns its own config shape.
+///
+/// `main_file` is the ledger's main file, the location (at line 0) of each
+/// document the plugin finds, as beancount's `find_documents` gives it
+/// (#2713); `None` leaves the documents without a location.
 #[must_use]
-pub fn document_discovery_config(base_dir: &std::path::Path, directories: &[String]) -> String {
+pub fn document_discovery_config(
+    base_dir: &std::path::Path,
+    main_file: Option<&std::path::Path>,
+    directories: &[String],
+) -> String {
     serde_json::json!({
         "base_dir": base_dir,
+        "main_file": main_file.map(|f| f.to_string_lossy()),
         "directories": directories,
     })
     .to_string()
@@ -198,9 +213,16 @@ impl NativePlugin for DocumentDiscoveryPlugin {
             )));
         }
 
-        // Keep all input directives, then insert discovered documents.
+        // Keep all input directives, then insert discovered documents, each
+        // at the main file's line 0, as beancount's `find_documents` places
+        // them (`new_metadata(input_filename, 0)`), so an error on one names
+        // the ledger instead of no location (#2713).
         let mut ops: Vec<PluginOp> = (0..input.directives.len()).map(PluginOp::Keep).collect();
-        for w in new_directives {
+        for mut w in new_directives {
+            if let Some(main_file) = &config.main_file {
+                w.filename = Some(main_file.clone());
+                w.lineno = Some(0);
+            }
             ops.push(PluginOp::Insert(w));
         }
 
@@ -462,7 +484,8 @@ fn scan_documents(
                             directives.push(DirectiveWrapper {
                                 directive_type: "document".to_string(),
                                 date: date_str.to_string(),
-                                filename: None, // Plugin-generated
+                                // Located by `process` (#2713).
+                                filename: None,
                                 lineno: None,
                                 data: DirectiveData::Document(DocumentData {
                                     account,

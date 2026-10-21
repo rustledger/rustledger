@@ -353,8 +353,12 @@ fn process(&self, input: PluginInput) -> PluginOutput {
 ### Adding New Directives
 
 Keep every input index and append `PluginOp::Insert(wrapper)` for each
-synthesized directive. Inserted directives get `SYNTHESIZED_FILE_ID`
-and a zero span. If your plugin synthesizes `Open` or `Document`
+synthesized directive. An inserted directive gets the location its
+wrapper's `filename` and `lineno` name: a line of a loaded file, or else a
+placeholder location such as beancount's `<check_closing>`, line 0, where
+its errors are reported (#2713). With no `filename` and `lineno` it gets
+`SYNTHESIZED_FILE_ID` and a zero span, and its errors have no location.
+If your plugin synthesizes `Open` or `Document`
 directives that the loader's pre-booking Early validation depends on,
 implement `SynthPlugin` (instead of `RegularPlugin`) so the loader runs it
 in the synth pass:

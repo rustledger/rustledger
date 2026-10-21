@@ -265,12 +265,18 @@ impl LedgerErrorRenderer {
             rustledger_loader::ErrorSeverity::Warning => "warning",
         };
         if let Some(loc) = &err.location {
+            // A placeholder location (`<check_closing>:0`, #2713) has no
+            // column; it prints as `bean-check` prints it.
+            let column = if loc.column == 0 {
+                String::new()
+            } else {
+                format!(":{}", loc.column)
+            };
             writeln!(
                 writer,
-                "{}:{}:{}: {}[{}]: {}",
+                "{}:{}{column}: {}[{}]: {}",
                 loc.file.display(),
                 loc.line,
-                loc.column,
                 severity_label,
                 err.code,
                 err.message,

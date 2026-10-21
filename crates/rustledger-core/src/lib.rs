@@ -104,7 +104,9 @@ pub use inventory::{
 pub use meta_json::{json_to_meta_value, meta_value_to_json, meta_value_type_tag};
 pub use position::Position;
 pub use sorted_set::{LinkSet, SortedSet, TagSet};
-pub use span::{SYNTHESIZED_FILE_ID, ShiftSpans, Span, Spanned};
+pub use span::{
+    FIRST_PLACEHOLDER_FILE_ID, SYNTHESIZED_FILE_ID, ShiftSpans, Span, Spanned, is_source_file_id,
+};
 pub use visit::{visit_accounts, visit_currencies};
 
 // Re-export commonly used external types

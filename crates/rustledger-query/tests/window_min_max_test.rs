@@ -312,3 +312,42 @@ fn a_window_function_can_order_the_result() {
         ])
     );
 }
+
+/// Differential: on every row, the windowed value is the aggregate over the
+/// rows its frame holds. Without a window `ORDER BY` that is the row's whole
+/// account; with `ORDER BY date` it is the account's rows dated on or before
+/// the row's (peers included), for every argument type the ledger has.
+#[test]
+fn every_frame_equals_the_aggregate_over_its_rows() {
+    let mut checked = 0;
+    for arg in [
+        "number",
+        "position",
+        "units(position)",
+        "weight",
+        "date",
+        "payee",
+        "narration",
+        "currency",
+    ] {
+        let windowed = rows(&format!(
+            "SELECT account, date, MIN({arg}) OVER (PARTITION BY account), \
+             MAX({arg}) OVER (PARTITION BY account), \
+             MIN({arg}) OVER (PARTITION BY account ORDER BY date), \
+             MAX({arg}) OVER (PARTITION BY account ORDER BY date)"
+        ));
+        for row in &windowed {
+            let (account, date) = (&row[0], &row[1]);
+            let whole = rows(&format!(
+                "SELECT MIN({arg}), MAX({arg}) WHERE account = '{account}'"
+            ));
+            let running = rows(&format!(
+                "SELECT MIN({arg}), MAX({arg}) WHERE account = '{account}' AND date <= {date}"
+            ));
+            assert_eq!(row[2..4], whole[0][..], "{arg} on {row:?}");
+            assert_eq!(row[4..6], running[0][..], "{arg} on {row:?}");
+            checked += 1;
+        }
+    }
+    assert_eq!(checked, 8 * 10);
+}

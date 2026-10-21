@@ -1110,7 +1110,15 @@ fn a_backup_an_include_pattern_would_read_is_refused_and_removed() {
     args.ledger = Some(main.clone());
     args.dir = Some(dir.path().join("split"));
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let e = split::run_with_writer(&args, &mut out, &mut err).unwrap_err();
+    let mut outcome = super::Outcome::default();
+    let e = split::run_with_outcome(&args, &mut out, &mut err, &mut outcome).unwrap_err();
+    assert_eq!(
+        super::refusal_code(&e),
+        Some(super::code::BACKUP_INCLUDED),
+        "{e:#}"
+    );
+    // The backup was removed, so none is reported.
+    assert_eq!(outcome.backup_dir, None);
     let e = format!("{e:#}");
     assert!(e.contains("nothing was changed"), "{e}");
     assert!(e.contains("was removed"), "{e}");
@@ -1525,8 +1533,17 @@ fn a_rolled_back_write_is_coded() {
         template: file,
         mode_mask: None,
     };
-    let e = swap::apply(&plan, after_swap_fails).unwrap_err();
+    let mut backup = None;
+    let e = swap::apply_recording(&plan, &mut backup, after_swap_fails).unwrap_err();
     assert_eq!(refusal_code(&e), Some(code::WRITE_ROLLED_BACK), "{e:#}");
+    // The backup is kept after a rollback, and its directory is known even
+    // though `apply` failed.
+    let backup = backup.expect("the backup directory is recorded on failure");
+    assert!(
+        backup.join("manifest.txt").is_file(),
+        "{}",
+        backup.display()
+    );
     assert_eq!(refusal_code(&anyhow::anyhow!("disk on fire")), None);
 }
 
@@ -1588,7 +1605,7 @@ fn the_outcome_records_plan_check_and_writes() {
         ]
     );
     assert!(
-        written
+        outcome
             .backup_dir
             .is_some_and(|d| d.join("manifest.txt").is_file())
     );

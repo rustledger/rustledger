@@ -116,13 +116,26 @@ fn unchanged(plan: &Plan) -> Result<()> {
 /// touched ([`Phase::BackedUp`]; a failure removes the backup and changes
 /// nothing), and once after the swap ([`Phase::Swapped`]; a failure restores
 /// the backup).
-pub(super) fn apply(plan: &Plan, mut verify: impl FnMut(Phase) -> Result<()>) -> Result<Applied> {
+#[cfg(test)]
+pub(super) fn apply(plan: &Plan, verify: impl FnMut(Phase) -> Result<()>) -> Result<Applied> {
+    apply_recording(plan, &mut None, verify)
+}
+
+/// [`apply`], also setting `backup` to the backup directory as soon as it
+/// exists, and back to `None` if it is removed again, so a caller knows where
+/// the originals are even when `apply` fails afterwards.
+pub(super) fn apply_recording(
+    plan: &Plan,
+    backup: &mut Option<PathBuf>,
+    mut verify: impl FnMut(Phase) -> Result<()>,
+) -> Result<Applied> {
     preflight(plan)?;
     let backup_dir = if plan.originals.is_empty() {
         None
     } else {
         Some(make_backup(plan).context("nothing was changed")?)
     };
+    backup.clone_from(&backup_dir);
     let backup_note = backup_dir.as_ref().map_or_else(String::new, |d| {
         format!("; a backup copy is in {}", d.display())
     });
@@ -130,6 +143,7 @@ pub(super) fn apply(plan: &Plan, mut verify: impl FnMut(Phase) -> Result<()>) ->
         && let Err(e) = verify(Phase::BackedUp)
     {
         let removed = if remove_backup(dir) {
+            *backup = None;
             "was removed".to_string()
         } else {
             format!("could not be removed; delete {} by hand", dir.display())

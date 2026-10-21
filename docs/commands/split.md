@@ -128,8 +128,8 @@ if nothing opens the ledger through the link.
 
 `ag-rledger split` takes the same flags and needs `--dry-run` or `--yes`:
 without either it refuses with `CONFIRMATION_REQUIRED`, since it rewrites
-and removes ledger files. Its JSON envelope carries the plan, the equivalence
-check's verdict, the written and removed paths and the backup directory in
+ledger files. Its JSON envelope carries the plan, the equivalence check's
+verdict, the written paths and the backup directory in
 `result`, and each refusal as a coded error (`SYMLINK_ELSEWHERE`,
 `TARGET_EXISTS`, `EQUIVALENCE_FAILED`, ...) with what the run got to in `data`.
 

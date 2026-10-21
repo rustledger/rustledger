@@ -2070,3 +2070,110 @@ fn split_and_merge_are_offered_not_unsupported() {
         );
     }
 }
+
+/// Review of #2633: agcli turns a value flag given nothing (`-o` last,
+/// `--dir --yes`) into the value `"true"`, which was taken as a path and
+/// written to. It is refused, and nothing is written; a path typed as
+/// `true` is still a path.
+#[test]
+fn a_path_flag_without_a_value_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let file = write_fixture(dir, "ledger.beancount", TWO_YEARS);
+    let file = file.to_str().unwrap();
+    let parent = write_fixture(dir, "parent.beancount", "include \"child.beancount\"\n");
+    write_fixture(dir, "child.beancount", TWO_YEARS);
+    let parent = parent.to_str().unwrap();
+    let before = tree(dir);
+    for args in [
+        vec!["merge", parent, "--yes", "-o"],
+        vec!["merge", parent, "--output", "--yes"],
+        vec!["split", file, "--by", "year", "--yes", "--dir"],
+        vec!["split", file, "--by", "year", "--dir", "--yes"],
+        vec!["split", file, "--by", "year", "--ledger", "--yes"],
+    ] {
+        let (code, env, stderr) = run_in(dir, &args);
+        assert!(stderr.is_empty(), "{stderr}");
+        assert_eq!(env["error"]["code"], "MISSING_VALUE", "{args:?}: {env}");
+        assert_eq!(code, 2, "{args:?}: {env}");
+    }
+    assert_eq!(tree(dir), before, "a refused run wrote something");
+
+    // Typed, `true` is a directory name like any other.
+    let (code, env, _) = run_in(dir, &["split", file, "--by", "year", "--dir", "true", "-n"]);
+    assert_eq!(code, 0, "{env}");
+    let created = env["result"]["plan"]["steps"][0]["path"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(
+        created.contains("/true/") || created.contains("\\true\\"),
+        "{env}"
+    );
+}
+
+/// `--keep-included=false` does not keep the inlined files, as agcli reads
+/// a switch's negation.
+#[test]
+fn keep_included_false_is_off() {
+    let tmp = tempfile::tempdir().unwrap();
+    let parent = write_fixture(
+        tmp.path(),
+        "parent.beancount",
+        "include \"child.beancount\"\n",
+    );
+    write_fixture(tmp.path(), "child.beancount", TWO_YEARS);
+    let parent = parent.to_str().unwrap();
+    for (flag, remove) in [("--keep-included", false), ("--keep-included=false", true)] {
+        let (code, env, _) = run_in(tmp.path(), &["merge", parent, flag, "--dry-run"]);
+        assert_eq!(code, 0, "{env}");
+        assert_eq!(
+            env["result"]["plan"]["steps"][0]["remove"], remove,
+            "{flag}: {env}"
+        );
+    }
+}
+
+/// More refusals, each with its code: a FILE outside the `--ledger` root,
+/// no FILE and no default, and a file that is not UTF-8.
+#[test]
+fn more_refusals_map_to_their_codes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let file = write_fixture(dir, "ledger.beancount", TWO_YEARS);
+    let other = write_fixture(dir, "other.beancount", TWO_YEARS);
+    let latin1 = dir.join("latin1.beancount");
+    std::fs::write(
+        &latin1,
+        b"2024-01-01 open Assets:Cash\n2024-01-02 * \"bad \xff\"\n  Assets:Cash 1 USD\n  Assets:Cash -1 USD\n",
+    )
+    .unwrap();
+    let before = tree(dir);
+    for (args, code, exit) in [
+        (
+            vec![
+                "split",
+                file.to_str().unwrap(),
+                "--by",
+                "year",
+                "--ledger",
+                other.to_str().unwrap(),
+            ],
+            "NOT_IN_LEDGER",
+            2,
+        ),
+        (vec!["merge", "--yes"], "MISSING_FILE", 2),
+        (
+            vec!["split", latin1.to_str().unwrap(), "--by", "year"],
+            "NOT_UTF8",
+            1,
+        ),
+    ] {
+        let mut args = args.clone();
+        args.push("--yes");
+        let (got, env, stderr) = run_in(dir, &args);
+        assert!(stderr.is_empty(), "{stderr}");
+        assert_eq!(env["error"]["code"], code, "{args:?}: {env}");
+        assert_eq!(got, exit, "{args:?}: {env}");
+    }
+    assert_eq!(tree(dir), before);
+}

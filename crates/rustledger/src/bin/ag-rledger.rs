@@ -876,24 +876,66 @@ fn clap_usage(command: &str, definition: &clap::Command) -> String {
             } else {
                 choices.join("|")
             };
-            let mut spelled = format!("--{long}");
-            if let Some(short) = arg.get_short() {
-                spelled.push_str(&format!("/-{short}"));
-            }
             if arg.is_required_set() {
-                parts.push(format!("{spelled} <{placeholder}>"));
+                parts.push(format!("--{long} <{placeholder}>"));
             } else {
-                parts.push(format!("[{spelled} <{placeholder}>]"));
+                parts.push(format!("[--{long} <{placeholder}>]"));
+            }
+            // Spelled on its own, so agcli sees `-o` as a declared flag.
+            if let Some(short) = arg.get_short() {
+                parts.push(format!("[-{short} <{placeholder}>]"));
             }
         } else {
-            parts.push(format!("[--{long}]"));
+            // agcli already reads `--dry-run` as a switch; declaring a
+            // reserved flag again is an audit warning.
+            if !RESERVED_SWITCHES.contains(&long) {
+                parts.push(format!("[--{long}]"));
+            }
             if let Some(short) = arg.get_short() {
                 parts.push(format!("[-{short}]"));
             }
         }
     }
-    parts.push("[--yes] [-y]".to_string());
+    // `--yes` is reserved too; only its short form needs declaring.
+    parts.push("[-y]".to_string());
     parts.join(" ")
+}
+
+/// agcli's reserved boolean flags that `split`/`merge` also take: already
+/// switches on every command, so the usage string does not redeclare them.
+const RESERVED_SWITCHES: &[&str] = &["dry-run", "yes"];
+
+/// A path-valued flag's value, refusing one given without a value.
+///
+/// agcli turns a value flag with nothing after it (`-o` last, or `--dir
+/// --yes`) into the value `"true"`. Taken as a path, `merge --yes -o` wrote
+/// the merged ledger to `./true` and `split --dir --yes` wrote the period
+/// files into `./true/`, past an equivalence check that had no reason to
+/// object. A path really named `true` is still taken when it was typed
+/// (`--dir true` or `--dir=true`).
+fn path_value(
+    req: &Req<'_>,
+    long: &str,
+    short: Option<&str>,
+) -> Result<Option<PathBuf>, CommandError> {
+    let Some(value) = flag(req, long, short) else {
+        return Ok(None);
+    };
+    let typed = |value: &str| {
+        req.invocation()
+            .raw_args()
+            .iter()
+            .any(|arg| arg == value || arg.ends_with(&format!("={value}")))
+    };
+    if value.is_empty() || (value == "true" && !typed("true")) {
+        return Err(CommandError::new(
+            format!("--{long} needs a value"),
+            "MISSING_VALUE",
+            format!("Pass a path after --{long}."),
+        )
+        .exit_code(agcli::ExitCode::USAGE));
+    }
+    Ok(Some(PathBuf::from(value)))
 }
 
 /// Refuse two flags `definition` says conflict (`merge --output` with
@@ -991,8 +1033,8 @@ fn build_split_args(req: &Req<'_>) -> Result<(split::Args, bool), CommandError> 
         split::Args {
             file,
             by,
-            dir: path_flag(req, "dir", None),
-            ledger: path_flag(req, "ledger", None),
+            dir: path_value(req, "dir", None)?,
+            ledger: path_value(req, "ledger", None)?,
             dry_run,
         },
         yes,
@@ -1008,9 +1050,11 @@ fn build_merge_args(req: &Req<'_>) -> Result<(merge::Args, bool), CommandError> 
     Ok((
         merge::Args {
             file,
-            output: path_flag(req, "output", Some("o")),
-            keep_included: bool_flag(req, "keep-included", None),
-            ledger: path_flag(req, "ledger", None),
+            output: path_value(req, "output", Some("o"))?,
+            // Read as agcli reads its switches: `--keep-included=false`
+            // does not keep them.
+            keep_included: req.reserved_bool("keep-included"),
+            ledger: path_value(req, "ledger", None)?,
             dry_run,
         },
         yes,
@@ -1026,7 +1070,12 @@ fn require_confirmation(command: &str, yes: bool, dry_run: bool) -> Result<(), C
     }
     Err(CommandError::new(
         format!(
-            "ag-rledger {command} needs explicit confirmation: it rewrites and removes ledger files"
+            "ag-rledger {command} needs explicit confirmation: it {}",
+            if command == "merge" {
+                "rewrites ledger files and removes the ones it inlines"
+            } else {
+                "rewrites ledger files"
+            }
         ),
         "CONFIRMATION_REQUIRED",
         "Run it with --dry-run first to see the plan and the equivalence check without writing \
@@ -1343,9 +1392,7 @@ fn outcome_json(command: &str, outcome: &Outcome) -> serde_json::Map<String, Val
     );
     body.insert(
         "backup_dir".to_string(),
-        written
-            .and_then(|w| w.backup_dir.as_deref())
-            .map_or(Value::Null, path),
+        outcome.backup_dir.as_deref().map_or(Value::Null, path),
     );
     body
 }

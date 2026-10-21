@@ -185,6 +185,10 @@ pub struct Outcome {
     pub dry_run: bool,
     /// What was written, once the new layout is in place and verified.
     pub written: Option<Written>,
+    /// Where the originals were backed up, from the moment the backup
+    /// exists: also on a failed write (the backup is kept, and holds the
+    /// originals if restoring failed), and `None` again if it was removed.
+    pub backup_dir: Option<PathBuf>,
 }
 
 impl Outcome {
@@ -286,8 +290,6 @@ pub struct Written {
     /// Inlined files that should have been removed and could not be, each
     /// with why ([`code::FILES_NOT_REMOVED`]).
     pub not_removed: Vec<String>,
-    /// Where the originals were backed up, when any were replaced.
-    pub backup_dir: Option<PathBuf>,
 }
 
 /// Read a file the restructurer will rewrite. Invalid UTF-8 is refused: the
@@ -576,7 +578,7 @@ fn write_plan(
     plan: &swap::Plan,
     outcome: &mut Outcome,
 ) -> Result<()> {
-    let applied = swap::apply(plan, |_phase| {
+    let applied = swap::apply_recording(plan, &mut outcome.backup_dir, |_phase| {
         let (again, _) = equivalence::load(root, overlay::OverlayFs::disk())?;
         match equivalence::first_difference(&before.fingerprint, &again) {
             None => Ok(()),
@@ -596,7 +598,6 @@ fn write_plan(
             .iter()
             .map(|(p, why)| format!("{}: {why}", p.display()))
             .collect(),
-        backup_dir: applied.backup_dir.clone(),
     });
     if let Some(dir) = &applied.backup_dir {
         writeln!(out, "Backup of the original files: {}", show(dir))?;

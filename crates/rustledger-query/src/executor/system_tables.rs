@@ -141,6 +141,13 @@ pub(super) const ENTRIES_COLUMNS: &[ColumnInfo] = &[
 /// The columns of `#postings` a query names, in order. The table also
 /// keeps hidden columns after them (`_entry_meta`, `_posting_meta` and the
 /// NUL-named posting values), which back functions rather than queries.
+///
+/// The same columns as [`POSTING_COLUMNS`](super::POSTING_COLUMNS) minus
+/// `units`, `cost` and `has_cost` (only a `SELECT` with no `FROM` has those),
+/// in its order except the tail: this list ends `accounts, entry`, the
+/// builder's order, where the default table's ends `entry, accounts`
+/// (bean-query's `.describe postings` order).
+/// `postings_column_lists_agree` pins the relationship.
 pub(super) const POSTINGS_TABLE_COLUMNS: &[ColumnInfo] = &[
     col("type", "str", "Directive type (always `transaction`)"),
     col("id", "int", "Directive index"),

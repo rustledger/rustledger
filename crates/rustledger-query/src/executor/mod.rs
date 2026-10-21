@@ -383,6 +383,11 @@ pub struct ColumnInfo {
 /// Every column of the default posting row source, in `.describe postings`
 /// order.
 ///
+/// This is not the `FROM postings` / `#postings` table: that one
+/// (`POSTINGS_TABLE_COLUMNS`) has these columns minus `units`, `cost` and
+/// `has_cost`, and orders its tail `accounts, entry` where this list's is
+/// `entry, accounts`. `postings_column_lists_agree` pins the relationship.
+///
 /// The one list of them: query completion and the REPL's `.describe` read
 /// it, and a test checks it against the row evaluator's arms in both
 /// directions, so a column added to one cannot go missing from the other.

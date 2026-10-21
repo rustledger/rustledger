@@ -3351,6 +3351,64 @@ fn posting_columns_match_the_evaluator() {
     }
 }
 
+/// The two postings column lists describe two different shapes on purpose:
+/// [`POSTING_COLUMNS`] is the default row source (a `SELECT` with no `FROM`)
+/// and `POSTINGS_TABLE_COLUMNS` is the `FROM postings` table. This pins
+/// their exact relationship — same names and types, exactly three
+/// default-only columns, and one documented order difference — so an edit
+/// to either list cannot silently drift from the other.
+#[test]
+fn postings_column_lists_agree() {
+    let default_cols: Vec<(&str, &str)> = POSTING_COLUMNS
+        .iter()
+        .map(|c| (c.name, c.type_name))
+        .collect();
+    let from_cols: Vec<(&str, &str)> = system_table_columns("#postings")
+        .expect("#postings described")
+        .iter()
+        .map(|c| (c.name, c.type_name))
+        .collect();
+
+    // Every `FROM postings` column is a default-table column of the same
+    // type, and what the default table adds is exactly the three columns
+    // only a `SELECT` with no `FROM` has.
+    let extras: Vec<(&str, &str)> = default_cols
+        .iter()
+        .filter(|c| !from_cols.contains(c))
+        .copied()
+        .collect();
+    assert_eq!(
+        extras,
+        [
+            ("units", "amount"),
+            ("cost", "amount"),
+            ("has_cost", "bool")
+        ],
+        "the default-only columns changed; update this test and both docs"
+    );
+    let mut shared: Vec<(&str, &str)> = default_cols
+        .iter()
+        .filter(|c| from_cols.contains(c))
+        .copied()
+        .collect();
+
+    // The shared columns are in the same order except the documented tail:
+    // the default table ends `entry, accounts` (bean-query's `.describe
+    // postings` order) and the `FROM` table ends `accounts, entry` (the
+    // builder's order).
+    assert_eq!(
+        from_cols[from_cols.len() - 2..].to_vec(),
+        vec![("accounts", "set[str]"), ("entry", "transaction")],
+        "the `FROM` table's tail changed; update this test and both docs"
+    );
+    let n = shared.len();
+    shared[n - 2..].reverse();
+    assert_eq!(
+        shared, from_cols,
+        "the postings column lists drifted apart in name, type or order"
+    );
+}
+
 /// Drift guard for the two hand-kept column lists that decide how a `FROM`
 /// filter is evaluated (#2414): `FROM_ENTRY_COLUMNS` (read once per
 /// transaction) and `POSTING_ONLY_COLUMNS` (rejected in `PRINT`).
@@ -3581,11 +3639,34 @@ fn system_tables_describe_their_real_columns() {
             .get_builtin_table(name, &query)
             .expect("builds")
             .unwrap_or_else(|| panic!("{name} is not a table"));
-        // Without the `#` and in any case, as a query's FROM finds it.
-        assert_eq!(
-            system_table_columns(&name[1..].to_uppercase()),
-            Some(described)
-        );
+        // Every spelling a query's `FROM` and `.describe` accept — bare or
+        // `#`, any case — resolves to the same table (the parity
+        // `system_table_columns` claims, spelled out).
+        for spelling in [
+            name.to_string(),
+            name[1..].to_string(),
+            name.to_uppercase(),
+            name[1..].to_uppercase(),
+        ] {
+            assert_eq!(
+                system_table_columns(&spelling),
+                Some(described),
+                "system_table_columns({spelling})"
+            );
+            let sql = format!("SELECT {} FROM {spelling}", all.join(", "));
+            let Query::Select(q) = parse(&sql).expect("parses") else {
+                unreachable!()
+            };
+            let t = executor
+                .get_builtin_table(&spelling, &q)
+                .expect("builds")
+                .unwrap_or_else(|| panic!("{spelling} is not a table"));
+            assert_eq!(
+                &t.columns[..all.len().min(t.columns.len())],
+                all.as_slice(),
+                "get_builtin_table({spelling}) columns"
+            );
+        }
 
         let names: Vec<&str> = described.iter().map(|c| c.name).collect();
         let (real, internal) = table.columns.split_at(names.len().min(table.columns.len()));

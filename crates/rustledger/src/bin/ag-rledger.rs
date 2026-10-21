@@ -380,13 +380,17 @@ fn reject_inapplicable_flags(report_name: &str, req: &Req<'_>) -> Result<(), Com
     // is a global flag or a genuine unknown, neither of which is ours to judge.
     // Deduplicated: `account` appears in several entries, and listing it
     // several times in the error would be its own small confusion.
+    //
+    // Long and short spellings are judged apart: a report can read a flag's
+    // long form without its short one. `journal` reads `--year` (the shared
+    // date window) but not `capgains`'s `-y`, so `journal -y 2024` must be
+    // refused, not dropped because the long name applies.
     let mut supplied: Vec<String> = report_flags()
         .iter()
         .flat_map(|(_, flags)| flags.iter())
-        .filter(|f| !applies(&f.long))
         .filter_map(|f| {
             let short = f.short.filter(|s| !short_applies(*s));
-            if flag_was_supplied(req, &f.long, None) {
+            if !applies(&f.long) && flag_was_supplied(req, &f.long, None) {
                 Some(match f.short {
                     Some(s) => format!("--{}/-{s}", f.long),
                     None => format!("--{}", f.long),
@@ -999,15 +1003,22 @@ fn build_report(
     match parse_report_name(report_name).as_deref() {
         Some("balances") => Ok(Report::Balances {
             account: string_flag(req, "account", Some("a")),
+            window: date_window(req),
         }),
-        Some("balsheet") => Ok(Report::Balsheet),
-        Some("income") => Ok(Report::Income),
+        Some("balsheet") => Ok(Report::Balsheet {
+            window: date_window(req),
+        }),
+        Some("income") => Ok(Report::Income {
+            window: date_window(req),
+        }),
         Some("journal") => Ok(Report::Journal {
             account: string_flag(req, "account", Some("a")),
             limit: optional_parse_flag(req, "limit", Some("l"))?,
+            window: date_window(req),
         }),
         Some("holdings") => Ok(Report::Holdings {
             account: string_flag(req, "account", Some("a")),
+            window: date_window(req),
         }),
         Some("networth") => Ok(Report::Networth {
             period: string_flag(req, "period", Some("p")).unwrap_or_else(|| "monthly".to_string()),
@@ -1023,8 +1034,7 @@ fn build_report(
         }),
         Some("budget") => Ok(Report::Budget {
             account: string_flag(req, "account", Some("a")),
-            from: string_flag(req, "from", None),
-            to: string_flag(req, "to", None),
+            window: date_window(req),
             children: bool_flag(req, "children", None),
         }),
         Some("returns") => {
@@ -1066,6 +1076,18 @@ fn build_report(
         )
         .exit_code(agcli::ExitCode::USAGE)),
         None => Err(invalid_enum("report", report_name, &report_names())),
+    }
+}
+
+/// The date-window flags `rledger report` shares across its windowed reports
+/// (`cmd::report_cmd::DateWindow`). Conflicting combinations are rejected
+/// when the window is resolved, by the same code `rledger` runs.
+fn date_window(req: &Req<'_>) -> rustledger::cmd::report_cmd::DateWindow {
+    rustledger::cmd::report_cmd::DateWindow {
+        from: string_flag(req, "from", None),
+        to: string_flag(req, "to", None),
+        year: string_flag(req, "year", None),
+        time: string_flag(req, "time", None),
     }
 }
 
@@ -2185,23 +2207,42 @@ mod tests {
         );
     }
 
-    /// The reports from #2280 read no report-specific flags at all.
+    /// The reports from #2280 read no report-specific flags at all, except
+    /// `income` and `balsheet`, which read the shared date window (#2643)
+    /// and nothing else.
     #[test]
     fn the_reports_that_take_no_flags_still_take_none() {
-        for report in ["income", "balsheet", "accounts", "commodities", "stats"] {
+        for report in ["accounts", "commodities", "stats"] {
             let flags = flags_of(report).unwrap_or_else(|| panic!("`{report}` missing"));
             assert!(flags.is_empty(), "`{report}` now lists {flags:?}");
         }
+        for report in ["income", "balsheet"] {
+            let flags = flags_of(report).unwrap_or_else(|| panic!("`{report}` missing"));
+            let longs: Vec<&str> = flags.iter().map(|f| f.long.as_str()).collect();
+            assert_eq!(longs, ["from", "to", "year", "time"], "`{report}`");
+        }
     }
 
-    /// `--from` and `--to` belong to `budget` alone. This is the specific
-    /// claim #2280 made and the one most likely to regress, since a date
-    /// window reads as globally applicable.
+    /// `--from` and `--to` belong to the reports that take the shared date
+    /// window (#2643) and to no other. #2280 was a window flag accepted and
+    /// ignored; a report that does not clamp must still refuse it.
     #[test]
-    fn date_window_flags_belong_to_budget_only() {
+    fn date_window_flags_belong_to_the_windowed_reports_only() {
+        const WINDOWED: [&str; 6] = [
+            "balances", "balsheet", "income", "journal", "holdings", "budget",
+        ];
         for (report, flags) in report_flags() {
             let has_dates = flags.iter().any(|f| f.long == "from" || f.long == "to");
-            assert_eq!(has_dates, report == "budget", "`{report}`: {flags:?}");
+            assert_eq!(
+                has_dates,
+                WINDOWED.contains(&report.as_str()),
+                "`{report}`: {flags:?}"
+            );
+        }
+        for report in ["networth", "returns", "capgains", "stats", "prices"] {
+            let refusal = report_refusal(&[report, "--from", "2024-01-01"])
+                .unwrap_or_else(|| panic!("`{report} --from` accepted"));
+            assert!(refusal.contains("INAPPLICABLE_FLAG"), "{report}: {refusal}");
         }
     }
 

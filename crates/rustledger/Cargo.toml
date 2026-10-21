@@ -109,6 +109,7 @@ serde_json.workspace = true
 toml.workspace = true
 miette.workspace = true
 anyhow.workspace = true
+regex.workspace = true
 rust_decimal.workspace = true
 format_num_pattern.workspace = true
 glob.workspace = true

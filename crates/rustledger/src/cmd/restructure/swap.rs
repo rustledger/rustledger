@@ -26,7 +26,8 @@
 //! immediately before the first rename, so an edit made while the backup and
 //! the temporaries were being written and flushed is not overwritten.
 
-use anyhow::{Context, Result, bail};
+use super::Refusal;
+use anyhow::{Context, Result};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -77,13 +78,16 @@ pub(super) fn occupied(path: &Path) -> bool {
 pub(super) struct Applied {
     /// `None` when the plan replaced and removed nothing.
     pub(super) backup_dir: Option<PathBuf>,
+    /// Files the plan should have removed and could not, with why.
+    pub(super) not_removed: Vec<(PathBuf, std::io::Error)>,
 }
 
 /// Refuse a plan whose preconditions no longer hold, before touching anything.
 pub(super) fn preflight(plan: &Plan) -> Result<()> {
     for (path, _) in &plan.writes {
         if path != &plan.commit && occupied(path) {
-            bail!(
+            refuse!(
+                super::code::TARGET_EXISTS,
                 "{} already exists; refusing to overwrite it (move it away or choose another --dir)",
                 path.display()
             );
@@ -97,7 +101,8 @@ fn unchanged(plan: &Plan) -> Result<()> {
     for (path, original) in &plan.originals {
         let now = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         if &now != original {
-            bail!(
+            refuse!(
+                super::code::CHANGED_ON_DISK,
                 "{} changed on disk while the plan was being checked; nothing was written",
                 path.display()
             );
@@ -129,11 +134,14 @@ pub(super) fn apply(plan: &Plan, mut verify: impl FnMut(Phase) -> Result<()>) ->
         } else {
             format!("could not be removed; delete {} by hand", dir.display())
         };
-        return Err(e.context(format!(
-            "nothing was changed: with the backup in {} the ledger no longer loads as \
-             before (an include pattern that matches the backup is the usual cause), \
-             so the backup {removed}",
-            dir.display()
+        return Err(e.context(Refusal::new(
+            super::code::BACKUP_INCLUDED,
+            format!(
+                "nothing was changed: with the backup in {} the ledger no longer loads as \
+                 before (an include pattern that matches the backup is the usual cause), \
+                 so the backup {removed}",
+                dir.display()
+            ),
         )));
     }
 
@@ -172,32 +180,51 @@ pub(super) fn apply(plan: &Plan, mut verify: impl FnMut(Phase) -> Result<()>) ->
         placed.push(target.clone());
     }
 
-    let mut leftovers = Vec::new();
+    let mut not_removed = Vec::new();
     for path in &plan.removes {
         if let Err(e) = fs::remove_file(path) {
-            leftovers.push(format!("{}: {e}", path.display()));
+            not_removed.push((path.clone(), e));
         }
     }
 
     if let Err(e) = verify(Phase::Swapped) {
         let restored = restore(plan, backup_dir.as_deref(), &placed, &created_dirs);
-        let how = match restored {
-            Ok(()) => "the original files were restored".to_string(),
-            Err(r) => format!("restoring failed too ({r:#}){backup_note}"),
+        let (code, how) = match restored {
+            Ok(()) => (
+                super::code::WRITE_ROLLED_BACK,
+                "the original files were restored".to_string(),
+            ),
+            Err(r) => (
+                super::code::RESTORE_FAILED,
+                format!("restoring failed too ({r:#}){backup_note}"),
+            ),
         };
-        return Err(e.context(format!(
-            "the ledger written to disk did not load the same as before; {how}"
+        return Err(e.context(Refusal::new(
+            code,
+            format!("the ledger written to disk did not load the same as before; {how}"),
         )));
     }
 
-    if !leftovers.is_empty() {
-        eprintln!(
-            "warning: could not remove {} file(s) that are no longer included:\n  {}",
-            leftovers.len(),
-            leftovers.join("\n  ")
+    if !not_removed.is_empty() {
+        // A notice, not a write to stderr: `ag-rledger` captures it into its
+        // envelope (#2566, #2633); `rledger` prints it as before.
+        let listed: Vec<String> = not_removed
+            .iter()
+            .map(|(path, e)| format!("{}: {e}", path.display()))
+            .collect();
+        rustledger_plugin::notice::emit_warning(
+            super::code::FILES_NOT_REMOVED,
+            &format!(
+                "could not remove {} file(s) that are no longer included:\n  {}",
+                listed.len(),
+                listed.join("\n  ")
+            ),
         );
     }
-    Ok(Applied { backup_dir })
+    Ok(Applied {
+        backup_dir,
+        not_removed,
+    })
 }
 
 fn stage(

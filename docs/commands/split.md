@@ -124,6 +124,19 @@ the link points to and would write the period files next to that file, where
 the ledger opened through the link does not look. Split the file it points to
 if nothing opens the ledger through the link.
 
+## From an agent
+
+`ag-rledger split` takes the same flags and needs `--dry-run` or `--yes`:
+without either it refuses with `CONFIRMATION_REQUIRED`, since it rewrites
+and removes ledger files. Its JSON envelope carries the plan, the equivalence
+check's verdict, the written and removed paths and the backup directory in
+`result`, and each refusal as a coded error (`SYMLINK_ELSEWHERE`,
+`TARGET_EXISTS`, `EQUIVALENCE_FAILED`, ...) with what the run got to in `data`.
+
+```bash
+ag-rledger split ledger.beancount --by year --dry-run
+```
+
 ## Exit Codes
 
 | Code | Meaning |

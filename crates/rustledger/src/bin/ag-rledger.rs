@@ -22,6 +22,7 @@ use agcli::{
     ActionParam, AgentCli, Command, CommandError, CommandOutput, ExecutionContext, NextAction,
 };
 use rustledger::cmd::report_cmd::{CollectedDiagnostics, Diagnostic};
+use rustledger::cmd::restructure::{self, Check, Outcome, Step, merge, split};
 use rustledger::config::Config;
 use rustledger::plugin_budget::PluginBudgetArgs;
 use serde_json::{Value, json};
@@ -50,22 +51,10 @@ async fn main() {
 ///
 /// The drift guard in `tests/ag_rledger_test.rs` fails when `rledger` has a
 /// command that is neither offered here nor listed in this table (#2567).
-const UNSUPPORTED_COMMANDS: &[(&str, &str)] = &[
-    (
-        "completions",
-        "it writes a shell completion script, which is for an interactive shell, not an agent",
-    ),
-    (
-        "split",
-        "it rewrites ledger files, and is not wired for agents yet (no confirmation gate, \
-         and part of its output still goes to the process's stderr)",
-    ),
-    (
-        "merge",
-        "it rewrites ledger files, and is not wired for agents yet (no confirmation gate, \
-         and part of its output still goes to the process's stderr)",
-    ),
-];
+const UNSUPPORTED_COMMANDS: &[(&str, &str)] = &[(
+    "completions",
+    "it writes a shell completion script, which is for an interactive shell, not an agent",
+)];
 
 fn build_cli() -> AgentCli {
     let mut cli = AgentCli::new("ag-rledger", "Agent-native plain-text accounting CLI")
@@ -107,6 +96,8 @@ fn build_cli() -> AgentCli {
         .command(compat_command())
         .command(explain_command())
         .command(lint_command())
+        .command(split_command())
+        .command(merge_command())
         .root_field(
             "unsupported_commands",
             json!(
@@ -833,6 +824,530 @@ fn lint_command() -> Command {
                 })
             })
         })
+}
+
+/// `rledger split`'s own clap definition, which the flags, the usage string
+/// and the drift guard are all read from.
+fn split_definition() -> clap::Command {
+    use clap::Args as _;
+    split::Args::augment_args(clap::Command::new("split"))
+}
+
+/// `rledger merge`'s own clap definition. See [`split_definition`].
+fn merge_definition() -> clap::Command {
+    use clap::Args as _;
+    merge::Args::augment_args(clap::Command::new("merge"))
+}
+
+/// The usage string for a command whose flags are `definition`'s, plus the
+/// confirmation `ag-rledger` adds.
+///
+/// Built from `rledger`'s clap definition, so the usage cannot promise a
+/// flag the handler does not read, or omit one `rledger` gains. A switch is
+/// written `[--keep-included]` and its short form separately as `[-n]`,
+/// which is how agcli knows neither takes the next argument as its value:
+/// `--dry-run ledger.beancount` must keep the file as the positional.
+fn clap_usage(command: &str, definition: &clap::Command) -> String {
+    let mut parts = vec![format!("ag-rledger {command}")];
+    for arg in definition.get_arguments() {
+        let value = arg
+            .get_value_names()
+            .and_then(|names| names.first())
+            .map_or_else(
+                || arg.get_id().as_str().to_ascii_uppercase(),
+                ToString::to_string,
+            );
+        if arg.is_positional() {
+            parts.push(format!("[<{}>]", value.to_ascii_lowercase()));
+            continue;
+        }
+        let Some(long) = arg.get_long() else { continue };
+        if long == "help" {
+            continue;
+        }
+        if arg.get_action().takes_values() {
+            let choices: Vec<String> = arg
+                .get_possible_values()
+                .iter()
+                .map(|v| v.get_name().to_string())
+                .collect();
+            let placeholder = if choices.is_empty() {
+                value
+            } else {
+                choices.join("|")
+            };
+            let mut spelled = format!("--{long}");
+            if let Some(short) = arg.get_short() {
+                spelled.push_str(&format!("/-{short}"));
+            }
+            if arg.is_required_set() {
+                parts.push(format!("{spelled} <{placeholder}>"));
+            } else {
+                parts.push(format!("[{spelled} <{placeholder}>]"));
+            }
+        } else {
+            parts.push(format!("[--{long}]"));
+            if let Some(short) = arg.get_short() {
+                parts.push(format!("[-{short}]"));
+            }
+        }
+    }
+    parts.push("[--yes] [-y]".to_string());
+    parts.join(" ")
+}
+
+/// Refuse two flags `definition` says conflict (`merge --output` with
+/// `--ledger`), as `rledger`'s clap parse does.
+fn reject_conflicts(
+    command: &str,
+    definition: &clap::Command,
+    req: &Req<'_>,
+) -> Result<(), CommandError> {
+    let supplied = |arg: &clap::Arg| {
+        arg.get_long()
+            .is_some_and(|long| req.invocation().flag(long).is_some())
+            || arg
+                .get_short()
+                .is_some_and(|short| req.invocation().flag(&short.to_string()).is_some())
+    };
+    for arg in definition.get_arguments().filter(|a| supplied(a)) {
+        for other in definition.get_arg_conflicts_with(arg) {
+            // Checked in both directions: clap records a conflict on the
+            // argument that declares it (`--output`), not on both.
+            if supplied(other) {
+                let name = |a: &clap::Arg| format!("--{}", a.get_long().unwrap_or_default());
+                return Err(CommandError::new(
+                    format!(
+                        "`{command}` does not take {} together with {}",
+                        name(arg),
+                        name(other)
+                    ),
+                    "CONFLICTING_FLAGS",
+                    format!("Pass one of {} and {}.", name(arg), name(other)),
+                )
+                .exit_code(agcli::ExitCode::USAGE));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Whether the run is confirmed (`--yes`/`-y`) and whether it is a dry run
+/// (`--dry-run`/`-n`), each read as agcli reads its reserved booleans, so
+/// `--dry-run=false` is not a dry run.
+///
+/// `--no-input` is NOT a confirmation here, unlike for `add`: it says "never
+/// prompt", and these commands rewrite and delete ledger files, which needs
+/// an explicit yes.
+fn confirmation(req: &Req<'_>) -> (bool, bool) {
+    let yes = req.reserved_bool("yes") || req.reserved_bool("y");
+    let dry_run = req.dry_run() || req.reserved_bool("n");
+    (yes, dry_run)
+}
+
+/// The one FILE positional `split` and `merge` take, if any.
+fn restructure_file(command: &str, req: &Req<'_>) -> Result<Option<PathBuf>, CommandError> {
+    if req.positionals().len() > 1 {
+        return Err(CommandError::new(
+            format!("{command} takes at most one file"),
+            "INVALID_ARGS",
+            format!("Pass the one file to {command}, or none to use default.file from the config."),
+        )
+        .exit_code(agcli::ExitCode::USAGE));
+    }
+    Ok(req.arg(0).map(PathBuf::from))
+}
+
+/// `split`'s arguments, and whether the run is confirmed.
+fn build_split_args(req: &Req<'_>) -> Result<(split::Args, bool), CommandError> {
+    use clap::ValueEnum as _;
+    let definition = split_definition();
+    reject_conflicts("split", &definition, req)?;
+    let file = restructure_file("split", req)?;
+    let periods: Vec<String> = split::Period::value_variants()
+        .iter()
+        .filter_map(clap::ValueEnum::to_possible_value)
+        .map(|p| p.get_name().to_string())
+        .collect();
+    let by = match flag(req, "by", None) {
+        Some(raw) => split::Period::from_str(raw, false).map_err(|_| {
+            let allowed: Vec<&str> = periods.iter().map(String::as_str).collect();
+            invalid_enum("by", raw, &allowed)
+        })?,
+        None => {
+            return Err(CommandError::new(
+                "split requires --by",
+                "MISSING_FLAG",
+                format!(
+                    "Name the period each file covers: --by {}.",
+                    periods.join("|")
+                ),
+            )
+            .exit_code(agcli::ExitCode::USAGE));
+        }
+    };
+    let (yes, dry_run) = confirmation(req);
+    Ok((
+        split::Args {
+            file,
+            by,
+            dir: path_flag(req, "dir", None),
+            ledger: path_flag(req, "ledger", None),
+            dry_run,
+        },
+        yes,
+    ))
+}
+
+/// `merge`'s arguments, and whether the run is confirmed.
+fn build_merge_args(req: &Req<'_>) -> Result<(merge::Args, bool), CommandError> {
+    let definition = merge_definition();
+    reject_conflicts("merge", &definition, req)?;
+    let file = restructure_file("merge", req)?;
+    let (yes, dry_run) = confirmation(req);
+    Ok((
+        merge::Args {
+            file,
+            output: path_flag(req, "output", Some("o")),
+            keep_included: bool_flag(req, "keep-included", None),
+            ledger: path_flag(req, "ledger", None),
+            dry_run,
+        },
+        yes,
+    ))
+}
+
+/// Refuse to rewrite ledger files without an explicit `--yes`, as `add`
+/// refuses to append without one. `rledger` asks nothing either, but a
+/// person typed that command; an agent is told how to proceed instead.
+fn require_confirmation(command: &str, yes: bool, dry_run: bool) -> Result<(), CommandError> {
+    if yes || dry_run {
+        return Ok(());
+    }
+    Err(CommandError::new(
+        format!(
+            "ag-rledger {command} needs explicit confirmation: it rewrites and removes ledger files"
+        ),
+        "CONFIRMATION_REQUIRED",
+        "Run it with --dry-run first to see the plan and the equivalence check without writing \
+             anything, then with --yes to write it. The originals are backed up under \
+             .rledger-backup/ next to the file.",
+    )
+    .exit_code(agcli::ExitCode::USAGE))
+}
+
+fn split_command() -> Command {
+    Command::new(
+        "split",
+        "Split a file into one file per year or month, plus a root of includes \
+         (rewrites files: needs --dry-run or --yes)",
+    )
+    .usage(with_globals(&clap_usage("split", &split_definition())))
+    .allow_unknown_flags()
+    .allow_extra_args()
+    .handles_dry_run()
+    .default_next_action(NextAction::new(
+        "ag-rledger split <file> --by year --dry-run",
+        "Preview the split and its equivalence check without writing",
+    ))
+    .handler(|req, _ctx| {
+        let parsed = parse_request("split", req, build_split_args);
+        Box::pin(async move {
+            let ((mut args, yes), globals) = parsed?;
+            require_confirmation("split", yes, args.dry_run)?;
+            let config = load_config(&globals.budget)?;
+            if args.file.is_none() {
+                args.file = default_file(&config, globals.profile.as_deref());
+            }
+            run_restructure("split", |out, err, outcome| {
+                split::run_with_outcome(&args, out, err, outcome)
+            })
+        })
+    })
+}
+
+fn merge_command() -> Command {
+    Command::new(
+        "merge",
+        "Merge a file and everything it includes back into one file \
+         (rewrites and removes files: needs --dry-run or --yes)",
+    )
+    .usage(with_globals(&clap_usage("merge", &merge_definition())))
+    .allow_unknown_flags()
+    .allow_extra_args()
+    .handles_dry_run()
+    .default_next_action(NextAction::new(
+        "ag-rledger merge <file> --dry-run",
+        "Preview the merge and its equivalence check without writing",
+    ))
+    .handler(|req, _ctx| {
+        let parsed = parse_request("merge", req, build_merge_args);
+        Box::pin(async move {
+            let ((mut args, yes), globals) = parsed?;
+            require_confirmation("merge", yes, args.dry_run)?;
+            let config = load_config(&globals.budget)?;
+            if args.file.is_none() {
+                args.file = default_file(&config, globals.profile.as_deref());
+            }
+            run_restructure("merge", |out, err, outcome| {
+                merge::run_with_outcome(&args, out, err, outcome)
+            })
+        })
+    })
+}
+
+/// Run `split` or `merge` and report it: the plan, the equivalence check's
+/// verdict and what was written in `result`, every refusal as a coded error
+/// carrying as much of that as the run got to, and the warning a merge can
+/// leave behind (files it could not remove) in `warnings` (#2633).
+fn run_restructure<F>(command: &str, run: F) -> Result<CommandOutput, CommandError>
+where
+    F: FnOnce(&mut Vec<u8>, &mut Vec<u8>, &mut Outcome) -> anyhow::Result<ProcessExitCode>,
+{
+    let mut stdout = Vec::new();
+    let mut stderr = Vec::new();
+    let mut outcome = Outcome::default();
+    let (result, notices) =
+        rustledger_plugin::notice::capture(|| run(&mut stdout, &mut stderr, &mut outcome));
+    let diagnostics = library_diagnostics(&notices, CollectedDiagnostics::default());
+    let mut body = outcome_json(command, &outcome);
+    body.insert(
+        "stdout".to_string(),
+        json!(String::from_utf8_lossy(&stdout)),
+    );
+    let stderr = String::from_utf8_lossy(&stderr).into_owned();
+    if !stderr.is_empty() {
+        body.insert("stderr".to_string(), json!(stderr));
+    }
+    if let Some(items) = warnings_json(&diagnostics) {
+        body.insert("warnings".to_string(), items);
+    }
+
+    let refused = match &result {
+        Err(e) => Some(match restructure::refusal_code(e) {
+            Some(code) => {
+                let message =
+                    rustledger_plugin::escape_untrusted_text(&format!("{e:#}")).into_owned();
+                let (exit, fix) = refusal_fix(code);
+                CommandError::new(message, code, fix).exit_code(exit)
+            }
+            None => command_failed(e),
+        }),
+        Ok(_) => match &outcome.check {
+            Some(check @ Check::Refused { reason, unstable }) => {
+                let code = check
+                    .refusal_code()
+                    .unwrap_or(restructure::code::EQUIVALENCE_FAILED);
+                let why = if *unstable {
+                    "the ledger as it is cannot be verified"
+                } else {
+                    "the result would not load as the same ledger"
+                };
+                let (exit, fix) = refusal_fix(code);
+                Some(
+                    CommandError::new(
+                        rustledger_plugin::escape_untrusted_text(&format!(
+                            "refusing to {command}: {why}: {reason}"
+                        ))
+                        .into_owned(),
+                        code,
+                        fix,
+                    )
+                    .exit_code(exit),
+                )
+            }
+            _ => None,
+        },
+    };
+    if let Some(error) = refused {
+        // A refusal has its own exit code; the outcome's would read 0 for a
+        // run that never reached the check.
+        body.remove("exit_status");
+        return Err(error.data(Value::Object(body)));
+    }
+    let next = if outcome.dry_run {
+        NextAction::new(
+            format!("ag-rledger {command} <same arguments> --yes"),
+            "Write the plan: the same command with --yes in place of --dry-run",
+        )
+    } else {
+        NextAction::new(
+            "ag-rledger check <file>",
+            "Validate the restructured ledger",
+        )
+    };
+    Ok(CommandOutput::new(Value::Object(body))
+        .exit_code(0)
+        .next_action(next))
+}
+
+/// The exit code and the advice for a refusal code (see
+/// [`restructure::code`]).
+fn refusal_fix(code: &str) -> (i32, &'static str) {
+    use restructure::code as c;
+    let usage = agcli::ExitCode::USAGE;
+    let error = agcli::ExitCode::ERROR;
+    let not_found = agcli::ExitCode::NOT_FOUND;
+    match code {
+        c::MISSING_FILE => (
+            usage,
+            "Pass a ledger file path or set default.file in rledger config.",
+        ),
+        c::FILE_NOT_FOUND => (not_found, "Check the path and retry with an existing file."),
+        c::INCLUDE_NOT_FOUND => (
+            not_found,
+            "Fix or remove the include that names no file, then retry.",
+        ),
+        c::BAD_INCLUDE_PATTERN => (error, "Fix the include pattern, then retry."),
+        c::SYMLINK_ELSEWHERE => (
+            error,
+            "Run it on the file the link points to, if nothing opens the ledger through the link.",
+        ),
+        c::ENCRYPTED_FILE | c::NOT_UTF8 => (
+            error,
+            "Restructure a plain-text UTF-8 ledger; this file is left as it is.",
+        ),
+        c::PARSE_ERRORS => (
+            error,
+            "Fix the parse errors (`ag-rledger check <file>` lists them), then retry.",
+        ),
+        c::NOTHING_TO_SPLIT | c::NOTHING_TO_MERGE => {
+            (error, "Nothing to do; the file is unchanged.")
+        }
+        c::NOT_A_DIRECTORY | c::TARGET_IS_SOURCE | c::UNWRITABLE_INCLUDE => {
+            (usage, "Choose another --dir.")
+        }
+        c::TARGET_EXISTS => (
+            error,
+            "Move the existing file away, or choose another --dir (split) or --output (merge).",
+        ),
+        c::NOT_IN_LEDGER => (
+            usage,
+            "Pass, as --ledger, the root file whose includes reach FILE.",
+        ),
+        c::LOAD_FAILED => (error, "Fix what stops the ledger loading, then retry."),
+        c::EQUIVALENCE_FAILED => (
+            error,
+            "Nothing was written. The reason names the first difference; change the plan \
+             (another --dir, --by, or --output) or the ledger, then retry with --dry-run.",
+        ),
+        c::LEDGER_UNSTABLE => (
+            error,
+            "Nothing was written. The ledger loads differently from run to run (usually a \
+             plugin emitting entries in a varying order); fix that first.",
+        ),
+        c::CHANGED_ON_DISK => (
+            error,
+            "Nothing was written. A file changed while the plan was checked; retry.",
+        ),
+        c::BACKUP_INCLUDED => (
+            error,
+            "Nothing was changed. An include pattern matches the backup directory \
+             (.rledger-backup/); narrow the pattern, then retry.",
+        ),
+        c::WRITE_ROLLED_BACK => (
+            error,
+            "The originals were restored. Report this: the written files passed the check \
+             in memory but not on disk.",
+        ),
+        c::RESTORE_FAILED => (
+            error,
+            "Restoring failed: copy the originals back from the backup directory named in \
+             the message (its manifest.txt lists each file).",
+        ),
+        _ => (
+            error,
+            "Inspect the message, adjust the invocation, and retry.",
+        ),
+    }
+}
+
+/// `outcome` as the envelope's `result` (or a refusal's `data`).
+fn outcome_json(command: &str, outcome: &Outcome) -> serde_json::Map<String, Value> {
+    let path = |p: &std::path::Path| json!(p.to_string_lossy());
+    let mut body = serde_json::Map::new();
+    body.insert("command".to_string(), json!(command));
+    body.insert(
+        "exit_status".to_string(),
+        json!(i32::from(outcome.exit_status())),
+    );
+    body.insert("dry_run".to_string(), json!(outcome.dry_run));
+    let plan = outcome.plan.as_ref().map(|plan| {
+        let steps: Vec<Value> = plan
+            .steps
+            .iter()
+            .map(|step| match step {
+                Step::Create {
+                    path: p,
+                    dated_directives,
+                } => {
+                    let mut o = json!({"action": "create", "path": path(p)});
+                    if let Some(n) = dated_directives {
+                        o["dated_directives"] = json!(n);
+                    }
+                    o
+                }
+                Step::Rewrite { path: p, split } => {
+                    let mut o = json!({"action": "rewrite", "path": path(p)});
+                    if let Some((kept, added)) = split {
+                        o["kept_lines"] = json!(kept);
+                        o["added_includes"] = json!(added);
+                    }
+                    o
+                }
+                Step::Inline {
+                    path: p,
+                    remove,
+                    shared,
+                } => json!({
+                    "action": "inline",
+                    "path": path(p),
+                    "remove": remove,
+                    "kept_as_shared": shared,
+                }),
+            })
+            .collect();
+        let mut o = json!({
+            "operation": plan.operation,
+            "file": path(&plan.file),
+            "steps": steps,
+        });
+        if let Some(by) = plan.by {
+            o["by"] = json!(by);
+        }
+        o
+    });
+    body.insert("plan".to_string(), plan.unwrap_or(Value::Null));
+    let check = outcome.check.as_ref().map(|check| match check {
+        Check::Passed { directives, errors } => json!({
+            "passed": true,
+            "directives": directives,
+            "errors_and_warnings": errors,
+        }),
+        Check::Refused { reason, .. } => json!({
+            "passed": false,
+            "code": check.refusal_code(),
+            "reason": reason,
+        }),
+    });
+    body.insert("equivalence".to_string(), check.unwrap_or(Value::Null));
+    let written = outcome.written.as_ref();
+    let paths = |list: Option<&Vec<PathBuf>>| -> Value {
+        json!(list.map_or_else(Vec::new, |l| l.iter().map(|p| path(p)).collect::<Vec<_>>()))
+    };
+    body.insert("written".to_string(), paths(written.map(|w| &w.written)));
+    body.insert("removed".to_string(), paths(written.map(|w| &w.removed)));
+    body.insert(
+        "not_removed".to_string(),
+        json!(written.map_or_else(Vec::new, |w| w.not_removed.clone())),
+    );
+    body.insert(
+        "backup_dir".to_string(),
+        written
+            .and_then(|w| w.backup_dir.as_deref())
+            .map_or(Value::Null, path),
+    );
+    body
 }
 
 fn build_check_args(req: &Req<'_>) -> Result<rustledger::cmd::check::Args, CommandError> {
@@ -2550,6 +3065,18 @@ mod tests {
         let rledger = rledger_flags(&cmd::explain::Args::augment_args(command("explain")));
         let read = flags_read(&["explain", "E2001"], build_explain_args);
         assert_reads_rledger_flags("explain", &rledger, &read, &[]);
+
+        // `split` and `merge` (#2633): every flag `rledger` defines is read,
+        // and each must build, not just have its flags read.
+        let argv = ["split", "f.beancount", "--by", "year"];
+        assert!(builds(&argv, build_split_args), "`split` does not build");
+        let read = flags_read(&argv, build_split_args);
+        assert_reads_rledger_flags("split", &rledger_flags(&split_definition()), &read, &[]);
+
+        let argv = ["merge", "f.beancount"];
+        assert!(builds(&argv, build_merge_args), "`merge` does not build");
+        let read = flags_read(&argv, build_merge_args);
+        assert_reads_rledger_flags("merge", &rledger_flags(&merge_definition()), &read, &[]);
     }
 
     /// A flag the command does not read is refused, a framework flag is not.

@@ -1535,6 +1535,15 @@ fn apply_plugin_ops(
         return Ok(());
     }
 
+    // Booking's recorded decisions (`Posting::booking`, #2390) hold only
+    // against the stream booking realized. A plugin that drops, adds, rewrites
+    // or reorders a cost-bearing transaction changes the inventory every
+    // later posting is realized against, so the decisions kept on the
+    // untouched transactions no longer describe it: forget them all, and the
+    // validator and every later realization ask each posting of the
+    // inventory they reach, as they did before decisions were recorded.
+    let stale_decisions = plugin_ops_move_lots(directives, &ops);
+
     // Materialize new directives, preserving spans for Keep/Modify.
     let mut new_directives = Vec::with_capacity(ops.len());
     for op in ops {
@@ -1601,8 +1610,68 @@ fn apply_plugin_ops(
         }
     }
 
+    if stale_decisions {
+        for spanned in &mut new_directives {
+            if let Directive::Transaction(txn) = &mut spanned.value {
+                txn.forget_booking();
+            }
+        }
+    }
     *directives = new_directives;
     Ok(())
+}
+
+/// Whether a plugin's `ops` change which lots the booked stream holds when:
+/// they delete, rewrite or insert a transaction with a cost spec, or keep
+/// the input out of its order. Booking's recorded decisions then no longer
+/// describe the stream (see `apply_plugin_ops`). Conservative: rewriting a
+/// cost-bearing transaction counts even if the plugin only added metadata.
+#[cfg(feature = "plugins")]
+fn plugin_ops_move_lots(
+    directives: &[Spanned<Directive>],
+    ops: &[rustledger_plugin::PluginOp],
+) -> bool {
+    use rustledger_plugin::PluginOp;
+
+    let carries_cost = |directive: &Directive| {
+        matches!(directive, Directive::Transaction(txn)
+            if txn.postings.iter().any(|p| p.cost.is_some()))
+    };
+    let wrapper_carries_cost = |wrapper: &rustledger_plugin::DirectiveWrapper| {
+        matches!(&wrapper.data, rustledger_plugin::types::DirectiveData::Transaction(txn)
+            if txn.postings.iter().any(|p| p.cost.is_some()))
+    };
+    let mut last: Option<usize> = None;
+    for op in ops {
+        match op {
+            PluginOp::Keep(i) => {
+                if last.is_some_and(|l| *i <= l) {
+                    return true;
+                }
+                last = Some(*i);
+            }
+            PluginOp::Modify(i, wrapper) => {
+                if carries_cost(&directives[*i].value) || wrapper_carries_cost(wrapper) {
+                    return true;
+                }
+                if last.is_some_and(|l| *i <= l) {
+                    return true;
+                }
+                last = Some(*i);
+            }
+            PluginOp::Delete(i) => {
+                if carries_cost(&directives[*i].value) {
+                    return true;
+                }
+            }
+            PluginOp::Insert(wrapper) => {
+                if wrapper_carries_cost(wrapper) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 /// `wrapper` as a directive, or `None` after reporting why it cannot be
@@ -2251,6 +2320,127 @@ mod sanitize_tests {
         });
         sanitize_inner_posting_spans(&mut d, &sm); // no panic, no change
         assert!(matches!(d, Directive::Open(_)));
+    }
+}
+
+/// Booking's recorded decisions survive a plugin that leaves the booked
+/// stream's lots alone, and are forgotten by one that moves them (#2390).
+#[cfg(all(test, feature = "plugins"))]
+mod plugin_decision_tests {
+    use super::apply_plugin_ops;
+    use crate::source_map::SourceMap;
+    use rust_decimal_macros::dec;
+    use rustledger_core::{
+        Amount, BookingDecision, CostNumber, CostSpec, Directive, Posting, Spanned, Transaction,
+    };
+    use rustledger_plugin::PluginOp;
+
+    fn txn(units: rust_decimal::Decimal, decision: BookingDecision) -> Directive {
+        let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
+        let mut stock = Posting::new("Assets:Stock", Amount::new(units, "X")).with_cost(
+            CostSpec::empty()
+                .with_number(CostNumber::PerUnit { value: dec!(100) })
+                .with_currency("USD"),
+        );
+        stock.booking = decision;
+        Directive::Transaction(
+            Transaction::new(date, "x")
+                .with_synthesized_posting(stock)
+                .with_synthesized_posting(Posting::new(
+                    "Assets:Cash",
+                    Amount::new(units * dec!(-100), "USD"),
+                )),
+        )
+    }
+
+    fn cash_only() -> Directive {
+        let date = rustledger_core::naive_date(2024, 1, 16).unwrap();
+        Directive::Transaction(
+            Transaction::new(date, "fee")
+                .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1), "USD")))
+                .with_synthesized_posting(Posting::new(
+                    "Expenses:Fees",
+                    Amount::new(dec!(1), "USD"),
+                )),
+        )
+    }
+
+    fn wrapper(d: &Directive) -> rustledger_plugin::DirectiveWrapper {
+        rustledger_plugin::directive_to_wrapper_with_location(d, None, None)
+    }
+
+    /// The decision on each kept stock posting after applying `ops` to a
+    /// booked buy and sale.
+    fn after(ops: impl FnOnce(&[Spanned<Directive>]) -> Vec<PluginOp>) -> Vec<BookingDecision> {
+        let mut directives: Vec<Spanned<Directive>> = [
+            txn(dec!(5), BookingDecision::Augment),
+            txn(dec!(-2), BookingDecision::Reduce),
+        ]
+        .into_iter()
+        .map(Spanned::synthesized)
+        .collect();
+        let ops = ops(&directives);
+        let mut errors = Vec::new();
+        apply_plugin_ops(&mut directives, ops, &mut errors, &SourceMap::new()).unwrap();
+        assert!(errors.is_empty(), "{errors:?}");
+        directives
+            .iter()
+            .filter_map(|d| match &d.value {
+                Directive::Transaction(t) => t
+                    .postings
+                    .iter()
+                    .find(|p| p.account.as_str() == "Assets:Stock")
+                    .map(|p| p.booking),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn decisions_survive_a_plugin_that_moves_no_lots() {
+        use BookingDecision::{Augment, Reduce};
+        assert_eq!(
+            after(|_| vec![PluginOp::Keep(0), PluginOp::Keep(1)]),
+            [Augment, Reduce]
+        );
+        // Adding a transaction without a cost moves no lot.
+        assert_eq!(
+            after(|_| vec![
+                PluginOp::Keep(0),
+                PluginOp::Insert(wrapper(&cash_only())),
+                PluginOp::Keep(1),
+            ]),
+            [Augment, Reduce]
+        );
+    }
+
+    #[test]
+    fn decisions_are_forgotten_when_a_plugin_moves_lots() {
+        use BookingDecision::Undecided;
+        // The buy is gone, so the sale's "reduce" describes lots that are not
+        // in the stream any more.
+        assert_eq!(
+            after(|_| vec![PluginOp::Delete(0), PluginOp::Keep(1)]),
+            [Undecided]
+        );
+        // A new lot, which every later posting is realized against.
+        assert_eq!(
+            after(|_| vec![
+                PluginOp::Insert(wrapper(&txn(dec!(3), BookingDecision::Undecided))),
+                PluginOp::Keep(0),
+                PluginOp::Keep(1),
+            ]),
+            [Undecided, Undecided, Undecided]
+        );
+        // A rewritten cost-bearing transaction, and a reordered stream.
+        assert_eq!(
+            after(|d| vec![PluginOp::Modify(0, wrapper(&d[0].value)), PluginOp::Keep(1)]),
+            [Undecided, Undecided]
+        );
+        assert_eq!(
+            after(|_| vec![PluginOp::Keep(1), PluginOp::Keep(0)]),
+            [Undecided, Undecided]
+        );
     }
 }
 

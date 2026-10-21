@@ -802,6 +802,7 @@ fn test_meta_functions() {
                 meta: posting_meta,
                 comments: Vec::new(),
                 trailing_comments: Vec::new(),
+                booking: Default::default(),
             }),
             rustledger_core::Spanned::synthesized(Posting::new(
                 "Assets:Cash",
@@ -871,6 +872,7 @@ fn test_getitem_meta_eager_path_postings() {
                 meta: posting_meta,
                 comments: Vec::new(),
                 trailing_comments: Vec::new(),
+                booking: Default::default(),
             }),
             rustledger_core::Spanned::synthesized(Posting::new(
                 "Assets:Cash",
@@ -1607,6 +1609,7 @@ fn test_meta_includes_source_location() {
                     meta: p1_meta,
                     comments: Vec::new(),
                     trailing_comments: Vec::new(),
+                    booking: Default::default(),
                 },
                 span: Span { start: 20, end: 42 },
                 file_id,
@@ -2742,6 +2745,40 @@ fn account_balance_replays_with_the_ledgers_booking_method() {
             "{sql}: the sale is its own lot beside the buy: {last}"
         );
     }
+}
+
+/// The running balance replays the whole booked ledger as booking decided it
+/// (#2390), and a filtered stream as its own ledger. The sale names a cost no
+/// lot has; booked under NONE it is an augmentation, and its recorded
+/// decision says so. Read as booked it is added even under the STRICT
+/// default; replayed behind a `FROM` filter it is asked again, and STRICT
+/// reads it as a reduction that finds no lot.
+#[test]
+fn account_balance_reads_the_recorded_decision_only_for_the_whole_ledger() {
+    let mut directives = none_booked_sale_at_a_new_cost();
+    for directive in &mut directives {
+        if let Directive::Transaction(txn) = directive {
+            for posting in &mut txn.postings {
+                if posting.cost.is_some() {
+                    posting.booking = rustledger_core::BookingDecision::Augment;
+                }
+            }
+        }
+    }
+    let run = |sql: &str| Executor::new(&directives).execute(&parse(sql).unwrap());
+    let whole = run("SELECT account, account_balance WHERE account = 'Assets:Stock'")
+        .expect("the whole ledger replays as booked");
+    let last = format!("{:?}", whole.rows.last().expect("a row per Stock posting"));
+    assert!(
+        last.contains("-2") && last.contains("90"),
+        "the recorded augmentation is a lot of its own: {last}"
+    );
+    let filtered =
+        run("SELECT account, account_balance FROM year = 2020 WHERE account = 'Assets:Stock'");
+    assert!(
+        matches!(&filtered, Err(QueryError::Evaluation(m)) if m.contains("No matching lot")),
+        "a filtered replay asks again: {filtered:?}"
+    );
 }
 
 /// The `#postings` table reports a replay the engine refuses as a query

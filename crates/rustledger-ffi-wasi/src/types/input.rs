@@ -394,6 +394,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                         meta: json_map_to_metadata(&p.meta),
                         comments: Vec::new(),
                         trailing_comments: Vec::new(),
+                        booking: Default::default(),
                     }))
                 })
                 .collect::<Result<_, String>>()?;

@@ -470,6 +470,7 @@ pub(super) fn convert_simple_posting(
             meta,
             comments: Vec::new(),
             trailing_comments,
+            booking: Default::default(),
         },
         Span::new(base, end),
     ))

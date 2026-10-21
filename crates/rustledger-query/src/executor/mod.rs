@@ -1410,6 +1410,18 @@ impl<'a> Executor<'a> {
         // decides per posting (no filter, or an entry-level one outside
         // BALANCES, which keeps or drops the transaction whole).
         let mut passes: Vec<bool> = Vec::new();
+        // Whether this scan replays the booked ledger itself: every
+        // transaction from the first, in booking order. Then each posting's
+        // reduction-or-augmentation is the one booking recorded (#2390),
+        // as `apply` realizes it, rather than asked again of the booked
+        // posting (the disagreement behind #2380). Not under `OPEN ON`,
+        // which starts from summaries booking never saw, nor under a filter
+        // that drops transactions from the replay: that is a different
+        // ledger, and the replay asks it its own question (#1985). `CLOSE`
+        // only cuts the tail, and what `CLOSE`/`CLEAR` append carries no
+        // decision.
+        let replays_as_booked =
+            from.and_then(|f| f.open_on).is_none() && (from_filter.is_none() || balances_selection);
 
         for (txn_number, (directive_index, txn)) in
             self.window_transactions(from, directive_iter)?.enumerate()
@@ -1455,7 +1467,13 @@ impl<'a> Executor<'a> {
             // and `BALANCES` then failed on ledgers `check` accepts
             // (#2380). A posting's `account_balance` is the state the walk
             // reaches over the postings up to and including it.
-            let mut replay = needs_account_balance.then(|| engine.begin_replay(&txn));
+            let mut replay = needs_account_balance.then(|| {
+                if replays_as_booked {
+                    engine.begin_replay_as_booked(&txn)
+                } else {
+                    engine.begin_replay(&txn)
+                }
+            });
             // An AVERAGE account's running balance is presented as its pools,
             // as `BALANCES` presents it (#2543). Anything else shares the
             // engine's copy (#2086).

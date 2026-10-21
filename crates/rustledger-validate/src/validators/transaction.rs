@@ -533,7 +533,8 @@ pub fn calculate_tolerances(
 /// would make `+10 X {100}` then `-20 X {100}` reduce 20 from 10 and fail,
 /// where booking (and beancount) open a short of 10. The walk in
 /// `BookingEngine::apply` documents the reasoning; change one and change the
-/// other.
+/// other. Which of the two each posting is comes from booking's recorded
+/// decision ([`rustledger_core::Posting::reduces`], #2390).
 pub fn update_inventories(
     state: &mut LedgerState,
     txn: &Transaction,
@@ -555,13 +556,15 @@ pub fn update_inventories(
             .map(|a| a.booking)
             .unwrap_or_default();
 
-        // Reduction vs augmentation — the SAME decision the booking engine makes,
-        // now via the single `Inventory::is_booking_reduction` source: a cost-bearing
-        // opposite-sign position reduces, and under `option "booking_method" "NONE"`
-        // (issue #1182) every posting is an augmentation. Sharing it means this
-        // validator pass and `BookingEngine::apply` can't drift, and the #1182 gate
-        // lives in one place instead of being maintained in both crates.
-        let is_reduction = inv.is_booking_reduction(units, posting.cost.as_deref(), booking_method);
+        // Reduction vs augmentation — booking's decision, recorded on the
+        // posting (#2390), exactly as `BookingEngine::apply` reads it. Asking
+        // again of the booked posting, whose cost and date booking rewrote,
+        // is how the consumers came to disagree with booking (#2368, #2384).
+        // A posting booking never decided (standalone validation, or a
+        // stream a plugin changed, whose decisions the loader forgets) is
+        // asked of this inventory through `Inventory::is_booking_reduction`,
+        // the one rule `book` asks, including the #1182 NONE gate.
+        let is_reduction = posting.reduces(units, Some(inv), booking_method);
 
         if is_reduction {
             process_inventory_reduction(inv, posting, units, booking_method, txn, errors);

@@ -121,7 +121,7 @@ pub(super) fn apply(plan: &Plan, verify: impl FnMut(Phase) -> Result<()>) -> Res
     apply_recording(plan, &mut None, verify)
 }
 
-/// [`apply`], also setting `backup` to the backup directory as soon as it
+/// `apply`, also setting `backup` to the backup directory as soon as it
 /// exists, and back to `None` if it is removed again, so a caller knows where
 /// the originals are even when `apply` fails afterwards.
 pub(super) fn apply_recording(

@@ -94,7 +94,12 @@ pub(super) fn report_balances<W: Write>(
                 if cost.is_empty() {
                     writeln!(writer, "  {amount:>15} {currency}")?;
                 } else {
-                    writeln!(writer, "  {amount:>15} {currency} {cost}")?;
+                    // A lot's label is the ledger's text (#2538).
+                    writeln!(
+                        writer,
+                        "  {amount:>15} {currency} {}",
+                        super::sanitize_display(cost)
+                    )?;
                 }
             }
         }

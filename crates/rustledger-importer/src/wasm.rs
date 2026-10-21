@@ -695,6 +695,8 @@ fn format_plugin_error(e: &PluginError) -> String {
 ///
 /// Warnings are appended in this order:
 ///
+/// 0. **Neutralized text** — one per entry whose text held a control
+///    character, which is replaced before it reaches the ledger (#2538).
 /// 1. **Output warnings** — `output.warnings` forwarded verbatim.
 /// 2. **Output errors** — `output.errors`, formatted via
 ///    [`format_plugin_error`] so the severity prefix is preserved.
@@ -704,12 +706,17 @@ fn format_plugin_error(e: &PluginError) -> String {
 /// no analogue here.)
 fn output_to_import_result(out: ImporterOutput) -> anyhow::Result<ImportResult> {
     let mut directives = Vec::with_capacity(out.directives.len());
-    for w in out.directives {
-        let d = rustledger_plugin::convert::wrapper_to_directive(&w)
+    let mut neutralized = Vec::new();
+    for (index, w) in out.directives.iter().enumerate() {
+        let mut d = rustledger_plugin::convert::wrapper_to_directive(w)
             .map_err(|e| anyhow::anyhow!("WASM importer returned invalid directive: {e:?}"))?;
+        neutralize_entry(&mut d, index, &mut neutralized);
         directives.push(d);
     }
     let mut result = ImportResult::new(directives);
+    for w in neutralized {
+        result = result.with_warning(w);
+    }
     // An importer's text is shown to the user: escape its control
     // characters (see `rustledger_plugin::untrusted`).
     for w in out.warnings {
@@ -817,9 +824,11 @@ impl Importer for WasmImporter {
 fn bridge_enriched_output(output: EnrichedImporterOutput) -> anyhow::Result<EnrichedImportResult> {
     let mut entries = Vec::with_capacity(output.entries.len());
     let mut bridge_warnings: Vec<String> = Vec::new();
-    for (wrapper, enr) in output.entries {
-        let dir = rustledger_plugin::convert::wrapper_to_directive(&wrapper)
+    let mut neutralized = Vec::new();
+    for (index, (wrapper, enr)) in output.entries.into_iter().enumerate() {
+        let mut dir = rustledger_plugin::convert::wrapper_to_directive(&wrapper)
             .map_err(|e| anyhow::anyhow!("WASM importer returned invalid directive: {e:?}"))?;
+        neutralize_entry(&mut dir, index, &mut neutralized);
         let method = parse_method(&enr.method).unwrap_or_else(|unknown| {
             bridge_warnings.push(format!(
                 "warning: WASM importer used unknown categorization method `{unknown}`, falling back to Default"
@@ -865,6 +874,9 @@ fn bridge_enriched_output(output: EnrichedImporterOutput) -> anyhow::Result<Enri
         entries.push((dir, enrichment));
     }
     let mut enriched = EnrichedImportResult::new(entries);
+    for w in neutralized {
+        enriched = enriched.with_warning(w);
+    }
     // These quote the importer's own strings (a method name, a
     // fingerprint), so they are escaped like its warnings.
     for w in bridge_warnings {
@@ -877,6 +889,23 @@ fn bridge_enriched_output(output: EnrichedImporterOutput) -> anyhow::Result<Enri
         enriched = enriched.with_warning(format_plugin_error(e));
     }
     Ok(enriched)
+}
+
+/// Neutralize the control characters in the text of the importer's entry
+/// `index` (0-based) before it reaches the ledger, recording a warning in
+/// `warnings` when there were any (#2538).
+fn neutralize_entry(
+    directive: &mut rustledger_core::Directive,
+    index: usize,
+    warnings: &mut Vec<String>,
+) {
+    let fields = crate::imported_text::neutralize_directive(directive);
+    if !fields.is_empty() {
+        warnings.push(crate::imported_text::warning(
+            &format!("Entry {}", index + 1),
+            &fields,
+        ));
+    }
 }
 
 /// Convert the wire-format method string (as emitted by

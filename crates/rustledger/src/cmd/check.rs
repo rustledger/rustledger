@@ -12,6 +12,7 @@ use rustledger_plugin::PluginManager;
 // The canonical advisory-only predicate lives in `rustledger-validate` so that
 // `check` (which hides these, mirroring bean-check) and `lint` share one source
 // of truth for which codes are advisory.
+use rustledger_plugin::escape_untrusted_text;
 use rustledger_validate::is_advisory_only_code;
 use serde::Serialize;
 use std::io::{self, Write};
@@ -423,7 +424,11 @@ pub fn run_with_writer<W: Write>(
                     });
                     parse_error_count += 1;
                 } else if !args.quiet && shown {
-                    writeln!(stdout, "error: failed to read {path_str}: {source}")?;
+                    writeln!(
+                        stdout,
+                        "error: {}",
+                        escape_untrusted_text(&format!("failed to read {path_str}: {source}"))
+                    )?;
                 }
                 error_count += 1;
             }
@@ -458,7 +463,7 @@ pub fn run_with_writer<W: Write>(
                     });
                     parse_error_count += 1;
                 } else if !args.quiet && shown {
-                    writeln!(stdout, "error: {message}")?;
+                    writeln!(stdout, "error: {}", escape_untrusted_text(&message))?;
                 }
                 error_count += 1;
             }
@@ -493,7 +498,7 @@ pub fn run_with_writer<W: Write>(
                     });
                     parse_error_count += 1;
                 } else if !args.quiet && shown {
-                    writeln!(stdout, "error: {message}")?;
+                    writeln!(stdout, "error: {}", escape_untrusted_text(&message))?;
                 }
                 error_count += 1;
             }
@@ -528,9 +533,12 @@ pub fn run_with_writer<W: Write>(
                 } else if !args.quiet && shown {
                     writeln!(
                         stdout,
-                        "error: path traversal not allowed: {} escapes {}",
-                        include_path,
-                        base_dir.display()
+                        "error: {}",
+                        escape_untrusted_text(&format!(
+                            "path traversal not allowed: {} escapes {}",
+                            include_path,
+                            base_dir.display()
+                        ))
                     )?;
                 }
                 error_count += 1;
@@ -560,9 +568,12 @@ pub fn run_with_writer<W: Write>(
                 } else if !args.quiet && shown {
                     writeln!(
                         stdout,
-                        "error: failed to decrypt {}: {}",
-                        path.display(),
-                        message
+                        "error: {}",
+                        escape_untrusted_text(&format!(
+                            "failed to decrypt {}: {}",
+                            path.display(),
+                            message
+                        ))
                     )?;
                 }
                 error_count += 1;
@@ -593,7 +604,10 @@ pub fn run_with_writer<W: Write>(
                 } else if !args.quiet && shown {
                     writeln!(
                         stdout,
-                        "error: include pattern \"{pattern}\" does not match any files"
+                        "error: {}",
+                        escape_untrusted_text(&format!(
+                            "include pattern \"{pattern}\" does not match any files"
+                        ))
                     )?;
                 }
                 error_count += 1;
@@ -624,7 +638,10 @@ pub fn run_with_writer<W: Write>(
                 } else if !args.quiet && shown {
                     writeln!(
                         stdout,
-                        "error: failed to expand include pattern \"{pattern}\": {message}"
+                        "error: {}",
+                        escape_untrusted_text(&format!(
+                            "failed to expand include pattern \"{pattern}\": {message}"
+                        ))
                     )?;
                 }
                 error_count += 1;
@@ -653,7 +670,7 @@ pub fn run_with_writer<W: Write>(
                     });
                     parse_error_count += 1;
                 } else if !args.quiet && shown {
-                    writeln!(stdout, "error: {message}")?;
+                    writeln!(stdout, "error: {}", escape_untrusted_text(&message))?;
                 }
                 error_count += 1;
             }
@@ -696,7 +713,13 @@ pub fn run_with_writer<W: Write>(
                 parse_error_count += 1;
             }
         } else if !args.quiet && shown {
-            writeln!(stdout, "{severity}[{}]: {}", warning.code, warning.message)?;
+            // An option's message quotes its value from the ledger (#2538).
+            writeln!(
+                stdout,
+                "{severity}[{}]: {}",
+                warning.code,
+                escape_untrusted_text(&warning.message)
+            )?;
         }
         if is_error {
             option_error_count += 1;
@@ -1050,7 +1073,11 @@ pub fn run_with_writer<W: Write>(
                     m.from_filename.as_deref().unwrap_or("?"),
                     m.from_lineno.map_or_else(|| "?".into(), |n| n.to_string()),
                 );
-                writeln!(stdout, "{loc}: warning[LINT-XFER]: {msg}")?;
+                writeln!(
+                    stdout,
+                    "{}",
+                    escape_untrusted_text(&format!("{loc}: warning[LINT-XFER]: {msg}"))
+                )?;
             }
             warning_count += 1;
         }
@@ -1068,7 +1095,7 @@ pub fn run_with_writer<W: Write>(
             validate_error_count,
             rule_summary: args.show_summary.then(|| rules.seen.clone()),
         };
-        writeln!(stdout, "{}", serde_json::to_string_pretty(&output)?)?;
+        writeln!(stdout, "{}", crate::cmd::to_json_pretty(&output)?)?;
     } else if !args.quiet {
         if args.verbose {
             let cache_note = if from_cache { " (from cache)" } else { "" };

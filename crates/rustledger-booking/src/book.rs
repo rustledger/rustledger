@@ -109,6 +109,31 @@ pub enum BookingError {
         /// The cost currency the spec took.
         cost: rustledger_core::Currency,
     },
+
+    /// A total cost spread over so many units that its per-unit cost is
+    /// below the smallest positive `Decimal`, `1e-28` (#2689).
+    ///
+    /// `{{1 USD}}` over `5e28` units costs `2e-29` a unit, which rounds to
+    /// zero, and a lot at zero cost would be a number nobody wrote. Named for
+    /// what it is: nothing in the ledger is out of range, only the per-unit
+    /// quotient is too small to hold. (It used to read as an amount past the
+    /// representable range.)
+    #[error(
+        "{account}: the per-unit cost of {total} {currency} over {units} units is below \
+         1e-28, the smallest number a decimal holds, so the lot cannot record it; \
+         denominate the commodity in larger units (thousands, millions) so there are fewer \
+         of them"
+    )]
+    PerUnitCostUnderflow {
+        /// The account receiving the lot.
+        account: rustledger_core::Account,
+        /// The cost currency.
+        currency: rustledger_core::Currency,
+        /// The total cost, as booked.
+        total: Decimal,
+        /// The units, unsigned.
+        units: Decimal,
+    },
 }
 
 impl From<InterpolationError> for BookingError {
@@ -130,7 +155,8 @@ impl BookingError {
             Self::Inventory(e) => Some(&e.account),
             Self::NotBooked { account }
             | Self::CostPriceCurrencyMismatch { account, .. }
-            | Self::NoLotInInferredCostCurrency { account, .. } => Some(account),
+            | Self::NoLotInInferredCostCurrency { account, .. }
+            | Self::PerUnitCostUnderflow { account, .. } => Some(account),
             Self::Interpolation(e) => e.account(),
         }
     }
@@ -766,7 +792,12 @@ impl BookingEngine {
                             units.number,
                         )
                         .ok_or_else(|| {
-                            cost_overflow(&posting.account, cost_spec.currency.as_ref(), units)
+                            per_unit_failure(
+                                &posting.account,
+                                cost_spec.currency.as_ref(),
+                                units,
+                                combined,
+                            )
                         })?;
                         // `try_new`, not `new`: see the underflow case at
                         // the head of this file's sibling site in
@@ -927,10 +958,11 @@ impl BookingEngine {
                                 // the per-unit the lot was booked at.
                                 let per_unit = rustledger_core::py_div(total, units.number.abs())
                                     .ok_or_else(|| {
-                                    cost_overflow(
+                                    per_unit_failure(
                                         &posting.account,
                                         cost_spec.currency.as_ref(),
                                         units,
+                                        total,
                                     )
                                 })?;
                                 // `try_new`, not `new` (#2340).
@@ -1369,9 +1401,17 @@ impl BookingEngine {
                         // itself is kept exactly, beside it.
                         let per_unit = rustledger_core::py_div(total, units.number.abs())
                             .ok_or_else(|| {
-                                cost_overflow(&posting.account, Some(currency), units)
+                                per_unit_failure(&posting.account, Some(currency), units, total)
                             })?;
-                        // `try_new`, not `new` (#2340).
+                        // `try_new`, not `new` (#2340). It accepts a per-unit
+                        // as close as a `Decimal` gets to the quotient, which for
+                        // a tiny one over very many units is fewer than 28
+                        // significant digits (#2689); the exact total beside it
+                        // is what weighs the posting. Deliberate divergence:
+                        // `30000000000 X {{1 USD}}` against `-1 USD` balances
+                        // here, where bean-check reports `(-1E-28 USD)` from its
+                        // own per-unit times the units. See `BookedCost`'s
+                        // `check_invariant` in rustledger-core.
                         let booked =
                             rustledger_core::BookedCost::try_new(per_unit, total, units.number)
                                 .map_err(|_| {
@@ -2964,6 +3004,32 @@ fn cost_overflow(
     )
 }
 
+/// Why a total cost's per-unit quotient (`py_div`, `compound_per_unit`)
+/// could not be represented, as the error to report (#2689).
+///
+/// A quotient fails at either end of the range: below `1e-28` it would round
+/// to a zero nobody wrote, past `Decimal::MAX` it does not fit at all. Which
+/// end is decided by the operands: `|total| < |units|` is a quotient below
+/// one, which cannot overflow, and the converse cannot underflow.
+fn per_unit_failure(
+    account: &rustledger_core::Account,
+    cost_currency: Option<&rustledger_core::Currency>,
+    units: &rustledger_core::Amount,
+    total: Decimal,
+) -> BookingError {
+    match cost_currency {
+        Some(currency) if !total.is_zero() && total.abs() < units.number.abs() => {
+            BookingError::PerUnitCostUnderflow {
+                account: account.clone(),
+                currency: currency.clone(),
+                total,
+                units: units.number.abs(),
+            }
+        }
+        _ => cost_overflow(account, cost_currency, units),
+    }
+}
+
 /// Book and interpolate a list of transactions.
 ///
 /// This processes transactions in order, tracking inventory to enable
@@ -3618,10 +3684,10 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                BookingError::Inventory(e)
-                    if matches!(e.error, rustledger_core::BookingError::Overflow(_))
+                BookingError::PerUnitCostUnderflow { currency, total, units, .. }
+                    if currency.as_str() == "USD" && *total == dec!(2.55) && *units == Decimal::MAX
             ),
-            "expected an inventory Overflow, got {err:?}"
+            "expected the per-unit underflow, named as such (#2689), got {err:?}"
         );
     }
 
@@ -3647,10 +3713,10 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                BookingError::Inventory(e)
-                    if matches!(e.error, rustledger_core::BookingError::Overflow(_))
+                BookingError::PerUnitCostUnderflow { currency, total, units, .. }
+                    if currency.as_str() == "USD" && *total == dec!(2.55) && *units == Decimal::MAX
             ),
-            "expected an inventory Overflow, got {err:?}"
+            "expected the per-unit underflow, named as such (#2689), got {err:?}"
         );
     }
 
@@ -3678,10 +3744,10 @@ mod tests {
         assert!(
             matches!(
                 &err,
-                BookingError::Inventory(e)
-                    if matches!(e.error, rustledger_core::BookingError::Overflow(_))
+                BookingError::PerUnitCostUnderflow { currency, total, units, .. }
+                    if currency.as_str() == "USD" && *total == dec!(2.55) && *units == Decimal::MAX
             ),
-            "expected an inventory Overflow, got {err:?}"
+            "expected the per-unit underflow, named as such (#2689), got {err:?}"
         );
     }
 

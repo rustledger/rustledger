@@ -54,13 +54,22 @@ impl<'a> Messages<'a> {
     /// A warning recorded as `diagnostic`, whose terminal form is `line`
     /// (for the messages `rledger` prints without a `warning:` prefix).
     pub fn emit_as(&mut self, diagnostic: Diagnostic, line: impl Display) {
-        match self.warnings.as_deref_mut() {
-            Some(sink) => sink.emit(diagnostic),
+        if let Some(sink) = self.warnings.as_deref_mut() {
+            sink.emit(diagnostic);
+        } else {
             // A failed write of a warning must never cost the reader the
             // command's output.
-            None => {
-                let _ = writeln!(self.err, "{line}");
-            }
+            //
+            // The line can quote text from the ledger or from a network
+            // price source (a fetch error's body), and a terminal reads it,
+            // so it is escaped (#2538). A recorded diagnostic keeps it as it
+            // is.
+            let line = line.to_string();
+            let _ = writeln!(
+                self.err,
+                "{}",
+                rustledger_plugin::escape_untrusted_text(&line)
+            );
         }
     }
 }

@@ -817,7 +817,7 @@ fn build_explain_args(req: &Req<'_>) -> Result<rustledger::cmd::explain::Args, C
 fn lint_command() -> Command {
     Command::new("lint", "Run non-fatal advisory passes")
         .usage(with_globals(
-            "ag-rledger lint <transfers|closed-nonempty> <file>... [--format <format>]  |  \
+            "ag-rledger lint <transfers|closed-nonempty|control-chars> <file>... [--format <format>]  |  \
              transfers: [--min-confidence <n>] [--date-window <days>] \
              [--amount-tolerance <amount>] [--apply]",
         ))
@@ -1376,10 +1376,10 @@ fn build_add_args(req: &Req<'_>) -> Result<rustledger::cmd::add_cmd::Args, Comma
 }
 
 /// The lints `ag-rledger lint` runs: every `rledger lint` subcommand.
-const LINTS: &[&str] = &["transfers", "closed-nonempty"];
+const LINTS: &[&str] = &["transfers", "closed-nonempty", "control-chars"];
 
 fn build_lint_args(req: &Req<'_>) -> Result<rustledger::cmd::lint::Args, CommandError> {
-    use rustledger::cmd::lint::{Args, LintKind, closed_nonempty, transfers};
+    use rustledger::cmd::lint::{Args, LintKind, closed_nonempty, control_chars, transfers};
     let subcommand = req.arg(0).ok_or_else(|| {
         CommandError::new(
             "lint name is required",
@@ -1412,11 +1412,20 @@ fn build_lint_args(req: &Req<'_>) -> Result<rustledger::cmd::lint::Args, Command
                 other => return Err(invalid_enum("format", other, &["text", "json"])),
             },
         }),
+        "control-chars" => LintKind::ControlChars(control_chars::Args {
+            files,
+            format: match format {
+                "text" => closed_nonempty::OutputFormat::Text,
+                "json" => closed_nonempty::OutputFormat::Json,
+                other => return Err(invalid_enum("format", other, &["text", "json"])),
+            },
+        }),
         other => return Err(invalid_enum("lint", other, LINTS)),
     };
     let files = match &lint {
         LintKind::Transfers(args) => &args.files,
         LintKind::ClosedNonempty(args) => &args.files,
+        LintKind::ControlChars(args) => &args.files,
     };
     if files.is_empty() {
         return Err(missing_file_error(&format!("lint {subcommand}")));

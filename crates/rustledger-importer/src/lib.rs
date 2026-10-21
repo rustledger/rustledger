@@ -35,6 +35,7 @@
 pub mod config;
 pub mod csv_importer;
 pub mod csv_inference;
+mod imported_text;
 pub mod ofx_importer;
 pub mod order;
 pub mod payees;

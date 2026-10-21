@@ -699,7 +699,7 @@ fn render_grouped<W: Write>(
                     GroupRow::Ok(r) => writeln!(
                         writer,
                         "{},{},{},{},{},{},{},{},{}",
-                        csv_escape(&sanitize_display(&r.label)),
+                        csv_escape(&r.label),
                         end_date,
                         currency,
                         r.flow_count,
@@ -714,7 +714,7 @@ fn render_grouped<W: Write>(
                     GroupRow::Unvaluable { label, .. } => writeln!(
                         writer,
                         "{},{},{},n/a,n/a,n/a,n/a,n/a,n/a",
-                        csv_escape(&sanitize_display(label)),
+                        csv_escape(label),
                         end_date,
                         currency,
                     )?,

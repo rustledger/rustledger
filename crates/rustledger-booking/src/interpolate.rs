@@ -149,6 +149,24 @@ pub enum InterpolationError {
         /// The currency group whose arithmetic left the range.
         currency: Currency,
     },
+
+    /// A cost solved from the balance spread over so many units that its
+    /// per-unit cost is below `1e-28`, the smallest positive `Decimal`, so it
+    /// would round to a zero nobody wrote (#2689). Not a range overflow:
+    /// every amount in the transaction fits; only the quotient is too small.
+    #[error(
+        "the per-unit cost of {total} {currency} over {units} units is below 1e-28, the \
+         smallest number a decimal holds, so the lot cannot record it; denominate the \
+         commodity in larger units (thousands, millions) so there are fewer of them"
+    )]
+    PerUnitCostUnderflow {
+        /// The cost currency.
+        currency: Currency,
+        /// The solved total cost.
+        total: Decimal,
+        /// The units, unsigned.
+        units: Decimal,
+    },
 }
 
 impl InterpolationError {
@@ -172,7 +190,8 @@ impl InterpolationError {
             | Self::NegativeInferredCost { .. }
             | Self::AmbiguousInferredCostCurrency { .. }
             | Self::DoesNotBalance { .. }
-            | Self::Unrepresentable { .. } => None,
+            | Self::Unrepresentable { .. }
+            | Self::PerUnitCostUnderflow { .. } => None,
         }
     }
 }
@@ -1936,9 +1955,20 @@ fn interpolate_inner(
         // `/ units...abs()` and this path is in a third, so the pattern could
         // not have found it. The widened booking fuzzer (#2340) reached it on
         // its first run, which is the whole argument for widening it.
+        // `None` at either end of the range: a quotient below one cannot
+        // overflow, so there it is the underflow, named for what it is
+        // (#2689); past `MAX` it is the overflow.
         let per_unit = rustledger_core::py_div(total, units_number.abs()).ok_or_else(|| {
-            InterpolationError::Unrepresentable {
-                currency: currency.clone(),
+            if !total.is_zero() && total.abs() < units_number.abs() {
+                InterpolationError::PerUnitCostUnderflow {
+                    currency: currency.clone(),
+                    total,
+                    units: units_number.abs(),
+                }
+            } else {
+                InterpolationError::Unrepresentable {
+                    currency: currency.clone(),
+                }
             }
         })?;
         if per_unit < Decimal::ZERO {
@@ -2869,7 +2899,7 @@ mod tests {
         let err = interpolate_in_place(&mut txn, &tolerances)
             .expect_err("the USD group's cost underflows and must be reported");
         assert!(
-            matches!(err, InterpolationError::Unrepresentable { .. }),
+            matches!(err, InterpolationError::PerUnitCostUnderflow { .. }),
             "expected the underflow to be reported, got {err:?}"
         );
         assert_eq!(
@@ -2905,10 +2935,16 @@ mod tests {
 
         let err = interpolate(&txn)
             .expect_err("a per-unit that cannot reproduce its total must not be booked");
+        // Named for its cause, not as an amount out of range (#2689).
         assert!(
-            matches!(err, InterpolationError::Unrepresentable { .. }),
+            matches!(
+                err,
+                InterpolationError::PerUnitCostUnderflow { ref currency, total, units }
+                    if currency.as_str() == "USD" && total == dec!(2.55) && units == Decimal::MAX
+            ),
             "expected the underflow to be reported, got {err:?}"
         );
+        assert!(!err.to_string().contains("range"), "{err}");
     }
 
     /// The elided posting absorbs currencies in the order the transaction

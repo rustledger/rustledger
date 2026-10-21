@@ -3581,7 +3581,7 @@ plugin "auto_accounts"
                     2024-01-01 open Income:Gains\n";
         let buy = "2024-01-02 * \"buy\"\n  Assets:Stock  10 AAPL {100 USD}\n  Assets:Cash\n\
                    2024-01-03 * \"buy\"\n  Assets:Stock  10 AAPL {110 USD}\n  Assets:Cash\n";
-        let cases: [(&str, String, &str, &str); 11] = [
+        let cases: [(&str, String, &str, &str); 12] = [
             (
                 "NoMatchingLot",
                 format!(
@@ -3665,6 +3665,15 @@ plugin "auto_accounts"
                     .to_string(),
                 "held at a cost in EUR",
                 "E4001",
+            ),
+            (
+                // #2689: a per-unit below 1e-28 is named, not "out of range".
+                "PerUnitCostUnderflow",
+                "2024-02-01 * \"x\"\n  Assets:Stock  50000000000000000000000000000 X {{1 USD}}\n  \
+                 Assets:Cash  -1 USD\n"
+                    .to_string(),
+                "below 1e-28",
+                "BOOK",
             ),
             (
                 "Interpolation",

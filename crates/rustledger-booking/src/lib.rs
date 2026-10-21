@@ -128,14 +128,15 @@ pub fn decimal_quantum(value: Decimal) -> Decimal {
 /// decimal places contributes `quantum(amount) x multiplier`, max'd per
 /// currency; integer amounts contribute nothing (exact balance required).
 ///
-/// When `infer_tolerance_from_cost` is enabled, each posting with a
-/// per-unit cost (or price) contributes
-/// `units_quantum * cost_per_unit * multiplier`; these contributions are
-/// ACCUMULATED (summed) per cost currency across the transaction's
-/// postings, and the accumulated value is then max'd against the base
-/// quantum tolerance for that currency. (The doc used to claim the
-/// per-posting maximum — the implementation, moved verbatim from the
-/// validator, has always summed.)
+/// When `infer_tolerance_from_cost` is enabled, each posting's cost and
+/// price contribute `min(units_quantum * multiplier * number, 0.5)`, capped
+/// at beancount's `MAXIMUM_TOLERANCE` one contribution at a time (#2717);
+/// these contributions are ACCUMULATED (summed) per cost or price currency
+/// across the transaction's postings, and the accumulated value is then
+/// max'd against the base quantum tolerance for that currency. The number
+/// is the per-unit cost, or for a cost spec as written the minimum over its
+/// per-unit and total numbers (`cost_contribution`), and the per-unit
+/// price, which for `@@` is the total over the units.
 ///
 /// A tolerance needing more digits than a `Decimal` holds is rounded DOWN,
 /// so the balance check is never looser than the exact tolerance (#2582).
@@ -242,7 +243,8 @@ fn tolerances_rounded(
 
     // Calculate cost-inferred tolerance if enabled.
     // In Python, cost/price tolerance is only computed for postings where units
-    // have decimal places (expo < 0). The cost tolerance is ACCUMULATED (summed)
+    // have decimal places (expo < 0). Each contribution is capped at
+    // `MAXIMUM_TOLERANCE`, the capped contributions are ACCUMULATED (summed)
     // across postings, then max'd with the existing tolerance per currency.
     if opts.infer_from_cost {
         // Accumulated cost/price tolerances per currency
@@ -273,24 +275,26 @@ fn tolerances_rounded(
                 }
                 let units_quantum = decimal_quantum(units_number);
 
-                // Cost contribution — only per-unit cost feeds into
-                // tolerance inference. `PerUnitFromTotal` and `PerUnit`
-                // both expose a per-unit value via `per_unit()`.
+                // Each contribution is CAPPED at `MAXIMUM_TOLERANCE` (0.5)
+                // before it joins the sum, as in beancount's
+                // `infer_tolerances` (#2717). Uncapped, `10.0 X {100000 USD}`
+                // allowed 5,000 USD of imbalance where beancount allows 0.5.
                 if let Some(cost_spec) = &posting.cost
-                    && let Some(cost_per_unit) = cost_spec.number.and_then(|cn| cn.per_unit())
                     && let Some(cost_currency) = &cost_spec.currency
                 {
                     cost_tolerances
                         .entry(cost_currency.clone())
                         .or_default()
-                        .add_product(units_quantum, opts.multiplier, cost_per_unit);
+                        .add(cost_contribution(
+                            units_quantum,
+                            opts.multiplier,
+                            cost_spec.number.as_ref(),
+                        ));
                 }
 
                 // Price contribution: only complete amounts contribute
                 // (incomplete/empty price annotations are filled in by
-                // interpolation later). `kind` (Unit vs Total) doesn't
-                // change the tolerance math here — both use `tolerance *
-                // price_amt.number`.
+                // interpolation later).
                 if let Some(price) = &posting.price
                     && let Some(price_amt) = price
                         .amount
@@ -300,7 +304,13 @@ fn tolerances_rounded(
                     cost_tolerances
                         .entry(price_amt.currency.clone())
                         .or_default()
-                        .add_product(units_quantum, opts.multiplier, price_amt.number);
+                        .add(price_contribution(
+                            units_quantum,
+                            opts.multiplier,
+                            price.kind,
+                            price_amt.number,
+                            units_number,
+                        ));
                 }
             }
         }
@@ -374,8 +384,100 @@ fn tolerances_rounded(
     (tolerances, rounded)
 }
 
+/// The largest tolerance one cost or price can contribute: beancount's
+/// `interpolate.MAXIMUM_TOLERANCE` (#2717).
+const MAXIMUM_TOLERANCE: Decimal = Decimal::from_parts(5, 0, 0, false, 1);
+
+/// A cost or price number a contribution multiplies the units tolerance by.
+#[derive(Debug, Clone, Copy)]
+enum Rate {
+    /// A number as written (or as booking left it).
+    Number(Decimal),
+    /// `total / |units|`, a `@@` price whose per-unit number has no `Decimal`
+    /// (`rustledger_core::per_unit_price` is `None`), divided exactly.
+    Quotient { total: Decimal, units: Decimal },
+}
+
+/// A posting's capped cost contribution, as beancount's `infer_tolerances`
+/// computes it for a `Cost` (after booking) or a `CostSpec` (as written).
+///
+/// A `Cost` is one per-unit number: `min(tolerance x number, 0.5)`. That is
+/// [`CostNumber::PerUnit`] and booking's [`CostNumber::PerUnitFromTotal`],
+/// whose per-unit number is the booked `Cost`'s.
+///
+/// A `CostSpec` takes the minimum over `number_per` and `number_total`,
+/// skipping a missing one, starting from 0.5. Beancount's parser reads
+/// `{{T}}` as `number_per = 0`, `number_total = T`, so a total cost written
+/// so contributes `min(0, tolerance x T)`, zero for a positive total, and
+/// still names the currency. `{USD}` (no number at all) contributes 0.5.
+///
+/// [`CostNumber::Compound`] cannot tell an omitted side from a written zero
+/// (`{# 10 USD}` and `{0 # 10 USD}` parse alike), so a zero side counts as
+/// omitted, which is beancount's reading of the one-sided forms. A written
+/// `0 #` contributes `min(0.5, tolerance x total)` where beancount
+/// contributes 0: a deliberate divergence, for a form no real ledger writes.
+///
+/// [`CostNumber::PerUnit`]: rustledger_core::CostNumber::PerUnit
+/// [`CostNumber::PerUnitFromTotal`]: rustledger_core::CostNumber::PerUnitFromTotal
+/// [`CostNumber::Compound`]: rustledger_core::CostNumber::Compound
+fn cost_contribution(
+    quantum: Decimal,
+    multiplier: Decimal,
+    number: Option<&rustledger_core::CostNumber>,
+) -> ToleranceSum {
+    use rustledger_core::CostNumber;
+    let rates: smallvec::SmallVec<[Rate; 2]> = match number {
+        None => smallvec::SmallVec::new(),
+        Some(CostNumber::PerUnit { value }) => smallvec::smallvec![Rate::Number(*value)],
+        Some(CostNumber::PerUnitFromTotal(booked)) => {
+            smallvec::smallvec![Rate::Number(booked.per_unit)]
+        }
+        Some(CostNumber::Total { value }) => {
+            smallvec::smallvec![Rate::Number(Decimal::ZERO), Rate::Number(*value)]
+        }
+        Some(CostNumber::Compound { per_unit, total }) => [*per_unit, *total]
+            .into_iter()
+            .filter(|n| !n.is_zero())
+            .map(Rate::Number)
+            .collect(),
+    };
+    ToleranceSum::capped(quantum, multiplier, &rates)
+}
+
+/// A posting's capped price contribution, `min(tolerance x price, 0.5)`.
+///
+/// Beancount's parser turns `@@ T` into the per-unit price `T / |units|`
+/// (zero for zero units), so that is the number a total price contributes
+/// with; it used to contribute the whole total (#2717).
+fn price_contribution(
+    quantum: Decimal,
+    multiplier: Decimal,
+    kind: rustledger_core::PriceKind,
+    number: Decimal,
+    units: Decimal,
+) -> ToleranceSum {
+    let rate = match kind {
+        rustledger_core::PriceKind::Unit => Rate::Number(number),
+        rustledger_core::PriceKind::Total if units.is_zero() => Rate::Number(Decimal::ZERO),
+        rustledger_core::PriceKind::Total => rustledger_core::per_unit_price(number, units).map_or(
+            Rate::Quotient {
+                total: number,
+                units,
+            },
+            Rate::Number,
+        ),
+    };
+    ToleranceSum::capped(quantum, multiplier, &[rate])
+}
+
 /// One currency's accumulated cost/price tolerance: a sum of
-/// `units quantum x multiplier x cost or price` contributions.
+/// `min(units quantum x multiplier x cost or price, 0.5)` contributions
+/// (also the type of one contribution, see `ToleranceSum::capped`).
+///
+/// Since the cap (#2717) a positive contribution is at most 0.5, so only
+/// negative costs or prices (errors in their own right, E4005) still drive a
+/// sum far out of range; the escalation below stays for them, and for
+/// products that need more digits than a `Decimal` holds.
 ///
 /// The bare `*` and `+=` it replaces PANICKED: a price near `Decimal::MAX`
 /// times a tolerance of `0.05`, accumulated over twenty-odd postings, leaves
@@ -399,26 +501,72 @@ impl Default for ToleranceSum {
 }
 
 impl ToleranceSum {
-    /// Add `quantum x multiplier x rate`, exactly.
+    /// Add `quantum x multiplier x rate` uncapped, for the tests of the sum
+    /// itself: a capped contribution never exceeds 0.5, so only this reaches
+    /// the range's top from a handful of terms.
+    #[cfg(test)]
+    fn add_product(&mut self, quantum: Decimal, multiplier: Decimal, rate: Decimal) {
+        use rustledger_core::checked_mul_exact;
+        let product = checked_mul_exact(quantum, multiplier)
+            .and_then(|tolerance| checked_mul_exact(tolerance, rate))
+            .map_or_else(
+                || Self::Exact(to_big(quantum) * to_big(multiplier) * to_big(rate)),
+                Self::Fast,
+            );
+        self.add(product);
+    }
+
+    /// Add one contribution, exactly.
+    fn add(&mut self, contribution: Self) {
+        use rustledger_core::checked_add_exact;
+        if let (Self::Fast(sum), Self::Fast(term)) = (&mut *self, &contribution)
+            && let Some(next) = checked_add_exact(*sum, *term)
+        {
+            *sum = next;
+            return;
+        }
+        let term = match contribution {
+            Self::Fast(term) => to_big(term),
+            Self::Exact(term) => term,
+        };
+        *self = Self::Exact(match std::mem::take(self) {
+            Self::Fast(sum) => to_big(sum) + term,
+            Self::Exact(sum) => sum + term,
+        });
+    }
+
+    /// `min(MAXIMUM_TOLERANCE, quantum x multiplier x rate, ...)` over
+    /// `rates`, exactly: beancount's capped contribution (#2717).
     ///
     /// The units tolerance `quantum x multiplier` is a factor here, not a
     /// precomputed `Decimal`: rounding it first would carry its error into the
     /// product, and in either direction, since a rate can be negative.
-    fn add_product(&mut self, quantum: Decimal, multiplier: Decimal, rate: Decimal) {
-        use rustledger_core::{checked_add_exact, checked_mul_exact};
-        if let Self::Fast(sum) = self {
-            if let Some(next) = checked_mul_exact(quantum, multiplier)
-                .and_then(|tolerance| checked_mul_exact(tolerance, rate))
-                .and_then(|product| checked_add_exact(*sum, product))
-            {
-                *sum = next;
-                return;
-            }
-            *self = Self::Exact(to_big(*sum));
+    fn capped(quantum: Decimal, multiplier: Decimal, rates: &[Rate]) -> Self {
+        use rustledger_core::checked_mul_exact;
+        let fast = rates.iter().try_fold(MAXIMUM_TOLERANCE, |min, rate| {
+            let Rate::Number(rate) = rate else {
+                return None;
+            };
+            let product = checked_mul_exact(quantum, multiplier)
+                .and_then(|tolerance| checked_mul_exact(tolerance, *rate))?;
+            Some(min.min(product))
+        });
+        if let Some(min) = fast {
+            return Self::Fast(min);
         }
-        if let Self::Exact(sum) = self {
-            *sum += to_big(quantum) * to_big(multiplier) * to_big(rate);
-        }
+        let tolerance = to_big(quantum) * to_big(multiplier);
+        let min = rates
+            .iter()
+            .map(|rate| match rate {
+                Rate::Number(rate) => &tolerance * to_big(*rate),
+                Rate::Quotient { total, units } => {
+                    &tolerance * to_big(*total) / to_big(units.abs())
+                }
+            })
+            .fold(to_big(MAXIMUM_TOLERANCE), std::cmp::min);
+        // Back on the fast path when the minimum is a `Decimal` exactly: a
+        // product that overflowed and lost to the cap leaves nothing rounded.
+        rustledger_core::decimal_from_big_exact(&min).map_or(Self::Exact(min), Self::Fast)
     }
 
     /// The tolerance, CLAMPED to `±Decimal::MAX` when the exact sum is past it.
@@ -2162,7 +2310,8 @@ mod tests {
     /// #2554: the cost/price tolerance accumulated with bare `*` and `+=`.
     /// Twenty-two postings at a price of `MAX` sum `22 x 0.05 x MAX`, and
     /// one posting under a large multiplier overflows its own product: both
-    /// panicked. The true tolerance is past `MAX`, so it clamps.
+    /// panicked. Each product is past `MAX`; since #2717 each is capped at
+    /// beancount's `MAXIMUM_TOLERANCE`, so the sum is `22 x 0.5`.
     #[test]
     fn cost_tolerance_past_the_range_clamps_instead_of_panicking() {
         let price = |n: Decimal| PriceAnnotation {
@@ -2187,7 +2336,7 @@ mod tests {
         }
         assert_eq!(
             transaction_tolerances(&many, &opts(dec!(0.5)))[&usd],
-            Decimal::MAX
+            dec!(11)
         );
     }
 
@@ -2256,7 +2405,8 @@ mod tests {
         assert_eq!(tolerances(&[("*", dec!(0.05))], &priced)[&usd], dec!(0.05));
     }
 
-    /// The product alone: `0.1 x 1,000,000 x 9e23` is `9e28`, past `MAX`.
+    /// The product alone: `0.1 x 1,000,000 x 9e23` is `9e28`, past `MAX`,
+    /// and capped at 0.5 (#2717) without panicking.
     #[test]
     fn one_cost_tolerance_product_past_the_range_clamps() {
         let price = |n: Decimal| PriceAnnotation {
@@ -2275,7 +2425,7 @@ mod tests {
         );
         assert_eq!(
             transaction_tolerances(&one, &opts)[&Currency::from("USD")],
-            Decimal::MAX
+            dec!(0.5)
         );
     }
 
@@ -2522,6 +2672,113 @@ mod tests {
         let tolerance = transaction_tolerances(&txn, &opts)[&Currency::from("USD")];
         // Exact: 0.005555555555555555555555555555.
         assert_eq!(tolerance.to_string(), "0.0055555555555555555555555555");
+    }
+
+    /// Each cost shape contributes what beancount's `infer_tolerances` gives
+    /// its `Cost` or `CostSpec`, capped at `MAXIMUM_TOLERANCE` (#2717).
+    #[test]
+    fn a_cost_contribution_is_beancounts_capped_minimum() {
+        use rustledger_core::{BookedCost, CostNumber};
+        // Units written to tenths: 0.1 x 0.5 = 0.05.
+        let contribution = |number: Option<CostNumber>| {
+            cost_contribution(dec!(0.1), dec!(0.5), number.as_ref()).value(ToleranceRounding::Down)
+        };
+        let per_unit = |value| Some(CostNumber::PerUnit { value });
+        assert_eq!(contribution(per_unit(dec!(2))), dec!(0.1));
+        assert_eq!(contribution(per_unit(dec!(100000))), dec!(0.5));
+        // Past `Decimal`'s range, and still the cap, exactly.
+        let huge = cost_contribution(dec!(0.1), dec!(0.5), per_unit(Decimal::MAX).as_ref());
+        assert!(
+            matches!(huge, ToleranceSum::Fast(v) if v == dec!(0.5)),
+            "{huge:?}"
+        );
+        // A booked total cost: its per-unit number, a `Cost`'s.
+        let booked = BookedCost::new(dec!(200), dec!(300), dec!(1.5));
+        assert_eq!(
+            contribution(Some(CostNumber::PerUnitFromTotal(booked))),
+            dec!(0.5)
+        );
+        // `{{T}}` as written is beancount's `number_per = 0`, `number_total = T`.
+        assert_eq!(
+            contribution(Some(CostNumber::Total { value: dec!(300) })),
+            dec!(0)
+        );
+        // `{a # b}`: the minimum; an omitted side (parsed as zero) is skipped.
+        let compound = |per_unit, total| Some(CostNumber::Compound { per_unit, total });
+        assert_eq!(contribution(compound(dec!(2), dec!(3))), dec!(0.1));
+        assert_eq!(contribution(compound(dec!(0), dec!(3))), dec!(0.15));
+        assert_eq!(contribution(compound(dec!(3), dec!(0))), dec!(0.15));
+        // `{USD}`: no number at all, so the cap itself.
+        assert_eq!(contribution(None), dec!(0.5));
+        // A negative cost is not raised to anything (beancount's `min`).
+        assert_eq!(contribution(per_unit(dec!(-100))), dec!(-5));
+    }
+
+    /// A price contributes its per-unit price, capped; `@@` is divided by the
+    /// units first, as beancount's parser divides it.
+    #[test]
+    fn a_price_contribution_is_per_unit_and_capped() {
+        use rustledger_core::PriceKind;
+        let contribution = |kind, number, units| {
+            price_contribution(dec!(0.1), dec!(0.5), kind, number, units)
+                .value(ToleranceRounding::Down)
+        };
+        assert_eq!(contribution(PriceKind::Unit, dec!(2), dec!(1.5)), dec!(0.1));
+        assert_eq!(
+            contribution(PriceKind::Unit, dec!(20), dec!(1.5)),
+            dec!(0.5)
+        );
+        assert_eq!(
+            contribution(PriceKind::Total, dec!(3), dec!(-1.5)),
+            dec!(0.1)
+        );
+        assert_eq!(
+            contribution(PriceKind::Total, dec!(300), dec!(1.5)),
+            dec!(0.5)
+        );
+        assert_eq!(contribution(PriceKind::Total, dec!(3), dec!(0.0)), dec!(0));
+        // A quotient with no `Decimal` (too small), divided exactly instead.
+        let tiny = contribution(
+            PriceKind::Total,
+            dec!(0.0000000000000000000000000001),
+            dec!(1000.0),
+        );
+        assert_eq!(tiny, Decimal::ZERO);
+        // Too large: the cap.
+        assert_eq!(
+            contribution(PriceKind::Total, Decimal::MAX, dec!(0.0000000001)),
+            dec!(0.5)
+        );
+    }
+
+    /// The cap is on each contribution, not on the currency's sum.
+    #[test]
+    fn capped_contributions_sum_per_currency() {
+        let defaults = FxHashMap::default();
+        let opts = ToleranceOptions {
+            multiplier: dec!(0.5),
+            infer_from_cost: true,
+            defaults: &defaults,
+        };
+        let at_cost = |account: &str, currency: &str| {
+            Posting::new(account, Amount::new(dec!(1.0), currency)).with_cost(
+                CostSpec::empty()
+                    .with_number(rustledger_core::CostNumber::PerUnit { value: dec!(100) })
+                    .with_currency("USD"),
+            )
+        };
+        let txn = Transaction::new(NaiveDate::default(), "t")
+            .with_synthesized_posting(at_cost("Assets:A", "X"))
+            .with_synthesized_posting(at_cost("Assets:B", "Y"))
+            .with_synthesized_posting(
+                Posting::new("Assets:C", Amount::new(dec!(1.0), "Z"))
+                    .with_price(PriceAnnotation::unit(Amount::new(dec!(100), "USD"))),
+            )
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-300), "USD")));
+        assert_eq!(
+            transaction_tolerances(&txn, &opts)[&Currency::from("USD")],
+            dec!(1.5)
+        );
     }
 
     /// A sum that leaves the range and comes back is exact, not clamped:

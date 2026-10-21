@@ -283,7 +283,13 @@ use crate::types::{Error, LedgerOptions};
 /// with that tolerance and validation checks the balance against it, so a
 /// v50 blob of a ledger setting `*` would serve the old interpolated amounts
 /// and miss the imbalance errors a fresh load reports.
-pub const CACHE_VERSION: u32 = 51;
+/// v52: under `infer_tolerance_from_cost`, each cost or price contributes at
+/// most 0.5 to its currency's tolerance, and `@@` contributes its per-unit
+/// price (#2717). Loader v41, unchanged -- parsed directives did not move.
+/// Booking quantizes interpolated amounts with that tolerance and validation
+/// checks the balance against it, so a v51 blob of such a ledger would serve
+/// the old interpolated amounts and miss the imbalance errors.
+pub const CACHE_VERSION: u32 = 52;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

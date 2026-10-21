@@ -288,7 +288,18 @@ use crate::types::{Error, LedgerOptions};
 /// out of range (#2689). Loader v41, unchanged -- parsed directives did not
 /// move. `Ledger` archives booked directives and errors, so a v51 blob would
 /// serve the refusal and the posting left unbooked.
-pub const CACHE_VERSION: u32 = 52;
+/// v55: a sale past the end of a lot its own transaction emptied is dated
+/// with the transaction's date, as beancount dates it (#2390). Loader v41,
+/// unchanged -- parsed directives did not move. `Ledger` archives booked
+/// directives, so a v52 blob would serve the short's cost left undated. The
+/// recorded `Posting::booking` decisions are NOT archived (they are skipped
+/// by serde and rkyv), so a restored `Ledger` re-derives each one as before
+/// #2390; this bump is for the dated short. The v53 and v54 slots are taken
+/// by the parallel `fix/tolerance-cost-cap` (#2717) and
+/// `fix/plugin-placeholder-locations` (#2713) branches, which bump the
+/// version for their own changes; the three must keep DISTINCT numbers, so a
+/// blob written between the merges is regenerated whichever lands last.
+pub const CACHE_VERSION: u32 = 55;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

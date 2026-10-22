@@ -16,16 +16,29 @@
 //! including right-to-left scripts and zero-width characters, is left as
 //! it is: it can mislead only as any text can.
 //!
-//! Strings from the ledger itself (narrations, payees) are a separate
-//! question: the ledger is the user's own.
+//! Strings from the ledger itself (narrations, payees, metadata, comments)
+//! get the same treatment on human-readable output (#2538): a ledger can be
+//! shared, included from elsewhere, or imported from a bank's data, where a
+//! merchant name is partly the merchant's to choose. Query tables, `report`
+//! text and `check` diagnostics escape them with these functions; output
+//! that is data (CSV, JSON values, `PRINT`, `rledger format`) keeps them as
+//! they are.
 
 use std::borrow::Cow;
 use std::fmt::Write;
 
 /// Whether `c` can change how text around it is shown.
-fn is_unsafe(c: char) -> bool {
-    c.is_control()
-        || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{2028}' | '\u{2029}')
+///
+/// That is a control character (C0, DEL, C1), a bidirectional embedding,
+/// override or isolate, or a Unicode line or paragraph separator: the
+/// characters these functions escape (each keeps some of them, as its
+/// documentation says).
+///
+/// Defined once, in [`rustledger_core::format::is_display_unsafe`], which
+/// JSON output escapes by too.
+#[must_use]
+pub fn is_unsafe(c: char) -> bool {
+    rustledger_core::format::is_display_unsafe(c)
 }
 
 fn escape(text: &str, keep: impl Fn(char) -> bool) -> Cow<'_, str> {
@@ -57,9 +70,103 @@ pub fn escape_untrusted_line(text: &str) -> Cow<'_, str> {
     escape(text, |_| false)
 }
 
+/// Source text for a diagnostic snippet, escaped like
+/// [`escape_untrusted_text`] but also keeping `\r`, which the snippet
+/// renderer reads as a line terminator (`\r\n` files), not as a character
+/// to show.
+///
+/// Escaping lengthens the text, so the result also maps a byte offset into
+/// `text` to the offset of the same character in the escaped text, for the
+/// spans that point into it.
+#[must_use]
+pub fn escape_untrusted_source(text: &str) -> EscapedSource<'_> {
+    let keep = |c: char| matches!(c, '\n' | '\t' | '\r');
+    let mut grown = Vec::new();
+    let mut extra = 0;
+    for (offset, c) in text.char_indices() {
+        if is_unsafe(c) && !keep(c) {
+            extra += escaped_len(c) - c.len_utf8();
+            grown.push((offset, extra));
+        }
+    }
+    EscapedSource {
+        text: escape(text, keep),
+        grown,
+    }
+}
+
+/// The length of `c` escaped as `\u{..}`.
+fn escaped_len(c: char) -> usize {
+    // `\u{` + the hex digits + `}`.
+    let digits = (32 - u32::from(c).leading_zeros()).div_ceil(4).max(1) as usize;
+    digits + 4
+}
+
+/// Text escaped by [`escape_untrusted_source`], with the offset map.
+#[derive(Debug)]
+pub struct EscapedSource<'a> {
+    /// The escaped text.
+    pub text: Cow<'a, str>,
+    /// For each escaped character, its byte offset in the input and the
+    /// bytes the escaping added up to and including it.
+    grown: Vec<(usize, usize)>,
+}
+
+impl EscapedSource<'_> {
+    /// The same, owning its text.
+    #[must_use]
+    pub fn into_owned(self) -> EscapedSource<'static> {
+        EscapedSource {
+            text: Cow::Owned(self.text.into_owned()),
+            grown: self.grown,
+        }
+    }
+
+    /// The offset in [`Self::text`] of what is at `offset` in the input. An
+    /// offset at an escaped character maps to the start of its escape, so a
+    /// span over the character covers the whole escape.
+    #[must_use]
+    pub fn offset(&self, offset: usize) -> usize {
+        let before = self.grown.partition_point(|&(at, _)| at < offset);
+        offset + before.checked_sub(1).map_or(0, |i| self.grown[i].1)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_escaping_keeps_line_terminators_and_maps_offsets() {
+        let text = "a\u{1b}[2Jb\r\nc\u{9b}d\te";
+        let escaped = escape_untrusted_source(text);
+        assert_eq!(escaped.text, "a\\u{1b}[2Jb\r\nc\\u{9b}d\te");
+        // Every character of the input lands on the same character after
+        // escaping; an escaped one on the start of its escape.
+        for (offset, c) in text.char_indices() {
+            let at = escaped.offset(offset);
+            if is_unsafe(c) && !matches!(c, '\r' | '\n' | '\t') {
+                assert!(escaped.text[at..].starts_with("\\u{"), "{offset}");
+            } else {
+                assert!(escaped.text[at..].starts_with(c), "{offset}");
+            }
+        }
+        // The end of the input maps to the end of the escaped text, so a
+        // span ending there still ends at the end.
+        assert_eq!(escaped.offset(text.len()), escaped.text.len());
+        // Nothing to escape: the text is borrowed and offsets are unchanged.
+        let plain = escape_untrusted_source("plain\r\ntext");
+        assert!(matches!(plain.text, Cow::Borrowed(_)));
+        assert_eq!(plain.offset(7), 7);
+        // The escape lengths, one to six hex digits.
+        for c in ['\u{0}', '\u{1b}', '\u{7f}', '\u{9b}', '\u{202e}'] {
+            assert_eq!(
+                escaped_len(c),
+                escape_untrusted_line(&c.to_string()).len(),
+                "{c:?}"
+            );
+        }
+    }
 
     #[test]
     fn escapes_terminal_controls() {

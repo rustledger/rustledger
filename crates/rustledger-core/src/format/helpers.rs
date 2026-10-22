@@ -41,11 +41,29 @@ pub fn escape_csv(s: &str) -> String {
     }
 }
 
+/// Whether `c` can change how the text around it is shown.
+///
+/// That is a control character (C0, DEL, C1), a bidirectional embedding,
+/// override or isolate (U+202A–U+202E, U+2066–U+2069), or a Unicode line or
+/// paragraph separator (U+2028, U+2029).
+///
+/// The one definition behind every surface that keeps such characters off a
+/// reader's terminal: `rustledger_plugin::untrusted` escapes them as
+/// `\u{..}` on human-readable output, [`escape_json`] as `\uXXXX` (#2538).
+#[must_use]
+pub fn is_display_unsafe(c: char) -> bool {
+    c.is_control()
+        || matches!(c, '\u{202a}'..='\u{202e}' | '\u{2066}'..='\u{2069}' | '\u{2028}' | '\u{2029}')
+}
+
 /// Escape a string as a JSON string body (RFC 8259).
 ///
 /// Handles the required escapes (`"`, `\`, and every C0 control character —
 /// `\n`/`\t`/`\r`/`\b`/`\f` by name, the rest as `\uXXXX`), so the result is
-/// always valid between JSON double quotes. Unlike [`escape_string`] (which
+/// always valid between JSON double quotes. DEL, the C1 controls, and the
+/// other characters [`is_display_unsafe`] names are escaped as `\uXXXX` too:
+/// JSON allows them raw, but raw they reach the terminal of whoever reads
+/// the output (#2538), and escaped they decode to the same string. Unlike [`escape_string`] (which
 /// targets beancount source and leaves control bytes other than `\n`/`\t`/`\r`
 /// raw), this never emits a bare control character — use it for JSON egress of
 /// user-controlled text (e.g. metadata-derived labels), which may carry an
@@ -63,7 +81,9 @@ pub fn escape_json(s: &str) -> String {
             '\r' => out.push_str("\\r"),
             '\u{08}' => out.push_str("\\b"),
             '\u{0c}' => out.push_str("\\f"),
-            c if (c as u32) < 0x20 => {
+            c if is_display_unsafe(c) => {
+                // Every such character is in the Basic Multilingual Plane, so
+                // one `\uXXXX` holds it.
                 let _ = write!(out, "\\u{:04x}", c as u32);
             }
             c => out.push(c),
@@ -105,6 +125,12 @@ mod tests {
         // raw, which is invalid JSON) — this is the bug escape_json fixes.
         assert_eq!(escape_json("A\u{1b}B"), "A\\u001bB");
         assert_eq!(escape_json("\u{00}"), "\\u0000");
+        // DEL, C1, bidi controls and line separators too (#2538): legal raw
+        // in JSON, but a terminal acts on them.
+        assert_eq!(
+            escape_json("a\u{7f}b\u{9b}c\u{202e}d\u{2028}"),
+            "a\\u007fb\\u009bc\\u202ed\\u2028"
+        );
         // Plain text (incl. non-control unicode) is untouched.
         assert_eq!(escape_json("投資 123"), "投資 123");
     }

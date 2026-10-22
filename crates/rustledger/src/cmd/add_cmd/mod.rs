@@ -384,8 +384,8 @@ fn run_quick_mode_with_writer<W: std::io::Write>(
     // Show preview and confirm
     if !args.yes {
         writeln!(out, "Preview:")?;
-        writeln!(out, "{formatted}")?;
-        write!(out, "Append to {}? [Y/n] ", file.display())?;
+        writeln!(out, "{}", shown(&formatted))?;
+        write!(out, "Append to {}? [Y/n] ", shown_path(file))?;
         out.flush()?;
 
         let mut response = String::new();
@@ -401,7 +401,7 @@ fn run_quick_mode_with_writer<W: std::io::Write>(
     // Append to file
     append_transaction(file, &formatted)?;
 
-    writeln!(out, "Transaction appended to {}", file.display())?;
+    writeln!(out, "Transaction appended to {}", shown_path(file))?;
     Ok(())
 }
 
@@ -620,10 +620,10 @@ fn run_interactive_mode(args: &Args, file: &PathBuf, date: NaiveDate) -> Result<
 
     // Show preview and confirm
     println!("\nPreview:");
-    println!("{formatted}");
+    println!("{}", shown(&formatted));
 
     if !args.yes {
-        print!("Append to {}? [Y/n] ", file.display());
+        print!("Append to {}? [Y/n] ", shown_path(file));
         std::io::stdout().flush()?;
 
         let mut response = String::new();
@@ -639,7 +639,7 @@ fn run_interactive_mode(args: &Args, file: &PathBuf, date: NaiveDate) -> Result<
     // Append to file
     append_transaction(file, &formatted)?;
 
-    println!("Transaction appended to {}", file.display());
+    println!("Transaction appended to {}", shown_path(file));
     Ok(())
 }
 
@@ -700,6 +700,22 @@ fn append_transaction(file: &PathBuf, formatted: &str) -> Result<()> {
     Ok(())
 }
 
+/// The transaction preview as the terminal shows it: its control
+/// characters escaped (#2714), as `check` and `report` escape ledger text
+/// (#2538). A payee or narration can carry one, typed or pasted; inside a
+/// string the formatter escapes only quotes, backslashes, newlines, tabs
+/// and carriage returns. `--dry-run` prints the transaction as it would be
+/// written, which is data, and keeps it as it is.
+fn shown(text: &str) -> std::borrow::Cow<'_, str> {
+    rustledger_plugin::escape_untrusted_text(text)
+}
+
+/// A path as a prompt or message shows it, on one line, escaped as
+/// [`shown`] escapes text.
+fn shown_path(path: &std::path::Path) -> String {
+    rustledger_plugin::escape_untrusted_line(&path.display().to_string()).into_owned()
+}
+
 /// Run the add command.
 pub fn run(args: &Args, file: &PathBuf) -> Result<()> {
     // Parse the date
@@ -712,7 +728,10 @@ pub fn run(args: &Args, file: &PathBuf) -> Result<()> {
     // Check if file exists, offer to create if not
     if !file.exists() && !args.dry_run {
         if !args.yes {
-            print!("File {} does not exist. Create it? [y/N] ", file.display());
+            print!(
+                "File {} does not exist. Create it? [y/N] ",
+                shown_path(file)
+            );
             std::io::stdout().flush()?;
 
             let mut response = String::new();

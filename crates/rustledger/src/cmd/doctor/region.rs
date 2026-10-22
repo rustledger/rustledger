@@ -130,7 +130,15 @@ pub(super) fn cmd_region<W: Write>(
     let mut balances: BTreeMap<String, Number> = BTreeMap::new();
 
     for txn in &region_transactions {
-        writeln!(writer, "{} {} \"{}\"", txn.date, txn.flag, txn.narration)?;
+        // One line: a newline in the narration is escaped too
+        // (#2714); the doctor's writer escapes the other controls.
+        writeln!(
+            writer,
+            "{} {} \"{}\"",
+            txn.date,
+            txn.flag,
+            rustledger_plugin::escape_untrusted_line(&txn.narration)
+        )?;
         for posting in &txn.postings {
             if let Some(amount) = posting.amount() {
                 // Apply conversion if specified

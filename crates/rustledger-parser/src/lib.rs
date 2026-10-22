@@ -32,7 +32,7 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs)]
 // Never-panic surface: the parser must handle malformed input gracefully (no
-// panics — see CLAUDE.md), so production code must not `unwrap`/`expect`.
+// panics — see AGENTS.md), so production code must not `unwrap`/`expect`.
 // `not(test)` scopes the deny to non-test builds, exempting this crate's own
 // `#[cfg(test)]` code (it compiles with `cfg(test)`); integration tests under
 // `tests/` are separate crates. Proven-safe production sites (parser invariants

@@ -402,6 +402,44 @@ impl Executor<'_> {
         })
     }
 
+    /// Whether `left` is a member of `right`: the one definition of `IN`, which
+    /// `NOT IN` negates. Neither operand is NULL here (`propagates_null`).
+    ///
+    /// bean-query evaluates `x IN y` as Python's `y.__contains__(x)`, so a
+    /// mapping answers by KEY: `'note' IN meta` asks whether the posting has a
+    /// `note` key. Every metadata value takes that path -- the posting `meta`
+    /// ([`Value::Metadata`]) and `entry.meta` and the system tables' `meta`
+    /// columns ([`Value::Object`]). Both fell through to the scalar arm below,
+    /// which compared the key with the whole map and was always FALSE, so
+    /// `'k' IN meta` matched nothing and `'k' NOT IN meta` matched every row,
+    /// without an error (#2701).
+    ///
+    /// A [`Value::Object`] is also how the `entry` column is represented, so
+    /// `'narration' IN entry` asks for a field name here, where bean-query
+    /// searches a namedtuple's field VALUES. Nothing tests a transaction for a
+    /// value that way; the metadata maps are what `IN` is written against.
+    fn value_in(&self, left: &Value, right: &Value) -> Result<bool, QueryError> {
+        match right {
+            // StringSet from columns like tags, links.
+            Value::StringSet(set) => match left {
+                Value::String(needle) => Ok(set.contains(needle)),
+                _ => Err(QueryError::Type(
+                    "IN/NOT IN requires string left operand for StringSet".to_string(),
+                )),
+            },
+            // Generic set from a set literal: equal to any element.
+            Value::Set(values) => Ok(values.iter().any(|v| self.values_equal(left, v))),
+            // A mapping contains its keys, which are always strings, so a
+            // key of any other type is simply absent, as in Python.
+            Value::Metadata(meta) => Ok(matches!(left, Value::String(k) if meta.contains_key(k))),
+            Value::Object(obj) => Ok(matches!(left, Value::String(k) if obj.contains_key(k))),
+            // Fall back to scalar equality so `x IN ('a')` ≡ `x = 'a'`
+            // (issue #916). bean-query answers `contains` here too, which
+            // for a string is a substring test.
+            _ => Ok(self.values_equal(left, right)),
+        }
+    }
+
     pub(super) fn binary_op_on_values(
         &self,
         op: BinaryOperator,
@@ -463,31 +501,7 @@ impl Executor<'_> {
                         .map_err(|e| super::word_boundary_error(pattern, &e))?,
                 ))
             }
-            BinaryOperator::In => {
-                // Check if left value is in right set
-                match right {
-                    Value::StringSet(set) => {
-                        // StringSet from columns like tags, links
-                        let needle = match left {
-                            Value::String(s) => s,
-                            _ => {
-                                return Err(QueryError::Type(
-                                    "IN requires string left operand for StringSet".to_string(),
-                                ));
-                            }
-                        };
-                        Ok(Value::Boolean(set.contains(needle)))
-                    }
-                    Value::Set(values) => {
-                        // Generic set from set literal - check if left equals any element
-                        let found = values.iter().any(|v| self.values_equal(left, v));
-                        Ok(Value::Boolean(found))
-                    }
-                    // Fall back to scalar equality so `x IN ('a')` ≡ `x = 'a'`,
-                    // matching SQL/bean-query semantics (issue #916).
-                    _ => Ok(Value::Boolean(self.values_equal(left, right))),
-                }
-            }
+            BinaryOperator::In => Ok(Value::Boolean(self.value_in(left, right)?)),
             BinaryOperator::NotRegex => {
                 // !~ operator: string does not match regex pattern. As with
                 // `~`, a NULL operand is short-circuited to NULL above and
@@ -512,31 +526,7 @@ impl Executor<'_> {
                         .map_err(|e| super::word_boundary_error(pattern, &e))?,
                 ))
             }
-            BinaryOperator::NotIn => {
-                // NOT IN: check if left value is not in right set
-                match right {
-                    Value::StringSet(set) => {
-                        // StringSet from columns like tags, links
-                        let needle = match left {
-                            Value::String(s) => s,
-                            _ => {
-                                return Err(QueryError::Type(
-                                    "NOT IN requires string left operand for StringSet".to_string(),
-                                ));
-                            }
-                        };
-                        Ok(Value::Boolean(!set.contains(needle)))
-                    }
-                    Value::Set(values) => {
-                        // Generic set from set literal - check if left does not equal any element
-                        let found = values.iter().any(|v| self.values_equal(left, v));
-                        Ok(Value::Boolean(!found))
-                    }
-                    // Fall back to scalar inequality so `x NOT IN ('a')` ≡ `x != 'a'`,
-                    // matching SQL/bean-query semantics (issue #916).
-                    _ => Ok(Value::Boolean(!self.values_equal(left, right))),
-                }
-            }
+            BinaryOperator::NotIn => Ok(Value::Boolean(!self.value_in(left, right)?)),
             BinaryOperator::Add => {
                 // Handle date + interval
                 match (left, right) {

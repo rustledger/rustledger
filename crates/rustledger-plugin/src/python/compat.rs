@@ -85,7 +85,7 @@ Cost = namedtuple('Cost', ['number', 'currency', 'date', 'label'])
 # `_parse_cost_spec` below.
 #
 # This is an INTENTIONAL legacy-shape match (Python compat policy
-# bucket 2: "not fixable locally" — see project CLAUDE.md). Upstream
+# bucket 2: "not fixable locally" — see project AGENTS.md). Upstream
 # beancount's Python API is what every existing Python plugin codes
 # against; presenting a different shape here would break every
 # Python plugin in the ecosystem. The host's stricter `CostNumber`

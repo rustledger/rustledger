@@ -2,7 +2,7 @@
 
 Each file here reproduced a panic once. They live beside the fix rather than in
 the durable fuzz corpus branch, so losing that branch cannot resurrect a bug
-that was already closed (CLAUDE.md, "Long-lived reference branches").
+that was already closed (AGENTS.md, "Long-lived reference branches").
 
 Replay one:
 

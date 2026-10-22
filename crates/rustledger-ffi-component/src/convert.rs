@@ -2077,7 +2077,7 @@ impl SessionState {
     /// The free `util.get-account-type` classifies with hardcoded English
     /// roots, so on a ledger that renames Expenses it answers "unknown" while
     /// `report balsheet` — which classifies through
-    /// [`rustledger_core::AccountTypes`], the canonical CLAUDE.md names —
+    /// [`rustledger_core::AccountTypes`], the canonical AGENTS.md names —
     /// gets it right. Same ledger, different answers depending on the surface
     /// asked. That utility cannot fix it: its interface holds no ledger. A
     /// session does, so this one goes through the canonical.

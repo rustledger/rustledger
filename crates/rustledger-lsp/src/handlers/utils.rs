@@ -903,7 +903,7 @@ mod tests {
     /// `rustledger-completion` keeps its own copy because it has no
     /// dependencies at all — that is what lets both the LSP and the WASM editor
     /// take it. A deliberate copy is only allowed here if something asserts the
-    /// agreement (CLAUDE.md's canonical-function rule), and nothing did: each
+    /// agreement (AGENTS.md's canonical-function rule), and nothing did: each
     /// crate tested its own list against its own expectations, so a change to
     /// one would have left both suites green while the two surfaces disagreed
     /// about what an account root is.

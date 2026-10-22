@@ -1,6 +1,6 @@
 //! `WEIGHT()` must not invent precision the `weight` column does not (#1963).
 //!
-//! Found by the canonical-function drift sweep (#1902 Phase 2). CLAUDE.md names
+//! Found by the canonical-function drift sweep (#1902 Phase 2). AGENTS.md names
 //! this pair specifically: a consumer surfacing a per-posting weight must call
 //! `rustledger_booking::posting_weight` rather than re-derive it. The `weight`
 //! COLUMN does; the `WEIGHT()` FUNCTION cannot, because it receives a

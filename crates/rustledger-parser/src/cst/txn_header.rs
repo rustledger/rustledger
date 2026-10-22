@@ -27,7 +27,7 @@
 //! the red walker (`convert::transaction_header_check`) and the green walker
 //! (`green::tl_transaction_header_check`) share the *logic* and differ only in
 //! how they enumerate tokens. Per the Canonical-Function Discipline in
-//! CLAUDE.md, the green/red parser mirrors are a known drift source; a rule
+//! AGENTS.md, the green/red parser mirrors are a known drift source; a rule
 //! this fiddly is exactly the kind that drifts. `fuzz_green_eq_red` and the
 //! parity tests pin the two walkers against each other.
 //!

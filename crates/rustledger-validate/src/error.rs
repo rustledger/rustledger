@@ -98,7 +98,7 @@ impl ErrorCode {
     /// two call sites, one classification. They had byte-identical `match`
     /// arms; a reclassification applied to one and not the other would give
     /// the same ledger different codes in the editor and on the command line
-    /// (CLAUDE.md, Canonical-Function Discipline).
+    /// (AGENTS.md, Canonical-Function Discipline).
     #[must_use]
     pub const fn for_booking_error(err: &rustledger_core::BookingError) -> Self {
         use rustledger_core::BookingError as B;

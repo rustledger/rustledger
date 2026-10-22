@@ -333,6 +333,42 @@ for those rows, and so does `BALANCES` for an account partly selected by its
 `FROM` or `WHERE`. Python beancount has no `AVERAGE`
 booking, so there is no bean-query answer to compare with.
 
+## Window Functions
+
+Window functions are a rustledger extension: bean-query has no `OVER` clause
+and rejects these queries as a syntax error. A window function gives a value
+on every posting row, computed over the rows of its window:
+
+```sql
+SELECT date, account, number,
+       row_number() OVER (PARTITION BY account ORDER BY date),
+       min(number) OVER (PARTITION BY account ORDER BY date),
+       max(number) OVER (PARTITION BY account)
+```
+
+| Function | Description |
+|----------|-------------|
+| `row_number()` | Position of the row in its partition, from 1 |
+| `rank()` | Rank by the window's `ORDER BY`; tied rows share a rank and leave a gap |
+| `dense_rank()` | As `rank()`, without the gaps |
+| `min(x)` | Minimum of `x` over the window frame |
+| `max(x)` | Maximum of `x` over the window frame |
+
+`OVER` takes an optional `PARTITION BY` list, which splits the rows into
+independent groups, and an optional `ORDER BY` list, which orders the rows
+within each group. Each window function uses its own `OVER` clause. Window
+functions cannot be combined with `GROUP BY` or aggregates, and explicit
+frames (`ROWS BETWEEN ...`) are not supported.
+
+`min` and `max` use SQL's default frame. Without an `ORDER BY` the frame is
+the whole partition, so each row gets the partition's minimum or maximum.
+With an `ORDER BY`, the frame runs from the first row of the partition through
+the current row and the rows that tie with it on the `ORDER BY` values, so
+the result is a running minimum or maximum. Values compare as in the
+aggregate `min` and `max`: NULLs are skipped, a frame with nothing else is
+NULL, and amounts, positions and inventories compare in `ORDER BY`'s order
+(an amount by currency, then number).
+
 ## Scalar Functions
 
 ### Date Functions

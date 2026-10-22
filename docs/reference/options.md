@@ -290,7 +290,7 @@ directory below the filesystem root.
 | `inferred_tolerance_default` | string | - | Balance tolerance |
 | `inferred_tolerance_multiplier` | decimal | 0.5 | Tolerance multiplier (deprecated; renamed to `tolerance_multiplier`) |
 | `tolerance_multiplier` | decimal | 0.5 | Tolerance multiplier |
-| `infer_tolerance_from_cost` | bool | FALSE | Infer tolerance from cost |
+| `infer_tolerance_from_cost` | bool | FALSE | Infer tolerance from cost and price (each contribution capped at 0.5, as in beancount) |
 | `use_legacy_fixed_tolerances` | bool | FALSE | Use legacy fixed tolerances |
 | `experiment_explicit_tolerances` | bool | FALSE | Enable experimental explicit tolerances |
 | `display_precision` | string | - | Per-currency display precision (e.g. `USD:0.01`) |

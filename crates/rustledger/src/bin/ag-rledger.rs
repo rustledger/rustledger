@@ -39,7 +39,13 @@ async fn main() {
     let cli = build_cli();
     let mut ctx = ExecutionContext::default();
     let run = cli.run_argv_with_context(args, &mut ctx).await;
-    println!("{}", run.to_json());
+    // The envelope's records carry ledger strings: DEL, C1, bidi controls
+    // and line separators are written as `\uXXXX`, the same JSON value, so
+    // whoever reads the envelope raw is not acted on (#2714).
+    println!(
+        "{}",
+        rustledger::cmd::escape_display_unsafe_in_json(&run.to_json())
+    );
     std::process::exit(run.exit_code());
 }
 

@@ -1587,3 +1587,56 @@ fn the_commands_from_2567_answer_as_rledger_does() {
         "{env}"
     );
 }
+
+/// #2714: the envelope escapes DEL, C1, bidi controls and line separators
+/// from the ledger as `\uXXXX`, so reading it raw is safe, and the values
+/// decode unchanged.
+#[test]
+fn envelope_escapes_display_unsafe_characters_and_keeps_the_values() {
+    // Somewhere under `value`, the string `text`.
+    fn holds(value: &Value, text: &str) -> bool {
+        match value {
+            Value::String(s) => s == text,
+            Value::Array(items) => items.iter().any(|v| holds(v, text)),
+            Value::Object(map) => map.values().any(|v| holds(v, text)),
+            _ => false,
+        }
+    }
+    let narration = "a\u{1b}[2Jb\u{7f}c\u{9b}d\u{202e}e\u{2028}f";
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        tmp.path(),
+        "ledger.beancount",
+        &format!(
+            "2024-01-01 open Assets:Cash\n\
+             2024-01-01 open Equity:Opening\n\
+             2024-01-02 * \"{narration}\"\n  \
+               Assets:Cash  1 USD\n  \
+               Equity:Opening\n"
+        ),
+    );
+    let output = Command::new(ag_rledger())
+        .args([
+            "query",
+            file.to_str().unwrap(),
+            "SELECT narration",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("spawn ag-rledger");
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 envelope");
+    for raw in ['\u{1b}', '\u{7f}', '\u{9b}', '\u{202e}', '\u{2028}'] {
+        assert!(
+            !stdout.contains(raw),
+            "{raw:?} raw in the envelope: {stdout:?}"
+        );
+    }
+    assert!(stdout.contains("\\u009b"), "{stdout}");
+    let envelope: Value = serde_json::from_str(stdout.trim()).expect("envelope is JSON");
+    // Somewhere in the rows, the narration as it is in the ledger.
+    assert!(
+        holds(&envelope["result"]["data"]["rows"], narration),
+        "the narration decodes unchanged: {envelope}"
+    );
+}

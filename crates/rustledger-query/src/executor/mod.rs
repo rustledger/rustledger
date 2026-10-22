@@ -1903,13 +1903,20 @@ impl<'a> Executor<'a> {
                 }
             }
             // Math functions
+            // bean-query's `abs` takes a number, a position and an inventory
+            // (not an amount). A position keeps its cost, as beancount's
+            // `abs(Position)` does, and an inventory takes each position's.
             "ABS" => {
                 Self::require_args_count(&name_upper, args, 1)?;
                 match &args[0] {
                     Value::Number(n) => Ok(Value::Number(n.abs())),
                     Value::Integer(i) => Ok(Value::Integer(i.abs())),
+                    Value::Position(p) => Ok(Value::Position(Box::new(Self::position_abs(p)))),
+                    Value::Inventory(inv) => Self::map_inventory(inv, Self::position_abs),
                     Value::Null => Ok(Value::Null),
-                    _ => Err(QueryError::Type("ABS expects a number".to_string())),
+                    _ => Err(QueryError::Type(
+                        "ABS expects a number, position or inventory".to_string(),
+                    )),
                 }
             }
             "ROUND" => Self::round_on_values(args),
@@ -2115,6 +2122,9 @@ impl<'a> Executor<'a> {
                     }
                 }
             }
+            // bean-query's `neg` takes a number, an amount, a position and an
+            // inventory (#2703). A position keeps its cost, as beancount's
+            // `-Position` does, and an inventory negates each position.
             "NEG" => {
                 Self::require_args_count(&name_upper, args, 1)?;
                 match &args[0] {
@@ -2123,9 +2133,11 @@ impl<'a> Executor<'a> {
                     Value::Amount(a) => {
                         Ok(Value::Amount(Amount::new(-a.number, a.currency.clone())))
                     }
+                    Value::Position(p) => Ok(Value::Position(Box::new(p.neg()))),
+                    Value::Inventory(inv) => Self::map_inventory(inv, Position::neg),
                     Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type(
-                        "NEG expects a number or amount".to_string(),
+                        "NEG expects a number, amount, position or inventory".to_string(),
                     )),
                 }
             }
@@ -2321,7 +2333,7 @@ impl<'a> Executor<'a> {
                     Value::Null => return Ok(Value::Null),
                     _ => {
                         return Err(QueryError::Type(
-                            "FILTER_CURRENCY expects (inventory, string)".to_string(),
+                            "FILTER_CURRENCY expects (position or inventory, string)".to_string(),
                         ));
                     }
                 };
@@ -2340,9 +2352,16 @@ impl<'a> Executor<'a> {
                         }
                         Ok(Value::Inventory(std::sync::Arc::new(new_inv)))
                     }
+                    // bean-query's `filter_currency_position`: the position
+                    // itself when its units are in `currency`, else NULL.
+                    Value::Position(p) => Ok(if p.units.currency.as_str() == currency {
+                        Value::Position(p.clone())
+                    } else {
+                        Value::Null
+                    }),
                     Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type(
-                        "FILTER_CURRENCY expects (inventory, string)".to_string(),
+                        "FILTER_CURRENCY expects (position or inventory, string)".to_string(),
                     )),
                 }
             }
@@ -2353,7 +2372,8 @@ impl<'a> Executor<'a> {
                     Value::Null => return Ok(Value::Null),
                     _ => {
                         return Err(QueryError::Type(
-                            "POSSIGN expects (amount, account_string)".to_string(),
+                            "POSSIGN expects (number, amount, position or inventory, account_string)"
+                                .to_string(),
                         ));
                     }
                 };
@@ -2379,9 +2399,19 @@ impl<'a> Executor<'a> {
                         let adjusted = if is_credit_normal { -n } else { n };
                         Ok(Value::Number(adjusted))
                     }
+                    // bean-query takes a position and an inventory too, and
+                    // negates them as `neg()` does.
+                    Value::Position(p) if is_credit_normal => {
+                        Ok(Value::Position(Box::new(p.neg())))
+                    }
+                    Value::Inventory(inv) if is_credit_normal => {
+                        Self::map_inventory(inv, Position::neg)
+                    }
+                    Value::Position(_) | Value::Inventory(_) => Ok(args[0].clone()),
                     Value::Null => Ok(Value::Null),
                     _ => Err(QueryError::Type(
-                        "POSSIGN expects (amount, account_string)".to_string(),
+                        "POSSIGN expects (number, amount, position or inventory, account_string)"
+                            .to_string(),
                     )),
                 }
             }
@@ -2640,14 +2670,23 @@ impl<'a> Executor<'a> {
                 }
             }
             // Position/amount getters
+            // `getitem(container, key[, default])`: bean-query's `GetItem2`
+            // and `GetItem3`. The default stands in for a missing key only
+            // (#2699); see `getitem_entry`.
             "GETITEM" | "GET" => {
-                Self::require_args_count(&name_upper, args, 2)?;
+                if !(2..=3).contains(&args.len()) {
+                    return Err(QueryError::InvalidArguments(
+                        name_upper.clone(),
+                        format!("expected 2 or 3 argument(s), got {}", args.len()),
+                    ));
+                }
                 match (&args[0], &args[1]) {
                     // Container lookups delegate to the CANONICAL
-                    // `getitem_lookup`, shared with `[...]` subscript
+                    // `getitem_entry`, shared with `[...]` subscript
                     // expressions so the two spellings cannot drift
                     // (#1800 review).
-                    (container, Value::String(key)) => Self::getitem_lookup(container, key),
+                    (container, Value::String(key)) => Ok(Self::getitem_entry(container, key)?
+                        .unwrap_or_else(|| args.get(2).cloned().unwrap_or(Value::Null))),
                     (Value::Null, _) => Ok(Value::Null),
                     _ => Err(QueryError::Type(
                         "GETITEM expects (inventory, string), (metadata, string), or (object, string)"
@@ -3048,6 +3087,30 @@ impl<'a> Executor<'a> {
             "SUM" | "COUNT" | "MIN" | "MAX" | "FIRST" | "LAST" | "AVG" => Ok(Value::Null),
             _ => Err(QueryError::UnknownFunction(name.to_string())),
         }
+    }
+
+    /// `position` with the absolute value of its units, cost kept.
+    fn position_abs(position: &Position) -> Position {
+        Position {
+            units: position.units.abs(),
+            cost: position.cost.clone(),
+        }
+    }
+
+    /// An inventory of `f` applied to each of `inv`'s positions, as
+    /// beancount's `Inventory.__neg__` / `__abs__` build one: position by
+    /// position, each keeping its cost.
+    ///
+    /// The result is built with [`Inventory::add`], so a lot's exact `{{T}}`
+    /// total (#2425) is not carried over; `units × per-unit` stands in for it,
+    /// as it does after [`Inventory::merge`].
+    fn map_inventory(
+        inv: &Inventory,
+        f: impl Fn(&Position) -> Position,
+    ) -> Result<Value, QueryError> {
+        Inventory::try_from_positions(inv.positions().filter(|p| !p.is_empty()).map(f))
+            .map(|result| Value::Inventory(std::sync::Arc::new(result)))
+            .map_err(|e| QueryError::Evaluation(e.to_string()))
     }
 
     /// Convert a `Metadata` map to a `Value::Object` for table storage.

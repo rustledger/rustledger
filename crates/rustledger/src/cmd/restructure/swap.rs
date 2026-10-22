@@ -82,6 +82,23 @@ pub(super) struct Applied {
     pub(super) not_removed: Vec<(PathBuf, std::io::Error)>,
 }
 
+/// What [`apply_recording`] did to disk, kept as it goes so a caller can say
+/// how far a failing write got (#2721): what it renamed or removed before it
+/// stopped — a rollback may have restored them afterwards, which the
+/// refusal's code says — and where the originals are.
+#[derive(Debug, Default)]
+pub(super) struct Touched {
+    /// The backup directory from the moment it exists, `None` again if it
+    /// was removed.
+    pub(super) backup_dir: Option<PathBuf>,
+    /// Files renamed into place.
+    pub(super) written: Vec<PathBuf>,
+    /// Files removed.
+    pub(super) removed: Vec<PathBuf>,
+    /// Files the plan should have removed and could not, with why.
+    pub(super) not_removed: Vec<(PathBuf, std::io::Error)>,
+}
+
 /// Refuse a plan whose preconditions no longer hold, before touching anything.
 pub(super) fn preflight(plan: &Plan) -> Result<()> {
     for (path, _) in &plan.writes {
@@ -118,15 +135,15 @@ fn unchanged(plan: &Plan) -> Result<()> {
 /// the backup).
 #[cfg(test)]
 pub(super) fn apply(plan: &Plan, verify: impl FnMut(Phase) -> Result<()>) -> Result<Applied> {
-    apply_recording(plan, &mut None, verify)
+    apply_recording(plan, &mut Touched::default(), verify)
 }
 
-/// `apply`, also setting `backup` to the backup directory as soon as it
-/// exists, and back to `None` if it is removed again, so a caller knows where
-/// the originals are even when `apply` fails afterwards.
+/// `apply`, also recording what the run did in `touched` as it goes — where
+/// the backup is and which files it renamed or removed — so a caller can say
+/// how far a failing write got even when `apply` rolls it back (#2721).
 pub(super) fn apply_recording(
     plan: &Plan,
-    backup: &mut Option<PathBuf>,
+    touched: &mut Touched,
     mut verify: impl FnMut(Phase) -> Result<()>,
 ) -> Result<Applied> {
     preflight(plan)?;
@@ -135,7 +152,7 @@ pub(super) fn apply_recording(
     } else {
         Some(make_backup(plan).context("nothing was changed")?)
     };
-    backup.clone_from(&backup_dir);
+    touched.backup_dir.clone_from(&backup_dir);
     let backup_note = backup_dir.as_ref().map_or_else(String::new, |d| {
         format!("; a backup copy is in {}", d.display())
     });
@@ -143,7 +160,7 @@ pub(super) fn apply_recording(
         && let Err(e) = verify(Phase::BackedUp)
     {
         let removed = if remove_backup(dir) {
-            *backup = None;
+            touched.backup_dir = None;
             "was removed".to_string()
         } else {
             format!("could not be removed; delete {} by hand", dir.display())
@@ -182,6 +199,7 @@ pub(super) fn apply_recording(
             let committed = placed.contains(&plan.commit);
             if !committed {
                 cleanup(&temps, &placed, &created_dirs);
+                touched.written.clear();
                 return Err(anyhow::Error::new(e).context(format!(
                     "failed to move {} into place; nothing was changed",
                     target.display()
@@ -192,12 +210,13 @@ pub(super) fn apply_recording(
                 .context(format!("failed to move {} into place", target.display())));
         }
         placed.push(target.clone());
+        touched.written.push(target.clone());
     }
 
-    let mut not_removed = Vec::new();
     for path in &plan.removes {
-        if let Err(e) = fs::remove_file(path) {
-            not_removed.push((path.clone(), e));
+        match fs::remove_file(path) {
+            Ok(()) => touched.removed.push(path.clone()),
+            Err(e) => touched.not_removed.push((path.clone(), e)),
         }
     }
 
@@ -206,7 +225,11 @@ pub(super) fn apply_recording(
         let (code, how) = match restored {
             Ok(()) => (
                 super::code::WRITE_ROLLED_BACK,
-                "the original files were restored".to_string(),
+                if plan.originals.is_empty() {
+                    "nothing original was replaced and the output file was removed".to_string()
+                } else {
+                    "the original files were restored".to_string()
+                },
             ),
             Err(r) => (
                 super::code::RESTORE_FAILED,
@@ -219,10 +242,11 @@ pub(super) fn apply_recording(
         )));
     }
 
-    if !not_removed.is_empty() {
+    if !touched.not_removed.is_empty() {
         // A notice, not a write to stderr: `ag-rledger` captures it into its
         // envelope (#2566, #2633); `rledger` prints it as before.
-        let listed: Vec<String> = not_removed
+        let listed: Vec<String> = touched
+            .not_removed
             .iter()
             .map(|(path, e)| format!("{}: {e}", path.display()))
             .collect();
@@ -237,7 +261,7 @@ pub(super) fn apply_recording(
     }
     Ok(Applied {
         backup_dir,
-        not_removed,
+        not_removed: std::mem::take(&mut touched.not_removed),
     })
 }
 

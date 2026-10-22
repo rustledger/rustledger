@@ -1305,10 +1305,12 @@ fn refusal_fix(code: &str) -> (i32, &'static str) {
         ),
         c::WRITE_ROLLED_BACK => (
             error,
-            "The originals were restored; the backup is in backup_dir. The written files \
-             passed the check in memory but reloaded differently from disk, usually a \
-             ledger that loads differently from run to run (a plugin) or a file edited \
-             meanwhile. Retry with --dry-run; if it recurs, treat it as LEDGER_UNSTABLE.",
+            "The originals were restored (with merge --output nothing original was \
+             replaced and the output file was removed); a backup, when one was taken, \
+             is in backup_dir. The written files passed the check in memory but \
+             reloaded differently from disk, usually a ledger that loads differently \
+             from run to run (a plugin) or a file edited meanwhile. Retry with \
+             --dry-run; if it recurs, treat it as LEDGER_UNSTABLE.",
         ),
         c::RESTORE_FAILED => (
             error,
@@ -1323,7 +1325,10 @@ fn refusal_fix(code: &str) -> (i32, &'static str) {
     }
 }
 
-/// `outcome` as the envelope's `result` (or a refusal's `data`).
+/// `outcome` as the envelope's `result` (or a refusal's `data`). On a
+/// rolled-back write, `written`/`removed` are what the run changed before
+/// the rollback, and the error's code says whether those files were
+/// restored (#2721).
 fn outcome_json(command: &str, outcome: &Outcome) -> serde_json::Map<String, Value> {
     let path = |p: &std::path::Path| json!(p.to_string_lossy());
     let mut body = serde_json::Map::new();

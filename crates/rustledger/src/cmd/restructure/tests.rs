@@ -340,11 +340,15 @@ fn failed_verification_restores_the_backup() {
         template: file.clone(),
         mode_mask: None,
     };
-    let e = swap::apply(&plan, after_swap_fails).unwrap_err();
+    let mut touched = swap::Touched::default();
+    let e = swap::apply_recording(&plan, &mut touched, after_swap_fails).unwrap_err();
     assert!(format!("{e:#}").contains("restored"), "{e:#}");
     assert_eq!(fs::read_to_string(&file).unwrap(), "; original\n");
     assert!(!new.exists());
     assert!(!dir.path().join("sub").exists());
+    // The rollback does not erase the record of what the run wrote (#2721).
+    assert_eq!(touched.written, vec![new.clone(), file.clone()]);
+    assert!(touched.removed.is_empty());
 }
 
 /// The check must be able to say "dirty". A split that drops one
@@ -1321,7 +1325,7 @@ fn an_edit_during_staging_is_not_overwritten() {
 #[test]
 fn a_failed_restore_names_a_complete_backup() {
     let dir = tmp();
-    let (plan, _file) = split_plan(dir.path());
+    let (plan, file) = split_plan(dir.path());
     let _hook = swap::inject(|point| match point {
         swap::Fault::Restore(original) => {
             assert!(original.ends_with("ledger.beancount"), "{original:?}");
@@ -1329,8 +1333,23 @@ fn a_failed_restore_names_a_complete_backup() {
         }
         _ => Ok(()),
     });
-    let e = format!("{:#}", swap::apply(&plan, after_swap_fails).unwrap_err());
+    let mut touched = swap::Touched::default();
+    let e = format!(
+        "{:#}",
+        swap::apply_recording(&plan, &mut touched, after_swap_fails).unwrap_err()
+    );
     assert!(e.contains("restoring failed too"), "{e}");
+    // A restore that fails leaves the written files as they are; they stay
+    // listed, so the envelope can name what to inspect (#2721).
+    assert_eq!(
+        touched.written,
+        vec![
+            dir.path().join("ledger/2023.beancount"),
+            dir.path().join("ledger/2024.beancount"),
+            file.clone(),
+        ]
+    );
+    assert!(touched.removed.is_empty());
     let backup = complete_backup(dir.path(), "ledger.beancount", "; original\n");
     assert!(e.contains(&backup.display().to_string()), "{e}");
     let manifest = fs::read_to_string(backup.join("manifest.txt")).unwrap();
@@ -1530,21 +1549,120 @@ fn a_rolled_back_write_is_coded() {
         backup_base: dir.path().canonicalize().unwrap(),
         originals: vec![(file.clone(), b"; original\n".to_vec())],
         operation: "split",
-        template: file,
+        template: file.clone(),
         mode_mask: None,
     };
-    let mut backup = None;
-    let e = swap::apply_recording(&plan, &mut backup, after_swap_fails).unwrap_err();
+    let mut touched = swap::Touched::default();
+    let e = swap::apply_recording(&plan, &mut touched, after_swap_fails).unwrap_err();
     assert_eq!(refusal_code(&e), Some(code::WRITE_ROLLED_BACK), "{e:#}");
+    // What the run wrote is recorded even though it was rolled back (#2721).
+    assert_eq!(touched.written, vec![file.clone()]);
+    assert!(touched.removed.is_empty());
+    assert!(touched.not_removed.is_empty());
     // The backup is kept after a rollback, and its directory is known even
     // though `apply` failed.
-    let backup = backup.expect("the backup directory is recorded on failure");
+    let backup = touched
+        .backup_dir
+        .expect("the backup directory is recorded on failure");
     assert!(
         backup.join("manifest.txt").is_file(),
         "{}",
         backup.display()
     );
     assert_eq!(refusal_code(&anyhow::anyhow!("disk on fire")), None);
+}
+
+/// With `merge --output` the run replaces nothing, so a rollback removes the
+/// output file and there is no backup: the message must say that instead of
+/// pointing at one (#2721).
+#[test]
+fn a_rolled_back_output_file_says_nothing_was_replaced() {
+    use super::{code, refusal_code};
+    let dir = tmp();
+    let template = write(dir.path(), "ledger.beancount", "; original\n");
+    let target = dir.path().join("merged.beancount");
+    let plan = swap::Plan {
+        writes: vec![(target.clone(), "; merged\n".to_string())],
+        commit: target.clone(),
+        removes: Vec::new(),
+        backup_base: dir.path().canonicalize().unwrap(),
+        originals: Vec::new(),
+        operation: "merge",
+        template,
+        mode_mask: None,
+    };
+    let mut touched = swap::Touched::default();
+    let e = swap::apply_recording(&plan, &mut touched, after_swap_fails).unwrap_err();
+    assert_eq!(refusal_code(&e), Some(code::WRITE_ROLLED_BACK), "{e:#}");
+    let msg = format!("{e:#}");
+    assert!(msg.contains("nothing original was replaced"), "{msg}");
+    assert!(msg.contains("output file was removed"), "{msg}");
+    assert!(touched.backup_dir.is_none(), "{msg}");
+    assert_eq!(touched.written, vec![target.clone()]);
+    assert!(!target.exists(), "the output file was removed again");
+}
+
+/// A ledger file edited while the plan was being written makes the reload
+/// after the swap differ; the write is rolled back, and the outcome still
+/// lists what the run wrote before restoring it (#2721).
+#[test]
+fn a_rolled_back_split_still_lists_what_it_wrote() {
+    use super::{Outcome, code, refusal_code};
+    let dir = tmp();
+    let extra = write(
+        dir.path(),
+        "extra.beancount",
+        "2023-02-01 * \"Bonus\"\n  Assets:Bank      5 USD\n  Income:Salary  -5 USD\n",
+    );
+    let file = write(
+        dir.path(),
+        "ledger.beancount",
+        "; My ledger\n\noption \"operating_currency\" \"USD\"\ninclude \"extra.beancount\"\n\n\
+         2023-01-01 open Assets:Bank USD\n2023-01-01 open Income:Salary USD\n\n\
+         2023-01-31 * \"Pay\"\n  Assets:Bank      1000 USD\n  Income:Salary  -1000 USD\n\n\
+         2024-03-01 * \"Lunch\"\n  Expenses:Food    12 USD\n  Assets:Bank     -12 USD\n",
+    );
+    let original = fs::read_to_string(&file).unwrap();
+    let mut outcome = Outcome::default();
+    // Edit a file that is in the ledger but not in the plan, after the
+    // temporaries are staged: the reload after the swap finds a difference.
+    let edited = extra.clone();
+    let _hook = swap::inject(move |point| {
+        if matches!(point, swap::Fault::BeforeRename) {
+            fs::write(
+                &edited,
+                "2023-02-01 * \"Bonus\"\n  Assets:Bank      6 USD\n  Income:Salary  -6 USD\n",
+            )
+            .unwrap();
+        }
+        Ok(())
+    });
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let e = split::run_with_outcome(
+        &split_args(&file, Period::Year),
+        &mut out,
+        &mut err,
+        &mut outcome,
+    )
+    .unwrap_err();
+    assert_eq!(refusal_code(&e), Some(code::WRITE_ROLLED_BACK), "{e:#}");
+    let written = outcome.written.expect("written");
+    let base = file.parent().unwrap();
+    assert_eq!(
+        written.written,
+        vec![
+            base.join("ledger/2023.beancount"),
+            base.join("ledger/2024.beancount"),
+            file.clone(),
+        ]
+    );
+    assert!(written.removed.is_empty());
+    assert!(written.not_removed.is_empty());
+    assert!(outcome.backup_dir.is_some());
+    // The plan's files were restored; the edited file is as the edit left it.
+    assert_eq!(fs::read_to_string(&file).unwrap(), original);
+    assert!(!base.join("ledger").exists());
+    assert!(fs::read_to_string(&extra).unwrap().contains("6 USD"));
 }
 
 /// The outcome records the plan, the verdict and what was written, and the

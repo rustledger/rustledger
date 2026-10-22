@@ -282,6 +282,11 @@ impl Check {
 }
 
 /// What a run that was not a dry run wrote.
+///
+/// Also for a write that failed after the swap: the lists then say how far
+/// the write got, and the refusal's code says whether the rollback restored
+/// these files ([`code::WRITE_ROLLED_BACK`]) or some may still be in place
+/// ([`code::RESTORE_FAILED`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Written {
     /// Every file written: new files and the rewritten FILE.
@@ -579,13 +584,32 @@ fn write_plan(
     plan: &swap::Plan,
     outcome: &mut Outcome,
 ) -> Result<()> {
-    let applied = swap::apply_recording(plan, &mut outcome.backup_dir, |_phase| {
+    let mut touched = swap::Touched::default();
+    let applied = swap::apply_recording(plan, &mut touched, |_phase| {
         let (again, _) = equivalence::load(root, overlay::OverlayFs::disk())?;
         match equivalence::first_difference(&before.fingerprint, &again) {
             None => Ok(()),
             Some(reason) => bail!("{reason}"),
         }
-    })?;
+    });
+    outcome.backup_dir.clone_from(&touched.backup_dir);
+    let applied = match applied {
+        Ok(applied) => applied,
+        Err(e) => {
+            // How far the write got, even when it failed: the refusal's
+            // code and message say whether the rollback restored these
+            // files or left some in place (#2721).
+            outcome.written = Some(Written {
+                written: std::mem::take(&mut touched.written),
+                removed: std::mem::take(&mut touched.removed),
+                not_removed: std::mem::take(&mut touched.not_removed)
+                    .into_iter()
+                    .map(|(p, why)| format!("{}: {why}", p.display()))
+                    .collect(),
+            });
+            return Err(e);
+        }
+    };
     outcome.written = Some(Written {
         written: plan.writes.iter().map(|(p, _)| p.clone()).collect(),
         removed: plan

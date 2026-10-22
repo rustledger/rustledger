@@ -7,31 +7,225 @@
 //! from the directives at construction).
 
 use super::types::{SourceLocation, Table, Value};
-use super::{Executor, compute_posting_weight};
+use super::{ColumnInfo, Executor, compute_posting_weight};
 use rustc_hash::FxHashMap;
 use rustledger_core::{Amount, Directive, Position};
 
+/// A [`ColumnInfo`] in a `const` table definition.
+const fn col(name: &'static str, type_name: &'static str, description: &'static str) -> ColumnInfo {
+    ColumnInfo {
+        name,
+        type_name,
+        description,
+    }
+}
+
+// The columns of each system table, in order: the one definition its builder
+// below creates the table from and the REPL's `.describe` prints (#2634), so
+// the two cannot drift. Types use the names bean-query 0.2's `.describe` gives
+// its own tables (`metadata` for a directive's `meta`, `frozenset` for a
+// note's or document's tags, ...) where it has the column, and the type of the
+// value rledger puts there where it does not, or where the two differ.
+// `system_tables_describe_their_real_columns` checks every column against the
+// values the builder produces.
+
+/// The columns of `#prices`. bean-query's also has `meta`, which rledger's
+/// price database does not keep.
+pub(super) const PRICES_COLUMNS: &[ColumnInfo] = &[
+    col("date", "date", "Date of the price"),
+    col("currency", "str", "Currency being priced"),
+    col("amount", "amount", "Price, in the quote currency"),
+];
+
+/// The columns of `#balances`.
+pub(super) const BALANCES_COLUMNS: &[ColumnInfo] = &[
+    col("date", "date", "Date of the assertion"),
+    col("account", "str", "Account asserted"),
+    col("amount", "amount", "Asserted balance"),
+    col("tolerance", "decimal", "Explicit `~` tolerance, else NULL"),
+    col(
+        "discrepancy",
+        "amount",
+        "Computed minus asserted balance on a failing assertion, else NULL",
+    ),
+    col("meta", "metadata", "Directive metadata (not in `SELECT *`)"),
+];
+
+/// The columns of `#commodities`.
+pub(super) const COMMODITIES_COLUMNS: &[ColumnInfo] = &[
+    col("meta", "metadata", "Directive metadata"),
+    col("date", "date", "Date of the declaration"),
+    col("name", "str", "Commodity"),
+];
+
+/// The columns of `#events`.
+pub(super) const EVENTS_COLUMNS: &[ColumnInfo] = &[
+    col("date", "date", "Date of the event"),
+    col("type", "str", "Event type"),
+    col("description", "str", "Event value"),
+    col("meta", "metadata", "Directive metadata (not in `SELECT *`)"),
+];
+
+/// The columns of `#notes`.
+pub(super) const NOTES_COLUMNS: &[ColumnInfo] = &[
+    col("date", "date", "Date of the note"),
+    col("account", "str", "Account the note is attached to"),
+    col("comment", "str", "Note text"),
+    col("tags", "frozenset", "Note tags"),
+    col("links", "frozenset", "Note links"),
+    col("meta", "metadata", "Directive metadata (not in `SELECT *`)"),
+];
+
+/// The columns of `#documents`.
+pub(super) const DOCUMENTS_COLUMNS: &[ColumnInfo] = &[
+    col("date", "date", "Date of the document"),
+    col("account", "str", "Account the document is attached to"),
+    col("filename", "str", "Path of the document"),
+    col("tags", "frozenset", "Document tags"),
+    col("links", "frozenset", "Document links"),
+    col("meta", "metadata", "Directive metadata (not in `SELECT *`)"),
+];
+
+/// The columns of `#accounts`. `currencies` and `booking` are rledger's own.
+pub(super) const ACCOUNTS_COLUMNS: &[ColumnInfo] = &[
+    col("account", "str", "Account name"),
+    col(
+        "open",
+        "open",
+        "The account's `open` directive, structured (NULL if none)",
+    ),
+    col(
+        "close",
+        "close",
+        "The account's `close` directive, structured (NULL if still open)",
+    ),
+    col("currencies", "set", "Currencies the account allows"),
+    col("booking", "str", "Booking method, else NULL"),
+];
+
+/// The columns of `#transactions`.
+pub(super) const TRANSACTIONS_COLUMNS: &[ColumnInfo] = &[
+    col("date", "date", "Transaction date"),
+    col("flag", "str", "Transaction flag"),
+    col("payee", "str", "Payee, else NULL"),
+    col("narration", "str", "Narration"),
+    col("tags", "set", "Transaction tags"),
+    col("links", "set", "Transaction links"),
+    col(
+        "accounts",
+        "set[str]",
+        "Accounts of the transaction's postings",
+    ),
+    col(
+        "meta",
+        "metadata",
+        "Transaction metadata (not in `SELECT *`)",
+    ),
+];
+
 /// The columns of the `#entries` table, in order: one row per directive,
 /// whatever its type, as beanquery's `entries` table. `PRINT`'s FROM filter
-/// reads an entry through them too.
-pub(super) const ENTRY_TABLE_COLUMNS: &[&str] = &[
-    "id",
-    "type",
-    "filename",
-    "lineno",
-    "date",
-    "year",
-    "month",
-    "day",
-    "flag",
-    "payee",
-    "narration",
-    "description",
-    "tags",
-    "links",
-    "meta",
-    "accounts",
+/// reads an entry through them too. `id` is an `int` here, where
+/// bean-query's is a `str` hash, as in [`POSTING_COLUMNS`](super::POSTING_COLUMNS).
+pub(super) const ENTRIES_COLUMNS: &[ColumnInfo] = &[
+    col("id", "int", "Directive index"),
+    col("type", "str", "Directive type"),
+    col("filename", "str", "Source file"),
+    col("lineno", "int", "Source line"),
+    col("date", "date", "Directive date"),
+    col("year", "int", "Year of the date"),
+    col("month", "int", "Month of the date"),
+    col("day", "int", "Day of the date"),
+    col("flag", "str", "Transaction flag, else NULL"),
+    col("payee", "str", "Transaction payee, else NULL"),
+    col("narration", "str", "Transaction narration, else NULL"),
+    col("description", "str", "`payee | narration`, else NULL"),
+    col("tags", "set", "Tags"),
+    col("links", "set", "Links"),
+    col("meta", "dict", "Metadata, with `filename` and `lineno`"),
+    col("accounts", "set[str]", "Accounts the directive names"),
 ];
+
+/// The columns of `#postings` a query names, in order. The table also
+/// keeps hidden columns after them (`_entry_meta`, `_posting_meta` and the
+/// NUL-named posting values), which back functions rather than queries.
+///
+/// The same columns as [`POSTING_COLUMNS`](super::POSTING_COLUMNS) minus
+/// `units`, `cost` and `has_cost` (only a `SELECT` with no `FROM` has those),
+/// in its order except the tail: this list ends `accounts, entry`, the
+/// builder's order, where the default table's ends `entry, accounts`
+/// (bean-query's `.describe postings` order).
+/// `postings_column_lists_agree` pins the relationship.
+pub(super) const POSTINGS_TABLE_COLUMNS: &[ColumnInfo] = &[
+    col("type", "str", "Directive type (always `transaction`)"),
+    col("id", "int", "Directive index"),
+    col("date", "date", "Transaction date"),
+    col("year", "int", "Year of the date"),
+    col("month", "int", "Month of the date"),
+    col("day", "int", "Day of the date"),
+    col("filename", "str", "Source file"),
+    col("lineno", "int", "Source line of the posting"),
+    col("location", "str", "`filename:lineno`"),
+    col("flag", "str", "Transaction flag"),
+    col("payee", "str", "Payee, else NULL"),
+    col("narration", "str", "Narration"),
+    col("description", "str", "`payee | narration`"),
+    col("tags", "set", "Transaction tags"),
+    col("links", "set", "Transaction links"),
+    col("posting_flag", "str", "Posting flag, else NULL"),
+    col("account", "str", "Posting account"),
+    col("other_accounts", "set", "The transaction's other accounts"),
+    col("number", "decimal", "Units number"),
+    col("currency", "str", "Units currency"),
+    col("cost_number", "decimal", "Per-unit cost, else NULL"),
+    col("cost_currency", "str", "Cost currency, else NULL"),
+    col("cost_date", "date", "Lot date, else NULL"),
+    col("cost_label", "str", "Lot label, else NULL"),
+    col("position", "position", "Units with cost"),
+    col("price", "amount", "Price, else NULL"),
+    col("weight", "amount", "Balancing weight"),
+    col("balance", "inventory", "Running balance"),
+    col(
+        "account_balance",
+        "inventory",
+        "Per-account running balance",
+    ),
+    col("meta", "dict", "Posting metadata"),
+    col(
+        "accounts",
+        "set[str]",
+        "Accounts of all the transaction's postings",
+    ),
+    col("entry", "transaction", "Parent transaction"),
+];
+
+/// The columns of the system table `name` (any case, `#` optional).
+///
+/// What `.describe` prints, and the columns the table is built with. `None`
+/// when `name` is not a system table. It knows the same names as the
+/// executor's table lookup, which a test checks.
+#[must_use]
+pub fn system_table_columns(name: &str) -> Option<&'static [ColumnInfo]> {
+    let upper = name.to_uppercase();
+    Some(match upper.strip_prefix('#').unwrap_or(&upper) {
+        "PRICES" => PRICES_COLUMNS,
+        "BALANCES" => BALANCES_COLUMNS,
+        "COMMODITIES" => COMMODITIES_COLUMNS,
+        "EVENTS" => EVENTS_COLUMNS,
+        "NOTES" => NOTES_COLUMNS,
+        "DOCUMENTS" => DOCUMENTS_COLUMNS,
+        "ACCOUNTS" => ACCOUNTS_COLUMNS,
+        "TRANSACTIONS" => TRANSACTIONS_COLUMNS,
+        "ENTRIES" => ENTRIES_COLUMNS,
+        "POSTINGS" => POSTINGS_TABLE_COLUMNS,
+        _ => return None,
+    })
+}
+
+/// The column names of a table definition, to build the table from.
+fn column_names(columns: &[ColumnInfo]) -> Vec<String> {
+    columns.iter().map(|c| c.name.to_string()).collect()
+}
 
 impl Executor<'_> {
     /// Build the #prices table from price directives.
@@ -48,11 +242,7 @@ impl Executor<'_> {
     /// internal `VALUE()` lookups are intentionally excluded so the
     /// `#prices` table matches `bean-query`'s output (issue #1048).
     pub(super) fn build_prices_table(&self) -> Table {
-        let columns = vec![
-            "date".to_string(),
-            "currency".to_string(),
-            "amount".to_string(),
-        ];
+        let columns = column_names(PRICES_COLUMNS);
         let mut table = Table::new(columns);
 
         // Collect explicit price entries only — transaction-derived
@@ -104,14 +294,7 @@ impl Executor<'_> {
     /// `diff_amount` only on a failing entry, so an assertion that is off by
     /// less than its tolerance reports nothing rather than a small number.
     pub(super) fn build_balances_table(&self) -> Table {
-        let columns = vec![
-            "date".to_string(),
-            "account".to_string(),
-            "amount".to_string(),
-            "tolerance".to_string(),
-            "discrepancy".to_string(),
-            "meta".to_string(),
-        ];
+        let columns = column_names(BALANCES_COLUMNS);
         let mut table = Table::new(columns).with_hidden(&["meta"]);
 
         // Collect balance directives from either spanned or unspanned directives
@@ -188,7 +371,7 @@ impl Executor<'_> {
     /// the `Commodity` namedtuple, whose first field is `meta`. Verified
     /// against bean-query rather than inferred (#2154).
     pub(super) fn build_commodities_table(&self) -> Table {
-        let columns = vec!["meta".to_string(), "date".to_string(), "name".to_string()];
+        let columns = column_names(COMMODITIES_COLUMNS);
         let mut table = Table::new(columns);
 
         // Collect commodity directives from either spanned or unspanned directives
@@ -242,12 +425,7 @@ impl Executor<'_> {
     /// - description: The event value/description
     /// - meta: The directive's metadata (hidden from `SELECT *`)
     pub(super) fn build_events_table(&self) -> Table {
-        let columns = vec![
-            "date".to_string(),
-            "type".to_string(),
-            "description".to_string(),
-            "meta".to_string(),
-        ];
+        let columns = column_names(EVENTS_COLUMNS);
         let mut table = Table::new(columns).with_hidden(&["meta"]);
 
         // Collect event directives
@@ -309,14 +487,7 @@ impl Executor<'_> {
     /// fields to hold them and the parser discarded them -- a column census
     /// could not see that, since the columns were simply absent.
     pub(super) fn build_notes_table(&self) -> Table {
-        let columns = vec![
-            "date".to_string(),
-            "account".to_string(),
-            "comment".to_string(),
-            "tags".to_string(),
-            "links".to_string(),
-            "meta".to_string(),
-        ];
+        let columns = column_names(NOTES_COLUMNS);
         let mut table = Table::new(columns).with_hidden(&["meta"]);
 
         // Collect note directives
@@ -384,14 +555,7 @@ impl Executor<'_> {
     /// - links: The document links (as a set)
     /// - meta: The directive's metadata (hidden from `SELECT *`)
     pub(super) fn build_documents_table(&self) -> Table {
-        let columns = vec![
-            "date".to_string(),
-            "account".to_string(),
-            "filename".to_string(),
-            "tags".to_string(),
-            "links".to_string(),
-            "meta".to_string(),
-        ];
+        let columns = column_names(DOCUMENTS_COLUMNS);
         let mut table = Table::new(columns).with_hidden(&["meta"]);
 
         // Collect document directives
@@ -472,13 +636,7 @@ impl Executor<'_> {
     pub(super) fn build_accounts_table(&self) -> Table {
         // A directive with its source location, while the earliest is chosen.
         type Located<'d, T> = Option<(&'d T, Option<&'d SourceLocation>)>;
-        let columns = vec![
-            "account".to_string(),
-            "open".to_string(),
-            "close".to_string(),
-            "currencies".to_string(),
-            "booking".to_string(),
-        ];
+        let columns = column_names(ACCOUNTS_COLUMNS);
         let mut table = Table::new(columns);
 
         let mut accounts: FxHashMap<
@@ -599,16 +757,7 @@ impl Executor<'_> {
     /// - accounts: Set of accounts involved in the transaction
     /// - meta: The transaction's metadata (hidden from `SELECT *`)
     pub(super) fn build_transactions_table(&self) -> Table {
-        let columns = vec![
-            "date".to_string(),
-            "flag".to_string(),
-            "payee".to_string(),
-            "narration".to_string(),
-            "tags".to_string(),
-            "links".to_string(),
-            "accounts".to_string(),
-            "meta".to_string(),
-        ];
+        let columns = column_names(TRANSACTIONS_COLUMNS);
         // `meta` is hidden from `SELECT *`, which bean-query keeps at seven
         // columns here, but selectable by name -- the last of #2154's
         // eleven, and the same split #2161 established for the other five
@@ -694,10 +843,7 @@ impl Executor<'_> {
     /// POSTING's metadata and `_entry_meta` the TRANSACTION's, two different
     /// maps on one row (#2154).
     pub(super) fn build_entries_table(&self) -> Table {
-        let columns = ENTRY_TABLE_COLUMNS
-            .iter()
-            .map(ToString::to_string)
-            .collect();
+        let columns = column_names(ENTRIES_COLUMNS);
         let mut table = Table::new(columns);
 
         // Process directives with optional source locations. `get_source_location`
@@ -713,7 +859,7 @@ impl Executor<'_> {
     }
 
     /// Convert a directive to a row for the #entries table, whose columns are
-    /// [`ENTRY_TABLE_COLUMNS`]. `idx` is its directive index, the `id`; an
+    /// [`ENTRIES_COLUMNS`]. `idx` is its directive index, the `id`; an
     /// entry a query synthesized has none.
     pub(super) fn directive_to_entry_row(
         &self,
@@ -875,57 +1021,21 @@ impl Executor<'_> {
         &self,
         query: &crate::ast::SelectQuery,
     ) -> Result<Table, crate::QueryError> {
-        let columns = vec![
-            // Entry-level columns
-            "type".to_string(),
-            "id".to_string(),
-            "date".to_string(),
-            "year".to_string(),
-            "month".to_string(),
-            "day".to_string(),
-            "filename".to_string(),
-            "lineno".to_string(),
-            "location".to_string(),
-            // Transaction-level columns
-            "flag".to_string(),
-            "payee".to_string(),
-            "narration".to_string(),
-            "description".to_string(),
-            "tags".to_string(),
-            "links".to_string(),
-            // Posting-level columns
-            "posting_flag".to_string(),
-            "account".to_string(),
-            "other_accounts".to_string(),
-            "number".to_string(),
-            "currency".to_string(),
-            "cost_number".to_string(),
-            "cost_currency".to_string(),
-            "cost_date".to_string(),
-            "cost_label".to_string(),
-            "position".to_string(),
-            "price".to_string(),
-            "weight".to_string(),
-            "balance".to_string(),
-            "account_balance".to_string(),
-            // Metadata and collection columns
-            "meta".to_string(),
-            "accounts".to_string(),
-            // Parent transaction as a structured object (entry.meta etc.,
-            // #1796) — same canonical builder as the default-path column.
-            "entry".to_string(),
+        let mut columns = column_names(POSTINGS_TABLE_COLUMNS);
+        columns.extend([
             // Hidden metadata columns for META/ENTRY_META functions
             "_entry_meta".to_string(),
             "_posting_meta".to_string(),
-            // Hidden: each row's `weight(position)` and `cost(position)`
-            // (#2429) and its lot's exact total (#2430), computed from the
-            // posting, which the row evaluator cannot see. NUL-named, so
-            // `SELECT *` omits them (see `hidden_weight_column`).
-            super::hidden_weight_column("position"),
-            super::hidden_cost_column("position"),
-            super::hidden_cost_error_column("position"),
-            super::hidden_lot_total_column("position"),
-        ];
+        ]);
+        // Each row keeps its posting, which `weight(position)`,
+        // `cost(position)` (#2429) and `sum(position)` (#2430) answer from
+        // when a query reads them (#2442, `RowOrigin`).
+        let position_column: std::sync::Arc<[usize]> = std::sync::Arc::from(vec![
+            columns
+                .iter()
+                .position(|c| c == "position")
+                .expect("#postings has a position column"),
+        ]);
         let mut table = Table::new(columns);
 
         // Single posting-source scan, shared with the default `SELECT` path
@@ -1039,6 +1149,7 @@ impl Executor<'_> {
         let mut last_entry: Option<(usize, Value)> = None;
 
         for ctx in contexts {
+            let source = Self::context_source(&ctx);
             let txn: &rustledger_core::Transaction = &ctx.transaction;
             let posting = &txn.postings[ctx.posting_index];
             // `scan_postings` always sets a real directive index on every context.
@@ -1141,32 +1252,6 @@ impl Executor<'_> {
             // table and the default-FROM `weight` accessor stay in lockstep
             // (issue #1052).
             let weight_val = compute_posting_weight(posting);
-            let weight_of_position = weight_val.clone();
-            // `cost(position)` as the default FROM gives it (#2428): the
-            // posting's booked cost, else the value path's `COST` of the
-            // position, which is what it falls back to there too.
-            let cost_of_position = match super::compute_posting_cost(posting) {
-                Some(cost) => cost,
-                None => {
-                    self.evaluate_function_on_values("COST", std::slice::from_ref(&position_val))
-                }
-            };
-            // An overflow is raised when a query reads this row's
-            // `cost(position)`, not here (see `hidden_cost_error_column`).
-            // It is the only error either path raises for a posting; anything
-            // else still fails the table.
-            let (cost_of_position, cost_error) = match cost_of_position {
-                Ok(cost) => (cost, Value::Null),
-                Err(crate::QueryError::Evaluation(message)) => {
-                    (Value::Null, Value::String(message))
-                }
-                Err(other) => return Err(other),
-            };
-            // The lot's exact total, for `sum(position)` (#2430).
-            let lot_total = posting
-                .amount()
-                .and_then(|units| rustledger_booking::posting_lot_total(posting, units))
-                .map_or(Value::Null, Value::Number);
 
             // The running balances come straight from the shared scan
             // (`needs_balance`/`needs_account_balance` both `true` above), so they
@@ -1242,12 +1327,14 @@ impl Executor<'_> {
                 } else {
                     Value::Null
                 },
-                weight_of_position,
-                cost_of_position,
-                cost_error,
-                lot_total,
             ];
-            table.add_row(row);
+            table.add_row_with_origin(
+                row,
+                Some(super::types::RowOrigin {
+                    posting: source,
+                    columns: std::sync::Arc::clone(&position_column),
+                }),
+            );
         }
 
         Ok(table)

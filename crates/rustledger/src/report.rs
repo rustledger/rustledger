@@ -9,6 +9,7 @@ use miette::{
 };
 use rustledger_loader::{LedgerError, SourceMap};
 use rustledger_parser::ParseError;
+use rustledger_plugin::{escape_untrusted_line, escape_untrusted_text};
 use std::collections::HashMap;
 use std::io::{IsTerminal, Write};
 use std::path::Path;
@@ -44,18 +45,26 @@ pub fn should_use_color() -> bool {
 /// routine keeps, its columns and its end are the ones it computes from byte
 /// 0. Lines are split exactly as miette splits them (`\n`, `\r\n`, or a
 /// lone `\r`). `windowed_read_matches_miettes_whole_file_read` pins that.
+///
+/// The source is shown ESCAPED: a control character in a ledger (a narration
+/// carrying an ANSI sequence, from a shared or imported file) would otherwise
+/// reach the terminal raw in the snippet (#2538). Escaping lengthens the
+/// text, so a span into the file goes through [`Self::offset`] first.
 #[derive(Debug)]
 struct IndexedSource {
     name: String,
-    source: String,
+    /// The escaped source, and where each byte of the file landed in it.
+    escaped: rustledger_plugin::EscapedSource<'static>,
     /// Byte offset of the start of every line: 0, then the offset just past
     /// each line terminator.
     line_starts: Vec<usize>,
 }
 
 impl IndexedSource {
-    fn new(name: String, source: String) -> Self {
-        let bytes = source.as_bytes();
+    fn new(name: &str, source: &str) -> Self {
+        let name = rustledger_plugin::escape_untrusted_line(name).into_owned();
+        let escaped = rustledger_plugin::escape_untrusted_source(source).into_owned();
+        let bytes = escaped.text.as_bytes();
         let mut line_starts = vec![0];
         let mut i = 0;
         while i < bytes.len() {
@@ -74,9 +83,19 @@ impl IndexedSource {
         }
         Self {
             name,
-            source,
+            escaped,
             line_starts,
         }
+    }
+
+    /// The offset in the shown source of byte `offset` of the file.
+    fn offset(&self, offset: usize) -> usize {
+        self.escaped.offset(offset)
+    }
+
+    /// A label over bytes `start..end` of the file.
+    fn label(&self, start: usize, end: usize, text: impl Into<String>) -> LabeledSpan {
+        LabeledSpan::at(self.offset(start)..self.offset(end), text.into())
     }
 }
 
@@ -105,7 +124,7 @@ impl SourceCode for IndexedSource {
         // context.
         let window_line = span_line.saturating_sub(context_lines_before.saturating_add(1));
         let window_start = self.line_starts[window_line];
-        let window = &self.source.as_bytes()[window_start..];
+        let window = &self.escaped.text.as_bytes()[window_start..];
         let local = SourceSpan::new((span.offset() - window_start).into(), span.len());
         let contents = window.read_span(&local, context_lines_before, context_lines_after)?;
         Ok(Box::new(MietteSpanContents::new_named(
@@ -146,18 +165,27 @@ pub fn report_parse_errors<W: Write>(
     let path_str = source_path.display().to_string();
     let error_count = errors.len();
     let handler = build_handler(use_color);
-    let named_source = std::sync::Arc::new(IndexedSource::new(path_str, source.to_string()));
+    let named_source = std::sync::Arc::new(IndexedSource::new(&path_str, source));
 
     for error in errors {
         let (start, end) = error.span();
 
+        // The message and hint can quote the ledger's text, so they are
+        // escaped like the snippet (#2538).
         let diagnostic = miette::MietteDiagnostic {
-            message: error.message(),
+            message: escape_untrusted_text(&error.message()).into_owned(),
             code: Some(format!("P{:04}", error.kind_code())),
             severity: Some(Severity::Error),
-            help: error.hint.as_ref().map(String::from),
+            help: error
+                .hint
+                .as_ref()
+                .map(|hint| escape_untrusted_text(hint).into_owned()),
             url: None,
-            labels: Some(vec![LabeledSpan::at(start..end, error.label())]),
+            labels: Some(vec![named_source.label(
+                start,
+                end,
+                escape_untrusted_text(error.label()),
+            )]),
         };
 
         let report =
@@ -231,8 +259,8 @@ impl LedgerErrorRenderer {
             // happens at most once per file_id per renderer lifetime.
             let named_source = self.sources.entry(file_id).or_insert_with(|| {
                 std::sync::Arc::new(IndexedSource::new(
-                    source_file.path.display().to_string(),
-                    source_file.source.as_ref().to_string(),
+                    &source_file.path.display().to_string(),
+                    source_file.source.as_ref(),
                 ))
             });
             let miette_severity = match err.severity {
@@ -240,13 +268,19 @@ impl LedgerErrorRenderer {
                 rustledger_loader::ErrorSeverity::Warning => Severity::Warning,
             };
 
+            // The message and hint can quote the ledger's text (a document
+            // path, a metadata value), so they are escaped like the snippet
+            // (#2538).
             let diagnostic = miette::MietteDiagnostic {
-                message: err.message.clone(),
+                message: escape_untrusted_text(&err.message).into_owned(),
                 code: Some(err.code.clone()),
                 severity: Some(miette_severity),
-                help: err.hint.clone(),
+                help: err
+                    .hint
+                    .as_ref()
+                    .map(|hint| escape_untrusted_text(hint).into_owned()),
                 url: None,
-                labels: Some(vec![LabeledSpan::at(span_start..span_end, "here")]),
+                labels: Some(vec![named_source.label(span_start, span_end, "here")]),
             };
             let report = miette::Report::new(diagnostic)
                 .with_source_code(std::sync::Arc::clone(named_source));
@@ -264,26 +298,33 @@ impl LedgerErrorRenderer {
             rustledger_loader::ErrorSeverity::Error => "error",
             rustledger_loader::ErrorSeverity::Warning => "warning",
         };
+        let message = escape_untrusted_text(&err.message);
         if let Some(loc) = &err.location {
+            // A placeholder location (`<check_closing>:0`, #2713) has no
+            // column; it prints as `bean-check` prints it.
+            let column = if loc.column == 0 {
+                String::new()
+            } else {
+                format!(":{}", loc.column)
+            };
             writeln!(
                 writer,
-                "{}:{}:{}: {}[{}]: {}",
-                loc.file.display(),
+                "{}:{}{column}: {}[{}]: {}",
+                escape_untrusted_line(&loc.file.display().to_string()),
                 loc.line,
-                loc.column,
                 severity_label,
                 err.code,
-                err.message,
+                message,
             )?;
         } else {
             writeln!(
                 writer,
                 "<unknown>: {}[{}]: {}",
-                severity_label, err.code, err.message,
+                severity_label, err.code, message,
             )?;
         }
         if let Some(hint) = &err.hint {
-            writeln!(writer, "  help: {hint}")?;
+            writeln!(writer, "  help: {}", escape_untrusted_text(hint))?;
         }
         Ok(())
     }
@@ -367,7 +408,7 @@ mod tests {
 
         let mut compared = 0usize;
         for source in &sources {
-            let indexed = IndexedSource::new("f.beancount".to_string(), source.clone());
+            let indexed = IndexedSource::new("f.beancount", source);
             let whole = miette::NamedSource::new("f.beancount", source.clone());
             // Every span a ledger error can carry starts inside the file (or
             // at its end); a length past the end is miette's `OutOfBounds`,

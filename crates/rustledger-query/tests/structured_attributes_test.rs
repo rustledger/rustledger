@@ -293,6 +293,33 @@ fn accounts_keep_the_earliest_directive() {
     assert_eq!(got, vec![earliest("Assets:A"), earliest("Assets:B")]);
 }
 
+/// On a tie -- two `open`s of the same date -- the FIRST of them is kept,
+/// as beancount's `get_account_open_close` keeps the first minimum it saw
+/// (the code keeps a directive only on a strict earlier date). The
+/// currencies tell the two apart.
+#[test]
+fn accounts_keep_the_first_of_a_same_date_tie() {
+    let source = "2020-01-01 open Assets:C USD\n\
+                  2020-01-01 open Assets:C EUR\n";
+    let directives: Vec<Directive> = rustledger_parser::parse(source)
+        .directives
+        .iter()
+        .map(|d| (**d).clone())
+        .collect();
+    let mut executor = Executor::new(&directives);
+    let got = executor
+        .execute(
+            &parse("SELECT open.currencies FROM #accounts WHERE account = 'Assets:C'").unwrap(),
+        )
+        .unwrap()
+        .rows;
+    assert_eq!(
+        got,
+        vec![vec![Value::StringSet(vec!["USD".into()])]],
+        "the first of two same-date opens must win the tie"
+    );
+}
+
 /// bean-query's `Transaction` structure has `accounts`; it was NULL.
 #[test]
 fn entry_accounts() {

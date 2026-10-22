@@ -14,6 +14,10 @@ use super::utils::{falsy, increment_date};
 /// for that account with zero balance on the next day.
 pub struct CheckClosingPlugin;
 
+/// The location of each balance check the plugin inserts, line 0, as
+/// beancount's `check_closing` gives it (#2713).
+const CHECK_CLOSING_LOCATION: &str = "<check_closing>";
+
 impl NativePlugin for CheckClosingPlugin {
     fn name(&self) -> &'static str {
         "check_closing"
@@ -70,8 +74,11 @@ impl NativePlugin for CheckClosingPlugin {
                     inserts.push(PluginOp::Insert(DirectiveWrapper {
                         directive_type: "balance".to_string(),
                         date: next_date,
-                        filename: None, // Plugin-generated
-                        lineno: None,
+                        // Beancount's placeholder location
+                        // (`new_metadata("<check_closing>", 0)`), so an
+                        // error on the check is reported there (#2713).
+                        filename: Some(CHECK_CLOSING_LOCATION.to_string()),
+                        lineno: Some(0),
                         data: DirectiveData::Balance(BalanceData {
                             account: posting.account.clone(),
                             amount: AmountData {

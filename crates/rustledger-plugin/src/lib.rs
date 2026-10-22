@@ -64,7 +64,7 @@ pub use dispatch::{
 };
 pub use native::{
     AUTO_ACCOUNTS_NAME, DOCUMENT_DISCOVERY_NAME, NativePlugin, NativePluginRegistry, RegularPlugin,
-    SynthPlugin, document_discovery_config,
+    SynthPlugin, document_discovery_config, document_discovery_config_with_main_file,
 };
 #[cfg(feature = "wasm-runtime")]
 pub use runtime::{
@@ -75,4 +75,6 @@ pub use types::{
     DirectiveWrapper, PluginAccountTypes, PluginError, PluginErrorSeverity, PluginInput, PluginOp,
     PluginOptions, PluginOutput, validate_op_coverage,
 };
-pub use untrusted::{escape_untrusted_line, escape_untrusted_text};
+pub use untrusted::{
+    EscapedSource, escape_untrusted_line, escape_untrusted_source, escape_untrusted_text,
+};

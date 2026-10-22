@@ -337,7 +337,11 @@ fn print_json_report<W: std::io::Write>(
             .collect(),
         applied,
     };
-    serde_json::to_writer_pretty(&mut *out, &report).context("write JSON report")?;
+    write!(
+        out,
+        "{}",
+        crate::cmd::to_json_pretty(&report).context("write JSON report")?
+    )?;
     writeln!(out).ok();
     Ok(())
 }

@@ -96,6 +96,7 @@ fn synthetic_posting(
             meta: Metadata::default(),
             comments: Vec::new(),
             trailing_comments: Vec::new(),
+            booking: Default::default(),
         },
         Span::ZERO,
     )

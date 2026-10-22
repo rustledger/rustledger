@@ -148,7 +148,7 @@ pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<Ex
         }
         OutputFormat::Json => {
             let report = Report { findings };
-            writeln!(out, "{}", serde_json::to_string_pretty(&report)?)?;
+            writeln!(out, "{}", crate::cmd::to_json_pretty(&report)?)?;
         }
     }
     Ok(ExitCode::SUCCESS)

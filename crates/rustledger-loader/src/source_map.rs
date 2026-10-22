@@ -231,7 +231,7 @@ pub struct SourceMap {
     /// because plugins run with a shared `&SourceMap` (the loader and the
     /// LSP hand one to [`crate::run_plugins`]); placeholders are only added,
     /// never changed, so an id stays valid for the map's life.
-    placeholders: std::sync::Mutex<Placeholders>,
+    placeholders: parking_lot::Mutex<Placeholders>,
 }
 
 /// See [`SourceMap::placeholder_file_id`].
@@ -325,10 +325,7 @@ impl SourceMap {
     /// Returns [`rustledger_parser::SYNTHESIZED_FILE_ID`] (no location) once
     /// the range's 4,095 ids are taken.
     pub fn placeholder_file_id(&self, name: &Path, line: u32) -> u16 {
-        let mut table = self
-            .placeholders
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut table = self.placeholders.lock();
         let key = (name.to_path_buf(), line);
         if let Some(&id) = table.ids.get(&key) {
             return id;
@@ -356,10 +353,7 @@ impl SourceMap {
             return None;
         }
         let index = file_id - rustledger_parser::FIRST_PLACEHOLDER_FILE_ID;
-        let table = self
-            .placeholders
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let table = self.placeholders.lock();
         table.locations.get(usize::from(index)).cloned()
     }
 

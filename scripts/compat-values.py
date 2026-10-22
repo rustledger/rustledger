@@ -130,7 +130,7 @@ def beancount_errors(path: Path):
     """
     # An ImportError is NOT a per-file "undecidable". Swallowing it would mark
     # every file undecidable and let the step pass having compared nothing —
-    # the silent-skip shape CLAUDE.md calls out ("availability-gated tests must
+    # the silent-skip shape AGENTS.md calls out ("availability-gated tests must
     # fail loudly somewhere"). Let it propagate and kill the run.
     from beancount import loader
 
@@ -332,7 +332,7 @@ KNOWN_PRICE_DIVERGENCES: dict[tuple[str, str], str] = {
         "5 (the exact float64 expansion, ~52 digits) where rledger holds "
         "0.9990799999999999680966311644. They agree to every digit rledger "
         "can represent; the difference is the documented limitation in "
-        "CLAUDE.md's Decimal Precision section, not a disagreement about "
+        "AGENTS.md's Decimal Precision section, not a disagreement about "
         "the money. Note `_num_agrees` cannot absorb this on its own: it "
         "quantizes rledger's value to beancount's exponent, and an exponent "
         "that fine overflows the Decimal context and raises.",
@@ -342,7 +342,7 @@ KNOWN_PRICE_DIVERGENCES: dict[tuple[str, str], str] = {
 KNOWN_POSTING_DIVERGENCES: dict[tuple[str, str], str] = {
     # rust_decimal's ~28-29 significant-digit ceiling. The price here needs 30
     # to round-trip, so we store a value truncated at the coefficient limit.
-    # CLAUDE.md records this as NOT fixable locally: the recovery side channel
+    # AGENTS.md records this as NOT fixable locally: the recovery side channel
     # was prototyped and rejected (PR #1613). No real ledger carries a literal
     # this precise.
     ("chapter-4_src_transactions.beancount", "price_number"):
@@ -909,7 +909,7 @@ def self_test(binary: str) -> int:
             "  Assets:B   -50.00 EUR\n"
         ),
         # rledger rejects, beancount accepts — the Python #877-equivalent that
-        # CLAUDE.md records as a deliberate deviation (two-phase validation).
+        # AGENTS.md records as a deliberate deviation (two-phase validation).
         "st_rledger_only.beancount": (
             "2018-01-01 open Assets:A\n"
             '2018-07-07 * "elided zero into an unopened account"\n'

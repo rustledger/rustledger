@@ -15,7 +15,7 @@ the job looks exactly like one that passed it.
 
 The fix is not a longer hand-written list -- that is the thing that drifted --
 but deriving the requirement from cargo and asserting agreement, per the
-canonical-function discipline in CLAUDE.md.
+canonical-function discipline in AGENTS.md.
 """
 
 from __future__ import annotations

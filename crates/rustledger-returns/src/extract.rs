@@ -2253,7 +2253,7 @@ mod tests {
         assert!((rate - 0.155).abs() < 0.001, "expected ~15.5%, got {rate}");
     }
 
-    /// Drift guard (CLAUDE.md Canonical-Function Discipline): the single-pass
+    /// Drift guard (AGENTS.md Canonical-Function Discipline): the single-pass
     /// `investment_values_at` must return exactly what calling the per-date
     /// `investment_value_at` yields for each date — the two share
     /// `value_investment_scope`, and `twr` now relies on the batch version. Uses
@@ -2433,7 +2433,7 @@ mod tests {
         r
     }
 
-    /// Drift guard (CLAUDE.md Canonical-Function Discipline): `compute_returns`
+    /// Drift guard (AGENTS.md Canonical-Function Discipline): `compute_returns`
     /// must equal the by-hand composition it replaced, across the shapes that hit
     /// its distinct branches — the happy path is not enough (a broken zero-terminal
     /// suppression or a narrowed zero-capital guard hides in the all-nonzero case).
@@ -2589,7 +2589,7 @@ mod tests {
         assert_eq!(unwrap(&multi[1]), vec![dec!(500), dec!(550)]);
     }
 
-    /// Drift guard (CLAUDE.md Canonical-Function Discipline): `compute_returns_multi`
+    /// Drift guard (AGENTS.md Canonical-Function Discipline): `compute_returns_multi`
     /// shares one realization, but each scope's result MUST equal calling
     /// `compute_returns` for that scope alone. Covers a happy single-holding scope,
     /// a scope whose EUR flow can't be priced (an independent error, skipped from

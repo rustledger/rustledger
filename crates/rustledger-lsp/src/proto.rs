@@ -63,7 +63,7 @@ pub fn uri_to_path(uri: &Uri) -> Result<AbsPathBuf, PathUriError> {
     //
     // Worth rejecting regardless of whether a trusted client would send it: the
     // result goes straight to `vfs.open` and `Path::exists` with no
-    // confinement, and CLAUDE.md names path traversal a standing concern here.
+    // confinement, and AGENTS.md names path traversal a standing concern here.
     //
     // Checked BEFORE `to_file_path` so the error names the real problem rather
     // than whatever the platform's path rules happen to object to first, which

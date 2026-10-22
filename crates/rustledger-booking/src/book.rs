@@ -3782,7 +3782,7 @@ mod tests {
             .expect_err("a compound cost that cannot be represented must not be booked");
         // On the VARIANT, not on a substring of the message. A message match
         // is satisfied by any error that happens to use the word, including
-        // ones from a different failure entirely, and CLAUDE.md names that
+        // ones from a different failure entirely, and AGENTS.md names that
         // exact shape as a guard a future divergence cannot trip.
         assert!(
             matches!(

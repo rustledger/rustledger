@@ -816,7 +816,7 @@ jobs:
       # missing (so plain `cargo test` works locally without a wasip2
       # build). In THIS job the build step just produced it, so a skip
       # means artifact-path drift — fail loudly instead of passing green
-      # on zero assertions (availability-gated-tests rule, CLAUDE.md).
+      # on zero assertions (availability-gated-tests rule, AGENTS.md).
       - name: Run parity tests
         run: |
           cargo test -p rustledger-ffi-component-tests -- --nocapture 2>&1 | tee parity-output.log

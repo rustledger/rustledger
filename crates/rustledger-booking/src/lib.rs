@@ -416,6 +416,9 @@ enum Rate {
 /// omitted, which is beancount's reading of the one-sided forms. A written
 /// `0 #` contributes `min(0.5, tolerance x total)` where beancount
 /// contributes 0: a deliberate divergence, for a form no real ledger writes.
+/// With both sides written zero (`{0 # 0}`) both count as omitted, so the
+/// cost contributes the 0.5 cap where beancount contributes 0 — the same
+/// divergence, taken twice.
 ///
 /// [`CostNumber::PerUnit`]: rustledger_core::CostNumber::PerUnit
 /// [`CostNumber::PerUnitFromTotal`]: rustledger_core::CostNumber::PerUnitFromTotal
@@ -2708,6 +2711,10 @@ mod tests {
         assert_eq!(contribution(compound(dec!(2), dec!(3))), dec!(0.1));
         assert_eq!(contribution(compound(dec!(0), dec!(3))), dec!(0.15));
         assert_eq!(contribution(compound(dec!(3), dec!(0))), dec!(0.15));
+        // `{0 # 0}`: both sides count as omitted, so this is the `{USD}`
+        // case — the cap, where beancount gives 0 (the deliberate
+        // divergence above, taken twice).
+        assert_eq!(contribution(compound(dec!(0), dec!(0))), dec!(0.5));
         // `{USD}`: no number at all, so the cap itself.
         assert_eq!(contribution(None), dec!(0.5));
         // A negative cost is not raised to anything (beancount's `min`).

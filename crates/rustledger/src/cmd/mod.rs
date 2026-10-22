@@ -32,13 +32,24 @@ pub mod restructure;
 pub(crate) fn to_json_pretty<T: serde::Serialize + ?Sized>(
     value: &T,
 ) -> serde_json::Result<String> {
+    let json = serde_json::to_string_pretty(value)?;
+    Ok(escape_display_unsafe_in_json(&json).into_owned())
+}
+
+/// `json` with the display-unsafe characters escaped as `\uXXXX`.
+///
+/// DEL, the C1 controls and the other characters
+/// [`rustledger_core::format::is_display_unsafe`] names are written as
+/// `\uXXXX`: the same JSON value, safe to show on a terminal. The one rule
+/// `to_json_pretty` and the `ag-rledger` envelope escape by (#2538, #2714).
+#[must_use]
+pub fn escape_display_unsafe_in_json(json: &str) -> std::borrow::Cow<'_, str> {
     // A raw C0 character in `serde_json`'s output is the pretty-printer's
     // own line break (it escapes every C0 inside a string), and outside
     // strings JSON is ASCII, so what is left to escape is inside a string.
     let needs_escape = |c: char| c >= '\u{7f}' && rustledger_core::format::is_display_unsafe(c);
-    let json = serde_json::to_string_pretty(value)?;
     if !json.chars().any(needs_escape) {
-        return Ok(json);
+        return std::borrow::Cow::Borrowed(json);
     }
     let mut out = String::with_capacity(json.len() + 16);
     for c in json.chars() {
@@ -49,7 +60,7 @@ pub(crate) fn to_json_pretty<T: serde::Serialize + ?Sized>(
             out.push(c);
         }
     }
-    Ok(out)
+    std::borrow::Cow::Owned(out)
 }
 
 #[cfg(test)]

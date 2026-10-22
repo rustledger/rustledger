@@ -802,6 +802,7 @@ fn test_meta_functions() {
                 meta: posting_meta,
                 comments: Vec::new(),
                 trailing_comments: Vec::new(),
+                booking: Default::default(),
             }),
             rustledger_core::Spanned::synthesized(Posting::new(
                 "Assets:Cash",
@@ -871,6 +872,7 @@ fn test_getitem_meta_eager_path_postings() {
                 meta: posting_meta,
                 comments: Vec::new(),
                 trailing_comments: Vec::new(),
+                booking: Default::default(),
             }),
             rustledger_core::Spanned::synthesized(Posting::new(
                 "Assets:Cash",
@@ -1607,6 +1609,7 @@ fn test_meta_includes_source_location() {
                     meta: p1_meta,
                     comments: Vec::new(),
                     trailing_comments: Vec::new(),
+                    booking: Default::default(),
                 },
                 span: Span { start: 20, end: 42 },
                 file_id,
@@ -2744,6 +2747,40 @@ fn account_balance_replays_with_the_ledgers_booking_method() {
     }
 }
 
+/// The running balance replays the whole booked ledger as booking decided it
+/// (#2390), and a filtered stream as its own ledger. The sale names a cost no
+/// lot has; booked under NONE it is an augmentation, and its recorded
+/// decision says so. Read as booked it is added even under the STRICT
+/// default; replayed behind a `FROM` filter it is asked again, and STRICT
+/// reads it as a reduction that finds no lot.
+#[test]
+fn account_balance_reads_the_recorded_decision_only_for_the_whole_ledger() {
+    let mut directives = none_booked_sale_at_a_new_cost();
+    for directive in &mut directives {
+        if let Directive::Transaction(txn) = directive {
+            for posting in &mut txn.postings {
+                if posting.cost.is_some() {
+                    posting.booking = rustledger_core::BookingDecision::Augment;
+                }
+            }
+        }
+    }
+    let run = |sql: &str| Executor::new(&directives).execute(&parse(sql).unwrap());
+    let whole = run("SELECT account, account_balance WHERE account = 'Assets:Stock'")
+        .expect("the whole ledger replays as booked");
+    let last = format!("{:?}", whole.rows.last().expect("a row per Stock posting"));
+    assert!(
+        last.contains("-2") && last.contains("90"),
+        "the recorded augmentation is a lot of its own: {last}"
+    );
+    let filtered =
+        run("SELECT account, account_balance FROM year = 2020 WHERE account = 'Assets:Stock'");
+    assert!(
+        matches!(&filtered, Err(QueryError::Evaluation(m)) if m.contains("No matching lot")),
+        "a filtered replay asks again: {filtered:?}"
+    );
+}
+
 /// The `#postings` table reports a replay the engine refuses as a query
 /// error. It used to `expect` the scan could not fail, and a NONE-booked
 /// ledger replayed under the wrong default crashed the process (#2386).
@@ -2765,55 +2802,6 @@ fn postings_table_reports_a_refused_replay_as_an_error() {
             "the replay's own error must reach the caller: {message}"
         ),
         other => panic!("expected the refused replay as an error, got {other:?}"),
-    }
-}
-
-/// Every hidden-column lookup finds the name the producers write (#2432):
-/// the static `position` keys, the ASCII buffer and the allocating path must
-/// all agree with `hidden_name`, or a table carrying the value is read as
-/// one that does not, silently, through the value path.
-#[test]
-fn position_hidden_keys_are_hidden_names() {
-    let kinds = [
-        ("weight", ""),
-        ("weight", " error"),
-        ("cost", ""),
-        ("cost", " error"),
-        ("lot total", ""),
-    ];
-    for (kind, suffix) in kinds {
-        assert_eq!(
-            position_hidden_key(kind, suffix),
-            Some(hidden_name(kind, "position", suffix).as_str()),
-            "{kind}{suffix}"
-        );
-    }
-    assert_eq!(hidden_weight_column("P"), hidden_name("weight", "p", ""));
-    assert_eq!(hidden_cost_column("P"), hidden_name("cost", "p", ""));
-    assert_eq!(
-        hidden_cost_error_column("P"),
-        hidden_name("cost", "p", " error")
-    );
-    assert_eq!(
-        hidden_weight_error_column("P"),
-        hidden_name("weight", "p", " error")
-    );
-    assert_eq!(
-        hidden_lot_total_column("P"),
-        hidden_name("lot total", "p", "")
-    );
-    // Column maps key on the lowercased name; each path finds it however the
-    // query spells the column.
-    for column in ["position", "POSITION", "Pos_2", "prénom", "ΣΑΣ"] {
-        for (kind, suffix) in kinds {
-            let name = hidden_name(kind, column, suffix).to_lowercase();
-            let map: rustc_hash::FxHashMap<String, usize> = std::iter::once((name, 7)).collect();
-            assert_eq!(
-                hidden_index(&map, kind, column, suffix),
-                Some(7),
-                "{column}: {kind}{suffix}"
-            );
-        }
     }
 }
 
@@ -3327,7 +3315,7 @@ fn posting_columns_match_the_evaluator() {
     );
 
     // Every listed column runs, and `#postings` has no visible column the
-    // default table lacks (its hidden ones are `_`- or NUL-prefixed).
+    // default table lacks (its hidden ones are `_`-prefixed).
     let directives = sample_directives();
     for name in &listed {
         let mut executor = Executor::new(&directives);
@@ -3341,7 +3329,7 @@ fn posting_columns_match_the_evaluator() {
         .execute(&parse("SELECT * FROM #postings").expect("parses"))
         .expect("#postings");
     for column in &postings.columns {
-        if column.starts_with('_') || column.starts_with('\0') {
+        if column.starts_with('_') {
             continue;
         }
         assert!(
@@ -3349,6 +3337,64 @@ fn posting_columns_match_the_evaluator() {
             "`#postings` has `{column}` but POSTING_COLUMNS does not",
         );
     }
+}
+
+/// The two postings column lists describe two different shapes on purpose:
+/// [`POSTING_COLUMNS`] is the default row source (a `SELECT` with no `FROM`)
+/// and `POSTINGS_TABLE_COLUMNS` is the `FROM postings` table. This pins
+/// their exact relationship — same names and types, exactly three
+/// default-only columns, and one documented order difference — so an edit
+/// to either list cannot silently drift from the other.
+#[test]
+fn postings_column_lists_agree() {
+    let default_cols: Vec<(&str, &str)> = POSTING_COLUMNS
+        .iter()
+        .map(|c| (c.name, c.type_name))
+        .collect();
+    let from_cols: Vec<(&str, &str)> = system_table_columns("#postings")
+        .expect("#postings described")
+        .iter()
+        .map(|c| (c.name, c.type_name))
+        .collect();
+
+    // Every `FROM postings` column is a default-table column of the same
+    // type, and what the default table adds is exactly the three columns
+    // only a `SELECT` with no `FROM` has.
+    let extras: Vec<(&str, &str)> = default_cols
+        .iter()
+        .filter(|c| !from_cols.contains(c))
+        .copied()
+        .collect();
+    assert_eq!(
+        extras,
+        [
+            ("units", "amount"),
+            ("cost", "amount"),
+            ("has_cost", "bool")
+        ],
+        "the default-only columns changed; update this test and both docs"
+    );
+    let mut shared: Vec<(&str, &str)> = default_cols
+        .iter()
+        .filter(|c| from_cols.contains(c))
+        .copied()
+        .collect();
+
+    // The shared columns are in the same order except the documented tail:
+    // the default table ends `entry, accounts` (bean-query's `.describe
+    // postings` order) and the `FROM` table ends `accounts, entry` (the
+    // builder's order).
+    assert_eq!(
+        from_cols[from_cols.len() - 2..].to_vec(),
+        vec![("accounts", "set[str]"), ("entry", "transaction")],
+        "the `FROM` table's tail changed; update this test and both docs"
+    );
+    let n = shared.len();
+    shared[n - 2..].reverse();
+    assert_eq!(
+        shared, from_cols,
+        "the postings column lists drifted apart in name, type or order"
+    );
 }
 
 /// Drift guard for the two hand-kept column lists that decide how a `FROM`
@@ -3484,4 +3530,193 @@ fn from_filter_column_lists_match_the_executor() {
     assert!(!from_filter_reads_postings(&Expr::Column(
         "narration".into()
     )));
+}
+
+/// Every system table's described columns ([`system_table_columns`], what the
+/// REPL's `.describe` prints, #2634) are the columns its builder creates, in
+/// order, and each column's type is the type of the values the builder puts
+/// there. The builders create their tables from those same definitions, so
+/// this guards the types and the name lookup; the hidden `_`- and NUL-named
+/// columns `#postings` keeps for functions are the only extras allowed.
+#[test]
+fn system_tables_describe_their_real_columns() {
+    use rustledger_loader::{LoadOptions, Loader, VirtualFileSystem, process};
+
+    const LEDGER: &str = r#"option "operating_currency" "USD"
+2024-01-01 commodity HOOL
+  name: "Hooli"
+2024-01-01 open Assets:Bank USD "STRICT"
+2024-01-01 open Assets:Stock
+2024-01-01 open Equity:Opening
+2024-01-01 open Expenses:Food
+2024-01-02 pad Assets:Bank Equity:Opening
+2024-01-03 balance Assets:Bank 1000 USD
+2024-01-04 * "Shop" "lunch" #food ^trip
+  note: "x"
+  ! Expenses:Food   10 USD
+    flag: "y"
+  Assets:Bank
+2024-01-05 * "Broker" "buy"
+  Assets:Stock    2 HOOL {100 USD, 2024-01-05, "lot"} @ 101 USD
+  Assets:Bank  -200 USD
+2024-01-06 price HOOL 110 USD
+2024-01-07 event "location" "Paris"
+  k: "v"
+2024-01-08 note Assets:Bank "called" #call ^ref
+2024-01-09 document Assets:Bank "statement.pdf" #doc ^ref
+2024-01-10 balance Assets:Bank 700 ~ 1 USD
+2024-01-11 query "q" "SELECT 1"
+2024-01-12 custom "budget" "x"
+2024-12-31 close Expenses:Food
+"#;
+
+    let mut vfs = VirtualFileSystem::new();
+    vfs.add_file("main.beancount", LEDGER);
+    let raw = Loader::new()
+        .with_filesystem(Box::new(vfs))
+        .load(std::path::Path::new("main.beancount"))
+        .expect("loads");
+    let ledger = process(raw, &LoadOptions::default()).expect("processes");
+    let mut executor = Executor::new_with_sources(&ledger.directives, &ledger.source_map);
+    executor.set_balance_discrepancies([(
+        date(2024, 1, 10),
+        "Assets:Bank".to_string(),
+        "USD".to_string(),
+        dec!(700),
+        Amount::new(dec!(90), "USD"),
+    )]);
+
+    // A value of `value`'s kind can sit in a column `.describe` calls
+    // `declared`. NULL fits anywhere; the structured and set kinds answer to
+    // the several names bean-query uses for them.
+    let fits = |declared: &str, value: &Value| match value {
+        Value::Null => true,
+        Value::Object(_) => {
+            matches!(
+                declared,
+                "metadata" | "dict" | "transaction" | "open" | "close"
+            )
+        }
+        Value::Metadata(_) => matches!(declared, "metadata" | "dict"),
+        Value::StringSet(_) | Value::Set(_) => matches!(declared, "set" | "frozenset" | "set[str]"),
+        other => other.type_name() == declared,
+    };
+
+    let tables = [
+        "#prices",
+        "#balances",
+        "#commodities",
+        "#events",
+        "#notes",
+        "#documents",
+        "#accounts",
+        "#transactions",
+        "#entries",
+        "#postings",
+    ];
+    for name in tables {
+        let described = system_table_columns(name).unwrap_or_else(|| panic!("{name} undescribed"));
+        // A query naming every column, so `#postings` fills the ones it
+        // builds only on demand (`balance`, `meta`, `entry`, ...).
+        let all: Vec<&str> = described.iter().map(|c| c.name).collect();
+        let sql = format!("SELECT {} FROM {name}", all.join(", "));
+        let Query::Select(query) = parse(&sql).expect("parses") else {
+            unreachable!()
+        };
+        let table = executor
+            .get_builtin_table(name, &query)
+            .expect("builds")
+            .unwrap_or_else(|| panic!("{name} is not a table"));
+        // Every spelling a query's `FROM` and `.describe` accept — bare or
+        // `#`, any case — resolves to the same table (the parity
+        // `system_table_columns` claims, spelled out).
+        for spelling in [
+            name.to_string(),
+            name[1..].to_string(),
+            name.to_uppercase(),
+            name[1..].to_uppercase(),
+        ] {
+            assert_eq!(
+                system_table_columns(&spelling),
+                Some(described),
+                "system_table_columns({spelling})"
+            );
+            let sql = format!("SELECT {} FROM {spelling}", all.join(", "));
+            let Query::Select(q) = parse(&sql).expect("parses") else {
+                unreachable!()
+            };
+            let t = executor
+                .get_builtin_table(&spelling, &q)
+                .expect("builds")
+                .unwrap_or_else(|| panic!("{spelling} is not a table"));
+            assert_eq!(
+                &t.columns[..all.len().min(t.columns.len())],
+                all.as_slice(),
+                "get_builtin_table({spelling}) columns"
+            );
+        }
+
+        let names: Vec<&str> = described.iter().map(|c| c.name).collect();
+        let (real, internal) = table.columns.split_at(names.len().min(table.columns.len()));
+        assert_eq!(real, names.as_slice(), "{name}: described columns differ");
+        assert!(
+            internal
+                .iter()
+                .all(|c| c.starts_with('_') || c.starts_with('\0')),
+            "{name}: undescribed columns {internal:?}"
+        );
+        assert!(
+            !table.rows.is_empty(),
+            "{name}: the ledger gives it no rows"
+        );
+        // The builder's rows have one value per column, so a column dropped
+        // from (or added to) the definition without its value is caught.
+        assert!(
+            table
+                .rows
+                .iter()
+                .all(|row| row.len() == table.columns.len()),
+            "{name}: rows and columns differ in width"
+        );
+
+        for (i, column) in described.iter().enumerate() {
+            let values: Vec<&Value> = table.rows.iter().map(|row| &row[i]).collect();
+            for value in &values {
+                assert!(
+                    fits(column.type_name, value),
+                    "{name}.{}: described as {} but holds {value:?}",
+                    column.name,
+                    column.type_name,
+                );
+            }
+            // Not vacuous: every column holds a real value somewhere.
+            assert!(
+                values.iter().any(|v| !matches!(v, Value::Null)),
+                "{name}.{} is NULL on every row of the test ledger",
+                column.name
+            );
+        }
+
+        // Every described column is one a query can name.
+        for column in described {
+            let query = parse(&format!("SELECT {} FROM {name}", column.name)).expect("parses");
+            if let Err(e) = executor.execute(&query) {
+                panic!(
+                    "{name}.{} is described but cannot be selected: {e}",
+                    column.name
+                );
+            }
+        }
+    }
+    assert_eq!(system_table_columns("#nope"), None);
+    assert_eq!(system_table_columns("nope"), None);
+    let Query::Select(query) = parse("SELECT * FROM #nope").expect("parses") else {
+        unreachable!()
+    };
+    assert!(
+        executor
+            .get_builtin_table("#nope", &query)
+            .expect("no error")
+            .is_none()
+    );
 }

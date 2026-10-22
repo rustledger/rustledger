@@ -231,6 +231,8 @@ impl ShiftSpans for Posting {
             meta,
             comments,
             trailing_comments,
+            // Holds no span.
+            booking: _,
         } = self;
         account.shift_spans(shift);
         units.shift_spans(shift);

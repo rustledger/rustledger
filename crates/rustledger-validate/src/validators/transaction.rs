@@ -34,12 +34,14 @@ pub fn validate_transaction_early(
     }
     // Only a transaction with a real source identity can be matched up in
     // late. A synthesized one shares the `(SYNTHESIZED_FILE_ID, Span::ZERO)`
-    // sentinel and an unspanned caller has no identity; both hand late the
-    // same list (no booking or plugins in between), so late covers them.
+    // sentinel, one at a placeholder location (#2713) shares its
+    // placeholder's id, and an unspanned caller has no identity; all hand
+    // late the same list (no booking or plugins in between), so late covers
+    // them.
     let Some((span, file_id)) = location else {
         return;
     };
-    if file_id == rustledger_core::SYNTHESIZED_FILE_ID {
+    if !rustledger_core::is_source_file_id(file_id) {
         return;
     }
     let mut held = Vec::new();
@@ -411,7 +413,9 @@ pub fn validate_posting_currency(
 /// Tolerance is calculated per-currency based on:
 /// 1. The quantum (precision) of amounts in postings
 /// 2. Cost-based tolerance when `infer_tolerance_from_cost` is enabled:
-///    `tolerance = units_quantum * cost_per_unit * tolerance_multiplier`
+///    each cost or price contributes
+///    `min(units_quantum * tolerance_multiplier * number, 0.5)`, summed per
+///    currency (see [`rustledger_booking::transaction_tolerances`])
 pub fn validate_transaction_balance(
     txn: &Transaction,
     tolerances: &FxHashMap<rustledger_core::Currency, Decimal>,
@@ -533,7 +537,8 @@ pub fn calculate_tolerances(
 /// would make `+10 X {100}` then `-20 X {100}` reduce 20 from 10 and fail,
 /// where booking (and beancount) open a short of 10. The walk in
 /// `BookingEngine::apply` documents the reasoning; change one and change the
-/// other.
+/// other. Which of the two each posting is comes from booking's recorded
+/// decision ([`rustledger_core::Posting::reduces`], #2390).
 pub fn update_inventories(
     state: &mut LedgerState,
     txn: &Transaction,
@@ -555,13 +560,15 @@ pub fn update_inventories(
             .map(|a| a.booking)
             .unwrap_or_default();
 
-        // Reduction vs augmentation — the SAME decision the booking engine makes,
-        // now via the single `Inventory::is_booking_reduction` source: a cost-bearing
-        // opposite-sign position reduces, and under `option "booking_method" "NONE"`
-        // (issue #1182) every posting is an augmentation. Sharing it means this
-        // validator pass and `BookingEngine::apply` can't drift, and the #1182 gate
-        // lives in one place instead of being maintained in both crates.
-        let is_reduction = inv.is_booking_reduction(units, posting.cost.as_deref(), booking_method);
+        // Reduction vs augmentation — booking's decision, recorded on the
+        // posting (#2390), exactly as `BookingEngine::apply` reads it. Asking
+        // again of the booked posting, whose cost and date booking rewrote,
+        // is how the consumers came to disagree with booking (#2368, #2384).
+        // A posting booking never decided (standalone validation, or a
+        // stream a plugin changed, whose decisions the loader forgets) is
+        // asked of this inventory through `Inventory::is_booking_reduction`,
+        // the one rule `book` asks, including the #1182 NONE gate.
+        let is_reduction = posting.reduces(units, Some(inv), booking_method);
 
         if is_reduction {
             process_inventory_reduction(inv, posting, units, booking_method, txn, errors);
@@ -831,15 +838,14 @@ mod tolerance_tests {
         assert_eq!(t.get(&cur("USD")), Some(&dec!(0.005)));
     }
 
-    /// #2554 (robcohen's decision): a cost/price tolerance past
-    /// `Decimal::MAX` is capped at `MAX`. Pinned end to end through the
-    /// balance validator, whose residual is EXACT and can itself pass `MAX`:
-    /// the cap never turns a failing balance check into a passing one. Here
-    /// the true USD tolerance is `22 x 0.05 x MAX = 1.1 MAX`.
-    /// - a residual of `0.5 MAX` is inside both, and passes;
-    /// - a residual of `1.05 MAX` is inside the true tolerance but not the
-    ///   cap, and FAILS: the cap is the stricter bound;
-    /// - a residual of `1.2 MAX` is outside both, and fails.
+    /// #2554 pinned the `Decimal::MAX` clamp of a cost/price tolerance past
+    /// the range here: 22 prices of `MAX` gave a true USD tolerance of
+    /// `22 x 0.05 x MAX = 1.1 MAX`. Since #2717 each contribution is capped
+    /// at beancount's `MAXIMUM_TOLERANCE`, so the tolerance is `22 x 0.5 =
+    /// 11`, exactly, end to end through the balance validator, whose residual
+    /// is EXACT and can itself pass `MAX`:
+    /// - a residual of 11 passes, and one of 11.1 fails;
+    /// - residuals of `0.5 MAX`, `MAX` and past `MAX` all fail.
     #[test]
     fn the_capped_tolerance_never_passes_an_imbalance_the_true_one_fails() {
         let max = Decimal::MAX;
@@ -861,7 +867,11 @@ mod tolerance_tests {
             }
             let txn = mk_txn(postings);
             let tolerances = calculate_tolerances(&txn, &opts);
-            assert_eq!(tolerances.get(&cur("USD")), Some(&max), "the cap");
+            assert_eq!(
+                tolerances.get(&cur("USD")),
+                Some(&dec!(11)),
+                "22 capped 0.5s"
+            );
             let mut errors = Vec::new();
             validate_transaction_balance(&txn, &tolerances, &mut errors);
             errors
@@ -871,15 +881,11 @@ mod tolerance_tests {
         };
         let half = Decimal::from_str_exact("39614081257132168796771975167").unwrap();
         let twentieth = Decimal::from_str_exact("3961408125713216879677197517").unwrap();
-        let fifth = Decimal::from_str_exact("15845632502852867518708790067").unwrap();
-        // 0.5 MAX.
-        assert_eq!(unbalanced(&[half]), 0, "within both bounds");
-        // MAX itself: a `Decimal` residual is never outside the cap.
-        assert_eq!(unbalanced(&[max]), 0, "MAX is within the cap");
-        // ~1.05 MAX: the exact residual is past the cap.
-        assert_eq!(unbalanced(&[max, twentieth]), 1, "stricter than 1.1 MAX");
-        // ~1.2 MAX: past both.
-        assert_eq!(unbalanced(&[max, fifth]), 1, "past both bounds");
+        assert_eq!(unbalanced(&[dec!(11)]), 0, "within the capped sum");
+        assert_eq!(unbalanced(&[dec!(11.1)]), 1, "past the capped sum");
+        assert_eq!(unbalanced(&[half]), 1, "0.5 MAX");
+        assert_eq!(unbalanced(&[max]), 1, "MAX");
+        assert_eq!(unbalanced(&[max, twentieth]), 1, "past MAX");
     }
 }
 

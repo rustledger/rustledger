@@ -12,6 +12,10 @@ use super::super::{NativePlugin, RegularPlugin};
 /// close directives for all sub-accounts like `Assets:Bank:Checking`.
 pub struct CloseTreePlugin;
 
+/// The location of each close the plugin inserts, line 0, as beancount's
+/// `close_tree` gives it (#2713).
+const CLOSE_TREE_LOCATION: &str = "<beancount.plugins.close_tree>";
+
 impl NativePlugin for CloseTreePlugin {
     fn name(&self) -> &'static str {
         "close_tree"
@@ -74,8 +78,12 @@ impl NativePlugin for CloseTreePlugin {
                     ops.push(PluginOp::Insert(DirectiveWrapper {
                         directive_type: "close".to_string(),
                         date: close_date.clone(),
-                        filename: None, // Plugin-generated
-                        lineno: None,
+                        // Beancount's placeholder location
+                        // (`new_metadata("<beancount.plugins.close_tree>",
+                        // 0)`), so an error on the close is reported there
+                        // (#2713).
+                        filename: Some(CLOSE_TREE_LOCATION.to_string()),
+                        lineno: Some(0),
                         data: DirectiveData::Close(CloseData {
                             account: account.clone(),
                             metadata: vec![],

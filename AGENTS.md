@@ -97,7 +97,7 @@ The project is a Cargo workspace with 19 crates plus editor extensions:
 | `rustledger-parser` | Lexer and parser with error recovery |
 | `rustledger-loader` | File loading, includes, options |
 | `rustledger-booking` | Interpolation and booking engine (7 methods) |
-| `rustledger-validate` | Validation with 25 error codes |
+| `rustledger-validate` | Validation with 27 error codes |
 | `rustledger-query` | BQL query engine |
 | `rustledger-completion` | Editor-agnostic completion logic (shared by LSP + WASM) |
 | `rustledger-plugin` | Native and WASM plugin system (33 plugins) |
@@ -371,7 +371,7 @@ Verified against this repo:
 ### Where this policy is enforced
 
 The policy covers the whole organization, but only this repository carries it
-in `AGENTS.md` and `AGENTS.md`; no other org repository has either file. An
+in `AGENTS.md`; no other org repository has the file. An
 assistant working in another org repository will not read this document, so do
 not rely on it as the enforcement there.
 
@@ -566,7 +566,7 @@ stack). To bump:
    stable` comment; leave MSRV/nightly pins alone) AND
    `rust-toolchain.toml`'s `channel`. rustup's file-based override beats the workflow-installed
    toolchain, so splitting them silently strands wasm targets on the wrong
-   install (#1750 — every wasip2 job failed with "can't find crate for
+   install (#1751 — every wasip2 job failed with "can't find crate for
    `std`").
 1. Before pushing, run clippy + the full test suite under the NEW version
    (`rustup toolchain install <ver>`, `RUSTUP_TOOLCHAIN=<ver> cargo clippy

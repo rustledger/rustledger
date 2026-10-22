@@ -98,7 +98,9 @@ pub use cst::{
 pub use error::{ParseError, ParseErrorKind};
 pub use logos_lexer::{is_valid_account_name, is_valid_currency};
 pub use rowan::{Direction, NodeOrToken, TextRange, TextSize, TokenAtOffset, WalkEvent};
-pub use rustledger_core::{InternedStr, SYNTHESIZED_FILE_ID, Span, Spanned};
+pub use rustledger_core::{
+    FIRST_PLACEHOLDER_FILE_ID, InternedStr, SYNTHESIZED_FILE_ID, Span, Spanned, is_source_file_id,
+};
 
 use rustledger_core::Directive;
 

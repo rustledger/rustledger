@@ -98,6 +98,7 @@ pub(super) fn data_to_posting(data: &PostingData) -> Result<Posting, ConversionE
         meta,
         comments: Vec::new(),
         trailing_comments: Vec::new(),
+        booking: Default::default(),
     })
 }
 

@@ -3783,7 +3783,8 @@ plugin "auto_accounts"
             ledger
                 .directives
                 .iter()
-                .any(|d| d.file_id == rustledger_parser::SYNTHESIZED_FILE_ID),
+                // At its `<auto_accounts>` placeholder location (#2713).
+                .any(|d| !rustledger_parser::is_source_file_id(d.file_id)),
             "auto_accounts must synthesize an entry: {:?}",
             ledger.directives
         );

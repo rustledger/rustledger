@@ -1587,3 +1587,652 @@ fn the_commands_from_2567_answer_as_rledger_does() {
         "{env}"
     );
 }
+
+/// A two-year ledger for `split` and `merge` (#2633).
+const TWO_YEARS: &str = "\
+option \"operating_currency\" \"USD\"
+
+2023-01-01 open Assets:Bank
+2023-01-01 open Expenses:Food
+
+2023-05-01 * \"Lunch\"
+  Expenses:Food  10 USD
+  Assets:Bank
+
+2024-05-01 * \"Lunch\"
+  Expenses:Food  11 USD
+  Assets:Bank
+";
+
+/// Every file under `dir`, with its bytes, `.rledger-backup` included.
+fn tree(dir: &std::path::Path) -> Vec<(PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).unwrap() {
+            let p = e.unwrap().path();
+            let meta = std::fs::symlink_metadata(&p).unwrap();
+            if meta.is_dir() {
+                stack.push(p);
+            } else if meta.is_file() {
+                out.push((p.clone(), std::fs::read(&p).unwrap()));
+            } else {
+                out.push((p.clone(), Vec::new()));
+            }
+        }
+    }
+    out.sort();
+    out
+}
+
+/// The paths in a `result` array, as strings.
+fn path_list(value: &Value) -> Vec<String> {
+    value
+        .as_array()
+        .unwrap_or_else(|| panic!("not an array: {value}"))
+        .iter()
+        .map(|p| p.as_str().expect("a path").to_string())
+        .collect()
+}
+
+/// #2633: `split` and `merge` rewrite and remove ledger files, so without
+/// `--yes` or `--dry-run` they refuse, saying how to proceed, and touch
+/// nothing. `--no-input` is not a yes.
+#[test]
+fn split_and_merge_need_yes_or_dry_run() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "ledger.beancount", TWO_YEARS);
+    let file = file.to_str().unwrap();
+    let before = tree(tmp.path());
+    for args in [
+        vec!["split", file, "--by", "year"],
+        vec!["split", file, "--by", "year", "--no-input"],
+        vec!["split", file, "--by", "year", "--yes=false"],
+        vec!["merge", file],
+    ] {
+        let (code, env, stderr) = run_in(tmp.path(), &args);
+        assert!(stderr.is_empty(), "{args:?}: {stderr}");
+        assert_eq!(code, 2, "{args:?}: {env}");
+        assert_eq!(
+            env["error"]["code"], "CONFIRMATION_REQUIRED",
+            "{args:?}: {env}"
+        );
+        let fix = env["fix"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no advice: {env}"));
+        assert!(fix.contains("--dry-run") && fix.contains("--yes"), "{env}");
+    }
+    assert_eq!(tree(tmp.path()), before, "a refused run wrote something");
+}
+
+/// `--dry-run` (and `-n`) returns the plan and the equivalence check's
+/// verdict, and writes nothing at all: no period files, no backup.
+#[test]
+fn split_dry_run_returns_the_plan_and_writes_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "ledger.beancount", TWO_YEARS);
+    let canonical = file.canonicalize().unwrap();
+    let file = file.to_str().unwrap();
+    let before = tree(tmp.path());
+    for dry in ["--dry-run", "-n"] {
+        // The switch before the file: it must not take the file as a value.
+        let (code, env, stderr) = run_in(tmp.path(), &["split", "--by", "year", dry, file]);
+        assert!(stderr.is_empty(), "{stderr}");
+        assert_eq!(code, 0, "{dry}: {env}");
+        let result = &env["result"];
+        assert_eq!(result["dry_run"], true, "{env}");
+        assert_eq!(result["plan"]["operation"], "split", "{env}");
+        assert_eq!(result["plan"]["by"], "year", "{env}");
+        let steps = result["plan"]["steps"].as_array().expect("steps");
+        let dir = canonical.parent().unwrap().join("ledger");
+        let expected = [
+            ("create", dir.join("2023.beancount"), Some(3)),
+            ("create", dir.join("2024.beancount"), Some(1)),
+            ("rewrite", canonical.clone(), None),
+        ];
+        assert_eq!(steps.len(), expected.len(), "{env}");
+        for (step, (action, path, count)) in steps.iter().zip(&expected) {
+            assert_eq!(step["action"], *action, "{env}");
+            assert_eq!(step["path"].as_str(), path.to_str(), "{env}");
+            if let Some(n) = count {
+                assert_eq!(step["dated_directives"], *n, "{env}");
+            }
+        }
+        assert_eq!(result["equivalence"]["passed"], true, "{env}");
+        assert_eq!(result["equivalence"]["directives"], 4, "{env}");
+        assert!(path_list(&result["written"]).is_empty(), "{env}");
+        assert_eq!(result["backup_dir"], Value::Null, "{env}");
+        assert_eq!(tree(tmp.path()), before, "{dry} wrote something");
+    }
+}
+
+/// `--yes` writes, and `result` lists every written path, the backup, and,
+/// for `merge`, the removed files; the ledger on disk is what was listed.
+#[test]
+fn yes_writes_and_lists_the_written_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "ledger.beancount", TWO_YEARS);
+    let canonical = file.canonicalize().unwrap();
+    let file = file.to_str().unwrap();
+    let dir = canonical.parent().unwrap().join("ledger");
+    let periods = [dir.join("2023.beancount"), dir.join("2024.beancount")];
+
+    let (code, env, stderr) = run_in(tmp.path(), &["split", file, "--by", "year", "--yes"]);
+    assert!(stderr.is_empty(), "{stderr}");
+    assert_eq!(code, 0, "{env}");
+    let result = &env["result"];
+    assert_eq!(result["dry_run"], false, "{env}");
+    assert_eq!(result["equivalence"]["passed"], true, "{env}");
+    let mut expected: Vec<String> = periods
+        .iter()
+        .chain(std::iter::once(&canonical))
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    expected.sort();
+    let mut written = path_list(&result["written"]);
+    written.sort();
+    assert_eq!(written, expected, "{env}");
+    for p in &periods {
+        assert!(p.is_file(), "{} not written", p.display());
+    }
+    let backup = result["backup_dir"].as_str().expect("a backup");
+    assert!(
+        std::path::Path::new(backup).join("manifest.txt").is_file(),
+        "{env}"
+    );
+    // The same text rledger prints is in `stdout`.
+    assert!(
+        result["stdout"]
+            .as_str()
+            .is_some_and(|s| s.contains("Done; the ledger was reloaded")),
+        "{env}"
+    );
+
+    // Merge back: the period files are removed and listed as removed.
+    let (code, env, stderr) = run_in(tmp.path(), &["merge", file, "-y"]);
+    assert!(stderr.is_empty(), "{stderr}");
+    assert_eq!(code, 0, "{env}");
+    let result = &env["result"];
+    assert_eq!(
+        path_list(&result["written"]),
+        vec![canonical.to_string_lossy().into_owned()],
+        "{env}"
+    );
+    let mut removed = path_list(&result["removed"]);
+    removed.sort();
+    let periods: Vec<String> = periods
+        .iter()
+        .map(|p| p.to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(removed, periods, "{env}");
+    for p in &periods {
+        assert!(!std::path::Path::new(p).exists(), "{p} not removed");
+    }
+    let steps = result["plan"]["steps"].as_array().expect("steps");
+    assert!(
+        steps[..2]
+            .iter()
+            .all(|s| s["action"] == "inline" && s["remove"] == true),
+        "{env}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&canonical).unwrap(),
+        TWO_YEARS,
+        "split then merge must give the original back"
+    );
+}
+
+/// Each refusal is a coded error, the ledger untouched. The symlink
+/// refusals are #2614's (and #2635's for merge).
+#[test]
+fn each_refusal_maps_to_its_code() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let file = write_fixture(dir, "ledger.beancount", TWO_YEARS);
+    let file = file.to_str().unwrap();
+    // Moving a relative `document` into `ledger/` points it elsewhere.
+    std::fs::write(dir.join("r.pdf"), "%PDF").unwrap();
+    let doc = write_fixture(
+        dir,
+        "doc.beancount",
+        &format!("{TWO_YEARS}\n2024-06-01 document Assets:Bank \"r.pdf\"\n"),
+    );
+    let broken = write_fixture(dir, "broken.beancount", "2024-01-01 open\n");
+    let empty = write_fixture(dir, "empty.beancount", "option \"title\" \"x\"\n");
+    std::fs::create_dir(dir.join("taken")).unwrap();
+    std::fs::write(dir.join("taken/2023.beancount"), "").unwrap();
+    let missing_include = write_fixture(dir, "inc.beancount", "include \"gone.beancount\"\n");
+    std::fs::write(dir.join("a-file"), "").unwrap();
+    let existing_out = write_fixture(dir, "out.beancount", "");
+    let parent = write_fixture(dir, "parent.beancount", "include \"child.beancount\"\n");
+    write_fixture(dir, "child.beancount", TWO_YEARS);
+
+    let mut cases: Vec<(Vec<String>, &str, i32)> = vec![
+        (
+            vec![
+                "split".into(),
+                "nope.beancount".into(),
+                "--by".into(),
+                "year".into(),
+            ],
+            "FILE_NOT_FOUND",
+            3,
+        ),
+        (
+            vec![
+                "split".into(),
+                doc.to_str().unwrap().into(),
+                "--by".into(),
+                "year".into(),
+            ],
+            "EQUIVALENCE_FAILED",
+            1,
+        ),
+        (
+            vec![
+                "split".into(),
+                broken.to_str().unwrap().into(),
+                "--by".into(),
+                "year".into(),
+            ],
+            "PARSE_ERRORS",
+            1,
+        ),
+        (
+            vec![
+                "split".into(),
+                empty.to_str().unwrap().into(),
+                "--by".into(),
+                "year".into(),
+            ],
+            "NOTHING_TO_SPLIT",
+            1,
+        ),
+        (
+            vec![
+                "split".into(),
+                file.into(),
+                "--by".into(),
+                "year".into(),
+                "--dir".into(),
+                "taken".into(),
+            ],
+            "TARGET_EXISTS",
+            1,
+        ),
+        (
+            vec![
+                "split".into(),
+                file.into(),
+                "--by".into(),
+                "year".into(),
+                "--dir".into(),
+                "a*b".into(),
+            ],
+            "UNWRITABLE_INCLUDE",
+            2,
+        ),
+        (
+            vec![
+                "split".into(),
+                file.into(),
+                "--by".into(),
+                "year".into(),
+                "--dir".into(),
+                "a-file".into(),
+            ],
+            "NOT_A_DIRECTORY",
+            2,
+        ),
+        (
+            vec!["split".into(), file.into(), "--by".into(), "week".into()],
+            "INVALID_VALUE",
+            2,
+        ),
+        (vec!["split".into(), file.into()], "MISSING_FLAG", 2),
+        (
+            vec![
+                "split".into(),
+                file.into(),
+                file.into(),
+                "--by".into(),
+                "year".into(),
+            ],
+            "INVALID_ARGS",
+            2,
+        ),
+        (vec!["merge".into(), file.into()], "NOTHING_TO_MERGE", 1),
+        (
+            vec!["merge".into(), missing_include.to_str().unwrap().into()],
+            "INCLUDE_NOT_FOUND",
+            3,
+        ),
+        (
+            vec![
+                "merge".into(),
+                file.into(),
+                "-o".into(),
+                "x.beancount".into(),
+                "--ledger".into(),
+                file.into(),
+            ],
+            "CONFLICTING_FLAGS",
+            2,
+        ),
+        (
+            vec![
+                "merge".into(),
+                parent.to_str().unwrap().into(),
+                "-o".into(),
+                existing_out.to_str().unwrap().into(),
+            ],
+            "TARGET_EXISTS",
+            1,
+        ),
+        (
+            vec!["merge".into(), file.into(), "--frobnicate".into()],
+            "UNKNOWN_FLAG",
+            2,
+        ),
+    ];
+    #[cfg(unix)]
+    {
+        std::fs::create_dir(dir.join("sub")).unwrap();
+        std::os::unix::fs::symlink("../ledger.beancount", dir.join("sub/link.beancount")).unwrap();
+        for op in ["split", "merge"] {
+            let mut args = vec![op.to_string(), "sub/link.beancount".to_string()];
+            if op == "split" {
+                args.extend(["--by".to_string(), "year".to_string()]);
+            }
+            cases.push((args, "SYMLINK_ELSEWHERE", 1));
+        }
+    }
+
+    let before = tree(dir);
+    for (args, code, exit) in &cases {
+        let mut args: Vec<&str> = args.iter().map(String::as_str).collect();
+        // `--dry-run` would hide a refusal that only a write reaches, and
+        // `--yes` proves the gate is not what refused.
+        args.push("--yes");
+        let (got, env, stderr) = run_in(dir, &args);
+        assert!(stderr.is_empty(), "{args:?} wrote to stderr: {stderr}");
+        assert_eq!(env["ok"], false, "{args:?}: {env}");
+        assert_eq!(env["error"]["code"], *code, "{args:?}: {env}");
+        assert_eq!(got, *exit, "{args:?}: {env}");
+    }
+    assert_eq!(tree(dir), before, "a refused run changed the directory");
+
+    // The equivalence refusal carries the plan and the verdict, and names
+    // the difference.
+    let (_, env, _) = run_in(
+        dir,
+        &["split", doc.to_str().unwrap(), "--by", "year", "--dry-run"],
+    );
+    assert_eq!(env["error"]["code"], "EQUIVALENCE_FAILED", "{env}");
+    let data = &env["data"];
+    assert_eq!(data["equivalence"]["passed"], false, "{env}");
+    assert!(
+        data["equivalence"]["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("document path")),
+        "{env}"
+    );
+    assert_eq!(data["plan"]["operation"], "split", "{env}");
+    assert!(
+        env["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("document path")),
+        "{env}"
+    );
+}
+
+/// `split`/`merge` through ag-rledger print what rledger prints: `stdout`
+/// is rledger's stdout, for a dry run and a write alike.
+#[test]
+fn split_and_merge_answer_as_rledger_does() {
+    let ag = tempfile::tempdir().unwrap();
+    let native = tempfile::tempdir().unwrap();
+    for dir in [ag.path(), native.path()] {
+        write_fixture(dir, "ledger.beancount", TWO_YEARS);
+    }
+    for (ag_args, rledger_args) in [
+        (
+            vec!["split", "ledger.beancount", "--by", "month", "--dry-run"],
+            vec!["split", "ledger.beancount", "--by", "month", "--dry-run"],
+        ),
+        (
+            vec!["split", "ledger.beancount", "--by", "year", "--yes"],
+            vec!["split", "ledger.beancount", "--by", "year"],
+        ),
+        (
+            vec![
+                "merge",
+                "ledger.beancount",
+                "--keep-included",
+                "-o",
+                "all.beancount",
+                "--yes",
+            ],
+            vec![
+                "merge",
+                "ledger.beancount",
+                "--keep-included",
+                "-o",
+                "all.beancount",
+            ],
+        ),
+    ] {
+        let (code, env, stderr) = run_in(ag.path(), &ag_args);
+        assert!(stderr.is_empty(), "{stderr}");
+        let (native_code, printed) = rledger_stdout(native.path(), &rledger_args);
+        assert_eq!(code, native_code, "{ag_args:?}: {env}");
+        // The backup directory is named after the second it was made in.
+        let stamp = |s: &str| {
+            s.lines()
+                .map(|l| {
+                    if l.starts_with("Backup of the original files:") {
+                        "Backup of the original files: <dir>"
+                    } else {
+                        l
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        assert_eq!(
+            env["result"]["stdout"].as_str().map(stamp),
+            Some(stamp(&printed)),
+            "{ag_args:?}: {env}"
+        );
+    }
+}
+
+/// #2633: `split` and `merge` are offered, so the drift guard above now
+/// requires them; listing either as unsupported again fails here.
+#[test]
+fn split_and_merge_are_offered_not_unsupported() {
+    let (_, root) = run(&[]);
+    let names = |key: &str, field: &str| -> Vec<String> {
+        root["result"][key]
+            .as_array()
+            .unwrap_or_else(|| panic!("no {key}: {root}"))
+            .iter()
+            .filter_map(|c| c[field].as_str().map(str::to_string))
+            .collect()
+    };
+    let commands = names("commands", "name");
+    let unsupported = names("unsupported_commands", "command");
+    for name in ["split", "merge"] {
+        assert!(commands.iter().any(|c| c == name), "{name} not offered");
+        assert!(
+            !unsupported.iter().any(|c| c == name),
+            "{name} is still listed as unsupported"
+        );
+    }
+}
+
+/// Review of #2633: agcli turns a value flag given nothing (`-o` last,
+/// `--dir --yes`) into the value `"true"`, which was taken as a path and
+/// written to. It is refused, and nothing is written; a path typed as
+/// `true` is still a path.
+#[test]
+fn a_path_flag_without_a_value_is_refused() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let file = write_fixture(dir, "ledger.beancount", TWO_YEARS);
+    let file = file.to_str().unwrap();
+    let parent = write_fixture(dir, "parent.beancount", "include \"child.beancount\"\n");
+    write_fixture(dir, "child.beancount", TWO_YEARS);
+    let parent = parent.to_str().unwrap();
+    let before = tree(dir);
+    for args in [
+        vec!["merge", parent, "--yes", "-o"],
+        vec!["merge", parent, "--output", "--yes"],
+        vec!["split", file, "--by", "year", "--yes", "--dir"],
+        vec!["split", file, "--by", "year", "--dir", "--yes"],
+        vec!["split", file, "--by", "year", "--ledger", "--yes"],
+        // Another flag's `=true`, or a positional named `true`, is not
+        // this flag's value (review round 2).
+        vec!["merge", parent, "--yes=true", "-o"],
+        vec!["split", file, "--by", "year", "--dry-run=true", "--dir"],
+        vec!["merge", "true", "-o", "--yes"],
+    ] {
+        let (code, env, stderr) = run_in(dir, &args);
+        assert!(stderr.is_empty(), "{stderr}");
+        assert_eq!(env["error"]["code"], "MISSING_VALUE", "{args:?}: {env}");
+        assert_eq!(code, 2, "{args:?}: {env}");
+    }
+    assert_eq!(tree(dir), before, "a refused run wrote something");
+
+    // Typed, `true` is a directory name like any other.
+    let (code, env, _) = run_in(dir, &["split", file, "--by", "year", "--dir", "true", "-n"]);
+    assert_eq!(code, 0, "{env}");
+    let base = std::path::Path::new(file).canonicalize().unwrap();
+    let expected = base.parent().unwrap().join("true").join("2023.beancount");
+    assert_eq!(
+        env["result"]["plan"]["steps"][0]["path"].as_str(),
+        expected.to_str(),
+        "{env}"
+    );
+    let (code, env, _) = run_in(dir, &["split", file, "--by", "year", "--dir=true", "-n"]);
+    assert_eq!(code, 0, "{env}");
+}
+
+/// `--keep-included=false` does not keep the inlined files, as agcli reads
+/// a switch's negation.
+#[test]
+fn keep_included_false_is_off() {
+    let tmp = tempfile::tempdir().unwrap();
+    let parent = write_fixture(
+        tmp.path(),
+        "parent.beancount",
+        "include \"child.beancount\"\n",
+    );
+    write_fixture(tmp.path(), "child.beancount", TWO_YEARS);
+    let parent = parent.to_str().unwrap();
+    for (flag, remove) in [("--keep-included", false), ("--keep-included=false", true)] {
+        let (code, env, _) = run_in(tmp.path(), &["merge", parent, flag, "--dry-run"]);
+        assert_eq!(code, 0, "{env}");
+        assert_eq!(
+            env["result"]["plan"]["steps"][0]["remove"], remove,
+            "{flag}: {env}"
+        );
+    }
+}
+
+/// More refusals, each with its code: a FILE outside the `--ledger` root,
+/// no FILE and no default, and a file that is not UTF-8.
+#[test]
+fn more_refusals_map_to_their_codes() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let file = write_fixture(dir, "ledger.beancount", TWO_YEARS);
+    let other = write_fixture(dir, "other.beancount", TWO_YEARS);
+    let latin1 = dir.join("latin1.beancount");
+    std::fs::write(
+        &latin1,
+        b"2024-01-01 open Assets:Cash\n2024-01-02 * \"bad \xff\"\n  Assets:Cash 1 USD\n  Assets:Cash -1 USD\n",
+    )
+    .unwrap();
+    let before = tree(dir);
+    for (args, code, exit) in [
+        (
+            vec![
+                "split",
+                file.to_str().unwrap(),
+                "--by",
+                "year",
+                "--ledger",
+                other.to_str().unwrap(),
+            ],
+            "NOT_IN_LEDGER",
+            2,
+        ),
+        (vec!["merge", "--yes"], "MISSING_FILE", 2),
+        (
+            vec!["split", latin1.to_str().unwrap(), "--by", "year"],
+            "NOT_UTF8",
+            1,
+        ),
+    ] {
+        let mut args = args.clone();
+        args.push("--yes");
+        let (got, env, stderr) = run_in(dir, &args);
+        assert!(stderr.is_empty(), "{stderr}");
+        assert_eq!(env["error"]["code"], code, "{args:?}: {env}");
+        assert_eq!(got, exit, "{args:?}: {env}");
+    }
+    assert_eq!(tree(dir), before);
+}
+/// #2714: the envelope escapes DEL, C1, bidi controls and line separators
+/// from the ledger as `\uXXXX`, so reading it raw is safe, and the values
+/// decode unchanged.
+#[test]
+fn envelope_escapes_display_unsafe_characters_and_keeps_the_values() {
+    // Somewhere under `value`, the string `text`.
+    fn holds(value: &Value, text: &str) -> bool {
+        match value {
+            Value::String(s) => s == text,
+            Value::Array(items) => items.iter().any(|v| holds(v, text)),
+            Value::Object(map) => map.values().any(|v| holds(v, text)),
+            _ => false,
+        }
+    }
+    let narration = "a\u{1b}[2Jb\u{7f}c\u{9b}d\u{202e}e\u{2028}f";
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        tmp.path(),
+        "ledger.beancount",
+        &format!(
+            "2024-01-01 open Assets:Cash\n\
+             2024-01-01 open Equity:Opening\n\
+             2024-01-02 * \"{narration}\"\n  \
+               Assets:Cash  1 USD\n  \
+               Equity:Opening\n"
+        ),
+    );
+    let output = Command::new(ag_rledger())
+        .args([
+            "query",
+            file.to_str().unwrap(),
+            "SELECT narration",
+            "--format",
+            "json",
+        ])
+        .output()
+        .expect("spawn ag-rledger");
+    let stdout = String::from_utf8(output.stdout).expect("utf-8 envelope");
+    for raw in ['\u{1b}', '\u{7f}', '\u{9b}', '\u{202e}', '\u{2028}'] {
+        assert!(
+            !stdout.contains(raw),
+            "{raw:?} raw in the envelope: {stdout:?}"
+        );
+    }
+    assert!(stdout.contains("\\u009b"), "{stdout}");
+    let envelope: Value = serde_json::from_str(stdout.trim()).expect("envelope is JSON");
+    // Somewhere in the rows, the narration as it is in the ledger.
+    assert!(
+        holds(&envelope["result"]["data"]["rows"], narration),
+        "the narration decodes unchanged: {envelope}"
+    );
+}

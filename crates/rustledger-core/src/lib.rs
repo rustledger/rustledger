@@ -76,10 +76,10 @@ pub use decimal::{
     round_dp_python, sub_python_scale, to_bigdecimal, with_ideal_scale,
 };
 pub use directive::{
-    AUTOMATIC_META, Balance, Close, Commodity, Custom, Directive, DirectivePriority, Document,
-    Event, MetaValue, Metadata, Note, Open, Pad, Posting, Price, PriceAnnotation, PriceKind, Query,
-    Transaction, booking_sort_key, meta_value_as_bool, parse_bool_word, parse_precision_meta,
-    sort_directives,
+    AUTOMATIC_META, Balance, BookingDecision, Close, Commodity, Custom, Directive,
+    DirectivePriority, Document, Event, MetaValue, Metadata, Note, Open, Pad, Posting, Price,
+    PriceAnnotation, PriceKind, Query, Transaction, booking_sort_key, meta_value_as_bool,
+    parse_bool_word, parse_precision_meta, sort_directives,
 };
 pub use display_context::{DEFAULT_CURRENCY, DisplayContext, OutputSurface, Precision};
 pub use extract::{
@@ -104,7 +104,9 @@ pub use inventory::{
 pub use meta_json::{json_to_meta_value, meta_value_to_json, meta_value_type_tag};
 pub use position::Position;
 pub use sorted_set::{LinkSet, SortedSet, TagSet};
-pub use span::{SYNTHESIZED_FILE_ID, ShiftSpans, Span, Spanned};
+pub use span::{
+    FIRST_PLACEHOLDER_FILE_ID, SYNTHESIZED_FILE_ID, ShiftSpans, Span, Spanned, is_source_file_id,
+};
 pub use visit::{visit_accounts, visit_currencies};
 
 // Re-export commonly used external types

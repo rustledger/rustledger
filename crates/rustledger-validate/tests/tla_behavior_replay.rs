@@ -79,6 +79,7 @@ fn posting(account: &str, number: i64) -> Spanned<Posting> {
         comments: Vec::new(),
         trailing_comments: Vec::new(),
         meta: Default::default(),
+        booking: Default::default(),
     })
 }
 

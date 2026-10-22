@@ -709,15 +709,13 @@ pub struct PostingContext<'a> {
     pub(super) txn_accounts: Option<std::sync::Arc<super::system_tables::TxnAccounts<String>>>,
 }
 
-/// Context for window function evaluation.
-#[derive(Debug, Clone)]
+/// Context for window function evaluation: one row's window function
+/// values, precomputed over the whole result.
+#[derive(Debug, Clone, Default)]
 pub struct WindowContext {
-    /// Row number within the partition (1-based).
-    pub row_number: usize,
-    /// Rank within the partition (1-based, ties get same rank).
-    pub rank: usize,
-    /// Dense rank within the partition (1-based, no gaps after ties).
-    pub dense_rank: usize,
+    /// The value of each window function among the row's targets, in target
+    /// order. Each is computed over its own `OVER` clause.
+    pub values: Vec<Value>,
 }
 
 /// Account information cached from Open/Close directives.

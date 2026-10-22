@@ -163,13 +163,8 @@ impl Executor<'_> {
             }
         } else {
             // Check if query has window functions
-            let has_windows = Self::has_window_functions(&query.targets);
-            let window_contexts = if has_windows {
-                if let Some(wf) = Self::find_window_function(&query.targets) {
-                    Some(self.compute_window_contexts(&postings, wf)?)
-                } else {
-                    None
-                }
+            let window_contexts = if Self::has_window_functions(&extended_targets) {
+                Some(self.compute_window_contexts(&postings, &extended_targets)?)
             } else {
                 None
             };

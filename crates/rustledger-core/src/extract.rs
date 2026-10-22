@@ -198,6 +198,7 @@ mod tests {
                         meta: Default::default(),
                         comments: vec![],
                         trailing_comments: vec![],
+                        booking: Default::default(),
                     }),
                     crate::Spanned::synthesized(Posting {
                         account: "Assets:Cash".into(),
@@ -208,6 +209,7 @@ mod tests {
                         meta: Default::default(),
                         comments: vec![],
                         trailing_comments: vec![],
+                        booking: Default::default(),
                     }),
                 ],
                 trailing_comments: vec![],
@@ -400,6 +402,7 @@ mod tests {
                     meta: posting_meta,
                     comments: vec![],
                     trailing_comments: vec![],
+                    booking: Default::default(),
                 })],
                 trailing_comments: vec![],
             }),

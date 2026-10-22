@@ -277,15 +277,16 @@ impl LoadError {
 /// values, returning [`LoadError::TooManyFiles`] instead of panicking when a
 /// ledger references more files than the id space allows.
 ///
-/// `SYNTHESIZED_FILE_ID` (`u16::MAX`) is reserved as the plugin-synthesized
-/// sentinel, so a real file id must be strictly below it — we reject `>=` it,
-/// not merely `> u16::MAX`, otherwise the 65,535th file would alias onto the
-/// sentinel. (This is also the boundary `SourceMap::add_file` asserts, so the
-/// loader must check it *before* calling `add_file`.)
+/// The ids from `FIRST_PLACEHOLDER_FILE_ID` up are reserved for placeholder
+/// locations (#2713) and the plugin-synthesized sentinel
+/// `SYNTHESIZED_FILE_ID` (`u16::MAX`), so a real file id must be strictly
+/// below `FIRST_PLACEHOLDER_FILE_ID`, otherwise a file would alias onto a
+/// placeholder. (This is also the boundary `SourceMap::add_file` asserts, so
+/// the loader must check it *before* calling `add_file`.)
 const fn file_id_to_u16(file_id: usize) -> Result<u16, LoadError> {
-    if file_id >= rustledger_parser::SYNTHESIZED_FILE_ID as usize {
+    if file_id >= rustledger_parser::FIRST_PLACEHOLDER_FILE_ID as usize {
         return Err(LoadError::TooManyFiles {
-            limit: rustledger_parser::SYNTHESIZED_FILE_ID as usize,
+            limit: rustledger_parser::FIRST_PLACEHOLDER_FILE_ID as usize,
         });
     }
     Ok(file_id as u16)
@@ -995,13 +996,15 @@ mod tests {
 
     #[test]
     fn file_id_to_u16_rejects_the_reserved_sentinel_not_panic() {
-        let sentinel = rustledger_parser::SYNTHESIZED_FILE_ID as usize;
-        // The last valid real id is one BELOW the reserved sentinel.
+        // The first reserved id: placeholders (#2713), then the sentinel.
+        let sentinel = rustledger_parser::FIRST_PLACEHOLDER_FILE_ID as usize;
+        // The last valid real id is one BELOW the reserved range.
         assert_eq!(file_id_to_u16(0).unwrap(), 0);
         assert_eq!(
             file_id_to_u16(sentinel - 1).unwrap(),
-            rustledger_parser::SYNTHESIZED_FILE_ID - 1
+            rustledger_parser::FIRST_PLACEHOLDER_FILE_ID - 1
         );
+        assert!(file_id_to_u16(rustledger_parser::SYNTHESIZED_FILE_ID as usize).is_err());
         // The sentinel itself (and beyond) is rejected with a LoadError — NOT a
         // panic, and NOT aliased onto SYNTHESIZED_FILE_ID. `load` is a
         // never-panic-on-input surface; the old `expect`/`assert` would have

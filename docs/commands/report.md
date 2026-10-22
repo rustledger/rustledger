@@ -42,6 +42,64 @@ A report subcommand (e.g. `balances`, `journal`) is required — running `rledge
 | `--no-pager` | Disable pager for output |
 | `--no-cache` | Disable the on-disk parse cache (always re-parse) |
 
+## Date Windows
+
+`balances`, `balsheet`, `income`, `journal` and `holdings` (and `budget`) take one shared set of window flags:
+
+| Option | Meaning |
+|--------|---------|
+| `--from <YYYY-MM-DD>` | First day of the window, **inclusive**. |
+| `--to <YYYY-MM-DD>` | End of the window, **exclusive**: the first day *not* reported. A single day is `--from 2024-03-15 --to 2024-03-16`. |
+| `--year <YYYY>` | One calendar year: `--from YYYY-01-01 --to <YYYY+1>-01-01`. |
+| `--time <EXPR>` | A window in Fava's time-filter syntax, parsed exactly as Fava parses it (below). |
+
+`--from` and `--to` combine with each other (either may be left open). `--year` and `--time` each name the whole window, so they combine with no other window flag; a conflicting combination is an error. The flags keep these meanings in every report. They do not change `capgains --year`/`--end`, `returns --end` (a valuation date) or `networth --period`, which keep their own meanings.
+
+```bash
+rledger report ledger.beancount income   --year 2024
+rledger report ledger.beancount balsheet --to 2025-01-01
+rledger report ledger.beancount journal  --time 2024-Q1
+rledger report ledger.beancount balances --time "2024-01 - 2024-03"
+rledger report ledger.beancount income   --time year-1
+```
+
+**`--time` expressions.** Everything Fava's time filter accepts, with the same meaning:
+
+| Expression | Window |
+|------------|--------|
+| `2024` | the year 2024 |
+| `2024-03` | March 2024 |
+| `2024-03-15` | that day |
+| `2024-Q1` | the first quarter of 2024 |
+| `2024-W05` | ISO week 5 of 2024 (Monday to Sunday) |
+| `FY2024`, `FY2024-Q2` | a fiscal year or fiscal quarter (see below) |
+| `2024-01 - 2024-03`, `2024-01 to 2024-03` | from the start of the first to the end of the second |
+| `year`, `quarter`, `month`, `week`, `day` | the current one, by your local date |
+| `year-1`, `month+2`, `(quarter-1)` | the current one, offset |
+| `fiscal_year`, `fiscal_quarter-1` | the current fiscal year or quarter, offset |
+
+The relative forms combine with ranges (`year-1 - month`). Case does not matter. Fava's corner cases are kept as well: a range splits at the first `-` or `to` followed by a four-digit year, so `2020-2021-2022` runs from 2020 through 2022, and `today` is rejected (Fava reads it as `to` and today's date, a range with no start). The parser is checked against a table of several thousand expressions generated from Fava's own `parse_date`.
+
+**Fiscal years** follow the ledger's own Fava option, read the way Fava reads it:
+
+```beancount
+2024-01-01 custom "fava-option" "fiscal-year-end" "03-31"
+```
+
+With that option, `FY2024` is 2023-04-01 through 2024-03-31 and `FY2024-Q1` is April to June 2023. The last valid option wins, and an invalid value is warned about and ignored. Without the option, fiscal years are calendar years.
+
+**The window clamps the ledger; it does not filter it.** Reports run over the ledger as Fava's time filter presents it (through the same clamp `rustfava` uses, modeled on beancount's `clamp_opt`):
+
+- Activity before the window becomes one opening-balance transaction per account, against `account_previous_balances` (`Equity:Opening-Balances` by default).
+- Income and expenses before the window are rolled into `account_previous_earnings` (`Equity:Earnings:Previous`).
+- Nothing on or after `--to` is included.
+
+So **`income`** and **`journal`** cover the window: the income statement is the income and expenses within it, and the journal lists the window's transactions after the opening balances that carry in what came before (flagged `S`). Pad transactions are not listed, with or without a window, but what they padded is in the opening balances. **`balances`**, **`balsheet`** and **`holdings`** show the state at the window's end: `balances --year 2024` is the balances on 2024-12-31, with the year's income and expenses still in their accounts and earlier earnings in `Equity:Earnings:Previous`.
+
+**The balance sheet balances.** With or without a window, the equity section carries the lines that make assets + liabilities + equity zero at cost, as Fava's balance sheet does: the period's net income in `account_current_earnings` (`Equity:Earnings:Current`) and, when `@` price conversions moved value between currencies, the residual in `account_current_conversions` (`Equity:Conversions:Current`). Each appears only when it is not zero.
+
+**Holdings** lists units and cost basis, so no price is involved. (For reference, Fava's holdings view under a time filter prices the window-end holdings with the ledger's latest price, not the price at the window's end, because it adds every price directive back into the filtered entries.)
+
 ## Examples
 
 ### Account Balances
@@ -487,6 +545,7 @@ one decimal would report `0.2` for a true `0.22580645`.
 | `--account <PREFIX>` | Only accounts starting with this prefix — the same raw prefix test `balances`, `holdings`, `journal` and `networth` use, so one value selects the same accounts everywhere. (Budget *coverage* under `--children` is matched by account component instead; see below.) |
 | `--from <YYYY-MM-DD>` | Window start, inclusive. Defaults to the start of the year being reported on (the year of `--to`), not the current year. |
 | `--to <YYYY-MM-DD>` | Window end, **exclusive**. Defaults to *tomorrow*, so the default window includes today's own spending. Because it is exclusive, `--from X --to X` is an empty window and is rejected. |
+| `--year <YYYY>` / `--time <EXPR>` | The window as a calendar year or in Fava's time-filter syntax; see [Date windows](#date-windows). Budget sums the postings inside the window itself rather than clamping, which gives the same figures. |
 | `--children` | Count spending in subaccounts toward a parent's budget (see below). |
 
 **Intervals** are `daily`, `weekly`, `monthly`, `quarterly` and `yearly` (the bare

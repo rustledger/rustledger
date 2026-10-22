@@ -300,12 +300,18 @@ impl LedgerErrorRenderer {
         };
         let message = escape_untrusted_text(&err.message);
         if let Some(loc) = &err.location {
+            // A placeholder location (`<check_closing>:0`, #2713) has no
+            // column; it prints as `bean-check` prints it.
+            let column = if loc.column == 0 {
+                String::new()
+            } else {
+                format!(":{}", loc.column)
+            };
             writeln!(
                 writer,
-                "{}:{}:{}: {}[{}]: {}",
+                "{}:{}{column}: {}[{}]: {}",
                 escape_untrusted_line(&loc.file.display().to_string()),
                 loc.line,
-                loc.column,
                 severity_label,
                 err.code,
                 message,

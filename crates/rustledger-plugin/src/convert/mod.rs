@@ -325,6 +325,7 @@ mod tests {
                     meta: Metadata::default(),
                     comments: Vec::new(),
                     trailing_comments: Vec::new(),
+                    booking: Default::default(),
                 }),
                 rustledger_core::Spanned::synthesized(Posting {
                     account: "Assets:Checking".into(),
@@ -335,6 +336,7 @@ mod tests {
                     meta: Metadata::default(),
                     comments: Vec::new(),
                     trailing_comments: Vec::new(),
+                    booking: Default::default(),
                 }),
             ],
             trailing_comments: Vec::new(),

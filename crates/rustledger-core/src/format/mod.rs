@@ -971,6 +971,7 @@ mod tests {
             meta: Default::default(),
             comments: Vec::new(),
             trailing_comments: Vec::new(),
+            booking: Default::default(),
         };
 
         let config = FormatConfig::default();
@@ -1050,6 +1051,7 @@ mod tests {
             meta: Default::default(),
             comments: Vec::new(),
             trailing_comments: Vec::new(),
+            booking: Default::default(),
         };
 
         let config = FormatConfig::default();

@@ -224,6 +224,10 @@ fuzz_target!(|input: FuzzTransaction| {
 
     let date = make_date(input.year_offset, input.month, input.day);
 
+    // What booked and applied, in order: the stream the realization property
+    // below replays.
+    let mut booked: Vec<Transaction> = Vec::new();
+
     // Build prior inventory state with buy transactions
     for (i, buy) in input.prior_buys.iter().take(5).enumerate() {
         let (units, cost) = (buy.units.0, buy.cost.0);
@@ -257,7 +261,9 @@ fuzz_target!(|input: FuzzTransaction| {
         // input to explore past, not a crash. Unwrapping here would abort the
         // run and report a false finding — the opposite of this target's job.
         if let Ok(result) = engine.book_and_interpolate(&txn) {
-            let _ = engine.apply(&result.transaction);
+            if engine.apply(&result.transaction).is_ok() {
+                booked.push(result.transaction);
+            }
         }
     }
 
@@ -327,4 +333,58 @@ fuzz_target!(|input: FuzzTransaction| {
     // The booking engine must never panic, regardless of input.
     // Errors are expected and fine — panics are bugs.
     let _ = engine.book_and_interpolate(&txn);
+
+    // Every realization of the booked stream agrees with booking's record
+    // (#2390). `apply` and the as-booked replay read each posting's recorded
+    // decision; with the decisions forgotten they ask the inventory instead.
+    // All of them must reach the inventory the booking engine holds, so the
+    // record changes no result and no consumer disagrees with it.
+    if let Ok(result) = engine.book_and_interpolate(&txn) {
+        if engine.apply(&result.transaction).is_ok() {
+            booked.push(result.transaction);
+        }
+    }
+    let expected = holdings(&engine);
+    let forgotten: Vec<Transaction> = booked
+        .iter()
+        .cloned()
+        .map(|mut t| {
+            t.forget_booking();
+            t
+        })
+        .collect();
+    for (name, stream, replay) in [
+        ("apply", &booked, false),
+        ("replay", &booked, true),
+        ("apply, decisions forgotten", &forgotten, false),
+        ("replay, decisions forgotten", &forgotten, true),
+    ] {
+        let mut fresh = BookingEngine::with_method(method);
+        for t in stream.iter() {
+            let realized = if replay {
+                fresh.replay_transaction_as_booked(t)
+            } else {
+                fresh.apply(t)
+            };
+            assert!(
+                realized.is_ok(),
+                "{name}: a booked transaction failed to realize: {realized:?}\n{t:?}"
+            );
+        }
+        assert_eq!(holdings(&fresh), expected, "{name} disagrees with booking");
+    }
 });
+
+/// Every account's non-empty positions, sorted, for comparison.
+fn holdings(engine: &BookingEngine) -> Vec<String> {
+    let mut out: Vec<String> = engine
+        .inventories()
+        .flat_map(|(account, inv)| {
+            inv.positions()
+                .filter(|p| !p.is_empty())
+                .map(move |p| format!("{account} {:?} {:?}", p.units, p.cost))
+        })
+        .collect();
+    out.sort();
+    out
+}

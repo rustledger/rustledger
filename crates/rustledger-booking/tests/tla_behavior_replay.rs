@@ -73,6 +73,7 @@ fn txn(date: NaiveDate, amount: i64) -> Directive {
             comments: Vec::new(),
             trailing_comments: Vec::new(),
             meta: Default::default(),
+            booking: Default::default(),
         })
     };
     Directive::Transaction(Transaction {

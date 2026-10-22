@@ -9,8 +9,8 @@
 // ratchet: fxhash-only — hot path; use FxHashMap/FxHashSet, not std SipHash collections (#1237).
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustledger_core::{
-    AccountedBookingError, Amount, BookingMethod, Cost, CostSpec, Decimal, Directive,
-    IncompleteAmount, Inventory, Position, Posting, Transaction,
+    AccountedBookingError, Amount, BookingDecision, BookingMethod, Cost, CostSpec, Decimal,
+    Directive, IncompleteAmount, Inventory, Position, Posting, Transaction,
 };
 use thiserror::Error;
 
@@ -843,6 +843,10 @@ impl BookingEngine {
                 // Whether a `{*}` on this posting ran its merge, which only
                 // the reduction branch below does (#2418).
                 let mut merged = false;
+                // The decision itself, recorded on the booked posting below
+                // and read by every consumer that realizes it (#2390). An
+                // account holding nothing yet is augmented.
+                let mut is_reduction = false;
                 if let Some(inv) = working_inventories
                     .get(&posting.account)
                     .or_else(|| self.inventories.get(&posting.account).map(AsRef::as_ref))
@@ -891,7 +895,7 @@ impl BookingEngine {
                         };
                         &classify_spec
                     };
-                    let is_reduction = inv.is_booking_reduction(units, Some(classify_as), method);
+                    is_reduction = inv.is_booking_reduction(units, Some(classify_as), method);
 
                     if is_reduction && let Some(e) = mismatch() {
                         return Err(e);
@@ -1132,6 +1136,7 @@ impl BookingEngine {
                                     }
                                     new_posting.units =
                                         Some(IncompleteAmount::Complete(expanded_units));
+                                    new_posting.booking = BookingDecision::Reduce;
                                     // Set cost from the matched lot
                                     if let Some(cost) = &matched_pos.cost {
                                         new_posting.cost = Some(Box::new(CostSpec {
@@ -1435,25 +1440,14 @@ impl BookingEngine {
                     // Fill in missing parts from price annotation, other postings, and transaction date
                     let inferred_currency = inferred_cost_currency(posting, cost_spec, txn);
 
-                    // Check if this is a reduction (opposite sign exists in inventory)
-                    // Reductions get their date from matched lot, augmentations get txn date
-                    // Must agree with the classification above, or a posting
-                    // booked as an augmentation would be left undated.
-                    let is_reduction = self.inventories.get(&posting.account).is_some_and(|inv| {
-                        let method = self.method_for(&posting.account);
-                        // Cloned only to fill a missing currency, which is rare:
-                        // this runs for every cost-bearing augmentation.
-                        if cost_spec.currency.is_some() {
-                            inv.is_booking_reduction(units, Some(cost_spec), method)
-                        } else {
-                            let filled = CostSpec {
-                                currency: inferred_currency.clone(),
-                                ..cost_spec.clone()
-                            };
-                            inv.is_booking_reduction(units, Some(&filled), method)
-                        }
-                    });
-
+                    // Reductions get their date from the matched lot,
+                    // augmentations the transaction's. The decision made
+                    // above, not a second asking: this one read the inventory
+                    // before the transaction, so a sale past the end of a lot
+                    // an earlier posting emptied (a short `book` books as an
+                    // augmentation) read as a reduction here and was left
+                    // undated, where beancount dates it (#2390).
+                    //
                     // Fill in date for augmentations only (not reductions)
                     let inferred_date = if is_reduction {
                         None // Reductions get their date from matched lot
@@ -1472,6 +1466,13 @@ impl BookingEngine {
                         }));
                     }
                 }
+                // A posting this expanded into one per lot is replaced below
+                // by postings that carry `Reduce` themselves.
+                result.postings[idx].booking = if is_reduction {
+                    BookingDecision::Reduce
+                } else {
+                    BookingDecision::Augment
+                };
             }
         }
 
@@ -1570,8 +1571,9 @@ impl BookingEngine {
         };
         // Only a posting that will actually REDUCE runs the merge; an
         // augmentation carrying `{*}` is added, and comparing it against a pool
-        // it never builds would reject a valid posting. Uses the canonical
-        // predicate `realize_posting` itself consults, so the two cannot drift.
+        // it never builds would reject a valid posting. Asked the way `apply`
+        // asks it ([`Posting::reduces`]: booking's recorded decision), so the
+        // two cannot drift.
         //
         // This also keeps `apply`'s rollback guard sound: every posting this
         // can reject is a cost-bearing reduction, which is exactly what
@@ -1580,7 +1582,7 @@ impl BookingEngine {
         // where `rollback_needed` said failure was impossible — an assert, not
         // an error.
         let method = self.method_for(&posting.account);
-        if !inv.is_booking_reduction(units, posting.cost.as_deref(), method) {
+        if !posting.reduces(units, Some(inv), method) {
             return Ok(());
         }
         let Ok(Some(got)) = inv.merged_pool_cost(units) else {
@@ -1658,14 +1660,12 @@ impl BookingEngine {
         self.realize_posting(posting, date)
     }
 
-    /// Realize one booked posting as part of [`Self::apply`].
+    /// [`Self::replay_posting`]'s body: decide against live state whether
+    /// the posting reduces, then reduce or add it.
     ///
-    /// Private on purpose. This is the per-posting half of the *realize*
-    /// question, and a caller outside this engine has no business reaching it:
-    /// realizing means [`Self::apply`], which applies a whole transaction and
-    /// runs the `{*}` precondition first. Replaying a filtered stream means
-    /// [`Self::replay_posting`], which is a different question. Leaving this
-    /// public is what let the two blur together.
+    /// Not [`Self::apply`]'s: realizing reads booking's recorded decision
+    /// (#2390) and dispatches to [`Self::reduce_posting`] or
+    /// [`Self::augment_posting`] itself.
     fn realize_posting(
         &mut self,
         posting: &Posting,
@@ -1680,6 +1680,34 @@ impl BookingEngine {
                 account: posting.account.clone(),
             });
         };
+        // Reduction vs augmentation, re-derived on purpose: this is the
+        // filtered replay's question (see `replay_posting`), so booking's
+        // recorded decision does not apply.
+        let reduces = self.inventories.get(&posting.account).is_some_and(|inv| {
+            inv.is_booking_reduction(
+                units,
+                posting.cost.as_deref(),
+                self.method_for(&posting.account),
+            )
+        });
+        if reduces {
+            self.reduce_posting(posting)
+        } else {
+            self.augment_posting(posting, date)
+        }
+    }
+
+    /// Reduce the account's lots by one booked posting, without asking
+    /// whether it reduces: the caller has decided that (#2390).
+    ///
+    /// The reduction half of [`Self::realize_posting`], as
+    /// [`Self::augment_posting`] is the other.
+    fn reduce_posting(&mut self, posting: &Posting) -> Result<(), BookingError> {
+        let Some(IncompleteAmount::Complete(units)) = &posting.units else {
+            return Err(BookingError::NotBooked {
+                account: posting.account.clone(),
+            });
+        };
         // Resolve the per-account booking method before mutably borrowing the
         // inventories map.
         let method = self.method_for(&posting.account);
@@ -1687,19 +1715,10 @@ impl BookingEngine {
         // account. Booking on its own never is, so this is a plain `&mut`.
         let inv =
             std::sync::Arc::make_mut(self.inventories.entry(posting.account.clone()).or_default());
-
-        // Reduction vs augmentation — the single source for this decision
-        // (`Inventory::is_booking_reduction`), shared with the Late validator so
-        // the two can't drift (including the #1182 NONE gate that previously had
-        // to be maintained in both crates).
-        if inv.is_booking_reduction(units, posting.cost.as_deref(), method) {
-            // `reduce` only errors when the lot it would match is missing — a
-            // "must book first" precondition violation.
-            inv.reduce(units, posting.cost.as_deref(), method)
-                .map_err(|e| convert_core_booking_error(e, &posting.account))?;
-        } else {
-            return self.augment_posting(posting, date);
-        }
+        // `reduce` only errors when the lot it would match is missing — a
+        // "must book first" precondition violation.
+        inv.reduce(units, posting.cost.as_deref(), method)
+            .map_err(|e| convert_core_booking_error(e, &posting.account))?;
         Ok(())
     }
 
@@ -1718,16 +1737,21 @@ impl BookingEngine {
     /// it comes ([`WalkStep::AddNow`]). Only then: a cost-less position does
     /// not change the classification, but `AVERAGE` pools it, so adding one
     /// ahead of an `AVERAGE` sale would move that sale's basis.
-    fn walk_step(&self, posting: &Posting, any_cost: bool) -> WalkStep {
+    ///
+    /// `decisions` says whether booking's recorded decision
+    /// ([`Posting::booking`]) answers the question, or it is asked again of
+    /// live state; see [`Decisions`].
+    fn walk_step(&self, posting: &Posting, any_cost: bool, decisions: Decisions) -> WalkStep {
         let is_reduction = posting.cost.is_some()
             && posting.amount().is_some_and(|units| {
-                self.inventories.get(&posting.account).is_some_and(|inv| {
-                    inv.is_booking_reduction(
-                        units,
-                        posting.cost.as_deref(),
-                        self.method_for(&posting.account),
-                    )
-                })
+                let inv = self.inventories.get(&posting.account).map(AsRef::as_ref);
+                let method = self.method_for(&posting.account);
+                match decisions {
+                    Decisions::AsBooked => posting.reduces(units, inv, method),
+                    Decisions::Rederive => inv.is_some_and(|inv| {
+                        inv.is_booking_reduction(units, posting.cost.as_deref(), method)
+                    }),
+                }
             });
         if is_reduction {
             WalkStep::Reduce
@@ -1752,9 +1776,45 @@ impl BookingEngine {
     /// postings are applied in `book`'s order rather than one at a time
     /// against live state, which misreads a transaction that sells past a lot
     /// it touches (#2380).
+    ///
+    /// Each posting's reduction-or-augmentation is asked again of the
+    /// replay's own state, ignoring booking's recorded decision: a filtered
+    /// or partial stream is a different ledger, and a sale whose lots the
+    /// filter left out is no reduction in it. A caller replaying the whole
+    /// booked stream wants [`Self::begin_replay_as_booked`].
     pub fn begin_replay<'e, 't>(&'e mut self, txn: &'t Transaction) -> TransactionReplay<'e, 't> {
+        self.replay_with(txn, Decisions::Rederive)
+    }
+
+    /// [`Self::begin_replay`], taking each posting's reduction-or-augmentation
+    /// from booking's recorded decision ([`Posting::booking`], #2390) rather
+    /// than asking again.
+    ///
+    /// For a caller replaying the WHOLE booked stream from its start, in
+    /// booking order, as [`Self::apply`] realizes it: the replay's state
+    /// before each transaction is then the state booking read, and the
+    /// recorded decision is the answer. Asking again, of the booked posting,
+    /// is how the query replay came to disagree with booking (#2380). A
+    /// posting with no recorded decision is asked as in
+    /// [`Self::begin_replay`].
+    ///
+    /// Like [`Self::begin_replay`] it runs no `{*}` precondition and no
+    /// rollback.
+    pub fn begin_replay_as_booked<'e, 't>(
+        &'e mut self,
+        txn: &'t Transaction,
+    ) -> TransactionReplay<'e, 't> {
+        self.replay_with(txn, Decisions::AsBooked)
+    }
+
+    fn replay_with<'e, 't>(
+        &'e mut self,
+        txn: &'t Transaction,
+        decisions: Decisions,
+    ) -> TransactionReplay<'e, 't> {
         TransactionReplay {
             any_cost: txn.postings.iter().any(|p| p.cost.is_some()),
+            decisions,
             engine: self,
             txn,
             next: 0,
@@ -1772,6 +1832,17 @@ impl BookingEngine {
     /// postings before it stay applied, as with [`Self::replay_posting`].
     pub fn replay_transaction(&mut self, txn: &Transaction) -> Result<(), BookingError> {
         self.begin_replay(txn).finish()
+    }
+
+    /// Replay a whole booked transaction as booking decided it.
+    ///
+    /// See [`Self::begin_replay_as_booked`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::replay_transaction`].
+    pub fn replay_transaction_as_booked(&mut self, txn: &Transaction) -> Result<(), BookingError> {
+        self.begin_replay_as_booked(txn).finish()
     }
 
     /// Add one booked posting as a new position, without asking whether it
@@ -1897,7 +1968,14 @@ impl BookingEngine {
             // and state-independent, so it cannot be falsified mid-transaction
             // either; only `{*}` postings widen the gate, which are rare enough
             // not to reopen the #1897 snapshot regression.
-            spec.merge || units.number.is_sign_negative()
+            //
+            // A posting booking recorded as a reduction is one whatever its
+            // sign (covering a short has positive units), and `apply` now
+            // reduces it on that word (#2390), so it can fail the way a
+            // reduction fails.
+            spec.merge
+                || units.number.is_sign_negative()
+                || posting.booking == BookingDecision::Reduce
         })
     }
 
@@ -2082,6 +2160,13 @@ impl BookingEngine {
         // shapes of the same divergence; the 40-unit property almost never
         // reached any of them.
         //
+        // The walk still matters for the ORDER, but no longer for the
+        // decision: each posting's reduction-or-augmentation is the one
+        // `book` recorded on it (#2390), read through `walk_step`, and only
+        // a posting booking never decided is asked of live state. Asking the
+        // booked posting again was the root of #2368, #2378 and #2384:
+        // booking rewrites the very fields the rule reads.
+        //
         // The validator's inventory pass (`update_inventories` in
         // rustledger-validate) walks the same way for the same reason; change
         // one and change the other. [`TransactionReplay`], which the query
@@ -2089,7 +2174,7 @@ impl BookingEngine {
         let any_cost = txn.postings.iter().any(|p| p.cost.is_some());
         let mut deferred: smallvec::SmallVec<[usize; 8]> = smallvec::SmallVec::new();
         for (i, posting) in txn.postings.iter().enumerate() {
-            let result = match self.walk_step(posting, any_cost) {
+            let result = match self.walk_step(posting, any_cost, Decisions::AsBooked) {
                 WalkStep::Defer => {
                     deferred.push(i);
                     continue;
@@ -2112,7 +2197,7 @@ impl BookingEngine {
                         self.verify_merge_precondition(posting)
                     };
                     touched.insert(&posting.account);
-                    checked.and_then(|()| self.realize_posting(posting, txn.date))
+                    checked.and_then(|()| self.reduce_posting(posting))
                 }
             };
             if let Err(e) = result {
@@ -3190,6 +3275,20 @@ fn sell_undated_lots_after_their_dated_twins<P: std::ops::Deref<Target = Posting
     }
 }
 
+/// Who answers the booking-order walk's reduction-or-augmentation question
+/// (#2390).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Decisions {
+    /// Booking, through the decision it recorded on each posting
+    /// ([`Posting::reduces`]); a posting without one is asked of live state.
+    /// For realizing the booked stream: [`BookingEngine::apply`] and
+    /// [`BookingEngine::begin_replay_as_booked`].
+    AsBooked,
+    /// Live state, whatever booking recorded: a filtered or partial replay
+    /// is a different ledger, which booking never saw (#1985).
+    Rederive,
+}
+
 /// One step of the booking-order walk; see [`BookingEngine::walk_step`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WalkStep {
@@ -3216,6 +3315,7 @@ pub struct TransactionReplay<'e, 't> {
     engine: &'e mut BookingEngine,
     txn: &'t Transaction,
     any_cost: bool,
+    decisions: Decisions,
     next: usize,
     deferred: smallvec::SmallVec<[usize; 8]>,
 }
@@ -3235,8 +3335,11 @@ impl TransactionReplay<'_, '_> {
         let i = self.next;
         let posting = &self.txn.postings[i];
         self.next += 1;
-        match self.engine.walk_step(posting, self.any_cost) {
-            WalkStep::Reduce => self.engine.realize_posting(posting, self.txn.date),
+        match self
+            .engine
+            .walk_step(posting, self.any_cost, self.decisions)
+        {
+            WalkStep::Reduce => self.engine.reduce_posting(posting),
             WalkStep::AddNow => self.engine.augment_posting(posting, self.txn.date),
             WalkStep::Defer => {
                 self.deferred.push(i);
@@ -5854,5 +5957,163 @@ mod tests {
             rustledger_core::MetaValue::Bool(true),
         );
         assert_eq!(usd_tolerance(&txn), None);
+    }
+
+    // --- Recorded booking decisions (#2390) --------------------------------
+
+    fn usd_lot(units: Decimal, cost: Decimal) -> Posting {
+        Posting::new("Assets:Stock", Amount::new(units, "X")).with_cost(
+            CostSpec::empty()
+                .with_number(rustledger_core::CostNumber::PerUnit { value: cost })
+                .with_currency("USD"),
+        )
+    }
+
+    fn holding(lots: &[(Decimal, Decimal, NaiveDate)]) -> BookingEngine {
+        let mut engine = BookingEngine::new();
+        for &(units, cost, on) in lots {
+            let buy = Transaction::new(on, "buy")
+                .with_synthesized_posting(usd_lot(units, cost))
+                .with_synthesized_posting(Posting::auto("Assets:Cash"));
+            engine
+                .book_interpolate_apply(&mut buy.clone())
+                .expect("fixture buy books");
+        }
+        engine
+    }
+
+    fn decisions(txn: &Transaction) -> Vec<BookingDecision> {
+        txn.postings.iter().map(|p| p.booking).collect()
+    }
+
+    #[test]
+    fn book_records_its_decision_on_each_posting() {
+        use BookingDecision::{Augment, Reduce, Undecided};
+        let engine = holding(&[
+            (dec!(5), dec!(100), date(2024, 1, 1)),
+            (dec!(5), dec!(110), date(2024, 1, 2)),
+        ]);
+        // A sale across both lots splits into one posting per lot, each a
+        // reduction; the buy beside it is an augmentation; cash carries no
+        // cost and no decision.
+        let txn = Transaction::new(date(2024, 2, 1), "sell 7, buy 1")
+            .with_synthesized_posting(
+                Posting::new("Assets:Stock", Amount::new(dec!(-7), "X"))
+                    .with_cost(CostSpec::empty()),
+            )
+            .with_synthesized_posting(usd_lot(dec!(1), dec!(120)))
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(600), "USD")));
+        let booked = engine.book(&txn).expect("books");
+        assert_eq!(
+            decisions(&booked.transaction),
+            [Reduce, Reduce, Augment, Undecided]
+        );
+
+        // Under NONE nothing reduces.
+        let mut none = BookingEngine::with_method(BookingMethod::None);
+        let buy = Transaction::new(date(2024, 1, 1), "buy")
+            .with_synthesized_posting(usd_lot(dec!(5), dec!(100)))
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-500), "USD")));
+        none.apply(&buy).expect("buy applies");
+        let sale = Transaction::new(date(2024, 2, 1), "sell")
+            .with_synthesized_posting(usd_lot(dec!(-2), dec!(100)))
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(200), "USD")));
+        let booked = none.book(&sale).expect("books");
+        assert_eq!(decisions(&booked.transaction), [Augment, Undecided]);
+    }
+
+    /// A sale past the end of a lot an earlier posting of the same
+    /// transaction emptied opens a short, which is an augmentation and is
+    /// dated like one (#2390). The date fill asked the reduction question a
+    /// second time, of the inventory before the transaction, where the lot
+    /// was still there, and left the short undated. Beancount dates it.
+    #[test]
+    fn a_sale_past_a_lot_its_transaction_emptied_is_dated() {
+        let engine = holding(&[(dec!(2), dec!(100), date(2024, 1, 2))]);
+        let txn = Transaction::new(date(2024, 1, 3), "sell past")
+            .with_synthesized_posting(usd_lot(dec!(-2), dec!(100)))
+            .with_synthesized_posting(usd_lot(dec!(-2), dec!(100)))
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(400), "USD")));
+        let booked = engine.book(&txn).expect("books");
+        let dates: Vec<Option<NaiveDate>> = booked
+            .transaction
+            .postings
+            .iter()
+            .take(2)
+            .map(|p| p.cost.as_ref().and_then(|c| c.date))
+            .collect();
+        assert_eq!(
+            dates,
+            [Some(date(2024, 1, 2)), Some(date(2024, 1, 3))],
+            "the sale takes the lot's date, the short its transaction's"
+        );
+        assert_eq!(
+            decisions(&booked.transaction)[..2],
+            [BookingDecision::Reduce, BookingDecision::Augment]
+        );
+    }
+
+    /// A booked buy of 2 beside a held lot of 5, carrying `decision`. The
+    /// inventory reads it as an augmentation; recording it as a reduction is
+    /// the one way to see whose answer a consumer takes.
+    fn buy_recorded_as(decision: BookingDecision) -> (BookingEngine, Transaction) {
+        let engine = holding(&[(dec!(5), dec!(100), date(2024, 1, 1))]);
+        let mut buy = usd_lot(dec!(2), dec!(100));
+        if let Some(cost) = buy.cost.as_deref_mut() {
+            cost.date = Some(date(2024, 2, 1));
+        }
+        buy.booking = decision;
+        let txn = Transaction::new(date(2024, 2, 1), "buy")
+            .with_synthesized_posting(buy)
+            .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-200), "USD")));
+        (engine, txn)
+    }
+
+    fn stock_lots(engine: &BookingEngine) -> Vec<Decimal> {
+        let mut lots: Vec<Decimal> = engine
+            .inventory(&"Assets:Stock".into())
+            .map(|inv| {
+                inv.positions()
+                    .filter(|p| !p.is_empty())
+                    .map(|p| p.units.number)
+                    .collect()
+            })
+            .unwrap_or_default();
+        lots.sort();
+        lots
+    }
+
+    /// `apply` takes booking's word: a posting recorded as a reduction is
+    /// reduced (and here finds no lot to reduce) even where the inventory
+    /// reads it as an augmentation, and one booking never decided is asked of
+    /// the inventory (#2390).
+    #[test]
+    fn apply_realizes_the_decision_booking_recorded() {
+        let (mut engine, txn) = buy_recorded_as(BookingDecision::Reduce);
+        assert!(
+            engine.apply(&txn).is_err(),
+            "a recorded reduction is reduced"
+        );
+        assert_eq!(stock_lots(&engine), [dec!(5)], "and rolled back whole");
+
+        let (mut engine, txn) = buy_recorded_as(BookingDecision::Undecided);
+        engine.apply(&txn).expect("applies");
+        assert_eq!(stock_lots(&engine), [dec!(2), dec!(5)]);
+
+        let (mut engine, txn) = buy_recorded_as(BookingDecision::Augment);
+        engine.apply(&txn).expect("applies");
+        assert_eq!(stock_lots(&engine), [dec!(2), dec!(5)]);
+    }
+
+    /// The replay of the whole booked stream reads the decision; the
+    /// filtered replay asks its own state, whatever booking recorded.
+    #[test]
+    fn only_the_as_booked_replay_reads_the_decision() {
+        let (mut engine, txn) = buy_recorded_as(BookingDecision::Reduce);
+        assert!(engine.replay_transaction_as_booked(&txn).is_err());
+
+        let (mut engine, txn) = buy_recorded_as(BookingDecision::Reduce);
+        engine.replay_transaction(&txn).expect("replays");
+        assert_eq!(stock_lots(&engine), [dec!(2), dec!(5)]);
     }
 }

@@ -3585,3 +3585,56 @@ fn e8001_hint_is_relative_to_the_including_file() {
         )]
     );
 }
+
+/// #2713: the directives `check_closing`, `close_tree` and document
+/// discovery create have beancount's placeholder locations, so their errors
+/// are located there (line 0, no column) instead of nowhere.
+#[test]
+fn test_plugin_created_directives_have_placeholder_locations() {
+    use rustledger_loader::{LoadOptions, load};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path().canonicalize().expect("canonical tempdir");
+    std::fs::create_dir_all(root.join("docs/Assets/Cash")).expect("docs dir");
+    std::fs::write(root.join("docs/Assets/Cash/2023-06-01.stmt.pdf"), "").expect("doc");
+    let path = root.join("ledger.beancount");
+    std::fs::write(
+        &path,
+        "option \"documents\" \"docs\"\n\
+         plugin \"beancount.plugins.check_closing\"\n\
+         plugin \"beancount.plugins.close_tree\"\n\
+         2024-01-01 open Assets:Bank\n\
+         2024-01-01 open Assets:Cash\n\
+         2024-01-01 open Assets:Brokerage\n\
+         2024-03-01 open Assets:Bank:Sub\n\
+         2024-01-15 * \"close out\"\n  \
+           Assets:Brokerage  -5 USD\n    \
+             closing: TRUE\n  \
+           Assets:Bank  5 USD\n\
+         2024-02-01 close Assets:Bank\n",
+    )
+    .expect("write ledger");
+    let ledger = load(&path, &LoadOptions::default()).expect("load ledger");
+    let located = |needle: &str| {
+        let e = ledger
+            .errors
+            .iter()
+            .find(|e| e.message.contains(needle))
+            .unwrap_or_else(|| panic!("an error names {needle}: {:?}", ledger.errors));
+        let loc = e
+            .location
+            .as_ref()
+            .unwrap_or_else(|| panic!("it has a location: {e:?}"));
+        (loc.file.clone(), loc.line, loc.column)
+    };
+    assert_eq!(
+        located("Assets:Brokerage"),
+        ("<check_closing>".into(), 0, 0)
+    );
+    assert_eq!(
+        located("Assets:Bank:Sub"),
+        ("<beancount.plugins.close_tree>".into(), 0, 0)
+    );
+    // Dated before the account opens.
+    assert_eq!(located("Assets:Cash"), (path, 0, 0));
+}

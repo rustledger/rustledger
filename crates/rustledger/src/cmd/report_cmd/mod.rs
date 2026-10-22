@@ -28,6 +28,7 @@ mod balsheet;
 mod budget;
 mod capgains;
 mod commodities;
+pub mod fava_time;
 mod holdings;
 mod income;
 mod journal;
@@ -35,6 +36,9 @@ mod networth;
 mod prices;
 mod returns;
 mod stats;
+pub mod window;
+
+pub use window::DateWindow;
 
 use crate::cmd::completions::ShellType;
 use anyhow::{Context, Result};
@@ -119,18 +123,39 @@ impl OutputFormat {
 #[derive(Subcommand, Debug)]
 pub enum Report {
     /// Show account balances
+    ///
+    /// With a window (`--from`/`--to`/`--year`/`--time`), the balances at the
+    /// window's end, with earlier activity summarized into opening balances.
     Balances {
         /// Filter to accounts matching this prefix
         #[arg(short, long)]
         account: Option<String>,
+        /// The date window (`--from`, `--to`, `--year`, `--time`).
+        #[command(flatten)]
+        window: DateWindow,
     },
     /// Balance sheet (Assets, Liabilities, Equity)
+    ///
+    /// With a window, the balance sheet at the window's end.
     #[command(alias = "bal")]
-    Balsheet,
+    Balsheet {
+        /// The date window (`--from`, `--to`, `--year`, `--time`).
+        #[command(flatten)]
+        window: DateWindow,
+    },
     /// Income statement (Income and Expenses)
+    ///
+    /// With a window, the income and expenses within it.
     #[command(alias = "is")]
-    Income,
+    Income {
+        /// The date window (`--from`, `--to`, `--year`, `--time`).
+        #[command(flatten)]
+        window: DateWindow,
+    },
     /// Transaction journal/register
+    ///
+    /// With a window, the transactions within it, after one opening-balance
+    /// transaction per account carrying in what came before.
     #[command(alias = "register")]
     Journal {
         /// Filter to accounts matching this prefix
@@ -139,12 +164,20 @@ pub enum Report {
         /// Limit number of entries
         #[arg(short, long)]
         limit: Option<usize>,
+        /// The date window (`--from`, `--to`, `--year`, `--time`).
+        #[command(flatten)]
+        window: DateWindow,
     },
     /// Investment holdings with cost basis
+    ///
+    /// With a window, the holdings at the window's end.
     Holdings {
         /// Filter to accounts matching this prefix
         #[arg(short, long)]
         account: Option<String>,
+        /// The date window (`--from`, `--to`, `--year`, `--time`).
+        #[command(flatten)]
+        window: DateWindow,
     },
     /// Net worth over time
     Networth {
@@ -227,22 +260,18 @@ pub enum Report {
         irr: bool,
     },
     /// Budgeted vs actual spending, from Fava-compatible `custom "budget"` directives
+    ///
+    /// Without `--to`, the window ends tomorrow, so that it includes today.
+    /// Without `--from`, it starts on January 1 of the year `--to` falls in, so
+    /// narrowing `--to` narrows the window with it rather than reporting from
+    /// January of the CURRENT year against an older `--to`.
     Budget {
         /// Only accounts under this prefix (default: all budgeted accounts).
         #[arg(short, long)]
         account: Option<String>,
-        /// Start of the reporting window, inclusive (`YYYY-MM-DD`).
-        /// Defaults to the start of the year `--to` falls in, so narrowing
-        /// `--to` narrows the window with it rather than silently reporting
-        /// from January of the CURRENT year against an older `--to`.
-        /// (No short flag: `-f` is the global `--format`.)
-        #[arg(long)]
-        from: Option<String>,
-        /// End of the reporting window, EXCLUSIVE (`YYYY-MM-DD`).
-        /// Defaults to tomorrow, so that the default window includes today.
-        /// (No short flag: `-t` is unused but `--to` stays symmetric with `--from`.)
-        #[arg(long)]
-        to: Option<String>,
+        /// The date window (`--from`, `--to`, `--year`, `--time`).
+        #[command(flatten)]
+        window: DateWindow,
         /// Count spending in subaccounts toward a parent's budget, summing the
         /// parent's own budget with any child budgets. Off by default, matching
         /// Fava: a budget on `Expenses:Food` covers only that exact account.
@@ -473,6 +502,15 @@ struct LoadedReport {
     /// The returns report uses the first as the default reporting currency
     /// (overridable with `--currency`); other reports ignore it.
     operating_currency: Vec<String>,
+    /// The classifier and summary accounts a date window clamps with: the
+    /// ledger's own `account_previous_balances` / `account_previous_earnings`,
+    /// as rustfava's `session.clamp` uses them.
+    clamp_accounts: rustledger_ops::clamp::ClampAccounts,
+    /// `account_current_earnings` and `account_current_conversions`, resolved
+    /// under the equity root: where the balance sheet books the period's net
+    /// income and its conversion residual so that it balances.
+    current_earnings: String,
+    current_conversions: String,
 }
 
 /// Load and fully process the file (parse → book → plugins), producing the
@@ -566,8 +604,8 @@ fn load(
     let needs_balance_view = matches!(
         report,
         Report::Balances { .. }
-            | Report::Balsheet
-            | Report::Income
+            | Report::Balsheet { .. }
+            | Report::Income { .. }
             | Report::Holdings { .. }
             | Report::Networth { .. }
             // Returns extraction requires the booked, pad-expanded stream (its
@@ -577,6 +615,11 @@ fn load(
             // spending like any other — without this the budget report disagreed
             // with `balances`/`income` on the same ledger.
             | Report::Budget { .. }
+    ) || matches!(
+        // A windowed journal clamps the pad-expanded view, so the opening
+        // balances it carries in include what pads put there.
+        report,
+        Report::Journal { window, .. } if window.is_set()
     );
     let has_pads = needs_balance_view
         && ledger
@@ -589,6 +632,13 @@ fn load(
         None
     };
     let account_types = ledger.options.to_account_types();
+    let clamp_accounts = rustledger_ops::clamp::ClampAccounts {
+        types: account_types.clone(),
+        previous_balances: ledger.options.previous_balances_account(),
+        previous_earnings: ledger.options.previous_earnings_account(),
+    };
+    let current_earnings = ledger.options.current_earnings_account();
+    let current_conversions = ledger.options.current_conversions_account();
     let display_context = ledger.display_context.clone();
     let operating_currency = ledger.options.operating_currency.clone();
     let capital_gains = ledger.capital_gains;
@@ -603,6 +653,9 @@ fn load(
         display_context,
         booking_method,
         operating_currency,
+        clamp_accounts,
+        current_earnings,
+        current_conversions,
     })
 }
 
@@ -635,14 +688,32 @@ fn render<W: io::Write>(
     let balance_input: &[rustledger_core::Directive] =
         loaded.balance_view.as_deref().unwrap_or(directives);
 
+    // The date window (#2643), for the reports that take one: resolved once,
+    // against the local "today" Fava's relative forms read, and applied by
+    // clamping `balance_input`. `None` = no window flag, the whole ledger.
+    let windowed = |window: &DateWindow,
+                    warnings: &mut dyn Diagnostics|
+     -> Result<Option<Vec<rustledger_core::Directive>>> {
+        if !window.is_set() {
+            return Ok(None);
+        }
+        let resolved = resolve_window(window, directives, warnings)?;
+        Ok(Some(window::clamp_to_window(
+            balance_input,
+            resolved,
+            &loaded.clamp_accounts,
+        )?))
+    };
+
     // Generate the requested report into the caller-provided writer.
     // Balance-computing reports get `balance_input` (the pad-expanded
     // view when the ledger has pads, otherwise the borrowed source
     // stream); source-faithful reports get `&directives`.
     match report {
-        Report::Balances { account } => {
+        Report::Balances { account, window } => {
+            let clamped = windowed(window, warnings)?;
             balances::report_balances(
-                balance_input,
+                clamped.as_deref().unwrap_or(balance_input),
                 loaded.booking_method,
                 account.as_deref(),
                 &display_context,
@@ -650,19 +721,25 @@ fn render<W: io::Write>(
                 writer,
             )?;
         }
-        Report::Balsheet => {
+        Report::Balsheet { window } => {
+            let clamped = windowed(window, warnings)?;
             balsheet::report_balsheet(
-                balance_input,
+                clamped.as_deref().unwrap_or(balance_input),
                 loaded.booking_method,
                 &loaded.account_types,
+                &balsheet::CapAccounts {
+                    current_earnings: &loaded.current_earnings,
+                    current_conversions: &loaded.current_conversions,
+                },
                 &display_context,
                 format,
                 writer,
             )?;
         }
-        Report::Income => {
+        Report::Income { window } => {
+            let clamped = windowed(window, warnings)?;
             income::report_income(
-                balance_input,
+                clamped.as_deref().unwrap_or(balance_input),
                 loaded.booking_method,
                 &loaded.account_types,
                 &display_context,
@@ -670,12 +747,38 @@ fn render<W: io::Write>(
                 writer,
             )?;
         }
-        Report::Journal { account, limit } => {
-            journal::report_journal(directives, account.as_deref(), *limit, format, writer)?;
+        Report::Journal {
+            account,
+            limit,
+            window,
+        } => {
+            // The windowed journal lists the CLAMPED transactions: the
+            // opening-balance summaries, then the window's own. They are
+            // clamped from the pad-expanded view so the summaries include what
+            // pads put there, and the pad transactions inside the window are
+            // then dropped again: the journal lists what the file says, and an
+            // unwindowed journal never shows them either.
+            let clamped = windowed(window, warnings)?.map(|entries| {
+                entries
+                    .into_iter()
+                    .filter(|d| {
+                        !matches!(d, rustledger_core::Directive::Transaction(t)
+                            if rustledger_booking::is_synthesized_pad(t))
+                    })
+                    .collect::<Vec<_>>()
+            });
+            journal::report_journal(
+                clamped.as_deref().unwrap_or(directives),
+                account.as_deref(),
+                *limit,
+                format,
+                writer,
+            )?;
         }
-        Report::Holdings { account } => {
+        Report::Holdings { account, window } => {
+            let clamped = windowed(window, warnings)?;
             holdings::report_holdings(
-                balance_input,
+                clamped.as_deref().unwrap_or(balance_input),
                 &loaded.account_types,
                 account.as_deref(),
                 &display_context,
@@ -782,21 +885,21 @@ fn render<W: io::Write>(
         }
         Report::Budget {
             account,
-            from,
-            to,
+            window,
             children,
         } => {
-            let parse_date = |s: &str| -> Result<NaiveDate> {
-                s.parse()
-                    .with_context(|| format!("invalid date {s:?} (expected YYYY-MM-DD)"))
-            };
+            // The shared window flags (#2643), resolved by the same code every
+            // other windowed report uses; `--from`/`--to` keep the meaning and
+            // messages they always had here. Budget sums postings inside the
+            // window itself, so it reads only the bounds and does not clamp.
+            let resolved = resolve_window(window, directives, warnings)?;
             // Default window: the current year to date. `to` is exclusive, so the
             // default end is today + 1 day — otherwise today's own spending would
             // be silently excluded from its own budget.
             // Same clock source the returns report uses for its default horizon.
             let today = jiff::Zoned::now().date();
-            let to_date = match to.as_deref() {
-                Some(s) => parse_date(s)?,
+            let to_date = match resolved.to {
+                Some(d) => d,
                 None => today
                     .checked_add(jiff::Span::new().days(1))
                     .unwrap_or(today),
@@ -806,8 +909,8 @@ fn render<W: io::Write>(
             // anchoring the start to wall-clock `now` made that hard-error with
             // an empty window. The sibling horizon-taking reports (returns,
             // capgains) likewise derive their window from the supplied endpoint.
-            let from_date = match from.as_deref() {
-                Some(s) => parse_date(s)?,
+            let from_date = match resolved.from {
+                Some(d) => d,
                 None => to_date
                     .checked_sub(jiff::Span::new().days(1))
                     .unwrap_or(to_date)
@@ -843,6 +946,35 @@ fn render<W: io::Write>(
     }
 
     Ok(())
+}
+
+/// Resolve a report's window flags: `--time`'s relative forms against the
+/// local date (Fava's `datetime.date.today()`), and its fiscal forms against
+/// the ledger's `fiscal-year-end` Fava option.
+///
+/// The ledger's fiscal-year-end is read only when `--time` is given, and an
+/// invalid one (which Fava reports as an option error and ignores) is said so
+/// in `warnings`, since it changes what `FY2024` means.
+fn resolve_window(
+    window: &DateWindow,
+    directives: &[rustledger_core::Directive],
+    warnings: &mut dyn Diagnostics,
+) -> Result<window::ResolvedWindow> {
+    let fye = if window.time.is_some() {
+        let (fye, ignored) = fava_time::fiscal_year_end_from_directives(directives);
+        for (date, message) in ignored {
+            warnings.emit(Diagnostic {
+                code: None,
+                date: Some(date),
+                account: None,
+                message,
+            });
+        }
+        fye
+    } else {
+        fava_time::END_OF_YEAR
+    };
+    window.resolve(fye, jiff::Zoned::now().date())
 }
 
 /// The single source of truth for "what does each account hold".

@@ -7,11 +7,30 @@ use rustledger_core::{Directive, DisplayContext, Inventory};
 use std::collections::BTreeMap;
 use std::io::Write;
 
+/// Where the balance sheet books what makes it balance: the ledger's
+/// `account_current_earnings` and `account_current_conversions`, resolved
+/// under the equity root.
+pub(super) struct CapAccounts<'a> {
+    pub current_earnings: &'a str,
+    pub current_conversions: &'a str,
+}
+
 /// Generate a balance sheet report (Assets, Liabilities, Equity).
+///
+/// The sheet BALANCES: at cost, assets + liabilities + equity is zero. As
+/// Fava's balance sheet does (`Tree.cap`), the equity section carries two
+/// lines the ledger's own accounts lack: the net income of the period
+/// (income and expenses, booked to `account_current_earnings`) and the
+/// conversion residual that `@` price conversions leave between currencies
+/// (booked to `account_current_conversions`). Each is shown only when it is
+/// not zero. Over a date window the period is the window, and the income
+/// before it is already in `account_previous_earnings` (the clamp put it
+/// there).
 pub(super) fn report_balsheet<W: Write>(
     directives: &[Directive],
     booking_method: rustledger_core::BookingMethod,
     account_types: &rustledger_core::AccountTypes,
+    cap: &CapAccounts<'_>,
     ctx: &DisplayContext,
     format: &OutputFormat,
     writer: &mut W,
@@ -27,14 +46,51 @@ pub(super) fn report_balsheet<W: Write>(
     // ledger with `option "name_assets" "Activa"` must still fill the
     // balance sheet), never by hardcoded root prefixes.
     use rustledger_core::AccountTypeKind as K;
+    let overflow = |e: rustledger_core::OverflowError| {
+        anyhow::anyhow!(
+            "the balance sheet's {} total is too large to represent",
+            e.currency
+        )
+    };
+    // The period's net income (Fava inserts the Income and the Expenses
+    // subtrees into `account_current_earnings`), and every account's balance
+    // at cost, whose residual is the conversions line.
+    let mut earnings = Inventory::new();
+    let mut at_cost = Inventory::new();
     for (account, inv) in super::account_balances(directives, booking_method)? {
+        at_cost
+            .merge(&inv.at_cost().map_err(overflow)?)
+            .map_err(overflow)?;
         let section = match account_types.kind(&account) {
             Some(K::Assets) => &mut assets,
             Some(K::Liabilities) => &mut liabilities,
             Some(K::Equity) => &mut equity,
-            _ => continue,
+            Some(K::Income | K::Expenses) => {
+                earnings.merge(&inv).map_err(overflow)?;
+                continue;
+            }
+            None => continue,
         };
         section.insert(account, inv);
+    }
+    let mut conversions = Inventory::new();
+    for pos in at_cost.positions() {
+        conversions.add(pos.neg()).map_err(overflow)?;
+    }
+    // Into the configured accounts, adding to whatever the ledger itself
+    // booked there (as Fava's `Tree.insert` does).
+    for (name, inv) in [
+        (cap.current_earnings, earnings),
+        (cap.current_conversions, conversions),
+    ] {
+        if inv.is_empty() {
+            continue;
+        }
+        equity
+            .entry(name.into())
+            .or_default()
+            .merge(&inv)
+            .map_err(overflow)?;
     }
 
     // Helper to sum inventory by currency, keyed by the Currency newtype

@@ -207,7 +207,8 @@ const fn meta_value_kind(v: &MetaValue) -> &'static str {
 /// interpolation algorithm to balance the transaction. When units is
 /// `Some(IncompleteAmount)`, it may still have missing components that
 /// need to be filled in.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+// `PartialEq` is written by hand, below: it leaves out `booking`.
+#[derive(Debug, Clone, Eq, Serialize, Deserialize)]
 #[cfg_attr(
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
@@ -239,6 +240,105 @@ pub struct Posting {
     /// Trailing comment(s) on the same line as the posting
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub trailing_comments: Vec<String>,
+    /// What booking decided this posting does to its account's inventory
+    /// (#2390). Not part of the posting's data: never serialized, never
+    /// hashed, and left out of equality. See [`BookingDecision`].
+    #[serde(skip)]
+    #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Skip))]
+    pub booking: BookingDecision,
+}
+
+/// Equality of everything a posting SAYS, which leaves out
+/// [`Posting::booking`]: a posting booking has decided is the same posting
+/// as before. Destructured, so a field added later has to be placed on one
+/// side of that line or the other.
+impl PartialEq for Posting {
+    fn eq(&self, other: &Self) -> bool {
+        let Self {
+            account,
+            units,
+            cost,
+            price,
+            flag,
+            meta,
+            comments,
+            trailing_comments,
+            booking: _,
+        } = self;
+        *account == other.account
+            && *units == other.units
+            && *cost == other.cost
+            && *price == other.price
+            && *flag == other.flag
+            && *meta == other.meta
+            && *comments == other.comments
+            && *trailing_comments == other.trailing_comments
+    }
+}
+
+/// What booking decided a posting does to its account's inventory (#2390).
+///
+/// For each posting with a cost spec, booking (`BookingEngine::book` in
+/// `rustledger-booking`) decides whether it REDUCES lots the account holds or
+/// AUGMENTS the inventory with a new lot, and rewrites the posting to say
+/// which lot, with what units and at what cost: a reduction takes the matched
+/// lot's cost (one posting per lot when it matches several), an augmentation
+/// gets its acquisition date. This records the decision beside that rewrite,
+/// so the posting carries the whole of it.
+///
+/// It used to be thrown away. Every consumer that realizes the booked ledger
+/// (`BookingEngine::apply`, the validator's inventory pass, the query's
+/// replay) asked the question again, of the BOOKED posting — which booking
+/// had rewritten, so any part of the rule that reads a field booking changes
+/// could answer differently. It did, three times (#2368, #2378, #2384). Those
+/// consumers now read the answer instead, through [`Posting::reduces`].
+///
+/// Not part of the posting's data. It is never serialized (serde, the parse
+/// cache, the plugin and FFI wire formats), never hashed (`meta.hash`), and
+/// ignored by `Posting`'s equality. A posting built by hand or rebuilt from
+/// any of those formats is [`Self::Undecided`], and a consumer then derives
+/// the decision as it always did.
+///
+/// A decision holds against the inventory booking read, which is the
+/// inventory a consumer realizing the same booked stream reaches. Whoever
+/// changes the stream under it — a plugin that adds, removes or rewrites a
+/// cost-bearing transaction — must forget the decisions
+/// ([`Transaction::forget_booking`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum BookingDecision {
+    /// No decision recorded: booking never saw this posting, or the
+    /// decision was forgotten. Consumers derive it from the inventory.
+    #[default]
+    Undecided,
+    /// Booking added the posting to the inventory as a new position.
+    Augment,
+    /// Booking reduced lots the account held. The posting's cost names the
+    /// lot (or, for `{*}` and `AVERAGE`, the pool it is taken from).
+    Reduce,
+}
+
+impl Posting {
+    /// Whether this posting, of `units`, REDUCES the account's inventory:
+    /// booking's recorded decision ([`Self::booking`]) when there is one,
+    /// otherwise derived from `inventory` (`None` when the account holds
+    /// nothing yet) with [`crate::Inventory::is_booking_reduction`].
+    ///
+    /// The one place a realizing consumer asks, so the record and the
+    /// fallback cannot be read two ways.
+    #[must_use]
+    pub fn reduces(
+        &self,
+        units: &Amount,
+        inventory: Option<&crate::Inventory>,
+        method: crate::BookingMethod,
+    ) -> bool {
+        match self.booking {
+            BookingDecision::Reduce => true,
+            BookingDecision::Augment => false,
+            BookingDecision::Undecided => inventory
+                .is_some_and(|inv| inv.is_booking_reduction(units, self.cost.as_deref(), method)),
+        }
+    }
 }
 
 impl Posting {
@@ -254,6 +354,7 @@ impl Posting {
             meta: Metadata::default(),
             comments: Vec::new(),
             trailing_comments: Vec::new(),
+            booking: BookingDecision::Undecided,
         }
     }
 
@@ -269,6 +370,7 @@ impl Posting {
             meta: Metadata::default(),
             comments: Vec::new(),
             trailing_comments: Vec::new(),
+            booking: BookingDecision::Undecided,
         }
     }
 
@@ -284,6 +386,7 @@ impl Posting {
             meta: Metadata::default(),
             comments: Vec::new(),
             trailing_comments: Vec::new(),
+            booking: BookingDecision::Undecided,
         }
     }
 
@@ -793,6 +896,27 @@ impl Transaction {
             postings: Vec::new(),
             trailing_comments: Vec::new(),
         }
+    }
+
+    /// Forget booking's decision on every posting
+    /// ([`Posting::booking`]), so a consumer derives each one from the
+    /// inventory it reaches instead.
+    ///
+    /// For a transaction whose decisions no longer describe the state it
+    /// will be realized against, as when a plugin changed the stream around
+    /// it (#2390).
+    pub fn forget_booking(&mut self) {
+        for posting in &mut self.postings {
+            posting.booking = BookingDecision::Undecided;
+        }
+    }
+
+    /// Whether any posting carries a decision booking recorded.
+    #[must_use]
+    pub fn has_booking_decisions(&self) -> bool {
+        self.postings
+            .iter()
+            .any(|p| p.booking != BookingDecision::Undecided)
     }
 
     /// Set the flag.
@@ -2137,6 +2261,7 @@ mod tests {
             meta,
             comments: Vec::new(),
             trailing_comments: Vec::new(),
+            booking: Default::default(),
         };
 
         let output = posting.to_string();

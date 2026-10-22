@@ -17,7 +17,7 @@ use directives::{
     format_pad_lines, format_price_lines, format_query_lines,
 };
 pub(crate) use helpers::format_meta_value;
-pub use helpers::{escape_csv, escape_json, escape_string};
+pub use helpers::{escape_csv, escape_json, escape_string, is_display_unsafe};
 pub(crate) use transaction::{format_incomplete_amount, format_transaction_lines};
 pub use transaction::{format_posting_line, posting_format_line};
 
@@ -971,6 +971,7 @@ mod tests {
             meta: Default::default(),
             comments: Vec::new(),
             trailing_comments: Vec::new(),
+            booking: Default::default(),
         };
 
         let config = FormatConfig::default();
@@ -1050,6 +1051,7 @@ mod tests {
             meta: Default::default(),
             comments: Vec::new(),
             trailing_comments: Vec::new(),
+            booking: Default::default(),
         };
 
         let config = FormatConfig::default();

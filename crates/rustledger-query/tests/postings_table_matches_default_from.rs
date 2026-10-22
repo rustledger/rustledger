@@ -6,8 +6,8 @@
 //! FROM routes them to the posting (#1966, #2428). `#postings` materializes its
 //! rows as values, so it answered from the `Position`: `10 EUR @ 1.10 USD`
 //! weighed `10 EUR` where the `weight` column says `11.00 USD`, and a
-//! `{{500 USD}}` lot cost 500.00…01. It now computes both from the posting into
-//! hidden columns.
+//! `{{500 USD}}` lot cost 500.00…01. Each row now keeps its posting, and both
+//! answer from it (#2442).
 
 use rustledger_booking::BookingEngine;
 use rustledger_core::{BookingMethod, Directive};
@@ -98,8 +98,7 @@ fn held_amounts(value: &Value) -> Vec<String> {
 }
 
 /// `cost(sum(position))` too (#2430): the table's `sum(position)` records each
-/// lot's exact total from a hidden column, as the default FROM records it
-/// from the posting.
+/// lot's exact total from the row's posting, as the default FROM records it.
 #[test]
 fn cost_of_sum_of_position_agrees_across_from_clauses() {
     let directives = booked();
@@ -131,8 +130,7 @@ fn cost_of_sum_of_position_agrees_across_from_clauses() {
     }
 }
 
-/// The hidden columns stay out of `SELECT *`: its columns are exactly the
-/// table's visible ones.
+/// `SELECT *`'s columns are exactly the table's visible ones.
 #[test]
 fn select_star_does_not_show_the_hidden_columns() {
     let directives = booked();
@@ -176,7 +174,7 @@ fn select_star_does_not_show_the_hidden_columns() {
 }
 
 /// A subquery that aliases another value as `position` (and `weight`) takes
-/// the value path: its table carries no hidden column to route to.
+/// the value path: its column holds no posting's `position`.
 #[test]
 fn a_subquery_aliasing_position_takes_the_value_path() {
     let directives = booked();

@@ -161,7 +161,17 @@ impl CsvImporter {
                             .or_default()
                             .push(row_num);
                     }
-                    directives.push(Directive::Transaction(txn));
+                    let mut directive = Directive::Transaction(txn);
+                    // A cell's control characters, neutralized before they
+                    // reach the ledger (#2538).
+                    let fields = crate::imported_text::neutralize_directive(&mut directive);
+                    if !fields.is_empty() {
+                        warnings.push(crate::imported_text::warning(
+                            &format!("Row {row_num}"),
+                            &fields,
+                        ));
+                    }
+                    directives.push(directive);
                 }
                 Ok(None) => {} // Skip empty rows
                 Err(e) => {

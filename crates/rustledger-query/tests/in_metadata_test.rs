@@ -11,7 +11,8 @@
 
 use rust_decimal_macros::dec;
 use rustledger_core::{
-    Amount, Balance, Commodity, Directive, MetaValue, NaiveDate, Open, Posting, Transaction,
+    Amount, Balance, Commodity, Directive, Document, Event, MetaValue, NaiveDate, Note, Open,
+    Posting, Transaction,
 };
 use rustledger_query::{Executor, Value, parse};
 
@@ -19,8 +20,8 @@ fn date(m: u32, d: u32) -> NaiveDate {
     rustledger_core::naive_date(2026, m, d).unwrap()
 }
 
-/// The issue's ledger, plus a commodity and a balance assertion with
-/// metadata of their own.
+/// The issue's ledger, plus a commodity, a balance assertion, an event,
+/// a note and a document with metadata of their own.
 fn ledger() -> Vec<Directive> {
     let mut shop = Transaction::new(date(1, 2), "Groceries")
         .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(-10), "EUR")))
@@ -44,6 +45,17 @@ fn ledger() -> Vec<Directive> {
     let mut balance = Balance::new(date(1, 4), "Assets:Bank", Amount::new(dec!(-10), "EUR"));
     balance.meta.insert("checked".into(), MetaValue::Bool(true));
 
+    let mut event = Event::new(date(1, 5), "location", "Paris");
+    event
+        .meta
+        .insert("venue".into(), MetaValue::String("Grand Hall".into()));
+    let mut note = Note::new(date(1, 6), "Assets:Bank", "bring receipts");
+    note.meta.insert("checked".into(), MetaValue::Bool(true));
+    let mut document = Document::new(date(1, 7), "Assets:Bank", "/x.pdf");
+    document
+        .meta
+        .insert("ref".into(), MetaValue::String("DOC 9".into()));
+
     vec![
         Directive::Commodity(eur),
         Directive::Open(Open::new(date(1, 1), "Assets:Bank")),
@@ -51,6 +63,9 @@ fn ledger() -> Vec<Directive> {
         Directive::Transaction(shop),
         Directive::Transaction(market),
         Directive::Balance(balance),
+        Directive::Event(event),
+        Directive::Note(note),
+        Directive::Document(document),
     ]
 }
 
@@ -142,6 +157,18 @@ fn key_in_system_table_meta() {
     assert_eq!(
         strings("SELECT narration FROM #transactions WHERE 'concept' NOT IN meta"),
         ["Fruit"]
+    );
+    assert_eq!(
+        strings("SELECT type FROM #events WHERE 'venue' IN meta"),
+        ["location"]
+    );
+    assert_eq!(
+        strings("SELECT account FROM #notes WHERE 'checked' IN meta"),
+        ["Assets:Bank"]
+    );
+    assert_eq!(
+        strings("SELECT filename FROM #documents WHERE 'ref' IN meta"),
+        ["/x.pdf"]
     );
 }
 

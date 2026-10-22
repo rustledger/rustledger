@@ -45,6 +45,7 @@ rkyv = { workspace = true, optional = true }
 blake3 = { workspace = true, optional = true }
 rustc-hash.workspace = true
 rayon.workspace = true
+parking_lot.workspace = true
 
 # Optional processing dependencies
 rustledger-booking.workspace = true

@@ -555,8 +555,9 @@ fn render<W: Write>(
                     .unwrap_or(floor)
                     .max(floor)
             };
-            let acct_w = width(&|r| r.account.chars().count(), "Account".len());
-            let ccy_w = width(&|r| r.currency.chars().count(), "Ccy".len());
+            let shown = |s: &str| super::sanitize_display(s).chars().count();
+            let acct_w = width(&|r| shown(&r.account), "Account".len());
+            let ccy_w = width(&|r| shown(&r.currency), "Ccy".len());
             let num_w =
                 |i: usize, head: &str| width(&|r| cells(r)[i].chars().count(), head.len()) + 2;
             let (bw, aw, rw) = (
@@ -584,10 +585,10 @@ fn render<W: Write>(
                 let [b, a, rem] = cells(r);
                 format!(
                     "{:<acct_w$} {:<ccy_w$}{:>bw$}{:>aw$}{:>rw$}{:>uw$}",
-                    // Sanitized, not truncated: every column is sized to its
+                    // Escaped, not truncated: every column is sized to its
                     // content, so nothing is cut, but a control character in a
                     // label would still split the fixed-width row. Widths are
-                    // computed on the same char counts (sanitizing is 1:1).
+                    // computed on the escaped text.
                     super::sanitize_display(&r.account),
                     super::sanitize_display(&r.currency),
                     b,

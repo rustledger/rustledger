@@ -46,6 +46,9 @@
 mod error;
 mod validators;
 
+#[cfg(test)]
+mod booking_record_tests;
+
 pub use error::{ErrorCode, Severity, ValidationError, is_advisory_only_code};
 pub use validators::balance::balance_tolerance;
 
@@ -3215,6 +3218,7 @@ mod tests {
                         meta: Default::default(),
                         comments: vec![],
                         trailing_comments: vec![],
+                        booking: Default::default(),
                     })
                     .with_synthesized_posting(Posting {
                         account: "Expenses:Drinks".into(),
@@ -3225,6 +3229,7 @@ mod tests {
                         meta: Default::default(),
                         comments: vec![],
                         trailing_comments: vec![],
+                        booking: Default::default(),
                     }),
             ),
         ];
@@ -3260,6 +3265,7 @@ mod tests {
                         meta: Default::default(),
                         comments: vec![],
                         trailing_comments: vec![],
+                        booking: Default::default(),
                     }),
             ),
         ];
@@ -3291,6 +3297,7 @@ mod tests {
             meta: Default::default(),
             comments: vec![],
             trailing_comments: vec![],
+            booking: Default::default(),
         };
 
         let directives = vec![
@@ -3338,6 +3345,7 @@ mod tests {
             meta: Default::default(),
             comments: vec![],
             trailing_comments: vec![],
+            booking: Default::default(),
         };
 
         let directives = vec![
@@ -4402,6 +4410,7 @@ mod tests {
                         meta: Default::default(),
                         comments: vec![],
                         trailing_comments: vec![],
+                        booking: Default::default(),
                     },
                     Posting::new("Equity:Opening", Amount::new(dec!(-100), "USD")),
                 ],

@@ -92,6 +92,19 @@ refusals:
 - The original layout reports an error that only exists because of the file
   structure, such as a file included twice.
 
+## From an agent
+
+`ag-rledger merge` takes the same flags and needs `--dry-run` or `--yes`:
+without either it refuses with `CONFIRMATION_REQUIRED`, since it rewrites
+and removes ledger files. Its JSON envelope carries the plan, the equivalence
+check's verdict, the written and removed paths and the backup directory in
+`result`, and each refusal as a coded error (`SYMLINK_ELSEWHERE`,
+`TARGET_EXISTS`, `EQUIVALENCE_FAILED`, ...) with what the run got to in `data`.
+
+```bash
+ag-rledger merge ledger.beancount --dry-run
+```
+
 ## Exit Codes
 
 | Code | Meaning |

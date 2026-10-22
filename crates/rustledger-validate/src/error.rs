@@ -168,6 +168,9 @@ impl ErrorCode {
             B::CostPriceCurrencyMismatch { .. } | B::NoLotInInferredCostCurrency { .. } => {
                 Some(Self::NoMatchingLot)
             }
+            // A per-unit cost too small for a decimal (#2689) is not the
+            // range overflow E4004 describes, and no other code says it.
+            B::PerUnitCostUnderflow { .. } => None,
         }
     }
 
@@ -732,6 +735,11 @@ mod tests {
                 residual: rust_decimal::Decimal::ONE,
             },
             I::Unrepresentable { currency: usd() },
+            I::PerUnitCostUnderflow {
+                currency: usd(),
+                total: rust_decimal::Decimal::ONE,
+                units: rust_decimal::Decimal::TEN,
+            },
         ];
         for e in interpolation {
             let err = B::Interpolation(e);
@@ -740,6 +748,13 @@ mod tests {
         }
         let not_booked = B::NotBooked { account: acct() };
         assert_eq!(ErrorCode::booking_failure_code_str(&not_booked), "BOOK");
+        let underflow = B::PerUnitCostUnderflow {
+            account: acct(),
+            currency: usd(),
+            total: rust_decimal::Decimal::ONE,
+            units: rust_decimal::Decimal::TEN,
+        };
+        assert_eq!(ErrorCode::booking_failure_code_str(&underflow), "BOOK");
         for err in [
             B::CostPriceCurrencyMismatch {
                 account: acct(),

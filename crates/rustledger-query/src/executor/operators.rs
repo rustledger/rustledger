@@ -424,7 +424,7 @@ impl Executor<'_> {
             Value::StringSet(set) => match left {
                 Value::String(needle) => Ok(set.contains(needle)),
                 _ => Err(QueryError::Type(
-                    "IN requires string left operand for StringSet".to_string(),
+                    "IN/NOT IN requires string left operand for StringSet".to_string(),
                 )),
             },
             // Generic set from a set literal: equal to any element.

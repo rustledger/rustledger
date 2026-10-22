@@ -2249,9 +2249,13 @@ impl Inventory {
     }
 
     /// Whether a posting of `units` carrying `cost` would REDUCE this inventory
-    /// under `method` — the single source for the reduction-vs-augmentation
-    /// decision shared by the booking engine (`BookingEngine::apply`) and the
-    /// Late validator's inventory pass.
+    /// under `method` — the single rule for the reduction-vs-augmentation
+    /// decision. Booking (`BookingEngine::book`) asks it of each posting as
+    /// written and records the answer on the booked posting
+    /// ([`crate::Posting::booking`], #2390); `BookingEngine::apply`, the
+    /// validator's inventory pass and the query's replay read that through
+    /// [`crate::Posting::reduces`], and ask this only of a posting booking
+    /// never decided, or of a filtered replay.
     ///
     /// A posting reduces only when it carries a cost spec (`cost.is_some()` —
     /// presence of the spec, which includes an empty/unresolved one like `{}`),

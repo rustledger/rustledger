@@ -81,7 +81,15 @@ pub(super) fn cmd_linked<W: Write>(file: &PathBuf, location: &str, writer: &mut 
     for directive in linked {
         if let Directive::Transaction(txn) = directive {
             writeln!(writer)?;
-            writeln!(writer, "{} {} \"{}\"", txn.date, txn.flag, txn.narration)?;
+            // One line: a newline in the narration is escaped too
+            // (#2714); the doctor's writer escapes the other controls.
+            writeln!(
+                writer,
+                "{} {} \"{}\"",
+                txn.date,
+                txn.flag,
+                rustledger_plugin::escape_untrusted_line(&txn.narration)
+            )?;
             if !txn.links.is_empty() {
                 writeln!(
                     writer,

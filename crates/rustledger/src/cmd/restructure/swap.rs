@@ -26,7 +26,8 @@
 //! immediately before the first rename, so an edit made while the backup and
 //! the temporaries were being written and flushed is not overwritten.
 
-use anyhow::{Context, Result, bail};
+use super::Refusal;
+use anyhow::{Context, Result};
 use std::fs;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
@@ -77,13 +78,33 @@ pub(super) fn occupied(path: &Path) -> bool {
 pub(super) struct Applied {
     /// `None` when the plan replaced and removed nothing.
     pub(super) backup_dir: Option<PathBuf>,
+    /// Files the plan should have removed and could not, with why.
+    pub(super) not_removed: Vec<(PathBuf, std::io::Error)>,
+}
+
+/// What [`apply_recording`] did to disk, kept as it goes so a caller can say
+/// how far a failing write got (#2721): what it renamed or removed before it
+/// stopped — a rollback may have restored them afterwards, which the
+/// refusal's code says — and where the originals are.
+#[derive(Debug, Default)]
+pub(super) struct Touched {
+    /// The backup directory from the moment it exists, `None` again if it
+    /// was removed.
+    pub(super) backup_dir: Option<PathBuf>,
+    /// Files renamed into place.
+    pub(super) written: Vec<PathBuf>,
+    /// Files removed.
+    pub(super) removed: Vec<PathBuf>,
+    /// Files the plan should have removed and could not, with why.
+    pub(super) not_removed: Vec<(PathBuf, std::io::Error)>,
 }
 
 /// Refuse a plan whose preconditions no longer hold, before touching anything.
 pub(super) fn preflight(plan: &Plan) -> Result<()> {
     for (path, _) in &plan.writes {
         if path != &plan.commit && occupied(path) {
-            bail!(
+            refuse!(
+                super::code::TARGET_EXISTS,
                 "{} already exists; refusing to overwrite it (move it away or choose another --dir)",
                 path.display()
             );
@@ -97,7 +118,8 @@ fn unchanged(plan: &Plan) -> Result<()> {
     for (path, original) in &plan.originals {
         let now = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
         if &now != original {
-            bail!(
+            refuse!(
+                super::code::CHANGED_ON_DISK,
                 "{} changed on disk while the plan was being checked; nothing was written",
                 path.display()
             );
@@ -111,13 +133,26 @@ fn unchanged(plan: &Plan) -> Result<()> {
 /// touched ([`Phase::BackedUp`]; a failure removes the backup and changes
 /// nothing), and once after the swap ([`Phase::Swapped`]; a failure restores
 /// the backup).
-pub(super) fn apply(plan: &Plan, mut verify: impl FnMut(Phase) -> Result<()>) -> Result<Applied> {
+#[cfg(test)]
+pub(super) fn apply(plan: &Plan, verify: impl FnMut(Phase) -> Result<()>) -> Result<Applied> {
+    apply_recording(plan, &mut Touched::default(), verify)
+}
+
+/// `apply`, also recording what the run did in `touched` as it goes — where
+/// the backup is and which files it renamed or removed — so a caller can say
+/// how far a failing write got even when `apply` rolls it back (#2721).
+pub(super) fn apply_recording(
+    plan: &Plan,
+    touched: &mut Touched,
+    mut verify: impl FnMut(Phase) -> Result<()>,
+) -> Result<Applied> {
     preflight(plan)?;
     let backup_dir = if plan.originals.is_empty() {
         None
     } else {
         Some(make_backup(plan).context("nothing was changed")?)
     };
+    touched.backup_dir.clone_from(&backup_dir);
     let backup_note = backup_dir.as_ref().map_or_else(String::new, |d| {
         format!("; a backup copy is in {}", d.display())
     });
@@ -125,15 +160,19 @@ pub(super) fn apply(plan: &Plan, mut verify: impl FnMut(Phase) -> Result<()>) ->
         && let Err(e) = verify(Phase::BackedUp)
     {
         let removed = if remove_backup(dir) {
+            touched.backup_dir = None;
             "was removed".to_string()
         } else {
             format!("could not be removed; delete {} by hand", dir.display())
         };
-        return Err(e.context(format!(
-            "nothing was changed: with the backup in {} the ledger no longer loads as \
-             before (an include pattern that matches the backup is the usual cause), \
-             so the backup {removed}",
-            dir.display()
+        return Err(e.context(Refusal::new(
+            super::code::BACKUP_INCLUDED,
+            format!(
+                "nothing was changed: with the backup in {} the ledger no longer loads as \
+                 before (an include pattern that matches the backup is the usual cause), \
+                 so the backup {removed}",
+                dir.display()
+            ),
         )));
     }
 
@@ -160,6 +199,7 @@ pub(super) fn apply(plan: &Plan, mut verify: impl FnMut(Phase) -> Result<()>) ->
             let committed = placed.contains(&plan.commit);
             if !committed {
                 cleanup(&temps, &placed, &created_dirs);
+                touched.written.clear();
                 return Err(anyhow::Error::new(e).context(format!(
                     "failed to move {} into place; nothing was changed",
                     target.display()
@@ -170,34 +210,59 @@ pub(super) fn apply(plan: &Plan, mut verify: impl FnMut(Phase) -> Result<()>) ->
                 .context(format!("failed to move {} into place", target.display())));
         }
         placed.push(target.clone());
+        touched.written.push(target.clone());
     }
 
-    let mut leftovers = Vec::new();
     for path in &plan.removes {
-        if let Err(e) = fs::remove_file(path) {
-            leftovers.push(format!("{}: {e}", path.display()));
+        match fs::remove_file(path) {
+            Ok(()) => touched.removed.push(path.clone()),
+            Err(e) => touched.not_removed.push((path.clone(), e)),
         }
     }
 
     if let Err(e) = verify(Phase::Swapped) {
         let restored = restore(plan, backup_dir.as_deref(), &placed, &created_dirs);
-        let how = match restored {
-            Ok(()) => "the original files were restored".to_string(),
-            Err(r) => format!("restoring failed too ({r:#}){backup_note}"),
+        let (code, how) = match restored {
+            Ok(()) => (
+                super::code::WRITE_ROLLED_BACK,
+                if plan.originals.is_empty() {
+                    "nothing original was replaced and the output file was removed".to_string()
+                } else {
+                    "the original files were restored".to_string()
+                },
+            ),
+            Err(r) => (
+                super::code::RESTORE_FAILED,
+                format!("restoring failed too ({r:#}){backup_note}"),
+            ),
         };
-        return Err(e.context(format!(
-            "the ledger written to disk did not load the same as before; {how}"
+        return Err(e.context(Refusal::new(
+            code,
+            format!("the ledger written to disk did not load the same as before; {how}"),
         )));
     }
 
-    if !leftovers.is_empty() {
-        eprintln!(
-            "warning: could not remove {} file(s) that are no longer included:\n  {}",
-            leftovers.len(),
-            leftovers.join("\n  ")
+    if !touched.not_removed.is_empty() {
+        // A notice, not a write to stderr: `ag-rledger` captures it into its
+        // envelope (#2566, #2633); `rledger` prints it as before.
+        let listed: Vec<String> = touched
+            .not_removed
+            .iter()
+            .map(|(path, e)| format!("{}: {e}", path.display()))
+            .collect();
+        rustledger_plugin::notice::emit_warning(
+            super::code::FILES_NOT_REMOVED,
+            &format!(
+                "could not remove {} file(s) that are no longer included:\n  {}",
+                listed.len(),
+                listed.join("\n  ")
+            ),
         );
     }
-    Ok(Applied { backup_dir })
+    Ok(Applied {
+        backup_dir,
+        not_removed: std::mem::take(&mut touched.not_removed),
+    })
 }
 
 fn stage(

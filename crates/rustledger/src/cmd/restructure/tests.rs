@@ -347,7 +347,7 @@ fn failed_verification_restores_the_backup() {
     assert!(!new.exists());
     assert!(!dir.path().join("sub").exists());
     // The rollback does not erase the record of what the run wrote (#2721).
-    assert_eq!(touched.written, vec![new.clone(), file.clone()]);
+    assert_eq!(touched.written, vec![new, file]);
     assert!(touched.removed.is_empty());
 }
 
@@ -1346,7 +1346,7 @@ fn a_failed_restore_names_a_complete_backup() {
         vec![
             dir.path().join("ledger/2023.beancount"),
             dir.path().join("ledger/2024.beancount"),
-            file.clone(),
+            file,
         ]
     );
     assert!(touched.removed.is_empty());
@@ -1556,7 +1556,7 @@ fn a_rolled_back_write_is_coded() {
     let e = swap::apply_recording(&plan, &mut touched, after_swap_fails).unwrap_err();
     assert_eq!(refusal_code(&e), Some(code::WRITE_ROLLED_BACK), "{e:#}");
     // What the run wrote is recorded even though it was rolled back (#2721).
-    assert_eq!(touched.written, vec![file.clone()]);
+    assert_eq!(touched.written, vec![file]);
     assert!(touched.removed.is_empty());
     assert!(touched.not_removed.is_empty());
     // The backup is kept after a rollback, and its directory is known even

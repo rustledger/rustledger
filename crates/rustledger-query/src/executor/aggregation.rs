@@ -136,11 +136,15 @@ impl<'a> Executor<'a> {
                     key.push_str(s);
                 }
                 Value::Number(n) => {
+                    // Numbers and integers are one key family: `Number(1)`
+                    // and `Integer(1)` tie under `compare_values_for_sort`,
+                    // so a GROUP BY / PARTITION BY key must not split them,
+                    // and `normalize()` keeps `Number(1.00)` with them too.
                     key.push('N');
-                    let _ = write!(key, "{n}");
+                    let _ = write!(key, "{}", n.normalize());
                 }
                 Value::Integer(n) => {
-                    key.push('I');
+                    key.push('N');
                     let _ = write!(key, "{n}");
                 }
                 Value::Date(d) => {

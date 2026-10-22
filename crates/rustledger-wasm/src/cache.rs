@@ -288,7 +288,13 @@ use crate::types::{Error, LedgerOptions};
 /// out of range (#2689). Loader v41, unchanged -- parsed directives did not
 /// move. `Ledger` archives booked directives and errors, so a v51 blob would
 /// serve the refusal and the posting left unbooked.
-pub const CACHE_VERSION: u32 = 52;
+/// v53: under `infer_tolerance_from_cost`, each cost or price contributes at
+/// most 0.5 to its currency's tolerance, and `@@` contributes its per-unit
+/// price (#2717). Loader v41, unchanged -- parsed directives did not move.
+/// Booking quantizes interpolated amounts with that tolerance and validation
+/// checks the balance against it, so a v52 blob of such a ledger would serve
+/// the old interpolated amounts and miss the imbalance errors.
+pub const CACHE_VERSION: u32 = 53;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

@@ -1697,10 +1697,10 @@ impl Executor<'_> {
         // The filter reads an entry as a row of `#entries`, whatever its
         // type: `narration` is NULL on an `open`, and `has_account()` asks
         // about the entry's `accounts`, as beanquery's `entries` table does.
-        let entry_columns: FxHashMap<String, usize> = super::system_tables::ENTRY_TABLE_COLUMNS
+        let entry_columns: FxHashMap<String, usize> = super::system_tables::ENTRIES_COLUMNS
             .iter()
             .enumerate()
-            .map(|(i, name)| ((*name).to_string(), i))
+            .map(|(i, column)| (column.name.to_string(), i))
             .collect();
 
         let config = rustledger_core::format::FormatConfig::default();

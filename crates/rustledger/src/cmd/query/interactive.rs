@@ -594,13 +594,9 @@ mod tests {
         // except the ones in `divergent`.
         //
         // `entries.id` is an integer here, a hash string there, as on
-        // `postings`; `#accounts`' `open` and `close` are dates here and
-        // directives there.
-        let divergent = [
-            ("entries", "id", "int"),
-            ("accounts", "open", "date"),
-            ("accounts", "close", "date"),
-        ];
+        // `postings`. `#accounts`' `open` and `close` are the directives,
+        // typed as bean-query types them.
+        let divergent = [("entries", "id", "int")];
         let bean_query: &[(&str, &[(&str, &str)])] = &[
             (
                 "entries",

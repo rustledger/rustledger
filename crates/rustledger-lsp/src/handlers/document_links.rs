@@ -628,7 +628,7 @@ mod uri_resolution_tests {
     /// - Windows: filenames are UTF-16; the byte sequence has no spelling.
     ///
     /// A runtime "skip if creation fails" would have been the tempting fix and
-    /// the wrong one — CLAUDE.md's rule is that an availability-gated test
+    /// the wrong one — AGENTS.md's rule is that an availability-gated test
     /// which silently skips is a test that runs nowhere. A `cfg` states the
     /// platform property instead, and the Linux leg always runs it.
     #[cfg(target_os = "linux")]

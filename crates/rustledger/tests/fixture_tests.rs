@@ -319,7 +319,7 @@ fn test_lima_2008_cases_have_expected_strictness() {
     // Hard assert, not a skip. These 441 fixtures are committed to the repo,
     // so a missing directory is a broken checkout, not an unavailable
     // dependency - and a test that skips itself is the exact failure mode
-    // CLAUDE.md warns about under "Availability-gated tests must fail loudly
+    // AGENTS.md warns about under "Availability-gated tests must fail loudly
     // somewhere". Skipping here would also hide the very thing this table
     // exists to pin.
     let dir = spec_fixtures_dir().join("lima-tests");

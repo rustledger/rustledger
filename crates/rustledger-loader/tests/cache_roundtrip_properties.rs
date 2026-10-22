@@ -83,7 +83,7 @@ fn shapes() -> Vec<(&'static str, &'static str)> {
 /// the same way (`assert_clean_cache_env`); this is that check, for a test
 /// binary that cannot see it.
 ///
-/// CLAUDE.md warns against asserting environment as a precondition (#1729).
+/// AGENTS.md warns against asserting environment as a precondition (#1729).
 /// The exception earns itself here: the alternative is not a hermetic test but
 /// a test that writes somewhere unexpected, and failing loudly beats that.
 fn assert_clean_cache_env() {

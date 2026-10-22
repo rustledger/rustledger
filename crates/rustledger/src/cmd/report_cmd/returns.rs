@@ -849,7 +849,7 @@ mod tests {
         assert_eq!(fmt_rate_pct(Some(0.3236)), "32.36%");
     }
 
-    /// Drift guard (CLAUDE.md Canonical-Function Discipline): `terminal_value`
+    /// Drift guard (AGENTS.md Canonical-Function Discipline): `terminal_value`
     /// (net units) deliberately re-derives `report_cmd::account_balances`'
     /// lot-matching realization (a leaf crate cannot call this CLI-side helper).
     /// Pin that the two still agree — the returns terminal value must equal the
@@ -1101,7 +1101,7 @@ mod tests {
         .unwrap();
         let json = String::from_utf8(json).unwrap();
         // Parse structurally so the assertions pin the `error` FIELD, not a
-        // substring floating anywhere in the blob (CLAUDE.md: assert the exact
+        // substring floating anywhere in the blob (AGENTS.md: assert the exact
         // observable, not a proxy).
         let parsed: serde_json::Value =
             serde_json::from_str(&json).expect("render_grouped must emit valid JSON");
@@ -1231,7 +1231,7 @@ mod tests {
         );
     }
 
-    /// Drift guard (CLAUDE.md Canonical-Function Discipline): the batched
+    /// Drift guard (AGENTS.md Canonical-Function Discipline): the batched
     /// `shared_inscope_accounts` (one pass over the transactions, used in
     /// production) must return, per group, exactly what the per-group
     /// `first_shared_inscope_account` reference returns. Covers the order-sensitive

@@ -55,7 +55,7 @@ Generate a single comprehensive weekly report covering ALL of the following sect
 - Report current pass rate (target: 99.86% or higher)
 - List any new failures since last week
 - Categorize failures: parsing, validation, booking, or known limitations
-- Note the decimal precision limitation (documented in CLAUDE.md)
+- Note the decimal precision limitation (documented in AGENTS.md)
 
 ### 3. Performance Status
 

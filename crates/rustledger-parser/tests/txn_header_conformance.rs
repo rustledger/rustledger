@@ -9,7 +9,7 @@
 //! The fixture bodies are inlined rather than read from
 //! `tests/compatibility/files/`: that corpus is downloaded by CI and is
 //! gitignored, so a test that reads it would silently pass by skipping on any
-//! machine that has not fetched it — the failure mode CLAUDE.md calls out
+//! machine that has not fetched it — the failure mode AGENTS.md calls out
 //! under "Availability-gated tests must fail loudly somewhere".
 
 use rustledger_parser::parse;

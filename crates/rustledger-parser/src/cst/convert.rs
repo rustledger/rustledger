@@ -2050,7 +2050,7 @@ fn cost_number_region<T: TokenView>(seg: &[T]) -> &[T] {
 /// cost path latched the first `NUMBER` token and silently dropped the rest, so
 /// `{10.00 * 3 USD}` booked a cost of 10.00. Same computation, two
 /// implementations, nothing asserting agreement — the exact drift shape
-/// CLAUDE.md's Canonical-Function Discipline describes. The fix is to share the
+/// AGENTS.md's Canonical-Function Discipline describes. The fix is to share the
 /// evaluator, not to teach this path its own arithmetic (#1939).
 fn cost_region_value<T: TokenView>(seg: &[T]) -> Option<Decimal> {
     use crate::SyntaxKind as K;

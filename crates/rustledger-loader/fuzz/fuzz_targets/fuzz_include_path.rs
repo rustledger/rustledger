@@ -1,6 +1,6 @@
 //! The `include` path-traversal guard, over arbitrary include strings.
 //!
-//! `CLAUDE.md` states the requirement plainly: "Loader: Must prevent path
+//! `AGENTS.md` states the requirement plainly: "Loader: Must prevent path
 //! traversal in `include` directives." The guard that enforces it is subtle
 //! enough to deserve a fuzzer rather than examples — it branches on whether
 //! the path looks like a glob, and for globs it slices the string at the first

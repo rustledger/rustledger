@@ -144,7 +144,7 @@ fn the_exact_slow_path_takes_the_same_scale() {
 }
 
 /// An INEXACT share keeps `rust_decimal`'s precision, which is a deliberate
-/// deviation from Python and is pinned as one (CLAUDE.md, "Checklist for a
+/// deviation from Python and is pinned as one (AGENTS.md, "Checklist for a
 /// deliberate Python deviation").
 ///
 /// Python rounds these to its 28-significant-digit context; `rust_decimal`

@@ -1,6 +1,6 @@
 //! `WEIGHT(position)` and the `weight` column must be ONE computation (#1966).
 //!
-//! CLAUDE.md's canonical-function rule names this pair: a consumer surfacing a
+//! AGENTS.md's canonical-function rule names this pair: a consumer surfacing a
 //! per-posting weight calls `rustledger_booking::posting_weight` rather than
 //! re-deriving it. The column always did. The function did not, because it was
 //! dispatched through the shared value registry, and by the time the registry

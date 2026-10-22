@@ -9517,42 +9517,516 @@ fn test_option_expiry_overflow_is_skipped() {
     assert_eq!(after.len(), 0, "{after:?}");
 }
 
-fn option_expiry_with_config(config: Option<&str>) -> Vec<PluginError> {
-    let mut input = make_input(vec![
+/// The plugin with `config`, on the shared opens plus `directives`.
+fn option_expiry_with_config(
+    config: Option<&str>,
+    directives: Vec<DirectiveWrapper>,
+) -> Vec<PluginError> {
+    let mut all = vec![
         make_open("2026-01-01", OPT_ACCT),
         make_open("2026-01-01", CASH_ACCT),
         make_open("2026-01-01", "Expenses:Fees"),
-        option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
-        later_entry("2026-11-01"),
-    ]);
+    ];
+    all.extend(directives);
+    let mut input = make_input(all);
     input.config = config.map(str::to_string);
-    process_and_materialize(&CheckOptionExpiryPlugin, input).errors
+    let n = input.directives.len();
+    let output = process_and_materialize(&CheckOptionExpiryPlugin, input);
+    // Whatever the config, every directive is kept and nothing is added.
+    assert_eq!(output.directives.len(), n);
+    output.errors
 }
 
-/// A config string is not read natively yet (`as_of` lives only in
-/// beancount-options), so it gives one warning instead of being ignored
-/// silently, and the default rules still apply.
-#[test]
-fn test_option_expiry_config_is_ignored_with_a_warning() {
-    let errors = option_expiry_with_config(Some("{'as_of': '2026-10-01'}"));
-    assert_eq!(errors.len(), 2, "{errors:?}");
-    assert_eq!(errors[0].severity, PluginErrorSeverity::Warning);
-    assert_eq!(
-        errors[0].message,
-        "check_option_expiry: the config is ignored; rledger does not support as_of yet"
-    );
-    assert_eq!(errors[1].severity, PluginErrorSeverity::Error);
+/// The full message of a config error with `problem`.
+fn invalid_expiry_config(problem: &str) -> String {
+    format!("Invalid configuration for check_option_expiry plugin: {problem}; skipping.")
+}
 
-    // A blank config (ASCII whitespace only, as beancount-options strips it)
-    // is no config at all.
-    for blank in [None, Some(""), Some(" \t\n\r\x0c\x0b")] {
-        let errors = option_expiry_with_config(blank);
+/// `config` is rejected with exactly one error, located as beancount's
+/// `check_commodity` locates its config errors, and the plugin skips: the
+/// expired position in the ledger is not reported.
+fn assert_expiry_config_problem(config: &str, problem: &str) {
+    let errors = option_expiry_with_config(
+        Some(config),
+        vec![
+            option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+            later_entry("2026-11-01"),
+        ],
+    );
+    assert_eq!(errors.len(), 1, "{config:?}: {errors:?}");
+    let e = &errors[0];
+    assert_eq!(e.message, invalid_expiry_config(problem), "{config:?}");
+    assert_eq!(e.severity, PluginErrorSeverity::Error, "{config:?}");
+    assert_eq!(
+        e.source_file.as_deref(),
+        Some("<check_option_expiry>"),
+        "{config:?}"
+    );
+    assert_eq!(e.line_number, Some(0), "{config:?}");
+}
+
+const EXPIRED_PUT: &str = "AAPL261016P00230000 expired 2026-10-16 but -1 contract(s) remain open in Assets:Broker:Options";
+
+/// A put expiring `d - 1` and one expiring `d`, both sold before, the
+/// first bought back on `d + 1`, and an entry on `d + 30`. With `as_of`
+/// = `d` exactly the first is reported (expired before `as_of`, its close
+/// ignored); by default (last date `d + 30`) exactly the second.
+fn as_of_probe(config: Option<&str>, d: jiff::civil::Date) -> Vec<String> {
+    let day = |n: i64| d.checked_add(jiff::Span::new().days(n)).unwrap();
+    let symbol = |date: jiff::civil::Date| format!("AAPL{}P00230000", date.strftime("%y%m%d"));
+    let iso = |date: jiff::civil::Date| date.strftime("%Y-%m-%d").to_string();
+    let errors = option_expiry_with_config(
+        config,
+        vec![
+            option_txn(&iso(day(-30)), OPT_ACCT, "-1", &symbol(day(-1))),
+            option_txn(&iso(day(-30)), OPT_ACCT, "-1", &symbol(d)),
+            option_txn(&iso(day(1)), OPT_ACCT, "1", &symbol(day(-1))),
+            later_entry(&iso(day(30))),
+        ],
+    );
+    errors.into_iter().map(|e| e.message).collect()
+}
+
+/// What [`as_of_probe`] reports when the contract expiring `date` is the
+/// one left open.
+fn probe_error(date: jiff::civil::Date) -> String {
+    format!(
+        "AAPL{}P00230000 expired {} but -1 contract(s) remain open in Assets:Broker:Options",
+        date.strftime("%y%m%d"),
+        date.strftime("%Y-%m-%d")
+    )
+}
+
+/// T40: beancount-options' shared config cases
+/// (`tests/cases/expiry_config.json`): each config gives its `as_of` or its
+/// `problem` natively, byte for byte. A case marked `native_differs` is
+/// skipped here; what native gives for it is pinned in
+/// `test_option_expiry_config_native_differs_pinned`. Reads the checkout
+/// named by `BEANCOUNT_OPTIONS_DIR`, and prints the same skip marker as
+/// `options_plugins_parity` when it is unset; CI fails on that marker.
+#[test]
+fn test_option_expiry_config_cases() {
+    let Some(dir) = std::env::var_os("BEANCOUNT_OPTIONS_DIR") else {
+        eprintln!(
+            "Skipping: BEANCOUNT_OPTIONS_DIR not set (the beancount-options checkout with tests/cases/)"
+        );
+        return;
+    };
+    let path = std::path::PathBuf::from(dir).join("tests/cases/expiry_config.json");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("reading {}: {e}", path.display()));
+    let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let cases = json["cases"].as_array().expect("a `cases` array");
+    let default_date = jiff::civil::date(2026, 10, 16);
+    let (mut checked, mut differs) = (0, 0);
+    let mut failures = Vec::new();
+    for case in cases {
+        if case.get("native_differs").is_some() {
+            differs += 1;
+            continue;
+        }
+        checked += 1;
+        let config = case["config"].as_str().expect("a config string");
+        let as_of = case["as_of"].as_str();
+        let problem = case["problem"].as_str();
+        let (got, want) = match (as_of, problem) {
+            (_, Some(problem)) => {
+                let errors = option_expiry_with_config(Some(config), vec![]);
+                let got: Vec<_> = errors
+                    .iter()
+                    .map(|e| {
+                        (
+                            e.message.clone(),
+                            e.source_file.clone(),
+                            e.line_number,
+                            e.severity,
+                        )
+                    })
+                    .collect();
+                let want = vec![(
+                    invalid_expiry_config(problem),
+                    Some("<check_option_expiry>".to_string()),
+                    Some(0),
+                    PluginErrorSeverity::Error,
+                )];
+                (format!("{got:?}"), format!("{want:?}"))
+            }
+            (Some(as_of), None) => {
+                let d: jiff::civil::Date = as_of.parse().unwrap();
+                let day_before = d.yesterday().unwrap();
+                (
+                    format!("{:?}", as_of_probe(Some(config), d)),
+                    format!("{:?}", [probe_error(day_before)]),
+                )
+            }
+            (None, None) => (
+                format!("{:?}", as_of_probe(Some(config), default_date)),
+                format!("{:?}", [probe_error(default_date)]),
+            ),
+        };
+        if got != want {
+            failures.push(format!("{config:?}\n  got:  {got}\n  want: {want}"));
+        }
+    }
+    eprintln!("expiry_config.json: {checked} cases checked, {differs} native_differs skipped");
+    assert_eq!(checked + differs, cases.len());
+    assert!(checked > 0, "no cases in {}", path.display());
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// T44: no config, an empty one, one of ASCII whitespace only (stripped
+/// as beancount-options strips it), and `{}` all mean the default rules.
+/// A non-ASCII space is not stripped, so it is not a dict, as in Python.
+#[test]
+fn test_option_expiry_blank_configs() {
+    let blanks = [
+        None,
+        Some(""),
+        Some(" "),
+        Some("\t"),
+        Some("\n"),
+        Some("\r"),
+        Some("\x0c"),
+        Some("\x0b"),
+        Some(" \t\n\r\x0c\x0b"),
+        Some("{}"),
+        Some(" {} "),
+        Some("\x0b{}\x0c"),
+    ];
+    for blank in blanks {
+        let errors = option_expiry_with_config(
+            blank,
+            vec![
+                option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+                later_entry("2026-11-01"),
+            ],
+        );
         assert_eq!(errors.len(), 1, "{blank:?}: {errors:?}");
+        assert_eq!(errors[0].message, EXPIRED_PUT, "{blank:?}");
         assert_eq!(errors[0].severity, PluginErrorSeverity::Error);
     }
-    // A non-ASCII space is not blank, as in Python's rule.
-    let errors = option_expiry_with_config(Some("\u{a0}"));
-    assert_eq!(errors.len(), 2, "{errors:?}");
+    let not_a_dict = "expected a dict such as {'as_of': '2026-10-16'}";
+    for config in ["\u{a0}", "\u{a0}{}", "\u{2003}{}", "\x1c{}", "{}\x1f"] {
+        assert_expiry_config_problem(config, not_a_dict);
+    }
+}
+
+/// T42: `as_of` before, on and after the expiry. A contract expiring on
+/// `as_of` is fine, as on the last entry's date by default; one that
+/// expired before it is reported even with no entry after the expiry.
+#[test]
+fn test_option_expiry_as_of_around_expiry() {
+    let run = |as_of: &str, later: bool| {
+        let mut directives = vec![option_txn(
+            "2026-09-02",
+            OPT_ACCT,
+            "-1",
+            "AAPL261016P00230000",
+        )];
+        if later {
+            directives.push(later_entry("2026-11-01"));
+        }
+        let config = format!("{{'as_of': '{as_of}'}}");
+        option_expiry_with_config(Some(&config), directives)
+            .into_iter()
+            .map(|e| e.message)
+            .collect::<Vec<_>>()
+    };
+    for later in [false, true] {
+        assert_eq!(run("2026-10-15", later), Vec::<String>::new(), "{later}");
+        assert_eq!(run("2026-10-16", later), Vec::<String>::new(), "{later}");
+        assert_eq!(run("2026-10-17", later), [EXPIRED_PUT], "{later}");
+    }
+    // Without as_of, the same ledger with nothing after the expiry passes.
+    let errors = option_expiry_with_config(
+        None,
+        vec![option_txn(
+            "2026-09-02",
+            OPT_ACCT,
+            "-1",
+            "AAPL261016P00230000",
+        )],
+    );
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// T43: entries dated after `as_of` are ignored entirely. A later entry
+/// does not move "today" past the expiry, and a close dated after `as_of`
+/// does not close the position; an entry dated on `as_of` counts, and an
+/// opener dated after it is never seen.
+#[test]
+fn test_option_expiry_as_of_ignores_later_entries() {
+    let config = |d: &str| format!("{{'as_of': '{d}'}}");
+    let open = || {
+        let mut open = option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000");
+        open.filename = Some("ledger.beancount".to_string());
+        open.lineno = Some(7);
+        open
+    };
+
+    // "Today": the later entry would report the put by default.
+    let errors = option_expiry_with_config(
+        Some(&config("2026-10-10")),
+        vec![open(), later_entry("2026-11-01")],
+    );
+    assert_eq!(errors.len(), 0, "{errors:?}");
+
+    // Closing: a forecast close after as_of leaves the put open.
+    let close = || option_txn("2026-10-20", OPT_ACCT, "1", "AAPL261016P00230000");
+    let errors = option_expiry_with_config(None, vec![open(), close()]);
+    assert_eq!(errors.len(), 0, "default: {errors:?}");
+    let errors = option_expiry_with_config(Some(&config("2026-10-18")), vec![open(), close()]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].message, EXPIRED_PUT);
+    assert_eq!(errors[0].source_file.as_deref(), Some("ledger.beancount"));
+    assert_eq!(errors[0].line_number, Some(7));
+    // The close dated on as_of itself counts.
+    let errors = option_expiry_with_config(Some(&config("2026-10-20")), vec![open(), close()]);
+    assert_eq!(errors.len(), 0, "{errors:?}");
+
+    // An opener dated after as_of is not a position.
+    let errors = option_expiry_with_config(
+        Some(&config("2026-10-25")),
+        vec![option_txn(
+            "2026-10-26",
+            OPT_ACCT,
+            "-1",
+            "AAPL261016P00230000",
+        )],
+    );
+    assert_eq!(errors.len(), 0, "{errors:?}");
+
+    // A sign change after as_of does not move the opener either: the
+    // position open on as_of is the short sold on 09-02.
+    let errors = option_expiry_with_config(
+        Some(&config("2026-10-18")),
+        vec![
+            open(),
+            option_txn("2026-10-19", OPT_ACCT, "2", "AAPL261016P00230000"),
+        ],
+    );
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].message, EXPIRED_PUT);
+    assert_eq!(errors[0].line_number, Some(7));
+}
+
+/// An empty ledger with `as_of` reports nothing.
+#[test]
+fn test_option_expiry_as_of_empty_ledger() {
+    let mut input = make_input(vec![]);
+    input.config = Some("{'as_of': '2026-10-16'}".to_string());
+    let output = CheckOptionExpiryPlugin.process(input);
+    assert_eq!(output.errors.len(), 0, "{:?}", output.errors);
+    assert_eq!(output.ops.len(), 0);
+}
+
+/// Each config problem, checked in beancount-options' order: not a dict,
+/// a non-str key, the first unknown key, a non-str `as_of`, a bad date.
+#[test]
+fn test_option_expiry_config_problems() {
+    let not_a_dict = "expected a dict such as {'as_of': '2026-10-16'}";
+    for config in [
+        "not a literal",
+        "['as_of']",
+        "('as_of', '2026-10-16')",
+        "'2026-10-16'",
+        "2026",
+        "None",
+        "{'as_of': '2026-10-16'",
+        "{'as_of': '2026-10-16'} {}",
+        "{'as_of': '2026-10-16',,}",
+        "{'as_of': f'2026-10-16'}",
+        "{'as_of': date(2026, 10, 16)}",
+    ] {
+        assert_expiry_config_problem(config, not_a_dict);
+    }
+    for config in [
+        "{1: 'x'}",
+        "{'as_of': '2026-10-16', 1: 2}",
+        "{'zz': 1, 1: 2}",
+        "{1: 'x', True: 'y'}",
+        "{None: 1}",
+        "{(1,): 2}",
+        "{b'as_of': '2026-10-16'}",
+        "{'as_of': 'bad', 2.5: 1}",
+    ] {
+        assert_expiry_config_problem(config, "keys must be strings");
+    }
+    assert_expiry_config_problem("{'asof': '2026-10-16'}", "unknown key 'asof'");
+    assert_expiry_config_problem("{'zz': 1, 'aa': 2}", "unknown key 'zz'");
+    assert_expiry_config_problem("{'as_of': '2026-10-16', 'zz': 1}", "unknown key 'zz'");
+    assert_expiry_config_problem("{'as_of': 1, 'zz': 1}", "unknown key 'zz'");
+    assert_expiry_config_problem("{'AS_OF': '2026-10-16'}", "unknown key 'AS_OF'");
+    for config in [
+        "{'as_of': 20261016}",
+        "{'as_of': None}",
+        "{'as_of': True}",
+        "{'as_of': b'2026-10-16'}",
+        "{'as_of': ['2026-10-16']}",
+        "{'as_of': {'b', 'a', 'c'}}",
+        "{'as_of': {'d': '2026-10-16'}}",
+    ] {
+        assert_expiry_config_problem(config, "as_of must be a string");
+    }
+    let bad_date = |v: &str| format!("as_of must be a date written YYYY-MM-DD, not '{v}'");
+    for value in [
+        "20261016",
+        "2026-02-30",
+        "2027-02-29",
+        "0000-01-01",
+        "2026-13-01",
+        "2026-00-10",
+        "2026-10-00",
+        "2026-10-32",
+        "2026-1-16",
+        "26-10-16",
+        "+2026-10-16",
+        "2026/10/16",
+        "2026-10-16 ",
+        " 2026-10-16",
+        "2026-10-16T00:00",
+        "2026-W42-5",
+        " ",
+        "bad",
+    ] {
+        assert_expiry_config_problem(&format!("{{'as_of': '{value}'}}"), &bad_date(value));
+    }
+}
+
+/// A key or value is quoted back only when it is 1–40 printable ASCII
+/// characters other than `'`, `"` and `\`, as in beancount-options;
+/// otherwise the message leaves it out.
+#[test]
+fn test_option_expiry_config_quoting() {
+    let forty = "a".repeat(40);
+    let forty_one = "a".repeat(41);
+    assert_expiry_config_problem(
+        &format!("{{'{forty}': 1}}"),
+        &format!("unknown key '{forty}'"),
+    );
+    assert_expiry_config_problem(&format!("{{'{forty_one}': 1}}"), "an unknown key");
+    for key in [
+        "",
+        "it\\'s",
+        "say \"hi\"",
+        "a\\\\b",
+        "clé",
+        "a\\x7fb",
+        "a\\tb",
+    ] {
+        assert_expiry_config_problem(&format!("{{'{key}': 1}}"), "an unknown key");
+    }
+    // The printable edges: space, `!`, `#`, `&`, `(`, `[`, `]`, `~`.
+    assert_expiry_config_problem("{' !#&([]~': 1}", "unknown key ' !#&([]~'");
+
+    let date = "as_of must be a date written YYYY-MM-DD";
+    let digits = "9".repeat(40);
+    assert_expiry_config_problem(
+        &format!("{{'as_of': '{digits}'}}"),
+        &format!("{date}, not '{digits}'"),
+    );
+    assert_expiry_config_problem(&format!("{{'as_of': '9{digits}'}}"), date);
+    for value in [
+        "",
+        "\"it's\"",
+        "'a\\\\b'",
+        "'say \"hi\"'",
+        "'２026-10-16'",
+        "'2026-10-16\\n'",
+        "'\\x7f'",
+    ] {
+        let config = if value.is_empty() {
+            "{'as_of': ''}".to_string()
+        } else {
+            format!("{{'as_of': {value}}}")
+        };
+        assert_expiry_config_problem(&config, date);
+    }
+}
+
+/// Valid dates: leap days, the first and last years Python allows, and
+/// the date forms beancount-options accepts (either quote, any spacing
+/// `literal_eval` allows, a comment, a trailing comma).
+#[test]
+fn test_option_expiry_config_valid_dates() {
+    let d = jiff::civil::date(2026, 10, 16);
+    let expect = [probe_error(d.yesterday().unwrap())];
+    for config in [
+        "{'as_of': '2026-10-16'}",
+        "{\"as_of\": \"2026-10-16\"}",
+        "{'as_of': '2026-10-16',}",
+        "{ 'as_of' : '2026-10-16' }",
+        "{'as_of':\n  '2026-10-16'}",
+        "{'as_of': '2026-10-16'}  # comment",
+        "{'as_of': '2026' '-10-16'}",
+        "{'as_of': r'2026-10-16'}",
+        "{'as_of': u'2026-10-16'}",
+        "{'as_of': '''2026-10-16'''}",
+        "{'as_of': '\\x32026-10-16'}",
+        "\t{'as_of': '2026-10-16'}\n",
+    ] {
+        assert_eq!(as_of_probe(Some(config), d), expect, "{config:?}");
+    }
+    let leap = jiff::civil::date(2028, 2, 29);
+    assert_eq!(
+        as_of_probe(Some("{'as_of': '2028-02-29'}"), leap),
+        [probe_error(leap.yesterday().unwrap())]
+    );
+
+    // Year 1 is Python's first: every entry is after it, so nothing is
+    // reported. Year 9999 is its last: the put is long expired.
+    let put = || {
+        vec![
+            option_txn("2026-09-02", OPT_ACCT, "-1", "AAPL261016P00230000"),
+            later_entry("2026-10-17"),
+        ]
+    };
+    let errors = option_expiry_with_config(Some("{'as_of': '0001-01-01'}"), put());
+    assert_eq!(errors.len(), 0, "{errors:?}");
+    let errors = option_expiry_with_config(Some("{'as_of': '9999-12-31'}"), put());
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(errors[0].message, EXPIRED_PUT);
+}
+
+/// A repeated key keeps its first position and takes its last value, as
+/// in the Python dict beancount-options reads.
+#[test]
+fn test_option_expiry_config_repeated_keys() {
+    let d = jiff::civil::date(2026, 10, 17);
+    assert_eq!(
+        as_of_probe(Some("{'as_of': 'bad', 'as_of': '2026-10-17'}"), d),
+        [probe_error(d.yesterday().unwrap())]
+    );
+    assert_expiry_config_problem(
+        "{'as_of': '2026-10-16', 'as_of': 1}",
+        "as_of must be a string",
+    );
+    assert_expiry_config_problem(
+        "{'as_of': '2026-10-16', 'as_of': '2026-10-99'}",
+        "as_of must be a date written YYYY-MM-DD, not '2026-10-99'",
+    );
+    assert_expiry_config_problem("{'yy': 1, 'zz': 2, 'yy': 3}", "unknown key 'yy'");
+    assert_expiry_config_problem(
+        "{'as_of': '2026-10-16', 'zz': 1, 'as_of': 'x'}",
+        "unknown key 'zz'",
+    );
+}
+
+/// T41: the configs beancount-options' cases mark `native_differs`, and
+/// one more of the same kind (a dict as a key). Python rejects them
+/// differently because `literal_eval` raises on an unhashable key or set
+/// element, or accepts what `py_literal` rejects (`\N{...}` and complex
+/// numbers). None is a config anyone would write; what native gives is
+/// pinned here so it stays deliberate.
+#[test]
+fn test_option_expiry_config_native_differs_pinned() {
+    let not_a_dict = "expected a dict such as {'as_of': '2026-10-16'}";
+    assert_expiry_config_problem("{[1]: 2}", "keys must be strings");
+    assert_expiry_config_problem("{{}: 1}", "keys must be strings");
+    assert_expiry_config_problem("{'zz': {[]: 1}}", "unknown key 'zz'");
+    assert_expiry_config_problem("{'as_of': {[1]}}", "as_of must be a string");
+    assert_expiry_config_problem("{'as_of': 1+2j}", not_a_dict);
+    assert_expiry_config_problem("{'as_of': '\\N{DIGIT TWO}026-10-16'}", not_a_dict);
 }
 
 /// The plugin is reachable by name through the registry.

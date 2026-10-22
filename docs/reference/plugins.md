@@ -536,7 +536,28 @@ plugin "beancount_options.check_option_expiry"
 
 Its Python counterpart is `beancount_options.check_option_expiry` in [beancount-options](https://github.com/rustledger/beancount-options) (`pip install git+https://github.com/rustledger/beancount-options`). rledger matches a native plugin by the last part of the name, so the same `plugin` line runs the native plugin under `rledger` and the Python one under `bean-check` and Fava, with the same messages at the same lines.
 
-Options: None natively yet. beancount-options accepts `"{'as_of': 'YYYY-MM-DD'}"`; rledger warns that it ignores the config and applies the default rules.
+Options: an optional dict literal, `"{'as_of': 'YYYY-MM-DD'}"`, which sets "today" instead of the last directive's date. Entries dated after `as_of` are ignored, so a forecast or scheduled transaction neither moves "today" forward nor closes a position early. Entries dated on `as_of` count. A contract that expired before `as_of` is reported even when the ledger has no later entry; one expiring on `as_of` is fine.
+
+```beancount
+plugin "beancount_options.check_option_expiry" "{'as_of': '2026-10-20'}"
+
+2026-01-01 open Assets:Broker:Cash USD
+2026-01-01 open Assets:Broker:Options
+2026-01-01 open Income:Options
+
+2026-09-02 * "Sell to open 1 AAPL 2026-10-16 230 put"
+  Assets:Broker:Options  -1 AAPL261016P00230000 @ 2.50 USD
+  Assets:Broker:Cash     2.50 USD
+
+2026-11-20 * "Forecast: buy to close"
+  Assets:Broker:Options   1 AAPL261016P00230000 @ 0.00 USD
+  Income:Options
+; Error: AAPL261016P00230000 expired 2026-10-16 but -1 contract(s) remain open in Assets:Broker:Options
+```
+
+No config, a blank one (ASCII whitespace only) and `{}` keep the default rules. Any other config that is not exactly that dict gives one error, `Invalid configuration for check_option_expiry plugin: <problem>; skipping.`, located at `<check_option_expiry>:0`, and the plugin then reports nothing else. The problems are checked in this order: not a dict (`expected a dict such as {'as_of': '2026-10-16'}`), a key that is not a string (`keys must be strings`), the first other key (`unknown key 'asof'`), a value that is not a string (`as_of must be a string`), and a date not written `YYYY-MM-DD` or not a real date (`as_of must be a date written YYYY-MM-DD, not '2026-02-30'`). A repeated key takes its last value. A key or value is quoted back only when it is 1–40 printable ASCII characters with no `'`, `"` or `\`. These are beancount-options' rules, and rustledger's tests run its shared config cases. A few configs nobody would write read differently, because Python's `literal_eval` accepts or rejects them where rledger's reader does not: `\N{...}` escapes, complex numbers, and lists, sets or dicts used as keys or set elements.
+
+`--native-plugin` passes no config, so `as_of` needs the `plugin` line.
 
 ### commodity_attr
 

@@ -1375,7 +1375,7 @@ mod tests {
     #[test]
     fn is_valid_currency_matches_lexer_rule() {
         use super::is_valid_currency as ok;
-        for good in ["USD", "EUR", "T", "VTI", "BRK.B", "ETH-2"] {
+        for good in ["USD", "EUR", "T", "VTI", "BRK.B", "ETH-2", "U.S-D'X"] {
             assert!(ok(good), "{good}");
         }
         for bad in ["", "usd", "€", " USD", "USD ", "US D", "1USD"] {

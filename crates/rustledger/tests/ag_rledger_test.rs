@@ -1249,6 +1249,19 @@ fn extract_and_price_warnings_are_coded_records() {
             .is_some_and(|m| m.starts_with("Failed to fetch AAPL: ")),
         "{env}"
     );
+    // The refusal is fetch-failure semantics: a coded warning and exit 0,
+    // not a hard error (the comment line lands in result.stderr).
+    let (code, _, _) = run_in_with(
+        dir,
+        &[
+            "price",
+            "AAPL",
+            "--source-cmd",
+            "rledger-test-no-such-command-2566",
+        ],
+        &[],
+    );
+    assert_eq!(code, 0, "a refused fetch is a warning, exit 0");
 }
 
 /// #2566: an `importers.toml` that does not parse costs the run its payee

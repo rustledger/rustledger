@@ -577,6 +577,7 @@ impl Executor<'_> {
         window_ctx: Option<&WindowContext>,
     ) -> Result<Row, QueryError> {
         let mut row = Vec::new();
+        let mut window_index = 0;
         for target in targets {
             if matches!(target.expr, Expr::Wildcard) {
                 // Expand wildcard to default columns.
@@ -597,9 +598,10 @@ impl Executor<'_> {
                 // lot lost its cost, and a table or subquery built from
                 // `SELECT *` summed units where `SELECT position` sums lots.
                 row.push(self.evaluate_column("position", ctx)?);
-            } else if let Expr::Window(wf) = &target.expr {
-                // Handle window function
-                row.push(self.evaluate_window_function(wf, window_ctx)?);
+            } else if matches!(target.expr, Expr::Window(_)) {
+                // Precomputed, one value per window target in target order.
+                row.push(Self::evaluate_window_function(window_ctx, window_index)?);
+                window_index += 1;
             } else {
                 row.push(self.evaluate_expr(&target.expr, ctx)?);
             }

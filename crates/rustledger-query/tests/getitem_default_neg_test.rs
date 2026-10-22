@@ -193,6 +193,13 @@ fn neg_and_abs_keep_the_cost() {
 fn abs_of_an_inventory() {
     let got = rows("SELECT abs(balance) WHERE account = 'Assets:Bank' AND narration != 'Buy'");
     assert_eq!(
+        got[0],
+        vec![inventory(vec![Position::simple(amount(
+            dec!(10.00),
+            "EUR"
+        ))])]
+    );
+    assert_eq!(
         got[1],
         vec![inventory(vec![
             Position::simple(amount(dec!(10.00), "EUR")),

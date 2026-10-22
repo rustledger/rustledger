@@ -340,11 +340,15 @@ fn failed_verification_restores_the_backup() {
         template: file.clone(),
         mode_mask: None,
     };
-    let e = swap::apply(&plan, after_swap_fails).unwrap_err();
+    let mut touched = swap::Touched::default();
+    let e = swap::apply_recording(&plan, &mut touched, after_swap_fails).unwrap_err();
     assert!(format!("{e:#}").contains("restored"), "{e:#}");
     assert_eq!(fs::read_to_string(&file).unwrap(), "; original\n");
     assert!(!new.exists());
     assert!(!dir.path().join("sub").exists());
+    // The rollback does not erase the record of what the run wrote (#2721).
+    assert_eq!(touched.written, vec![new, file]);
+    assert!(touched.removed.is_empty());
 }
 
 /// The check must be able to say "dirty". A split that drops one
@@ -1110,7 +1114,15 @@ fn a_backup_an_include_pattern_would_read_is_refused_and_removed() {
     args.ledger = Some(main.clone());
     args.dir = Some(dir.path().join("split"));
     let (mut out, mut err) = (Vec::new(), Vec::new());
-    let e = split::run_with_writer(&args, &mut out, &mut err).unwrap_err();
+    let mut outcome = super::Outcome::default();
+    let e = split::run_with_outcome(&args, &mut out, &mut err, &mut outcome).unwrap_err();
+    assert_eq!(
+        super::refusal_code(&e),
+        Some(super::code::BACKUP_INCLUDED),
+        "{e:#}"
+    );
+    // The backup was removed, so none is reported.
+    assert_eq!(outcome.backup_dir, None);
     let e = format!("{e:#}");
     assert!(e.contains("nothing was changed"), "{e}");
     assert!(e.contains("was removed"), "{e}");
@@ -1313,7 +1325,7 @@ fn an_edit_during_staging_is_not_overwritten() {
 #[test]
 fn a_failed_restore_names_a_complete_backup() {
     let dir = tmp();
-    let (plan, _file) = split_plan(dir.path());
+    let (plan, file) = split_plan(dir.path());
     let _hook = swap::inject(|point| match point {
         swap::Fault::Restore(original) => {
             assert!(original.ends_with("ledger.beancount"), "{original:?}");
@@ -1321,8 +1333,23 @@ fn a_failed_restore_names_a_complete_backup() {
         }
         _ => Ok(()),
     });
-    let e = format!("{:#}", swap::apply(&plan, after_swap_fails).unwrap_err());
+    let mut touched = swap::Touched::default();
+    let e = format!(
+        "{:#}",
+        swap::apply_recording(&plan, &mut touched, after_swap_fails).unwrap_err()
+    );
     assert!(e.contains("restoring failed too"), "{e}");
+    // A restore that fails leaves the written files as they are; they stay
+    // listed, so the envelope can name what to inspect (#2721).
+    assert_eq!(
+        touched.written,
+        vec![
+            dir.path().join("ledger/2023.beancount"),
+            dir.path().join("ledger/2024.beancount"),
+            file,
+        ]
+    );
+    assert!(touched.removed.is_empty());
     let backup = complete_backup(dir.path(), "ledger.beancount", "; original\n");
     assert!(e.contains(&backup.display().to_string()), "{e}");
     let manifest = fs::read_to_string(backup.join("manifest.txt")).unwrap();
@@ -1434,4 +1461,362 @@ fn merge_resolves_a_symlinked_includes_includes_next_to_the_link() {
     let merged = fs::read_to_string(&root).unwrap();
     assert!(merged.contains("Assets:A"), "{merged}");
     assert!(!merged.contains("Assets:L"), "{merged}");
+}
+
+/// Each refusal carries its stable code (#2633), and still displays as the
+/// exact message rledger prints.
+#[test]
+fn refusals_carry_stable_codes() {
+    use super::{code, refusal_code};
+    let dir = tmp();
+    let file = write(dir.path(), "ledger.beancount", LEDGER);
+
+    write(dir.path(), "ledger/2024.beancount", "; mine\n");
+    let e = split::run_with_writer(
+        &split_args(&file, Period::Year),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(refusal_code(&e), Some(code::TARGET_EXISTS), "{e:#}");
+    assert_eq!(
+        format!("{e:#}"),
+        format!(
+            "{} already exists; refusing to overwrite it (move it away or choose another --dir)",
+            dir.path()
+                .canonicalize()
+                .unwrap()
+                .join("ledger/2024.beancount")
+                .display()
+        )
+    );
+
+    let broken = write(dir.path(), "broken.beancount", "2024-01-01 open\n");
+    let e = split::run_with_writer(
+        &split_args(&broken, Period::Year),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(refusal_code(&e), Some(code::PARSE_ERRORS), "{e:#}");
+
+    let e =
+        merge::run_with_writer(&merge_args(&file), &mut Vec::new(), &mut Vec::new()).unwrap_err();
+    assert_eq!(refusal_code(&e), Some(code::NOTHING_TO_MERGE), "{e:#}");
+
+    let gone = write(dir.path(), "inc.beancount", "include \"gone.beancount\"\n");
+    let e =
+        merge::run_with_writer(&merge_args(&gone), &mut Vec::new(), &mut Vec::new()).unwrap_err();
+    assert_eq!(refusal_code(&e), Some(code::INCLUDE_NOT_FOUND), "{e:#}");
+
+    let e = split::run_with_writer(
+        &split_args(&dir.path().join("nope.beancount"), Period::Year),
+        &mut Vec::new(),
+        &mut Vec::new(),
+    )
+    .unwrap_err();
+    assert_eq!(refusal_code(&e), Some(code::FILE_NOT_FOUND), "{e:#}");
+
+    #[cfg(unix)]
+    {
+        fs::create_dir(dir.path().join("view")).unwrap();
+        let link = dir.path().join("view/main.beancount");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        let e = split::run_with_writer(
+            &split_args(&link, Period::Year),
+            &mut Vec::new(),
+            &mut Vec::new(),
+        )
+        .unwrap_err();
+        assert_eq!(refusal_code(&e), Some(code::SYMLINK_ELSEWHERE), "{e:#}");
+        let e = merge::run_with_writer(&merge_args(&link), &mut Vec::new(), &mut Vec::new())
+            .unwrap_err();
+        assert_eq!(refusal_code(&e), Some(code::SYMLINK_ELSEWHERE), "{e:#}");
+    }
+}
+
+/// A verification failure after the swap is coded as rolled back, under the
+/// context the swap adds; a plain I/O failure carries no code.
+#[test]
+fn a_rolled_back_write_is_coded() {
+    use super::{code, refusal_code};
+    let dir = tmp();
+    let file = write(dir.path(), "ledger.beancount", "; original\n");
+    let plan = swap::Plan {
+        writes: vec![(file.clone(), "; replaced\n".to_string())],
+        commit: file.clone(),
+        removes: Vec::new(),
+        backup_base: dir.path().canonicalize().unwrap(),
+        originals: vec![(file.clone(), b"; original\n".to_vec())],
+        operation: "split",
+        template: file.clone(),
+        mode_mask: None,
+    };
+    let mut touched = swap::Touched::default();
+    let e = swap::apply_recording(&plan, &mut touched, after_swap_fails).unwrap_err();
+    assert_eq!(refusal_code(&e), Some(code::WRITE_ROLLED_BACK), "{e:#}");
+    // What the run wrote is recorded even though it was rolled back (#2721).
+    assert_eq!(touched.written, vec![file]);
+    assert!(touched.removed.is_empty());
+    assert!(touched.not_removed.is_empty());
+    // The backup is kept after a rollback, and its directory is known even
+    // though `apply` failed.
+    let backup = touched
+        .backup_dir
+        .expect("the backup directory is recorded on failure");
+    assert!(
+        backup.join("manifest.txt").is_file(),
+        "{}",
+        backup.display()
+    );
+    assert_eq!(refusal_code(&anyhow::anyhow!("disk on fire")), None);
+}
+
+/// With `merge --output` the run replaces nothing, so a rollback removes the
+/// output file and there is no backup: the message must say that instead of
+/// pointing at one (#2721).
+#[test]
+fn a_rolled_back_output_file_says_nothing_was_replaced() {
+    use super::{code, refusal_code};
+    let dir = tmp();
+    let template = write(dir.path(), "ledger.beancount", "; original\n");
+    let target = dir.path().join("merged.beancount");
+    let plan = swap::Plan {
+        writes: vec![(target.clone(), "; merged\n".to_string())],
+        commit: target.clone(),
+        removes: Vec::new(),
+        backup_base: dir.path().canonicalize().unwrap(),
+        originals: Vec::new(),
+        operation: "merge",
+        template,
+        mode_mask: None,
+    };
+    let mut touched = swap::Touched::default();
+    let e = swap::apply_recording(&plan, &mut touched, after_swap_fails).unwrap_err();
+    assert_eq!(refusal_code(&e), Some(code::WRITE_ROLLED_BACK), "{e:#}");
+    let msg = format!("{e:#}");
+    assert!(msg.contains("nothing original was replaced"), "{msg}");
+    assert!(msg.contains("output file was removed"), "{msg}");
+    assert!(touched.backup_dir.is_none(), "{msg}");
+    assert_eq!(touched.written, vec![target.clone()]);
+    assert!(!target.exists(), "the output file was removed again");
+}
+
+/// A ledger file edited while the plan was being written makes the reload
+/// after the swap differ; the write is rolled back, and the outcome still
+/// lists what the run wrote before restoring it (#2721).
+#[test]
+fn a_rolled_back_split_still_lists_what_it_wrote() {
+    use super::{Outcome, code, refusal_code};
+    let dir = tmp();
+    let extra = write(
+        dir.path(),
+        "extra.beancount",
+        "2023-02-01 * \"Bonus\"\n  Assets:Bank      5 USD\n  Income:Salary  -5 USD\n",
+    );
+    let file = write(
+        dir.path(),
+        "ledger.beancount",
+        "; My ledger\n\noption \"operating_currency\" \"USD\"\ninclude \"extra.beancount\"\n\n\
+         2023-01-01 open Assets:Bank USD\n2023-01-01 open Income:Salary USD\n\n\
+         2023-01-31 * \"Pay\"\n  Assets:Bank      1000 USD\n  Income:Salary  -1000 USD\n\n\
+         2024-03-01 * \"Lunch\"\n  Expenses:Food    12 USD\n  Assets:Bank     -12 USD\n",
+    );
+    let original = fs::read_to_string(&file).unwrap();
+    let mut outcome = Outcome::default();
+    // Edit a file that is in the ledger but not in the plan, after the
+    // temporaries are staged: the reload after the swap finds a difference.
+    let edited = extra.clone();
+    let _hook = swap::inject(move |point| {
+        if matches!(point, swap::Fault::BeforeRename) {
+            fs::write(
+                &edited,
+                "2023-02-01 * \"Bonus\"\n  Assets:Bank      6 USD\n  Income:Salary  -6 USD\n",
+            )
+            .unwrap();
+        }
+        Ok(())
+    });
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let e = split::run_with_outcome(
+        &split_args(&file, Period::Year),
+        &mut out,
+        &mut err,
+        &mut outcome,
+    )
+    .unwrap_err();
+    assert_eq!(refusal_code(&e), Some(code::WRITE_ROLLED_BACK), "{e:#}");
+    let written = outcome.written.expect("written");
+    let base = file.parent().unwrap();
+    assert_eq!(
+        written.written,
+        vec![
+            base.join("ledger/2023.beancount"),
+            base.join("ledger/2024.beancount"),
+            file.clone(),
+        ]
+    );
+    assert!(written.removed.is_empty());
+    assert!(written.not_removed.is_empty());
+    assert!(outcome.backup_dir.is_some());
+    // The plan's files were restored; the edited file is as the edit left it.
+    assert_eq!(fs::read_to_string(&file).unwrap(), original);
+    assert!(!base.join("ledger").exists());
+    assert!(fs::read_to_string(&extra).unwrap().contains("6 USD"));
+}
+
+/// The outcome records the plan, the verdict and what was written, and the
+/// text is what it always was.
+#[test]
+fn the_outcome_records_plan_check_and_writes() {
+    use super::{Check, Outcome, Step};
+    let dir = tmp();
+    let file = write(dir.path(), "ledger.beancount", LEDGER);
+    let mut outcome = Outcome::default();
+    let mut args = split_args(&file, Period::Year);
+    args.dry_run = true;
+    let (mut out, mut err) = (Vec::new(), Vec::new());
+    let code = split::run_with_outcome(&args, &mut out, &mut err, &mut outcome).unwrap();
+    assert_eq!(code, ExitCode::SUCCESS);
+    assert!(outcome.dry_run);
+    let plan = outcome.plan.as_ref().expect("a plan");
+    assert_eq!(plan.operation, "split");
+    assert_eq!(plan.by, Some("year"));
+    let base = file.parent().unwrap();
+    assert_eq!(
+        plan.steps,
+        vec![
+            Step::Create {
+                path: base.join("ledger/2023.beancount"),
+                dated_directives: Some(7),
+            },
+            Step::Create {
+                path: base.join("ledger/2024.beancount"),
+                dated_directives: Some(2),
+            },
+            Step::Rewrite {
+                path: file.clone(),
+                split: Some((3, 2)),
+            },
+        ]
+    );
+    assert!(matches!(outcome.check, Some(Check::Passed { .. })));
+    assert_eq!(outcome.written, None, "a dry run writes nothing");
+    let text = String::from_utf8(out).unwrap();
+    assert!(text.contains("Dry run: nothing was written."), "{text}");
+
+    let mut outcome = Outcome::default();
+    split::run_with_outcome(
+        &split_args(&file, Period::Year),
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut outcome,
+    )
+    .unwrap();
+    let written = outcome.written.expect("written");
+    assert_eq!(
+        written.written,
+        vec![
+            base.join("ledger/2023.beancount"),
+            base.join("ledger/2024.beancount"),
+            file.clone(),
+        ]
+    );
+    assert!(
+        outcome
+            .backup_dir
+            .is_some_and(|d| d.join("manifest.txt").is_file())
+    );
+
+    // Merging back records the inlined files as removed.
+    let mut outcome = Outcome::default();
+    merge::run_with_outcome(
+        &merge_args(&file),
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut outcome,
+    )
+    .unwrap();
+    let written = outcome.written.expect("written");
+    assert_eq!(written.written, vec![file.clone()]);
+    assert_eq!(
+        written.removed,
+        vec![
+            base.join("ledger/2023.beancount"),
+            base.join("ledger/2024.beancount"),
+        ]
+    );
+    assert!(written.not_removed.is_empty());
+}
+
+/// A refused check is recorded with its reason, and exits 1.
+#[test]
+fn a_refused_check_is_recorded() {
+    use super::{Check, Outcome, code};
+    let dir = tmp();
+    fs::write(dir.path().join("r.pdf"), "%PDF").unwrap();
+    let file = write(
+        dir.path(),
+        "ledger.beancount",
+        &format!("{LEDGER}\n2024-06-01 document Assets:Bank \"r.pdf\"\n"),
+    );
+    let mut outcome = Outcome::default();
+    let code_ = split::run_with_outcome(
+        &split_args(&file, Period::Year),
+        &mut Vec::new(),
+        &mut Vec::new(),
+        &mut outcome,
+    )
+    .unwrap();
+    assert_eq!(code_, ExitCode::from(1));
+    assert_eq!(outcome.exit_status(), 1);
+    let check = outcome.check.expect("a verdict");
+    assert_eq!(check.refusal_code(), Some(code::EQUIVALENCE_FAILED));
+    assert!(
+        matches!(&check, Check::Refused { reason, unstable: false } if reason.contains("document path")),
+        "{check:?}"
+    );
+    assert!(outcome.plan.is_some(), "the plan is kept with the refusal");
+    assert_eq!(outcome.written, None);
+}
+
+/// A file the merge cannot remove is a coded notice, not a write to the
+/// process's stderr, so `ag-rledger` can carry it (#2633), and it is listed
+/// in the outcome rather than as removed.
+#[cfg(unix)]
+#[test]
+fn a_file_merge_cannot_remove_is_a_notice() {
+    use super::{Outcome, code};
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tmp();
+    let file = write(dir.path(), "ledger.beancount", LEDGER);
+    run_split(&split_args(&file, Period::Year));
+    let years = dir.path().join("ledger");
+    fs::set_permissions(&years, fs::Permissions::from_mode(0o555)).unwrap();
+    // Running as root, the directory's mode would not stop the removal.
+    if fs::write(years.join("probe"), "").is_ok() {
+        fs::set_permissions(&years, fs::Permissions::from_mode(0o755)).unwrap();
+        eprintln!("skipped: the directory's mode does not stop writes here");
+        return;
+    }
+    let mut outcome = Outcome::default();
+    let (result, notices) = rustledger_plugin::notice::capture(|| {
+        merge::run_with_outcome(
+            &merge_args(&file),
+            &mut Vec::new(),
+            &mut Vec::new(),
+            &mut outcome,
+        )
+    });
+    fs::set_permissions(&years, fs::Permissions::from_mode(0o755)).unwrap();
+    result.unwrap();
+    assert_eq!(notices.len(), 1, "{notices:?}");
+    assert_eq!(notices[0].code, code::FILES_NOT_REMOVED);
+    assert!(
+        notices[0].message.starts_with("could not remove 2 file(s)"),
+        "{notices:?}"
+    );
+    let written = outcome.written.expect("written");
+    assert!(written.removed.is_empty(), "{written:?}");
+    assert_eq!(written.not_removed.len(), 2, "{written:?}");
 }

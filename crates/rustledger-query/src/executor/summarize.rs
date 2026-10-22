@@ -255,12 +255,14 @@ impl Executor<'_> {
             self.booking_method,
             self.resolved_directives(),
         );
+        // The whole ledger up to the date, from its start: the booked
+        // stream itself, so as booking decided it (#2390).
         for directive in self.resolved_directives() {
             if let Directive::Transaction(txn) = directive
                 && txn.date < open
             {
                 engine
-                    .replay_transaction(txn)
+                    .replay_transaction_as_booked(txn)
                     .map_err(|e| QueryError::Evaluation(e.to_string()))?;
             }
         }

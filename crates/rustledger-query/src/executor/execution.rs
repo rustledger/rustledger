@@ -15,7 +15,7 @@ use crate::ast::{
 use crate::error::QueryError;
 
 use super::Executor;
-use super::types::{QueryResult, Row, Table, Value, hash_row};
+use super::types::{PostingSource, QueryResult, Row, RowOrigin, Table, TableRow, Value, hash_row};
 
 /// Normalized form of a `JOURNAL ... AT <mode>` clause.
 ///
@@ -52,14 +52,31 @@ const JOURNAL_NARRATION_MAXWIDTH: i64 = 80;
 impl Executor<'_> {
     /// Execute a SELECT query.
     pub(super) fn execute_select(&self, query: &SelectQuery) -> Result<QueryResult, QueryError> {
+        self.execute_select_with_origins(query, false)
+    }
+
+    /// [`Self::execute_select`], with each row's [`RowOrigin`] kept in the
+    /// result when `keep_origins` is set and the row has one (#2442): a
+    /// subquery's rows for its outer query, and the rows a table stores.
+    ///
+    /// A row has one when it was read from one posting and at least one of
+    /// its columns passes that posting's `position` through unchanged. A
+    /// grouped, aggregated or DISTINCT result keeps none: its rows have no
+    /// one posting behind them (a DISTINCT row stands for every posting with
+    /// those values), so they answer from the values.
+    pub(super) fn execute_select_with_origins(
+        &self,
+        query: &SelectQuery,
+        keep_origins: bool,
+    ) -> Result<QueryResult, QueryError> {
         // Check if we have a subquery
         if let Some(from) = &query.from {
             if let Some(subquery) = &from.subquery {
-                return self.execute_select_from_subquery(query, subquery);
+                return self.execute_select_from_subquery(query, subquery, keep_origins);
             }
             // Check if we're selecting from a user-created table
             if let Some(table_name) = &from.table_name {
-                return self.execute_select_from_table(query, table_name);
+                return self.execute_select_from_table(query, table_name, keep_origins);
             }
         }
 
@@ -68,7 +85,7 @@ impl Executor<'_> {
         if let Some(resolved) =
             self.resolve_double_quoted_columns(query, super::quoted_columns::is_posting_column)
         {
-            return self.execute_select(&resolved);
+            return self.execute_select_with_origins(&resolved, keep_origins);
         }
 
         // Find ORDER BY expressions not in SELECT and add as hidden columns.
@@ -90,6 +107,18 @@ impl Executor<'_> {
         // A query is aggregate if any SELECT target contains an aggregate function,
         // or if it has an explicit GROUP BY or HAVING clause.
         let is_aggregate = Self::is_aggregate_query(query);
+
+        // The columns holding each row's posting `position`, when the rows
+        // keep their origin.
+        let position_columns = (keep_origins && !is_aggregate && !query.distinct)
+            .then(|| Self::position_columns(&query.targets))
+            .filter(|columns| !columns.is_empty());
+        let origin_of = |ctx: &super::PostingContext<'_>| {
+            position_columns.as_ref().map(|columns| RowOrigin {
+                posting: Self::context_source(ctx),
+                columns: std::sync::Arc::clone(columns),
+            })
+        };
 
         if is_aggregate {
             // Determine GROUP BY expressions:
@@ -134,13 +163,8 @@ impl Executor<'_> {
             }
         } else {
             // Check if query has window functions
-            let has_windows = Self::has_window_functions(&query.targets);
-            let window_contexts = if has_windows {
-                if let Some(wf) = Self::find_window_function(&query.targets) {
-                    Some(self.compute_window_contexts(&postings, wf)?)
-                } else {
-                    None
-                }
+            let window_contexts = if Self::has_window_functions(&extended_targets) {
+                Some(self.compute_window_contexts(&postings, &extended_targets)?)
             } else {
                 None
             };
@@ -179,6 +203,9 @@ impl Executor<'_> {
                     let n = rows.len();
                     result.rows = rows;
                     result.row_group_keys.resize(n, None);
+                    if position_columns.is_some() {
+                        result.row_origins = postings.iter().map(origin_of).collect();
+                    }
                 }
             } else {
                 // Sequential evaluation for small datasets or window queries
@@ -202,7 +229,7 @@ impl Executor<'_> {
                             result.add_row(row);
                         }
                     } else {
-                        result.add_row(row);
+                        result.add_row_with_origin(row, origin_of(ctx));
                     }
                 }
             }
@@ -352,195 +379,83 @@ impl Executor<'_> {
         hidden
     }
 
-    /// `inner` with a hidden target for each posting-derived value `outer`
-    /// reads from one of its columns, or `None` when it needs none (#2432).
-    ///
-    /// `weight(c)`, `cost(c)` and `sum(c)` of a posting column need the
-    /// posting, and the outer query sees only the inner query's row values:
-    /// a `Position` without the price `weight` ranks second or the total a
-    /// `{{T}}` cost carries. So when `c` is one of the inner query's columns
-    /// passed straight through (a bare column target, or `position` from its
-    /// `SELECT *`), the inner query computes the value itself,
-    /// where its own routing reaches the posting: from the posting on the
-    /// default FROM, from the hidden columns of `#postings`, or from its own
-    /// subquery by this same rewrite. The result lands in a hidden column
-    /// named for `c` (see `hidden_weight_column`), which the outer row
-    /// evaluator reads in place of the value path. A column the inner query
-    /// computes, such as `units(position) AS position`, gets none.
-    ///
-    /// An inner query that groups, aggregates, pivots or is DISTINCT is left
-    /// alone: an extra column would change which rows it returns.
-    fn with_hidden_posting_columns(
-        &self,
-        outer: &SelectQuery,
-        inner: &SelectQuery,
-    ) -> Option<SelectQuery> {
-        // `PIVOT BY` requires a `GROUP BY`, so it is covered too.
-        if inner.distinct || Self::is_aggregate_query(inner) {
-            return None;
+    /// The output columns of default-FROM `targets` that hold the posting's
+    /// `position` as it is: a bare `position` column, renamed or not, and the
+    /// `position` a `SELECT *` expands to. Any other expression, such as
+    /// `units(position)`, is a value the posting does not answer for.
+    fn position_columns(targets: &[Target]) -> std::sync::Arc<[usize]> {
+        let wildcard_position = super::WILDCARD_COLUMNS
+            .iter()
+            .position(|c| *c == "position");
+        let mut columns = Vec::new();
+        let mut index = 0;
+        for target in targets {
+            match &target.expr {
+                Expr::Wildcard => {
+                    if let Some(offset) = wildcard_position {
+                        columns.push(index + offset);
+                    }
+                    index += super::WILDCARD_COLUMNS.len();
+                }
+                Expr::Column(name) => {
+                    if name.eq_ignore_ascii_case("position") {
+                        columns.push(index);
+                    }
+                    index += 1;
+                }
+                _ => index += 1,
+            }
         }
+        columns.into()
+    }
 
-        // Which values the outer query reads, per column it reads them from.
-        let mut needed: Vec<(String, &str)> = Vec::new();
+    /// Where the posting a default-FROM row reads lives: in the ledger, by
+    /// index, or in the transaction a FROM clause synthesized.
+    pub(super) fn context_source(ctx: &super::PostingContext<'_>) -> PostingSource {
+        let posting = ctx.posting_index;
+        match (&ctx.transaction, ctx.directive_index) {
+            (super::TransactionRef::Ledger(_), Some(directive)) => {
+                PostingSource::Ledger { directive, posting }
+            }
+            (super::TransactionRef::Ledger(txn), None) => PostingSource::Shared {
+                transaction: std::sync::Arc::new((*txn).clone()),
+                posting,
+            },
+            (super::TransactionRef::Synthesized(txn), _) => PostingSource::Shared {
+                transaction: std::sync::Arc::clone(txn),
+                posting,
+            },
+        }
+    }
+
+    /// Whether `query` calls `weight`, `cost` or `sum` on a bare column
+    /// anywhere: the calls a row's origin answers (#2442). Its source keeps
+    /// origins only then, so a query that reads none pays nothing for them.
+    fn reads_posting_functions(query: &SelectQuery) -> bool {
+        let mut reads = false;
         let mut note = |expr: &Expr| {
             if let Expr::Function(call) = expr
-                && let [Expr::Column(column)] = call.args.as_slice()
+                && let [Expr::Column(_)] = call.args.as_slice()
+                && ["WEIGHT", "COST", "SUM"]
+                    .iter()
+                    .any(|f| call.name.eq_ignore_ascii_case(f))
             {
-                let kind = match call.name.to_uppercase().as_str() {
-                    "WEIGHT" | super::WEIGHT_OR_NULL | super::WEIGHT_FAILED => "weight",
-                    "COST" | super::COST_OR_NULL | super::COST_FAILED => "cost",
-                    "SUM" | super::LOT_TOTAL => "lot total",
-                    _ => return,
-                };
-                let key = (column.to_lowercase(), kind);
-                if !needed.contains(&key) {
-                    needed.push(key);
-                }
+                reads = true;
             }
         };
-        for target in &outer.targets {
+        for target in &query.targets {
             super::visit_expr(&target.expr, &mut note);
         }
-        for expr in outer
+        for expr in query
             .where_clause
             .iter()
-            .chain(outer.having.iter())
-            .chain(outer.group_by.iter().flatten())
-            .chain(outer.order_by.iter().flatten().map(|o| &o.expr))
+            .chain(query.having.iter())
+            .chain(query.group_by.iter().flatten())
+            .chain(query.order_by.iter().flatten().map(|o| &o.expr))
         {
             super::visit_expr(expr, &mut note);
         }
-        if needed.is_empty() {
-            return None;
-        }
-
-        // `position` from the inner query's `SELECT *`, which never hides it.
-        // If the inner source has no such column, computing a value from it
-        // fails with the same unknown column the outer query would report.
-        let wildcard = inner
-            .targets
-            .iter()
-            .any(|t| matches!(t.expr, Expr::Wildcard));
-
-        let mut targets = inner.targets.clone();
-        for (column, kind) in needed {
-            // The inner column the outer one names, passed straight through.
-            let mut named = inner.targets.iter().filter(|t| {
-                !matches!(t.expr, Expr::Wildcard)
-                    && t.alias
-                        .as_ref()
-                        .map_or_else(|| self.expr_to_name(&t.expr), |alias| alias.to_lowercase())
-                        == column
-            });
-            let source = match (named.next(), named.next()) {
-                (
-                    Some(Target {
-                        expr: Expr::Column(source),
-                        ..
-                    }),
-                    None,
-                ) => source.clone(),
-                (None, _) if wildcard && column == "position" => column.clone(),
-                _ => continue,
-            };
-            let hidden = |name: &str, alias: String| Target {
-                expr: Expr::Function(FunctionCall {
-                    name: name.to_string(),
-                    args: vec![Expr::Column(source.clone())],
-                }),
-                alias: Some(alias),
-            };
-            let (value, failed, value_column, error_column) = match kind {
-                "weight" => (
-                    super::WEIGHT_OR_NULL,
-                    super::WEIGHT_FAILED,
-                    super::hidden_weight_column(&column),
-                    super::hidden_weight_error_column(&column),
-                ),
-                "cost" => (
-                    super::COST_OR_NULL,
-                    super::COST_FAILED,
-                    super::hidden_cost_column(&column),
-                    super::hidden_cost_error_column(&column),
-                ),
-                _ => {
-                    targets.push(hidden(
-                        super::LOT_TOTAL,
-                        super::hidden_lot_total_column(&column),
-                    ));
-                    continue;
-                }
-            };
-            targets.push(hidden(value, value_column));
-            targets.push(hidden(failed, error_column));
-        }
-        (targets.len() > inner.targets.len()).then(|| SelectQuery {
-            targets,
-            ..inner.clone()
-        })
-    }
-
-    /// `select` with hidden targets carrying `weight`, `cost` and the lot
-    /// total of each of its columns that can pass a posting's `position`
-    /// through, for a table that stores its rows (`CREATE TABLE ... AS
-    /// SELECT`, `INSERT ... SELECT`), or `None` when there is none (#2441).
-    ///
-    /// A subquery computes these for the columns its outer query reads
-    /// ([`Self::with_hidden_posting_columns`]). A stored table has no outer
-    /// query yet, so it keeps them for every column that can need them: a
-    /// bare `position`, renamed or not; a column of a stored table that
-    /// keeps them itself; and any bare column of a subquery, which computes
-    /// them only for the columns that pass a posting through. Without them a
-    /// table answered `weight(position)` from the `Position` value, which
-    /// has no price, and `cost` / `sum` from the per-unit cost a `{{T}}` lot
-    /// rounds to: `10 EUR` for `10 EUR @ 1.10 USD`, and
-    /// `500.00000000000000000000000001 USD` for `3 X {{500 USD}}`.
-    ///
-    /// The values are stored in the same NUL-named columns `#postings` and
-    /// subqueries use (see `hidden_weight_column`), which the row evaluator
-    /// reads for any table and `SELECT *` never shows.
-    pub(super) fn with_stored_posting_columns(&self, select: &SelectQuery) -> Option<SelectQuery> {
-        let from = select.from.as_ref();
-        let from_subquery = from.is_some_and(|f| f.subquery.is_some());
-        let from_table = from
-            .and_then(|f| f.table_name.as_ref())
-            .and_then(|name| self.tables.get(name));
-        let mut reads: Vec<Target> = Vec::new();
-        let mut read = |column: String| {
-            for function in ["WEIGHT", "COST", "SUM"] {
-                reads.push(Target {
-                    expr: Expr::Function(FunctionCall {
-                        name: function.to_string(),
-                        args: vec![Expr::Column(column.clone())],
-                    }),
-                    alias: None,
-                });
-            }
-        };
-        for target in &select.targets {
-            match &target.expr {
-                Expr::Wildcard => read("position".to_string()),
-                Expr::Column(source) => {
-                    let carries = source.eq_ignore_ascii_case("position")
-                        || from_subquery
-                        || from_table.is_some_and(|t| {
-                            let hidden = super::hidden_weight_column(source);
-                            t.columns.contains(&hidden)
-                        });
-                    if carries {
-                        read(target.alias.as_ref().map_or_else(
-                            || self.expr_to_name(&target.expr),
-                            |alias| alias.to_lowercase(),
-                        ));
-                    }
-                }
-                _ => {}
-            }
-        }
-        if reads.is_empty() {
-            return None;
-        }
-        self.with_hidden_posting_columns(&SelectQuery::new(reads), select)
+        reads
     }
 
     /// Execute a SELECT query that sources from a subquery.
@@ -548,20 +463,22 @@ impl Executor<'_> {
         &self,
         outer_query: &SelectQuery,
         inner_query: &SelectQuery,
+        keep_origins: bool,
     ) -> Result<QueryResult, QueryError> {
-        // Execute the inner query first, with the posting-derived values the
-        // outer query needs carried beside its posting columns (#2432).
-        let with_hidden = self.with_hidden_posting_columns(outer_query, inner_query);
-        let inner_result = self.execute_select(with_hidden.as_ref().unwrap_or(inner_query))?;
+        // Execute the inner query first, keeping each row's posting when the
+        // outer query can read `weight`, `cost` or `sum` of a column passing
+        // it through, or must keep it itself (#2442).
+        let inner_keeps = keep_origins || Self::reads_posting_functions(outer_query);
+        let inner_result = self.execute_select_with_origins(inner_query, inner_keeps)?;
 
         // A double-quoted string naming one of the subquery's columns is that
         // column, as in bean-query (#2596). Known only now that the inner
-        // query has run; the rewritten query starts over, since the
-        // posting-derived values it needs carried may differ.
+        // query has run; the rewritten query starts over, since whether the
+        // inner rows need their postings may differ.
         if let Some(resolved) = self.resolve_double_quoted_columns(outer_query, |name| {
-            !name.starts_with('\u{0}') && inner_result.columns.iter().any(|c| c == name)
+            inner_result.columns.iter().any(|c| c == name)
         }) {
-            return self.execute_select_from_subquery(&resolved, inner_query);
+            return self.execute_select_from_subquery(&resolved, inner_query, keep_origins);
         }
 
         // Build a column name -> index mapping for the inner result
@@ -583,6 +500,7 @@ impl Executor<'_> {
                 rows: inner_result.rows,
                 // An inner result's columns are already wildcard-expanded.
                 hidden: Vec::new(),
+                origins: inner_result.row_origins,
             };
             return self.execute_aggregate_from_table(outer_query, &table, &inner_column_map);
         }
@@ -609,8 +527,19 @@ impl Executor<'_> {
             FxHashSet::default()
         };
 
+        // The postings this query's own rows keep, for a query over it.
+        let mut carrier = (keep_origins && !outer_query.distinct).then(|| {
+            OriginCarrier::new(
+                &outer_query.targets,
+                &inner_column_map,
+                &inner_result.columns,
+                &[],
+            )
+        });
+
         // Process each row from the inner result
-        for inner_row in &inner_result.rows {
+        for i in 0..inner_result.rows.len() {
+            let inner_row = TableRow::at(&inner_result.rows, &inner_result.row_origins, i);
             // Apply outer WHERE clause if present
             if let Some(where_expr) = &outer_query.where_clause
                 && !self.evaluate_subquery_filter(where_expr, inner_row, &inner_column_map)?
@@ -635,7 +564,10 @@ impl Executor<'_> {
                     result.add_row(outer_row);
                 }
             } else {
-                result.add_row(outer_row);
+                let origin = carrier
+                    .as_mut()
+                    .and_then(|carrier| carrier.carry(inner_row.origin));
+                result.add_row_with_origin(outer_row, origin);
             }
         }
 
@@ -684,6 +616,7 @@ impl Executor<'_> {
         &self,
         query: &SelectQuery,
         table_name: &str,
+        keep_origins: bool,
     ) -> Result<QueryResult, QueryError> {
         // Check for user-created tables first (exact match takes precedence),
         // then fall back to built-in system tables (which support aliases like
@@ -723,7 +656,7 @@ impl Executor<'_> {
                     }),
                     ..query.clone()
                 };
-                return self.execute_select(&as_filter);
+                return self.execute_select_with_origins(&as_filter, keep_origins);
             }
             return Err(missing());
         };
@@ -731,10 +664,10 @@ impl Executor<'_> {
         // A double-quoted string naming one of the table's columns is that
         // column, as in bean-query (#2596). The rewritten query starts over:
         // a built-in table is built for the columns the query reads.
-        if let Some(resolved) = self.resolve_double_quoted_columns(query, |name| {
-            !name.starts_with('\u{0}') && table.columns.iter().any(|c| c == name)
-        }) {
-            return self.execute_select_from_table(&resolved, table_name);
+        if let Some(resolved) = self
+            .resolve_double_quoted_columns(query, |name| table.columns.iter().any(|c| c == name))
+        {
+            return self.execute_select_from_table(&resolved, table_name, keep_origins);
         }
 
         // Build a column name -> index mapping for the table
@@ -801,8 +734,14 @@ impl Executor<'_> {
         // snapshot O(1) and the chain O(base + deltas).
         let mut running_balance = Inventory::new_shared();
 
+        // The postings this query's own rows keep, for a query over it.
+        let mut carrier = (keep_origins && !query.distinct).then(|| {
+            OriginCarrier::new(&query.targets, &column_map, &table.columns, &table.hidden)
+        });
+
         // Process each row from the table
-        for row in &table.rows {
+        for i in 0..table.rows.len() {
+            let row = table.row(i);
             // Apply WHERE clause if present
             if let Some(where_expr) = &query.where_clause
                 && !self.evaluate_subquery_filter(where_expr, row, &column_map)?
@@ -818,12 +757,15 @@ impl Executor<'_> {
                         .add((**pos).clone())
                         .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                 }
-                let mut r = row.clone();
+                let mut r = row.to_vec();
                 if let Some(i) = balance_idx {
                     r[i] = Value::Inventory(std::sync::Arc::new(running_balance.clone()));
                 }
                 overridden_row = r;
-                &overridden_row
+                TableRow {
+                    values: &overridden_row,
+                    origin: row.origin,
+                }
             } else {
                 row
             };
@@ -851,7 +793,10 @@ impl Executor<'_> {
                     result.add_row(result_row);
                 }
             } else {
-                result.add_row(result_row);
+                let origin = carrier
+                    .as_mut()
+                    .and_then(|carrier| carrier.carry(row.origin));
+                result.add_row_with_origin(result_row, origin);
             }
         }
 
@@ -939,10 +884,11 @@ impl Executor<'_> {
 
         // Group table rows by GROUP BY key.
         // Maintain a Vec of keys in insertion order for deterministic results.
-        let mut group_map: HashMap<String, (Vec<Value>, Vec<&Row>)> = HashMap::default();
+        let mut group_map: HashMap<String, (Vec<Value>, Vec<TableRow<'_>>)> = HashMap::default();
         let mut key_order: Vec<String> = Vec::new();
 
-        for row in &table.rows {
+        for i in 0..table.rows.len() {
+            let row = table.row(i);
             // Apply WHERE clause if present
             if let Some(where_expr) = &query.where_clause
                 && !self.evaluate_subquery_filter(where_expr, row, column_map)?
@@ -1115,24 +1061,19 @@ impl Executor<'_> {
     /// [`Table::hidden`]. Every hidden column stays addressable by explicit
     /// name. Pinned by `select_star_hides_structured_and_helper_columns`
     /// and `select_star_matches_bean_query_per_table`.
-    ///
-    /// A NUL-prefixed column holds a posting-derived value beside a posting
-    /// column (see `hidden_weight_column`) and is never shown.
     fn wildcard_hidden(name: &str, table_hidden: &[String]) -> bool {
         name.starts_with('_')
-            || name.starts_with('\u{0}')
             || name == "entry"
             || table_hidden.iter().any(|h| h.eq_ignore_ascii_case(name))
     }
 
-    /// [`Self::evaluate_subquery_expr`] of a call to `func`'s arguments under
-    /// the upper-case `name_upper`, which an attempt (#2432) sets to the
-    /// function it attempts.
+    /// [`Self::evaluate_subquery_expr`] of a call to `func`, whose name is
+    /// `name_upper` in upper case.
     fn evaluate_subquery_function(
         &self,
         name_upper: &str,
         func: &FunctionCall,
-        row: &[Value],
+        row: TableRow<'_>,
         column_map: &FxHashMap<String, usize>,
     ) -> Result<Value, QueryError> {
         // Metadata functions need row context — intercept before
@@ -1182,52 +1123,18 @@ impl Executor<'_> {
             }));
         }
 
-        // `weight`, `cost` and `sum` of a posting column need the
-        // POSTING, as on the default FROM (#1966, #2428, #2430), and a
-        // table row has only values. A table built from postings
-        // carries them in hidden columns beside that column: read them
-        // there (see `hidden_weight_column`). A column with none, an
-        // alias of some other value included, keeps the value path.
-        if let [Expr::Column(column)] = func.args.as_slice() {
-            let cell = |kind: &str, suffix: &str| {
-                super::hidden_index(column_map, kind, column, suffix).and_then(|i| row.get(i))
-            };
-            // The hidden value, unless computing it failed: an error
-            // message is raised (`#postings`), and TRUE takes the
-            // value path, which raises the error itself.
-            let hidden = |kind: &str| {
-                let value = cell(kind, "")?;
-                match cell(kind, " error") {
-                    Some(Value::Boolean(true)) => None,
-                    Some(Value::String(message)) => {
-                        Some(Err(QueryError::Evaluation(message.clone())))
-                    }
-                    _ => Some(Ok(value.clone())),
-                }
-            };
-            match name_upper {
-                "WEIGHT" => {
-                    if let Some(weight) = hidden("weight") {
-                        return weight;
-                    }
-                }
-                "COST" => {
-                    if let Some(cost) = hidden("cost") {
-                        return cost;
-                    }
-                }
-                super::LOT_TOTAL => {
-                    return Ok(cell("lot total", "").cloned().unwrap_or(Value::Null));
-                }
-                _ => {}
-            }
-        }
-        if name_upper == super::LOT_TOTAL {
-            return Ok(Value::Null);
-        }
-        if let Some((function, failed_half)) = Self::attempt_of(name_upper) {
-            let result = self.evaluate_subquery_function(function, func, row, column_map);
-            return Ok(Self::attempt_value(failed_half, result));
+        // `weight` and `cost` of a posting column need the POSTING, as on
+        // the default FROM (#1966, #2428), and a table row has only values.
+        // A row read from a posting keeps it (`RowOrigin`, #2442): when the
+        // column holds that posting's `position`, answer from the posting
+        // through the default FROM's own route, computed here, once, for a
+        // row a query reads. Any other column, an alias of some other value
+        // included, keeps the value path.
+        if let [Expr::Column(column)] = func.args.as_slice()
+            && let Some(posting) = self.row_posting(row, column_map, column)
+            && let Some(value) = super::posting_function(name_upper, posting)
+        {
+            return value;
         }
 
         // Evaluate function arguments.
@@ -1249,7 +1156,7 @@ impl Executor<'_> {
     pub(super) fn evaluate_subquery_filter(
         &self,
         expr: &Expr,
-        row: &[Value],
+        row: TableRow<'_>,
         column_map: &FxHashMap<String, usize>,
     ) -> Result<bool, QueryError> {
         let val = self.evaluate_subquery_expr(expr, row, column_map)?;
@@ -1260,7 +1167,7 @@ impl Executor<'_> {
     pub(super) fn evaluate_subquery_expr(
         &self,
         expr: &Expr,
-        row: &[Value],
+        row: TableRow<'_>,
         column_map: &FxHashMap<String, usize>,
     ) -> Result<Value, QueryError> {
         match expr {
@@ -1345,7 +1252,7 @@ impl Executor<'_> {
     pub(super) fn evaluate_subquery_row(
         &self,
         targets: &[Target],
-        inner_row: &[Value],
+        inner_row: TableRow<'_>,
         column_map: &FxHashMap<String, usize>,
         inner_columns: &[String],
         hidden: &[String],
@@ -1790,10 +1697,10 @@ impl Executor<'_> {
         // The filter reads an entry as a row of `#entries`, whatever its
         // type: `narration` is NULL on an `open`, and `has_account()` asks
         // about the entry's `accounts`, as beanquery's `entries` table does.
-        let entry_columns: FxHashMap<String, usize> = super::system_tables::ENTRY_TABLE_COLUMNS
+        let entry_columns: FxHashMap<String, usize> = super::system_tables::ENTRIES_COLUMNS
             .iter()
             .enumerate()
-            .map(|(i, name)| ((*name).to_string(), i))
+            .map(|(i, column)| (column.name.to_string(), i))
             .collect();
 
         let config = rustledger_core::format::FormatConfig::default();
@@ -1813,7 +1720,7 @@ impl Executor<'_> {
                     directive,
                     index.and_then(|i| self.get_source_location(i)),
                 );
-                if !self.evaluate_subquery_filter(filter, &row, &entry_columns)? {
+                if !self.evaluate_subquery_filter(filter, TableRow::plain(&row), &entry_columns)? {
                     continue;
                 }
             }
@@ -1871,16 +1778,16 @@ impl Executor<'_> {
         }
 
         let table = if let Some(select) = &create.as_select {
-            // CREATE TABLE ... AS SELECT ..., keeping the posting-derived
-            // values of its posting columns beside them (#2441).
-            let stored = self.with_stored_posting_columns(select);
-            let result = self.execute_select(stored.as_ref().unwrap_or(select))?;
+            // CREATE TABLE ... AS SELECT ..., keeping the posting each row was
+            // read from, so `weight`, `cost` and `sum` of a column passing its
+            // `position` through answer from the posting (#2441, #2442).
+            let result = self.execute_select_with_origins(select, true)?;
+            let origins = self.detach_origins(result.row_origins);
             Table {
                 columns: result.columns,
                 rows: result.rows,
-                // Nothing beyond the NUL-named columns, which every table
-                // hides (`wildcard_hidden`).
                 hidden: Vec::new(),
+                origins,
             }
         } else {
             // CREATE TABLE ... (col1, col2, ...)
@@ -1905,6 +1812,25 @@ impl Executor<'_> {
         Ok(result)
     }
 
+    /// `origins` as a table that outlives this executor keeps them, each
+    /// posting a copy rather than an index into this executor's ledger (see
+    /// [`Self::detach_source`] and `CreatedTables`).
+    fn detach_origins(&self, origins: Vec<Option<RowOrigin>>) -> Vec<Option<RowOrigin>> {
+        if origins.iter().all(Option::is_none) {
+            return Vec::new();
+        }
+        origins
+            .into_iter()
+            .map(|origin| {
+                let origin = origin?;
+                Some(RowOrigin {
+                    posting: self.detach_source(origin.posting)?,
+                    columns: origin.columns,
+                })
+            })
+            .collect()
+    }
+
     /// Execute an INSERT statement.
     pub(super) fn execute_insert(
         &mut self,
@@ -1918,20 +1844,15 @@ impl Executor<'_> {
             )));
         };
 
-        // The columns an INSERT writes: all but the NUL-named ones holding
-        // each row's posting-derived values (#2441), which no query names.
-        let visible: Vec<usize> = (0..table.columns.len())
-            .filter(|&i| !table.columns[i].starts_with('\u{0}'))
-            .collect();
         // The table column each inserted value goes to.
         let targets: Vec<usize> = match &insert.columns {
             Some(cols) => cols
                 .iter()
                 .map(|c| {
-                    visible
+                    table
+                        .columns
                         .iter()
-                        .copied()
-                        .find(|&i| table.columns[i].eq_ignore_ascii_case(c))
+                        .position(|column| column.eq_ignore_ascii_case(c))
                         .ok_or_else(|| {
                             QueryError::Evaluation(format!(
                                 "column '{}' does not exist in table '{}'",
@@ -1940,130 +1861,81 @@ impl Executor<'_> {
                         })
                 })
                 .collect::<Result<_, _>>()?,
-            None => visible.clone(),
+            None => (0..table.columns.len()).collect(),
         };
         let width_mismatch = |found: String| {
             QueryError::Evaluation(match &insert.columns {
                 Some(cols) => format!("INSERT has {} columns but {found}", cols.len()),
-                None => format!("table has {} columns but {found}", visible.len()),
+                None => format!("table has {} columns but {found}", table.columns.len()),
             })
         };
-        // Each inserted row's values, and for a SELECT the result's columns,
-        // whose hidden ones carry the posting-derived values of the posting
-        // columns it passes through.
-        let (rows_to_insert, source): (Vec<Vec<Value>>, Option<Vec<String>>) = match &insert.source
-        {
-            InsertSource::Values(value_rows) => {
-                let mut rows = Vec::with_capacity(value_rows.len());
-                for value_row in value_rows {
-                    if value_row.len() != targets.len() {
+        // Each inserted row's values, and for a SELECT the posting each row
+        // was read from.
+        let (rows_to_insert, origins): (Vec<Vec<Value>>, Vec<Option<RowOrigin>>) =
+            match &insert.source {
+                InsertSource::Values(value_rows) => {
+                    let mut rows = Vec::with_capacity(value_rows.len());
+                    for value_row in value_rows {
+                        if value_row.len() != targets.len() {
+                            return Err(width_mismatch(format!(
+                                "VALUES has {} values",
+                                value_row.len()
+                            )));
+                        }
+                        let row = value_row
+                            .iter()
+                            .map(|expr| self.evaluate_literal_expr(expr))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        rows.push(row);
+                    }
+                    (rows, Vec::new())
+                }
+                InsertSource::Select(select) => {
+                    // The rows inserted keep their postings, as a table created
+                    // from the same SELECT would, or they would answer from the
+                    // value (#2441, #2442).
+                    let result = self.execute_select_with_origins(select, true)?;
+                    if result.columns.len() != targets.len() {
                         return Err(width_mismatch(format!(
-                            "VALUES has {} values",
-                            value_row.len()
+                            "SELECT returns {} columns",
+                            result.columns.len()
                         )));
                     }
-                    let row = value_row
+                    // Source column `k` lands in table column `targets[k]`, so
+                    // the table column holds the posting's `position` where
+                    // the source column did. A column named twice keeps the
+                    // last value written to it, so only that source counts.
+                    let mut carrier = OriginCarrier::from_pass_through(
+                        targets
+                            .iter()
+                            .copied()
+                            .enumerate()
+                            .filter(|&(k, t)| !targets[k + 1..].contains(&t))
+                            .map(|(k, t)| (t, k))
+                            .collect(),
+                    );
+                    let origins = result
+                        .row_origins
                         .iter()
-                        .map(|expr| self.evaluate_literal_expr(expr))
-                        .collect::<Result<Vec<_>, _>>()?;
-                    rows.push(row);
+                        .map(|origin| carrier.carry(origin.as_ref()))
+                        .collect();
+                    (result.rows, self.detach_origins(origins))
                 }
-                (rows, None)
-            }
-            InsertSource::Select(select) => {
-                // The rows inserted keep their posting-derived values, as a
-                // table created from the same SELECT would, or they would
-                // answer from the value (#2441).
-                let stored = self.with_stored_posting_columns(select);
-                let result = self.execute_select(stored.as_ref().unwrap_or(select))?;
-                let shown = result
-                    .columns
-                    .iter()
-                    .filter(|c| !c.starts_with('\u{0}'))
-                    .count();
-                if shown != targets.len() {
-                    return Err(width_mismatch(format!("SELECT returns {shown} columns")));
-                }
-                (result.rows, Some(result.columns))
-            }
-        };
-
-        // A hidden cell with no posting behind it: NULL, with each failure
-        // flag TRUE, so `weight`, `cost` and `sum` take the value path, which
-        // is all a row without a posting has.
-        let no_posting = |column: &str| {
-            if column.starts_with('\u{0}') && column.ends_with(") error") {
-                Value::Boolean(true)
-            } else {
-                Value::Null
-            }
-        };
-        // The table's columns after this insert: a hidden value the source
-        // carries for a column the table keeps none for adds that hidden
-        // column (a table made by `CREATE TABLE t (account, position)` has
-        // none until a posting arrives), with the rows already there marked
-        // as having no posting.
-        let mut columns_after = table.columns.clone();
-        // For each inserted value, the (table, source) cells of its hidden
-        // values.
-        let index = |columns: &[String], name: &str| columns.iter().position(|c| c == name);
-        let mut copies: Vec<(usize, usize)> = Vec::new();
-        let mut value_at: Vec<usize> = Vec::with_capacity(targets.len());
-        match &source {
-            Some(columns) => {
-                for (k, (i, name)) in columns
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, c)| !c.starts_with('\u{0}'))
-                    .enumerate()
-                {
-                    value_at.push(i);
-                    let table_column = table.columns[targets[k]].clone();
-                    for (kind, suffix) in [
-                        ("weight", ""),
-                        ("weight", " error"),
-                        ("cost", ""),
-                        ("cost", " error"),
-                        ("lot total", ""),
-                    ] {
-                        let Some(from) = index(columns, &super::hidden_name(kind, name, suffix))
-                        else {
-                            continue;
-                        };
-                        let hidden = super::hidden_name(kind, &table_column, suffix);
-                        let to = index(&columns_after, &hidden).unwrap_or_else(|| {
-                            columns_after.push(hidden);
-                            columns_after.len() - 1
-                        });
-                        copies.push((to, from));
-                    }
-                }
-            }
-            None => value_at.extend(0..targets.len()),
-        }
+            };
 
         let rows_inserted = rows_to_insert.len();
         let table = self
             .tables
             .get_mut(&table_name)
             .expect("table existence verified above");
-        let added = table.columns.len()..columns_after.len();
-        if !added.is_empty() {
-            for row in &mut table.rows {
-                row.extend(columns_after[added.clone()].iter().map(|c| no_posting(c)));
-            }
-            table.columns = columns_after;
-        }
-        let template: Vec<Value> = table.columns.iter().map(|c| no_posting(c)).collect();
+        let width = table.columns.len();
+        let mut origins = origins.into_iter();
         for mut source_row in rows_to_insert {
-            let mut row = template.clone();
-            for (&to, &from) in targets.iter().zip(&value_at) {
-                row[to] = std::mem::replace(&mut source_row[from], Value::Null);
+            let mut row = vec![Value::Null; width];
+            for (k, &to) in targets.iter().enumerate() {
+                row[to] = std::mem::replace(&mut source_row[k], Value::Null);
             }
-            for &(to, from) in &copies {
-                row[to] = std::mem::replace(&mut source_row[from], Value::Null);
-            }
-            table.add_row(row);
+            table.add_row_with_origin(row, origins.next().flatten());
         }
 
         // Return result with row count
@@ -2160,7 +2032,7 @@ impl Executor<'_> {
         &self,
         name: &str,
         func: &crate::ast::FunctionCall,
-        row: &[Value],
+        row: TableRow<'_>,
         column_map: &FxHashMap<String, usize>,
     ) -> Result<Value, QueryError> {
         if func.args.len() != 1 {
@@ -2287,5 +2159,90 @@ fn bare_has_account_as_string(filter: Expr) -> Expr {
             Expr::Function(func)
         }
         other => other,
+    }
+}
+
+/// Carries each source row's [`RowOrigin`] to the row a query computes from
+/// it (#2442): an output column that passes a source column through unchanged
+/// holds the posting's `position` when that source column does. So a
+/// posting's origin survives a subquery over a subquery, a table built from a
+/// table, and any renaming on the way.
+pub(super) struct OriginCarrier {
+    /// (output column, source column) for each output column that is a bare
+    /// source column, in output order.
+    pass_through: Vec<(usize, usize)>,
+    /// The last source layout seen and the output layout it gives, so the
+    /// rows sharing a layout share one.
+    last: Option<(std::sync::Arc<[usize]>, Option<std::sync::Arc<[usize]>>)>,
+}
+
+impl OriginCarrier {
+    /// For a query whose output columns are `targets`, over source rows
+    /// named by `column_map` and `source_columns` (`hidden` being the
+    /// source's columns `SELECT *` leaves out).
+    pub(super) fn new(
+        targets: &[Target],
+        column_map: &FxHashMap<String, usize>,
+        source_columns: &[String],
+        hidden: &[String],
+    ) -> Self {
+        let mut pass_through = Vec::new();
+        let mut index = 0;
+        for target in targets {
+            match &target.expr {
+                Expr::Wildcard => {
+                    for (source, name) in source_columns.iter().enumerate() {
+                        if !Executor::wildcard_hidden(name, hidden) {
+                            pass_through.push((index, source));
+                            index += 1;
+                        }
+                    }
+                }
+                Expr::Column(name) => {
+                    if let Some(&source) = column_map.get(&name.to_lowercase()) {
+                        pass_through.push((index, source));
+                    }
+                    index += 1;
+                }
+                _ => index += 1,
+            }
+        }
+        Self::from_pass_through(pass_through)
+    }
+
+    /// For output columns that are the source columns `pass_through` pairs
+    /// them with.
+    pub(super) const fn from_pass_through(pass_through: Vec<(usize, usize)>) -> Self {
+        Self {
+            pass_through,
+            last: None,
+        }
+    }
+
+    /// The origin of a row computed from a source row with `origin`: the
+    /// same posting, held by the output columns passing one of its position
+    /// columns through, or `None` when no output column does.
+    pub(super) fn carry(&mut self, origin: Option<&RowOrigin>) -> Option<RowOrigin> {
+        let origin = origin?;
+        let columns = match &self.last {
+            Some((source, carried)) if std::sync::Arc::ptr_eq(source, &origin.columns) => {
+                carried.clone()
+            }
+            _ => {
+                let carried: Vec<usize> = self
+                    .pass_through
+                    .iter()
+                    .filter(|(_, source)| origin.holds_position(*source))
+                    .map(|(output, _)| *output)
+                    .collect();
+                let carried = (!carried.is_empty()).then(|| std::sync::Arc::from(carried));
+                self.last = Some((std::sync::Arc::clone(&origin.columns), carried.clone()));
+                carried
+            }
+        }?;
+        Some(RowOrigin {
+            posting: origin.posting.clone(),
+            columns,
+        })
     }
 }

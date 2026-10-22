@@ -60,9 +60,12 @@ pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<u8
                 writeln!(out, "{}", code.explanation())?;
                 Ok(0)
             } else {
+                // The argument is echoed on a terminal: escaped, so one
+                // carrying an escape sequence cannot act on it (#2714).
                 writeln!(
                     out,
-                    "unknown error code `{raw}` — run `rledger explain` to list all codes"
+                    "unknown error code `{}` — run `rledger explain` to list all codes",
+                    rustledger_plugin::escape_untrusted_line(raw)
                 )?;
                 Ok(1)
             }

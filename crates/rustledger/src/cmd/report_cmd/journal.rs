@@ -121,6 +121,8 @@ pub(super) fn report_journal<W: Write>(
                 } else {
                     format!("{payee} | {narration}")
                 };
+                // The ledger's text, shown on a terminal (#2538).
+                let desc = super::sanitize_display(&desc);
                 writeln!(writer, "{} {} {}", txn.date, txn.flag, desc)?;
 
                 for posting in &txn.postings {

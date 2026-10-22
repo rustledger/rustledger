@@ -1608,6 +1608,7 @@ fn convert_posting(
         meta,
         comments: Vec::new(),
         trailing_comments,
+        booking: Default::default(),
     };
     let span = posting_span(node.syntax(), bom_offset);
     Some(Spanned::new(posting, span))

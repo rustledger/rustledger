@@ -7,6 +7,7 @@ mod summarize;
 mod types;
 
 pub use summarize::SummaryAccounts;
+pub use system_tables::system_table_columns;
 use types::AccountInfo;
 use types::EntryRef;
 pub use types::{
@@ -99,133 +100,24 @@ fn position_cost_total(units: &Amount, cost: &rustledger_core::Cost) -> Result<A
     Ok(Amount::new(total, cost.currency.clone()))
 }
 
-/// The hidden column holding `weight(<column>)` for each row of a table: the
-/// posting's canonical weight, as the default FROM computes it (#1966).
+/// `weight(position)` or `cost(position)` of `posting`, as the default FROM
+/// computes it, or `None` to take the value path, as it does then: for a cost
+/// not booked to a number and a currency, and for every other function.
 ///
-/// `weight`, `cost` and `sum` of the posting column need the POSTING, and a
-/// table row has only values: a `Position` has no price, which `weight` ranks
-/// second, and not the total a `{{T}}` cost carries. So a table whose rows
-/// come from postings carries these values beside the column: `#postings`
-/// computes them for `position` (#2429, #2430), and a subquery computes them
-/// for whichever of its columns the outer query asks about (#2432). The row
-/// evaluator reads them in place of the value path.
-///
-/// Every such name starts with NUL, which no query can type and no header
-/// can contain (a column is named by its alias or its rendered expression),
-/// so a table has one only when it was built to have it, and an alias of some
-/// other value never reaches it. `SELECT *` omits them (`wildcard_hidden`).
-pub(super) fn hidden_weight_column(column: &str) -> String {
-    hidden_name("weight", column, "")
-}
-
-/// `\0<kind>(<column>)<suffix>`, the one spelling of every hidden column name.
-fn hidden_name(kind: &str, column: &str, suffix: &str) -> String {
-    format!("\u{0}{kind}({}){suffix}", column.to_lowercase())
-}
-
-std::thread_local! {
-    static HIDDEN_KEY: std::cell::RefCell<String> = const { std::cell::RefCell::new(String::new()) };
-}
-
-/// The index of the hidden column [`hidden_name`] names in `column_map`,
-/// without allocating: the row evaluator looks one up for every `weight`,
-/// `cost` and `sum` call on every row, and a `format!` there cost `#postings`
-/// a quarter of its instructions. `position`, the column `#postings` and most
-/// subqueries carry them for, reads a static key; any other ASCII name is
-/// lowercased into a reused buffer; and a non-ASCII one goes through
-/// [`hidden_name`], so no two paths can spell a name differently.
-pub(super) fn hidden_index(
-    column_map: &rustc_hash::FxHashMap<String, usize>,
-    kind: &str,
-    column: &str,
-    suffix: &str,
-) -> Option<usize> {
-    if column.eq_ignore_ascii_case("position")
-        && let Some(key) = position_hidden_key(kind, suffix)
-    {
-        return column_map.get(key).copied();
+/// ONE route for every row source (#2442). The default FROM calls it with the
+/// row's posting, and a table row (`#postings`, a subquery, a created table)
+/// with the posting it was read from (see `RowOrigin`), so no source keeps a
+/// parallel computation that has to keep agreeing with it.
+pub(super) fn posting_function(
+    name_upper: &str,
+    posting: &rustledger_core::Posting,
+) -> Option<Result<Value, QueryError>> {
+    match name_upper {
+        "WEIGHT" => Some(Ok(compute_posting_weight(posting))),
+        "COST" => compute_posting_cost(posting),
+        _ => None,
     }
-    if !column.is_ascii() {
-        return column_map.get(&hidden_name(kind, column, suffix)).copied();
-    }
-    HIDDEN_KEY.with(|key| {
-        // Nothing below re-enters: the borrow covers one map lookup.
-        let mut key = key.borrow_mut();
-        key.clear();
-        key.push('\u{0}');
-        key.push_str(kind);
-        key.push('(');
-        let start = key.len();
-        key.push_str(column);
-        key[start..].make_ascii_lowercase();
-        key.push(')');
-        key.push_str(suffix);
-        column_map.get(key.as_str()).copied()
-    })
 }
-
-/// [`hidden_name`] of `position`, spelled out; pinned to it by
-/// `position_hidden_keys_are_hidden_names`.
-fn position_hidden_key(kind: &str, suffix: &str) -> Option<&'static str> {
-    Some(match (kind, suffix) {
-        ("weight", "") => "\u{0}weight(position)",
-        ("weight", " error") => "\u{0}weight(position) error",
-        ("cost", "") => "\u{0}cost(position)",
-        ("cost", " error") => "\u{0}cost(position) error",
-        ("lot total", "") => "\u{0}lot total(position)",
-        _ => return None,
-    })
-}
-
-/// The hidden column holding `cost(<column>)`, from the posting's booked cost
-/// (#2428), or NULL where computing it failed; see [`hidden_weight_column`]
-/// and [`hidden_cost_error_column`].
-pub(super) fn hidden_cost_column(column: &str) -> String {
-    hidden_name("cost", column, "")
-}
-
-/// The hidden column saying whether computing the row's `cost(<column>)`
-/// failed, else NULL. A table computes every row's value whether or not a
-/// query reads it, so a failure must fail only a query that does, as on the
-/// default FROM, which computes it only when asked. It holds either:
-///
-/// - the message of the overflow `#postings` hit, raised when a query reads
-///   the row's `cost(<column>)`; or
-/// - TRUE, from a subquery: the row evaluator takes the value path instead,
-///   which raises the same error, of the same kind, for a row a query reads.
-///   For an overflow it is the same error: the posting's cost overflows only
-///   when it is `units × per-unit`, which is what the value path computes.
-pub(super) fn hidden_cost_error_column(column: &str) -> String {
-    hidden_name("cost", column, " error")
-}
-
-/// [`hidden_cost_error_column`] for [`hidden_weight_column`].
-pub(super) fn hidden_weight_error_column(column: &str) -> String {
-    hidden_name("weight", column, " error")
-}
-
-/// The hidden column holding the exact total each row's lot cost
-/// (`rustledger_booking::posting_lot_total`), else NULL, so a table's
-/// `sum(<column>)` records it as the default FROM does (#2430).
-pub(super) fn hidden_lot_total_column(column: &str) -> String {
-    hidden_name("lot total", column, "")
-}
-
-/// Internal functions a subquery evaluates to fill the hidden columns the
-/// outer query needs (#2432). NUL-prefixed like the columns, so no query can
-/// call them. [`WEIGHT_OR_NULL`] is `weight()`, NULL if it fails, and
-/// [`WEIGHT_FAILED`] is TRUE if it fails, the pair [`hidden_weight_column`]
-/// and [`hidden_weight_error_column`] hold; the `COST` pair likewise.
-/// [`LOT_TOTAL`] is the posting's lot total, which cannot fail.
-pub(super) const WEIGHT_OR_NULL: &str = "\u{0}WEIGHT";
-/// See [`WEIGHT_OR_NULL`].
-pub(super) const WEIGHT_FAILED: &str = "\u{0}WEIGHT FAILED";
-/// See [`WEIGHT_OR_NULL`].
-pub(super) const COST_OR_NULL: &str = "\u{0}COST";
-/// See [`WEIGHT_OR_NULL`].
-pub(super) const COST_FAILED: &str = "\u{0}COST FAILED";
-/// See [`WEIGHT_OR_NULL`].
-pub(super) const LOT_TOTAL: &str = "\u{0}LOT TOTAL";
 
 pub(super) fn compute_posting_weight(posting: &rustledger_core::Posting) -> Value {
     rustledger_booking::posting_weight(posting).map_or(Value::Null, Value::Amount)
@@ -362,16 +254,18 @@ const DETACH_ACCOUNT_BALANCE_AT: usize = 4;
 pub const WILDCARD_COLUMNS: &[&str] =
     &["date", "flag", "payee", "narration", "account", "position"];
 
-/// One column of the default posting row source (a `SELECT` with no `FROM`
-/// table): its name, its value type, and a one-line description.
+/// One column of a table: its name, its value type, and a one-line description.
+///
+/// The table is the default posting row source (a `SELECT` with no `FROM`
+/// table, [`POSTING_COLUMNS`]) or a system table ([`system_table_columns`]).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct ColumnInfo {
     /// The column's name, as a query writes it.
     pub name: &'static str,
-    /// The column's value type, as bean-query's `.describe postings` names
-    /// it (`str`, `set`, `amount`, ...), except `id`, which is an `int` here
-    /// where bean-query's is a `str` hash. Most columns can be NULL.
+    /// The column's value type, as bean-query's `.describe` names it (`str`,
+    /// `set`, `amount`, ...), except `id`, which is an `int` here where
+    /// bean-query's is a `str` hash. Most columns can be NULL.
     pub type_name: &'static str,
     /// What the column holds.
     pub description: &'static str,
@@ -379,6 +273,11 @@ pub struct ColumnInfo {
 
 /// Every column of the default posting row source, in `.describe postings`
 /// order.
+///
+/// This is not the `FROM postings` / `#postings` table: that one
+/// (`POSTINGS_TABLE_COLUMNS`) has these columns minus `units`, `cost` and
+/// `has_cost`, and orders its tail `accounts, entry` where this list's is
+/// `entry, accounts`. `postings_column_lists_agree` pins the relationship.
 ///
 /// The one list of them: query completion and the REPL's `.describe` read
 /// it, and a test checks it against the row evaluator's arms in both
@@ -918,6 +817,83 @@ impl<'a> Executor<'a> {
             .chain(self.directives.iter())
     }
 
+    /// The directive at `index` of [`Self::resolved_directives`].
+    fn resolved_directive(&self, index: usize) -> Option<&'a Directive> {
+        let spanned = self.spanned_directives.unwrap_or(&[]);
+        match spanned.get(index) {
+            Some(spanned) => Some(&spanned.value),
+            None => self.directives.get(index - spanned.len()),
+        }
+    }
+
+    /// The posting a [`types::PostingSource`] names.
+    pub(super) fn source_posting<'s>(
+        &'s self,
+        source: &'s types::PostingSource,
+    ) -> Option<&'s rustledger_core::Posting> {
+        match source {
+            types::PostingSource::Ledger { directive, posting } => {
+                match self.resolved_directive(*directive)? {
+                    Directive::Transaction(txn) => txn.postings.get(*posting).map(|p| &**p),
+                    _ => None,
+                }
+            }
+            types::PostingSource::Shared {
+                transaction,
+                posting,
+            } => transaction.postings.get(*posting).map(|p| &**p),
+            types::PostingSource::Detached(posting) => Some(posting),
+        }
+    }
+
+    /// The posting `row` was read from, when its column named `column` holds
+    /// that posting's `position` (see `RowOrigin`), else `None`, and the
+    /// value path answers.
+    ///
+    /// The column resolves as the value path resolves it
+    /// (`evaluate_subquery_expr`), so the posting answers only for the cell
+    /// the value path would read. An already lower-case name, which the
+    /// table's keys all are, is looked up without allocating.
+    pub(super) fn row_posting<'s>(
+        &'s self,
+        row: types::TableRow<'s>,
+        column_map: &FxHashMap<String, usize>,
+        column: &str,
+    ) -> Option<&'s rustledger_core::Posting> {
+        let origin = row.origin?;
+        let index = column_map
+            .get(column)
+            .or_else(|| column_map.get(&column.to_lowercase()))?;
+        if !origin.holds_position(*index) {
+            return None;
+        }
+        self.source_posting(&origin.posting)
+    }
+
+    /// `source` as a table that outlives this executor keeps it (see
+    /// `CreatedTables`): a ledger posting becomes a
+    /// [`types::PostingSource::Detached`] copy, not an index into this executor's
+    /// ledger. The copy drops the posting's metadata and comments, which
+    /// [`posting_function`] and `posting_lot_total` never read, so a stored
+    /// table holds about what the values it answers would.
+    pub(super) fn detach_source(
+        &self,
+        source: types::PostingSource,
+    ) -> Option<types::PostingSource> {
+        match source {
+            types::PostingSource::Ledger { .. } => {
+                let mut posting = self.source_posting(&source)?.clone();
+                posting.meta = rustledger_core::Metadata::default();
+                posting.comments = Vec::new();
+                posting.trailing_comments = Vec::new();
+                Some(types::PostingSource::Detached(Arc::new(posting)))
+            }
+            kept @ (types::PostingSource::Shared { .. } | types::PostingSource::Detached(_)) => {
+                Some(kept)
+            }
+        }
+    }
+
     /// `pattern`, a Python regular expression, compiled as bean-query's
     /// `mode` reads it, from the cache (#2656). bean-query matches with
     /// Python's `re`, so the pattern is read with Python's grammar
@@ -1410,6 +1386,18 @@ impl<'a> Executor<'a> {
         // decides per posting (no filter, or an entry-level one outside
         // BALANCES, which keeps or drops the transaction whole).
         let mut passes: Vec<bool> = Vec::new();
+        // Whether this scan replays the booked ledger itself: every
+        // transaction from the first, in booking order. Then each posting's
+        // reduction-or-augmentation is the one booking recorded (#2390),
+        // as `apply` realizes it, rather than asked again of the booked
+        // posting (the disagreement behind #2380). Not under `OPEN ON`,
+        // which starts from summaries booking never saw, nor under a filter
+        // that drops transactions from the replay: that is a different
+        // ledger, and the replay asks it its own question (#1985). `CLOSE`
+        // only cuts the tail, and what `CLOSE`/`CLEAR` append carries no
+        // decision.
+        let replays_as_booked =
+            from.and_then(|f| f.open_on).is_none() && (from_filter.is_none() || balances_selection);
 
         for (txn_number, (directive_index, txn)) in
             self.window_transactions(from, directive_iter)?.enumerate()
@@ -1455,7 +1443,13 @@ impl<'a> Executor<'a> {
             // and `BALANCES` then failed on ledgers `check` accepts
             // (#2380). A posting's `account_balance` is the state the walk
             // reaches over the postings up to and including it.
-            let mut replay = needs_account_balance.then(|| engine.begin_replay(&txn));
+            let mut replay = needs_account_balance.then(|| {
+                if replays_as_booked {
+                    engine.begin_replay_as_booked(&txn)
+                } else {
+                    engine.begin_replay(&txn)
+                }
+            });
             // An AVERAGE account's running balance is presented as its pools,
             // as `BALANCES` presents it (#2543). Anything else shares the
             // engine's copy (#2086).
@@ -1731,65 +1725,14 @@ impl<'a> Executor<'a> {
         )
     }
 
-    /// The function one of the attempt pairs ([`WEIGHT_OR_NULL`] and the
-    /// rest) calls, and whether it is the half reporting failure.
-    pub(super) fn attempt_of(name_upper: &str) -> Option<(&'static str, bool)> {
-        match name_upper {
-            WEIGHT_OR_NULL => Some(("WEIGHT", false)),
-            WEIGHT_FAILED => Some(("WEIGHT", true)),
-            COST_OR_NULL => Some(("COST", false)),
-            COST_FAILED => Some(("COST", true)),
-            _ => None,
-        }
-    }
-
-    /// An attempt's value: the result, or NULL if it failed; or, for the half
-    /// reporting failure, TRUE if it failed, else NULL. Never an error, so the
-    /// subquery computing it does not fail for a row no one reads (#2432).
-    pub(super) fn attempt_value(failed_half: bool, result: Result<Value, QueryError>) -> Value {
-        match (result, failed_half) {
-            (Ok(value), false) => value,
-            (Err(_), true) => Value::Boolean(true),
-            (Ok(_), true) | (Err(_), false) => Value::Null,
-        }
-    }
-
     fn evaluate_function(
         &self,
         func: &FunctionCall,
         ctx: &PostingContext,
     ) -> Result<Value, QueryError> {
-        self.evaluate_function_named(&func.name.to_uppercase(), func, ctx)
-    }
-
-    /// [`Self::evaluate_function`] of `func`'s arguments under the upper-case
-    /// `name`, which an attempt (#2432) sets to the function it attempts.
-    fn evaluate_function_named(
-        &self,
-        name: &str,
-        func: &FunctionCall,
-        ctx: &PostingContext,
-    ) -> Result<Value, QueryError> {
+        let name = func.name.to_uppercase();
+        let name = name.as_str();
         match name {
-            // The values a subquery carries in hidden columns for its outer
-            // query (#2432; see `hidden_weight_column`).
-            WEIGHT_OR_NULL | WEIGHT_FAILED | COST_OR_NULL | COST_FAILED => {
-                let (function, failed_half) =
-                    Self::attempt_of(name).expect("the arm matches only attempt names");
-                Ok(Self::attempt_value(
-                    failed_half,
-                    self.evaluate_function_named(function, func, ctx),
-                ))
-            }
-            LOT_TOTAL => Ok(if Self::is_position_column(func) {
-                let posting = &ctx.transaction.postings[ctx.posting_index];
-                posting
-                    .amount()
-                    .and_then(|units| rustledger_booking::posting_lot_total(posting, units))
-                    .map_or(Value::Null, Value::Number)
-            } else {
-                Value::Null
-            }),
             // Metadata functions read the row's `PostingContext`, so they stay
             // on the lazy path rather than routing through the value registry.
             "META" | "ENTRY_META" | "ANY_META" | "POSTING_META" => {
@@ -1815,16 +1758,17 @@ impl<'a> Executor<'a> {
             // spellings one computation rather than two implementations that
             // agree by inspection. It also closes the residual scale gap from
             // #1963 — the column's exact `100.00` instead of a re-derived `100`.
-            "WEIGHT" if Self::is_position_column(func) => Ok(compute_posting_weight(
-                &ctx.transaction.postings[ctx.posting_index],
-            )),
+            //
             // `COST(position)` for the same reason (#2425): the posting still
             // carries a `{{T}}` lot's exact total, which the `Position` value
             // has already resolved away. Any other argument, or a posting
             // whose cost is not booked, falls to the value path below.
-            "COST" if Self::is_position_column(func) => {
-                match compute_posting_cost(&ctx.transaction.postings[ctx.posting_index]) {
-                    Some(cost) => cost,
+            //
+            // A table row read from a posting answers through the same
+            // `posting_function` (#2442, `RowOrigin`).
+            "WEIGHT" | "COST" if Self::is_position_column(func) => {
+                match posting_function(name, &ctx.transaction.postings[ctx.posting_index]) {
+                    Some(value) => value,
                     None => self.evaluate_on_argument_values(name, func, ctx),
                 }
             }

@@ -54,6 +54,7 @@ pub use commodity_attr::CommodityAttrPlugin;
 pub use currency_accounts::CurrencyAccountsPlugin;
 pub use document_discovery::{
     DOCUMENT_DISCOVERY_NAME, DocumentDiscoveryPlugin, document_discovery_config,
+    document_discovery_config_with_main_file,
 };
 pub use effective_date::EffectiveDatePlugin;
 pub use forecast::ForecastPlugin;

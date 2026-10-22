@@ -445,3 +445,41 @@ fn ag_rledger_carries_the_runtime_download_and_compile_notices() {
     // other test, so this is the run's one download.
     eprintln!("fresh XDG_CACHE_HOME: downloaded and compiled the CPython runtime ({codes:?})");
 }
+
+/// #2713: a plugin sees the placeholder location an earlier plugin gave a
+/// directive, as beancount's next plugin sees its meta: `check_closing`'s
+/// balance check is at `<check_closing>`, line 0.
+#[test]
+fn a_later_plugin_sees_a_placeholder_location() {
+    let Some(bin) = rledger_with_python() else {
+        return;
+    };
+    let plugin = "\
+__plugins__ = ['where']
+
+def where(entries, options_map):
+    errors = [
+        ValidationError(None, 'balance at %s:%s' % (e.meta.get('filename'), e.meta.get('lineno')), None)
+        for e in entries
+        if isinstance(e, Balance)
+    ]
+    return entries, errors
+";
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("plugin.py"), plugin).unwrap();
+    let ledger = dir.path().join("ledger.beancount");
+    std::fs::write(
+        &ledger,
+        "plugin \"beancount.plugins.check_closing\"\n\
+         plugin \"plugin.py\"\n\n\
+         2024-01-01 open Assets:Bank\n\
+         2024-01-01 open Assets:Brokerage\n\n\
+         2024-01-15 * \"close out\"\n  \
+           Assets:Brokerage  -5 USD\n    \
+             closing: TRUE\n  \
+           Assets:Bank  5 USD\n",
+    )
+    .unwrap();
+    let r = run(&bin, dir.path(), &["check", ledger.to_str().unwrap()]);
+    assert!(r.out.contains("balance at <check_closing>:0"), "{}", r.out);
+}

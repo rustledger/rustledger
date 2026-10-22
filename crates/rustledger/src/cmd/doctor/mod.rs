@@ -197,8 +197,10 @@ pub fn run_with_writer<W: io::Write>(command: Command, stdout: &mut W) -> Result
     // text (#2538).
     let mut escaped = EscapingWriter::new(stdout);
     let result = dispatch(command, &mut escaped);
-    escaped.finish()?;
-    result
+    // A finish error must not mask what the subcommand itself failed to
+    // do: run finish either way, but report its error only when dispatch
+    // succeeded.
+    result.and(escaped.finish().map_err(anyhow::Error::from))
 }
 
 fn dispatch<W: io::Write>(command: Command, stdout: &mut W) -> Result<()> {

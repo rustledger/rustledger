@@ -85,7 +85,8 @@ impl Segmented {
 pub(super) fn segment(source: &str, path: &std::path::Path) -> Result<Segmented> {
     let parsed = rustledger_parser::parse(source);
     if let Some(e) = parsed.errors.first() {
-        bail!(
+        refuse!(
+            super::code::PARSE_ERRORS,
             "{} has {} parse error(s) (first: {e}); fix them before restructuring",
             path.display(),
             parsed.errors.len()
@@ -204,14 +205,14 @@ pub(super) fn segment(source: &str, path: &std::path::Path) -> Result<Segmented>
 fn tag_name(tag: Option<rustledger_parser::cst::ast::Tag>) -> Result<String> {
     match tag {
         Some(t) => Ok(t.text().trim_start_matches('#').to_string()),
-        None => bail!("pushtag/poptag without a tag"),
+        None => refuse!(super::code::PARSE_ERRORS, "pushtag/poptag without a tag"),
     }
 }
 
 fn meta_key(key: Option<rustledger_parser::cst::ast::MetaKey>) -> Result<String> {
     match key {
         Some(k) => Ok(k.text_without_colon().to_string()),
-        None => bail!("pushmeta/popmeta without a key"),
+        None => refuse!(super::code::PARSE_ERRORS, "pushmeta/popmeta without a key"),
     }
 }
 

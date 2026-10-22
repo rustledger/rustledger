@@ -294,11 +294,10 @@ use crate::types::{Error, LedgerOptions};
 /// directives, so a v52 blob would serve the short's cost left undated. The
 /// recorded `Posting::booking` decisions are NOT archived (they are skipped
 /// by serde and rkyv), so a restored `Ledger` re-derives each one as before
-/// #2390; this bump is for the dated short. The v53 and v54 slots are taken
-/// by the parallel `fix/tolerance-cost-cap` (#2717) and
-/// `fix/plugin-placeholder-locations` (#2713) branches, which bump the
-/// version for their own changes; the three must keep DISTINCT numbers, so a
-/// blob written between the merges is regenerated whichever lands last.
+/// #2390; this bump is for the dated short. v53 landed with `fix/tolerance-cost-cap`
+/// (#2717) and v54 with `fix/plugin-placeholder-locations` (#2713); the
+/// bumps kept DISTINCT numbers, so a blob written between the merges is
+/// regenerated.
 pub const CACHE_VERSION: u32 = 55;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.

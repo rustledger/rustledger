@@ -124,6 +124,28 @@ impl fmt::Display for Span {
 /// See issue #896.
 pub const SYNTHESIZED_FILE_ID: u16 = u16::MAX;
 
+/// The first `file_id` of the placeholder range: ids from here up to (not
+/// including) [`SYNTHESIZED_FILE_ID`] name a *placeholder location*, a file
+/// name and line with no source text behind them.
+///
+/// A plugin gives a directive it creates the location beancount gives it,
+/// such as `<check_closing>:0` or the main file at line 0 (#2713). Such a
+/// location points at no text in any loaded file, so the directive has no
+/// source identity, like a [`SYNTHESIZED_FILE_ID`] one, but its errors can
+/// still name where it came from. `rustledger_loader::SourceMap` hands out
+/// these ids and resolves them to their name and line; source files take
+/// the ids below this one.
+pub const FIRST_PLACEHOLDER_FILE_ID: u16 = 0xF000;
+
+/// Whether `file_id` is a loaded source file's id, one whose text is in the
+/// `SourceMap`, rather than a placeholder location
+/// ([`FIRST_PLACEHOLDER_FILE_ID`]) or [`SYNTHESIZED_FILE_ID`].
+#[inline]
+#[must_use]
+pub const fn is_source_file_id(file_id: u16) -> bool {
+    file_id < FIRST_PLACEHOLDER_FILE_ID
+}
+
 /// A value with an associated source location (span and file).
 ///
 /// `PartialEq` / `Eq` / `Hash` are implemented manually to delegate to

@@ -35,7 +35,7 @@
 //! before it.
 
 use super::segment::{ItemKind, Segmented, StackKey, segment};
-use super::{Before, swap};
+use super::{Before, Outcome, Planned, Step, swap};
 use anyhow::{Result, bail};
 use clap::{Parser, ValueEnum};
 use rustledger_core::NaiveDate;
@@ -110,10 +110,27 @@ pub fn run(args: &Args) -> Result<ExitCode> {
 ///
 /// Exit codes: 0 when the split was written (or, with `--dry-run`, would be);
 /// 1 when the equivalence check refused it; errors (unreadable file, parse
-/// errors, a target that already exists) are returned as `Err`.
+/// errors, a target that already exists) are returned as `Err`, a
+/// [`Refusal`](super::Refusal) carrying a stable code where the run refused.
 pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) -> Result<ExitCode> {
+    run_with_outcome(args, out, err, &mut Outcome::default())
+}
+
+/// [`run_with_writer`], also recording the plan, the check's verdict and
+/// what was written in `outcome`, which says how far the run got when it
+/// fails (#2633).
+pub fn run_with_outcome(
+    args: &Args,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    outcome: &mut Outcome,
+) -> Result<ExitCode> {
+    outcome.dry_run = args.dry_run;
     let Some(file) = &args.file else {
-        bail!("FILE is required (or set default.file in config)");
+        refuse!(
+            super::code::MISSING_FILE,
+            "FILE is required (or set default.file in config)"
+        );
     };
     let given = file;
     let file = super::existing_file(file)?;
@@ -125,7 +142,11 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
     let (source, original) = super::read_source(&file)?;
     let seg = segment(&source, &file)?;
     if seg.dated_count() == 0 {
-        bail!("{} has no dated directives to split", file.display());
+        refuse!(
+            super::code::NOTHING_TO_SPLIT,
+            "{} has no dated directives to split",
+            file.display()
+        );
     }
 
     let file_dir = file.parent().map(Path::to_path_buf).unwrap_or_default();
@@ -134,7 +155,11 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
         None => file_dir.join(file.file_stem().unwrap_or_default()),
     };
     if dir.is_file() {
-        bail!("{} is a file, not a directory", dir.display());
+        refuse!(
+            super::code::NOT_A_DIRECTORY,
+            "{} is a file, not a directory",
+            dir.display()
+        );
     }
     let ext = file.extension().map_or_else(
         || "beancount".to_string(),
@@ -152,7 +177,8 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
         writes.push((path, content.clone()));
     }
     if let Some((clash, _)) = writes.iter().find(|(p, _)| *p == file) {
-        bail!(
+        refuse!(
+            super::code::TARGET_IS_SOURCE,
             "the period file {} would overwrite the file being split; choose another --dir",
             clash.display()
         );
@@ -175,46 +201,50 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
 
     let before: Before = super::load_before(&root)?;
     if root != file && !before.files.contains(&file) {
-        bail!(
+        refuse!(
+            super::code::NOT_IN_LEDGER,
             "{} is not part of the ledger rooted at {}",
             file.display(),
             root.display()
         );
     }
 
-    writeln!(
+    let mut steps: Vec<Step> = swap_plan
+        .writes
+        .iter()
+        .zip(layout.periods.values())
+        .map(|((path, _), (_, count))| Step::Create {
+            path: path.clone(),
+            dated_directives: Some(*count),
+        })
+        .collect();
+    steps.push(Step::Rewrite {
+        path: file.clone(),
+        split: Some((layout.root_items, layout.periods.len())),
+    });
+    super::report_plan(
         out,
-        "Plan: split {} by {}",
-        super::show(&file),
-        args.by.name()
-    )?;
-    for ((path, _), (_, count)) in swap_plan.writes.iter().zip(layout.periods.values()) {
-        writeln!(
-            out,
-            "  create   {}  ({count} dated directives)",
-            super::show(path)
-        )?;
-    }
-    writeln!(
-        out,
-        "  rewrite  {}  (keeps {} option/plugin/include lines; adds {} includes)",
-        super::show(&file),
-        layout.root_items,
-        layout.periods.len()
+        Planned {
+            operation: "split",
+            file,
+            by: Some(args.by.name()),
+            steps,
+        },
+        outcome,
     )?;
 
     let difference = match super::unstable(&root, &before)? {
         Some(reason) => Some(reason),
         None => super::check_planned(&root, &before, &swap_plan.writes, &[])?,
     };
-    if !super::report_check(out, err, "split", &before, difference.as_deref())? {
+    if !super::report_check(out, err, "split", &before, difference.as_deref(), outcome)? {
         return Ok(ExitCode::from(1));
     }
     if args.dry_run {
         writeln!(out, "Dry run: nothing was written.")?;
         return Ok(ExitCode::SUCCESS);
     }
-    super::write_plan(out, &root, &before, &swap_plan)?;
+    super::write_plan(out, &root, &before, &swap_plan, outcome)?;
     Ok(ExitCode::SUCCESS)
 }
 

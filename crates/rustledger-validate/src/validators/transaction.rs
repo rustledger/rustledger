@@ -34,12 +34,14 @@ pub fn validate_transaction_early(
     }
     // Only a transaction with a real source identity can be matched up in
     // late. A synthesized one shares the `(SYNTHESIZED_FILE_ID, Span::ZERO)`
-    // sentinel and an unspanned caller has no identity; both hand late the
-    // same list (no booking or plugins in between), so late covers them.
+    // sentinel, one at a placeholder location (#2713) shares its
+    // placeholder's id, and an unspanned caller has no identity; all hand
+    // late the same list (no booking or plugins in between), so late covers
+    // them.
     let Some((span, file_id)) = location else {
         return;
     };
-    if file_id == rustledger_core::SYNTHESIZED_FILE_ID {
+    if !rustledger_core::is_source_file_id(file_id) {
         return;
     }
     let mut held = Vec::new();

@@ -357,11 +357,14 @@ pub enum ErrorSeverity {
 /// Source location for an error.
 #[derive(Debug, Clone)]
 pub struct ErrorLocation {
-    /// File path.
+    /// File path, or the name of a placeholder location such as
+    /// `<check_closing>`.
     pub file: std::path::PathBuf,
-    /// Line number (1-indexed).
+    /// Line number (1-indexed). A placeholder location's line is the one a
+    /// plugin gave it, as beancount's, often 0 (#2713).
     pub line: usize,
-    /// Column number (1-indexed).
+    /// Column number (1-indexed), or 0 for a placeholder location, which has
+    /// no text to count columns in.
     pub column: usize,
 }
 
@@ -679,8 +682,10 @@ pub const fn canonical_sort_key(d: &Spanned<Directive>) -> CanonicalSortKey {
     (
         d.value.date(),
         d.value.priority(),
-        // `false` sorts before `true`: no location first.
-        d.file_id != rustledger_parser::SYNTHESIZED_FILE_ID,
+        // `false` sorts before `true`: no location first. A placeholder
+        // location (`<check_closing>:0`, #2713) is no place in a file either,
+        // and beancount sorts its line 0 first too.
+        rustledger_parser::is_source_file_id(d.file_id),
         d.file_id,
         d.span.start,
     )
@@ -1096,13 +1101,8 @@ fn run_booking(
                     // Resolve to file/line/column the same way the validator
                     // does, so CLI and LSP consumers need no lookup of their
                     // own (the pattern from #901).
-                    if let Some(file) = source_map.get(file_id as usize) {
-                        let (line, column) = file.line_col(span.start);
-                        err = err.with_location(ErrorLocation {
-                            file: file.path.clone(),
-                            line,
-                            column,
-                        });
+                    if let Some(location) = error_location(source_map, file_id, span.start) {
+                        err = err.with_location(location);
                     }
                     errors.push(err);
                     failed_indices.push(i);
@@ -1235,6 +1235,9 @@ fn dispatch_plugins(
         .files()
         .first()
         .map_or_else(|| std::path::Path::new("."), crate::SourceFile::dir);
+    // The main file as errors name it, where each found document is placed
+    // (line 0), as beancount places it (#2713).
+    let main_file = source_map.files().first().map(|f| f.path.as_path());
 
     // Access the process-wide registry singleton. The registry is
     // immutable and stateless, so the same instance services every
@@ -1270,8 +1273,8 @@ fn dispatch_plugins(
                 .collect();
             entries.push(PluginInvocation {
                 name: rustledger_plugin::DOCUMENT_DISCOVERY_NAME.to_string(),
-                config: Some(rustledger_plugin::document_discovery_config(
-                    base_dir, &resolved,
+                config: Some(rustledger_plugin::document_discovery_config_with_main_file(
+                    base_dir, main_file, &resolved,
                 )),
                 force_python: false,
             });
@@ -1439,6 +1442,10 @@ fn build_wrappers(
             let (filename, lineno) = if let Some(file) = source_map.get(spanned.file_id as usize) {
                 let (line, _col) = file.line_col(spanned.span.start);
                 (Some(file.path.display().to_string()), Some(line as u32))
+            } else if let Some((name, line)) = source_map.placeholder(spanned.file_id) {
+                // A later plugin sees the placeholder location an earlier
+                // one gave, as beancount's next plugin sees its meta (#2713).
+                (Some(name.display().to_string()), Some(line))
             } else {
                 (None, None)
             };
@@ -1576,23 +1583,29 @@ fn apply_plugin_ops(
                 // (Wrapper-derived outer span is validated below.)
                 // Resolve the wrapper's filename + line number, if set,
                 // into a real (file_id, span) when the filename
-                // corresponds to a loaded source file. Falls back to
-                // SYNTHESIZED_FILE_ID + zero span otherwise — including
-                // for plugin-only attribution like `"<auto_accounts>"`
-                // (which never matches a loaded file).
+                // corresponds to a loaded source file and the line is in
+                // it. Any other location is a placeholder, such as
+                // beancount's `<check_closing>:0` or a found document's
+                // main file at line 0 (a line no file has): it gets a
+                // placeholder id, so an error on the directive is reported
+                // there, as `bean-check` reports it, instead of with no
+                // location (#2713). With no location at all, it is
+                // SYNTHESIZED_FILE_ID + zero span.
                 let (span, file_id) = match (&wrapper.filename, wrapper.lineno) {
                     (Some(filename), Some(lineno)) => {
-                        if let Some(file) = source_map.get_by_path(std::path::Path::new(filename)) {
-                            let span_start = file.line_start(lineno as usize).unwrap_or(0);
-                            (
+                        let path = std::path::Path::new(filename);
+                        match source_map
+                            .get_by_path(path)
+                            .and_then(|file| Some((file, file.line_start(lineno as usize)?)))
+                        {
+                            Some((file, span_start)) => (
                                 rustledger_parser::Span::new(span_start, span_start),
                                 file.id as u16,
-                            )
-                        } else {
-                            (
+                            ),
+                            None => (
                                 rustledger_parser::Span::ZERO,
-                                rustledger_parser::SYNTHESIZED_FILE_ID,
-                            )
+                                source_map.placeholder_file_id(path, lineno),
+                            ),
                         }
                     }
                     _ => (
@@ -1904,6 +1917,27 @@ fn build_validation_options(
         .with_default_booking_method(default_booking_method)
 }
 
+/// Where an error at byte `offset` of `file_id` is: the file, line and column
+/// of a source file, or the name and line of a placeholder location (such as
+/// `<check_closing>:0`, #2713), which has no column (0) because no text is
+/// behind it. `None` for a synthesized directive, which has no location.
+fn error_location(source_map: &SourceMap, file_id: u16, offset: usize) -> Option<ErrorLocation> {
+    let Some(file) = source_map.get(file_id as usize) else {
+        let (file, line) = source_map.placeholder(file_id)?;
+        return Some(ErrorLocation {
+            file,
+            line: line as usize,
+            column: 0,
+        });
+    };
+    let (line, column) = file.line_col(offset);
+    Some(ErrorLocation {
+        file: file.path.clone(),
+        line,
+        column,
+    })
+}
+
 /// Convert a batch of [`rustledger_validate::ValidationError`]s into
 /// loader-level [`LedgerError`]s (with resolved `file:line:column`
 /// locations) and append to the existing list.
@@ -1937,16 +1971,9 @@ fn ledger_errors_extend(
         // Resolve span + file_id into a file/line/column triple so CLI and
         // LSP consumers can render `file:line:col` headers without having
         // to do the lookup themselves (issue #901).
-        let location = err.span.and_then(|span| {
-            let fid = err.file_id? as usize;
-            let file = source_map.get(fid)?;
-            let (line, column) = file.line_col(span.start);
-            Some(ErrorLocation {
-                file: file.path.clone(),
-                line,
-                column,
-            })
-        });
+        let location = err
+            .span
+            .and_then(|span| error_location(source_map, err.file_id?, span.start));
         errors.push(LedgerError {
             severity: severity_level,
             code: err.code.code().to_string(),

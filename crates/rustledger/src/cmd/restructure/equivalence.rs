@@ -59,8 +59,12 @@ pub(super) fn load(root: &Path, fs: OverlayFs) -> anyhow::Result<(Fingerprint, V
         plugin_max_memory_mb: crate::plugin_budget::max_memory_mb(),
         ..Default::default()
     };
-    let ledger = rustledger_loader::load_with_fs(root, &options, Box::new(fs))
-        .map_err(|e| anyhow::anyhow!("failed to load {}: {e}", root.display()))?;
+    let ledger = rustledger_loader::load_with_fs(root, &options, Box::new(fs)).map_err(|e| {
+        anyhow::Error::new(super::Refusal::new(
+            super::code::LOAD_FAILED,
+            format!("failed to load {}: {e}", root.display()),
+        ))
+    })?;
     let files = ledger
         .source_map
         .files()

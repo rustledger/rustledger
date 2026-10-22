@@ -6,9 +6,9 @@
 //! cost carries its total, neither of which a `Position` value holds. A
 //! stored table's rows are values, so `weight(position)` of
 //! `10 EUR @ 1.10 USD` gave `10 EUR` where the default FROM gives
-//! `11.00 USD`, and a `{{500 USD}}` lot weighed and cost 500.00…01. The table
-//! now keeps them beside the posting column, as `#postings` (#2429) and a
-//! subquery (#2432) do.
+//! `11.00 USD`, and a `{{500 USD}}` lot weighed and cost 500.00…01. Each
+//! stored row now keeps the posting it was read from (#2442), as `#postings`
+//! and a subquery's rows do.
 
 use rustledger_booking::BookingEngine;
 use rustledger_core::{BookingMethod, Directive};
@@ -238,7 +238,7 @@ fn a_row_without_a_posting_takes_the_value_path() {
     let create = "CREATE TABLE t AS SELECT account, position WHERE account = 'Assets:E'";
 
     // `weight` of an inserted NULL is NULL, as the value path gives, not a
-    // stale or default hidden value.
+    // value from some posting.
     let got = rows(
         &directives,
         &[
@@ -326,8 +326,8 @@ fn select_star_does_not_show_them() {
     );
 }
 
-/// The table computes a cost for every row, so an overflowing one fails only
-/// a query that reads it, as on the default FROM.
+/// An overflowing cost fails only a query that reads it, as on the default
+/// FROM.
 #[test]
 fn an_overflowing_cost_fails_only_the_query_that_reads_it() {
     let directives: Vec<Directive> = rustledger_parser::parse(

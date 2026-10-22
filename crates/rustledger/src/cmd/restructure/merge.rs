@@ -17,8 +17,8 @@
 //! to a new file and nothing else is touched.
 
 use super::segment::{ItemKind, segment};
-use super::{Before, swap};
-use anyhow::{Context, Result, bail};
+use super::{Before, Outcome, Planned, Step, swap};
+use anyhow::Result;
 use clap::Parser;
 use std::collections::HashSet;
 use std::io::{self, Write};
@@ -61,10 +61,26 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     run_with_writer(args, &mut io::stdout().lock(), &mut io::stderr())
 }
 
-/// Run `merge` with explicit output streams. Exit codes as for `split`.
+/// Run `merge` with explicit output streams. Exit codes and errors as for
+/// `split`.
 pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) -> Result<ExitCode> {
+    run_with_outcome(args, out, err, &mut Outcome::default())
+}
+
+/// [`run_with_writer`], also recording the plan, the check's verdict and
+/// what was written in `outcome` (#2633).
+pub fn run_with_outcome(
+    args: &Args,
+    out: &mut dyn Write,
+    err: &mut dyn Write,
+    outcome: &mut Outcome,
+) -> Result<ExitCode> {
+    outcome.dry_run = args.dry_run;
     let Some(file) = &args.file else {
-        bail!("FILE is required (or set default.file in config)");
+        refuse!(
+            super::code::MISSING_FILE,
+            "FILE is required (or set default.file in config)"
+        );
     };
     let given = file;
     let file = super::existing_file(file)?;
@@ -81,7 +97,8 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
     };
     let merged = flat.flatten(&file, &file, &source, true)?;
     if flat.order.is_empty() {
-        bail!(
+        refuse!(
+            super::code::NOTHING_TO_MERGE,
             "{} includes nothing; there is nothing to merge",
             file.display()
         );
@@ -121,7 +138,8 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
         mode_mask: strictest_mode(&file, &flat.order),
     };
     if args.output.is_some() && swap::occupied(&target) {
-        bail!(
+        refuse!(
+            super::code::TARGET_EXISTS,
             "{} already exists; refusing to overwrite it",
             target.display()
         );
@@ -133,34 +151,48 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
     let reference = if args.output.is_some() { &file } else { &root };
     let before: Before = super::load_before(reference)?;
     if args.ledger.is_some() && !before.files.contains(&file) {
-        bail!(
+        refuse!(
+            super::code::NOT_IN_LEDGER,
             "{} is not part of the ledger rooted at {}",
             file.display(),
             root.display()
         );
     }
 
-    writeln!(
-        out,
-        "Plan: merge {} and the files it includes",
-        super::show(&file)
-    )?;
-    for path in &flat.order {
-        let verb = if args.output.is_some() || args.keep_included {
-            "inline"
-        } else if flat.removable.contains(path) {
-            "inline and remove"
-        } else {
-            "inline (kept: outside FILE's directory or reached through a symlink)"
-        };
-        writeln!(out, "  {verb}  {}", super::show(path))?;
-    }
-    let verb = if args.output.is_some() {
-        "create"
+    let keep_all = args.output.is_some() || args.keep_included;
+    let mut steps: Vec<Step> = flat
+        .order
+        .iter()
+        .map(|path| {
+            let ours = flat.removable.contains(path);
+            Step::Inline {
+                path: path.clone(),
+                remove: !keep_all && ours,
+                shared: !keep_all && !ours,
+            }
+        })
+        .collect();
+    steps.push(if args.output.is_some() {
+        Step::Create {
+            path: target,
+            dated_directives: None,
+        }
     } else {
-        "rewrite"
-    };
-    writeln!(out, "  {verb}  {}", super::show(&target))?;
+        Step::Rewrite {
+            path: target,
+            split: None,
+        }
+    });
+    super::report_plan(
+        out,
+        Planned {
+            operation: "merge",
+            file: file.clone(),
+            by: None,
+            steps,
+        },
+        outcome,
+    )?;
 
     let mut difference = match super::unstable(reference, &before)? {
         Some(reason) => Some(reason),
@@ -177,14 +209,14 @@ pub fn run_with_writer(args: &Args, out: &mut dyn Write, err: &mut dyn Write) ->
             )
         });
     }
-    if !super::report_check(out, err, "merge", &before, difference.as_deref())? {
+    if !super::report_check(out, err, "merge", &before, difference.as_deref(), outcome)? {
         return Ok(ExitCode::from(1));
     }
     if args.dry_run {
         writeln!(out, "Dry run: nothing was written.")?;
         return Ok(ExitCode::SUCCESS);
     }
-    super::write_plan(out, &root, &before, &swap_plan)?;
+    super::write_plan(out, &root, &before, &swap_plan, outcome)?;
     Ok(ExitCode::SUCCESS)
 }
 
@@ -292,9 +324,17 @@ fn resolve_include(base: &Path, include: &str) -> Result<Vec<(PathBuf, PathBuf)>
             &rustledger_loader::DiskFileSystem,
             &full.to_string_lossy(),
         )
-        .map_err(|e| anyhow::anyhow!("bad include pattern {include:?}: {e}"))?;
+        .map_err(|e| {
+            anyhow::Error::new(super::Refusal::new(
+                super::code::BAD_INCLUDE_PATTERN,
+                format!("bad include pattern {include:?}: {e}"),
+            ))
+        })?;
         if matched.is_empty() {
-            bail!("include pattern {include:?} matches no files");
+            refuse!(
+                super::code::INCLUDE_NOT_FOUND,
+                "include pattern {include:?} matches no files"
+            );
         }
         matched
     } else {
@@ -305,9 +345,12 @@ fn resolve_include(base: &Path, include: &str) -> Result<Vec<(PathBuf, PathBuf)>
         .map(|p| {
             // Lexically first, as the loader spells it: a `..` after a
             // symlink names the file beancount reads (#2635).
-            let c = lexical(&p)
-                .canonicalize()
-                .with_context(|| format!("included file not found: {}", p.display()))?;
+            let c = lexical(&p).canonicalize().map_err(|e| {
+                anyhow::Error::new(e).context(super::Refusal::new(
+                    super::code::INCLUDE_NOT_FOUND,
+                    format!("included file not found: {}", p.display()),
+                ))
+            })?;
             Ok((p, c))
         })
         .collect()

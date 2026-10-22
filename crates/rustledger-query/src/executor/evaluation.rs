@@ -362,18 +362,26 @@ impl Executor<'_> {
     /// inventory-by-currency, metadata-by-key, object-by-key. A missing
     /// key (or zero inventory units) is `NULL`, like upstream's `getitem`.
     pub(super) fn getitem_lookup(container: &Value, key: &str) -> Result<Value, QueryError> {
+        Ok(Self::getitem_entry(container, key)?.unwrap_or(Value::Null))
+    }
+
+    /// [`Self::getitem_lookup`], telling a MISSING key (`None`) from a key
+    /// that is present (`Some`), whose value may itself be NULL (`key:` with
+    /// no value). GETITEM's third argument replaces only the first, as
+    /// Python's `dict.get(key, default)` does (#2699). A NULL container is
+    /// present-and-NULL: upstream returns `None` before it reads the default.
+    pub(super) fn getitem_entry(container: &Value, key: &str) -> Result<Option<Value>, QueryError> {
         match container {
             Value::Inventory(inv) => {
                 let amount = inv.units(key);
-                if amount.is_zero() {
-                    Ok(Value::Null)
-                } else {
-                    Ok(Value::Amount(rustledger_core::Amount::new(amount, key)))
-                }
+                Ok((!amount.is_zero())
+                    .then(|| Value::Amount(rustledger_core::Amount::new(amount, key))))
             }
-            Value::Metadata(meta) => Ok(Self::meta_value_to_value(meta.get(key))),
-            Value::Object(obj) => Ok(obj.get(key).cloned().unwrap_or(Value::Null)),
-            Value::Null => Ok(Value::Null),
+            Value::Metadata(meta) => Ok(meta
+                .get(key)
+                .map(|value| Self::meta_value_to_value(Some(value)))),
+            Value::Object(obj) => Ok(obj.get(key).cloned()),
+            Value::Null => Ok(Some(Value::Null)),
             other => Err(QueryError::Type(format!(
                 "cannot subscript with '{key}': operand {other:?} is not a mapping"
             ))),

@@ -414,6 +414,14 @@ NULL, and amounts, positions and inventories compare in `ORDER BY`'s order
 | `currency(position)` | Get currency |
 | `commodity(amount)` | Get the currency of an **amount** |
 | `number(amount)` | Extract number from amount |
+| `neg(x)` | Negate a number, amount, position or inventory; a position keeps its cost |
+| `abs(x)` | Absolute value of a number, position or inventory; a position keeps its cost |
+| `possign(x, account)` | Flip the sign for a credit-normal account (Income, Liabilities, Equity, including `name_*` renames), unchanged otherwise; takes a number, amount, position or inventory |
+| `filter_currency(x, currency)` | The positions of a position or inventory held in `currency`, else `NULL`; a position gives itself or `NULL` |
+
+Negating or taking the absolute value of an inventory keeps each lot's
+cost; a lot's exact `{{T}}` total is rebuilt as units x per-unit, as after
+an `Inventory::merge`.
 
 `commodity()` and `currency()` overlap but are not interchangeable.
 `commodity()` takes an amount, which is how `bean-query` spells it, so
@@ -496,6 +504,12 @@ matters at query time:
 All three return `NULL` when the key is absent at the relevant level — so a
 `WHERE meta('foo') = 'bar'` filter quietly drops every row when `foo` was
 actually set on the transaction.
+
+`getitem(map, key)` reads one key of any metadata map, such as `entry.meta`,
+and is `NULL` when the key is absent. With a third argument,
+`getitem(map, key, default)` returns `default` instead, as bean-query does:
+`getitem(entry.meta, 'concept', narration)`. The default replaces only a
+missing key, not a key written with no value.
 
 Commodity metadata is separate, because it lives on a `commodity` directive
 rather than on any transaction or posting:

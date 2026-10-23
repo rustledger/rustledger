@@ -735,29 +735,29 @@ fn dump_fetch_plan(
         // and source-cmd paths. Each row dumps the attempts that quote spec
         // would produce. The plan shows the request's quote currency (what
         // the fetch asks for); the written label is `emit_price`'s business
-        // (#2731), so the third field is unused here.
-        let per_quote_jobs: Vec<(String, Option<CommodityMapping>, bool)> = discovered
+        // (#2731), so the declared flag does not appear here.
+        let per_quote_jobs: Vec<(String, Option<CommodityMapping>)> = discovered
             .get(symbol)
             .filter(|info| !info.quote_specs.is_empty())
             .map_or_else(
                 || {
-                    let (qc, declared) = resolve_quote_currency(
+                    let (qc, _declared) = resolve_quote_currency(
                         symbol,
                         discovered,
                         config_mapping,
                         args.currency.as_deref(),
                     );
-                    vec![(qc, None, declared)]
+                    vec![(qc, None)]
                 },
                 |info| {
                     info.quote_specs
                         .iter()
-                        .map(|qs| (qs.quote_currency.clone(), qs.mapping.clone(), true))
+                        .map(|qs| (qs.quote_currency.clone(), qs.mapping.clone()))
                         .collect()
                 },
             );
 
-        for (currency, per_spec_mapping, _quote_declared) in per_quote_jobs {
+        for (currency, per_spec_mapping) in per_quote_jobs {
             // Skip self-referential (base == quote) jobs so `--dry-run` matches
             // the fetch path: a commodity is never priced in itself. See the
             // identical guard in the fetch loop above — case-insensitive like
@@ -903,6 +903,25 @@ fn same_unit_family(a: &str, b: &str) -> bool {
 /// - a valid commodity from another family (`EUR` for a `GBX:` pair) is a
 ///   mismatch to refuse, not relabel: the source answered with something
 ///   other than the pair that was asked for.
+/// The declaration, not the source, named a currency that is no commodity
+/// (#2731): name it as the problem, with what the source said for contrast,
+/// or the message points the user at the wrong thing.
+fn invalid_declared_err(declared: &str, src: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "the declared quote currency {declared:?} is not a valid beancount commodity \
+         (commodities are upper-case, like `USD` or `EUR`); the source returned {src:?}; \
+         no price directive was written"
+    )
+}
+
+/// Label a fetched price with the quote currency the pair declared (#2731),
+/// the number untouched. The source's word is a sanity check on the
+/// declaration, deliberately NOT a validity check of its own: a same-family
+/// spelling (`GBp`, `GBp` for `GBX`) is accepted even though it is no
+/// commodity — the label is the declaration's, and `check_beancount_currency`
+/// then judges that. Outside the family, an invalid source word is the #2715
+/// source refusal, an invalid declaration is named as the declaration, and
+/// two valid commodities that are not one family are a mismatch to refuse.
 fn price_label(response: &crate::cmd::price::PriceResponse, declared: &str) -> Result<String> {
     let src = response.currency.as_str();
     if src == declared || same_unit_family(src, declared) {
@@ -915,6 +934,9 @@ fn price_label(response: &crate::cmd::price::PriceResponse, declared: &str) -> R
              no price directive was written",
             response.source
         );
+    }
+    if !rustledger_parser::is_valid_currency(declared) {
+        return Err(invalid_declared_err(declared, src));
     }
     anyhow::bail!(
         "price source `{}` returned a price in {src} for the {declared} pair; \
@@ -951,12 +973,7 @@ fn check_beancount_currency(
         // The label is the declared quote (#2731), which the source did not
         // say: name the declaration, not the source, or the message points
         // the user at the wrong thing.
-        anyhow::bail!(
-            "the declared quote currency {currency:?} is not a valid beancount commodity \
-             (commodities are upper-case, like `USD` or `EUR`); the source returned {:?}; \
-             no price directive was written",
-            response.currency
-        );
+        return Err(invalid_declared_err(currency, &response.currency));
     }
     Ok(())
 }

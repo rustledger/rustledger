@@ -54,7 +54,23 @@ fn run_price(dir: &TempDir, json_line: &str, declared: Option<&str>, beancount: 
 /// A run against `-f` `file`, for the dedup cases: the file's own `price`
 /// directives are what `--clobber` compares against.
 fn run_price_with_file(dir: &TempDir, file: &Path, declared: &str, beancount: bool) -> Output {
-    let cmd = stub_cmd(dir.path(), r#"{"price": "2770.0", "currency": "GBP"}"#);
+    run_price_with_file_stub(
+        dir,
+        file,
+        declared,
+        beancount,
+        r#"{"price": "2770.0", "currency": "GBP"}"#,
+    )
+}
+
+fn run_price_with_file_stub(
+    dir: &TempDir,
+    file: &Path,
+    declared: &str,
+    beancount: bool,
+    stub_line: &str,
+) -> Output {
+    let cmd = stub_cmd(dir.path(), stub_line);
     let mut args = vec![
         "price".to_string(),
         "BNZL".to_string(),
@@ -319,5 +335,105 @@ fn a_bad_declared_quote_is_named_as_the_declaration() {
     assert!(
         !stderr.contains("price source `sh` returned the currency \"GBp\""),
         "the source returned GBP, not GBp — it must not be blamed; stderr:\n{stderr}"
+    );
+}
+
+/// The post-fetch `--clobber` re-check keys on the label too: when the
+/// response carries its own date, a directive already written for THAT date
+/// under the declared label is matched and nothing is written again.
+#[test]
+fn a_response_dated_earlier_is_deduplicated_on_the_declared_label() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("main.beancount");
+    std::fs::write(
+        &file,
+        "2024-01-01 commodity BNZL\n2024-01-14 price BNZL 2770.0 GBX\n",
+    )
+    .unwrap();
+    let out = run_price_with_file_stub(
+        &dir,
+        &file,
+        "GBX",
+        true,
+        r#"{"price": "2770.0", "currency": "GBP", "date": "2024-01-14"}"#,
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(
+            "skipped after fetch (response dated 2024-01-14 GBX matches existing directive)"
+        ),
+        "the response's own date must reach the dedup; stderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("price BNZL"),
+        "nothing may be written; stdout:\n{stdout}"
+    );
+}
+
+/// The cached path's copy of the same re-check: an entry cached under the
+/// requested key whose payload is dated earlier is deduplicated on the
+/// declared label as well.
+#[test]
+fn the_cached_path_deduplicates_on_the_declared_label_too() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("main.beancount");
+    std::fs::write(
+        &file,
+        "2024-01-01 commodity BNZL\n2024-01-14 price BNZL 2770.0 GBX\n",
+    )
+    .unwrap();
+    let cache_dir = dir.path().join("rledger");
+    std::fs::create_dir_all(&cache_dir).unwrap();
+    let cached_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let envelope = serde_json::json!({
+        "version": rustledger::cmd::price::cache::CACHE_SCHEMA_VERSION,
+        "entries": {
+            "coinbase:BNZL:GBX:2024-01-15": {
+                "price": "2770.0",
+                "currency": "GBP",
+                "date": "2024-01-14",
+                "source": "coinbase",
+                "cached_at": cached_at,
+            }
+        }
+    });
+    std::fs::write(
+        cache_dir.join("prices.json"),
+        serde_json::to_string(&envelope).unwrap(),
+    )
+    .unwrap();
+
+    let out = Command::new(env!("CARGO_BIN_EXE_rledger"))
+        .env("XDG_CACHE_HOME", dir.path())
+        .args([
+            "price",
+            "BNZL",
+            "-b",
+            "--source",
+            "coinbase",
+            "--date",
+            "2024-01-15",
+            "--currency",
+            "GBX",
+            "-f",
+            file.to_str().unwrap(),
+            "--verbose",
+        ])
+        .output()
+        .expect("rledger price should execute");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr
+            .contains("skipped from cache (cached date 2024-01-14 GBX matches existing directive)"),
+        "the cached payload's own date must reach the dedup; stderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("price BNZL"),
+        "nothing may be written; stdout:\n{stdout}"
     );
 }

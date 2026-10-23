@@ -462,15 +462,21 @@ pub fn run_with_writer<W: Write>(
                 // response carries the source's actual date, which can differ
                 // from `date` (e.g. ECB on weekends). Without this, a "latest"
                 // price cached on Friday would re-emit the Friday `price`
-                // directive on Saturday and Sunday runs.
+                // directive on Saturday and Sunday runs. The currency is the
+                // declared quote (#2731), the label the directive is written
+                // with, as the pre-fetch dedup above already uses it.
                 if !args.clobber
-                    && existing_prices.contains(&dedup_key(symbol, &cached.currency, cached.date))
+                    && existing_prices.contains(&dedup_key(
+                        symbol,
+                        &effective_currency,
+                        cached.date,
+                    ))
                 {
                     if args.verbose {
                         let _ = writeln!(
                             err_out,
                             "{symbol}: skipped from cache (cached date {} {} matches existing directive)",
-                            cached.date, cached.currency
+                            cached.date, effective_currency
                         );
                     }
                     continue;
@@ -478,7 +484,7 @@ pub fn run_with_writer<W: Write>(
                 if args.verbose {
                     let _ = writeln!(err_out, "{symbol}: cached (source: {})", cached.source);
                 }
-                emit_price(out, err_out, args, symbol, &cached)?;
+                emit_price(out, err_out, args, symbol, &cached, &effective_currency)?;
                 continue;
             }
 
@@ -539,11 +545,13 @@ pub fn run_with_writer<W: Write>(
                     // published business day on weekends; JSON/beancount source-cmd
                     // output can carry its own date). The pre-fetch skip uses the
                     // requested date, so duplicates can still slip through. Re-check
-                    // here against the actual response date.
+                    // here against the actual response date. The currency is the
+                    // declared quote (#2731), the label the directive is written
+                    // with, so it matches the existing directives' own labels.
                     if !args.clobber
                         && existing_prices.contains(&dedup_key(
                             symbol,
-                            &response.currency,
+                            &effective_currency,
                             response.date,
                         ))
                     {
@@ -551,12 +559,12 @@ pub fn run_with_writer<W: Write>(
                             let _ = writeln!(
                                 err_out,
                                 "{symbol}: skipped after fetch (response dated {} {} matches existing directive)",
-                                response.date, response.currency
+                                response.date, effective_currency
                             );
                         }
                         continue;
                     }
-                    emit_price(out, err_out, args, symbol, &response)?;
+                    emit_price(out, err_out, args, symbol, &response, &effective_currency)?;
                 }
                 Err(e) => fetch_failed(err_out, args.verbose, symbol, &e),
             }
@@ -817,33 +825,86 @@ fn describe_attempts(
     }
 }
 
-/// Refuse a response whose currency `rledger price -b` cannot write as a
-/// beancount commodity, naming the source that returned it (#2715).
+/// Units whose spellings differ only as a major differs from its subunit,
+/// where a price source picks one spelling and the `price:` label another
+/// (#2731). Yahoo labels a London pence quote `GBp` on its historical
+/// endpoint and `GBP` on its latest — both endpoints return pence numbers —
+/// and pence/cents quotes elsewhere get the same treatment (`ZAc`, `ILA`).
+/// The map names a family, not a conversion: its members differ in scale and
+/// the number is written unchanged whatever the family says, since the
+/// declared quote currency is the caller's claim about the number's unit, as
+/// in bean-price. A user who declares `GBP` on a pence feed gets a pounds
+/// label on pence numbers, exactly as bean-price writes it.
+const UNIT_FAMILIES: &[&[&str]] = &[&["GBP", "GBp", "GBX"], &["ZAR", "ZAc"], &["ILS", "ILA"]];
+
+/// Whether `a` and `b` name units of one [`UNIT_FAMILIES`] family.
+fn same_unit_family(a: &str, b: &str) -> bool {
+    UNIT_FAMILIES
+        .iter()
+        .any(|family| family.contains(&a) && family.contains(&b))
+}
+
+/// The currency the written price is labeled with (#2731).
 ///
-/// A source's currency goes into ledger text verbatim, so one with a space,
-/// a quote, a newline, a control character or lower case would write a line
-/// that does not parse, or that parses as something else (`USD\n2024-01-01
-/// open ...`). It is checked against the parser's own commodity rule. The
-/// number needs no check: it is a `Decimal`, whose `Display` is always a
-/// plain decimal the grammar reads (no exponent, no grouping).
+/// The quote currency the pair declared (`price: "GBX:yahoo/BNZL.L"`, or
+/// `--currency`) labels the price, as bean-price writes it, whatever the
+/// source calls the unit. Yahoo's `GBp` and `GBP` both label pence numbers,
+/// on the two endpoints of the same ticker, and the declared `GBX` is right
+/// for both; the source's word is a sanity check, not the label:
+///
+/// - a source currency that matches the declared one exactly, or is in its
+///   [`UNIT_FAMILIES`] family, is accepted and the declared one labels the
+///   price, the number unchanged (no scale is applied);
+/// - a currency that is not a beancount commodity and names no family member
+///   is the #2715 refusal, naming the source;
+/// - a valid commodity from another family (`EUR` for a `GBX:` pair) is a
+///   mismatch to refuse, not relabel: the source answered with something
+///   other than the pair that was asked for.
+fn price_label(response: &crate::cmd::price::PriceResponse, declared: &str) -> Result<String> {
+    let src = response.currency.as_str();
+    if src == declared || same_unit_family(src, declared) {
+        return Ok(declared.to_string());
+    }
+    if !rustledger_parser::is_valid_currency(src) {
+        anyhow::bail!(
+            "price source `{}` returned the currency {src:?}, which is not a valid \
+             beancount commodity (commodities are upper-case, like `USD` or `EUR`); \
+             no price directive was written",
+            response.source
+        );
+    }
+    anyhow::bail!(
+        "price source `{}` returned a price in {src} for the {declared} pair; \
+         refusing to label it {declared} (no price directive was written)",
+        response.source
+    );
+}
+
+/// Refuse a currency `rledger price -b` cannot write as a beancount
+/// commodity, naming the source (#2715).
+///
+/// The label goes into ledger text verbatim, so one with a space, a quote, a
+/// newline, a control character or lower case would write a line that does
+/// not parse, or that parses as something else (`USD\n2024-01-01 open ...`).
+/// It is checked against the parser's own commodity rule. The number needs no
+/// check: it is a `Decimal`, whose `Display` is always a plain decimal the
+/// grammar reads (no exponent, no grouping).
 ///
 /// Only the beancount form is checked: the plain `SYMBOL: price CURRENCY`
 /// form is display, not ledger text.
-fn check_beancount_currency(response: &crate::cmd::price::PriceResponse) -> Result<()> {
-    if !rustledger_parser::is_valid_currency(&response.currency) {
+fn check_beancount_currency(currency: &str, source: &str) -> Result<()> {
+    if !rustledger_parser::is_valid_currency(currency) {
         anyhow::bail!(
-            "price source `{}` returned the currency {:?}, which is not a valid \
+            "price source `{source}` returned the currency {currency:?}, which is not a valid \
              beancount commodity (commodities are upper-case, like `USD` or `EUR`); \
-             no price directive was written",
-            response.source,
-            response.currency
+             no price directive was written"
         );
     }
     Ok(())
 }
 
 /// Write `response` as `rledger price` prints it, or report why it cannot
-/// be written as a beancount `price` directive (see
+/// be written as a beancount `price` directive (see [`price_label`] and
 /// [`check_beancount_currency`]) the way a failed fetch is reported.
 fn emit_price(
     handle: &mut impl Write,
@@ -851,21 +912,44 @@ fn emit_price(
     args: &PriceArgs,
     symbol: &str,
     response: &crate::cmd::price::PriceResponse,
+    declared: &str,
 ) -> Result<()> {
-    if args.beancount
-        && let Err(e) = check_beancount_currency(response)
-    {
-        fetch_failed(err_out, args.verbose, symbol, &e);
-        return Ok(());
-    }
-    write_price(handle, symbol, response, args.beancount, args.source_meta)
+    let label = if args.beancount {
+        let label = match price_label(response, declared) {
+            Ok(label) => label,
+            Err(e) => {
+                fetch_failed(err_out, args.verbose, symbol, &e);
+                return Ok(());
+            }
+        };
+        if let Err(e) = check_beancount_currency(&label, &response.source) {
+            fetch_failed(err_out, args.verbose, symbol, &e);
+            return Ok(());
+        }
+        label
+    } else {
+        // The plain `SYMBOL: price CURRENCY` form is display, not ledger
+        // text, and prints the source's own word, unchecked (#2715).
+        response.currency.clone()
+    };
+    write_price(
+        handle,
+        symbol,
+        response,
+        &label,
+        args.beancount,
+        args.source_meta,
+    )
 }
 
-/// Write a price response to the output.
+/// Write a price response to the output, labeled with `label`: the declared
+/// quote currency [`price_label`] resolved in the beancount form, the
+/// source's own word in the plain display form.
 fn write_price(
     handle: &mut impl Write,
     symbol: &str,
     response: &crate::cmd::price::PriceResponse,
+    label: &str,
     beancount: bool,
     source_meta: bool,
 ) -> Result<()> {
@@ -881,7 +965,7 @@ fn write_price(
             "{date_str} price {} {} {}",
             symbol.to_uppercase(),
             response.price,
-            response.currency
+            label
         )?;
         // Opt-in provenance (see PriceArgs::source_meta): record the fetching
         // source as beancount metadata on the directive. Off by default so the
@@ -896,13 +980,14 @@ fn write_price(
             )?;
         }
     } else {
-        // Display, not ledger text: the currency is the price source's word,
-        // so it is escaped like any untrusted text on a terminal (#2538).
+        // Display, not ledger text: the label is the price source's word
+        // here, so it is escaped like any untrusted text on a terminal
+        // (#2538).
         writeln!(
             handle,
             "{symbol}: {} {}",
             response.price,
-            rustledger_plugin::escape_untrusted_line(&response.currency)
+            rustledger_plugin::escape_untrusted_line(label)
         )?;
     }
     Ok(())
@@ -1018,11 +1103,13 @@ fn run_with_external_command<W: Write>(
                     // Post-fetch --clobber re-check: source-cmd output (JSON or
                     // beancount form) can carry its own date that differs from
                     // the requested date. Skip writing if the actual response
-                    // duplicates an existing directive.
+                    // duplicates an existing directive. The currency is the
+                    // declared quote (#2731), the label the directive is written
+                    // with.
                     if !args.clobber
                         && existing_prices.contains(&dedup_key(
                             symbol,
-                            &response.currency,
+                            &effective_currency,
                             response.date,
                         ))
                     {
@@ -1030,12 +1117,19 @@ fn run_with_external_command<W: Write>(
                             let _ = writeln!(
                                 err_out,
                                 "{symbol}: skipped after fetch (response dated {} {} matches existing directive)",
-                                response.date, response.currency
+                                response.date, effective_currency
                             );
                         }
                         continue;
                     }
-                    emit_price(handle, err_out, args, symbol, &response)?;
+                    emit_price(
+                        handle,
+                        err_out,
+                        args,
+                        symbol,
+                        &response,
+                        &effective_currency,
+                    )?;
                 }
                 Err(e) => fetch_failed(err_out, args.verbose, symbol, &e),
             }
@@ -1548,21 +1642,21 @@ mod tests {
 
         // Default beancount output is bare (no source metadata).
         let mut out = Vec::new();
-        write_price(&mut out, "EURUSD", &resp, true, false).unwrap();
+        write_price(&mut out, "EURUSD", &resp, "USD", true, false).unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("2024-05-02 price EURUSD 1.0856 USD"));
         assert!(!s.contains("source:"));
 
         // --source-meta appends a `source:` metadata line.
         let mut out = Vec::new();
-        write_price(&mut out, "EURUSD", &resp, true, true).unwrap();
+        write_price(&mut out, "EURUSD", &resp, "USD", true, true).unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("2024-05-02 price EURUSD 1.0856 USD"));
         assert!(s.contains("  source: \"ecb\""));
 
         // Non-beancount output never emits metadata, even with source_meta.
         let mut out = Vec::new();
-        write_price(&mut out, "EURUSD", &resp, false, true).unwrap();
+        write_price(&mut out, "EURUSD", &resp, "USD", false, true).unwrap();
         assert!(!String::from_utf8(out).unwrap().contains("source:"));
     }
 
@@ -1577,7 +1671,7 @@ mod tests {
             source: "my\"src\\x".to_string(),
         };
         let mut out = Vec::new();
-        write_price(&mut out, "EURUSD", &resp, true, true).unwrap();
+        write_price(&mut out, "EURUSD", &resp, "USD", true, true).unwrap();
         let s = String::from_utf8(out).unwrap();
         assert!(s.contains("  source: \"my\\\"src\\\\x\"\n"), "{s}");
     }
@@ -1587,6 +1681,69 @@ mod tests {
         // --source-meta without -b is rejected by clap (requires = "beancount").
         assert!(Args::try_parse_from(["price", "AAPL", "--source-meta"]).is_err());
         assert!(Args::try_parse_from(["price", "AAPL", "-b", "--source-meta"]).is_ok());
+    }
+
+    /// #2731: the declared quote currency labels the price whatever the source
+    /// calls the unit; the source's word is a sanity check, never the label.
+    #[test]
+    fn price_label_is_the_declared_quote_currency() {
+        let resp = |currency: &str| crate::cmd::price::PriceResponse {
+            price: "2770.0".parse().unwrap(),
+            currency: currency.to_string(),
+            date: "2024-05-02".parse::<NaiveDate>().unwrap(),
+            source: "yahoo".to_string(),
+        };
+        assert_eq!(price_label(&resp("USD"), "USD").unwrap(), "USD");
+        // Yahoo's two spellings of a London pence quote, both declared GBX.
+        assert_eq!(price_label(&resp("GBP"), "GBX").unwrap(), "GBX");
+        assert_eq!(price_label(&resp("GBp"), "GBX").unwrap(), "GBX");
+        assert_eq!(price_label(&resp("ZAc"), "ZAR").unwrap(), "ZAR");
+        assert_eq!(price_label(&resp("ILA"), "ILS").unwrap(), "ILS");
+        // A commodity from another family is a mismatch, not a relabel.
+        let err = price_label(&resp("EUR"), "GBX").unwrap_err().to_string();
+        assert!(
+            err.contains("returned a price in EUR for the GBX pair"),
+            "{err}"
+        );
+        // Garbage that names no family member is the #2715 refusal.
+        let err = price_label(&resp("usd"), "USD").unwrap_err().to_string();
+        assert!(
+            err.contains("which is not a valid beancount commodity"),
+            "{err}"
+        );
+    }
+
+    /// A family is a spelling pair, not a conversion: its members differ in
+    /// scale and nothing scales the number.
+    #[test]
+    fn unit_families_are_spelling_pairs_not_conversions() {
+        assert!(same_unit_family("GBp", "GBX"));
+        assert!(same_unit_family("GBP", "GBX"));
+        assert!(same_unit_family("GBX", "GBP"));
+        assert!(!same_unit_family("GBP", "USD"));
+        assert!(!same_unit_family("gbx", "GBX"));
+    }
+
+    /// #2731: `write_price` writes the label it is given in both output
+    /// forms — the declared quote the caller resolved for `-b`, the source's
+    /// own word for the plain display form (`emit_price`).
+    #[test]
+    fn write_price_uses_the_resolved_label() {
+        let resp = crate::cmd::price::PriceResponse {
+            price: "2770.0".parse().unwrap(),
+            currency: "GBP".to_string(),
+            date: "2024-05-02".parse::<NaiveDate>().unwrap(),
+            source: "yahoo".to_string(),
+        };
+        let mut out = Vec::new();
+        write_price(&mut out, "BNZL", &resp, "GBX", true, false).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "2024-05-02 price BNZL 2770.0 GBX\n"
+        );
+        let mut out = Vec::new();
+        write_price(&mut out, "BNZL", &resp, "GBP", false, false).unwrap();
+        assert_eq!(String::from_utf8(out).unwrap(), "BNZL: 2770.0 GBP\n");
     }
 
     /// Multi-quote `price:` metadata produces one dry-run row per declared

@@ -1857,7 +1857,9 @@ fn build_price_args(req: &Req<'_>) -> Result<rustledger::cmd::price_cmd::PriceAr
     Ok(rustledger::cmd::price_cmd::PriceArgs {
         file: path_flag(req, "file", Some("f")),
         symbols: req.positionals().to_vec(),
-        currency: string_flag(req, "currency", Some("c")).unwrap_or_else(|| "USD".to_string()),
+        // `None` when the flag is absent, like `rledger`'s no-default `--currency`:
+        // the request falls back to USD but the quote is undeclared (#2731).
+        currency: string_flag(req, "currency", Some("c")),
         date: string_flag(req, "date", Some("d")),
         beancount: bool_flag(req, "beancount", Some("b")),
         source_meta: bool_flag(req, "source-meta", None),

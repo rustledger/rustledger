@@ -308,3 +308,62 @@ fn balance_in_where_is_refused() {
         assert!(err.contains("HAVING"), "{query}: {err}");
     }
 }
+
+const MERGE: &str = r#"
+2020-01-01 open Assets:Broker AAPL "STRICT"
+2020-01-01 open Assets:Cash
+
+2020-01-01 * "lot a"
+  Assets:Broker  10 AAPL {100.00 USD}
+  Assets:Cash
+2020-01-02 * "lot b"
+  Assets:Broker  10 AAPL {120.00 USD}
+  Assets:Cash
+2020-01-03 * "buy, then merge-sell"
+  Assets:Broker   5 AAPL {130.00 USD}
+  Assets:Broker  -4 AAPL {*}
+  Assets:Cash
+"#;
+
+/// A filtered `BALANCES` replays the WHOLE window as booking recorded it,
+/// and sums only what the filter selects (#2630, #2730).
+///
+/// The `{*}` sale books from the pool the two lots before it make (20 @
+/// 110); its own buy joins the pool only after. So the summed sale must read
+/// 4 out of the 110 pool, exactly as `apply` realizes the booked ledger.
+/// Every cheaper answer is a regression the filter could bring back:
+/// replaying only the selected transaction sells from nothing ("No matching
+/// lot", #2630); asking the booked posting again instead of reading its
+/// recorded decision is the #2380 disagreement; and dropping the earlier
+/// transactions from the replay would sell out of the buy's 5 @ 130. The
+/// whole-ledger run is the same replay's cross-check: 16 left in the 110
+/// pool beside the 130 buy, the bean-query holdings the report surface also
+/// produces (#2380's parity case).
+#[test]
+fn a_filtered_balances_replays_the_window_as_booking_recorded_it() {
+    let selected = table(&[
+        &[
+            "Assets:Broker",
+            "-4 AAPL { 110.00 USD, 2020-01-03}, 5 AAPL { 130.00 USD, 2020-01-03}",
+        ],
+        &["Assets:Cash", "-210.00 USD"],
+    ]);
+    assert_eq!(
+        rows(MERGE, "BALANCES WHERE narration = 'buy, then merge-sell'"),
+        selected
+    );
+    assert_eq!(
+        rows(MERGE, "BALANCES FROM narration = 'buy, then merge-sell'"),
+        selected
+    );
+    assert_eq!(
+        rows(MERGE, "BALANCES"),
+        table(&[
+            &[
+                "Assets:Broker",
+                "16 AAPL { 110.00 USD}, 5 AAPL { 130.00 USD, 2020-01-03}",
+            ],
+            &["Assets:Cash", "-2410.00 USD"],
+        ])
+    );
+}

@@ -218,3 +218,43 @@ fn an_insert_naming_a_column_twice_keeps_the_last_value_and_its_origin() {
         ))
     );
 }
+
+/// An INSERT naming a column three times writes the last value to it, so
+/// the column holds a posting's `position` only when that last value is one.
+///
+/// Symmetry with the two-way case above: a middle value is not the last one,
+/// whatever the order of the source columns.
+#[test]
+fn an_insert_naming_a_column_three_times_keeps_the_last_value_and_its_origin() {
+    let directives = booked(LEDGER);
+    let create = "CREATE TABLE t (account, position)";
+    let weight = "SELECT weight(position) FROM t";
+
+    let mut executor = Executor::new(&directives);
+    run(&mut executor, create);
+    run(
+        &mut executor,
+        "INSERT INTO t (position, position, position) SELECT position, account, position \
+         WHERE account = 'Assets:E'",
+    );
+    assert_eq!(
+        run(&mut executor, weight)[0][0],
+        Value::Amount(rustledger_core::Amount::new(
+            rust_decimal_macros::dec!(11.00),
+            "USD"
+        ))
+    );
+
+    let mut executor = Executor::new(&directives);
+    run(&mut executor, create);
+    run(
+        &mut executor,
+        "INSERT INTO t (position, position, position) SELECT account, position, account \
+         WHERE account = 'Assets:E'",
+    );
+    let query = parse(weight).expect("parses");
+    let err = executor
+        .execute(&query)
+        .expect_err("the column holds an account name, which has no weight");
+    assert!(err.to_string().starts_with("type error"), "{err}");
+}

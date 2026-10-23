@@ -885,3 +885,240 @@ fn a_posting_that_was_never_booked_is_refused() {
         .expect_err("realizing an unbooked posting must be refused as well");
     assert!(format!("{err}").contains("not booked"));
 }
+
+/// A `{*}` cover of a short books as a REDUCTION whatever its sign, and
+/// applies on that word (#2390).
+///
+/// Covering a short has positive units, so the sign test calls it an
+/// augmentation. The recorded decision is what says reduction, and the pool
+/// booking computed from the short's lot is recorded on the cover beside the
+/// marker.
+#[test]
+fn a_booked_wildcard_cover_of_a_short_records_a_reduction_and_applies() {
+    let mut engine = BookingEngine::with_method(BookingMethod::Strict);
+    let mut short = Posting::new("Assets:Short", amount("-10", "X"));
+    short.cost = Some(Box::new(spec("100.00", "USD", 1)));
+    engine
+        .apply(&Transaction::new(date(1), "open a short").with_synthesized_posting(short))
+        .expect("the short lot applies");
+
+    let mut close = Posting::new("Assets:Short", amount("5", "X"));
+    close.cost = Some(Box::new(CostSpec {
+        number: None,
+        currency: None,
+        date: None,
+        label: None,
+        merge: true,
+    }));
+    let txn = Transaction::new(date(2), "cover 5 of the short").with_synthesized_posting(close);
+    let booked = engine.book(&txn).expect("the cover books");
+
+    let cover = &booked.transaction.postings[0];
+    assert_eq!(
+        cover.booking,
+        rustledger_core::BookingDecision::Reduce,
+        "covering a short is a reduction whatever its sign"
+    );
+    let cost = cover
+        .cost
+        .as_deref()
+        .expect("the booked cover carries its pool");
+    assert!(cost.merge, "the merge marker is carried to application");
+    assert_eq!(
+        cost.number.and_then(|n| n.per_unit()),
+        Some("100".parse::<Decimal>().unwrap()),
+        "the pool the short's lot makes is recorded on the cover"
+    );
+
+    engine
+        .apply(&booked.transaction)
+        .expect("the booked cover applies");
+    let lots: Vec<(Decimal, Option<Decimal>)> = engine
+        .inventories()
+        .filter(|(account, _)| account.as_str() == "Assets:Short")
+        .flat_map(|(_, inv)| inv.positions())
+        .map(|p| (p.units.number, p.cost.as_ref().map(|c| c.number)))
+        .collect();
+    assert_eq!(
+        lots,
+        vec![(
+            "-5".parse::<Decimal>().unwrap(),
+            Some("100".parse().unwrap())
+        )],
+        "the cover must leave -5 of the short at the same cost"
+    );
+}
+
+/// A booked `{*}` cover whose pool has moved is reported and rolled back,
+/// with the recorded `Reduce` on it (#2390).
+///
+/// The sale before the refused cover must not stay applied: the rollback
+/// guard is what the record's reduction-or-augmentation word opens, and this
+/// is the `{*}`-cover shape the guard's `spec.merge` clause was widened for.
+#[test]
+fn a_rejected_booked_cover_of_a_short_rolls_back_whole() {
+    let mut engine = BookingEngine::with_method(BookingMethod::Strict);
+    let mut long = Posting::new("Assets:Stock", amount("10", "X"));
+    long.cost = Some(Box::new(spec("100.00", "USD", 1)));
+    let mut short = Posting::new("Assets:Short", amount("-10", "X"));
+    short.cost = Some(Box::new(spec("100.00", "USD", 1)));
+    engine
+        .apply(
+            &Transaction::new(date(1), "seed")
+                .with_synthesized_posting(long)
+                .with_synthesized_posting(short),
+        )
+        .expect("the seed applies");
+
+    // Booked: a sale of 5 beside a `{*}` cover of 5 of the short, in ONE
+    // transaction -- so the sale is applied first and must roll back with
+    // the refused cover.
+    let mut sell = Posting::new("Assets:Stock", amount("-5", "X"));
+    sell.cost = Some(Box::new(spec("100.00", "USD", 1)));
+    let mut close = Posting::new("Assets:Short", amount("5", "X"));
+    close.cost = Some(Box::new(CostSpec {
+        number: None,
+        currency: None,
+        date: None,
+        label: None,
+        merge: true,
+    }));
+    let txn = Transaction::new(date(2), "sell and cover together")
+        .with_synthesized_posting(sell)
+        .with_synthesized_posting(close);
+    let booked = engine.book(&txn).expect("the transaction books");
+    assert_eq!(
+        booked.transaction.postings[1].booking,
+        rustledger_core::BookingDecision::Reduce,
+        "the cover is booked as a reduction whatever its sign"
+    );
+
+    // Move the pool the cover booked against: a second short at 300.
+    let mut extra = Posting::new("Assets:Short", amount("-10", "X"));
+    extra.cost = Some(Box::new(spec("300.00", "USD", 3)));
+    engine
+        .apply(&Transaction::new(date(3), "second short").with_synthesized_posting(extra))
+        .expect("the second short applies");
+
+    let err = engine
+        .apply(&booked.transaction)
+        .expect_err("a pool that has moved is refused when realizing the booked ledger");
+    assert!(
+        format!("{err}").contains("100"),
+        "the refusal must name the recorded pool, got: {err}"
+    );
+
+    // The sale before the refusal is rolled back whole.
+    let mut longs: Vec<(Decimal, Option<Decimal>)> = engine
+        .inventories()
+        .filter(|(account, _)| account.as_str() == "Assets:Stock")
+        .flat_map(|(_, inv)| inv.positions())
+        .filter(|p| !p.is_empty())
+        .map(|p| (p.units.number, p.cost.as_ref().map(|c| c.number)))
+        .collect();
+    longs.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(
+        longs,
+        vec![(
+            "10".parse::<Decimal>().unwrap(),
+            Some("100".parse().unwrap())
+        )],
+        "the sale must not stay applied"
+    );
+    let mut shorts: Vec<(Decimal, Option<Decimal>)> = engine
+        .inventories()
+        .filter(|(account, _)| account.as_str() == "Assets:Short")
+        .flat_map(|(_, inv)| inv.positions())
+        .filter(|p| !p.is_empty())
+        .map(|p| (p.units.number, p.cost.as_ref().map(|c| c.number)))
+        .collect();
+    shorts.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    assert_eq!(
+        shorts,
+        vec![
+            (
+                "-10".parse::<Decimal>().unwrap(),
+                Some("100".parse().unwrap())
+            ),
+            (
+                "-10".parse::<Decimal>().unwrap(),
+                Some("300".parse().unwrap())
+            ),
+        ],
+        "both shorts must be untouched"
+    );
+}
+
+/// A positive-units cover booked as `Reduce` whose lot is gone fails and
+/// rolls back the cover before it, on the record alone (#2390).
+///
+/// No merge marker and no negative units in the transaction: the undo log is
+/// open only because booking recorded a reduction on a cover whose sign says
+/// augmentation. Drop `booking == BookingDecision::Reduce` from
+/// `has_reduction` and this reaches the "guard is unsound" assertion instead
+/// of reporting.
+#[test]
+fn a_failing_booked_cover_rolls_back_on_the_record_alone() {
+    let mut engine = BookingEngine::with_method(BookingMethod::Strict);
+    for account in ["Assets:ShortA", "Assets:ShortB"] {
+        let mut short = Posting::new(account, amount("-10", "X"));
+        short.cost = Some(Box::new(spec("100.00", "USD", 1)));
+        engine
+            .apply(&Transaction::new(date(1), "open a short").with_synthesized_posting(short))
+            .expect("the short applies");
+    }
+
+    // Booked covers of both shorts: positive units, plain cost specs, both
+    // recorded as reductions.
+    let mut cover_a = Posting::new("Assets:ShortA", amount("5", "X"));
+    cover_a.cost = Some(Box::new(spec("100.00", "USD", 1)));
+    let mut cover_b = Posting::new("Assets:ShortB", amount("5", "X"));
+    cover_b.cost = Some(Box::new(spec("100.00", "USD", 1)));
+    let txn = Transaction::new(date(2), "cover 5 of each short")
+        .with_synthesized_posting(cover_a)
+        .with_synthesized_posting(cover_b);
+    let booked = engine.book(&txn).expect("the covers book");
+    assert!(
+        booked
+            .transaction
+            .postings
+            .iter()
+            .all(|p| p.booking == rustledger_core::BookingDecision::Reduce),
+        "both covers record Reduce whatever their sign"
+    );
+
+    // Cover short B whole, outside the booked transaction: the booked cover
+    // of B will find no lot.
+    let mut close_b = Posting::new("Assets:ShortB", amount("10", "X"));
+    close_b.cost = Some(Box::new(spec("100.00", "USD", 1)));
+    engine
+        .apply(&Transaction::new(date(3), "close B").with_synthesized_posting(close_b))
+        .expect("closing B applies");
+
+    let err = engine
+        .apply(&booked.transaction)
+        .expect_err("a reduction that finds no lot is an error, not a silent skip");
+    let rendered = format!("{err}");
+    assert!(
+        rendered.contains("Assets:ShortB") || rendered.contains("lot"),
+        "the error must name the account or the missing lot, got: {rendered}"
+    );
+
+    // The cover of A -- the earlier posting of the failing transaction --
+    // rolled back whole.
+    let lots: Vec<(Decimal, Option<Decimal>)> = engine
+        .inventories()
+        .filter(|(account, _)| account.as_str() == "Assets:ShortA")
+        .flat_map(|(_, inv)| inv.positions())
+        .filter(|p| !p.is_empty())
+        .map(|p| (p.units.number, p.cost.as_ref().map(|c| c.number)))
+        .collect();
+    assert_eq!(
+        lots,
+        vec![(
+            "-10".parse::<Decimal>().unwrap(),
+            Some("100".parse().unwrap())
+        )],
+        "the cover of A must not stay applied"
+    );
+}

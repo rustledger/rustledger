@@ -296,6 +296,50 @@ fn an_existing_declared_label_is_deduplicated() {
     );
 }
 
+/// The network path's pre-fetch `--clobber` skip — the copy in
+/// `run_with_writer`, not the `--source-cmd` one — keys on the declared
+/// quote as well: an existing `GBX` directive for the requested date is
+/// matched before any fetch happens. (The skip fires first, so no network
+/// access is possible here.)
+#[test]
+fn the_network_path_skips_an_existing_declared_label_before_fetching() {
+    let dir = TempDir::new().unwrap();
+    let file = dir.path().join("main.beancount");
+    std::fs::write(
+        &file,
+        "2024-01-01 commodity BNZL\n2024-01-15 price BNZL 2770.0 GBX\n",
+    )
+    .unwrap();
+    let out = Command::new(env!("CARGO_BIN_EXE_rledger"))
+        .env("XDG_CACHE_HOME", dir.path())
+        .args([
+            "price",
+            "BNZL",
+            "-b",
+            "--source",
+            "coinbase",
+            "--date",
+            "2024-01-15",
+            "--currency",
+            "GBX",
+            "-f",
+            file.to_str().unwrap(),
+            "--verbose",
+        ])
+        .output()
+        .expect("rledger price should execute");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("skipped (existing price for 2024-01-15 GBX;"),
+        "the network pre-fetch skip must key on the declared quote; stderr:\n{stderr}"
+    );
+    assert!(
+        !stdout.contains("price BNZL"),
+        "nothing may be written; stdout:\n{stdout}"
+    );
+}
+
 /// The other half of the same rule, and the upgrade hazard it names: a
 /// directive an older rledger wrote with the source's word (`GBP`) does NOT
 /// match, so the correctly-labeled `GBX` directive is written beside it —
@@ -335,6 +379,24 @@ fn a_bad_declared_quote_is_named_as_the_declaration() {
     assert!(
         !stderr.contains("price source `sh` returned the currency \"GBp\""),
         "the source returned GBP, not GBp — it must not be blamed; stderr:\n{stderr}"
+    );
+
+    // When the declaration and the source word coincide and are both
+    // invalid, the declaration is still what made the label: it is named,
+    // with the source's word for contrast.
+    let dir = TempDir::new().unwrap();
+    let line = serde_json::json!({ "price": "2770.0", "currency": "GBp" }).to_string();
+    let out = run_price(&dir, &line, Some("GBp"), true);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(!stdout.contains("price BNZL"), "stdout:\n{stdout}");
+    assert!(
+        stderr.contains("the declared quote currency \"GBp\" is not a valid beancount commodity"),
+        "the declaration made the label and is named; stderr:\n{stderr}"
+    );
+    assert!(
+        !stderr.contains("price source `sh` returned the currency \"GBp\""),
+        "the blame must not fall on the source; stderr:\n{stderr}"
     );
 }
 

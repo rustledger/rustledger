@@ -957,23 +957,26 @@ fn price_label(response: &crate::cmd::price::PriceResponse, declared: &str) -> R
 ///
 /// Only the beancount form is checked: the plain `SYMBOL: price CURRENCY`
 /// form is display, not ledger text.
+/// Judge the label a `-b` directive would carry. The message names whatever
+/// produced the label: the source when nothing declared the quote (the
+/// label is then the source's own word), the declaration when one did (the
+/// label is then the declaration's, exact or family-relabeled), so a bad
+/// `--currency GBp` is never reported as the source's fault.
 fn check_beancount_currency(
     currency: &str,
     response: &crate::cmd::price::PriceResponse,
+    declared: Option<&str>,
 ) -> Result<()> {
     if !rustledger_parser::is_valid_currency(currency) {
-        if currency == response.currency {
-            anyhow::bail!(
-                "price source `{}` returned the currency {currency:?}, which is not a valid \
-                 beancount commodity (commodities are upper-case, like `USD` or `EUR`); \
-                 no price directive was written",
-                response.source
-            );
+        if let Some(declared) = declared {
+            return Err(invalid_declared_err(declared, &response.currency));
         }
-        // The label is the declared quote (#2731), which the source did not
-        // say: name the declaration, not the source, or the message points
-        // the user at the wrong thing.
-        return Err(invalid_declared_err(currency, &response.currency));
+        anyhow::bail!(
+            "price source `{}` returned the currency {currency:?}, which is not a valid \
+             beancount commodity (commodities are upper-case, like `USD` or `EUR`); \
+             no price directive was written",
+            response.source
+        );
     }
     Ok(())
 }
@@ -1010,7 +1013,7 @@ fn emit_price(
         response.currency.clone()
     };
     if args.beancount
-        && let Err(e) = check_beancount_currency(&label, response)
+        && let Err(e) = check_beancount_currency(&label, response, declared)
     {
         fetch_failed(err_out, args.verbose, symbol, &e);
         return Ok(());
@@ -1797,10 +1800,17 @@ mod tests {
         assert_eq!(price_label(&resp("GBp"), "GBX").unwrap(), "GBX");
         assert_eq!(price_label(&resp("ZAc"), "ZAR").unwrap(), "ZAR");
         assert_eq!(price_label(&resp("ILA"), "ILS").unwrap(), "ILS");
-        // A commodity from another family is a mismatch, not a relabel.
+        // A commodity from another family is a mismatch, not a relabel —
+        // this is the CHANGELOG's breaking-change example (`--currency USD`
+        // on a source answering `GBP`).
         let err = price_label(&resp("EUR"), "GBX").unwrap_err().to_string();
         assert!(
             err.contains("returned a price in EUR for the GBX pair"),
+            "{err}"
+        );
+        let err = price_label(&resp("GBP"), "USD").unwrap_err().to_string();
+        assert!(
+            err.contains("returned a price in GBP for the USD pair"),
             "{err}"
         );
         // Garbage that names no family member is the #2715 refusal.

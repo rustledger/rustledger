@@ -917,7 +917,7 @@ fn invalid_declared_err(declared: &str, src: &str) -> anyhow::Error {
 /// Label a fetched price with the quote currency the pair declared (#2731),
 /// the number untouched. The source's word is a sanity check on the
 /// declaration, deliberately NOT a validity check of its own: a same-family
-/// spelling (`GBp`, `GBp` for `GBX`) is accepted even though it is no
+/// spelling (`GBP`/`GBp` for `GBX`) is accepted even though it is no
 /// commodity — the label is the declaration's, and `check_beancount_currency`
 /// then judges that. Outside the family, an invalid source word is the #2715
 /// source refusal, an invalid declaration is named as the declaration, and

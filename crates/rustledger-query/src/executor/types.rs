@@ -769,6 +769,7 @@ impl Table {
 
     /// The `i`th row, with its origin.
     pub(crate) fn row(&self, i: usize) -> TableRow<'_> {
+        self.assert_lockstep();
         TableRow::at(&self.rows, &self.origins, i)
     }
 
@@ -781,6 +782,19 @@ impl Table {
             self.origins.push(origin);
         }
         self.rows.push(row);
+        self.assert_lockstep();
+    }
+
+    /// Hard assert (not `debug_assert!`): the invariant is load-bearing
+    /// for correctness; a release-mode mismatch would silently hand a row
+    /// the wrong posting's origin, or none at all. Mirrors
+    /// [`QueryResult::assert_lockstep`], for the table half of the same
+    /// sidecar (#2442).
+    fn assert_lockstep(&self) {
+        assert!(
+            self.origins.is_empty() || self.origins.len() == self.rows.len(),
+            "Table invariant violated: origins must be empty or as long as rows"
+        );
     }
 
     /// Mark columns as omitted from `SELECT *` expansion.

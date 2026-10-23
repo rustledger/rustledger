@@ -42,9 +42,12 @@ pub struct PriceArgs {
     #[arg(value_name = "SYMBOL")]
     pub symbols: Vec<String>,
 
-    /// Base currency for price quotes.
-    #[arg(short = 'c', long, default_value = "USD")]
-    pub currency: String,
+    /// Quote currency for price quotes. A quote currency a commodity's
+    /// `price:` metadata, a config mapping or this flag declares labels the
+    /// written price (#2731); with none of them, the request falls back to
+    /// `USD` and the written price keeps the source's own word.
+    #[arg(short = 'c', long)]
+    pub currency: Option<String>,
 
     /// Date for prices (YYYY-MM-DD, defaults to today).
     #[arg(short, long)]
@@ -400,29 +403,31 @@ pub fn run_with_writer<W: Write>(
         // `price: "USD:yahoo/AAPL CAD:google/AAPL"` produces two fetches
         // (matches bean-price's one-job-per-(base, quote) behavior). Single-
         // quote and CLI-only symbols collapse to one entry via the legacy
-        // resolve_quote_currency path.
-        let per_quote_jobs: Vec<(String, Option<CommodityMapping>)> = discovered
+        // resolve_quote_currency path. The third field is whether anything
+        // declared the quote (see `resolve_quote_currency`): a declared quote
+        // labels the written price (#2731), an undeclared one does not.
+        let per_quote_jobs: Vec<(String, Option<CommodityMapping>, bool)> = discovered
             .get(symbol)
             .filter(|info| !info.quote_specs.is_empty())
             .map_or_else(
                 || {
-                    let qc = resolve_quote_currency(
+                    let (qc, declared) = resolve_quote_currency(
                         symbol,
                         &discovered,
                         &price_config.mapping,
-                        &args.currency,
+                        args.currency.as_deref(),
                     );
-                    vec![(qc, None)]
+                    vec![(qc, None, declared)]
                 },
                 |info| {
                     info.quote_specs
                         .iter()
-                        .map(|qs| (qs.quote_currency.clone(), qs.mapping.clone()))
+                        .map(|qs| (qs.quote_currency.clone(), qs.mapping.clone(), true))
                         .collect()
                 },
             );
 
-        for (effective_currency, per_spec_mapping) in per_quote_jobs {
+        for (effective_currency, per_spec_mapping, quote_declared) in per_quote_jobs {
             // A commodity is never priced in itself. Skip self-referential
             // (base == quote) jobs — these arise when `--undeclared` picks up
             // the operating/quote currency (e.g. USD held as cash, or seen as a
@@ -463,20 +468,22 @@ pub fn run_with_writer<W: Write>(
                 // from `date` (e.g. ECB on weekends). Without this, a "latest"
                 // price cached on Friday would re-emit the Friday `price`
                 // directive on Saturday and Sunday runs. The currency is the
-                // declared quote (#2731), the label the directive is written
-                // with, as the pre-fetch dedup above already uses it.
+                // one the directive would carry — the declared quote when one
+                // was declared (#2731), the source's own word otherwise — as
+                // the pre-fetch dedup above already keys on the request's.
+                let label_currency = if quote_declared {
+                    effective_currency.as_str()
+                } else {
+                    cached.currency.as_str()
+                };
                 if !args.clobber
-                    && existing_prices.contains(&dedup_key(
-                        symbol,
-                        &effective_currency,
-                        cached.date,
-                    ))
+                    && existing_prices.contains(&dedup_key(symbol, label_currency, cached.date))
                 {
                     if args.verbose {
                         let _ = writeln!(
                             err_out,
                             "{symbol}: skipped from cache (cached date {} {} matches existing directive)",
-                            cached.date, effective_currency
+                            cached.date, label_currency
                         );
                     }
                     continue;
@@ -484,7 +491,14 @@ pub fn run_with_writer<W: Write>(
                 if args.verbose {
                     let _ = writeln!(err_out, "{symbol}: cached (source: {})", cached.source);
                 }
-                emit_price(out, err_out, args, symbol, &cached, &effective_currency)?;
+                emit_price(
+                    out,
+                    err_out,
+                    args,
+                    symbol,
+                    &cached,
+                    quote_declared.then_some(effective_currency.as_str()),
+                )?;
                 continue;
             }
 
@@ -546,12 +560,18 @@ pub fn run_with_writer<W: Write>(
                     // output can carry its own date). The pre-fetch skip uses the
                     // requested date, so duplicates can still slip through. Re-check
                     // here against the actual response date. The currency is the
-                    // declared quote (#2731), the label the directive is written
-                    // with, so it matches the existing directives' own labels.
+                    // one the directive would carry — the declared quote when one
+                    // was declared (#2731), the source's own word otherwise — so
+                    // it matches the existing directives' own labels.
+                    let label_currency = if quote_declared {
+                        effective_currency.as_str()
+                    } else {
+                        response.currency.as_str()
+                    };
                     if !args.clobber
                         && existing_prices.contains(&dedup_key(
                             symbol,
-                            &effective_currency,
+                            label_currency,
                             response.date,
                         ))
                     {
@@ -559,12 +579,19 @@ pub fn run_with_writer<W: Write>(
                             let _ = writeln!(
                                 err_out,
                                 "{symbol}: skipped after fetch (response dated {} {} matches existing directive)",
-                                response.date, effective_currency
+                                response.date, label_currency
                             );
                         }
                         continue;
                     }
-                    emit_price(out, err_out, args, symbol, &response, &effective_currency)?;
+                    emit_price(
+                        out,
+                        err_out,
+                        args,
+                        symbol,
+                        &response,
+                        quote_declared.then_some(effective_currency.as_str()),
+                    )?;
                 }
                 Err(e) => fetch_failed(err_out, args.verbose, symbol, &e),
             }
@@ -624,31 +651,41 @@ fn build_combined_mapping(
     combined
 }
 
-/// Resolve the effective quote currency for a single symbol.
+/// Resolve the effective quote currency for a single symbol, and whether
+/// anything declared it.
 ///
 /// Precedence (high to low), per issue #952:
 /// 1. `quote_currency:` metadata on the commodity directive (or the first
 ///    `price:` entry's quote currency), captured by `discovery` at load time
 /// 2. `quote_currency = "..."` in the `[price.mapping.X]` config-file block
-/// 3. The global `--currency` flag default
+/// 3. The global `--currency` flag
+///
+/// The `bool` is `true` when one of those declared the quote — a claim about
+/// the unit the number is in, which labels the written price (#2731). With
+/// none of them the request falls back to `USD` (`false`): a request default,
+/// not a claim, so the written price keeps the source's own word, as it did
+/// before #2731.
 fn resolve_quote_currency(
     symbol: &str,
     discovered: &HashMap<String, DiscoveredCommodity>,
     mapping: &HashMap<String, CommodityMapping>,
-    default_currency: &str,
-) -> String {
+    default_currency: Option<&str>,
+) -> (String, bool) {
     if let Some(c) = discovered
         .get(symbol)
         .and_then(|d| d.quote_currency.as_deref())
     {
-        return c.to_string();
+        return (c.to_string(), true);
     }
     if let Some(CommodityMapping::Detailed(d)) = mapping.get(symbol)
         && let Some(c) = &d.quote_currency
     {
-        return c.clone();
+        return (c.clone(), true);
     }
-    default_currency.to_string()
+    match default_currency {
+        Some(c) => (c.to_string(), true),
+        None => ("USD".to_string(), false),
+    }
 }
 
 /// Fetch a price using a specific source.
@@ -694,27 +731,33 @@ fn dump_fetch_plan(
     let fetch_date = date.unwrap_or_else(|| jiff::Zoned::now().date());
 
     for symbol in symbols {
-        // Expand to one row per declared quote currency, matching the network
+        // Expand to one row per quote currency, matching the network
         // and source-cmd paths. Each row dumps the attempts that quote spec
-        // would produce.
-        let per_quote_jobs: Vec<(String, Option<CommodityMapping>)> = discovered
+        // would produce. The plan shows the request's quote currency (what
+        // the fetch asks for); the written label is `emit_price`'s business
+        // (#2731), so the third field is unused here.
+        let per_quote_jobs: Vec<(String, Option<CommodityMapping>, bool)> = discovered
             .get(symbol)
             .filter(|info| !info.quote_specs.is_empty())
             .map_or_else(
                 || {
-                    let qc =
-                        resolve_quote_currency(symbol, discovered, config_mapping, &args.currency);
-                    vec![(qc, None)]
+                    let (qc, declared) = resolve_quote_currency(
+                        symbol,
+                        discovered,
+                        config_mapping,
+                        args.currency.as_deref(),
+                    );
+                    vec![(qc, None, declared)]
                 },
                 |info| {
                     info.quote_specs
                         .iter()
-                        .map(|qs| (qs.quote_currency.clone(), qs.mapping.clone()))
+                        .map(|qs| (qs.quote_currency.clone(), qs.mapping.clone(), true))
                         .collect()
                 },
             );
 
-        for (currency, per_spec_mapping) in per_quote_jobs {
+        for (currency, per_spec_mapping, _quote_declared) in per_quote_jobs {
             // Skip self-referential (base == quote) jobs so `--dry-run` matches
             // the fetch path: a commodity is never priced in itself. See the
             // identical guard in the fetch loop above — case-insensitive like
@@ -881,7 +924,7 @@ fn price_label(response: &crate::cmd::price::PriceResponse, declared: &str) -> R
 }
 
 /// Refuse a currency `rledger price -b` cannot write as a beancount
-/// commodity, naming the source (#2715).
+/// commodity, naming where it came from (#2715).
 ///
 /// The label goes into ledger text verbatim, so one with a space, a quote, a
 /// newline, a control character or lower case would write a line that does
@@ -892,12 +935,27 @@ fn price_label(response: &crate::cmd::price::PriceResponse, declared: &str) -> R
 ///
 /// Only the beancount form is checked: the plain `SYMBOL: price CURRENCY`
 /// form is display, not ledger text.
-fn check_beancount_currency(currency: &str, source: &str) -> Result<()> {
+fn check_beancount_currency(
+    currency: &str,
+    response: &crate::cmd::price::PriceResponse,
+) -> Result<()> {
     if !rustledger_parser::is_valid_currency(currency) {
+        if currency == response.currency {
+            anyhow::bail!(
+                "price source `{}` returned the currency {currency:?}, which is not a valid \
+                 beancount commodity (commodities are upper-case, like `USD` or `EUR`); \
+                 no price directive was written",
+                response.source
+            );
+        }
+        // The label is the declared quote (#2731), which the source did not
+        // say: name the declaration, not the source, or the message points
+        // the user at the wrong thing.
         anyhow::bail!(
-            "price source `{source}` returned the currency {currency:?}, which is not a valid \
-             beancount commodity (commodities are upper-case, like `USD` or `EUR`); \
-             no price directive was written"
+            "the declared quote currency {currency:?} is not a valid beancount commodity \
+             (commodities are upper-case, like `USD` or `EUR`); the source returned {:?}; \
+             no price directive was written",
+            response.currency
         );
     }
     Ok(())
@@ -906,32 +964,40 @@ fn check_beancount_currency(currency: &str, source: &str) -> Result<()> {
 /// Write `response` as `rledger price` prints it, or report why it cannot
 /// be written as a beancount `price` directive (see [`price_label`] and
 /// [`check_beancount_currency`]) the way a failed fetch is reported.
+///
+/// `declared` is the quote currency the pair declared, when one was (see
+/// [`resolve_quote_currency`]); `None` means nothing did, and the written
+/// price keeps the source's own word, as it did before #2731.
 fn emit_price(
     handle: &mut impl Write,
     err_out: &mut Messages<'_>,
     args: &PriceArgs,
     symbol: &str,
     response: &crate::cmd::price::PriceResponse,
-    declared: &str,
+    declared: Option<&str>,
 ) -> Result<()> {
-    let label = if args.beancount {
-        let label = match price_label(response, declared) {
+    // The label rule is the ledger text's: only `-b` output is labeled with
+    // the declared quote. The plain form is display and keeps printing the
+    // source's own word, unchecked, as #2715 documented (#2720's contract).
+    let label = if args.beancount
+        && let Some(declared) = declared
+    {
+        match price_label(response, declared) {
             Ok(label) => label,
             Err(e) => {
                 fetch_failed(err_out, args.verbose, symbol, &e);
                 return Ok(());
             }
-        };
-        if let Err(e) = check_beancount_currency(&label, &response.source) {
-            fetch_failed(err_out, args.verbose, symbol, &e);
-            return Ok(());
         }
-        label
     } else {
-        // The plain `SYMBOL: price CURRENCY` form is display, not ledger
-        // text, and prints the source's own word, unchecked (#2715).
         response.currency.clone()
     };
+    if args.beancount
+        && let Err(e) = check_beancount_currency(&label, response)
+    {
+        fetch_failed(err_out, args.verbose, symbol, &e);
+        return Ok(());
+    }
     write_price(
         handle,
         symbol,
@@ -1043,11 +1109,12 @@ fn run_with_external_command<W: Write>(
     let source = ExternalCommandSource::new(command_parts, timeout, HashMap::new());
 
     for symbol in symbols {
-        // Expand to one fetch per declared quote currency, matching the
-        // network path. Multi-currency `price:` metadata produces one request
+        // Expand to one fetch per quote currency, matching the network
+        // path. Multi-currency `price:` metadata produces one request
         // per (base, quote) pair; single-quote and CLI-only symbols collapse
-        // to one entry via resolve_quote_currency.
-        let per_quote_currencies: Vec<String> = discovered
+        // to one entry via resolve_quote_currency. The second field is
+        // whether anything declared the quote (see `resolve_quote_currency`).
+        let per_quote_currencies: Vec<(String, bool)> = discovered
             .get(symbol)
             .filter(|info| !info.quote_specs.is_empty())
             .map_or_else(
@@ -1056,18 +1123,18 @@ fn run_with_external_command<W: Write>(
                         symbol,
                         discovered,
                         &price_config.mapping,
-                        &args.currency,
+                        args.currency.as_deref(),
                     )]
                 },
                 |info| {
                     info.quote_specs
                         .iter()
-                        .map(|qs| qs.quote_currency.clone())
+                        .map(|qs| (qs.quote_currency.clone(), true))
                         .collect()
                 },
             );
 
-        for effective_currency in per_quote_currencies {
+        for (effective_currency, quote_declared) in per_quote_currencies {
             // Skip self-referential (base == quote) jobs, same as the network
             // fetch and --dry-run paths: a commodity is never priced in itself
             // (guards against `--undeclared` picking up the operating/quote
@@ -1104,12 +1171,18 @@ fn run_with_external_command<W: Write>(
                     // beancount form) can carry its own date that differs from
                     // the requested date. Skip writing if the actual response
                     // duplicates an existing directive. The currency is the
-                    // declared quote (#2731), the label the directive is written
-                    // with.
+                    // one the directive would carry — the declared quote when
+                    // one was declared (#2731), the source's own word
+                    // otherwise.
+                    let label_currency = if quote_declared {
+                        effective_currency.as_str()
+                    } else {
+                        response.currency.as_str()
+                    };
                     if !args.clobber
                         && existing_prices.contains(&dedup_key(
                             symbol,
-                            &effective_currency,
+                            label_currency,
                             response.date,
                         ))
                     {
@@ -1117,7 +1190,7 @@ fn run_with_external_command<W: Write>(
                             let _ = writeln!(
                                 err_out,
                                 "{symbol}: skipped after fetch (response dated {} {} matches existing directive)",
-                                response.date, effective_currency
+                                response.date, label_currency
                             );
                         }
                         continue;
@@ -1128,7 +1201,7 @@ fn run_with_external_command<W: Write>(
                         args,
                         symbol,
                         &response,
-                        &effective_currency,
+                        quote_declared.then_some(effective_currency.as_str()),
                     )?;
                 }
                 Err(e) => fetch_failed(err_out, args.verbose, symbol, &e),
@@ -1184,7 +1257,8 @@ mod tests {
     fn test_price_args_parsing() {
         let args = Args::parse_from(["price", "AAPL", "MSFT"]);
         assert_eq!(args.price_args.symbols, vec!["AAPL", "MSFT"]);
-        assert_eq!(args.price_args.currency, "USD");
+        // No `--currency`, no default: the quote is undeclared (#2731).
+        assert_eq!(args.price_args.currency, None);
         assert!(!args.price_args.beancount);
     }
 
@@ -1201,7 +1275,7 @@ mod tests {
             "ETH",
         ]);
         assert_eq!(args.price_args.symbols, vec!["BTC", "ETH"]);
-        assert_eq!(args.price_args.currency, "EUR");
+        assert_eq!(args.price_args.currency.as_deref(), Some("EUR"));
         assert!(args.price_args.beancount);
         assert_eq!(args.price_args.mapping.len(), 2);
     }
@@ -1322,8 +1396,8 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_quote_currency("AAPL", &discovered, &mapping, "USD"),
-            "EUR"
+            resolve_quote_currency("AAPL", &discovered, &mapping, Some("USD")),
+            ("EUR".to_string(), true)
         );
     }
 
@@ -1343,18 +1417,25 @@ mod tests {
         );
 
         assert_eq!(
-            resolve_quote_currency("AUD", &discovered, &mapping, "USD"),
-            "EUR"
+            resolve_quote_currency("AUD", &discovered, &mapping, Some("USD")),
+            ("EUR".to_string(), true)
         );
     }
 
     #[test]
     fn test_resolve_quote_currency_uses_default_when_unset() {
+        // Nothing declared: the request falls back to USD, undeclared — the
+        // written price keeps the source's word then (#2731).
         let discovered = HashMap::new();
         let mapping = HashMap::new();
         assert_eq!(
-            resolve_quote_currency("AAPL", &discovered, &mapping, "USD"),
-            "USD"
+            resolve_quote_currency("AAPL", &discovered, &mapping, None),
+            ("USD".to_string(), false)
+        );
+        // An explicit `--currency` is a declaration, even of USD.
+        assert_eq!(
+            resolve_quote_currency("AAPL", &discovered, &mapping, Some("USD")),
+            ("USD".to_string(), true)
         );
     }
 
@@ -1366,8 +1447,8 @@ mod tests {
         let mut mapping = HashMap::new();
         mapping.insert("VTI".to_string(), CommodityMapping::Simple("VTI".into()));
         assert_eq!(
-            resolve_quote_currency("VTI", &discovered, &mapping, "USD"),
-            "USD"
+            resolve_quote_currency("VTI", &discovered, &mapping, Some("USD")),
+            ("USD".to_string(), true)
         );
     }
 
@@ -1402,8 +1483,8 @@ mod tests {
         // given the raw config map; the call-site comment in `run`
         // documents the contract.
         assert_eq!(
-            resolve_quote_currency("AUD", &discovered, &mapping, "USD"),
-            "EUR"
+            resolve_quote_currency("AUD", &discovered, &mapping, Some("USD")),
+            ("EUR".to_string(), true)
         );
     }
 
@@ -1423,8 +1504,8 @@ mod tests {
             }),
         );
         assert_eq!(
-            resolve_quote_currency("AAPL", &discovered, &mapping, "USD"),
-            "USD"
+            resolve_quote_currency("AAPL", &discovered, &mapping, Some("USD")),
+            ("USD".to_string(), true)
         );
     }
 

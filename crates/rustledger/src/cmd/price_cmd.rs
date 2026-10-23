@@ -887,6 +887,17 @@ fn same_unit_family(a: &str, b: &str) -> bool {
         .any(|family| family.contains(&a) && family.contains(&b))
 }
 
+/// The declaration, not the source, named a currency that is no commodity
+/// (#2731): name it as the problem, with what the source said for contrast,
+/// or the message points the user at the wrong thing.
+fn invalid_declared_err(declared: &str, src: &str) -> anyhow::Error {
+    anyhow::anyhow!(
+        "the declared quote currency {declared:?} is not a valid beancount commodity \
+         (commodities are upper-case, like `USD` or `EUR`); the source returned {src:?}; \
+         no price directive was written"
+    )
+}
+
 /// The currency the written price is labeled with (#2731).
 ///
 /// The quote currency the pair declared (`price: "GBX:yahoo/BNZL.L"`, or
@@ -903,25 +914,14 @@ fn same_unit_family(a: &str, b: &str) -> bool {
 /// - a valid commodity from another family (`EUR` for a `GBX:` pair) is a
 ///   mismatch to refuse, not relabel: the source answered with something
 ///   other than the pair that was asked for.
-/// The declaration, not the source, named a currency that is no commodity
-/// (#2731): name it as the problem, with what the source said for contrast,
-/// or the message points the user at the wrong thing.
-fn invalid_declared_err(declared: &str, src: &str) -> anyhow::Error {
-    anyhow::anyhow!(
-        "the declared quote currency {declared:?} is not a valid beancount commodity \
-         (commodities are upper-case, like `USD` or `EUR`); the source returned {src:?}; \
-         no price directive was written"
-    )
-}
-
-/// Label a fetched price with the quote currency the pair declared (#2731),
-/// the number untouched. The source's word is a sanity check on the
-/// declaration, deliberately NOT a validity check of its own: a same-family
-/// spelling (`GBP`/`GBp` for `GBX`) is accepted even though it is no
-/// commodity — the label is the declaration's, and `check_beancount_currency`
-/// then judges that. Outside the family, an invalid source word is the #2715
-/// source refusal, an invalid declaration is named as the declaration, and
-/// two valid commodities that are not one family are a mismatch to refuse.
+///
+/// The family check is deliberately NOT a validity check of its own: a
+/// same-family spelling (`GBP`/`GBp` for `GBX`) is accepted even though it
+/// is no commodity — the label is the declaration's, and
+/// [`check_beancount_currency`] then judges that. Outside the family, an
+/// invalid source word is the #2715 source refusal, an invalid declaration
+/// is named as the declaration ([`invalid_declared_err`]), and two valid
+/// commodities that are not one family are a mismatch to refuse.
 fn price_label(response: &crate::cmd::price::PriceResponse, declared: &str) -> Result<String> {
     let src = response.currency.as_str();
     if src == declared || same_unit_family(src, declared) {

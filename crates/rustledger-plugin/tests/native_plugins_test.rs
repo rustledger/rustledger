@@ -10907,6 +10907,280 @@ fn test_option_assignment_registered() {
     assert!(NativePluginRegistry::global().has("check_option_assignment"));
 }
 
+/// A booking-filled (interpolated) cash posting: units written as the
+/// solver filled them, marked `__automatic__` as the host does.
+fn interpolated(mut p: PostingData) -> PostingData {
+    use rustledger_plugin_types::{AUTOMATIC_META, MetaValueData};
+    p.metadata.push((
+        AUTOMATIC_META.to_string(),
+        MetaValueData::String("true".to_string()),
+    ));
+    p
+}
+
+const FEE_ACCT: &str = "Expenses:Broker:Commission";
+const SWEEP_ACCT: &str = "Assets:Broker:Sweep";
+const DIV_ACCT: &str = "Income:Trading:Dividends";
+
+/// Short put assigned: the option and stock legs with `extra` postings
+/// beside them (fee legs), settling `cash_num`.
+fn put_assignment_settled(
+    basis: &str,
+    cash_num: &str,
+    extra: Vec<PostingData>,
+) -> Vec<DirectiveWrapper> {
+    let mut postings = vec![
+        per_unit(leg(OPT_ACCT, "1", PUT), "300.00"),
+        per_unit(leg(STOCK_ACCT, "100", "AAPL"), basis),
+    ];
+    postings.extend(extra);
+    postings.push(cash(cash_num));
+    vec![
+        sto("2026-09-03", "1", PUT, "300.00"),
+        txn_of("2026-10-16", postings),
+    ]
+}
+
+/// Covered call assigned: `stock_leg` describes the sale, `cash_num` the
+/// settlement, `extra` any fee legs.
+fn call_assignment_settled(
+    stock_leg: PostingData,
+    cash_num: &str,
+    extra: Vec<PostingData>,
+) -> Vec<DirectiveWrapper> {
+    let mut postings = vec![per_unit(leg(OPT_ACCT, "1", CALL), "220.00"), stock_leg];
+    postings.extend(extra);
+    postings.push(cash(cash_num));
+    postings.push(leg(GAINS_ACCT, "-8220.00", "USD"));
+    vec![
+        txn_of(
+            "2026-01-02",
+            vec![
+                per_unit(leg(STOCK_ACCT, "100", "AAPL"), "200.00"),
+                cash("0"),
+            ],
+        ),
+        sto("2026-09-04", "1", CALL, "220.00"),
+        txn_of("2026-10-16", postings),
+    ]
+}
+
+/// Commission shape A (fee expensed): basis at strike − premium, the
+/// commission on its own Expenses leg, cash short by the fee.
+#[test]
+fn test_option_assignment_put_commission_expensed() {
+    let errors = assignment_errors(put_assignment_settled(
+        "222.00",
+        "-22505.00",
+        vec![leg(FEE_ACCT, "5.00", "USD")],
+    ));
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// Commission shape B (fee folded): basis = strike − premium + fee.
+#[test]
+fn test_option_assignment_put_commission_folded() {
+    let errors = assignment_errors(put_assignment_settled("222.05", "-22505.00", vec![]));
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// Commission shape C (fee partly expensed, partly folded).
+#[test]
+fn test_option_assignment_put_commission_partly_expensed() {
+    let errors = assignment_errors(put_assignment_settled(
+        "222.03",
+        "-22505.00",
+        vec![leg(FEE_ACCT, "2.00", "USD")],
+    ));
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// Call shape A (fee expensed): proceeds at strike + premium, the
+/// commission on its own Expenses leg, cash short by the fee.
+#[test]
+fn test_option_assignment_call_commission_expensed() {
+    let errors = assignment_errors(call_assignment_settled(
+        priced(sold_aapl(), "282.20", false),
+        "27995.00",
+        vec![leg(FEE_ACCT, "5.00", "USD")],
+    ));
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// Call shape B (fee folded): proceeds = strike + premium − fee.
+#[test]
+fn test_option_assignment_call_commission_folded() {
+    let errors = assignment_errors(call_assignment_settled(
+        priced(sold_aapl(), "282.15", false),
+        "27995.00",
+        vec![],
+    ));
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// Call shape C (fee partly expensed, partly folded).
+#[test]
+fn test_option_assignment_call_commission_partly_expensed() {
+    let errors = assignment_errors(call_assignment_settled(
+        priced(sold_aapl(), "282.18", false),
+        "27995.00",
+        vec![leg(FEE_ACCT, "2.00", "USD")],
+    ));
+    assert_eq!(errors.len(), 0, "{errors:?}");
+}
+
+/// The elided-cash hazard from #2555: interpolation fills cash from the
+/// wrong basis. Guard 1 falls back to the exact rule and the missing
+/// premium is still caught, where a fee window read from the interpolated
+/// figure (22200.00 to 22500.00) would have swallowed the error.
+#[test]
+fn test_option_assignment_elided_cash_falls_back() {
+    let errors = assignment_errors(vec![
+        sto("2026-09-03", "1", PUT, "300.00"),
+        txn_of(
+            "2026-10-16",
+            vec![
+                per_unit(leg(OPT_ACCT, "1", PUT), "300.00"),
+                per_unit(leg(STOCK_ACCT, "100", "AAPL"), "225.00"),
+                interpolated(cash("-22800.00")),
+            ],
+        ),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016P00225000 assignment: AAPL basis 22500.00 USD, expected 22200.00 USD (strike 225 × 100 − premium 300.00)"
+    );
+}
+
+/// A second purchase in the same entry inflates the fee. Guard 2 falls
+/// back and the missing premium is still caught.
+#[test]
+fn test_option_assignment_extra_purchase_falls_back() {
+    let errors = assignment_errors(vec![
+        sto("2026-09-03", "1", PUT, "300.00"),
+        txn_of(
+            "2026-10-16",
+            vec![
+                per_unit(leg(OPT_ACCT, "1", PUT), "300.00"),
+                per_unit(leg(STOCK_ACCT, "100", "AAPL"), "225.00"),
+                per_unit(leg(STOCK_ACCT, "10", "MSFT"), "400.00"),
+                leg(GAINS_ACCT, "-300.00", "USD"),
+                cash("-26500.00"),
+            ],
+        ),
+    ]);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016P00225000 assignment: AAPL basis 22500.00 USD, expected 22200.00 USD (strike 225 × 100 − premium 300.00)"
+    );
+}
+
+/// Two assignments in one entry share the cash, so neither may read a fee
+/// from it: both fall back to the exact rule, and each flags the premium
+/// the fee window would have absorbed.
+#[test]
+fn test_option_assignment_two_groups_fall_back() {
+    let errors = assignment_errors(vec![
+        sto("2026-09-03", "1", PUT, "300.00"),
+        sto("2026-09-03", "1", "MSFT261016P00230000", "250.00"),
+        txn_of(
+            "2026-10-16",
+            vec![
+                per_unit(leg(OPT_ACCT, "1", PUT), "300.00"),
+                per_unit(leg(STOCK_ACCT, "100", "AAPL"), "222.05"),
+                per_unit(leg(OPT_ACCT, "1", "MSFT261016P00230000"), "250.00"),
+                per_unit(leg(STOCK_ACCT, "100", "MSFT"), "227.55"),
+                cash("-45260.00"),
+            ],
+        ),
+    ]);
+    assert_eq!(errors.len(), 2, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016P00225000 assignment: AAPL basis 22205.00 USD, expected 22200.00 USD (strike 225 × 100 − premium 300.00)"
+    );
+    assert_eq!(
+        errors[1].message,
+        "MSFT261016P00230000 assignment: MSFT basis 22755.00 USD, expected 22750.00 USD (strike 230 × 100 − premium 250.00)"
+    );
+}
+
+/// Sweep-fund settlement: a priced leg outside the group forces the exact
+/// rule, and the fee window must not read the sweep's cash.
+#[test]
+fn test_option_assignment_sweep_fund_falls_back() {
+    let errors = assignment_errors(put_assignment_settled(
+        "222.05",
+        "-22505.00",
+        vec![per_unit(leg(SWEEP_ACCT, "22505", "SWVXX"), "1.00")],
+    ));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016P00225000 assignment: AAPL basis 22205.00 USD, expected 22200.00 USD (strike 225 × 100 − premium 300.00)"
+    );
+}
+
+/// Cash in another currency, settled with `@`: the priced foreign leg
+/// forces the exact rule.
+#[test]
+fn test_option_assignment_foreign_cash_falls_back() {
+    let errors = assignment_errors(put_assignment_settled(
+        "222.05",
+        "-22505.00",
+        vec![priced(leg(CASH_ACCT, "100.00", "EUR"), "1.10", false)],
+    ));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016P00225000 assignment: AAPL basis 22205.00 USD, expected 22200.00 USD (strike 225 × 100 − premium 300.00)"
+    );
+}
+
+/// A dividend in the same entry: its income is not cash, so the proven fee
+/// is 0 and today's exact rule still applies.
+#[test]
+fn test_option_assignment_dividend_keeps_the_exact_rule() {
+    let errors = assignment_errors(put_assignment_settled(
+        "222.05",
+        "-22500.00",
+        vec![leg(DIV_ACCT, "-5.00", "USD")],
+    ));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016P00225000 assignment: AAPL basis 22205.00 USD, expected 22200.00 USD (strike 225 × 100 − premium 300.00)"
+    );
+}
+
+/// With a proven fee the error names the window it allows.
+#[test]
+fn test_option_assignment_put_error_names_the_fee_window() {
+    let errors = assignment_errors(put_assignment_settled("225.00", "-22505.00", vec![]));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016P00225000 assignment: AAPL basis 22500.00 USD, expected 22200.00 to 22205.00 USD (strike 225 × 100 − premium 300.00, + up to 5.00 in fees)"
+    );
+}
+
+/// The call's windowed error names its window too.
+#[test]
+fn test_option_assignment_call_error_names_the_fee_window() {
+    let errors = assignment_errors(call_assignment_settled(
+        priced(sold_aapl(), "283.00", false),
+        "27995.00",
+        vec![],
+    ));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016C00280000 assignment: AAPL proceeds 28300.00 USD, expected 28215.00 to 28220.00 USD (strike 280 × 100 + premium 220.00, − up to 5.00 in fees)"
+    );
+}
+
 // PT1: for any strike, premium, and contract count, a put assignment with
 // basis = strike × shares − premium passes, and one whose basis is off by
 // more than the half-cent-per-share tolerance fails exactly once. Same for

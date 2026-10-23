@@ -6,3 +6,4 @@
 # everyone who runs the test benefits from these saved cases.
 cc 069a3a8d13d363bfa5754dea4ccf9f397666b2c0199ec13f5fd445738e6d0196 # shrinks to strike_halves = 2, premium_cents = 1, contracts = 1, is_call = false, off_cents = 1
 cc aa7624cf0825673c02646525973de51364b2214cb1c16bf1911c58a14b9e7cd6 # shrinks to strike_halves = 2, premium_cents = 101, contracts = 1, is_call = false, off_cents = 1
+cc d4abc946d179452291243f7da66eee28e8b4aba04d9b8e3543a87f1a4a9d4f5a # shrinks to strike_halves = 11, premium_cents = 1, contracts = 1, is_call = true, off_cents = 1

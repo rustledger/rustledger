@@ -23,6 +23,27 @@
 //!    position (no stock held in that account before) may give its
 //!    proceeds as the short lot's cost instead.
 //!
+//! With a commission the entry settles beyond the strike value, and rule 3
+//! then accepts the range "fee expensed to fee folded" — but only when the
+//! entry is plainly one assignment and its cash is an independent witness
+//! (#2732): exactly one closing group, every cash posting written rather
+//! than booking-interpolated, and no posting carrying a cost or price
+//! outside the group's option and stock legs. The fee the window allows is
+//! the one the entry's cash proves it moved. Fees paid to acquire
+//! capitalize into basis (26 CFR §1.263(a)-4(c)(1)(i), (b)(1)(v),
+//! (e)(4)(iii)(B)); selling costs reduce the amount realized
+//! (§1.263(a)-1(e)(1)). When a guard fails, or there is no cash to measure
+//! a fee from, the exact figure is required: the safe direction, since at
+//! worst a fee-folded ledger gets flagged.
+//!
+//! Two things this window knowingly misses. An explicitly typed cash
+//! amount that is wrong by exactly the basis error still passes (only
+//! booking-interpolated cash forces the fallback); a `balance` assertion
+//! is what catches that. And a ledger whose basis matches its 1099-B —
+//! which carries the commission on the option's *opening* trade too — is
+//! flagged when it expensed that opening fee: a false alarm against the
+//! books, not a missed error.
+//!
 //! Puts and calls on one root are separate assignments, so a put assigned
 //! beside a call bought back in the same entry is still checked. Same-day
 //! entries are taken in beancount's `entry_sortkey` order (date, type,
@@ -49,8 +70,8 @@ use std::str::FromStr;
 use rust_decimal::Decimal;
 
 use crate::types::{
-    CostNumberData, DirectiveData, PluginError, PluginInput, PluginOp, PluginOutput, PostingData,
-    PriceAnnotationView,
+    CostNumberData, DirectiveData, PluginAccountTypes, PluginError, PluginInput, PluginOp,
+    PluginOutput, PostingData, PriceAnnotationView,
 };
 
 use super::super::{NativePlugin, RegularPlugin};
@@ -130,6 +151,97 @@ fn sum_totals(totals: impl Iterator<Item = Result<Decimal, Gap>>) -> Result<Deci
         Some(_) if missing => Err(Gap::Missing),
         Some(s) => Ok(s),
     }
+}
+
+/// Whether `account` is under one of the two cash roots the ledger
+/// configured. Equity is excluded: a settlement's cash belongs on the
+/// balance sheet's cash side (#2732).
+fn is_cash_account(account: &str, account_types: &PluginAccountTypes) -> bool {
+    let root = account.split(':').next().unwrap_or(account);
+    root == account_types.assets || root == account_types.liabilities
+}
+
+/// Whether `posting` is one of the entry's cash postings for the fee
+/// window: no cost, no price, in `currency`, on an Assets or Liabilities
+/// account (#2732).
+fn is_cash_posting(
+    posting: &PostingData,
+    currency: &str,
+    account_types: &PluginAccountTypes,
+) -> bool {
+    posting.cost.is_none()
+        && posting.price.is_none()
+        && posting
+            .units
+            .as_ref()
+            .is_some_and(|u| u.currency == currency)
+        && is_cash_account(&posting.account, account_types)
+}
+
+/// The commission the entry's cash proves it moved, floored at 0 (#2732).
+///
+/// Widens rule 3 from the exact figure to the range "fee expensed to fee
+/// folded", but only when the cash is an independent witness and the entry
+/// is one assignment, the two guards accepted in #2555: exactly one
+/// closing group; every cash posting written (a booking-interpolated
+/// figure is filled from the very residual this would measure); and no
+/// posting carrying a cost or price outside the group's option and stock
+/// legs (a sweep purchase, a foreign-currency settlement priced with `@`,
+/// or a second trade would all move the cash). Any guard failing, a
+/// missing cost currency, or arithmetic out of range gives 0 — today's
+/// exact rule, the safe direction: at worst a fee-folded ledger gets
+/// flagged.
+fn commission(
+    postings: &[PostingData],
+    root: &str,
+    right: OptionRight,
+    currency: Option<&str>,
+    strike_value: Decimal,
+    one_assignment: bool,
+    account_types: &PluginAccountTypes,
+) -> Decimal {
+    let Some(currency) = currency else {
+        return Decimal::ZERO;
+    };
+    if !one_assignment {
+        return Decimal::ZERO;
+    }
+    for posting in postings {
+        if posting.cost.is_none() && posting.price.is_none() {
+            continue;
+        }
+        let group_leg = posting.units.as_ref().is_some_and(|u| {
+            u.currency == root
+                || parse_occ(&u.currency).is_some_and(|o| o.root == root && o.right == right)
+        });
+        if !group_leg {
+            return Decimal::ZERO;
+        }
+    }
+    let mut cash = Some(Decimal::ZERO);
+    for posting in postings {
+        if !is_cash_posting(posting, currency, account_types) {
+            continue;
+        }
+        if posting.is_interpolated() {
+            return Decimal::ZERO;
+        }
+        let number = posting
+            .units
+            .as_ref()
+            .and_then(|u| Decimal::from_str(&u.number).ok());
+        cash = cash.zip(number).and_then(|(c, n)| c.checked_add(n));
+    }
+    let Some(cash) = cash else {
+        return Decimal::ZERO;
+    };
+    let fee = match right {
+        OptionRight::Put => Decimal::ZERO
+            .checked_sub(cash)
+            .and_then(|c| c.checked_sub(strike_value)),
+        OptionRight::Call => strike_value.checked_sub(cash),
+    };
+    fee.map_or(Decimal::ZERO, |f| f.max(Decimal::ZERO))
 }
 
 /// Option legs of one transaction that close short contracts of one right
@@ -321,9 +433,16 @@ impl NativePlugin for CheckOptionAssignmentPlugin {
             }
 
             for ((root, right), c) in &closings {
-                if let Some(finding) =
-                    check(root, *right, c, &txn.postings, &held, shares_per_contract)
-                {
+                if let Some(finding) = check(
+                    root,
+                    *right,
+                    c,
+                    &txn.postings,
+                    &held,
+                    shares_per_contract,
+                    closings.len() == 1,
+                    &input.options.account_types,
+                ) {
                     let message = match finding {
                         Finding::Error(message) => message,
                         Finding::Unchecked => format!(
@@ -369,6 +488,8 @@ fn check(
     postings: &[PostingData],
     held: &impl Fn(&str, &str) -> Option<Decimal>,
     shares_per_contract: Decimal,
+    one_assignment: bool,
+    account_types: &PluginAccountTypes,
 ) -> Option<Finding> {
     use Finding::{Error, Unchecked};
     let stock: Vec<(&PostingData, Decimal)> = postings
@@ -431,8 +552,32 @@ fn check(
     let Some(tolerance) = Decimal::new(5, 3).checked_mul(shares) else {
         return Some(Unchecked);
     };
-    let off = |actual: Decimal, expected: Decimal| -> Option<bool> {
-        Some(actual.checked_sub(expected)?.abs() > tolerance)
+    // Rule 3's acceptance band. `fee` widens it to "fee expensed to fee
+    // folded" when the entry's cash proves a commission (#2732); 0 keeps
+    // the exact rule.
+    let fee = commission(
+        postings,
+        root,
+        right,
+        c.currency.as_deref(),
+        strike_value,
+        one_assignment,
+        account_types,
+    );
+    // The fee widens only the side it can move: a put's basis may carry
+    // it, a call's proceeds may lose it.
+    let outside = |actual: Decimal, expected: Decimal| -> Option<bool> {
+        let (lo, hi) = match right {
+            OptionRight::Put => (
+                expected.checked_sub(tolerance)?,
+                expected.checked_add(fee)?.checked_add(tolerance)?,
+            ),
+            OptionRight::Call => (
+                expected.checked_sub(fee)?.checked_sub(tolerance)?,
+                expected.checked_add(tolerance)?,
+            ),
+        };
+        Some(actual < lo || actual > hi)
     };
     match right {
         OptionRight::Put => {
@@ -444,13 +589,21 @@ fn check(
                 Err(Gap::Missing) => Some(Error(format!(
                     "{label} assignment: {root} purchase has no cost; expected basis {expected:.2} {currency}"
                 ))),
-                Ok(basis) => match off(basis, expected) {
+                Ok(basis) => match outside(basis, expected) {
                     None => Some(Unchecked),
-                    Some(off) => off.then(|| {
-                        Error(format!(
+                    Some(false) => None,
+                    Some(true) => Some(Error(if fee > Decimal::ZERO {
+                        match expected.checked_add(fee) {
+                            None => return Some(Unchecked),
+                            Some(window_hi) => format!(
+                                "{label} assignment: {root} basis {basis:.2} {currency}, expected {expected:.2} to {window_hi:.2} {currency} ({breakdown_strike} − premium {premium:.2}, + up to {fee:.2} in fees)"
+                            ),
+                        }
+                    } else {
+                        format!(
                             "{label} assignment: {root} basis {basis:.2} {currency}, expected {expected:.2} {currency} ({breakdown_strike} − premium {premium:.2})"
-                        ))
-                    }),
+                        )
+                    })),
                 },
             }
         }
@@ -474,13 +627,21 @@ fn check(
                 Err(Gap::Missing) => Some(Error(format!(
                     "{label} assignment: {root} sale has no price; expected proceeds {expected:.2} {currency}"
                 ))),
-                Ok(proceeds) => match off(proceeds, expected) {
+                Ok(proceeds) => match outside(proceeds, expected) {
                     None => Some(Unchecked),
-                    Some(off) => off.then(|| {
-                        Error(format!(
+                    Some(false) => None,
+                    Some(true) => Some(Error(if fee > Decimal::ZERO {
+                        match expected.checked_sub(fee) {
+                            None => return Some(Unchecked),
+                            Some(window_lo) => format!(
+                                "{label} assignment: {root} proceeds {proceeds:.2} {currency}, expected {window_lo:.2} to {expected:.2} {currency} ({breakdown_strike} + premium {premium:.2}, − up to {fee:.2} in fees)"
+                            ),
+                        }
+                    } else {
+                        format!(
                             "{label} assignment: {root} proceeds {proceeds:.2} {currency}, expected {expected:.2} {currency} ({breakdown_strike} + premium {premium:.2})"
-                        ))
-                    }),
+                        )
+                    })),
                 },
             }
         }

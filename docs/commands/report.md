@@ -21,7 +21,8 @@ A report subcommand (e.g. `balances`, `journal`) is required — running `rledge
 | `balances` | | All account balances |
 | `balsheet` | `bal` | Balance sheet (Assets, Liabilities, Equity) |
 | `income` | `is` | Income statement (Income, Expenses) |
-| `journal` | `register` | Transaction register |
+| `journal` | | Transaction journal |
+| `register` | | Transaction register (journal with running balances) |
 | `holdings` | | Investment holdings with cost basis |
 | `returns` | | Investment returns — money-weighted (XIRR) and time-weighted |
 | `capgains` | | Realized capital gains/losses per tax lot (short vs long term) |
@@ -44,7 +45,7 @@ A report subcommand (e.g. `balances`, `journal`) is required — running `rledge
 
 ## Date Windows
 
-`balances`, `balsheet`, `income`, `journal` and `holdings` (and `budget`) take one shared set of window flags:
+`balances`, `balsheet`, `income`, `journal`, `register` and `holdings` (and `budget`) take one shared set of window flags:
 
 | Option | Meaning |
 |--------|---------|
@@ -162,7 +163,57 @@ rledger report ledger.beancount journal -a Expenses:Food
 
 # Limit entries
 rledger report ledger.beancount journal -l 20
+
+# The same list with the running-balance column (see below)
+rledger report ledger.beancount journal --running
 ```
+
+### Transaction Register
+
+`register` is the journal with a running-balance column — what hledger's
+`register` prints. `journal --running` is the same list under the journal's
+name.
+
+```bash
+rledger report ledger.beancount register
+rledger report ledger.beancount register -a Assets:Bank
+rledger report ledger.beancount register -a Assets:Bank --from 2024-01-01
+```
+
+```
+Transaction Register
+================================================================================
+
+2024-01-05 * salary
+  Assets:Bank                                             1000.00 USD | 1000.00 USD
+  Income:Salary                                          -1000.00 USD |
+
+2024-01-07 * fx
+  Assets:Euro                                              200.00 EUR | 200.00 EUR
+  Assets:Bank                                             -220.00 USD | 200.00 EUR, -220.00 USD
+```
+
+The column is the running **inventory** of the postings the report's
+`--account` filter matched — every posting when there is no filter — shown
+after each posting, one amount per currency with zero balances dropped
+(`200.00 EUR, -220.00 USD`). Consequences of that rule:
+
+- **`--account Assets:Bank` is the bank's balance over time** (only the
+  matched postings move the total, though both legs of each matched
+  transaction are still listed).
+- **Unfiltered, a balanced ledger's column zigzags back to zero** like
+  hledger's, and stays non-zero only where a cost or price conversion
+  changed the currency mix.
+- **`--limit` drops rows from the top**; the totals are computed over the
+  whole report first, so a limited register still shows the total as of
+  each row, not a subtotal of its own tail.
+- **With a date window**, the opening-balance summaries sort first among
+  same-date rows (they *are* the pre-window history), so every row shows
+  the carried-in balance plus the window's activity up to it.
+
+The column is also in the machine formats: CSV gains a `running_total`
+column (escaped — a mixed total contains commas), and JSON gains a
+`running_total` string on each posting.
 
 ### Holdings
 

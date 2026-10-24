@@ -1599,6 +1599,12 @@ fn build_report(
         Some("journal") => Ok(Report::Journal {
             account: string_flag(req, "account", Some("a")),
             limit: optional_parse_flag(req, "limit", Some("l"))?,
+            running: bool_flag(req, "running", None),
+            window: date_window(req),
+        }),
+        Some("register") => Ok(Report::Register {
+            account: string_flag(req, "account", Some("a")),
+            limit: optional_parse_flag(req, "limit", Some("l"))?,
             window: date_window(req),
         }),
         Some("holdings") => Ok(Report::Holdings {
@@ -1682,9 +1688,8 @@ fn report_names() -> Vec<&'static str> {
 }
 
 /// The report `name` refers to: a report's name or one of `rledger`'s
-/// aliases for it (`bal`, `is`, `register`), both read from `rledger`'s
-/// definition, or one of the longer spellings `ag-rledger` has always
-/// accepted.
+/// aliases for it (`bal`, `is`), both read from `rledger`'s definition, or
+/// one of the longer spellings `ag-rledger` has always accepted.
 fn parse_report_name(name: &str) -> Option<String> {
     static ALIASES: OnceLock<Vec<(String, Vec<String>)>> = OnceLock::new();
     let name = match name {

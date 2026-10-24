@@ -21,3 +21,5 @@ If you're coming from another tool:
 - **Python beancount users**: See [Migration from Beancount](../migration/from-beancount.md)
 - **ledger-cli users**: See [Migration from Ledger](../migration/from-ledger.md)
 - **hledger users**: See [Migration from hledger](../migration/from-hledger.md)
+
+Starting a ledger that will hold more than one currency? Read [Currency Accounts](../guides/cookbook.md#currency-accounts) before writing the first conversion: it is the style we recommend for new ledgers.

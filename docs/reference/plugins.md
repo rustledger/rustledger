@@ -581,7 +581,7 @@ A missing attribute is `Missing attribute 'name' for Commodity directive AAPL`, 
 
 ### currency_accounts
 
-Automatically generates currency conversion postings through trading accounts when transactions involve multiple currencies.
+Automatically generates currency conversion postings through trading accounts when transactions involve multiple currencies. For when to choose this style and a worked example, see [Currency Accounts](../guides/cookbook.md#currency-accounts) in the Cookbook.
 
 ```beancount
 plugin "beancount.plugins.currency_accounts"

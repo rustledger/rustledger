@@ -241,6 +241,61 @@ When starting to track an existing account:
 
 ## Currency and International
 
+### Currency Accounts
+
+If you are starting a new ledger that will hold more than one currency, book conversions
+through a trading account: each account then holds one currency, and every conversion is on
+the books in both currencies. It is where Vnext is pointed (Martin Blais, "Currency Accounts
+instead of a Single Conversion"), and rustledger has the semantics as the `currency_accounts`
+plugin.
+
+The source is the same either way. A conversion is written with a price:
+
+```beancount
+2024-01-15 * "Buy EUR"
+  Assets:Bank:EUR    100 EUR @ 1.10 USD
+  Assets:Bank:USD   -110 USD
+```
+
+Without the plugin that is the whole record: the price is the conversion. Enable it and the
+same transaction is booked through the trading account on load. This is what
+`rledger report journal` prints, with the price stripped, because a price beside an explicit
+conversion leg would count the exchange twice:
+
+```beancount
+plugin "beancount.plugins.currency_accounts"
+
+2024-01-15 * "Buy EUR"
+  Assets:Bank:EUR              100 EUR
+  Assets:Bank:USD             -110 USD
+  Equity:CurrencyAccounts:EUR -100 EUR
+  Equity:CurrencyAccounts:USD  110 USD
+```
+
+The transaction is marked `currency_accounts_processed: TRUE`, and the conversion shows up in
+the balances instead of being left implied:
+
+| Account | With the plugin | Without |
+|---|---|---|
+| `Assets:Bank:EUR` | 100 EUR | 100 EUR |
+| `Assets:Bank:USD` | -110.00 USD | -110.00 USD |
+| `Equity:CurrencyAccounts:EUR` | -100 EUR | — |
+| `Equity:CurrencyAccounts:USD` | 110.00 USD | — |
+
+The base account is `Equity:CurrencyAccounts`. Give the plugin a name to use your own:
+
+```beancount
+plugin "beancount.plugins.currency_accounts" "Equity:Trading"
+```
+
+Two divergences from beancount 3's plugin, both deliberate: a base account that is not a
+valid account name falls back to `Equity:CurrencyAccounts` where beancount's plugin fails, and
+the written posting order is kept. Full behavior in
+[`currency_accounts`](../reference/plugins.md#currency_accounts).
+
+The recipes below write conversions the common way, with the price doing the work. With
+currency accounts enabled they book through the trading account instead.
+
 ### Currency Exchange
 
 ```beancount

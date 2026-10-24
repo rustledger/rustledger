@@ -152,12 +152,29 @@ pub enum Report {
         #[command(flatten)]
         window: DateWindow,
     },
-    /// Transaction journal/register
+    /// Transaction journal
     ///
     /// With a window, the transactions within it, after one opening-balance
     /// transaction per account carrying in what came before.
-    #[command(alias = "register")]
     Journal {
+        /// Filter to accounts matching this prefix
+        #[arg(short, long)]
+        account: Option<String>,
+        /// Limit number of entries
+        #[arg(short, long)]
+        limit: Option<usize>,
+        /// Show the running-balance column
+        #[arg(long)]
+        running: bool,
+        /// The date window (`--from`, `--to`, `--year`, `--time`).
+        #[command(flatten)]
+        window: DateWindow,
+    },
+    /// Transaction register (the journal with running balances)
+    ///
+    /// With a window, the transactions within it, after one opening-balance
+    /// transaction per account carrying in what came before.
+    Register {
         /// Filter to accounts matching this prefix
         #[arg(short, long)]
         account: Option<String>,
@@ -616,10 +633,10 @@ fn load(
             // with `balances`/`income` on the same ledger.
             | Report::Budget { .. }
     ) || matches!(
-        // A windowed journal clamps the pad-expanded view, so the opening
-        // balances it carries in include what pads put there.
+        // A windowed journal/register clamps the pad-expanded view, so the
+        // opening balances it carries in include what pads put there.
         report,
-        Report::Journal { window, .. } if window.is_set()
+        Report::Journal { window, .. } | Report::Register { window, .. } if window.is_set()
     );
     let has_pads = needs_balance_view
         && ledger
@@ -657,6 +674,31 @@ fn load(
         current_earnings,
         current_conversions,
     })
+}
+
+/// The journal/register rows from a windowed or whole ledger: the window's
+/// CLAMPED transactions — the opening-balance summaries, then the window's
+/// own — minus the clamp's synthesized pad transactions, or the source
+/// stream untouched. The pad transactions inside the window are dropped
+/// again because the journal lists what the file says, and an unwindowed
+/// journal never shows them either (they are clamped from the pad-expanded
+/// view so the opening summaries include what pads put there).
+fn journal_rows(
+    clamped: Option<Vec<rustledger_core::Directive>>,
+    directives: &[rustledger_core::Directive],
+) -> std::borrow::Cow<'_, [rustledger_core::Directive]> {
+    match clamped {
+        Some(entries) => std::borrow::Cow::Owned(
+            entries
+                .into_iter()
+                .filter(|d| {
+                    !matches!(d, rustledger_core::Directive::Transaction(t)
+                        if rustledger_booking::is_synthesized_pad(t))
+                })
+                .collect(),
+        ),
+        None => std::borrow::Cow::Borrowed(directives),
+    }
 }
 
 /// Render the already-loaded report into `writer`.
@@ -751,27 +793,34 @@ fn render<W: io::Write>(
             account,
             limit,
             window,
+            running,
         } => {
-            // The windowed journal lists the CLAMPED transactions: the
-            // opening-balance summaries, then the window's own. They are
-            // clamped from the pad-expanded view so the summaries include what
-            // pads put there, and the pad transactions inside the window are
-            // then dropped again: the journal lists what the file says, and an
-            // unwindowed journal never shows them either.
-            let clamped = windowed(window, warnings)?.map(|entries| {
-                entries
-                    .into_iter()
-                    .filter(|d| {
-                        !matches!(d, rustledger_core::Directive::Transaction(t)
-                            if rustledger_booking::is_synthesized_pad(t))
-                    })
-                    .collect::<Vec<_>>()
-            });
+            let clamped = windowed(window, warnings)?;
+            let rows = journal_rows(clamped, directives);
             journal::report_journal(
-                clamped.as_deref().unwrap_or(directives),
+                &rows,
                 account.as_deref(),
                 *limit,
                 format,
+                *running,
+                "Transaction Journal",
+                writer,
+            )?;
+        }
+        Report::Register {
+            account,
+            limit,
+            window,
+        } => {
+            let clamped = windowed(window, warnings)?;
+            let rows = journal_rows(clamped, directives);
+            journal::report_journal(
+                &rows,
+                account.as_deref(),
+                *limit,
+                format,
+                true,
+                "Transaction Register",
                 writer,
             )?;
         }

@@ -1016,7 +1016,7 @@ fn a_rejected_booked_cover_of_a_short_rolls_back_whole() {
         .filter(|p| !p.is_empty())
         .map(|p| (p.units.number, p.cost.as_ref().map(|c| c.number)))
         .collect();
-    longs.sort_by(|a, b| a.0.cmp(&b.0));
+    longs.sort_by_key(|x| x.0);
     assert_eq!(
         longs,
         vec![(

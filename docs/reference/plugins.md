@@ -684,7 +684,7 @@ Options: Base currency code (e.g., `"USD"`)
 
 ### long_short
 
-Rebooks capital gains into short-term and long-term accounts, lot by lot, by holding period, as `beancount_reds_plugins.capital_gains_classifier.long_short` does. A lot is long-term when the sale falls after its one-year anniversary (a Feb 29 acquisition's anniversary is Feb 28), the rule `rledger report capgains` uses. Accounts it books to that the ledger doesn't open are opened for you.
+Rebooks capital gains into short-term and long-term accounts, lot by lot, by holding period, as `beancount_reds_plugins.capital_gains_classifier.long_short` does. A lot is long-term when the sale falls after its one-year anniversary (a Feb 29 acquisition's anniversary is Feb 28), the rule `rledger report capgains` uses. Closing a written option or any short position — a reduction posting with positive units — is always short-term whatever its holding period (US IRC 1234(b), and 1233(a) for short sales), the rule `rledger report capgains` applies and a deliberate divergence from the Python plugin, which books it by holding period like a sale. A cover needs no cost date; a sale of a long lot without one is left unchanged. Accounts it books to that the ledger doesn't open are opened for you.
 
 ```beancount
 plugin "beancount_reds_plugins.capital_gains_classifier.long_short" "{

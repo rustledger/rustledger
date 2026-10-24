@@ -7924,16 +7924,18 @@ proptest::proptest! {
 // ============================================================================
 //
 // `long_short` rebooks generic `Income:.*Capital-Gains` postings into
-// `:Short` / `:Long` accounts based on holding period. The plugin
-// classifies as long-term when the sale date is after the lot's one-year
-// anniversary (held more than one calendar year), the same rule as the
-// `capgains` report.
+// `:Short` / `:Long` accounts. A cover (positive units) closes a written
+// option or short position and is always short-term; a sale of a long
+// lot is long-term when the sale date is after the lot's one-year
+// anniversary (held more than one calendar year). Both rules are the
+// `capgains` report's terms (#2733).
 //
 // Config format:
 //   {'pattern': ['account_to_replace', 'short_replacement', 'long_replacement']}
 //
-// The plugin needs cost_date on each reduction posting to classify;
-// without a cost date the transaction is left unchanged.
+// A sale of a long lot needs a cost date to classify (the holding
+// period's start); without one the transaction is left unchanged.
+// A cover classifies without one -- it is always short-term.
 
 /// Build a sale transaction with cost.date set, plus a generic
 /// `Income:Capital-Gains` posting that `long_short` can rewrite. The
@@ -8139,7 +8141,7 @@ fn test_capital_gains_long_short_classifies_short_term() {
     );
 
     // Pin the posting AMOUNT, not just the account. Plugin computes
-    // gain = (cost - price) * |units| = (100 - 150) * 10 = -500.
+    // gain = (price - cost) * units = (150 - 100) * -10 = -500.
     // Currency must come from the original generic posting.
     let short_units = short_postings[0]
         .units
@@ -8217,14 +8219,14 @@ fn test_capital_gains_long_short_classifies_long_term() {
     );
 
     // Pin the posting AMOUNT, not just the account. Plugin computes
-    // gain = (cost - price) * |units| = (100 - 150) * 10 = -500.
+    // gain = (price - cost) * units = (150 - 100) * -10 = -500.
     let long_units = long_postings[0]
         .units
         .as_ref()
         .expect("long posting must have units");
     assert_eq!(
         long_units.number, "-500",
-        "long_term gain amount = (cost - price) * |units| = -500"
+        "long_term gain amount = (price - cost) * units = -500"
     );
     assert_eq!(long_units.currency, "USD");
 }
@@ -8454,6 +8456,410 @@ fn test_capital_gains_long_short_no_cost_date_passes_through_unchanged() {
         data.postings.len(),
         3,
         "all three input postings preserved on fall-through"
+    );
+}
+
+/// Closing a written option is short-term whatever its holding period
+/// (US IRC 1234(b); 1233(a) for short sales) — the rule `report capgains`
+/// applies (`(true, _, _) => Term::Short`) and the booking engine stamps
+/// on the disposal. The #2733 repro shape: opened 2025-03-03, closed
+/// 2026-06-01, more than a year later. Pre-fix the date rule called it
+/// long-term and the repo contradicted itself.
+#[test]
+fn test_capital_gains_long_short_written_option_held_over_a_year_is_short_term() {
+    let plugin = CapitalGainsLongShortPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_open("2025-01-01", "Assets:Stock"),
+            make_open("2025-01-01", "Assets:Cash"),
+            make_open("2025-01-01", "Income:Capital-Gains"),
+            // Positive units: the cover of the written option. The cost
+            // is the price the units were sold at when the short opened.
+            make_long_short_sale(
+                "2026-06-01", // closed more than a year after opening
+                "2025-03-03", // the short's opening date
+                ("1", "AAPL"),
+                ("1200", "USD"),
+                ("400", "USD"),
+                "Income:Capital-Gains",
+                ("-800", "USD"),
+            ),
+        ],
+        LONG_SHORT_CFG,
+    );
+    let output = process_and_materialize(&plugin, input);
+    assert_eq!(output.errors.len(), 0);
+
+    let txn = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("rewritten transaction should still be present");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!(
+            "transaction directive_type with non-Transaction data: {:?}",
+            txn.data
+        );
+    };
+
+    let short_postings: Vec<&PostingData> = data
+        .postings
+        .iter()
+        .filter(|p| p.account.contains(":Capital-Gains:Short"))
+        .collect();
+    assert_eq!(
+        short_postings.len(),
+        1,
+        "closing a written option rebooks to :Short however long it was held"
+    );
+    assert_eq!(
+        data.postings
+            .iter()
+            .filter(|p| p.account.contains(":Capital-Gains:Long"))
+            .count(),
+        0,
+        "no long-term posting for a written-option cover"
+    );
+    let short_units = short_postings[0]
+        .units
+        .as_ref()
+        .expect("short posting must have units");
+    assert_eq!(
+        short_units.number, "-800",
+        "cover gain = (price - cost) * units = (400 - 1200) * 1 = -800"
+    );
+    assert_eq!(short_units.currency, "USD");
+}
+
+/// The same cover closed at a loss: bought back above what the written
+/// option was sold for. The loss is short-term too.
+#[test]
+fn test_capital_gains_long_short_cover_at_a_loss_is_short_term() {
+    let plugin = CapitalGainsLongShortPlugin;
+    let input = make_input_with_config(
+        vec![
+            make_open("2025-01-01", "Assets:Stock"),
+            make_open("2025-01-01", "Assets:Cash"),
+            make_open("2025-01-01", "Income:Capital-Gains"),
+            make_long_short_sale(
+                "2026-06-01",
+                "2025-03-03",
+                ("1", "AAPL"),
+                ("400", "USD"),  // sold for 400 when the short opened
+                ("1200", "USD"), // bought back at 1200
+                "Income:Capital-Gains",
+                ("800", "USD"),
+            ),
+        ],
+        LONG_SHORT_CFG,
+    );
+    let output = process_and_materialize(&plugin, input);
+    assert_eq!(output.errors.len(), 0);
+
+    let txn = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("rewritten transaction should still be present");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!(
+            "transaction directive_type with non-Transaction data: {:?}",
+            txn.data
+        );
+    };
+
+    let short_postings: Vec<&PostingData> = data
+        .postings
+        .iter()
+        .filter(|p| p.account.contains(":Capital-Gains:Short"))
+        .collect();
+    assert_eq!(
+        short_postings.len(),
+        1,
+        "a cover closed at a loss is short-term like one closed at a gain"
+    );
+    assert_eq!(
+        data.postings
+            .iter()
+            .filter(|p| p.account.contains(":Capital-Gains:Long"))
+            .count(),
+        0,
+        "no long-term posting for a written-option cover"
+    );
+    let short_units = short_postings[0]
+        .units
+        .as_ref()
+        .expect("short posting must have units");
+    assert_eq!(
+        short_units.number, "800",
+        "cover loss = (price - cost) * units = (1200 - 400) * 1 = 800"
+    );
+}
+
+/// One entry carrying BOTH a long sale and a cover: each gain lands in
+/// its own bucket at its own amount. This pins the gain SIGN per posting
+/// too — pre-fix every cover's amount was computed sign-flipped and only
+/// a lone cover was rescued by the rounding reconciliation, so the two
+/// postings came out as -906.67/56.67 instead of -800/-500.
+#[test]
+fn test_capital_gains_long_short_cover_and_sale_split_by_the_rule() {
+    let plugin = CapitalGainsLongShortPlugin;
+    let txn = DirectiveWrapper {
+        directive_type: "transaction".to_string(),
+        date: "2026-06-01".to_string(),
+        filename: None,
+        lineno: None,
+        data: DirectiveData::Transaction(TransactionData {
+            flag: "*".to_string(),
+            payee: None,
+            narration: "Sell a long and cover a written option".to_string(),
+            tags: vec![],
+            links: vec![],
+            metadata: vec![],
+            postings: vec![
+                PostingData {
+                    account: "Assets:Stock".to_string(),
+                    units: Some(AmountData {
+                        number: "-10".to_string(),
+                        currency: "AAPL".to_string(),
+                    }),
+                    cost: Some(CostData {
+                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
+                            value: "100".to_string(),
+                        }),
+                        currency: Some("USD".to_string()),
+                        date: Some("2024-01-15".to_string()),
+                        label: None,
+                        merge: false,
+                    }),
+                    price: Some(PriceAnnotationData {
+                        is_total: false,
+                        amount: Some(AmountData {
+                            number: "150".to_string(),
+                            currency: "USD".to_string(),
+                        }),
+                        number: None,
+                        currency: None,
+                    }),
+                    flag: None,
+                    metadata: vec![],
+                    span: None,
+                },
+                PostingData {
+                    account: "Assets:Options".to_string(),
+                    units: Some(AmountData {
+                        number: "1".to_string(),
+                        currency: "OPT".to_string(),
+                    }),
+                    cost: Some(CostData {
+                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
+                            value: "1200".to_string(),
+                        }),
+                        currency: Some("USD".to_string()),
+                        date: Some("2025-03-03".to_string()),
+                        label: None,
+                        merge: false,
+                    }),
+                    price: Some(PriceAnnotationData {
+                        is_total: false,
+                        amount: Some(AmountData {
+                            number: "400".to_string(),
+                            currency: "USD".to_string(),
+                        }),
+                        number: None,
+                        currency: None,
+                    }),
+                    flag: None,
+                    metadata: vec![],
+                    span: None,
+                },
+                PostingData {
+                    account: "Assets:Cash".to_string(),
+                    units: None,
+                    cost: None,
+                    price: None,
+                    flag: None,
+                    metadata: vec![],
+                    span: None,
+                },
+                PostingData {
+                    account: "Income:Capital-Gains".to_string(),
+                    units: Some(AmountData {
+                        number: "-1300".to_string(),
+                        currency: "USD".to_string(),
+                    }),
+                    cost: None,
+                    price: None,
+                    flag: None,
+                    metadata: vec![],
+                    span: None,
+                },
+            ],
+        }),
+    };
+    let input = make_input_with_config(
+        vec![
+            make_open("2024-01-01", "Assets:Stock"),
+            make_open("2024-01-01", "Assets:Options"),
+            make_open("2024-01-01", "Assets:Cash"),
+            make_open("2024-01-01", "Income:Capital-Gains"),
+            txn,
+        ],
+        LONG_SHORT_CFG,
+    );
+    let output = process_and_materialize(&plugin, input);
+    assert_eq!(output.errors.len(), 0);
+
+    let txn = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("rewritten transaction should still be present");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!(
+            "transaction directive_type with non-Transaction data: {:?}",
+            txn.data
+        );
+    };
+
+    let amount_of = |suffix: &str| -> String {
+        let postings: Vec<&PostingData> = data
+            .postings
+            .iter()
+            .filter(|p| p.account.contains(suffix))
+            .collect();
+        assert_eq!(postings.len(), 1, "one posting expected for {suffix}");
+        postings[0]
+            .units
+            .as_ref()
+            .expect("gain posting must have units")
+            .number
+            .clone()
+    };
+    // The 2.5-year long sale: (150 - 100) * -10 = -500.
+    assert_eq!(amount_of(":Capital-Gains:Long"), "-500");
+    // The cover: (400 - 1200) * 1 = -800.
+    assert_eq!(amount_of(":Capital-Gains:Short"), "-800");
+}
+
+/// A cover needs no cost date to classify — there is no holding period
+/// to measure — so one written with a cost but no date is short-term
+/// rather than passed through. Only a SALE of a long lot needs the date
+/// (see `test_capital_gains_long_short_no_cost_date_passes_through_unchanged`).
+#[test]
+fn test_capital_gains_long_short_cover_without_a_cost_date_is_short_term() {
+    let plugin = CapitalGainsLongShortPlugin;
+    let txn = DirectiveWrapper {
+        directive_type: "transaction".to_string(),
+        date: "2026-06-01".to_string(),
+        filename: None,
+        lineno: None,
+        data: DirectiveData::Transaction(TransactionData {
+            flag: "*".to_string(),
+            payee: None,
+            narration: "Cover with a dateless cost".to_string(),
+            tags: vec![],
+            links: vec![],
+            metadata: vec![],
+            postings: vec![
+                PostingData {
+                    account: "Assets:Options".to_string(),
+                    units: Some(AmountData {
+                        number: "1".to_string(),
+                        currency: "OPT".to_string(),
+                    }),
+                    cost: Some(CostData {
+                        number: Some(rustledger_plugin_types::CostNumberData::PerUnit {
+                            value: "1200".to_string(),
+                        }),
+                        currency: Some("USD".to_string()),
+                        date: None,
+                        label: None,
+                        merge: false,
+                    }),
+                    price: Some(PriceAnnotationData {
+                        is_total: false,
+                        amount: Some(AmountData {
+                            number: "400".to_string(),
+                            currency: "USD".to_string(),
+                        }),
+                        number: None,
+                        currency: None,
+                    }),
+                    flag: None,
+                    metadata: vec![],
+                    span: None,
+                },
+                PostingData {
+                    account: "Assets:Cash".to_string(),
+                    units: None,
+                    cost: None,
+                    price: None,
+                    flag: None,
+                    metadata: vec![],
+                    span: None,
+                },
+                PostingData {
+                    account: "Income:Capital-Gains".to_string(),
+                    units: Some(AmountData {
+                        number: "-800".to_string(),
+                        currency: "USD".to_string(),
+                    }),
+                    cost: None,
+                    price: None,
+                    flag: None,
+                    metadata: vec![],
+                    span: None,
+                },
+            ],
+        }),
+    };
+    let input = make_input_with_config(
+        vec![
+            make_open("2025-01-01", "Assets:Options"),
+            make_open("2025-01-01", "Assets:Cash"),
+            make_open("2025-01-01", "Income:Capital-Gains"),
+            txn,
+        ],
+        LONG_SHORT_CFG,
+    );
+    let output = process_and_materialize(&plugin, input);
+    assert_eq!(output.errors.len(), 0);
+
+    let txn = output
+        .directives
+        .iter()
+        .find(|d| d.directive_type == "transaction")
+        .expect("rewritten transaction should still be present");
+    let DirectiveData::Transaction(data) = &txn.data else {
+        panic!(
+            "transaction directive_type with non-Transaction data: {:?}",
+            txn.data
+        );
+    };
+
+    let short_postings: Vec<&PostingData> = data
+        .postings
+        .iter()
+        .filter(|p| p.account.contains(":Capital-Gains:Short"))
+        .collect();
+    assert_eq!(
+        short_postings.len(),
+        1,
+        "a cover classifies as short-term without any cost date"
+    );
+    assert_eq!(
+        data.postings
+            .iter()
+            .filter(|p| p.account.contains(":Capital-Gains:Long"))
+            .count(),
+        0,
+        "no long-term posting for a cover"
+    );
+    assert_eq!(
+        short_postings[0].units.as_ref().unwrap().number,
+        "-800",
+        "cover gain = (price - cost) * units = (400 - 1200) * 1 = -800"
     );
 }
 

@@ -1,7 +1,8 @@
 //! Capital gains classifier plugin.
 //!
 //! This plugin rebooks capital gains into separate accounts based on:
-//! - **`long_short`**: Whether gains are long-term (held > 1 year) or short-term
+//! - **`long_short`**: Whether gains are long-term (held > 1 year) or short-term.
+//!   Closing a written option or any short position is always short-term.
 //! - **`gain_loss`**: Whether the posting is a gain (negative income) or loss (positive income)
 //!
 //! Usage for `long_short`:
@@ -258,20 +259,36 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
                 continue;
             };
 
-            // Fall through if ANY reduction lacks a parseable cost
-            // date. Without it the plugin can't classify holding
-            // period, and pre-fix (issue #1010) it would silently
-            // drop the generic Income:Capital-Gains posting in the
+            // Fall through if ANY reduction lacks what classification
+            // needs of it: a parseable per-unit cost number (the gain's
+            // basis) always, and a parseable cost date (the holding
+            // period's start) when it sells a long lot. A cover needs no
+            // date: closing a written option or any short position is
+            // short-term whatever its holding period (below).
+            // Pre-fix (issue #1010) the missing-date case silently
+            // dropped the generic Income:Capital-Gains posting in the
             // post-loop filter, leaving the transaction unbalanced.
             // Falling through preserves the user's ledger.
-            let any_missing_cost_date = reductions.iter().any(|p| {
-                p.cost
+            let any_missing_basis = reductions.iter().any(|p| {
+                let cost_number = p
+                    .cost
                     .as_ref()
-                    .and_then(|c| c.date.as_ref())
-                    .and_then(|d| d.parse::<NaiveDate>().ok())
-                    .is_none()
+                    .and_then(|c| c.number.as_ref())
+                    .and_then(|cn| cn.per_unit());
+                let missing_number = cost_number.is_none_or(|s| Decimal::from_str(s).is_err());
+                let units_number = p
+                    .units
+                    .as_ref()
+                    .and_then(|u| Decimal::from_str(&u.number).ok());
+                let missing_date = units_number.is_some_and(|n| n < Decimal::ZERO)
+                    && p.cost
+                        .as_ref()
+                        .and_then(|c| c.date.as_ref())
+                        .and_then(|d| d.parse::<NaiveDate>().ok())
+                        .is_none();
+                missing_number || missing_date
             });
-            if any_missing_cost_date {
+            if any_missing_basis {
                 ops.push(PluginOp::Keep(i));
                 continue;
             }
@@ -283,46 +300,59 @@ fn process_long_short(input: PluginInput) -> PluginOutput {
                 if let (Some(cost), Some(units), Some(price)) =
                     (&posting.cost, &posting.units, &posting.price)
                 {
-                    // Get cost date
-                    let cost_date = cost.date.as_ref().and_then(|d| d.parse::<NaiveDate>().ok());
+                    // Capital-gains classification operates on
+                    // post-booking transactions where the cost
+                    // carries a per-unit value (both PerUnit and
+                    // PerUnitFromTotal expose per_unit()).
+                    let cost_number = cost
+                        .number
+                        .as_ref()
+                        .and_then(|cn| cn.per_unit())
+                        .and_then(|s| Decimal::from_str(s).ok())
+                        .unwrap_or(Decimal::ZERO);
+                    let price_number = price
+                        .amount
+                        .as_ref()
+                        .and_then(|a| Decimal::from_str(&a.number).ok())
+                        .unwrap_or(Decimal::ZERO);
+                    let units_number = Decimal::from_str(&units.number).unwrap_or(Decimal::ZERO);
 
-                    if let Some(cost_date) = cost_date {
-                        // Calculate gain
-                        // Capital-gains classification operates on
-                        // post-booking transactions where the cost
-                        // carries a per-unit value (both PerUnit and
-                        // PerUnitFromTotal expose per_unit()).
-                        let cost_number = cost
-                            .number
+                    // The income posting's amount, sign and all: a gain
+                    // credits (negative), a loss debits (positive).
+                    let gain = (price_number - cost_number) * units_number;
+
+                    // Closing a written option or any short position is
+                    // short-term whatever its holding period (US IRC
+                    // 1234(b); 1233(a) for short sales). The units sign is
+                    // that fact at entry level: a reduction posting with
+                    // positive units closes a short. Same rule the booking
+                    // engine stamps on the disposal
+                    // (`RealizedGainLoss::short_sale` in book.rs, matched
+                    // lot negative) and the `capgains` report applies
+                    // (`(true, _, _) => Term::Short`).
+                    //
+                    // Otherwise (a sale of a long lot) long-term means
+                    // held more than one calendar year: the sale falls
+                    // after the lot's one-year anniversary. A Feb-29
+                    // acquisition's anniversary is Feb 28 (jiff clamps),
+                    // as in reds' relativedelta. Same rule as the
+                    // `capgains` report's `is_long_term`.
+                    let closes_short = units_number > Decimal::ZERO;
+                    let is_long_term = !closes_short
+                        && cost
+                            .date
                             .as_ref()
-                            .and_then(|cn| cn.per_unit())
-                            .map_or(Decimal::ZERO, |s| {
-                                Decimal::from_str(s).unwrap_or(Decimal::ZERO)
+                            .and_then(|d| d.parse::<NaiveDate>().ok())
+                            .is_some_and(|cost_date| {
+                                cost_date
+                                    .checked_add(jiff::Span::new().years(1))
+                                    .is_ok_and(|one_year| entry_date > one_year)
                             });
-                        let price_number = price
-                            .amount
-                            .as_ref()
-                            .and_then(|a| Decimal::from_str(&a.number).ok())
-                            .unwrap_or(Decimal::ZERO);
-                        let units_number =
-                            Decimal::from_str(&units.number).unwrap_or(Decimal::ZERO);
 
-                        let gain = (cost_number - price_number) * units_number.abs();
-
-                        // Long-term means held more than one calendar year:
-                        // the sale falls after the lot's one-year anniversary.
-                        // A Feb-29 acquisition's anniversary is Feb 28 (jiff
-                        // clamps), as in reds' relativedelta. Same rule as the
-                        // `capgains` report's `is_long_term`.
-                        let is_long_term = cost_date
-                            .checked_add(jiff::Span::new().years(1))
-                            .is_ok_and(|one_year| entry_date > one_year);
-
-                        if is_long_term {
-                            long_gains += gain;
-                        } else {
-                            short_gains += gain;
-                        }
+                    if is_long_term {
+                        long_gains += gain;
+                    } else {
+                        short_gains += gain;
                     }
                 }
             }

@@ -129,7 +129,7 @@ rledger check ledger.beancount
 | hledger | rustledger |
 |---------|------------|
 | `hledger bal` | `rledger report balances` |
-| `hledger reg` | `rledger report journal` |
+| `hledger reg` | `rledger report register` |
 | `hledger print` | `rledger format` |
 | `hledger accounts` | `rledger report accounts` |
 | `hledger bs` | `rledger report balsheet` |
@@ -154,6 +154,10 @@ rledger query ledger.beancount \
    WHERE account ~ 'Expenses:Food' AND year(date) = 2024"
 ```
 
+This particular one needs no BQL: `rledger report ledger.beancount register
+-a Expenses:Food --year 2024` is the same register. BQL is for what the
+report flags do not express.
+
 ## Shell Aliases
 
 Recreate hledger-style commands:
@@ -168,9 +172,9 @@ alias is='rledger report "$LEDGER_FILE" income'
 
 reg() {
   if [ -n "$1" ]; then
-    rledger report "$LEDGER_FILE" journal -a "$1"
+    rledger report "$LEDGER_FILE" register -a "$1"
   else
-    rledger report "$LEDGER_FILE" journal
+    rledger report "$LEDGER_FILE" register
   fi
 }
 ```

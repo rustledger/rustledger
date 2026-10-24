@@ -71,9 +71,9 @@ bal() {
 # Register filtered by account
 reg() {
   if [ -n "$1" ]; then
-    rledger report "$LEDGER_FILE" journal -a "$1"
+    rledger report "$LEDGER_FILE" register -a "$1"
   else
-    rledger report "$LEDGER_FILE" journal
+    rledger report "$LEDGER_FILE" register
   fi
 }
 
@@ -168,12 +168,12 @@ alias bal='rledger report "$LEDGER_FILE" balances'
 alias balsheet='rledger report "$LEDGER_FILE" balsheet'
 alias is='rledger report "$LEDGER_FILE" income'
 
-# Journal/register with optional account filter
+# Register with running balances, optional account filter
 reg() {
   if [ -n "$1" ]; then
-    rledger report "$LEDGER_FILE" journal -a "$1"
+    rledger report "$LEDGER_FILE" register -a "$1"
   else
-    rledger report "$LEDGER_FILE" journal
+    rledger report "$LEDGER_FILE" register
   fi
 }
 

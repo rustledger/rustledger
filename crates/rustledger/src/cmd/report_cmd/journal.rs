@@ -11,7 +11,9 @@ use std::io::Write;
 /// report shows for the history before the window. The journal sorts these
 /// ahead of the window's own same-date rows (they ARE the pre-window history),
 /// which is also what makes the running total already carry the balances in
-/// when the first real row is read (#2741).
+/// when the first real row is read (#2741). Recognized by the flag and
+/// narration `clamp` writes; a user-authored row of exactly that shape sorts
+/// first too, which costs it nothing but its position.
 fn is_opening_summary(txn: &rustledger_core::Transaction) -> bool {
     txn.flag == 'S' && txn.narration.as_str() == "Opening balance"
 }

@@ -162,7 +162,7 @@ Fix errors until validation passes.
 | Ledger Command | rustledger Command |
 |----------------|-------------------|
 | `ledger bal` | `rledger report balances` |
-| `ledger reg` | `rledger report journal` |
+| `ledger reg` | `rledger report register` |
 | `ledger print` | `rledger format` |
 | `ledger accounts` | `rledger report accounts` |
 | `ledger payees` | `rledger query "SELECT DISTINCT payee"` |
@@ -177,7 +177,7 @@ Recreate familiar commands:
 export LEDGER_FILE="$HOME/finances/ledger.beancount"
 
 alias bal='rledger report "$LEDGER_FILE" balances'
-alias reg='rledger report "$LEDGER_FILE" journal'
+alias reg='rledger report "$LEDGER_FILE" register'
 
 # With account filter
 bal() {
@@ -185,7 +185,7 @@ bal() {
 }
 
 reg() {
-  rledger report "$LEDGER_FILE" journal ${1:+-a "$1"}
+  rledger report "$LEDGER_FILE" register ${1:+-a "$1"}
 }
 ```
 

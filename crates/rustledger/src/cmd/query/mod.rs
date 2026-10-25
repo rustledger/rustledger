@@ -176,6 +176,12 @@ pub fn run_with_writer<W: io::Write>(
         validate: true,
         plugin_max_time_secs: crate::plugin_budget::max_time_secs(),
         plugin_max_memory_mb: crate::plugin_budget::max_memory_mb(),
+        // BQL answers and the `code: message` diagnostics below never read
+        // the source text — snippets are `check`'s job — and the text of a
+        // large ledger dwarfs everything else a query holds (173 MB on the
+        // 1M-beancount workload). Error locations are resolved while the
+        // text is still held, so the diagnostics keep it if they ever want it.
+        retain_source_text: false,
         ..Default::default()
     };
 

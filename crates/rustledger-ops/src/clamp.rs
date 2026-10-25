@@ -116,10 +116,11 @@ fn synthetic_transaction(date: NaiveDate, postings: Vec<Spanned<Posting>>) -> Di
     })
 }
 
-/// Whether a transaction is an opening-balance summary like
-/// [`synthetic_transaction`] writes: what a windowed report shows for the
-/// history before the window. Recognized by the flag and narration — the
-/// only durable shape a later stage sees, since `clamp_indexed`'s
+/// Whether a transaction is a clamp-synthesized opening-balance summary.
+///
+/// The shape `synthetic_transaction` writes: what a windowed report shows
+/// for the history before the window. Recognized by the flag and narration
+/// — the only durable shape a later stage sees, since `clamp_indexed`'s
 /// provenance (`None` for synthesized) is dropped when the directives are
 /// flattened. A user-authored row of exactly that shape is answered `true`
 /// too, which costs it nothing but its position.

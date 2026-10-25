@@ -426,7 +426,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 account: parse_account("open", account)?,
                 currencies: currencies.iter().map(|c| c.clone().into()).collect(),
                 booking: booking.clone(),
-                meta: json_map_to_metadata(meta),
+                meta: json_map_to_metadata(meta).into(),
             }))
         }
         InputEntry::Close {
@@ -440,7 +440,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
             Ok(Directive::Close(rustledger_core::Close {
                 date,
                 account: parse_account("close", account)?,
-                meta: json_map_to_metadata(meta),
+                meta: json_map_to_metadata(meta).into(),
             }))
         }
         InputEntry::Balance {
@@ -457,7 +457,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 account: parse_account("balance", account)?,
                 amount: parse_input_amount("balance amount", amount)?,
                 tolerance: None,
-                meta: json_map_to_metadata(meta),
+                meta: json_map_to_metadata(meta).into(),
             }))
         }
         InputEntry::Pad {
@@ -473,7 +473,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 date,
                 account: parse_account("pad", account)?,
                 source_account: parse_account("pad source", source_account)?,
-                meta: json_map_to_metadata(meta),
+                meta: json_map_to_metadata(meta).into(),
             }))
         }
         InputEntry::Commodity {
@@ -487,7 +487,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
             Ok(Directive::Commodity(rustledger_core::Commodity {
                 date,
                 currency: currency.clone().into(),
-                meta: json_map_to_metadata(meta),
+                meta: json_map_to_metadata(meta).into(),
             }))
         }
         InputEntry::Price {
@@ -503,7 +503,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 date,
                 currency: currency.clone().into(),
                 amount: parse_input_amount("price amount", amount)?,
-                meta: json_map_to_metadata(meta),
+                meta: json_map_to_metadata(meta).into(),
             }))
         }
         InputEntry::Event {
@@ -519,7 +519,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 date,
                 event_type: event_type.clone(),
                 value: value.clone(),
-                meta: json_map_to_metadata(meta),
+                meta: json_map_to_metadata(meta).into(),
             }))
         }
         InputEntry::Note {
@@ -540,7 +540,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 // Carried since #2573, as `InputEntry::Document` below does.
                 tags: tags.iter().map(|t| t.clone().into()).collect(),
                 links: links.iter().map(|l| l.clone().into()).collect(),
-                meta: json_map_to_metadata(meta),
+                meta: json_map_to_metadata(meta).into(),
             }))
         }
         InputEntry::Document {
@@ -560,7 +560,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 path: path.clone(),
                 tags: tags.iter().map(|t| t.clone().into()).collect(),
                 links: links.iter().map(|l| l.clone().into()).collect(),
-                meta: json_map_to_metadata(meta),
+                meta: json_map_to_metadata(meta).into(),
             }))
         }
         InputEntry::Query {
@@ -576,7 +576,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 date,
                 name: name.clone(),
                 query: query_string.clone(),
-                meta: json_map_to_metadata(meta),
+                meta: json_map_to_metadata(meta).into(),
             }))
         }
         InputEntry::Custom {
@@ -592,7 +592,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 date,
                 custom_type: custom_type.clone(),
                 values: values.iter().map(json_to_meta_value).collect(),
-                meta: json_map_to_metadata(meta),
+                meta: json_map_to_metadata(meta).into(),
             }))
         }
     }

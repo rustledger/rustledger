@@ -543,12 +543,20 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     deserialize into the new structs as junk. `MetaValue`,
 ///     `CostNumber` and the map's own entry encoding are untouched.
 ///
+/// v43: every variant's `meta` map is a `MetaMap` (boxed-while-nonempty,
+///     like v42's `Posting`/`Transaction` fields) and `SortedSet` holds its
+///     elements in an `Option<Box<Vec<T>>>`, so `TagSet`/`LinkSet` shrink
+///     to a pointer. The archived field shapes moved the same way, so a
+///     v42 blob would deserialize into the new structs as junk.
+///     `MetaValue`, `CostNumber` and the map's entry encoding are
+///     untouched.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 42;
+pub const CACHE_VERSION: u32 = 43;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1313,7 +1321,10 @@ mod tests {
         // v42 boxes `Posting`/`Transaction`'s meta map and comment lists
         // (`MetaMap`/`CommentList`); no `CostNumber` is involved, so the
         // byte arrays below still hold.
-        const FIXTURE_VERSION: u32 = 42;
+        // v43 boxes every variant's meta map and the `SortedSet` backing
+        // store; no `CostNumber` is involved, so the byte arrays below
+        // still hold.
+        const FIXTURE_VERSION: u32 = 43;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1438,7 +1449,10 @@ mod tests {
         // v42 boxes `Posting`/`Transaction`'s meta map and comment lists;
         // `MetaValue` itself is archived as before, so the hash below is
         // unchanged.
-        const FIXTURE_VERSION: u32 = 42;
+        // v43 boxes every variant's meta map and the `SortedSet` backing
+        // store; `MetaValue` itself is archived as before, so the hash
+        // below is unchanged.
+        const FIXTURE_VERSION: u32 = 43;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

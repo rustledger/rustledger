@@ -950,7 +950,7 @@ fn test_convert_function() {
         date: date(2024, 1, 1),
         currency: "EUR".into(),
         amount: Amount::new(dec!(1.10), "USD"),
-        meta: Metadata::default(),
+        meta: Default::default(),
     };
 
     let txn = Transaction::new(date(2024, 1, 15), "Test")
@@ -1249,7 +1249,7 @@ fn test_account_meta_functions() {
             account: "Assets:Bank:Checking".into(),
             currencies: vec![],
             booking: None,
-            meta: open_meta,
+            meta: open_meta.into(),
         }),
         Directive::Open(Open::new(date(2020, 2, 15), "Expenses:Food")),
         Directive::Close(Close::new(date(2024, 12, 31), "Assets:Bank:Checking")),
@@ -2221,7 +2221,7 @@ fn beanquery_functions_from_issue_2153_match_bean_query() {
         Directive::Commodity(rustledger_core::Commodity {
             date: date(2024, 1, 1),
             currency: "USD".into(),
-            meta: usd_meta,
+            meta: usd_meta.into(),
         }),
         Directive::Transaction(
             Transaction::new(date(2024, 2, 15), "t")
@@ -2333,12 +2333,12 @@ fn commodity_meta_takes_the_last_declaration() {
         Directive::Commodity(rustledger_core::Commodity {
             date: date(2024, 1, 1),
             currency: "USD".into(),
-            meta: meta_named("First"),
+            meta: meta_named("First").into(),
         }),
         Directive::Commodity(rustledger_core::Commodity {
             date: date(2024, 6, 1),
             currency: "USD".into(),
-            meta: meta_named("Second"),
+            meta: meta_named("Second").into(),
         }),
         Directive::Transaction(
             Transaction::new(date(2024, 2, 15), "t")
@@ -2467,7 +2467,7 @@ fn commodity_meta_resolves_under_the_sourced_constructor() {
             value: Directive::Commodity(rustledger_core::Commodity {
                 date: date(2024, 1, 1),
                 currency: "USD".into(),
-                meta: usd_meta,
+                meta: usd_meta.into(),
             }),
             span: rustledger_parser::Span { start: 0, end: 40 },
             file_id: file_id as u16,
@@ -2534,7 +2534,7 @@ fn entries_table_matches_bean_query_columns() {
             account: "Assets:A".into(),
             currencies: vec![],
             booking: None,
-            meta: Metadata::default(),
+            meta: Default::default(),
         }),
         Directive::Transaction(
             Transaction::new(date(2024, 2, 15), "monthly invoice")

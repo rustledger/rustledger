@@ -483,7 +483,7 @@ mod tests {
             Directive::Commodity(Commodity {
                 date: date(2024, 1, 2),
                 currency: "USD".into(),
-                meta: commodity_meta,
+                meta: commodity_meta.into(),
             }),
             // Balance.amount.currency
             Directive::Balance(Balance {
@@ -577,7 +577,7 @@ mod tests {
                 account: "Assets:X".into(),
                 currencies: vec![],
                 booking: None,
-                meta: meta_with_account.clone(),
+                meta: meta_with_account.clone().into(),
             }),
             Directive::Close(Close {
                 date: date(2024, 1, 2),

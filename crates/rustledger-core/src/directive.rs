@@ -1314,7 +1314,7 @@ pub struct Balance {
     #[cfg_attr(feature = "rkyv", rkyv(with = rkyv::with::Map<AsDecimal>))]
     pub tolerance: Option<Decimal>,
     /// Metadata
-    pub meta: Metadata,
+    pub meta: MetaMap,
 }
 
 impl Balance {
@@ -1339,8 +1339,8 @@ impl Balance {
 
     /// Set metadata.
     #[must_use]
-    pub fn with_meta(mut self, meta: Metadata) -> Self {
-        self.meta = meta;
+    pub fn with_meta(mut self, meta: impl Into<MetaMap>) -> Self {
+        self.meta = meta.into();
         self
     }
 }
@@ -1374,7 +1374,7 @@ pub struct Open {
     /// Booking method for this account
     pub booking: Option<String>,
     /// Metadata
-    pub meta: Metadata,
+    pub meta: MetaMap,
 }
 
 impl Open {
@@ -1406,8 +1406,8 @@ impl Open {
 
     /// Set metadata.
     #[must_use]
-    pub fn with_meta(mut self, meta: Metadata) -> Self {
-        self.meta = meta;
+    pub fn with_meta(mut self, meta: impl Into<MetaMap>) -> Self {
+        self.meta = meta.into();
         self
     }
 }
@@ -1445,7 +1445,7 @@ pub struct Close {
     /// Account name
     pub account: crate::Account,
     /// Metadata
-    pub meta: Metadata,
+    pub meta: MetaMap,
 }
 
 impl Close {
@@ -1461,8 +1461,8 @@ impl Close {
 
     /// Set metadata.
     #[must_use]
-    pub fn with_meta(mut self, meta: Metadata) -> Self {
-        self.meta = meta;
+    pub fn with_meta(mut self, meta: impl Into<MetaMap>) -> Self {
+        self.meta = meta.into();
         self
     }
 }
@@ -1488,7 +1488,7 @@ pub struct Commodity {
     /// Currency/commodity code (e.g., "USD", "AAPL")
     pub currency: crate::Currency,
     /// Metadata
-    pub meta: Metadata,
+    pub meta: MetaMap,
 }
 
 impl Commodity {
@@ -1504,8 +1504,8 @@ impl Commodity {
 
     /// Set metadata.
     #[must_use]
-    pub fn with_meta(mut self, meta: Metadata) -> Self {
-        self.meta = meta;
+    pub fn with_meta(mut self, meta: impl Into<MetaMap>) -> Self {
+        self.meta = meta.into();
         self
     }
 }
@@ -1534,7 +1534,7 @@ pub struct Pad {
     /// Source account for padding (e.g., Equity:Opening-Balances)
     pub source_account: crate::Account,
     /// Metadata
-    pub meta: Metadata,
+    pub meta: MetaMap,
 }
 
 impl Pad {
@@ -1555,8 +1555,8 @@ impl Pad {
 
     /// Set metadata.
     #[must_use]
-    pub fn with_meta(mut self, meta: Metadata) -> Self {
-        self.meta = meta;
+    pub fn with_meta(mut self, meta: impl Into<MetaMap>) -> Self {
+        self.meta = meta.into();
         self
     }
 }
@@ -1588,7 +1588,7 @@ pub struct Event {
     /// Event value
     pub value: String,
     /// Metadata
-    pub meta: Metadata,
+    pub meta: MetaMap,
 }
 
 impl Event {
@@ -1605,8 +1605,8 @@ impl Event {
 
     /// Set metadata.
     #[must_use]
-    pub fn with_meta(mut self, meta: Metadata) -> Self {
-        self.meta = meta;
+    pub fn with_meta(mut self, meta: impl Into<MetaMap>) -> Self {
+        self.meta = meta.into();
         self
     }
 }
@@ -1640,7 +1640,7 @@ pub struct Query {
     /// BQL query string
     pub query: String,
     /// Metadata
-    pub meta: Metadata,
+    pub meta: MetaMap,
 }
 
 impl Query {
@@ -1657,8 +1657,8 @@ impl Query {
 
     /// Set metadata.
     #[must_use]
-    pub fn with_meta(mut self, meta: Metadata) -> Self {
-        self.meta = meta;
+    pub fn with_meta(mut self, meta: impl Into<MetaMap>) -> Self {
+        self.meta = meta.into();
         self
     }
 }
@@ -1700,7 +1700,7 @@ pub struct Note {
     /// Links, from `^link` on the note header. See `tags`.
     pub links: crate::LinkSet,
     /// Metadata
-    pub meta: Metadata,
+    pub meta: MetaMap,
 }
 
 impl Note {
@@ -1737,8 +1737,8 @@ impl Note {
 
     /// Set metadata.
     #[must_use]
-    pub fn with_meta(mut self, meta: Metadata) -> Self {
-        self.meta = meta;
+    pub fn with_meta(mut self, meta: impl Into<MetaMap>) -> Self {
+        self.meta = meta.into();
         self
     }
 }
@@ -1776,7 +1776,7 @@ pub struct Document {
     /// Links
     pub links: crate::LinkSet,
     /// Metadata
-    pub meta: Metadata,
+    pub meta: MetaMap,
 }
 
 impl Document {
@@ -1813,8 +1813,8 @@ impl Document {
 
     /// Set metadata.
     #[must_use]
-    pub fn with_meta(mut self, meta: Metadata) -> Self {
-        self.meta = meta;
+    pub fn with_meta(mut self, meta: impl Into<MetaMap>) -> Self {
+        self.meta = meta.into();
         self
     }
 }
@@ -1848,7 +1848,7 @@ pub struct Price {
     /// Price amount (in another currency)
     pub amount: Amount,
     /// Metadata
-    pub meta: Metadata,
+    pub meta: MetaMap,
 }
 
 impl Price {
@@ -1865,8 +1865,8 @@ impl Price {
 
     /// Set metadata.
     #[must_use]
-    pub fn with_meta(mut self, meta: Metadata) -> Self {
-        self.meta = meta;
+    pub fn with_meta(mut self, meta: impl Into<MetaMap>) -> Self {
+        self.meta = meta.into();
         self
     }
 }
@@ -1894,7 +1894,7 @@ pub struct Custom {
     /// Values/arguments for this custom directive
     pub values: Vec<MetaValue>,
     /// Metadata
-    pub meta: Metadata,
+    pub meta: MetaMap,
 }
 
 impl Custom {
@@ -1918,8 +1918,8 @@ impl Custom {
 
     /// Set metadata.
     #[must_use]
-    pub fn with_meta(mut self, meta: Metadata) -> Self {
-        self.meta = meta;
+    pub fn with_meta(mut self, meta: impl Into<MetaMap>) -> Self {
+        self.meta = meta.into();
         self
     }
 }

@@ -1630,7 +1630,7 @@ jobs:
           # bean-price has no --version flag (it errors demanding sources);
           # --help is the probe bean_price_compat.rs itself uses.
           bean-price --help > /dev/null
-          python -c "import beancount_options.check_option_expiry"
+          python -c "import beancount_options.check_option_expiry, beancount_options.check_option_assignment"
       # The CPython WASI runtime that python_plugin_wasi and
       # plugin_conformance run Python plugins with. Without this every run
       # downloaded it (~14 MB) for those suites, and once more for the test

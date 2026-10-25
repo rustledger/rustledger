@@ -1,7 +1,6 @@
 ; check_option_assignment end to end: booking fills each closing `{}` leg
 ; with the cost of the lot it closed, which is the premium the plugin reads.
-; Native only until beancount-options has check_option_assignment; the
-; expected errors are in assignment.expected.
+; The expected errors are in assignment.expected.
 plugin "beancount_options.check_option_assignment"
 
 2026-01-01 open Assets:Broker:Options

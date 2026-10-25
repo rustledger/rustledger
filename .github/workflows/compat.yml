@@ -1619,7 +1619,7 @@ jobs:
           # cases (tests/cases/). Pinned to an immutable commit, as the
           # compat job pins its plugin repos; bump deliberately.
           git clone --quiet https://github.com/rustledger/beancount-options "$RUNNER_TEMP/beancount-options"
-          git -C "$RUNNER_TEMP/beancount-options" checkout --quiet b828d6bca32a57d97c569369c253654c39d3537a
+          git -C "$RUNNER_TEMP/beancount-options" checkout --quiet f51ca6f6dcdcd29fa690288fe5db3db6936ac479
           pip install "$RUNNER_TEMP/beancount-options"
       - name: Assert python tools are runnable (no silent skips)
         run: |

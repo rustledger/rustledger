@@ -8,12 +8,12 @@
 //! `tests/fixtures/options/` and require the same errors, at the same
 //! lines, in the same order.
 //!
-//! The shared cases in beancount-options' `tests/cases/expiry/` (each
+//! The shared cases in beancount-options' `tests/cases/<plugin>/` (each
 //! ledger with a `.expected` file of `line: message`) are run too, from the
 //! checkout named by `BEANCOUNT_OPTIONS_DIR`, so a rule change lands on
-//! both sides. `check_option_assignment` has no Python counterpart yet; its
-//! end-to-end fixture is checked against `assignment.expected` with
-//! `rledger` alone.
+//! both sides. `check_option_assignment`'s own fixture, which exercises
+//! what `rledger check`'s booking fills in, is checked against
+//! `assignment.expected` with `rledger` alone.
 //!
 //! Tool-gated: the parity tests need `bean-check` with beancount-options
 //! installed, and the shared cases need `BEANCOUNT_OPTIONS_DIR`. Where
@@ -181,15 +181,14 @@ fn check_option_expiry_same_day_across_include_matches() {
     );
 }
 
-/// beancount-options' shared cases: each `tests/cases/expiry/*.beancount`
+/// beancount-options' shared cases: each `tests/cases/<plugin>/*.beancount`
 /// gives its `.expected` errors natively, and the same as `bean-check`.
-#[test]
-fn check_option_expiry_shared_cases_match() {
+fn assert_shared_cases_match(plugin: &str) {
     let Some(dir) = std::env::var_os("BEANCOUNT_OPTIONS_DIR") else {
         eprintln!("{NO_CASES_DIR_MARKER}");
         return;
     };
-    let cases = PathBuf::from(dir).join("tests/cases/expiry");
+    let cases = PathBuf::from(dir).join("tests/cases").join(plugin);
     let mut ledgers: Vec<PathBuf> = std::fs::read_dir(&cases)
         .unwrap_or_else(|e| panic!("reading {}: {e}", cases.display()))
         .map(|e| e.unwrap().path())
@@ -206,10 +205,22 @@ fn check_option_expiry_shared_cases_match() {
     }
 }
 
+/// beancount-options' shared `check_option_expiry` cases, both sides.
+#[test]
+fn check_option_expiry_shared_cases_match() {
+    assert_shared_cases_match("expiry");
+}
+
+/// beancount-options' shared `check_option_assignment` cases, both sides.
+/// Its overflow fixture is not one, for the reason on that test.
+#[test]
+fn check_option_assignment_shared_cases_match() {
+    assert_shared_cases_match("assignment");
+}
+
 /// `check_option_assignment` through `rledger check`: booking fills each
 /// closing `{}` leg with its lot's cost, which is the premium the plugin
-/// reads, so the errors are those in `assignment.expected`. Native only
-/// until beancount-options has the plugin.
+/// reads, so the errors are those in `assignment.expected`.
 #[test]
 fn check_option_assignment_end_to_end() {
     let rledger = require_rledger!();
@@ -226,7 +237,9 @@ fn check_option_assignment_end_to_end() {
 
 /// Products past `Decimal`'s range neither panic nor pass silently: the
 /// share count still runs, and an assignment whose basis cannot be
-/// computed is reported as not checked (#2661 review).
+/// computed is reported as not checked (#2661 review). Not shared with
+/// beancount-options: its Python counterpart has arbitrary-precision
+/// decimals and checks these amounts instead.
 #[test]
 fn check_option_assignment_overflow_is_reported() {
     let rledger = require_rledger!();

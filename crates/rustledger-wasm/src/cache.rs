@@ -298,12 +298,15 @@ use crate::types::{Error, LedgerOptions};
 /// (#2717) and v54 with `fix/plugin-placeholder-locations` (#2713); the
 /// bumps kept DISTINCT numbers, so a blob written between the merges is
 /// regenerated.
-/// v56: `Posting`/`Transaction` keep their `meta` map and comment lists
+/// v57: `Posting`/`Transaction` keep their `meta` map and comment lists
 /// boxed-while-nonempty (`MetaMap`/`CommentList`). Loader v42, MOVED --
 /// both caches archive the same directives and the fields' archived
 /// shape went from a bare map/`Vec` to `Option<Box<..>>`, so a v55 blob
-/// reads the new structs at the wrong offsets.
-pub const CACHE_VERSION: u32 = 56;
+/// reads the new structs at the wrong offsets. The number skips v56:
+/// `fix/option-assignment-fee-window-guard` (handed over `569cf8099b`)
+/// claimed v56 first for its plugin-error archive change, and parallel
+/// bumps keep DISTINCT numbers (see v55's note).
+pub const CACHE_VERSION: u32 = 57;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

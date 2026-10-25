@@ -639,6 +639,161 @@ pub fn tokenize_lossless(source: &str) -> Vec<(Token<'_>, Span)> {
 /// turning `source.len() / 4` into a multi-GB reservation.
 pub(crate) const TOKEN_CAPACITY_CAP: usize = 4 << 20;
 
+/// Pull-based tokenizer: the former `tokenize_inner` loop body as an
+/// iterator, so the CST path can consume tokens one at a time.
+///
+/// Materializing the whole-file `Vec<(Token, Span)>` peaked at 2.6 GB
+/// of heap on a 173 MB ledger (profiling, issue #2742), and the CST
+/// immediately projected it into a second whole-file
+/// `Vec<(SyntaxKind, Range)>` (1.6 GB more). [`tokenize`] /
+/// [`tokenize_lossless`] keep their `Vec` API by collecting from this
+/// iterator; the structured parser streams it instead.
+pub struct TokenIter<'src> {
+    lexer: logos::Lexer<'src, Token<'src>>,
+    source: &'src str,
+    keep_whitespace: bool,
+    at_line_start: bool,
+    last_newline_end: usize,
+    pending: Option<(Token<'src>, Span)>,
+}
+
+impl<'src> TokenIter<'src> {
+    /// Tokenize `source`, preserving or dropping mid-line
+    /// [`Token::Whitespace`] per `keep_whitespace` (the AST path drops
+    /// it, the CST path keeps it). Layout post-processing — line-start
+    /// `#` comments and `Indent`/`DeepIndent` synthesis — is identical
+    /// on both paths.
+    pub fn new(source: &'src str, keep_whitespace: bool) -> Self {
+        Self {
+            lexer: Token::lexer(source),
+            source,
+            keep_whitespace,
+            at_line_start: true,
+            last_newline_end: 0,
+            pending: None,
+        }
+    }
+}
+
+impl<'src> Iterator for TokenIter<'src> {
+    type Item = (Token<'src>, Span);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(pending) = self.pending.take() {
+            return Some(pending);
+        }
+        let source = self.source;
+        while let Some(result) = self.lexer.next() {
+            let span = self.lexer.span();
+
+            if !self.keep_whitespace && matches!(result, Ok(Token::Whitespace(_))) {
+                // AST-path drops mid-line whitespace; the CST path keeps
+                // it. Layout-relevant whitespace (start-of-line indentation,
+                // BOM error spans) is handled by the dedicated arms below
+                // regardless of which path we are on.
+                continue;
+            }
+
+            match result {
+                Ok(Token::Newline) => {
+                    self.at_line_start = true;
+                    self.last_newline_end = span.end;
+                    return Some((Token::Newline, span.into()));
+                }
+                Ok(Token::Hash) if self.at_line_start && span.start == self.last_newline_end => {
+                    // Hash at very start of line (no indentation) is a comment
+                    // Find end of line and create a comment token for the whole line
+                    let comment_start = span.start;
+                    let line_end = source[span.end..]
+                        .find('\n')
+                        .map_or(source.len(), |i| span.end + i);
+                    let comment_text = &source[comment_start..line_end];
+                    // Skip lexer tokens until we reach the newline
+                    while let Some(peek_result) = self.lexer.next() {
+                        let peek_span = self.lexer.span();
+                        let peek_end = peek_span.end;
+                        if peek_result == Ok(Token::Newline) {
+                            self.pending = Some((Token::Newline, peek_span.into()));
+                            self.at_line_start = true;
+                            self.last_newline_end = peek_end;
+                            break;
+                        }
+                        // Skip other tokens on the comment line
+                    }
+                    return Some((
+                        Token::Comment(comment_text),
+                        Span {
+                            start: comment_start,
+                            end: line_end,
+                        },
+                    ));
+                }
+                Ok(token) => {
+                    // Check for indentation at line start
+                    if self.at_line_start && span.start > self.last_newline_end {
+                        // Count leading whitespace between last newline and this token
+                        // Tabs count as indentation (treat 1 tab as 4 spaces for counting purposes)
+                        let leading = &source[self.last_newline_end..span.start];
+                        let mut space_count = 0;
+                        let mut char_count = 0;
+                        for c in leading.chars() {
+                            match c {
+                                ' ' => {
+                                    space_count += 1;
+                                    char_count += 1;
+                                }
+                                '\t' => {
+                                    space_count += 4; // Treat tab as 4 spaces
+                                    char_count += 1;
+                                }
+                                _ => break,
+                            }
+                        }
+                        // Python beancount accepts 1+ space for metadata indentation
+                        if space_count >= 1 {
+                            let indent_start = self.last_newline_end;
+                            let indent_end = self.last_newline_end + char_count;
+                            // Use DeepIndent for 3+ spaces (posting metadata level).
+                            // Python beancount allows flexible indentation where posting
+                            // metadata just needs to be more indented than the posting.
+                            // Common patterns: 2-space posting / 4-space meta, or
+                            // 1-space posting / 3-space meta (as in beancount_reds_plugins).
+                            let indent_token = if space_count >= 3 {
+                                Token::DeepIndent(space_count)
+                            } else {
+                                Token::Indent(space_count)
+                            };
+                            self.pending = Some((token, span.into()));
+                            self.at_line_start = false;
+                            return Some((
+                                indent_token,
+                                Span {
+                                    start: indent_start,
+                                    end: indent_end,
+                                },
+                            ));
+                        }
+                    }
+                    self.at_line_start = false;
+                    return Some((token, span.into()));
+                }
+                Err(()) => {
+                    // Lexer error - produce an Error token with the invalid source text.
+                    let invalid_text = &source[span.clone()];
+                    apply_err_layout_transparency(
+                        invalid_text,
+                        span.start,
+                        &mut self.at_line_start,
+                        &mut self.last_newline_end,
+                    );
+                    return Some((Token::Error(invalid_text), span.into()));
+                }
+            }
+        }
+        None
+    }
+}
+
 fn tokenize_inner(source: &str, keep_whitespace: bool) -> Vec<(Token<'_>, Span)> {
     // Pre-size to avoid reallocation churn. A beancount token averages ~4 bytes
     // of source (dates, numbers, currencies, whitespace runs), so `len / 4` is a
@@ -649,116 +804,7 @@ fn tokenize_inner(source: &str, keep_whitespace: bool) -> Vec<(Token<'_>, Span)>
     // multi-GB up-front reservation — the parser must handle malformed input
     // gracefully; beyond the cap the `Vec` just grows normally.
     let mut tokens = Vec::with_capacity((source.len() / 4).min(TOKEN_CAPACITY_CAP));
-    let mut lexer = Token::lexer(source);
-    let mut at_line_start = true;
-    let mut last_newline_end = 0usize;
-
-    while let Some(result) = lexer.next() {
-        let span = lexer.span();
-
-        if !keep_whitespace && matches!(result, Ok(Token::Whitespace(_))) {
-            // AST-path drops mid-line whitespace; the CST path keeps
-            // it. Layout-relevant whitespace (start-of-line indentation,
-            // BOM error spans) is handled by the dedicated arms below
-            // regardless of which path we are on.
-            continue;
-        }
-
-        match result {
-            Ok(Token::Newline) => {
-                tokens.push((Token::Newline, span.clone().into()));
-                at_line_start = true;
-                last_newline_end = span.end;
-            }
-            Ok(Token::Hash) if at_line_start && span.start == last_newline_end => {
-                // Hash at very start of line (no indentation) is a comment
-                // Find end of line and create a comment token for the whole line
-                let comment_start = span.start;
-                let line_end = source[span.end..]
-                    .find('\n')
-                    .map_or(source.len(), |i| span.end + i);
-                let comment_text = &source[comment_start..line_end];
-                tokens.push((
-                    Token::Comment(comment_text),
-                    Span {
-                        start: comment_start,
-                        end: line_end,
-                    },
-                ));
-                // Skip lexer tokens until we reach the newline
-                while let Some(peek_result) = lexer.next() {
-                    let peek_span = lexer.span();
-                    let peek_end = peek_span.end;
-                    if peek_result == Ok(Token::Newline) {
-                        tokens.push((Token::Newline, peek_span.into()));
-                        at_line_start = true;
-                        last_newline_end = peek_end;
-                        break;
-                    }
-                    // Skip other tokens on the comment line
-                }
-            }
-            Ok(token) => {
-                // Check for indentation at line start
-                if at_line_start && span.start > last_newline_end {
-                    // Count leading whitespace between last newline and this token
-                    // Tabs count as indentation (treat 1 tab as 4 spaces for counting purposes)
-                    let leading = &source[last_newline_end..span.start];
-                    let mut space_count = 0;
-                    let mut char_count = 0;
-                    for c in leading.chars() {
-                        match c {
-                            ' ' => {
-                                space_count += 1;
-                                char_count += 1;
-                            }
-                            '\t' => {
-                                space_count += 4; // Treat tab as 4 spaces
-                                char_count += 1;
-                            }
-                            _ => break,
-                        }
-                    }
-                    // Python beancount accepts 1+ space for metadata indentation
-                    if space_count >= 1 {
-                        let indent_start = last_newline_end;
-                        let indent_end = last_newline_end + char_count;
-                        // Use DeepIndent for 3+ spaces (posting metadata level).
-                        // Python beancount allows flexible indentation where posting
-                        // metadata just needs to be more indented than the posting.
-                        // Common patterns: 2-space posting / 4-space meta, or
-                        // 1-space posting / 3-space meta (as in beancount_reds_plugins).
-                        let indent_token = if space_count >= 3 {
-                            Token::DeepIndent(space_count)
-                        } else {
-                            Token::Indent(space_count)
-                        };
-                        tokens.push((
-                            indent_token,
-                            Span {
-                                start: indent_start,
-                                end: indent_end,
-                            },
-                        ));
-                    }
-                }
-                at_line_start = false;
-                tokens.push((token, span.into()));
-            }
-            Err(()) => {
-                // Lexer error - produce an Error token with the invalid source text.
-                let invalid_text = &source[span.clone()];
-                apply_err_layout_transparency(
-                    invalid_text,
-                    span.start,
-                    &mut at_line_start,
-                    &mut last_newline_end,
-                );
-                tokens.push((Token::Error(invalid_text), span.into()));
-            }
-        }
-    }
-
+    tokens.extend(TokenIter::new(source, keep_whitespace));
     tokens
 }
 

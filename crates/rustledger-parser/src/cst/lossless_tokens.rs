@@ -17,9 +17,49 @@ use std::ops::Range;
 
 use crate::bom::strip_leading;
 use crate::cst::syntax_kind::SyntaxKind;
-use crate::logos_lexer::{Token, tokenize_lossless};
+use crate::logos_lexer::{Token, TokenIter};
 
 const UTF8_BOM_LEN: usize = 3;
+
+/// Pull-based lossless `(SyntaxKind, Range)` stream: the same entries
+/// [`lossless_kind_tokens`] returns, one at a time, without the
+/// whole-file `Vec`. The structured parser consumes this directly so
+/// neither the intermediate `(Token, Span)` vec nor the projected kind
+/// vec is ever materialized (issue #2742: together they peaked at
+/// ~4.3 GB on a 173 MB ledger).
+pub struct KindTokenIter<'src> {
+    inner: TokenIter<'src>,
+    bom: Option<Range<usize>>,
+    offset: usize,
+}
+
+impl<'src> KindTokenIter<'src> {
+    /// Stream `(SyntaxKind, Range)` entries for `source`, covering
+    /// every byte exactly once (same tiling as
+    /// [`lossless_kind_tokens`]).
+    pub fn new(source: &'src str) -> Self {
+        let (lexer_source, had_bom) = strip_leading(source);
+        Self {
+            inner: TokenIter::new(lexer_source, /* keep_whitespace = */ true),
+            bom: had_bom.then_some(0..UTF8_BOM_LEN),
+            offset: if had_bom { UTF8_BOM_LEN } else { 0 },
+        }
+    }
+}
+
+impl Iterator for KindTokenIter<'_> {
+    type Item = (SyntaxKind, Range<usize>);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(bom) = self.bom.take() {
+            return Some((SyntaxKind::BOM, bom));
+        }
+        let (token, span) = self.inner.next()?;
+        let start = span.start + self.offset;
+        let end = span.end + self.offset;
+        Some((map_kind(&token), start..end))
+    }
+}
 
 /// Tokenize `source` losslessly and emit `(SyntaxKind, Range)` entries
 /// covering every byte exactly once.
@@ -31,21 +71,7 @@ pub fn lossless_kind_tokens(source: &str) -> Vec<(SyntaxKind, Range<usize>)> {
     // `crate::logos_lexer::{tokenize_inner, TOKEN_CAPACITY_CAP}`.
     let mut out: Vec<(SyntaxKind, Range<usize>)> =
         Vec::with_capacity((source.len() / 4).min(crate::logos_lexer::TOKEN_CAPACITY_CAP));
-
-    let (lexer_source, had_bom) = strip_leading(source);
-    let offset = if had_bom {
-        out.push((SyntaxKind::BOM, 0..UTF8_BOM_LEN));
-        UTF8_BOM_LEN
-    } else {
-        0
-    };
-
-    for (token, span) in tokenize_lossless(lexer_source) {
-        let start = span.start + offset;
-        let end = span.end + offset;
-        out.push((map_kind(&token), start..end));
-    }
-
+    out.extend(KindTokenIter::new(source));
     out
 }
 

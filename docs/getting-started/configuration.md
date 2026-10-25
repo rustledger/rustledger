@@ -172,7 +172,7 @@ export RLEDGER_FILE="$HOME/finances/main.beancount"
 alias rc='rledger check'
 alias rq='rledger query'
 alias rb='rledger report balances -a'
-alias rr='rledger report journal -a'
+alias rr='rledger report register -a'
 alias rbal='rledger report balsheet'
 alias ris='rledger report income'
 

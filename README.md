@@ -141,7 +141,8 @@ Python beancount users can install `bean-check`, `bean-query`, etc. wrapper scri
 | `balances` | | All account balances |
 | `balsheet` | `bal` | Balance sheet report |
 | `income` | `is` | Income statement |
-| `journal` | `register` | Transaction register |
+| `journal` | | Transaction journal |
+| `register` | | Transaction register (running balances) |
 | `holdings` | | Investment holdings |
 | `returns` | | Investment returns: money-weighted (XIRR) + time-weighted, with `--by-group` breakdown (a built-in beangrow replacement) |
 | `capgains` | | Realized capital gains/losses per tax lot (short vs long term) |

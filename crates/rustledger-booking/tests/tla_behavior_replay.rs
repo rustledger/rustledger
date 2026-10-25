@@ -70,8 +70,8 @@ fn txn(date: NaiveDate, amount: i64) -> Directive {
             cost: None,
             price: None,
             flag: None,
-            comments: Vec::new(),
-            trailing_comments: Vec::new(),
+            comments: Default::default(),
+            trailing_comments: Default::default(),
             meta: Default::default(),
             booking: Default::default(),
         })
@@ -84,7 +84,7 @@ fn txn(date: NaiveDate, amount: i64) -> Directive {
         tags: Default::default(),
         links: Default::default(),
         postings: vec![leg(ACCOUNT, amount), leg("Equity:Aux", -amount)],
-        trailing_comments: Vec::new(),
+        trailing_comments: Default::default(),
         meta: Default::default(),
     })
 }

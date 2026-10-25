@@ -298,7 +298,12 @@ use crate::types::{Error, LedgerOptions};
 /// (#2717) and v54 with `fix/plugin-placeholder-locations` (#2713); the
 /// bumps kept DISTINCT numbers, so a blob written between the merges is
 /// regenerated.
-pub const CACHE_VERSION: u32 = 55;
+/// v56: `Posting`/`Transaction` keep their `meta` map and comment lists
+/// boxed-while-nonempty (`MetaMap`/`CommentList`). Loader v42, MOVED --
+/// both caches archive the same directives and the fields' archived
+/// shape went from a bare map/`Vec` to `Option<Box<..>>`, so a v55 blob
+/// reads the new structs at the wrong offsets.
+pub const CACHE_VERSION: u32 = 56;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -330,7 +335,7 @@ pub const CACHE_VERSION: u32 = 55;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 41;
+const LOADER_CACHE_VERSION_PIN: u32 = 42;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";
@@ -524,7 +529,12 @@ mod tests {
     /// `Vec` is not used -- nothing here depends on the collection encoding.
     #[test]
     fn directive_archived_form_is_pinned() {
-        const DIRECTIVE_LAYOUT_HASH: u64 = 0xd1ec_e901_a2ce_2542;
+        // Moved for the `MetaMap`/`CommentList` boxing: `Posting` and
+        // `Transaction` archive their meta map and comment lists as
+        // `Option<Box<..>>` where they were a bare map/`Vec`. That is a
+        // layout change, not an output one -- the fixture's values parse
+        // the same, the bytes sit at different offsets.
+        const DIRECTIVE_LAYOUT_HASH: u64 = 0x9616_8a8e_badf_9fef;
 
         // One of every `Directive` variant, in declaration order.
         let src = "\
@@ -629,7 +639,11 @@ mod tests {
         // with transactions: the fixture gained a same-date `price` written
         // before the transaction and a `commodity` after it (price,
         // transaction, commodity now; commodity first and price last before).
-        const PROCESSED_LAYOUT_HASH: u64 = 0xbe97_fc05_7eb2_8e1e;
+        //
+        // Moved once more for the `MetaMap`/`CommentList` boxing, which is a
+        // layout change in the archived directives rather than a reordering
+        // or a rebooking -- see `directive_archived_form_is_pinned`.
+        const PROCESSED_LAYOUT_HASH: u64 = 0x381c_cc5f_ac1a_494b;
 
         let src = "\
 2024-01-01 open Assets:Bank USD\n\

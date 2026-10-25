@@ -230,7 +230,7 @@ mod tests {
     use super::*;
     use rustledger_core::{
         Amount, Balance, Close, Commodity, Custom, Decimal, Document, Event, IncompleteAmount,
-        MetaValue, Metadata, Note, Open, Pad, Posting, Price, Query, Transaction,
+        MetaValue, Note, Open, Pad, Posting, Price, Query, Transaction,
     };
     use std::str::FromStr;
 
@@ -314,7 +314,7 @@ mod tests {
             narration: "Weekly groceries".into(),
             tags: vec!["food".into()].into(),
             links: vec!["grocery-2024".into()].into(),
-            meta: Metadata::default(),
+            meta: Default::default(),
             postings: vec![
                 rustledger_core::Spanned::synthesized(Posting {
                     account: "Expenses:Food".into(),
@@ -322,9 +322,9 @@ mod tests {
                     cost: None,
                     price: None,
                     flag: None,
-                    meta: Metadata::default(),
-                    comments: Vec::new(),
-                    trailing_comments: Vec::new(),
+                    meta: Default::default(),
+                    comments: Default::default(),
+                    trailing_comments: Default::default(),
                     booking: Default::default(),
                 }),
                 rustledger_core::Spanned::synthesized(Posting {
@@ -333,13 +333,13 @@ mod tests {
                     cost: None,
                     price: None,
                     flag: None,
-                    meta: Metadata::default(),
-                    comments: Vec::new(),
-                    trailing_comments: Vec::new(),
+                    meta: Default::default(),
+                    comments: Default::default(),
+                    trailing_comments: Default::default(),
                     booking: Default::default(),
                 }),
             ],
-            trailing_comments: Vec::new(),
+            trailing_comments: Default::default(),
         };
 
         let directive = Directive::Transaction(txn);
@@ -368,7 +368,7 @@ mod tests {
             account: "Assets:Checking".into(),
             amount: Amount::new(dec("1000.00"), "USD"),
             tolerance: Some(dec("0.01")),
-            meta: Metadata::default(),
+            meta: Default::default(),
         };
 
         let directive = Directive::Balance(balance);
@@ -393,7 +393,7 @@ mod tests {
             account: "Assets:Checking".into(),
             currencies: vec!["USD".into(), "EUR".into()],
             booking: Some("FIFO".to_string()),
-            meta: Metadata::default(),
+            meta: Default::default(),
         };
 
         let directive = Directive::Open(open);
@@ -417,7 +417,7 @@ mod tests {
             date,
             currency: "AAPL".into(),
             amount: Amount::new(dec("185.50"), "USD"),
-            meta: Metadata::default(),
+            meta: Default::default(),
         };
 
         let directive = Directive::Price(price);
@@ -447,7 +447,7 @@ mod tests {
             path: "statements/2024-01.pdf".to_string(),
             tags: vec!["statement".into(), "bank".into()].into(),
             links: vec!["inv-2024-01".into()].into(),
-            meta: Metadata::default(),
+            meta: Default::default(),
         };
 
         let directive = Directive::Document(doc);
@@ -482,7 +482,7 @@ mod tests {
             comment: "called the bank".to_string(),
             tags: vec!["trip".into(), "bank".into()].into(),
             links: vec!["call-1".into()].into(),
-            meta: Metadata::default(),
+            meta: Default::default(),
         });
         let wrapper = directive_to_wrapper(&directive);
         let DirectiveData::Note(data) = &wrapper.data else {
@@ -503,29 +503,29 @@ mod tests {
                 account: "Assets:Test".into(),
                 currencies: vec![],
                 booking: None,
-                meta: Metadata::default(),
+                meta: Default::default(),
             }),
             Directive::Close(Close {
                 date,
                 account: "Assets:Test".into(),
-                meta: Metadata::default(),
+                meta: Default::default(),
             }),
             Directive::Commodity(Commodity {
                 date,
                 currency: "TEST".into(),
-                meta: Metadata::default(),
+                meta: Default::default(),
             }),
             Directive::Pad(Pad {
                 date,
                 account: "Assets:Checking".into(),
                 source_account: "Equity:Opening".into(),
-                meta: Metadata::default(),
+                meta: Default::default(),
             }),
             Directive::Event(Event {
                 date,
                 event_type: "location".to_string(),
                 value: "Home".to_string(),
-                meta: Metadata::default(),
+                meta: Default::default(),
             }),
             Directive::Note(Note {
                 date,
@@ -533,7 +533,7 @@ mod tests {
                 comment: "Test note".to_string(),
                 tags: Default::default(),
                 links: Default::default(),
-                meta: Metadata::default(),
+                meta: Default::default(),
             }),
             Directive::Document(Document {
                 date,
@@ -541,19 +541,19 @@ mod tests {
                 path: "/path/to/doc.pdf".to_string(),
                 tags: Default::default(),
                 links: Default::default(),
-                meta: Metadata::default(),
+                meta: Default::default(),
             }),
             Directive::Query(Query {
                 date,
                 name: "test_query".to_string(),
                 query: "SELECT * FROM transactions".to_string(),
-                meta: Metadata::default(),
+                meta: Default::default(),
             }),
             Directive::Custom(Custom {
                 date,
                 custom_type: "budget".to_string(),
                 values: vec![MetaValue::String("monthly".to_string())],
-                meta: Metadata::default(),
+                meta: Default::default(),
             }),
         ];
 

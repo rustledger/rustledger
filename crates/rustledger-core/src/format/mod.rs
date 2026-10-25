@@ -869,8 +869,8 @@ mod tests {
             tags: Default::default(),
             links: Default::default(),
             postings: vec![],
-            meta,
-            trailing_comments: Vec::new(),
+            meta: meta.into(),
+            trailing_comments: Default::default(),
         };
 
         let config = FormatConfig::default();
@@ -969,8 +969,8 @@ mod tests {
             cost: None,
             price: None,
             meta: Default::default(),
-            comments: Vec::new(),
-            trailing_comments: Vec::new(),
+            comments: Default::default(),
+            trailing_comments: Default::default(),
             booking: Default::default(),
         };
 
@@ -1049,8 +1049,8 @@ mod tests {
                 "USD",
             )))),
             meta: Default::default(),
-            comments: Vec::new(),
-            trailing_comments: Vec::new(),
+            comments: Default::default(),
+            trailing_comments: Default::default(),
             booking: Default::default(),
         };
 
@@ -1229,7 +1229,7 @@ mod tests {
 
         // Create a posting with an inline comment
         let mut posting = Posting::new("Expenses:Food", Amount::new(dec!(50), "USD"));
-        posting.comments = vec!["; This is an inline comment".to_string()];
+        posting.comments = vec!["; This is an inline comment".to_string()].into();
 
         let txn = Transaction::new(date(2024, 1, 15), "Test transaction")
             .with_flag('*')
@@ -1259,12 +1259,13 @@ mod tests {
 
         // Create first posting with pre-comments and trailing comment
         let mut posting1 = Posting::new("Expenses:Food", Amount::new(dec!(50), "USD"));
-        posting1.comments = vec!["; Pre-comment 1".to_string(), "; Pre-comment 2".to_string()];
-        posting1.trailing_comments = vec!["; trailing on posting".to_string()];
+        posting1.comments =
+            vec!["; Pre-comment 1".to_string(), "; Pre-comment 2".to_string()].into();
+        posting1.trailing_comments = vec!["; trailing on posting".to_string()].into();
 
         // Create second posting with pre-comment
         let mut posting2 = Posting::new("Assets:Bank", Amount::new(dec!(-50), "USD"));
-        posting2.comments = vec!["; Comment before second posting".to_string()];
+        posting2.comments = vec!["; Comment before second posting".to_string()].into();
 
         // Create transaction with trailing comments
         let mut txn = Transaction::new(date(2024, 1, 15), "Test transaction")
@@ -1274,7 +1275,8 @@ mod tests {
         txn.trailing_comments = vec![
             "; Transaction trailing 1".to_string(),
             "; Transaction trailing 2".to_string(),
-        ];
+        ]
+        .into();
 
         let formatted = format_transaction(&txn, &config);
 
@@ -1309,7 +1311,7 @@ mod tests {
         let config = FormatConfig::default();
 
         let mut posting = Posting::new("Expenses:Food", Amount::new(dec!(50), "USD"));
-        posting.trailing_comments = vec!["; This goes on same line".to_string()];
+        posting.trailing_comments = vec!["; This goes on same line".to_string()].into();
 
         let txn = Transaction::new(date(2024, 1, 15), "Test")
             .with_flag('*')
@@ -1340,7 +1342,7 @@ mod tests {
         );
 
         let mut posting = Posting::new("Expenses:Expense", Amount::new(dec!(10), "USD"));
-        posting.meta = posting_meta;
+        posting.meta = posting_meta.into();
 
         let txn = Transaction {
             date: date(2026, 4, 7),
@@ -1353,8 +1355,8 @@ mod tests {
                 crate::Spanned::synthesized(posting),
                 crate::Spanned::synthesized(Posting::auto("Assets:Wallet")),
             ],
-            meta: Metadata::default(),
-            trailing_comments: Vec::new(),
+            meta: Default::default(),
+            trailing_comments: Default::default(),
         };
 
         let config = FormatConfig::default();

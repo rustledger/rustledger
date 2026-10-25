@@ -4,19 +4,9 @@ use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::Result;
 use rust_decimal::Decimal;
 use rustledger_core::{Directive, OverflowError, checked_add_exact};
+use rustledger_ops::clamp::is_opening_summary;
 use std::collections::BTreeMap;
 use std::io::Write;
-
-/// A clamp-synthesized opening-balance summary (#2643): what a windowed
-/// report shows for the history before the window. The journal sorts these
-/// ahead of the window's own same-date rows (they ARE the pre-window history),
-/// which is also what makes the running total already carry the balances in
-/// when the first real row is read (#2741). Recognized by the flag and
-/// narration `clamp` writes; a user-authored row of exactly that shape sorts
-/// first too, which costs it nothing but its position.
-fn is_opening_summary(txn: &rustledger_core::Transaction) -> bool {
-    txn.flag == 'S' && txn.narration.as_str() == "Opening balance"
-}
 
 /// The running inventory as `200.00 EUR, -220.00 USD` (#2741): every currency
 /// seen, sorted, zero balances dropped (hledger's mixed amount).

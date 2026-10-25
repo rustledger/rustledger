@@ -72,11 +72,40 @@ fn query(source: &str, sql: &str) -> (Option<i32>, String) {
         .output()
         .expect("run rledger query");
     let _ = std::fs::remove_dir_all(&dir);
+
     let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
     combined.push_str(&String::from_utf8_lossy(&out.stderr));
     (Some(out.status.code().unwrap_or(-1)), combined)
 }
 
+/// Run `rledger report <args...>` on `source`, returning `(exit_code,
+/// combined_output)` like [`check`].
+fn report(source: &str, report_args: &[&str]) -> (Option<i32>, String) {
+    let dir = std::env::temp_dir().join(format!(
+        "rledger-overflow-r-{}-{:?}",
+        std::process::id(),
+        std::thread::current().id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create temp dir");
+    let path = dir.join("ledger.beancount");
+    std::fs::write(&path, source).expect("write fixture");
+
+    let Some(bin) = common::rledger_binary() else {
+        eprintln!("Skipping: rledger binary not found");
+        return (None, String::new());
+    };
+    let out = Command::new(bin)
+        .arg("report")
+        .arg(&path)
+        .args(report_args)
+        .output()
+        .expect("run rledger report");
+    let _ = std::fs::remove_dir_all(&dir);
+
+    let mut combined = String::from_utf8_lossy(&out.stdout).into_owned();
+    combined.push_str(&String::from_utf8_lossy(&out.stderr));
+    (Some(out.status.code().unwrap_or(-1)), combined)
+}
 /// The process survived and said something about it.
 fn assert_reported_not_panicked(code: Option<i32>, output: &str, what: &str) {
     let Some(code) = code else { return }; // binary unavailable; already logged
@@ -358,4 +387,57 @@ fn bql_cost_and_value_report_instead_of_panicking() {
         );
         assert_ne!(code, 101, "`{sql}` exited 101 (a panic):\n{out}");
     }
+}
+
+/// The register's running total is its own accumulator (#2741): two legs the
+/// loader is happy with (each account holds 4e28) sum past the ceiling in the
+/// unfiltered total, because it walks every posting. `Decimal`'s `+` would
+/// PANIC there; the report must be refused instead.
+#[test]
+fn a_running_total_past_the_ceiling_is_reported_not_panicked() {
+    let (code, out) = report(
+        "2024-01-01 open Assets:A\n\
+         2024-01-01 open Assets:B\n\
+         2024-01-01 open Equity:E1\n\
+         2024-01-01 open Equity:E2\n\
+         2024-02-01 * \"two big asset legs\"\n\
+        \x20 Assets:A    40000000000000000000000000000 USD\n\
+        \x20 Assets:B    40000000000000000000000000000 USD\n\
+        \x20 Equity:E1  -40000000000000000000000000000 USD\n\
+        \x20 Equity:E2  -40000000000000000000000000000 USD\n",
+        &["register"],
+    );
+    assert_reported_not_panicked(code, &out, "running total past the ceiling");
+    if code.is_none() {
+        return;
+    }
+    assert!(
+        out.contains("exceeds the representable range"),
+        "expected the range diagnostic naming the limit:\n{out}"
+    );
+}
+
+/// The same ledger, but the total walks only the postings `--account`
+/// matched (#2741) — one leg of 4e28, which is in range. The exact figure
+/// must be shown, not a clamped or rounded one.
+#[test]
+fn a_filtered_running_total_within_the_ceiling_stays_exact() {
+    let (code, out) = report(
+        "2024-01-01 open Assets:A\n\
+         2024-01-01 open Assets:B\n\
+         2024-01-01 open Equity:E1\n\
+         2024-01-01 open Equity:E2\n\
+         2024-02-01 * \"two big asset legs\"\n\
+        \x20 Assets:A    40000000000000000000000000000 USD\n\
+        \x20 Assets:B    40000000000000000000000000000 USD\n\
+        \x20 Equity:E1  -40000000000000000000000000000 USD\n\
+        \x20 Equity:E2  -40000000000000000000000000000 USD\n",
+        &["-f", "json", "register", "-a", "Assets:A"],
+    );
+    let Some(code) = code else { return };
+    assert_eq!(code, 0, "a 4e28 total is in range:\n{out}");
+    assert!(
+        out.contains("\"running_total\": \"40000000000000000000000000000 USD\""),
+        "the exact residual must be shown:\n{out}"
+    );
 }

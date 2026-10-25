@@ -3,7 +3,7 @@
 use super::{OutputFormat, csv_escape, json_escape};
 use anyhow::Result;
 use rust_decimal::Decimal;
-use rustledger_core::Directive;
+use rustledger_core::{Directive, OverflowError, checked_add_exact};
 use std::collections::BTreeMap;
 use std::io::Write;
 
@@ -81,7 +81,13 @@ pub(super) fn report_journal<W: Write>(
                 {
                     let currency = amount.currency.to_string();
                     let total = inventory.entry(currency.clone()).or_default();
-                    *total += amount.number;
+                    // `Decimal`'s `+` PANICS past ±7.9e28 and rounds silently
+                    // near the digit ceiling; report the overflow like every
+                    // other balance path does (see `decimal_overflow_test`).
+                    *total =
+                        checked_add_exact(*total, amount.number).ok_or_else(|| OverflowError {
+                            currency: amount.currency.clone(),
+                        })?;
                     if total.is_zero() {
                         inventory.remove(&currency);
                     }

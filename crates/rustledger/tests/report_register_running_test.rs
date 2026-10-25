@@ -118,6 +118,26 @@ fn register_is_the_journal_plus_the_running_column() {
         register.contains(" | 1000.00 USD"),
         "register must carry the running column: {register}"
     );
+    // The exact rendered line pins the columns (#2741): account padded to
+    // 50, the number right-aligned in 12, the currency left-aligned in the
+    // widest one shown (3 here), then the total after `| `.
+    assert!(
+        register.contains(
+            "  Assets:Bank                                             -220.00 USD | 200.00 EUR, -220.00 USD"
+        ),
+        "{register}"
+    );
+    // An empty total leaves the bare `|` last, and no posting line ends in
+    // the whitespace `trim_end` is there to eat.
+    let posting_lines: Vec<&str> = register.lines().filter(|l| l.starts_with("  ")).collect();
+    assert!(
+        posting_lines.iter().any(|l| l.ends_with('|')),
+        "a zero running total must leave the bare `|` last: {register}"
+    );
+    assert!(
+        posting_lines.iter().all(|l| *l == l.trim_end()),
+        "no posting line may end in whitespace: {register:?}"
+    );
 
     let journal_running = run(&bin, &["report", path, "journal", "--running"]);
     assert!(

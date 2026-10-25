@@ -2829,8 +2829,8 @@ mod tests {
     /// ignored; a report that does not clamp must still refuse it.
     #[test]
     fn date_window_flags_belong_to_the_windowed_reports_only() {
-        const WINDOWED: [&str; 6] = [
-            "balances", "balsheet", "income", "journal", "holdings", "budget",
+        const WINDOWED: [&str; 7] = [
+            "balances", "balsheet", "income", "journal", "register", "holdings", "budget",
         ];
         for (report, flags) in report_flags() {
             let has_dates = flags.iter().any(|f| f.long == "from" || f.long == "to");

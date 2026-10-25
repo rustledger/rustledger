@@ -110,7 +110,7 @@ rledger report ledger.beancount balsheet
 rledger report ledger.beancount income
 
 # Transaction register
-rledger report ledger.beancount journal
+rledger report ledger.beancount register
 ```
 
 ## Format Your Ledger

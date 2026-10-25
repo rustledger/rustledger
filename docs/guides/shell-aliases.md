@@ -25,7 +25,7 @@ alias rl='rledger'
 alias bal='rledger report "$LEDGER_FILE" balances'
 alias balsheet='rledger report "$LEDGER_FILE" balsheet'
 alias is='rledger report "$LEDGER_FILE" income'
-alias reg='rledger report "$LEDGER_FILE" journal'
+alias reg='rledger report "$LEDGER_FILE" register'
 
 # Validation
 alias check='rledger check "$LEDGER_FILE"'
@@ -71,9 +71,9 @@ bal() {
 # Register filtered by account
 reg() {
   if [ -n "$1" ]; then
-    rledger report "$LEDGER_FILE" journal -a "$1"
+    rledger report "$LEDGER_FILE" register -a "$1"
   else
-    rledger report "$LEDGER_FILE" journal
+    rledger report "$LEDGER_FILE" register
   fi
 }
 
@@ -168,12 +168,12 @@ alias bal='rledger report "$LEDGER_FILE" balances'
 alias balsheet='rledger report "$LEDGER_FILE" balsheet'
 alias is='rledger report "$LEDGER_FILE" income'
 
-# Journal/register with optional account filter
+# Register with running balances, optional account filter
 reg() {
   if [ -n "$1" ]; then
-    rledger report "$LEDGER_FILE" journal -a "$1"
+    rledger report "$LEDGER_FILE" register -a "$1"
   else
-    rledger report "$LEDGER_FILE" journal
+    rledger report "$LEDGER_FILE" register
   fi
 }
 
@@ -209,9 +209,9 @@ alias balsheet='rledger report $LEDGER_FILE balsheet'
 
 function reg
     if test -n "$argv[1]"
-        rledger report $LEDGER_FILE journal -a $argv[1]
+        rledger report $LEDGER_FILE register -a $argv[1]
     else
-        rledger report $LEDGER_FILE journal
+        rledger report $LEDGER_FILE register
     end
 end
 

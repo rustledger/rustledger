@@ -673,34 +673,29 @@ fn ag_rledger_takes_the_same_window() {
     let ag = PathBuf::from(env!("CARGO_BIN_EXE_ag-rledger"));
     let f = write_fixture(LEDGER);
     let path = f.path().to_str().unwrap();
-    for report in ["balances", "balsheet", "income", "journal", "holdings"] {
-        let want = json(
-            &bin,
-            &[
-                "report",
-                path,
-                "-f",
-                "json",
-                report,
-                "--time",
-                "2023-02 - 2023-04",
-            ],
-        );
+    for report in [
+        &["balances"][..],
+        &["balsheet"][..],
+        &["income"][..],
+        &["journal"][..],
+        &["journal", "--running"][..],
+        &["register"][..],
+        &["holdings"][..],
+    ] {
+        let mut args = vec!["report", f.path().to_str().unwrap(), "-f", "json"];
+        args.extend_from_slice(report);
+        args.extend(["--time", "2023-02 - 2023-04"]);
+        let want = json(&bin, &args);
+        let mut args = vec!["report", path];
+        args.extend_from_slice(report);
+        args.extend(["--format", "json", "--time", "2023-02 - 2023-04"]);
         let out = Command::new(&ag)
-            .args([
-                "report",
-                path,
-                report,
-                "--format",
-                "json",
-                "--time",
-                "2023-02 - 2023-04",
-            ])
+            .args(&args)
             .output()
             .expect("spawn ag-rledger");
         let env: Value = serde_json::from_slice(&out.stdout).expect("envelope is JSON");
-        assert_eq!(env["ok"], Value::Bool(true), "{report}: {env}");
-        assert_eq!(env["result"]["data"], want, "{report}");
+        assert_eq!(env["ok"], Value::Bool(true), "{report:?}: {env}");
+        assert_eq!(env["result"]["data"], want, "{report:?}");
     }
     let out = Command::new(&ag)
         .args([

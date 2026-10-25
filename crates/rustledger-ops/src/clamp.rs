@@ -116,6 +116,19 @@ fn synthetic_transaction(date: NaiveDate, postings: Vec<Spanned<Posting>>) -> Di
     })
 }
 
+/// Whether a transaction is a clamp-synthesized opening-balance summary.
+///
+/// The shape `synthetic_transaction` writes: what a windowed report shows
+/// for the history before the window. Recognized by the flag and narration
+/// — the only durable shape a later stage sees, since `clamp_indexed`'s
+/// provenance (`None` for synthesized) is dropped when the directives are
+/// flattened. A user-authored row of exactly that shape is answered `true`
+/// too, which costs it nothing but its position.
+#[must_use]
+pub fn is_opening_summary(txn: &Transaction) -> bool {
+    txn.flag == 'S' && txn.narration.as_str() == "Opening balance"
+}
+
 /// The cost spec to carry on a synthesized opening-balance posting for a held
 /// lot, or `None` for a plain-currency position.
 fn position_cost_spec(position: &Position) -> Option<CostSpec> {
@@ -346,7 +359,7 @@ mod tests {
         naive_date(y, m, day).unwrap()
     }
     fn is_summary(dir: &Directive) -> bool {
-        matches!(dir, Directive::Transaction(t) if t.flag == 'S' && t.narration.to_string() == "Opening balance")
+        matches!(dir, Directive::Transaction(t) if is_opening_summary(t))
     }
     fn mentions(dir: &Directive, account: &str) -> bool {
         matches!(dir, Directive::Transaction(t)

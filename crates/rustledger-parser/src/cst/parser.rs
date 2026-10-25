@@ -56,11 +56,12 @@
 //! `parse_flat` once `parse_structured` covers every byte in
 //! every corpus file.
 
+use std::collections::VecDeque;
 use std::ops::Range;
 
 use rowan::GreenNodeBuilder;
 
-use crate::cst::lossless_tokens::lossless_kind_tokens;
+use crate::cst::lossless_tokens::{KindTokenIter, lossless_kind_tokens};
 use crate::cst::syntax_kind::{SyntaxKind, SyntaxNode};
 
 /// Parse `source` to a flat lossless CST.
@@ -93,20 +94,86 @@ pub fn parse_flat(source: &str) -> SyntaxNode {
 /// behavior. Round-trip byte-identical for every UTF-8 input.
 #[must_use]
 pub fn parse_structured(source: &str) -> SyntaxNode {
-    let tokens: Vec<(SyntaxKind, Range<usize>)> = lossless_kind_tokens(source);
     let mut builder = GreenNodeBuilder::new();
     builder.start_node(SyntaxKind::SOURCE_FILE.into());
 
     let mut pending_leading: Vec<(SyntaxKind, Range<usize>)> = Vec::new();
     let mut seen_first_content = false;
+
+    // Streaming token window. Tokens are pulled from the lexer lazily,
+    // one top-level item at a time: every emit helper below terminates
+    // at the next non-indented line (blank line, col-0 comment,
+    // top-level content) or EOF, so a window that ends at the next
+    // top-level content token always holds the full current item plus
+    // the single boundary token the helpers test for. The whole-file
+    // `Vec` this replaces peaked at 1.6 GB of heap on a 173 MB ledger
+    // (issue #2742); this window is item-sized.
+    let mut tokens: Vec<(SyntaxKind, Range<usize>)> = Vec::new();
+    // Indices (into `tokens`) of buffered top-level content tokens —
+    // starts of top-level items, ascending. The window at `i` is
+    // complete iff the back is `> i` (or the stream is done).
+    let mut item_starts: VecDeque<usize> = VecDeque::new();
+    let mut stream = KindTokenIter::new(source);
+    let mut stream_done = false;
+    // Line-layout state of the tokens buffered so far (kept across
+    // fills): a content token starts a top-level item iff it is the
+    // first content of its line and the line has no leading
+    // whitespace.
+    let mut at_line_start = true;
+    let mut line_has_whitespace = false;
     let mut i = 0;
 
-    while i < tokens.len() {
-        let (kind, ref range) = tokens[i];
-        if kind.is_trivia() {
-            pending_leading.push((kind, range.clone()));
-            i += 1;
-            continue;
+    loop {
+        // Drop the consumed prefix so the window stays item-sized.
+        if i > 0 {
+            while matches!(item_starts.front(), Some(&k) if k <= i) {
+                item_starts.pop_front();
+            }
+            tokens.drain(..i);
+            for start in &mut item_starts {
+                *start -= i;
+            }
+            i = 0;
+        }
+
+        // Skip the next item's leading trivia (rule 2 accumulates it
+        // in `pending_leading`) and pull tokens until the window holds
+        // the item's first content token AND the start of the NEXT
+        // top-level item — the current item is then fully buffered,
+        // because every emit helper below terminates at the next
+        // non-indented line (blank line, col-0 comment, top-level
+        // content) or EOF.
+        loop {
+            while i < tokens.len() && tokens[i].0.is_trivia() {
+                pending_leading.push((tokens[i].0, tokens[i].1.clone()));
+                i += 1;
+            }
+            if matches!(item_starts.back(), Some(&k) if k > i) || stream_done {
+                break;
+            }
+            let Some((kind, range)) = stream.next() else {
+                stream_done = true;
+                break;
+            };
+            let idx = tokens.len();
+            let is_content = !kind.is_trivia();
+            if is_content && at_line_start && !line_has_whitespace {
+                item_starts.push_back(idx);
+            }
+            match kind {
+                SyntaxKind::NEWLINE => {
+                    at_line_start = true;
+                    line_has_whitespace = false;
+                }
+                SyntaxKind::WHITESPACE if at_line_start => line_has_whitespace = true,
+                _ if is_content => at_line_start = false,
+                _ => {}
+            }
+            tokens.push((kind, range));
+        }
+
+        if i >= tokens.len() {
+            break;
         }
 
         // Non-trivia at the top level. Identify what kind of line

@@ -60,6 +60,16 @@ PY_OUTPUT="$WASM_DIR/bindings/types.py"
 # Bump deliberately + commit the regenerated `types.py`.
 DATAMODEL_CODEGEN_VERSION="0.32.0"
 
+# Interpreter the generator runs under, in lockstep with
+# `--target-python-version`. Pinning only the target is not enough:
+# datamodel-code-generator derives `DEFAULT_TARGET_PYTHON_VERSION` from
+# the *running* interpreter at import time and its `PythonVersion` enum
+# rejects versions it does not know (3.14 on newer runner images crashed
+# the tool before it parsed a single flag), so the venv interpreter is
+# pinned too -- pipx otherwise builds its venv with its own base
+# interpreter, ignoring the workflow's setup-python.
+DATAMODEL_TARGET_PYTHON="3.12"
+
 # autoflake removes the import orphaned by the placeholder strip in
 # Phase 3 (see that step for the why). Pinned for the same determinism
 # reason as the other generators. Pure-Python -- chosen over ruff
@@ -319,9 +329,16 @@ if command -v datamodel-codegen >/dev/null 2>&1; then
     # Local override: assume the maintainer pinned the right version.
     DATAMODEL_CODEGEN_CMD="datamodel-codegen"
 elif command -v pipx >/dev/null 2>&1; then
-    DATAMODEL_CODEGEN_CMD="pipx run --spec datamodel-code-generator==${DATAMODEL_CODEGEN_VERSION} datamodel-codegen"
+    # Prefer the pinned interpreter; fall back to `python3` only when it
+    # is absent (local boxes without 3.12). CI always has it.
+    if command -v "python${DATAMODEL_TARGET_PYTHON}" >/dev/null 2>&1; then
+        DATAMODEL_CODEGEN_CMD="pipx run --python python${DATAMODEL_TARGET_PYTHON} --spec datamodel-code-generator==${DATAMODEL_CODEGEN_VERSION} datamodel-codegen"
+    else
+        DATAMODEL_CODEGEN_CMD="pipx run --spec datamodel-code-generator==${DATAMODEL_CODEGEN_VERSION} datamodel-codegen"
+    fi
 elif command -v uvx >/dev/null 2>&1; then
-    DATAMODEL_CODEGEN_CMD="uvx --from datamodel-code-generator==${DATAMODEL_CODEGEN_VERSION} datamodel-codegen"
+    # uv downloads the interpreter when it is not installed.
+    DATAMODEL_CODEGEN_CMD="uvx --python ${DATAMODEL_TARGET_PYTHON} --from datamodel-code-generator==${DATAMODEL_CODEGEN_VERSION} datamodel-codegen"
 else
     echo "error: need one of datamodel-codegen, pipx, or uvx on PATH." >&2
     echo "  Install with: pipx install 'datamodel-code-generator==${DATAMODEL_CODEGEN_VERSION}'" >&2
@@ -343,7 +360,7 @@ $DATAMODEL_CODEGEN_CMD \
     --input-file-type jsonschema \
     --output "$PY_OUTPUT" \
     --output-model-type pydantic_v2.BaseModel \
-    --target-python-version 3.12 \
+    --target-python-version "${DATAMODEL_TARGET_PYTHON}" \
     --use-schema-description \
     --use-double-quotes \
     --field-constraints \

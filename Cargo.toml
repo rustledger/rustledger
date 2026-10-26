@@ -202,7 +202,7 @@ ropey = { version = "1", default-features = false, features = ["cr_lines", "simd
 # formatter doesn't re-roll byte/line diff primitives.
 similar = "3"
 crossbeam-channel = "0.5"
-parking_lot = "0.12"
+parking_lot = "0.13"
 
 # Internal crates
 rustledger-core = { version = "0.24.0", path = "crates/rustledger-core" }

@@ -1375,8 +1375,11 @@ pub fn normalize_prices(txn: &mut Transaction) {
                     }
                 }
             };
-            if let Some(normalized_price) = normalized {
-                posting.price = Some(Box::new(normalized_price));
+            // Overwrite the existing box in place — the pattern above matched
+            // `Some`, so the slot is there — rather than boxing a second
+            // annotation and dropping the parse-time one.
+            if let (Some(normalized_price), Some(slot)) = (normalized, posting.price.as_mut()) {
+                **slot = normalized_price;
             }
         }
     }

@@ -1832,13 +1832,17 @@ fn interpolate_inner(
             return Err(InterpolationError::Unrepresentable { currency });
         };
         rollback.touch(transaction, idx);
-        transaction.postings[idx].price = Some(Box::new(rustledger_core::PriceAnnotation {
+        let annotation = rustledger_core::PriceAnnotation {
             kind,
             amount: Some(IncompleteAmount::Complete(Amount::new(
                 price_number,
                 &currency,
             ))),
-        }));
+        };
+        match transaction.postings[idx].price.as_mut() {
+            Some(slot) => **slot = annotation,
+            None => transaction.postings[idx].price = Some(Box::new(annotation)),
+        }
         accumulate_residual(&mut residuals, &mut unrepresentable, &currency, weight);
         if unrepresentable.contains(&currency) {
             return Err(InterpolationError::Unrepresentable { currency });
@@ -2111,10 +2115,14 @@ fn interpolate_inner(
         }
 
         rollback.touch(transaction, idx);
-        transaction.postings[idx].price = Some(Box::new(rustledger_core::PriceAnnotation {
+        let annotation = rustledger_core::PriceAnnotation {
             kind,
             amount: Some(IncompleteAmount::Complete(Amount::new(solved, &currency))),
-        }));
+        };
+        match transaction.postings[idx].price.as_mut() {
+            Some(slot) => **slot = annotation,
+            None => transaction.postings[idx].price = Some(Box::new(annotation)),
+        }
         *residuals.slot(&currency) += weight;
     }
 

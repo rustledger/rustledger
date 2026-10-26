@@ -109,7 +109,7 @@ schemars = "=1.2.3"
 clap = { version = "4", features = ["derive"] }
 clap_complete = "4"
 clap_complete_nushell = "4"
-rustyline = { version = "18", features = ["derive"] }
+rustyline = { version = "19", features = ["derive"] }
 dirs = "7"
 edit = "0.1"
 shell-words = "1"

@@ -1,11 +1,9 @@
 //! Diagnostics handler for publishing parse and validation errors.
 
-use std::sync::Arc;
-
 use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
 use rustledger_booking::BookingEngine;
 use rustledger_core::Directive;
-use rustledger_loader::{LoadOptions, Options as LoaderOptions, Plugin, SourceMap};
+use rustledger_loader::{LoadOptions, Options as LoaderOptions, Plugin, SourceMap, SourceText};
 use rustledger_parser::{ParseError, ParseResult, Span, Spanned};
 use rustledger_plugin::NativePluginRegistry;
 use rustledger_validate::{Severity, ValidationError, ValidationOptions, ValidationSession};
@@ -1042,7 +1040,7 @@ pub fn all_diagnostics(
                 let mut sm = SourceMap::new();
                 sm.add_file(
                     std::path::PathBuf::from("/tmp/rustledger-lsp-buffer.beancount"),
-                    Arc::from(source),
+                    SourceText::from(source),
                 );
                 sm
             };
@@ -2522,7 +2520,7 @@ include "credit_card.beancount"
         }];
         let file_options = LoaderOptions::new();
         let mut source_map = SourceMap::new();
-        source_map.add_file(std::path::PathBuf::from("<test>"), Arc::from(source));
+        source_map.add_file(std::path::PathBuf::from("<test>"), SourceText::from(source));
         let ctx = PluginContext {
             plugins: &plugins,
             file_options: &file_options,
@@ -2895,7 +2893,7 @@ plugin "auto_accounts"
 
         let mut ls = LedgerState::new();
         ls.load(&main).expect("load multi-file ledger");
-        let files: Vec<(u16, Arc<str>)> = ls
+        let files: Vec<(u16, SourceText)> = ls
             .ledger()
             .expect("ledger loaded")
             .source_map
@@ -2977,7 +2975,7 @@ plugin "auto_accounts"
 
         let mut ls = LedgerState::new();
         ls.load(&main).expect("load multi-file ledger");
-        let files: Vec<(u16, Arc<str>)> = ls
+        let files: Vec<(u16, SourceText)> = ls
             .ledger()
             .expect("ledger loaded")
             .source_map
@@ -3031,7 +3029,7 @@ plugin "auto_accounts"
         // ...and ZERO validations when every target fails `validation_would_run`
         // (here: all targets have parse errors), since the result would be
         // discarded anyway (Copilot review).
-        let bad_source: Arc<str> = Arc::from("this is not valid @@@ beancount\n");
+        let bad_source: SourceText = "this is not valid @@@ beancount\n".into();
         let bad_parse = parse(&bad_source);
         assert!(
             !bad_parse.errors.is_empty(),
@@ -3092,7 +3090,7 @@ plugin "auto_accounts"
                 .any(|p| p.name == "auto_accounts"),
             "fixture must record the auto_accounts plugin"
         );
-        let (b_id, b_source): (u16, Arc<str>) = ls
+        let (b_id, b_source): (u16, SourceText) = ls
             .ledger()
             .expect("ledger")
             .source_map
@@ -3471,7 +3469,7 @@ plugin "auto_accounts"
 
         let mut state = LedgerState::new();
         state.load(&main).expect("load");
-        let sources: Vec<(u16, String, Arc<str>)> = state
+        let sources: Vec<(u16, String, SourceText)> = state
             .ledger()
             .unwrap()
             .source_map

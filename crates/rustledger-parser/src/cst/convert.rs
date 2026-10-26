@@ -96,8 +96,18 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
 
     let source_file = SourceFile::parse(stripped);
 
-    let mut directives: Vec<Spanned<Directive>> = Vec::new();
-    let mut directive_nodes: Vec<crate::SyntaxNode> = Vec::new();
+    // Count first, allocate once: both vecs grow 1:1 with producing
+    // directives, and doubling a `Vec<Spanned<Directive>>` on the way to
+    // 2M entries re-copied 2^21 × 192 B of entries (402,653,184 B total,
+    // DHAT `profile_pipeline` on `1M.beancount`). The count is a walk of
+    // the root's green children — a slice, no allocation, no red nodes —
+    // the same pattern `green.rs` uses for `posting_count` (measured
+    // 81.0 -> 71.2 ms there). It is an upper bound: the loop below emits
+    // only the producing kinds, not the state-only ones (option /
+    // include / plugin / push* / pop*).
+    let directive_capacity = directive_child_count(&source_file);
+    let mut directives: Vec<Spanned<Directive>> = Vec::with_capacity(directive_capacity);
+    let mut directive_nodes: Vec<crate::SyntaxNode> = Vec::with_capacity(directive_capacity);
     let mut options: Vec<(String, String, Span)> = Vec::new();
     let mut includes: Vec<(String, Span)> = Vec::new();
     let mut plugins: Vec<(String, Option<String>, Span)> = Vec::new();
@@ -4027,6 +4037,25 @@ fn single_line_directive_span(node: &crate::SyntaxNode, bom_offset: u32) -> Span
     Span::new((start + bom_offset) as usize, (end + bom_offset) as usize)
 }
 
+/// Count the root's Directive-castable children on the **green** tree: a
+/// slice walk, zero allocation — unlike `source_file.directives().count()`,
+/// whose red-tree walk materializes a rowan `NodeData` per child (~2M
+/// allocations on a 2M-directive ledger). Used purely as a `Vec`
+/// capacity hint; an over-count is fine.
+fn directive_child_count(source_file: &SourceFile) -> usize {
+    source_file
+        .syntax()
+        .green()
+        .children()
+        .filter(|child| match child {
+            rowan::NodeOrToken::Node(n) => ast::Directive::can_cast(
+                <crate::BeancountLanguage as rowan::Language>::kind_from_raw(n.kind()),
+            ),
+            rowan::NodeOrToken::Token(_) => false,
+        })
+        .count()
+}
+
 /// Span policy for top-level directives: legacy directives start
 /// at the first content character (skipping leading trivia from
 /// the Directive-Terminator Rule) and extend through any
@@ -4052,23 +4081,29 @@ fn fixup_directive_spans(
     // visible directive's span ends at the next /input/
     // directive's start, regardless of whether that next
     // directive is preserved.
-    let all_starts: Vec<(usize, usize)> = source_file
-        .syntax()
-        .children()
-        .filter(|n| ast::Directive::can_cast(n.kind()))
-        .map(|n| {
-            let raw_start: u32 = n.text_range().start().into();
-            let content_start = n
-                .descendants_with_tokens()
-                .filter_map(rowan::NodeOrToken::into_token)
-                .find(|t| !is_trivia_kind(t.kind()))
-                .map_or_else(
-                    || (raw_start + bom_offset) as usize,
-                    |t| (u32::from(t.text_range().start()) + bom_offset) as usize,
-                );
-            ((raw_start + bom_offset) as usize, content_start)
-        })
-        .collect();
+    // Same green count as the conversion loop's capacity hint: this walk
+    // produces one entry per Directive-castable child, so it is exact here
+    // rather than an upper bound.
+    let mut all_starts: Vec<(usize, usize)> =
+        Vec::with_capacity(directive_child_count(source_file));
+    all_starts.extend(
+        source_file
+            .syntax()
+            .children()
+            .filter(|n| ast::Directive::can_cast(n.kind()))
+            .map(|n| {
+                let raw_start: u32 = n.text_range().start().into();
+                let content_start = n
+                    .descendants_with_tokens()
+                    .filter_map(rowan::NodeOrToken::into_token)
+                    .find(|t| !is_trivia_kind(t.kind()))
+                    .map_or_else(
+                        || (raw_start + bom_offset) as usize,
+                        |t| (u32::from(t.text_range().start()) + bom_offset) as usize,
+                    );
+                ((raw_start + bom_offset) as usize, content_start)
+            }),
+    );
 
     // `all_starts` is built from `children()`, i.e. siblings in document
     // order, and sibling text ranges are disjoint and increasing — so it is

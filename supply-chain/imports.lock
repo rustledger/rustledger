@@ -596,12 +596,6 @@ user-id = 696
 user-login = "fitzgen"
 user-name = "Nick Fitzgerald"
 
-[[publisher.libc]]
-version = "0.2.189"
-when = "2026-07-21"
-user-id = 55123
-user-login = "rust-lang-owner"
-
 [[publisher.libm]]
 version = "0.2.16"
 when = "2026-01-24"
@@ -632,6 +626,13 @@ user-name = "Shane F. Carr"
 [[publisher.lock_api]]
 version = "0.4.14"
 when = "2025-10-03"
+user-id = 2915
+user-login = "Amanieu"
+user-name = "Amanieu d'Antras"
+
+[[publisher.lock_api]]
+version = "0.5.0"
+when = "2026-10-21"
 user-id = 2915
 user-login = "Amanieu"
 user-name = "Amanieu d'Antras"
@@ -724,9 +725,23 @@ user-id = 2915
 user-login = "Amanieu"
 user-name = "Amanieu d'Antras"
 
+[[publisher.parking_lot]]
+version = "0.13.0"
+when = "2026-10-21"
+user-id = 2915
+user-login = "Amanieu"
+user-name = "Amanieu d'Antras"
+
 [[publisher.parking_lot_core]]
 version = "0.9.12"
 when = "2025-10-03"
+user-id = 2915
+user-login = "Amanieu"
+user-name = "Amanieu d'Antras"
+
+[[publisher.parking_lot_core]]
+version = "0.10.0"
+when = "2026-10-21"
 user-id = 2915
 user-login = "Amanieu"
 user-name = "Amanieu d'Antras"

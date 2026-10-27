@@ -59,8 +59,11 @@
 //! Running positions cannot leave the range after booking, which rejects
 //! such an inventory first; unbooked input that does is not tracked.
 //!
-//! This plugin is native only: beancount-options has no Python counterpart
-//! for it yet, so there is no `bean-check` behavior to match.
+//! beancount-options has the Python counterpart (rustledger/beancount-options#4)
+//! and both report the same thing. Two details are documented in its README
+//! (`### Configuration`) instead of matched: its config notice is an error
+//! (beancount has no warnings), and amounts past `Decimal`'s range are
+//! checked rather than reported unchecked.
 //!
 //! The plugin only reports: every directive is kept and nothing is inserted.
 

@@ -102,3 +102,82 @@ fn test_load_with_posting_metadata_allocates_only_that_map() {
         Some(&MetaValue::String("r1".into()))
     );
 }
+
+/// The `MetaMap` of any directive, borrowed mutably so `as_map_mut` can
+/// report whether a map is allocated.
+fn meta_map_mut(directive: &mut Directive) -> &mut rustledger_core::MetaMap {
+    match directive {
+        Directive::Transaction(d) => &mut d.meta,
+        Directive::Balance(d) => &mut d.meta,
+        Directive::Open(d) => &mut d.meta,
+        Directive::Close(d) => &mut d.meta,
+        Directive::Commodity(d) => &mut d.meta,
+        Directive::Pad(d) => &mut d.meta,
+        Directive::Event(d) => &mut d.meta,
+        Directive::Query(d) => &mut d.meta,
+        Directive::Note(d) => &mut d.meta,
+        Directive::Document(d) => &mut d.meta,
+        Directive::Price(d) => &mut d.meta,
+        Directive::Custom(d) => &mut d.meta,
+    }
+}
+
+/// Every directive variant, none carrying source metadata.
+const ALL_VARIANTS: &str = "\
+option \"operating_currency\" \"USD\"
+2024-01-01 commodity USD
+2024-01-01 open Assets:Cash USD
+2024-01-01 open Assets:Old
+2024-01-01 open Equity:Opening
+2024-01-02 pad Assets:Cash Equity:Opening
+2024-01-03 balance Assets:Cash  100.00 USD
+2024-01-03 price EUR 1.10 USD
+2024-01-04 note Assets:Cash \"a note\"
+2024-01-04 event \"location\" \"Paris\"
+2024-01-04 query \"cash\" \"SELECT account\"
+2024-01-04 custom \"budget\" Assets:Cash \"monthly\" 10.00 USD
+2024-01-04 document Assets:Cash \"receipt.pdf\"
+2024-01-05 close Assets:Old
+2024-01-06 * \"spend\"
+  Assets:Cash  -1.00 USD
+  Equity:Opening
+";
+
+#[test]
+fn test_load_every_variant_without_metadata_leaves_meta_maps_unallocated() {
+    let dir = tempfile::tempdir().expect("temp dir");
+    std::fs::write(dir.path().join("receipt.pdf"), b"").expect("write document");
+    let path = dir.path().join("main.beancount");
+    std::fs::write(&path, ALL_VARIANTS).expect("write fixture");
+    let mut ledger = load(&path, &LoadOptions::default()).expect("the ledger loads");
+    assert!(
+        ledger.errors.is_empty(),
+        "{:?}",
+        ledger.errors.iter().map(|e| &e.message).collect::<Vec<_>>()
+    );
+
+    let mut seen: Vec<&'static str> = ledger
+        .directives
+        .iter()
+        .map(|d| d.value.type_name())
+        .collect();
+    seen.sort_unstable();
+    seen.dedup();
+    assert_eq!(seen.len(), 12, "the fixture covers every variant: {seen:?}");
+
+    let allocated: Vec<&'static str> = ledger
+        .directives
+        .iter_mut()
+        .filter_map(|d| {
+            let name = d.value.type_name();
+            meta_map_mut(&mut d.value)
+                .as_map_mut()
+                .is_some()
+                .then_some(name)
+        })
+        .collect();
+    assert!(
+        allocated.is_empty(),
+        "allocated meta maps on: {allocated:?}"
+    );
+}

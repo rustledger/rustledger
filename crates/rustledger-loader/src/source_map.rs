@@ -14,9 +14,31 @@ use std::sync::Arc;
 ///
 /// Migrating from `Arc<str>`: a `String` converts zero-copy with
 /// `SourceText::from(string)`; an `Arc<str>` converts with
-/// `SourceText::from(&*arc)`, which copies.
+/// `SourceText::from(&*arc)`, which copies. Like `Arc<str>`, it derefs to
+/// `str` and implements `Display`, `Hash` and `Borrow<str>`, so it formats
+/// as the text and a `HashMap<SourceText, _>` can be looked up by `&str`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceText(Arc<String>);
+
+// Hand-written rather than derived so the `Borrow<str>` contract is explicit:
+// a `SourceText` must hash exactly as its `str` contents do.
+impl std::hash::Hash for SourceText {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state);
+    }
+}
+
+impl std::borrow::Borrow<str> for SourceText {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for SourceText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
 
 impl SourceText {
     /// The contents as a `str`.
@@ -587,6 +609,31 @@ mod tests {
         assert_eq!(a, b);
         assert_eq!(a.clone(), a);
         assert_ne!(a, SourceText::from("xyz"));
+    }
+
+    #[test]
+    fn test_source_text_display_writes_contents() {
+        let text = SourceText::from("2024-01-01 open Assets:Cash");
+        assert_eq!(text.to_string(), "2024-01-01 open Assets:Cash");
+        assert_eq!(format!("[{text}]"), "[2024-01-01 open Assets:Cash]");
+    }
+
+    #[test]
+    fn test_source_text_hash_matches_str() {
+        use std::hash::BuildHasher;
+        let state = std::collections::hash_map::RandomState::new();
+        let text = SourceText::from("abc");
+        assert_eq!(state.hash_one(&text), state.hash_one("abc"));
+    }
+
+    #[test]
+    fn test_source_text_hashmap_lookup_by_str() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(SourceText::from("main.beancount"), 1);
+        map.insert(SourceText::from(String::from("other.beancount")), 2);
+        assert_eq!(map.get("main.beancount"), Some(&1));
+        assert_eq!(map.get("other.beancount"), Some(&2));
+        assert_eq!(map.get("missing.beancount"), None);
     }
 
     #[test]

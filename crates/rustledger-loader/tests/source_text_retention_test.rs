@@ -4,11 +4,11 @@
 //! processing is done. The contract this pins: what the caller gives up is
 //! *post-load text access* only. Error locations are resolved while the
 //! text is still held, so a dropped-text ledger reports the same
-//! `file:line:col` as a retained one — and its `lineno` answers stay real
+//! `file:line:col` as a retained one, and its `lineno` answers stay real
 //! (the line-start table is kept), which is what BQL's `filename`/`lineno`
 //! columns resolve from. A server that prints `code: message` sheds the
-//! text (173 MB on the 1M workload, 130 MB net of the kept table) without
-//! going blind.
+//! text (173 MB on the 1M-beancount workload, about 127 MB live once the
+//! kept line-start table is netted out) without going blind.
 
 use rustledger_loader::{LoadOptions, load};
 
@@ -97,12 +97,21 @@ fn error_locations_survive_the_drop() {
 }
 
 /// The drop is the whole point: the returned ledger holds no text, while
-/// the positions BQL exposes — `filename`/`lineno` — still resolve from
-/// the kept offsets table. Only the line's own text and the columns
-/// counted from it go.
+/// the positions BQL exposes (`filename`/`lineno`) still resolve from
+/// the kept offsets table, answering exactly what a retained load does.
+/// Only the line's own text and the columns counted from it go.
 #[test]
 fn dropped_ledger_holds_no_text() {
     let fixture = write_fixture(UNHAPPY_SOURCE);
+
+    let retained = load(
+        fixture.path(),
+        &LoadOptions {
+            retain_source_text: true,
+            ..Default::default()
+        },
+    )
+    .expect("load with text");
 
     let dropped = load(
         fixture.path(),
@@ -130,6 +139,28 @@ fn dropped_ledger_holds_no_text() {
         !dropped.source_map.files().is_empty(),
         "paths survive the drop"
     );
+
+    // Against the retained load: same line count, and a mid-file offset
+    // (the start of the `2024-02-01 balance` line) answers the same line,
+    // with the column going from real to 0.
+    let [keep] = retained.source_map.files() else {
+        panic!("retained load should hold exactly the fixture file");
+    };
+    let [drop] = dropped.source_map.files() else {
+        panic!("dropped load should hold exactly the fixture file");
+    };
+    assert_eq!(keep.path, drop.path);
+    assert_eq!(keep.num_lines(), drop.num_lines());
+
+    let offset = UNHAPPY_SOURCE
+        .find("2024-02-01 balance")
+        .expect("fixture has the balance line");
+    let (keep_line, keep_col) = keep.line_col(offset);
+    let (drop_line, drop_col) = drop.line_col(offset);
+    assert_eq!(keep_line, 14, "balance line is line 14 of the fixture");
+    assert_eq!(keep_line, drop_line);
+    assert_eq!(keep_col, 1);
+    assert_eq!(drop_col, 0);
 }
 
 /// The default is the status quo: text is kept, snippets stay possible.

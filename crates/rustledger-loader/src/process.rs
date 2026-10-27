@@ -73,9 +73,9 @@ pub struct LoadOptions {
     /// `false` calls [`SourceMap::drop_text`](crate::SourceMap::drop_text)
     /// at the end of [`process`], after every error location has been
     /// resolved from the text and before the `Ledger` is returned. The
-    /// trade is the whole file's bytes — 173 MB on the 1M-beancount
-    /// workload, 165 MB measured live after load — for a map that still
-    /// knows each file's paths, ids and line numbers.
+    /// trade is the text's bytes (173 MB on the 1M-beancount workload,
+    /// about 127 MB live once the kept line-start table is netted out) for
+    /// a map that still knows each file's paths, ids and line numbers.
     ///
     /// What is lost is post-load *text* access: snippet rendering
     /// (`rledger check` draws one with miette) and the line's own text
@@ -84,8 +84,8 @@ pub struct LoadOptions {
     /// processing and keep their real line and column, BQL's
     /// `filename`/`lineno` columns resolve from the kept offsets table,
     /// and `SourceFile::line_col`'s column drops to 0 (its line stands).
-    /// A consumer that never draws a snippet — `rledger query` prints
-    /// `code: message` — should set this false.
+    /// A consumer that never draws a snippet (`rledger query` prints
+    /// `code: message`) should set this false.
     pub retain_source_text: bool,
 }
 

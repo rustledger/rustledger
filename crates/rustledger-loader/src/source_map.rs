@@ -189,8 +189,8 @@ impl SourceFile {
     /// and only the remainder of that one line is scanned. The helper this
     /// replaced rescanned from byte 0 on every call.
     ///
-    /// The line survives [`SourceMap::drop_text`] — it comes from the
-    /// offsets table, which the drop keeps — but the column does not:
+    /// The line survives [`SourceMap::drop_text`] (it comes from the
+    /// offsets table, which the drop keeps), but the column does not:
     /// counting characters needs the text, so a dropped file answers
     /// column 0, the same "no text to count in" convention as a
     /// placeholder [`crate::ErrorLocation`]. Error locations on
@@ -359,11 +359,11 @@ impl SourceMap {
     /// of a 173 MB ledger is 173 MB of `Arc<str>` the query engine never
     /// reads. `LoadOptions::retain_source_text: false` calls this at the
     /// end of [`crate::process()`], which is the last moment the text is
-    /// needed — every error location has been resolved by then.
+    /// needed: every error location has been resolved by then.
     ///
     /// Each file's line-start table is built first and kept: it is one
     /// `usize` per line (megabytes on a huge ledger, against hundreds of
-    /// the text) and it is what answers `lineno` afterwards — BQL's
+    /// the text) and it is what answers `lineno` afterwards: BQL's
     /// `filename`/`lineno` columns ([`crate::Ledger`] positions generally)
     /// stay real. What goes is the text itself: [`SourceFile::line`] and
     /// [`SourceFile::span_text`] hand back nothing, and
@@ -612,8 +612,7 @@ mod tests {
     /// The contract `process` relies on: positions answer with real lines
     /// and columns while the text is held (that is when every `LedgerError`
     /// location is resolved), and the line survives the drop while the
-    /// column goes to 0. Same offset, same answer before the drop in both
-    /// a fresh and a rebuilt map.
+    /// column goes to 0.
     #[test]
     fn lines_resolve_before_the_drop_and_columns_do_not_after() {
         let mut sm = SourceMap::new();
@@ -626,17 +625,17 @@ mod tests {
     }
 
     /// The drop materializes the line-start table before emptying the text
-    /// — afterwards it can never be rebuilt — and keeps it, one `usize`
-    /// per line, because `lineno` answers from it. The pin: line numbers
-    /// queried after the drop are the ones queried before it.
+    /// (afterwards it can never be rebuilt) and keeps it, one `usize` per
+    /// line, because `lineno` answers from it. The pin: nothing touches the
+    /// lazily built table before the drop, so the 3 lines answered after it
+    /// can only come from a table the drop itself built from the text (a
+    /// table built from the emptied text would answer 1).
     #[test]
     fn drop_text_keeps_the_line_table() {
         let mut sm = SourceMap::new();
         let id = sm.add_file(PathBuf::from("t.beancount"), "a\nb\nc".into());
-        let lines_before = sm.get(id).unwrap().num_lines();
         sm.drop_text();
-        assert_eq!(sm.get(id).unwrap().num_lines(), lines_before);
-        assert_eq!(lines_before, 3);
+        assert_eq!(sm.get(id).unwrap().num_lines(), 3);
         assert_eq!(sm.get(id).unwrap().line_start(3), Some(4));
     }
 }

@@ -660,8 +660,8 @@ pub(crate) struct TokenIter<'src> {
 impl<'src> TokenIter<'src> {
     /// Tokenize `source`, preserving or dropping mid-line
     /// [`Token::Whitespace`] per `keep_whitespace` (the AST path drops
-    /// it, the CST path keeps it). Layout post-processing — line-start
-    /// `#` comments and `Indent`/`DeepIndent` synthesis — is identical
+    /// it, the CST path keeps it). Layout post-processing (line-start
+    /// `#` comments and `Indent`/`DeepIndent` synthesis) is identical
     /// on both paths.
     pub(crate) fn new(source: &'src str, keep_whitespace: bool) -> Self {
         Self {

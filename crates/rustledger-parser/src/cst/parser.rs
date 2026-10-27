@@ -109,7 +109,7 @@ pub fn parse_structured(source: &str) -> SyntaxNode {
     // `Vec` this replaces peaked at 1.6 GB of heap on a 173 MB ledger
     // (issue #2742); this window is item-sized.
     let mut tokens: Vec<(SyntaxKind, Range<usize>)> = Vec::new();
-    // Indices (into `tokens`) of buffered top-level content tokens —
+    // Indices (into `tokens`) of buffered top-level content tokens:
     // starts of top-level items, ascending. The window at `i` is
     // complete iff the back is `> i` (or the stream is done).
     let mut item_starts: VecDeque<usize> = VecDeque::new();
@@ -153,7 +153,7 @@ pub fn parse_structured(source: &str) -> SyntaxNode {
         // Skip the next item's leading trivia (rule 2 accumulates it
         // in `pending_leading`) and pull tokens until the window holds
         // the item's first content token AND the start of the NEXT
-        // top-level item — the current item is then fully buffered,
+        // top-level item; the current item is then fully buffered,
         // because every emit helper below terminates at the next
         // non-indented line (blank line, col-0 comment, top-level
         // content) or EOF.

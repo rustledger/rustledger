@@ -93,9 +93,13 @@ pub type Metadata = FxHashMap<String, MetaValue>;
 /// rkyv mirrors the in-memory layout, so that padding was also written to
 /// and validated from the parse cache. Same reasoning as
 /// [`Posting::cost`], with the same reading rule: the map is behind
-/// [`Deref`](std::ops::Deref), so `meta.get(..)`, `meta.insert(..)` and
-/// `for (k, v) in meta.iter()` all work on the field directly; only code
-/// that wants the map by value goes through [`Self::into_inner`].
+/// [`Deref`](std::ops::Deref), so `meta.get(..)` and
+/// `for (k, v) in meta.iter()` work on the field directly. There is no
+/// `DerefMut`: writes go through [`Self::insert`] or
+/// [`Self::get_or_create_mut`] (allocating on first write), removals and
+/// visits through [`Self::remove`], [`Self::retain`] or
+/// [`Self::as_map_mut`] (never allocating). Code that wants the map by
+/// value goes through [`Self::into_inner`].
 ///
 /// `None` and `Some(empty)` mean the same thing and compare equal;
 /// [`From<Metadata>`](From) normalizes an empty map to `None`.
@@ -119,35 +123,73 @@ impl MetaMap {
         self.0.map(|m| *m).unwrap_or_default()
     }
 
-    /// Whether nothing is attached.
+    /// Whether nothing is attached (no box, or an empty one).
     #[must_use]
-    pub const fn is_empty(&self) -> bool {
-        self.0.is_none()
+    pub fn is_empty(&self) -> bool {
+        self.0.as_deref().is_none_or(Metadata::is_empty)
     }
 
-    /// The map, borrowed mutably only if one is attached. Unlike
-    /// [`DerefMut`](std::ops::DerefMut) this never allocates, so it is
-    /// the shape to use when visiting an empty attachment is free.
+    /// The map, borrowed mutably only if one is attached. Never
+    /// allocates, so it is the shape for visits, removals and `retain`
+    /// over an attachment that may be empty.
     pub fn as_map_mut(&mut self) -> Option<&mut Metadata> {
         self.0.as_deref_mut()
     }
+
+    /// The map, borrowed mutably, allocating an empty one first if none
+    /// is attached. Use only on paths that are about to add entries;
+    /// visiting or removing goes through [`Self::as_map_mut`] so that an
+    /// empty attachment stays unallocated.
+    pub fn get_or_create_mut(&mut self) -> &mut Metadata {
+        self.0.get_or_insert_with(Default::default)
+    }
+
+    /// Insert one entry, allocating the map on first write.
+    pub fn insert(&mut self, key: String, value: MetaValue) -> Option<MetaValue> {
+        self.get_or_create_mut().insert(key, value)
+    }
+
+    /// Remove one entry. Never allocates; frees the map when the last
+    /// entry goes (so booking's transient interpolation marks leave no
+    /// empty box behind).
+    pub fn remove(&mut self, key: &str) -> Option<MetaValue> {
+        let removed = self.0.as_deref_mut()?.remove(key);
+        self.drop_if_empty();
+        removed
+    }
+
+    /// Keep only the entries `keep` accepts. Never allocates; frees the
+    /// map when nothing is kept.
+    pub fn retain(&mut self, keep: impl FnMut(&String, &mut MetaValue) -> bool) {
+        if let Some(m) = self.0.as_deref_mut() {
+            m.retain(keep);
+            self.drop_if_empty();
+        }
+    }
+
+    fn drop_if_empty(&mut self) {
+        if self.0.as_deref().is_some_and(Metadata::is_empty) {
+            self.0 = None;
+        }
+    }
 }
+
+/// The map every unattached [`MetaMap`] derefs to. A `const`
+/// initializer, so reading an empty attachment has no lazy-init check.
+static EMPTY_METADATA: Metadata = Metadata::with_hasher(rustc_hash::FxBuildHasher);
 
 impl std::ops::Deref for MetaMap {
     type Target = Metadata;
 
     fn deref(&self) -> &Metadata {
-        static EMPTY: std::sync::LazyLock<Metadata> = std::sync::LazyLock::new(Metadata::default);
-        self.0.as_deref().unwrap_or(&EMPTY)
+        self.0.as_deref().unwrap_or(&EMPTY_METADATA)
     }
 }
 
-/// Mutating through the field allocates on first write only.
-impl std::ops::DerefMut for MetaMap {
-    fn deref_mut(&mut self) -> &mut Metadata {
-        self.0.get_or_insert_with(Default::default)
-    }
-}
+// Deliberately no `DerefMut`: an implicit get-or-create on every `&mut`
+// access allocated an empty box for each posting or transaction a pass
+// merely visited. Mutation goes through `insert`/`remove`/`retain`,
+// `as_map_mut` (never allocates) or `get_or_create_mut` (adds data).
 
 impl From<Metadata> for MetaMap {
     fn from(map: Metadata) -> Self {
@@ -2025,6 +2067,45 @@ mod tests {
             None,
             "an elided amount has none"
         );
+    }
+
+    #[test]
+    fn test_meta_map_reads_and_removals_do_not_allocate() {
+        let mut meta = MetaMap::default();
+        assert!(meta.is_empty());
+        assert!(meta.get("k").is_none());
+        assert_eq!(meta.remove("k"), None);
+        meta.retain(|_, _| false);
+        assert!(meta.as_map_mut().is_none(), "a read or removal allocated");
+    }
+
+    #[test]
+    fn test_meta_map_insert_allocates_and_last_removal_frees() {
+        let mut meta = MetaMap::default();
+        assert_eq!(meta.insert("k".into(), MetaValue::Bool(true)), None);
+        assert!(!meta.is_empty());
+        assert_eq!(meta.get("k"), Some(&MetaValue::Bool(true)));
+        assert_eq!(meta.remove("k"), Some(MetaValue::Bool(true)));
+        assert!(meta.as_map_mut().is_none(), "the empty box was kept");
+        assert_eq!(meta, MetaMap::default());
+
+        meta.insert("a".into(), MetaValue::Int(1));
+        meta.insert("b".into(), MetaValue::Int(2));
+        meta.retain(|k, _| k == "a");
+        assert_eq!(meta.len(), 1);
+        meta.retain(|_, _| false);
+        assert!(meta.as_map_mut().is_none());
+    }
+
+    #[test]
+    fn test_meta_map_is_empty_with_an_empty_box() {
+        // `get_or_create_mut` without an insert leaves `Some(empty)`,
+        // which is still "nothing attached".
+        let mut meta = MetaMap::default();
+        meta.get_or_create_mut();
+        assert!(meta.as_map_mut().is_some());
+        assert!(meta.is_empty());
+        assert_eq!(meta, MetaMap::default());
     }
     use rust_decimal_macros::dec;
 

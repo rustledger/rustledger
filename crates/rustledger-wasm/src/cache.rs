@@ -656,8 +656,10 @@ mod tests {
         // or a rebooking -- see `directive_archived_form_is_pinned`. And
         // once more for the variant `MetaMap`/`SortedSet` boxing (loader
         // v43), the same shape move on the remaining meta maps and the
-        // tag/link sets.
-        const PROCESSED_LAYOUT_HASH: u64 = 0xe1b7_2338_5b3a_06f7;
+        // tag/link sets. (Within v57 the hash had also moved when the load
+        // pipeline stopped leaving an empty `Some(Box<Metadata>)` on every
+        // posting and transaction it merely visited; v58 covers both.)
+        const PROCESSED_LAYOUT_HASH: u64 = 0xf09b_417e_6cb6_e098;
 
         let src = "\
 2024-01-01 open Assets:Bank USD\n\

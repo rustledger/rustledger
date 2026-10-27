@@ -105,7 +105,7 @@ fn test_load_with_posting_metadata_allocates_only_that_map() {
 
 /// The `MetaMap` of any directive, borrowed mutably so `as_map_mut` can
 /// report whether a map is allocated.
-fn meta_map_mut(directive: &mut Directive) -> &mut rustledger_core::MetaMap {
+const fn meta_map_mut(directive: &mut Directive) -> &mut rustledger_core::MetaMap {
     match directive {
         Directive::Transaction(d) => &mut d.meta,
         Directive::Balance(d) => &mut d.meta,

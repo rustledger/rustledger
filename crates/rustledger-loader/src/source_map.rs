@@ -9,8 +9,12 @@ use std::sync::Arc;
 /// A newtype over `Arc<String>` rather than `Arc<str>`: `Arc<str>::from(String)`
 /// always copies the bytes into a fresh allocation (std has no zero-copy
 /// `String -> Arc<str>`), so every file read paid a second full-file buffer
-/// plus a `memcpy`. `Arc<String>` takes the `String`'s allocation as-is — a
+/// plus a `memcpy`. `Arc<String>` takes the `String`'s allocation as-is: a
 /// `read` keeps the buffer `String::from_utf8` already owns.
+///
+/// Migrating from `Arc<str>`: a `String` converts zero-copy with
+/// `SourceText::from(string)`; an `Arc<str>` converts with
+/// `SourceText::from(&*arc)`, which copies.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceText(Arc<String>);
 
@@ -556,5 +560,40 @@ mod tests {
         assert_eq!(id, 0);
         assert!(sm.get(0).is_some());
         assert!(sm.get(1).is_none());
+    }
+
+    #[test]
+    fn test_source_text_from_string_keeps_allocation() {
+        let s = String::from("2024-01-01 open Assets:Cash\n");
+        let data = s.as_ptr();
+        let text = SourceText::from(s);
+        assert_eq!(text.as_str().as_ptr(), data);
+    }
+
+    #[test]
+    fn test_source_text_deref_to_str() {
+        let text = SourceText::from("line 1\nline 2");
+        let as_str: &str = &text;
+        assert_eq!(as_str, "line 1\nline 2");
+        // str methods resolve through `Deref`.
+        assert_eq!(text.lines().count(), 2);
+        assert_eq!(AsRef::<str>::as_ref(&text), "line 1\nline 2");
+    }
+
+    #[test]
+    fn test_source_text_eq_compares_contents() {
+        let a = SourceText::from("abc");
+        let b = SourceText::from(String::from("abc"));
+        assert_eq!(a, b);
+        assert_eq!(a.clone(), a);
+        assert_ne!(a, SourceText::from("xyz"));
+    }
+
+    #[test]
+    fn test_source_text_from_str_copies_contents() {
+        let original = "include \"other.beancount\"";
+        let text = SourceText::from(original);
+        assert_eq!(text.as_str(), original);
+        assert_ne!(text.as_str().as_ptr(), original.as_ptr());
     }
 }

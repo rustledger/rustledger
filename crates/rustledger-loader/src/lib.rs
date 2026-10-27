@@ -624,7 +624,7 @@ impl Loader {
         // file count; reject it here (collected into `LoadResult::errors` by the
         // caller) so an over-large include/glob set fails loudly without a panic.
         let fid_u16 = file_id_to_u16(source_map.files().len())?;
-        // Add to source map (the map takes ownership of the shared text —
+        // Add to source map (the map takes ownership of the shared text:
         // `SourceText` clones are refcount bumps, and this one is the last use).
         let file_id = source_map.add_opened_file(path_buf.clone(), opened.to_path_buf(), source);
         debug_assert_eq!(file_id, fid_u16 as usize);

@@ -100,7 +100,7 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     // directives, and doubling a `Vec<Spanned<Directive>>` on the way to
     // 2M entries re-copied 2^21 × 192 B of entries (402,653,184 B total,
     // DHAT `profile_pipeline` on `1M.beancount`). The count is a walk of
-    // the root's green children — a slice, no allocation, no red nodes —
+    // the root's green children (a slice, no allocation, no red nodes),
     // the same pattern `green.rs` uses for `posting_count` (measured
     // 81.0 -> 71.2 ms there). It is an upper bound: the loop below emits
     // only the producing kinds, not the state-only ones (option /
@@ -4038,7 +4038,7 @@ fn single_line_directive_span(node: &crate::SyntaxNode, bom_offset: u32) -> Span
 }
 
 /// Count the root's Directive-castable children on the **green** tree: a
-/// slice walk, zero allocation — unlike `source_file.directives().count()`,
+/// slice walk, zero allocation, unlike `source_file.directives().count()`,
 /// whose red-tree walk materializes a rowan `NodeData` per child (~2M
 /// allocations on a 2M-directive ledger). Used purely as a `Vec`
 /// capacity hint; an over-count is fine.

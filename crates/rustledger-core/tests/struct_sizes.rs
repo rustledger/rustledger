@@ -3,8 +3,8 @@
 //! The loader keeps several `Vec<Spanned<Directive>>` alive at once (the
 //! parse result, the booked stream, the plugin round-trip), so every byte
 //! on these types is multiplied by millions of directives and megabytes
-//! of peak RSS. That is the whole argument for keeping rare data —
-//! metadata maps, comment lists, cost specs — behind `Option<Box<..>>`
+//! of peak RSS. That is the whole argument for keeping rare data
+//! (metadata maps, comment lists, cost specs) behind `Option<Box<..>>`
 //! instead of inline (`MetaMap`/`CommentList`, `Posting::cost`).
 //!
 //! These are upper bounds, not exact sizes: a future shrink passes, a

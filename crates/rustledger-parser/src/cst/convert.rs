@@ -2738,7 +2738,7 @@ fn apply_inherited_state(
         return;
     }
     let meta = match value {
-        Directive::Transaction(d) => &mut d.meta,
+        Directive::Transaction(d) => d.meta.get_or_create_mut(),
         Directive::Balance(d) => &mut d.meta,
         Directive::Open(d) => &mut d.meta,
         Directive::Close(d) => &mut d.meta,

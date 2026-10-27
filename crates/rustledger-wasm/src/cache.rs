@@ -646,7 +646,14 @@ mod tests {
         // Moved once more for the `MetaMap`/`CommentList` boxing, which is a
         // layout change in the archived directives rather than a reordering
         // or a rebooking -- see `directive_archived_form_is_pinned`.
-        const PROCESSED_LAYOUT_HASH: u64 = 0x381c_cc5f_ac1a_494b;
+        //
+        // And again, still within v57, when the load pipeline stopped
+        // leaving an empty `Some(Box<Metadata>)` on every posting and
+        // transaction it merely visited (the `MetaMap` `DerefMut` removal):
+        // those maps now archive as `None`.
+        // A blob holding the old `Some(empty)` still reads back as an equal
+        // empty map, so no further version bump is needed.
+        const PROCESSED_LAYOUT_HASH: u64 = 0x4126_ef98_6890_0872;
 
         let src = "\
 2024-01-01 open Assets:Bank USD\n\

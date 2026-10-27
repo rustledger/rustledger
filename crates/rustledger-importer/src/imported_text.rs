@@ -77,10 +77,14 @@ pub fn neutralize_directive(directive: &mut Directive) -> Vec<String> {
                 txn.narration = clean.into();
                 changed.push("narration".to_string());
             }
-            neutralize_meta(&mut txn.meta, "", &mut changed);
+            if let Some(meta) = txn.meta.as_map_mut() {
+                neutralize_meta(meta, "", &mut changed);
+            }
             for posting in &mut txn.postings {
                 let prefix = format!("posting {} ", posting.account);
-                neutralize_meta(&mut posting.meta, &prefix, &mut changed);
+                if let Some(meta) = posting.meta.as_map_mut() {
+                    neutralize_meta(meta, &prefix, &mut changed);
+                }
             }
         }
         Directive::Note(note) => {

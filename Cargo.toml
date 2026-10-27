@@ -119,7 +119,41 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # WASM
 wasm-bindgen = "0.2"
 serde-wasm-bindgen = "0.6"
-wasmtime = "49.0.0"
+# `default-features = false` drops ONLY wasmtime's `cache` feature (the list
+# below is wasmtime 49's default set minus `cache`). rustledger never enables
+# wasmtime's on-disk compilation cache (no `Config::cache` / `CacheConfig`
+# use; the Python runtime keeps its own precompiled-module cache via
+# `Engine::detect_precompiled_file`), and `cache` is the sole path that pulls
+# zstd 0.13 / zstd-safe 7 (RUSTSEC-2026-0391/0398/0403/0410, which need
+# zstd 0.14 to fix). Revisit when bumping wasmtime: re-sync this list with
+# the new version's `[features] default`, still omitting `cache`.
+wasmtime = { version = "49.0.0", default-features = false, features = [
+  "anyhow",
+  "async",
+  "backtrace",
+  "gc",
+  "gc-copying",
+  "gc-drc",
+  "gc-null",
+  "wat",
+  "profiling",
+  "parallel-compilation",
+  "cranelift",
+  "pooling-allocator",
+  "demangle",
+  "addr2line",
+  "coredump",
+  "debug-builtins",
+  "runtime",
+  "component-model",
+  "component-model-async",
+  "threads",
+  "stack-switching",
+  "std",
+  "debug",
+  "compile-time-builtins",
+  "wit-parser",
+] }
 wasmtime-wasi = "49.0.0"
 wat = "1"
 # WIT / Component Model guest bindings (rustledger-ffi-component, #1384)
@@ -170,7 +204,7 @@ ureq = { version = "3", features = ["json"] }
 flate2 = "1"
 # Only stored + deflate entries are read: the one archive is the SHA-256-pinned
 # CPython WASI build (python/download.rs). Default features would pull aes,
-# bzip2, lzma, ppmd, zopfli and a second zstd (wasmtime-internal-cache has 0.13).
+# bzip2, lzma, ppmd, zopfli and zstd (kept out of the tree; see `wasmtime` above).
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 sha2 = "0.11"
 

@@ -648,7 +648,7 @@ pub(crate) const TOKEN_CAPACITY_CAP: usize = 4 << 20;
 /// `Vec<(SyntaxKind, Range)>` (1.6 GB more). [`tokenize`] /
 /// [`tokenize_lossless`] keep their `Vec` API by collecting from this
 /// iterator; the structured parser streams it instead.
-pub struct TokenIter<'src> {
+pub(crate) struct TokenIter<'src> {
     lexer: logos::Lexer<'src, Token<'src>>,
     source: &'src str,
     keep_whitespace: bool,
@@ -663,7 +663,7 @@ impl<'src> TokenIter<'src> {
     /// it, the CST path keeps it). Layout post-processing — line-start
     /// `#` comments and `Indent`/`DeepIndent` synthesis — is identical
     /// on both paths.
-    pub fn new(source: &'src str, keep_whitespace: bool) -> Self {
+    pub(crate) fn new(source: &'src str, keep_whitespace: bool) -> Self {
         Self {
             lexer: Token::lexer(source),
             source,

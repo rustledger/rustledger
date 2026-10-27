@@ -74,7 +74,7 @@ pub struct LoadOptions {
     /// at the end of [`process`], after every error location has been
     /// resolved from the text and before the `Ledger` is returned. The
     /// trade is the text's bytes (173 MB on the 1M-beancount workload,
-    /// about 127 MB live once the kept line-start table is netted out) for
+    /// about 133 MB live once the kept line-start table is netted out) for
     /// a map that still knows each file's paths, ids and line numbers.
     ///
     /// What is lost is post-load *text* access: snippet rendering

@@ -7,7 +7,7 @@
 //! `file:line:col` as a retained one, and its `lineno` answers stay real
 //! (the line-start table is kept), which is what BQL's `filename`/`lineno`
 //! columns resolve from. A server that prints `code: message` sheds the
-//! text (173 MB on the 1M-beancount workload, about 127 MB live once the
+//! text (173 MB on the 1M-beancount workload, about 133 MB live once the
 //! kept line-start table is netted out) without going blind.
 
 use rustledger_loader::{LoadOptions, load};

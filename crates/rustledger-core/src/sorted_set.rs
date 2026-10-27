@@ -34,8 +34,10 @@ use std::ops::Deref;
 /// allocation while empty, which is the overwhelmingly common case for
 /// tags and links. The `Option` niches through the box (a plain
 /// `Option<Box<[T]>>` would be a 16-byte fat pointer and a bare `Vec` 24).
-/// [`Self::as_slice`] and [`Deref`](std::ops::Deref) read without
-/// allocating; the mutating methods allocate on first write only.
+/// [`Self::as_slice`] and [`Deref`] read without allocating; the mutating
+/// methods allocate on first write only, and [`Self::remove`] /
+/// [`Self::retain`] drop the box when the set becomes empty, so `None` is
+/// the only empty representation a mutation leaves behind.
 ///
 /// The rkyv archive stores the backing `Vec` as is. Archives are only ever
 /// written from a `SortedSet`, which already holds the invariant, so reading one
@@ -71,12 +73,6 @@ impl<T> SortedSet<T> {
     #[must_use]
     pub fn as_slice(&self) -> &[T] {
         self.0.as_deref().map_or(&[], Vec::as_slice)
-    }
-
-    /// The elements, borrowed mutably only if any are present (no
-    /// allocation).
-    pub fn as_slice_mut(&mut self) -> Option<&mut [T]> {
-        self.0.as_deref_mut().map(Vec::as_mut_slice)
     }
 
     /// Unwrap into the backing `Vec`, sorted and unique.
@@ -125,6 +121,9 @@ impl<T: Ord> SortedSet<T> {
         match vec.binary_search_by(|e| e.borrow().cmp(value)) {
             Ok(at) => {
                 vec.remove(at);
+                if vec.is_empty() {
+                    self.0 = None;
+                }
                 true
             }
             Err(_) => false,
@@ -148,6 +147,9 @@ impl<T: Ord> SortedSet<T> {
     pub fn retain(&mut self, f: impl FnMut(&T) -> bool) {
         if let Some(vec) = self.0.as_mut() {
             vec.retain(f);
+            if vec.is_empty() {
+                self.0 = None;
+            }
         }
     }
 
@@ -356,6 +358,34 @@ mod tests {
         // Both elements become "c": the set re-sorts and drops the duplicate.
         s.for_each_mut(|e| *e = "c".into());
         assert_eq!(s, ["c".to_string()]);
+    }
+
+    fn hash_of<T: std::hash::Hash>(value: &T) -> u64 {
+        use std::hash::{BuildHasher, BuildHasherDefault};
+        BuildHasherDefault::<std::collections::hash_map::DefaultHasher>::default().hash_one(value)
+    }
+
+    fn assert_canonical_empty(s: &TagSet) {
+        let empty = SortedSet::new();
+        assert!(s.0.is_none(), "an emptied set kept its box");
+        assert_eq!(*s, empty);
+        assert_eq!(s.cmp(&empty), std::cmp::Ordering::Equal);
+        assert_eq!(hash_of(s), hash_of(&empty));
+    }
+
+    #[test]
+    fn test_sorted_set_emptied_by_remove_equals_new() {
+        let mut s = TagSet::new();
+        assert!(s.insert(Tag::from("x")));
+        assert!(s.remove("x"));
+        assert_canonical_empty(&s);
+    }
+
+    #[test]
+    fn test_sorted_set_emptied_by_retain_equals_new() {
+        let mut s: TagSet = ["a", "b"].into_iter().map(Tag::from).collect();
+        s.retain(|_| false);
+        assert_canonical_empty(&s);
     }
 
     proptest! {

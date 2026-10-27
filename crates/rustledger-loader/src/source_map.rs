@@ -358,7 +358,7 @@ impl SourceMap {
     /// large ledger once and answers questions about it forever: the text
     /// of a 173 MB ledger is 173 MB of `Arc<str>` the query engine never
     /// reads. `LoadOptions::retain_source_text: false` calls this at the
-    /// end of [`crate::process`], which is the last moment the text is
+    /// end of [`crate::process()`], which is the last moment the text is
     /// needed — every error location has been resolved by then.
     ///
     /// Each file's line-start table is built first and kept: it is one
@@ -367,7 +367,8 @@ impl SourceMap {
     /// `filename`/`lineno` columns ([`crate::Ledger`] positions generally)
     /// stay real. What goes is the text itself: [`SourceFile::line`] and
     /// [`SourceFile::span_text`] hand back nothing, and
-    /// [`SourceFile::line_col`]'s column drops to 0 (the line stands).
+    /// [`SourceFile::line_col`]'s column drops to 0 (the line stands), so
+    /// [`SourceMap::format_span`] renders `path:line:0`.
     /// Snippet renderers like `rledger check`'s miette output want the
     /// text and should keep it.
     pub fn drop_text(&mut self) {

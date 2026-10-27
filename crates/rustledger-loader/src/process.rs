@@ -68,7 +68,7 @@ pub struct LoadOptions {
     /// (the LSP's E8006).
     pub native_plugins_only: bool,
     /// Keep the source text of every loaded file in the returned
-    /// [`Ledger`]'s [`SourceMap`](crate::SourceMap) (default: true).
+    /// [`Ledger`]'s [`SourceMap`] (default: true).
     ///
     /// `false` calls [`SourceMap::drop_text`](crate::SourceMap::drop_text)
     /// at the end of [`process`], after every error location has been

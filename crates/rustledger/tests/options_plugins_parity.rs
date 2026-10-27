@@ -13,10 +13,13 @@
 //! `tests/cases/assignment/` (each ledger with a `.expected` file of
 //! `line: message`) are run too, from the checkout named by
 //! `BEANCOUNT_OPTIONS_DIR`, so a rule change lands on both sides. Two
-//! assignment results differ by design and are checked with `rledger`
-//! alone: amounts past `Decimal`'s range (native reports the assignment
-//! as not checked, Python checks it), and a config string (a warning
-//! natively, an error in beancount, which has no warning severity).
+//! assignment results differ by design and are checked natively only:
+//! amounts past `Decimal`'s range (native reports the assignment as not
+//! checked, Python checks it; `check_option_assignment_overflow_is_reported`
+//! below), and a config string (a warning natively, an error in beancount,
+//! which has no warning severity;
+//! `test_option_assignment_config_is_ignored_with_a_warning` in
+//! `rustledger-plugin/tests/native_plugins_test.rs`).
 //!
 //! Tool-gated: the parity tests need `bean-check` with beancount-options
 //! installed, and the shared cases need `BEANCOUNT_OPTIONS_DIR`. Where

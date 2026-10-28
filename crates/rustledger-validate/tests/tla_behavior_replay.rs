@@ -76,8 +76,8 @@ fn posting(account: &str, number: i64) -> Spanned<Posting> {
         cost: None,
         price: None,
         flag: None,
-        comments: Vec::new(),
-        trailing_comments: Vec::new(),
+        comments: Default::default(),
+        trailing_comments: Default::default(),
         meta: Default::default(),
         booking: Default::default(),
     })
@@ -92,7 +92,7 @@ fn transaction(date: NaiveDate, postings: Vec<Spanned<Posting>>) -> Directive {
         tags: Default::default(),
         links: Default::default(),
         postings,
-        trailing_comments: Vec::new(),
+        trailing_comments: Default::default(),
         meta: Default::default(),
     })
 }

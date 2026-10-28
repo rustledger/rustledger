@@ -186,13 +186,17 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
                 &mut dedup_count,
                 rustledger_core::Link::as_interned_mut,
             );
-            intern_meta(&mut txn.meta, interner, &mut dedup_count);
+            if let Some(meta) = txn.meta.as_map_mut() {
+                intern_meta(meta, interner, &mut dedup_count);
+            }
 
             for posting in &mut txn.postings {
                 if do_intern(posting.account.as_interned_mut(), interner) {
                     dedup_count += 1;
                 }
-                intern_meta(&mut posting.meta, interner, &mut dedup_count);
+                if let Some(meta) = posting.meta.as_map_mut() {
+                    intern_meta(meta, interner, &mut dedup_count);
+                }
                 // Units
                 if let Some(ref mut units) = posting.units {
                     match units {

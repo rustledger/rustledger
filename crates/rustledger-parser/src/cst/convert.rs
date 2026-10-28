@@ -1368,9 +1368,9 @@ fn convert_transaction(
         narration,
         tags,
         links,
-        meta,
+        meta: meta.into(),
         postings,
-        trailing_comments,
+        trailing_comments: trailing_comments.into(),
     };
     let span = node_span(node.syntax(), bom_offset);
     Some(Spanned::new(Directive::Transaction(txn), span))
@@ -1468,7 +1468,7 @@ fn collect_postings_with_comments(
                 if let Some(p) = ast::Posting::cast(n) {
                     if let Some(mut spanned) = convert_posting(&p, bom_offset, errors) {
                         if !pending.is_empty() {
-                            spanned.value.comments = std::mem::take(&mut pending);
+                            spanned.value.comments = std::mem::take(&mut pending).into();
                         }
                         out.push(spanned);
                     } else {
@@ -1615,9 +1615,9 @@ fn convert_posting(
         cost: cost.map(Box::new),
         price: price.map(Box::new),
         flag,
-        meta,
-        comments: Vec::new(),
-        trailing_comments,
+        meta: meta.into(),
+        comments: Default::default(),
+        trailing_comments: trailing_comments.into(),
         booking: Default::default(),
     };
     let span = posting_span(node.syntax(), bom_offset);
@@ -2748,7 +2748,7 @@ fn apply_inherited_state(
         return;
     }
     let meta = match value {
-        Directive::Transaction(d) => &mut d.meta,
+        Directive::Transaction(d) => d.meta.get_or_create_mut(),
         Directive::Balance(d) => &mut d.meta,
         Directive::Open(d) => &mut d.meta,
         Directive::Close(d) => &mut d.meta,

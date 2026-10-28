@@ -295,6 +295,7 @@
             fd
             ripgrep
             hyperfine # Benchmarking
+            perf # CPU profiling (perf record/report)
             tokei # Code stats
             git-cliff # Changelog generation
             uv # Python package manager for compat testing

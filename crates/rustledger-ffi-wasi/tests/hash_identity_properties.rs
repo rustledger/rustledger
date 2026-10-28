@@ -19,9 +19,9 @@ fn txn(payee: Option<&str>, narration: &str, tags: &[&str], links: &[&str]) -> D
         narration: narration.into(),
         tags: tags.iter().copied().map(Tag::new).collect(),
         links: links.iter().copied().map(Link::new).collect(),
-        meta: Metadata::default(),
+        meta: Default::default(),
         postings: Vec::new(),
-        trailing_comments: Vec::new(),
+        trailing_comments: Default::default(),
     })
 }
 
@@ -119,12 +119,12 @@ fn directive_kind_is_part_of_the_identity() {
         account: acct.clone(),
         currencies: Vec::new(),
         booking: None,
-        meta: Metadata::default(),
+        meta: Default::default(),
     });
     let close = Directive::Close(rustledger_core::directive::Close {
         date,
         account: acct,
-        meta: Metadata::default(),
+        meta: Default::default(),
     });
     assert_ne!(hash(&open), hash(&close), "open and close must not collide");
 }
@@ -393,7 +393,7 @@ fn txn_with_meta(m: Metadata) -> Directive {
     let Directive::Transaction(mut t) = txn(None, "n", &[], &[]) else {
         unreachable!()
     };
-    t.meta = m;
+    t.meta = m.into();
     Directive::Transaction(t)
 }
 
@@ -534,7 +534,7 @@ fn comments_are_deliberately_not_part_of_the_identity() {
     let Directive::Transaction(mut t) = txn(None, "n", &[], &[]) else {
         unreachable!()
     };
-    t.trailing_comments = vec!["; a note to self".to_owned()];
+    t.trailing_comments = vec!["; a note to self".to_owned()].into();
     let commented = Directive::Transaction(t);
 
     assert_eq!(

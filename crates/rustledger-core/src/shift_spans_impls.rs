@@ -31,8 +31,8 @@
 
 use crate::cost::{BookedCost, Cost, CostNumber, CostSpec};
 use crate::directive::{
-    Balance, Close, Commodity, Custom, Directive, Document, Event, MetaValue, Note, Open, Pad,
-    Posting, Price, PriceAnnotation, PriceKind, Query, Transaction,
+    Balance, Close, CommentList, Commodity, Custom, Directive, Document, Event, MetaMap, MetaValue,
+    Note, Open, Pad, Posting, Price, PriceAnnotation, PriceKind, Query, Transaction,
 };
 use crate::identifiers::{Account, Currency, Link, Tag};
 use crate::{Amount, IncompleteAmount, InternedStr, ShiftSpans, Span};
@@ -214,6 +214,27 @@ impl ShiftSpans for MetaValue {
             Self::Amount(a) => a.shift_spans(shift),
             Self::None => {}
             Self::Int(i) => i.shift_spans(shift),
+        }
+    }
+}
+
+// --- Boxed-while-empty directive collections -----------------------
+
+impl ShiftSpans for MetaMap {
+    fn shift_spans<F: Fn(&mut Span)>(&mut self, shift: &F) {
+        // `as_map_mut` so an empty attachment stays allocation-free.
+        if let Some(map) = self.as_map_mut() {
+            map.shift_spans(shift);
+        }
+    }
+}
+
+impl ShiftSpans for CommentList {
+    fn shift_spans<F: Fn(&mut Span)>(&mut self, shift: &F) {
+        if let Some(comments) = self.as_comments_mut() {
+            for comment in comments {
+                comment.shift_spans(shift);
+            }
         }
     }
 }
@@ -495,9 +516,9 @@ mod tests {
             narration: "Test".into(),
             tags: Default::default(),
             links: Default::default(),
-            meta: crate::Metadata::default(),
+            meta: Default::default(),
             postings: vec![posting],
-            trailing_comments: Vec::new(),
+            trailing_comments: Default::default(),
         };
         let mut d = Directive::Transaction(txn);
         d.shift_spans(&|s: &mut Span| {

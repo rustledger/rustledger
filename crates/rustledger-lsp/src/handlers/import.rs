@@ -290,7 +290,7 @@ mod tests {
             narration: "Test".into(),
             tags: Default::default(),
             links: Default::default(),
-            meta,
+            meta: meta.into(),
             postings: vec![
                 rustledger_core::Spanned::synthesized(Posting::new(
                     "Assets:Bank",
@@ -301,7 +301,7 @@ mod tests {
                     rustledger_core::Amount::new(Decimal::from_str("50").unwrap(), "USD"),
                 )),
             ],
-            trailing_comments: vec![],
+            trailing_comments: Default::default(),
         };
 
         Spanned {
@@ -423,7 +423,7 @@ mod tests {
             narration: "Test".into(),
             tags: Default::default(),
             links: Default::default(),
-            meta,
+            meta: meta.into(),
             postings: vec![
                 rustledger_core::Spanned::synthesized(Posting::new(
                     "Assets:Bank",
@@ -434,7 +434,7 @@ mod tests {
                     rustledger_core::Amount::new(Decimal::from_str("50").unwrap(), "USD"),
                 )),
             ],
-            trailing_comments: vec![],
+            trailing_comments: Default::default(),
         };
 
         Spanned {

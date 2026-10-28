@@ -196,8 +196,8 @@ mod tests {
                         price: None,
                         flag: None,
                         meta: Default::default(),
-                        comments: vec![],
-                        trailing_comments: vec![],
+                        comments: Default::default(),
+                        trailing_comments: Default::default(),
                         booking: Default::default(),
                     }),
                     crate::Spanned::synthesized(Posting {
@@ -207,12 +207,12 @@ mod tests {
                         price: None,
                         flag: None,
                         meta: Default::default(),
-                        comments: vec![],
-                        trailing_comments: vec![],
+                        comments: Default::default(),
+                        trailing_comments: Default::default(),
                         booking: Default::default(),
                     }),
                 ],
-                trailing_comments: vec![],
+                trailing_comments: Default::default(),
             }),
             Directive::Transaction(Transaction {
                 date: date(2024, 1, 5),
@@ -223,7 +223,7 @@ mod tests {
                 links: Default::default(),
                 meta: Default::default(),
                 postings: vec![],
-                trailing_comments: vec![],
+                trailing_comments: Default::default(),
             }),
         ]
     }
@@ -325,7 +325,7 @@ mod tests {
                 links: vec![Link::new("trip-2024")].into(),
                 meta: Default::default(),
                 postings: vec![],
-                trailing_comments: vec![],
+                trailing_comments: Default::default(),
             }),
             Directive::Document(Document {
                 date: date(2024, 1, 2),
@@ -383,7 +383,7 @@ mod tests {
                 narration: "".into(),
                 tags: Default::default(),
                 links: Default::default(),
-                meta: txn_meta,
+                meta: txn_meta.into(),
                 postings: vec![crate::Spanned::synthesized(Posting {
                     account: "Assets:Stock".into(),
                     units: Some(crate::IncompleteAmount::from(Amount::new(dec!(10), "AAPL"))),
@@ -399,12 +399,12 @@ mod tests {
                         "CHF",
                     )))),
                     flag: None,
-                    meta: posting_meta,
-                    comments: vec![],
-                    trailing_comments: vec![],
+                    meta: posting_meta.into(),
+                    comments: Default::default(),
+                    trailing_comments: Default::default(),
                     booking: Default::default(),
                 })],
-                trailing_comments: vec![],
+                trailing_comments: Default::default(),
             }),
             // Price directive carrying both AAPL (base) and SGD (amount).
             Directive::Price(Price {
@@ -485,9 +485,9 @@ mod tests {
                 narration: "".into(),
                 tags: Default::default(),
                 links: Default::default(),
-                meta: txn_meta,
+                meta: txn_meta.into(),
                 postings: vec![],
-                trailing_comments: vec![],
+                trailing_comments: Default::default(),
             }),
             // Custom directive whose values include an Account.
             Directive::Custom(Custom {

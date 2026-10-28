@@ -76,9 +76,9 @@ pub use decimal::{
     round_dp_python, sub_python_scale, to_bigdecimal, with_ideal_scale,
 };
 pub use directive::{
-    AUTOMATIC_META, Balance, BookingDecision, Close, Commodity, Custom, Directive,
-    DirectivePriority, Document, Event, MetaValue, Metadata, Note, Open, Pad, Posting, Price,
-    PriceAnnotation, PriceKind, Query, Transaction, booking_sort_key, meta_value_as_bool,
+    AUTOMATIC_META, Balance, BookingDecision, Close, CommentList, Commodity, Custom, Directive,
+    DirectivePriority, Document, Event, MetaMap, MetaValue, Metadata, Note, Open, Pad, Posting,
+    Price, PriceAnnotation, PriceKind, Query, Transaction, booking_sort_key, meta_value_as_bool,
     parse_bool_word, parse_precision_meta, sort_directives,
 };
 pub use display_context::{DEFAULT_CURRENCY, DisplayContext, OutputSurface, Precision};

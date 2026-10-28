@@ -82,6 +82,270 @@ impl fmt::Display for MetaValue {
 /// Metadata is a key-value map attached to directives and postings.
 pub type Metadata = FxHashMap<String, MetaValue>;
 
+/// [`Metadata`] stored only while non-empty: 8 bytes on the directive,
+/// no allocation for the overwhelming majority of postings that carry
+/// none.
+///
+/// A plain `Metadata` field costs 32 bytes inline and this crate's
+/// directive structs are copied by the million (the loader keeps several
+/// `Vec<Spanned<Directive>>` at once), so 24 bytes of empty map per entry
+/// is the difference between a ~192-byte and a ~160-byte directive.
+/// rkyv mirrors the in-memory layout, so that padding was also written to
+/// and validated from the parse cache. Same reasoning as
+/// [`Posting::cost`], with the same reading rule: the map is behind
+/// [`Deref`](std::ops::Deref), so `meta.get(..)` and
+/// `for (k, v) in meta.iter()` work on the field directly. There is no
+/// `DerefMut`: writes go through [`Self::insert`] or
+/// [`Self::get_or_create_mut`] (allocating on first write), removals and
+/// visits through [`Self::remove`], [`Self::retain`] or
+/// [`Self::as_map_mut`] (never allocating). Code that wants the map by
+/// value goes through [`Self::into_inner`].
+///
+/// `None` and `Some(empty)` mean the same thing and compare equal;
+/// [`From<Metadata>`](From) normalizes an empty map to `None`.
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+pub struct MetaMap(Option<Box<Metadata>>);
+
+impl MetaMap {
+    /// The map, borrowed. Empty when nothing is attached (no allocation).
+    #[must_use]
+    pub fn as_map(&self) -> &Metadata {
+        self
+    }
+
+    /// The map, by value. Empty when nothing is attached.
+    #[must_use]
+    pub fn into_inner(self) -> Metadata {
+        self.0.map(|m| *m).unwrap_or_default()
+    }
+
+    /// Whether nothing is attached (no box, or an empty one).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.0.as_deref().is_none_or(Metadata::is_empty)
+    }
+
+    /// The map, borrowed mutably only if one is attached. Never
+    /// allocates, so it is the shape for visits, removals and `retain`
+    /// over an attachment that may be empty.
+    pub fn as_map_mut(&mut self) -> Option<&mut Metadata> {
+        self.0.as_deref_mut()
+    }
+
+    /// The map, borrowed mutably, allocating an empty one first if none
+    /// is attached. Use only on paths that are about to add entries;
+    /// visiting or removing goes through [`Self::as_map_mut`] so that an
+    /// empty attachment stays unallocated.
+    pub fn get_or_create_mut(&mut self) -> &mut Metadata {
+        self.0.get_or_insert_with(Default::default)
+    }
+
+    /// Insert one entry, allocating the map on first write.
+    pub fn insert(&mut self, key: String, value: MetaValue) -> Option<MetaValue> {
+        self.get_or_create_mut().insert(key, value)
+    }
+
+    /// Remove one entry. Never allocates; frees the map when the last
+    /// entry goes (so booking's transient interpolation marks leave no
+    /// empty box behind).
+    pub fn remove(&mut self, key: &str) -> Option<MetaValue> {
+        let removed = self.0.as_deref_mut()?.remove(key);
+        self.drop_if_empty();
+        removed
+    }
+
+    /// Keep only the entries `keep` accepts. Never allocates; frees the
+    /// map when nothing is kept.
+    pub fn retain(&mut self, keep: impl FnMut(&String, &mut MetaValue) -> bool) {
+        if let Some(m) = self.0.as_deref_mut() {
+            m.retain(keep);
+            self.drop_if_empty();
+        }
+    }
+
+    fn drop_if_empty(&mut self) {
+        if self.0.as_deref().is_some_and(Metadata::is_empty) {
+            self.0 = None;
+        }
+    }
+}
+
+/// The map every unattached [`MetaMap`] derefs to. A `const`
+/// initializer, so reading an empty attachment has no lazy-init check.
+static EMPTY_METADATA: Metadata = Metadata::with_hasher(rustc_hash::FxBuildHasher);
+
+impl std::ops::Deref for MetaMap {
+    type Target = Metadata;
+
+    fn deref(&self) -> &Metadata {
+        self.0.as_deref().unwrap_or(&EMPTY_METADATA)
+    }
+}
+
+// Deliberately no `DerefMut`: an implicit get-or-create on every `&mut`
+// access allocated an empty box for each posting or transaction a pass
+// merely visited. Mutation goes through `insert`/`remove`/`retain`,
+// `as_map_mut` (never allocates) or `get_or_create_mut` (adds data).
+
+impl From<Metadata> for MetaMap {
+    fn from(map: Metadata) -> Self {
+        if map.is_empty() {
+            Self(None)
+        } else {
+            Self(Some(Box::new(map)))
+        }
+    }
+}
+
+impl FromIterator<(String, MetaValue)> for MetaMap {
+    fn from_iter<I: IntoIterator<Item = (String, MetaValue)>>(iter: I) -> Self {
+        Self::from(iter.into_iter().collect::<Metadata>())
+    }
+}
+
+impl<'a> IntoIterator for &'a MetaMap {
+    type Item = (&'a String, &'a MetaValue);
+    type IntoIter = std::collections::hash_map::Iter<'a, String, MetaValue>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.as_map().iter()
+    }
+}
+
+impl PartialEq for MetaMap {
+    fn eq(&self, other: &Self) -> bool {
+        // `None` and `Some(empty)` are the same attachment; the map's own
+        // `PartialEq` is order-independent.
+        **self == **other
+    }
+}
+
+impl Eq for MetaMap {}
+
+impl Serialize for MetaMap {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        // Always a map, exactly as a bare `Metadata` field serialized.
+        self.as_map().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for MetaMap {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Metadata::deserialize(deserializer).map(Self::from)
+    }
+}
+
+/// Comment strings on a posting or transaction, boxed while non-empty.
+/// See [`MetaMap`] for why the inline size matters.
+///
+/// 8 bytes on the directive and no allocation when there are no comments,
+/// which is the common case.
+///
+/// Derefs to `[String]`, so `comments.iter()`, `comments.len()` and
+/// `comments[i]` work on the field directly; [`Self::push`] covers the
+/// parser's build-up, and [`From<Vec<String>>`] covers the bulk paths.
+#[derive(Debug, Clone, Default)]
+#[cfg_attr(
+    feature = "rkyv",
+    derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
+)]
+// `Box<Vec<_>>` is deliberate: the `Option` niches through the box to 8
+// bytes, where `Option<Box<[_]>>` is a 16-byte fat pointer and a plain
+// `Vec<_>` is 24. The box IS the storage decision this type exists for.
+#[allow(
+    clippy::box_collection,
+    reason = "Option<Box<Vec<_>>> niches to 8 bytes"
+)]
+pub struct CommentList(Option<Box<Vec<String>>>);
+
+impl CommentList {
+    /// Append one comment. Allocates on the first one only.
+    pub fn push(&mut self, comment: String) {
+        self.0.get_or_insert_with(Default::default).push(comment);
+    }
+
+    /// Remove every comment (the field is empty again).
+    pub fn clear(&mut self) {
+        self.0 = None;
+    }
+
+    /// Whether there are no comments.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.0.is_none()
+    }
+
+    /// The comments, by value.
+    #[must_use]
+    pub fn into_inner(self) -> Vec<String> {
+        self.0.map(|c| *c).unwrap_or_default()
+    }
+
+    /// The comments, borrowed mutably only if any are attached (no
+    /// allocation).
+    pub fn as_comments_mut(&mut self) -> Option<&mut [String]> {
+        self.0.as_deref_mut().map(Vec::as_mut_slice)
+    }
+}
+
+impl std::ops::Deref for CommentList {
+    type Target = [String];
+
+    fn deref(&self) -> &[String] {
+        self.0.as_deref().map_or(&[], Vec::as_slice)
+    }
+}
+
+impl From<Vec<String>> for CommentList {
+    fn from(comments: Vec<String>) -> Self {
+        if comments.is_empty() {
+            Self(None)
+        } else {
+            Self(Some(Box::new(comments)))
+        }
+    }
+}
+
+impl FromIterator<String> for CommentList {
+    fn from_iter<I: IntoIterator<Item = String>>(iter: I) -> Self {
+        Self::from(iter.into_iter().collect::<Vec<String>>())
+    }
+}
+
+impl<'a> IntoIterator for &'a CommentList {
+    type Item = &'a String;
+    type IntoIter = std::slice::Iter<'a, String>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+impl PartialEq for CommentList {
+    fn eq(&self, other: &Self) -> bool {
+        // `None` and `Some(empty)` are the same attachment.
+        **self == **other
+    }
+}
+
+impl Eq for CommentList {}
+
+impl Serialize for CommentList {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        self.as_ref().serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CommentList {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        Vec::<String>::deserialize(deserializer).map(Self::from)
+    }
+}
+
 /// The posting metadata key that marks a posting booking interpolated.
 ///
 /// An interpolated posting is one whose units, cost or price number was
@@ -232,14 +496,15 @@ pub struct Posting {
     pub price: Option<Box<PriceAnnotation>>,
     /// Whether this posting has the "!" flag
     pub flag: Option<char>,
-    /// Posting metadata
-    pub meta: Metadata,
+    /// Posting metadata. Boxed-while-nonempty for the same reason as
+    /// [`Self::cost`].
+    pub meta: MetaMap,
     /// Comments that appear before this posting (one per line)
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub comments: Vec<String>,
+    #[serde(default, skip_serializing_if = "CommentList::is_empty")]
+    pub comments: CommentList,
     /// Trailing comment(s) on the same line as the posting
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub trailing_comments: Vec<String>,
+    #[serde(default, skip_serializing_if = "CommentList::is_empty")]
+    pub trailing_comments: CommentList,
     /// What booking decided this posting does to its account's inventory
     /// (#2390). Not part of the posting's data: never serialized, never
     /// hashed, and left out of equality. See [`BookingDecision`].
@@ -351,9 +616,9 @@ impl Posting {
             cost: None,
             price: None,
             flag: None,
-            meta: Metadata::default(),
-            comments: Vec::new(),
-            trailing_comments: Vec::new(),
+            meta: Default::default(),
+            comments: Default::default(),
+            trailing_comments: Default::default(),
             booking: BookingDecision::Undecided,
         }
     }
@@ -367,9 +632,9 @@ impl Posting {
             cost: None,
             price: None,
             flag: None,
-            meta: Metadata::default(),
-            comments: Vec::new(),
-            trailing_comments: Vec::new(),
+            meta: Default::default(),
+            comments: Default::default(),
+            trailing_comments: Default::default(),
             booking: BookingDecision::Undecided,
         }
     }
@@ -383,9 +648,9 @@ impl Posting {
             cost: None,
             price: None,
             flag: None,
-            meta: Metadata::default(),
-            comments: Vec::new(),
-            trailing_comments: Vec::new(),
+            meta: Default::default(),
+            comments: Default::default(),
+            trailing_comments: Default::default(),
             booking: BookingDecision::Undecided,
         }
     }
@@ -698,7 +963,7 @@ impl Directive {
 
     /// Get the metadata of this directive.
     #[must_use]
-    pub const fn meta(&self) -> &Metadata {
+    pub fn meta(&self) -> &Metadata {
         match self {
             Self::Transaction(t) => &t.meta,
             Self::Balance(b) => &b.meta,
@@ -867,8 +1132,8 @@ pub struct Transaction {
     pub tags: crate::TagSet,
     /// Links attached to this transaction
     pub links: crate::LinkSet,
-    /// Transaction metadata
-    pub meta: Metadata,
+    /// Transaction metadata. Boxed-while-nonempty like [`Posting::meta`].
+    pub meta: MetaMap,
     /// Postings (account entries), each wrapped with its source span and
     /// file ID. Parser-emitted postings carry the byte range of the
     /// posting line (from leading indent through trailing same-line
@@ -877,8 +1142,8 @@ pub struct Transaction {
     /// pairs [`crate::Span::ZERO`] with [`crate::SYNTHESIZED_FILE_ID`].
     pub postings: Vec<crate::Spanned<Posting>>,
     /// Comments that appear after all postings
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub trailing_comments: Vec<String>,
+    #[serde(default, skip_serializing_if = "CommentList::is_empty")]
+    pub trailing_comments: CommentList,
 }
 
 impl Transaction {
@@ -892,9 +1157,9 @@ impl Transaction {
             narration: narration.into(),
             tags: crate::TagSet::new(),
             links: crate::LinkSet::new(),
-            meta: Metadata::default(),
+            meta: Default::default(),
             postings: Vec::new(),
-            trailing_comments: Vec::new(),
+            trailing_comments: Default::default(),
         }
     }
 
@@ -1103,7 +1368,7 @@ impl Balance {
             account: account.into(),
             amount,
             tolerance: None,
-            meta: Metadata::default(),
+            meta: Default::default(),
         }
     }
 
@@ -1163,7 +1428,7 @@ impl Open {
             account: account.into(),
             currencies: Vec::new(),
             booking: None,
-            meta: Metadata::default(),
+            meta: Default::default(),
         }
     }
 
@@ -1232,7 +1497,7 @@ impl Close {
         Self {
             date,
             account: account.into(),
-            meta: Metadata::default(),
+            meta: Default::default(),
         }
     }
 
@@ -1275,7 +1540,7 @@ impl Commodity {
         Self {
             date,
             currency: currency.into(),
-            meta: Metadata::default(),
+            meta: Default::default(),
         }
     }
 
@@ -1326,7 +1591,7 @@ impl Pad {
             date,
             account: account.into(),
             source_account: source_account.into(),
-            meta: Metadata::default(),
+            meta: Default::default(),
         }
     }
 
@@ -1376,7 +1641,7 @@ impl Event {
             date,
             event_type: event_type.into(),
             value: value.into(),
-            meta: Metadata::default(),
+            meta: Default::default(),
         }
     }
 
@@ -1428,7 +1693,7 @@ impl Query {
             date,
             name: name.into(),
             query: query.into(),
-            meta: Metadata::default(),
+            meta: Default::default(),
         }
     }
 
@@ -1494,7 +1759,7 @@ impl Note {
             comment: comment.into(),
             tags: crate::TagSet::new(),
             links: crate::LinkSet::new(),
-            meta: Metadata::default(),
+            meta: Default::default(),
         }
     }
 
@@ -1570,7 +1835,7 @@ impl Document {
             path: path.into(),
             tags: crate::TagSet::new(),
             links: crate::LinkSet::new(),
-            meta: Metadata::default(),
+            meta: Default::default(),
         }
     }
 
@@ -1636,7 +1901,7 @@ impl Price {
             date,
             currency: currency.into(),
             amount,
-            meta: Metadata::default(),
+            meta: Default::default(),
         }
     }
 
@@ -1682,7 +1947,7 @@ impl Custom {
             date,
             custom_type: custom_type.into(),
             values: Vec::new(),
-            meta: Metadata::default(),
+            meta: Default::default(),
         }
     }
 
@@ -1802,6 +2067,45 @@ mod tests {
             None,
             "an elided amount has none"
         );
+    }
+
+    #[test]
+    fn test_meta_map_reads_and_removals_do_not_allocate() {
+        let mut meta = MetaMap::default();
+        assert!(meta.is_empty());
+        assert!(meta.get("k").is_none());
+        assert_eq!(meta.remove("k"), None);
+        meta.retain(|_, _| false);
+        assert!(meta.as_map_mut().is_none(), "a read or removal allocated");
+    }
+
+    #[test]
+    fn test_meta_map_insert_allocates_and_last_removal_frees() {
+        let mut meta = MetaMap::default();
+        assert_eq!(meta.insert("k".into(), MetaValue::Bool(true)), None);
+        assert!(!meta.is_empty());
+        assert_eq!(meta.get("k"), Some(&MetaValue::Bool(true)));
+        assert_eq!(meta.remove("k"), Some(MetaValue::Bool(true)));
+        assert!(meta.as_map_mut().is_none(), "the empty box was kept");
+        assert_eq!(meta, MetaMap::default());
+
+        meta.insert("a".into(), MetaValue::Int(1));
+        meta.insert("b".into(), MetaValue::Int(2));
+        meta.retain(|k, _| k == "a");
+        assert_eq!(meta.len(), 1);
+        meta.retain(|_, _| false);
+        assert!(meta.as_map_mut().is_none());
+    }
+
+    #[test]
+    fn test_meta_map_is_empty_with_an_empty_box() {
+        // `get_or_create_mut` without an insert leaves `Some(empty)`,
+        // which is still "nothing attached".
+        let mut meta = MetaMap::default();
+        meta.get_or_create_mut();
+        assert!(meta.as_map_mut().is_some());
+        assert!(meta.is_empty());
+        assert_eq!(meta, MetaMap::default());
     }
     use rust_decimal_macros::dec;
 
@@ -2222,7 +2526,7 @@ mod tests {
             narration: "Example".into(),
             tags: Default::default(),
             links: Default::default(),
-            meta,
+            meta: meta.into(),
             postings: vec![
                 crate::Spanned::synthesized(Posting::new(
                     "Assets:Bank",
@@ -2230,7 +2534,7 @@ mod tests {
                 )),
                 crate::Spanned::synthesized(Posting::auto("Expenses:Example")),
             ],
-            trailing_comments: Vec::new(),
+            trailing_comments: Default::default(),
         };
 
         let output = txn.to_string();
@@ -2258,9 +2562,9 @@ mod tests {
             cost: None,
             price: None,
             flag: None,
-            meta,
-            comments: Vec::new(),
-            trailing_comments: Vec::new(),
+            meta: meta.into(),
+            comments: Default::default(),
+            trailing_comments: Default::default(),
             booking: Default::default(),
         };
 

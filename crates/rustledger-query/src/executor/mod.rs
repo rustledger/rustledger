@@ -883,9 +883,9 @@ impl<'a> Executor<'a> {
         match source {
             types::PostingSource::Ledger { .. } => {
                 let mut posting = self.source_posting(&source)?.clone();
-                posting.meta = rustledger_core::Metadata::default();
-                posting.comments = Vec::new();
-                posting.trailing_comments = Vec::new();
+                posting.meta = Default::default();
+                posting.comments = Default::default();
+                posting.trailing_comments = Default::default();
                 Some(types::PostingSource::Detached(Arc::new(posting)))
             }
             kept @ (types::PostingSource::Shared { .. } | types::PostingSource::Detached(_)) => {

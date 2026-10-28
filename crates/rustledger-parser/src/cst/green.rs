@@ -187,9 +187,9 @@ pub(super) fn convert_transaction_header(
         narration: InternedStr::from(narration_str),
         tags,
         links,
-        meta: Metadata::default(),
+        meta: Default::default(),
         postings: Vec::new(),
-        trailing_comments: Vec::new(),
+        trailing_comments: Default::default(),
     };
     Some((txn, span))
 }
@@ -467,9 +467,9 @@ pub(super) fn convert_simple_posting(
             cost: cost.map(Box::new),
             price: price.map(Box::new),
             flag,
-            meta,
-            comments: Vec::new(),
-            trailing_comments,
+            meta: meta.into(),
+            comments: Default::default(),
+            trailing_comments: trailing_comments.into(),
             booking: Default::default(),
         },
         Span::new(base, end),
@@ -546,7 +546,7 @@ pub(super) fn convert_transaction(
         offset += len;
     }
     txn.postings = postings;
-    txn.meta = meta;
+    txn.meta = meta.into();
     Some(Spanned::new(
         rustledger_core::Directive::Transaction(txn),
         span,

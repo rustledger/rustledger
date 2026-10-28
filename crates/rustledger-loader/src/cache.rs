@@ -536,12 +536,19 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     reached through a symlink holds the files next to the link's TARGET,
 ///     still unchanged and so still hash-valid, and would keep serving them.
 ///
+/// v42: `Posting`/`Transaction` store their `meta` map and comment lists
+///     boxed-while-nonempty (`MetaMap`/`CommentList`), so the archived
+///     fields are `Option<Box<..>>` where they were a bare map/`Vec`. The
+///     in-memory layout rkyv mirrors moved, so a v41 blob would
+///     deserialize into the new structs as junk. `MetaValue`,
+///     `CostNumber` and the map's own entry encoding are untouched.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 41;
+pub const CACHE_VERSION: u32 = 42;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1303,7 +1310,10 @@ mod tests {
         // in strings; no `CostNumber` is involved.
         // v41 (#2635) changes which FILES an include through a symlink reads;
         // no archived encoding moves, so the byte arrays below still hold.
-        const FIXTURE_VERSION: u32 = 41;
+        // v42 boxes `Posting`/`Transaction`'s meta map and comment lists
+        // (`MetaMap`/`CommentList`); no `CostNumber` is involved, so the
+        // byte arrays below still hold.
+        const FIXTURE_VERSION: u32 = 42;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1425,7 +1435,10 @@ mod tests {
         // not how a `MetaValue` is archived; the hash below is unchanged.
         // v41 (#2635) changes which files a symlinked include reads, not how
         // anything is archived; the hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 41;
+        // v42 boxes `Posting`/`Transaction`'s meta map and comment lists;
+        // `MetaValue` itself is archived as before, so the hash below is
+        // unchanged.
+        const FIXTURE_VERSION: u32 = 42;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

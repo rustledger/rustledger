@@ -85,17 +85,17 @@ fn leading_trivia_does_not_change_a_transaction() {
             // The header-line comment belongs to no posting.
             assert_eq!(
                 t.postings[0].value.comments,
-                vec!["; before the first posting".to_string()],
+                vec!["; before the first posting".to_string()].into(),
                 "{name} with prefix {prefix:?}"
             );
             assert_eq!(
                 t.postings[1].value.comments,
-                vec!["; before the second posting".to_string()],
+                vec!["; before the second posting".to_string()].into(),
                 "{name} with prefix {prefix:?}"
             );
             assert_eq!(
                 t.trailing_comments,
-                vec!["; after the last posting".to_string()],
+                vec!["; after the last posting".to_string()].into(),
                 "{name} with prefix {prefix:?}"
             );
         }

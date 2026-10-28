@@ -509,7 +509,7 @@ mod tests {
                 narration: "".into(),
                 tags: Default::default(),
                 links: Default::default(),
-                meta: txn_meta,
+                meta: txn_meta.into(),
                 postings: vec![Spanned::synthesized(Posting {
                     account: "Assets:Stock".into(),
                     units: Some(crate::IncompleteAmount::from(Amount::new(dec!(10), "USD"))),
@@ -523,11 +523,11 @@ mod tests {
                     price: Some(Box::new(PriceAnnotation::unit(Amount::new(dec!(1), "USD")))),
                     flag: None,
                     meta: Default::default(),
-                    comments: vec![],
-                    trailing_comments: vec![],
+                    comments: Default::default(),
+                    trailing_comments: Default::default(),
                     booking: Default::default(),
                 })],
-                trailing_comments: vec![],
+                trailing_comments: Default::default(),
             }),
             // Custom.values with Currency and Amount variants.
             Directive::Custom(Custom {
@@ -620,9 +620,9 @@ mod tests {
                 narration: "".into(),
                 tags: Default::default(),
                 links: Default::default(),
-                meta: meta_with_account,
+                meta: meta_with_account.into(),
                 postings: vec![Spanned::synthesized(Posting::auto("Assets:X"))],
-                trailing_comments: vec![],
+                trailing_comments: Default::default(),
             }),
             Directive::Custom(Custom {
                 date: date(2024, 1, 8),
@@ -673,9 +673,9 @@ mod tests {
                 narration: "".into(),
                 tags: vec![Tag::new("proj")].into(),
                 links: vec![Link::new("inv-1")].into(),
-                meta: txn_meta,
+                meta: txn_meta.into(),
                 postings: vec![],
-                trailing_comments: vec![],
+                trailing_comments: Default::default(),
             }),
             // Document.tags / Document.links.
             Directive::Document(Document {
@@ -739,11 +739,11 @@ mod tests {
                 price: Some(Box::new(price)),
                 flag: None,
                 meta: Default::default(),
-                comments: vec![],
-                trailing_comments: vec![],
+                comments: Default::default(),
+                trailing_comments: Default::default(),
                 booking: Default::default(),
             })],
-            trailing_comments: vec![],
+            trailing_comments: Default::default(),
         };
 
         // Unit + Total: each surface one currency.

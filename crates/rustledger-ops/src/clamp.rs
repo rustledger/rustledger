@@ -9,7 +9,7 @@ use std::collections::HashMap;
 
 use rustledger_core::{
     AccountTypes, Amount, CostNumber, CostSpec, Decimal, Directive, IncompleteAmount, Inventory,
-    Metadata, NaiveDate, OverflowError, Position, Posting, Span, Spanned, Transaction,
+    NaiveDate, OverflowError, Position, Posting, Span, Spanned, Transaction,
 };
 
 /// Account configuration for clamp's synthesized summaries (#1806).
@@ -93,9 +93,9 @@ fn synthetic_posting(
             cost: cost.map(Box::new),
             price: None,
             flag: None,
-            meta: Metadata::default(),
-            comments: Vec::new(),
-            trailing_comments: Vec::new(),
+            meta: Default::default(),
+            comments: Default::default(),
+            trailing_comments: Default::default(),
             booking: Default::default(),
         },
         Span::ZERO,
@@ -110,9 +110,9 @@ fn synthetic_transaction(date: NaiveDate, postings: Vec<Spanned<Posting>>) -> Di
         narration: "Opening balance".into(),
         tags: Default::default(),
         links: Default::default(),
-        meta: Metadata::default(),
+        meta: Default::default(),
         postings,
-        trailing_comments: Vec::new(),
+        trailing_comments: Default::default(),
     })
 }
 

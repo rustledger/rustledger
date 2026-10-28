@@ -788,7 +788,7 @@ fn test_meta_functions() {
         narration: "Coffee".into(),
         tags: Default::default(),
         links: Default::default(),
-        meta: txn_meta,
+        meta: txn_meta.into(),
         postings: vec![
             rustledger_core::Spanned::synthesized(Posting {
                 account: "Expenses:Food".into(),
@@ -799,9 +799,9 @@ fn test_meta_functions() {
                 cost: None,
                 price: None,
                 flag: None,
-                meta: posting_meta,
-                comments: Vec::new(),
-                trailing_comments: Vec::new(),
+                meta: posting_meta.into(),
+                comments: Default::default(),
+                trailing_comments: Default::default(),
                 booking: Default::default(),
             }),
             rustledger_core::Spanned::synthesized(Posting::new(
@@ -809,7 +809,7 @@ fn test_meta_functions() {
                 Amount::new(dec!(-5), "USD"),
             )),
         ],
-        trailing_comments: Vec::new(),
+        trailing_comments: Default::default(),
     };
 
     let directives = vec![Directive::Transaction(txn)];
@@ -858,7 +858,7 @@ fn test_getitem_meta_eager_path_postings() {
         narration: "Coffee".into(),
         tags: Default::default(),
         links: Default::default(),
-        meta: Metadata::default(),
+        meta: Default::default(),
         postings: vec![
             rustledger_core::Spanned::synthesized(Posting {
                 account: "Expenses:Food".into(),
@@ -869,9 +869,9 @@ fn test_getitem_meta_eager_path_postings() {
                 cost: None,
                 price: None,
                 flag: None,
-                meta: posting_meta,
-                comments: Vec::new(),
-                trailing_comments: Vec::new(),
+                meta: posting_meta.into(),
+                comments: Default::default(),
+                trailing_comments: Default::default(),
                 booking: Default::default(),
             }),
             rustledger_core::Spanned::synthesized(Posting::new(
@@ -879,7 +879,7 @@ fn test_getitem_meta_eager_path_postings() {
                 Amount::new(dec!(-5), "USD"),
             )),
         ],
-        trailing_comments: Vec::new(),
+        trailing_comments: Default::default(),
     };
     let directives = vec![Directive::Transaction(txn)];
     let mut executor = Executor::new(&directives);
@@ -1311,7 +1311,7 @@ fn test_source_location_columns_return_null_without_sources() {
         narration: "Test transaction".into(),
         tags: Default::default(),
         links: Default::default(),
-        meta: Metadata::default(),
+        meta: Default::default(),
         postings: vec![
             rustledger_core::Spanned::synthesized(Posting::new(
                 "Assets:Bank",
@@ -1322,7 +1322,7 @@ fn test_source_location_columns_return_null_without_sources() {
                 Amount::new(dec!(-100), "USD"),
             )),
         ],
-        trailing_comments: Vec::new(),
+        trailing_comments: Default::default(),
     })];
 
     let mut executor = Executor::new(&directives);
@@ -1362,7 +1362,7 @@ fn test_source_location_columns_with_sources() {
         narration: "Test transaction".into(),
         tags: Default::default(),
         links: Default::default(),
-        meta: Metadata::default(),
+        meta: Default::default(),
         postings: vec![
             rustledger_core::Spanned::synthesized(Posting::new(
                 "Assets:Bank",
@@ -1373,7 +1373,7 @@ fn test_source_location_columns_with_sources() {
                 Amount::new(dec!(-100), "USD"),
             )),
         ],
-        trailing_comments: Vec::new(),
+        trailing_comments: Default::default(),
     };
 
     let spanned_directives = vec![Spanned {
@@ -1429,7 +1429,7 @@ fn test_journal_via_source_mapped_executor_returns_rows() {
         narration: "Lunch".into(),
         tags: Default::default(),
         links: Default::default(),
-        meta: Metadata::default(),
+        meta: Default::default(),
         postings: vec![
             rustledger_core::Spanned::synthesized(Posting::new(
                 "Assets:Cash",
@@ -1440,7 +1440,7 @@ fn test_journal_via_source_mapped_executor_returns_rows() {
                 Amount::new(dec!(12.00), "USD"),
             )),
         ],
-        trailing_comments: Vec::new(),
+        trailing_comments: Default::default(),
     };
     let spanned_directives = vec![Spanned {
         value: Directive::Transaction(txn),
@@ -1529,7 +1529,7 @@ fn test_per_posting_source_location() {
         narration: "Test".into(),
         tags: Default::default(),
         links: Default::default(),
-        meta: Metadata::default(),
+        meta: Default::default(),
         postings: vec![
             Spanned {
                 value: Posting::new("Assets:Bank", Amount::new(dec!(100), "USD")),
@@ -1542,7 +1542,7 @@ fn test_per_posting_source_location() {
                 file_id,
             },
         ],
-        trailing_comments: Vec::new(),
+        trailing_comments: Default::default(),
     };
     let spanned = vec![Spanned {
         value: Directive::Transaction(txn),
@@ -1591,7 +1591,7 @@ fn test_meta_includes_source_location() {
         narration: "Test".into(),
         tags: Default::default(),
         links: Default::default(),
-        meta: Metadata::default(),
+        meta: Default::default(),
         postings: vec![
             Spanned {
                 value: Posting {
@@ -1603,9 +1603,9 @@ fn test_meta_includes_source_location() {
                     cost: None,
                     price: None,
                     flag: None,
-                    meta: p1_meta,
-                    comments: Vec::new(),
-                    trailing_comments: Vec::new(),
+                    meta: p1_meta.into(),
+                    comments: Default::default(),
+                    trailing_comments: Default::default(),
                     booking: Default::default(),
                 },
                 span: Span { start: 20, end: 42 },
@@ -1617,7 +1617,7 @@ fn test_meta_includes_source_location() {
                 file_id,
             },
         ],
-        trailing_comments: Vec::new(),
+        trailing_comments: Default::default(),
     };
     let spanned = vec![Spanned {
         value: Directive::Transaction(txn),
@@ -1674,9 +1674,9 @@ fn test_postings_balance_excludes_filtered_commodities() {
             narration: "t".into(),
             tags: Default::default(),
             links: Default::default(),
-            meta: Metadata::default(),
+            meta: Default::default(),
             postings,
-            trailing_comments: Vec::new(),
+            trailing_comments: Default::default(),
         })
     };
     let directives = vec![
@@ -2647,9 +2647,9 @@ fn entry_meta_fallback_does_not_disturb_postings() {
 
     let mut txn = Transaction::new(date(2024, 2, 15), "t");
     txn.flag = '*';
-    txn.meta = entry_meta;
+    txn.meta = entry_meta.into();
     let mut posting = Posting::new("Assets:A", Amount::new(dec!(1.00), "USD"));
-    posting.meta = posting_meta;
+    posting.meta = posting_meta.into();
     let directives = vec![Directive::Transaction(
         txn.with_synthesized_posting(posting)
             .with_synthesized_posting(Posting::new("Equity:O", Amount::new(dec!(-1.00), "USD"))),

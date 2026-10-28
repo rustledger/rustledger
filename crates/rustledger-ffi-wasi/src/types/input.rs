@@ -391,9 +391,9 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                         cost: cost.map(Box::new),
                         price: price.map(Box::new),
                         flag: None,
-                        meta: json_map_to_metadata(&p.meta),
-                        comments: Vec::new(),
-                        trailing_comments: Vec::new(),
+                        meta: json_map_to_metadata(&p.meta).into(),
+                        comments: Default::default(),
+                        trailing_comments: Default::default(),
                         booking: Default::default(),
                     }))
                 })
@@ -407,8 +407,8 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                 tags: tags.iter().map(|t| t.clone().into()).collect(),
                 links: links.iter().map(|l| l.clone().into()).collect(),
                 postings,
-                meta: json_map_to_metadata(meta),
-                trailing_comments: Vec::new(),
+                meta: json_map_to_metadata(meta).into(),
+                trailing_comments: Default::default(),
             }))
         }
         InputEntry::Open {

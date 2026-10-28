@@ -56,7 +56,7 @@ pub(super) fn data_to_transaction(
         links: data.links.iter().map(|l| l.as_str().into()).collect(),
         meta,
         postings,
-        trailing_comments: Vec::new(),
+        trailing_comments: Default::default(),
     })
 }
 
@@ -96,8 +96,8 @@ pub(super) fn data_to_posting(data: &PostingData) -> Result<Posting, ConversionE
         price: price.map(Box::new),
         flag,
         meta,
-        comments: Vec::new(),
-        trailing_comments: Vec::new(),
+        comments: Default::default(),
+        trailing_comments: Default::default(),
         booking: Default::default(),
     })
 }

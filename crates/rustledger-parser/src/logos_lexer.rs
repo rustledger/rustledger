@@ -81,8 +81,10 @@ pub enum Token<'src> {
     Number(&'src str),
 
     /// A double-quoted string (handles escape sequences).
-    /// The slice includes the quotes.
-    #[regex(r#""([^"\\]|\\.)*""#)]
+    /// The slice includes the quotes. Scanned by `lex_string`, which
+    /// matches exactly what the regex `"([^"\\]|\\.)*"` did, without the
+    /// recursion logos generates for that regex (#2789).
+    #[token("\"", lex_string)]
     String(&'src str),
 
     /// An account name like Assets:Bank:Checking, Капитал:Retained-Earnings,
@@ -909,6 +911,50 @@ fn line_chunk_end(source: &str, from: usize) -> usize {
     source[from..]
         .find('\n')
         .map_or(source.len(), |i| from + i + 1)
+}
+
+/// Scan the rest of a string after its opening `"`, as the regex
+/// `"([^"\\]|\\.)*"` did, in a plain loop (#2789).
+///
+/// logos compiled that regex into mutually recursive state functions, one
+/// frame per escape pair, so a long run of escapes (`"\"\"\"...`) overflowed
+/// the stack: in debug builds at 50,000 pairs, and in any build where the
+/// recursion is not turned into a loop (wasm32 has no tail calls). This is
+/// byte-for-byte the same match:
+///
+/// - a `"` closes the string;
+/// - a `\` escapes the next character, which may be anything but `\n`
+///   (`\\.`; a `\r` counts, so `\` before `\r\n` continues the string);
+/// - anything else, `\n` included, is string content.
+///
+/// On failure the error covers the scan up to and including the offending
+/// `\` (a `\` before `\n` or at the end of the input), or to the end of the
+/// input when no closing `"` comes, which is where logos ended the regex's
+/// error. `TokenIter`'s `Err` arm relies on those spans (#2784). Every bump
+/// lands just after an ASCII byte or at the end, so on a char boundary;
+/// stepping over the bytes of a multi-byte character one at a time is safe
+/// because none of them is `"` or `\`.
+fn lex_string<'src>(lex: &mut logos::Lexer<'src, Token<'src>>) -> Result<&'src str, ()> {
+    let rest = lex.remainder().as_bytes();
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            b'"' => {
+                lex.bump(i + 1);
+                return Ok(lex.slice());
+            }
+            b'\\' => match rest.get(i + 1) {
+                Some(b'\n') | None => {
+                    lex.bump(i + 1);
+                    return Err(());
+                }
+                Some(_) => i += 2,
+            },
+            _ => i += 1,
+        }
+    }
+    lex.bump(rest.len());
+    Err(())
 }
 
 /// Where a whole-line token that starts before `from` ends: before the

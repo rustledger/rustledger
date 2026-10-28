@@ -159,24 +159,24 @@ fn test_parse_indented_star_line_is_reported() {
     }
 }
 
-/// The reported case: a `"` on the indented line still opens a string that
-/// runs to the end of the file (that is #2784, which will change these
-/// rows), but the line is now an error instead of a silenced heading, so
-/// the loss is visible.
+/// The reported case: the line is an error instead of a silenced heading,
+/// and since #2784 its unterminated `"` ends at the line, so the
+/// directives after it survive (as in beancount) instead of being lost
+/// behind one error that ran to the end of the file.
 #[test]
 fn test_parse_indented_star_line_with_quote_is_not_silent() {
     for case in [
         Case {
             src: "  * h \"x\n2024-01-02 open Assets:B\n2024-01-03 open Assets:C\n",
-            errors: &[(2, 59)],
+            errors: &[(2, 9)],
             comments: &[],
-            opens: &[],
+            opens: &[B, "2024-01-03 Assets:C"],
         },
         Case {
             src: "2024-01-01 open Assets:A\n  * h \"x\n2024-01-02 open Assets:B\n",
-            errors: &[(25, 59)],
+            errors: &[(25, 34)],
             comments: &[],
-            opens: &[A],
+            opens: &[A, B],
         },
     ] {
         check(&case);

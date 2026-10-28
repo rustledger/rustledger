@@ -717,18 +717,18 @@ impl<'src> Iterator for TokenIter<'src> {
                         }
                     });
                     let comment_text = &source[comment_start..line_end];
-                    // Skip lexer tokens until we reach the newline
-                    while let Some(peek_result) = self.lexer.next() {
-                        let peek_span = self.lexer.span();
-                        let peek_end = peek_span.end;
-                        if peek_result == Ok(Token::Newline) {
-                            self.pending = Some((Token::Newline, peek_span.into()));
-                            self.at_line_start = true;
-                            self.last_newline_end = peek_end;
-                            break;
-                        }
-                        // Skip other tokens on the comment line
-                    }
+                    // Skip the rest of the line without lexing it, as
+                    // beancount's lexer does (`^#` enters an IGNORE state
+                    // that eats `.*`). Lexing it token by token let a `"`
+                    // in the comment open a multi-line string that ran
+                    // past the line ending and swallowed the directives
+                    // after it, with no error (#2775). The lexer resumes
+                    // exactly at `line_end`, so the next call emits the
+                    // `Newline` (or ends the stream) normally. `line_end`
+                    // sits on a `\r`, a `\n` or the end of the source, so
+                    // it is always a char boundary in range.
+                    self.lexer.bump(line_end - span.end);
+                    self.at_line_start = false;
                     return Some((
                         Token::Comment(comment_text),
                         Span {

@@ -66,7 +66,7 @@ pub use discover::{
     discover_journal_upward,
 };
 pub use options::{DEFAULT_CURRENT_CONVERSIONS, OptionWarning, Options, resolve_leaf_account};
-pub use source_map::{LineIndex, SourceFile, SourceMap, line_col_in};
+pub use source_map::{LineIndex, SourceFile, SourceMap, SourceText, line_col_in};
 pub use vfs::{DiskFileSystem, FileSystem, VirtualFileSystem};
 
 // Re-export processing API when features are enabled
@@ -563,7 +563,7 @@ impl Loader {
         &mut self,
         path: &Path,
         opened: &Path,
-        pre_parsed: Option<(std::sync::Arc<str>, rustledger_parser::ParseResult)>,
+        pre_parsed: Option<(SourceText, rustledger_parser::ParseResult)>,
         directives: &mut Vec<Spanned<Directive>>,
         options: &mut Options,
         plugins: &mut Vec<Plugin>,
@@ -604,7 +604,7 @@ impl Loader {
         let (source, result) = if let Some(pre) = pre_parsed {
             pre
         } else {
-            let src: std::sync::Arc<str> = if self.fs.is_encrypted(path) {
+            let src: SourceText = if self.fs.is_encrypted(path) {
                 // Route decryption through the filesystem so a sandboxed fs (the
                 // WASI component) can delegate to a host capability (#1667); the
                 // default impl shells out to gpg.
@@ -624,12 +624,9 @@ impl Loader {
         // file count; reject it here (collected into `LoadResult::errors` by the
         // caller) so an over-large include/glob set fails loudly without a panic.
         let fid_u16 = file_id_to_u16(source_map.files().len())?;
-        // Add to source map (Arc::clone is cheap - just increments refcount)
-        let file_id = source_map.add_opened_file(
-            path_buf.clone(),
-            opened.to_path_buf(),
-            std::sync::Arc::clone(&source),
-        );
+        // Add to source map (the map takes ownership of the shared text:
+        // `SourceText` clones are refcount bumps, and this one is the last use).
+        let file_id = source_map.add_opened_file(path_buf.clone(), opened.to_path_buf(), source);
         debug_assert_eq!(file_id, fid_u16 as usize);
 
         // Mark as loading (update both stack and set)
@@ -800,7 +797,7 @@ impl Loader {
                 // ensuring option/directive precedence matches the declared
                 // include sequence.
                 let fs = &*self.fs;
-                let pre_parsed: Vec<Option<(std::sync::Arc<str>, rustledger_parser::ParseResult)>> =
+                let pre_parsed: Vec<Option<(SourceText, rustledger_parser::ParseResult)>> =
                     valid_paths
                         .par_iter()
                         .map(|(p, _)| {

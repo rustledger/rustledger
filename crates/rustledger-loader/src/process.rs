@@ -1143,20 +1143,23 @@ fn run_booking(
 
     // Partition into (booked, failed). Indices are valid in the current
     // `directives` vec (no mutation has happened since they were
-    // collected); after this consuming iteration the vec is gone and
-    // partition is fait accompli — no window where a caller could
-    // accidentally mutate between collection and partition.
+    // collected); the partition is fait accompli — no window where a
+    // caller could accidentally mutate between collection and partition.
+    //
+    // `extract_if` keeps the booked stream in the original buffer: the
+    // failed elements are removed in place and collected separately, so
+    // the partition does not allocate a second stream-sized `Vec` beside
+    // the one it consumes (a 2M-directive ledger freed a 384 MB buffer
+    // only after a second 384 MB one had been filled).
     let failed_set: rustc_hash::FxHashSet<usize> = failed_indices.iter().copied().collect();
-    let mut booked = Vec::with_capacity(directives.len() - failed_indices.len());
+    let mut i = 0;
     let mut failed = Vec::with_capacity(failed_indices.len());
-    for (i, d) in directives.into_iter().enumerate() {
-        if failed_set.contains(&i) {
-            failed.push(d);
-        } else {
-            booked.push(d);
-        }
-    }
-    (booked, failed)
+    failed.extend(directives.extract_if(.., |_| {
+        let take = failed_set.contains(&i);
+        i += 1;
+        take
+    }));
+    (directives, failed)
 }
 
 /// Which subset of plugins to run.
@@ -2259,7 +2262,6 @@ mod sanitize_tests {
         Transaction,
     };
     use std::path::PathBuf;
-    use std::sync::Arc;
 
     fn txn_with_postings(postings: Vec<Spanned<Posting>>) -> Directive {
         let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
@@ -2278,7 +2280,7 @@ mod sanitize_tests {
 
     fn source_map_with_one_file(source: &str) -> (SourceMap, u16) {
         let mut sm = SourceMap::new();
-        let id = sm.add_file(PathBuf::from("test.bean"), Arc::from(source));
+        let id = sm.add_file(PathBuf::from("test.bean"), source.into());
         (sm, id as u16)
     }
 

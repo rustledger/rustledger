@@ -7,15 +7,14 @@
 //! planned files from memory, hides the files the plan removes, and passes
 //! everything else through to the disk.
 
-use rustledger_loader::{DiskFileSystem, FileSystem, LoadError};
+use rustledger_loader::{DiskFileSystem, FileSystem, LoadError, SourceText};
 use std::collections::{HashMap, HashSet};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 
 /// Disk, with some files replaced, added or removed in memory.
 #[derive(Debug, Default)]
 pub(super) struct OverlayFs {
-    files: HashMap<PathBuf, Arc<str>>,
+    files: HashMap<PathBuf, SourceText>,
     removed: HashSet<PathBuf>,
 }
 
@@ -31,7 +30,7 @@ impl OverlayFs {
     pub(super) fn add(&mut self, path: &Path, content: &str) {
         let key = normalize(path);
         self.removed.remove(&key);
-        self.files.insert(key, Arc::from(content));
+        self.files.insert(key, content.into());
     }
 
     /// Make `path` look absent.
@@ -94,10 +93,10 @@ fn not_found(path: &Path) -> LoadError {
 }
 
 impl FileSystem for OverlayFs {
-    fn read(&self, path: &Path) -> Result<Arc<str>, LoadError> {
+    fn read(&self, path: &Path) -> Result<SourceText, LoadError> {
         let key = normalize(path);
         if let Some(content) = self.files.get(&key) {
-            return Ok(Arc::clone(content));
+            return Ok(content.clone());
         }
         if self.removed.contains(&key) {
             return Err(not_found(path));
@@ -173,7 +172,7 @@ impl FileSystem for OverlayFs {
         Ok(matched)
     }
 
-    fn decrypt(&self, path: &Path) -> Result<Arc<str>, LoadError> {
+    fn decrypt(&self, path: &Path) -> Result<SourceText, LoadError> {
         DiskFileSystem.decrypt(path)
     }
 }

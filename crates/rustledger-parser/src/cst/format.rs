@@ -361,14 +361,16 @@ pub fn try_format_source_grouped(
 /// - String literals: bytes pass through verbatim. The user's
 ///   original line endings inside a multi-line narration / note /
 ///   document string are preserved.
-/// - Line comments (`;`, `%`, `#!`, `#+`): the comment's
-///   terminating newline IS a real structural line terminator, so
-///   it gets converted to CRLF; bytes inside the comment region
-///   (which can include arbitrary characters, notably stray `"`)
-///   pass through without flipping the in-string state. `#!` and
-///   `#+` open a comment at any column — the lexer's
+/// - Line comments (`;`, `%`, `#!`, `#+`, and a column-0 `#`): the
+///   comment's terminating newline IS a real structural line
+///   terminator, so it gets converted to CRLF; bytes inside the
+///   comment region (which can include arbitrary characters,
+///   notably stray `"`) pass through without flipping the in-string
+///   state. `#!` and `#+` open a comment at any column: the lexer's
 ///   `SHEBANG` / `EMACS_DIRECTIVE` regexes carry no line-start
-///   anchor, and the state machine matches that classification.
+///   anchor, and the state machine matches that classification. A
+///   bare `#` opens one only at line start (see
+///   `advance_source_state`).
 ///
 /// The helper lives in this module rather than the LSP crate
 /// because its correctness depends on the lexer's `STRING` and
@@ -657,12 +659,13 @@ pub fn cr_outside_strings_present(src: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceState {
     /// In normal code. `"` opens a string; `;` / `%` / `#!` /
-    /// `#+` opens a comment; everything else is just bytes.
+    /// `#+`, or a column-0 `#`, opens a comment; everything else is
+    /// just bytes.
     Code,
     /// Inside `"…"`. Bytes pass through; an unescaped `"` exits.
     InString,
-    /// Inside `;…\n`, `%…\n`, `#!…\n`, or `#+…\n`. Bytes pass
-    /// through until LF/CR.
+    /// Inside `;…\n`, `%…\n`, `#!…\n`, `#+…\n`, or a column-0
+    /// `#…\n`. Bytes pass through until LF/CR.
     InComment,
 }
 
@@ -675,8 +678,9 @@ enum SourceState {
 /// any column — the lexer's `#![^\n\r]*` / `#\+[^\n\r]*` regexes
 /// have NO line-start anchor, so a mid-line `#!` or `#+` is still
 /// a `SHEBANG` / `EMACS_DIRECTIVE` token. Any other `#` at the very
-/// start of a line (`at_line_start`: first char of the body, or
-/// right after a `\n`) is a column-0 `#` comment, the lexer's
+/// start of a line (`at_line_start`: first char of the body, right
+/// after a `\n`, or after a BOM at line start; see
+/// `next_at_line_start`) is a column-0 `#` comment, the lexer's
 /// `Token::Hash` arm in `TokenIter`, unless a tag character follows,
 /// which makes it a `TAG` token instead (#2775). A `#` anywhere else
 /// is a `TAG` / `HASH` token, not a comment.

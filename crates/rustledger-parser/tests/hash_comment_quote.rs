@@ -15,7 +15,7 @@ use rustledger_parser::format::{
     cr_outside_strings_present, crlf_to_lf_outside_strings, format_source,
     lf_to_crlf_outside_strings, try_format_source,
 };
-use rustledger_parser::logos_lexer::tokenize_lossless;
+use rustledger_parser::logos_lexer::{Token, tokenize_lossless};
 use rustledger_parser::{parse, parse_structured};
 
 /// Every byte of `src` covered exactly once, in order, by the lossless
@@ -162,6 +162,18 @@ fn test_parse_hash_that_is_not_a_comment_is_unchanged() {
     let result = parse(src);
     assert!(result.errors.is_empty(), "{:?}", result.errors);
     assert_eq!(result.directives.len(), 1);
+    assert!(result.comments.is_empty(), "{:?}", result.comments);
     assert_lossless(src);
+
+    // The column-0 tag lexes as a TAG, and its string stays a STRING; a
+    // lossless check alone would also pass if the line were one comment.
+    let tag_line = "#tag \"x\"\n";
+    let tokens = tokenize_lossless(tag_line);
+    assert!(matches!(tokens[0].0, Token::Tag("#tag")), "{tokens:?}");
+    assert!(
+        tokens.iter().any(|(t, _)| matches!(t, Token::String(_))),
+        "{tokens:?}"
+    );
+    assert!(parse(tag_line).comments.is_empty());
     assert_lossless("#tag \"x\n2024-01-02 open Assets:B\n");
 }

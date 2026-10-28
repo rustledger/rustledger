@@ -403,7 +403,7 @@ pub fn lf_to_crlf_outside_strings(s: &str) -> String {
             }
         }
         state = advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
-        at_line_start = ch == '\n';
+        at_line_start = next_at_line_start(ch, at_line_start);
     }
     out
 }
@@ -589,6 +589,9 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
     let mut at_line_start = true;
     while let Some(ch) = chars.next() {
         let peek = chars.peek().copied();
+        // A CRLF pair outside a string is consumed whole here, so the
+        // `\n` never reaches `next_at_line_start`; it still ends the line.
+        let mut ate_lf = false;
         match state {
             SourceState::InString => out.push(ch),
             _ => {
@@ -596,6 +599,7 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
                     out.push('\n');
                     if peek == Some('\n') {
                         chars.next();
+                        ate_lf = true;
                     }
                 } else {
                     out.push(ch);
@@ -603,7 +607,7 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
             }
         }
         state = advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
-        at_line_start = ch == '\n';
+        at_line_start = ate_lf || next_at_line_start(ch, at_line_start);
     }
     std::borrow::Cow::Owned(out)
 }
@@ -639,7 +643,7 @@ pub fn cr_outside_strings_present(src: &str) -> bool {
             return true;
         }
         state = advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
-        at_line_start = ch == '\n';
+        at_line_start = next_at_line_start(ch, at_line_start);
     }
     false
 }
@@ -724,6 +728,15 @@ const fn advance_source_state(
 /// after the `#`. A column-0 `#` followed by one is a tag, not a comment.
 const fn is_tag_char(c: char) -> bool {
     c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.')
+}
+
+/// Whether the character after `ch` is at line start, as the lexer sees
+/// it: a `\n` ends the line (the lexer's `Newline` is `\r?\n`; a lone `\r`
+/// does not), and a BOM at line start keeps it there, because the lexer
+/// treats a BOM as layout-transparent (`apply_err_layout_transparency`), so
+/// a `#` after a mid-file or second BOM is still a column-0 comment.
+const fn next_at_line_start(ch: char, at_line_start: bool) -> bool {
+    ch == '\n' || (at_line_start && ch == '\u{FEFF}')
 }
 
 /// Format a `SOURCE_FILE` syntax node in opinionated canonical form.
@@ -3967,6 +3980,19 @@ mod tests {
             "hash_comment_col0_quote_then_string",
             "# say \"hi\n2024-01-15 note Assets:A \"x\"\n",
         ),
+        // The two edges of the column-0 rule. `#tag` is a TAG token even
+        // at line start, so its `"x"` is a real STRING: a machine that
+        // opened a comment on any column-0 `#` would disagree on it. And
+        // a BOM at line start is layout-transparent to the lexer, so the
+        // `#` after it is still a column-0 comment.
+        (
+            "hash_tag_col0_with_quote",
+            "#tag \"x\"\n2024-01-15 open Assets:A\n",
+        ),
+        (
+            "hash_comment_after_mid_file_bom",
+            "2024-01-15 open Assets:A\n\u{feff}# 27\" x\n2024-01-16 note Assets:A \"y\"\n",
+        ),
         ("pushtag_directive", "pushtag #active\n"),
         ("poptag_directive", "poptag #active\n"),
         ("pushmeta_directive", "pushmeta location: \"NYC\"\n"),
@@ -4002,6 +4028,11 @@ mod tests {
     /// - `options_and_includes` — option / include / plugin lines
     ///   live on separate `ParseResult` collections, not on
     ///   `.directives`.
+    /// - `hash_tag_col0_with_quote`, `hash_comment_after_mid_file_bom`:
+    ///   a column-0 `#tag` and a mid-file BOM are parse errors, so the
+    ///   skip-on-errors guard triggers. They exist for the line-ending
+    ///   state machine's lexer-agreement test (#2775), not the round-trip
+    ///   body.
     ///
     /// Note: `comment_containing_quote` and
     /// `emacs_directive_mid_line_with_quote` BOTH exercise the
@@ -4012,7 +4043,7 @@ mod tests {
     /// rule. Their purpose is the state-machine / lexer agreement
     /// property on a comment with an unbalanced `"`, not the
     /// zero-directive case.
-    const ROUNDTRIP_KNOWN_ZERO_DIRECTIVE_FIXTURES: usize = 8;
+    const ROUNDTRIP_KNOWN_ZERO_DIRECTIVE_FIXTURES: usize = 10;
 
     #[test]
     fn lf_to_crlf_outside_strings_preserves_string_interior() {
@@ -4896,7 +4927,7 @@ mod tests {
             let prev_state = state;
             let next_state =
                 advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
-            at_line_start = ch == '\n';
+            at_line_start = next_at_line_start(ch, at_line_start);
             // Record only OPENING transitions and the comment-
             // closing newline, where the state machine and lexer
             // legitimately disagree on this single byte:

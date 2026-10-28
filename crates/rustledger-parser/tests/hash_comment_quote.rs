@@ -10,9 +10,10 @@
 //! machine had the matching gap: it did not treat a column-0 `#` as a
 //! comment, so the `"` flipped it into string state.
 
+use rustledger_core::Directive;
 use rustledger_parser::format::{
-    cr_outside_strings_present, crlf_to_lf_outside_strings, lf_to_crlf_outside_strings,
-    try_format_source,
+    cr_outside_strings_present, crlf_to_lf_outside_strings, format_source,
+    lf_to_crlf_outside_strings, try_format_source,
 };
 use rustledger_parser::logos_lexer::tokenize_lossless;
 use rustledger_parser::{parse, parse_structured};
@@ -33,6 +34,20 @@ fn assert_lossless(src: &str) {
     assert_eq!(parse_structured(src).text().to_string(), src, "{src:?}");
 }
 
+/// The parsed directives, as `date account [note]` lines, so a test pins
+/// exactly which ones survive rather than how many.
+fn summary(src: &str) -> Vec<String> {
+    parse(src)
+        .directives
+        .iter()
+        .map(|d| match &d.value {
+            Directive::Open(o) => format!("{} {}", o.date, o.account),
+            Directive::Note(n) => format!("{} {} {:?}", n.date, n.account, n.comment),
+            other => panic!("unexpected directive {other:?}"),
+        })
+        .collect()
+}
+
 #[test]
 fn test_parse_hash_comment_with_quote_keeps_the_following_directives() {
     for eol in ["\n", "\r\n"] {
@@ -41,7 +56,11 @@ fn test_parse_hash_comment_with_quote_keeps_the_following_directives() {
         );
         let result = parse(&src);
         assert!(result.errors.is_empty(), "{src:?}: {:?}", result.errors);
-        assert_eq!(result.directives.len(), 2, "{src:?}");
+        assert_eq!(
+            summary(&src),
+            ["2024-01-02 Assets:B", "2024-01-03 Assets:C"],
+            "{src:?}"
+        );
         assert_eq!(result.comments.len(), 1, "{src:?}");
         assert_eq!(result.comments[0].value, "# 27\" monitor", "{src:?}");
         assert_lossless(&src);
@@ -59,7 +78,14 @@ fn test_parse_hash_comment_with_quote_before_a_multiline_string() {
                2024-01-04 open Assets:C\n";
     let result = parse(src);
     assert!(result.errors.is_empty(), "{:?}", result.errors);
-    assert_eq!(result.directives.len(), 3);
+    assert_eq!(
+        summary(src),
+        [
+            "2024-01-02 Assets:B",
+            "2024-01-03 Assets:B \"two\\nlines\"",
+            "2024-01-04 Assets:C",
+        ]
+    );
     assert_lossless(src);
 }
 
@@ -97,21 +123,35 @@ fn test_crlf_to_lf_outside_strings_hash_comment_with_quote() {
     );
 }
 
+/// The same on a CRLF line after the first. The fold consumes a CRLF pair
+/// whole, so the `\n` never passed through the line-start bookkeeping: a
+/// `#` comment on line 2 or later was not recognized, its `"` opened a
+/// string, and a real string's interior CRLF further down was folded. On
+/// this clean file `format_source` (which folds first) then disagreed with
+/// `try_format_source`.
+#[test]
+fn test_crlf_to_lf_outside_strings_hash_comment_with_quote_on_a_later_line() {
+    let src = "2024-01-01 open Assets:A\r\n\
+               # 27\" monitor\r\n\
+               2024-01-02 note Assets:B \"a\r\nb\"\r\n";
+    assert_eq!(
+        crlf_to_lf_outside_strings(src),
+        "2024-01-01 open Assets:A\n\
+         # 27\" monitor\n\
+         2024-01-02 note Assets:B \"a\r\nb\"\n"
+    );
+    assert_eq!(
+        format_source(src),
+        try_format_source(src).expect("the file formats")
+    );
+}
+
 /// `rledger format` keeps the directives after the comment (it deleted
-/// them).
+/// them). The file is already canonical, so the output is the input.
 #[test]
 fn test_try_format_source_hash_comment_with_quote_keeps_directives() {
     let src = "# 27\" monitor\n2024-01-02 open Assets:B\n2024-01-03 open Assets:C\n";
-    let formatted = try_format_source(src).expect("the file formats");
-    assert!(
-        formatted.contains("2024-01-02 open Assets:B"),
-        "{formatted:?}"
-    );
-    assert!(
-        formatted.contains("2024-01-03 open Assets:C"),
-        "{formatted:?}"
-    );
-    assert_eq!(parse(&formatted).directives.len(), 2, "{formatted:?}");
+    assert_eq!(try_format_source(src).expect("the file formats"), src);
 }
 
 /// A `#` followed by a tag character is a tag even at column 0, and a

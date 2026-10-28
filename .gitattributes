@@ -10,3 +10,8 @@
 # for the wrong reason (both sides re-normalized) or fail with a
 # whitespace diff that only reproduces on Windows.
 crates/rustledger-parser/tests/format_compat/cases/**/*.bean -text
+
+# Fuzz regression inputs are byte-exact reproducers (some hold CR / CRLF,
+# e.g. `crlf-hash-comment-2769`), so end-of-line conversion must not touch
+# them either.
+crates/*/fuzz/regressions/** -text

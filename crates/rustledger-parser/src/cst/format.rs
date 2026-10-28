@@ -869,7 +869,15 @@ fn format_node_with_style(
     // too, as bean-format keeps them, so a file bean-format leaves alone
     // keeps every one of its lines (#2506).
     let mut spacing = TopLevelSpacing::default();
+    // A top-level WHITESPACE token directly before an `ERROR_NODE` is the
+    // indentation of the node's first line. Only at the top of the file does
+    // the parser leave it outside the node (mid-file it is inside), so it is
+    // carried over here to keep the line verbatim. Dropping it would move an
+    // indented `*` line to column 0, where it is a silenced org-mode heading
+    // instead of a reported error (#2786).
+    let mut indent: Option<crate::SyntaxToken> = None;
     for el in node.children_with_tokens() {
+        let line_indent = indent.take();
         match el {
             rowan::NodeOrToken::Node(n) => {
                 if let Some(directive) = ast::Directive::cast(n.clone()) {
@@ -888,6 +896,9 @@ fn format_node_with_style(
                     // directive) are preserved, not flushed.
                     spacing.blank_lines(leading_blank_lines(&n));
                     spacing.flush(&mut out);
+                    if let Some(ws) = line_indent {
+                        out.push_str(ws.text());
+                    }
                     let trailing = emit_error_node(&n, &mut out);
                     spacing.after_node();
                     // The node's own trailing blank lines were trimmed off
@@ -896,7 +907,13 @@ fn format_node_with_style(
                 }
                 // Any other non-directive node: nothing to emit.
             }
-            rowan::NodeOrToken::Token(t) => spacing.top_level_token(&t, &mut out),
+            rowan::NodeOrToken::Token(t) => {
+                if t.kind() == crate::SyntaxKind::WHITESPACE {
+                    indent = Some(t);
+                } else {
+                    spacing.top_level_token(&t, &mut out);
+                }
+            }
         }
     }
     // Blank lines after the last item are the file's trailing ones.

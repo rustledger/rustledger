@@ -1,0 +1,87 @@
+//! The error-tolerant formatter must not change which lines are errors
+//! (#2786).
+//!
+//! `format_source` formats a file despite parse errors (it backs the FFI
+//! component's best-effort `format.source`). It copies an unparsable line
+//! verbatim, but at the top of the file it used to drop the line's
+//! indentation, because only there does the parser leave that whitespace
+//! outside the error node. An indented `*` line is a reported error; moved
+//! to column 0 it becomes a silenced org-mode heading, so formatting erased
+//! the error and changed what the file means.
+
+use rustledger_parser::format::format_source;
+use rustledger_parser::parse;
+
+/// The text of each line that holds a parse error, in order.
+fn error_lines(src: &str) -> Vec<String> {
+    parse(src)
+        .errors
+        .iter()
+        .map(|e| {
+            let start = src[..e.span.start].rfind('\n').map_or(0, |i| i + 1);
+            let end = src[start..].find('\n').map_or(src.len(), |i| start + i);
+            src[start..end].trim_end().to_string()
+        })
+        .collect()
+}
+
+fn assert_errors_kept(label: &str, src: &str) {
+    let before = error_lines(src);
+    assert!(
+        !before.is_empty(),
+        "{label}: the input must have parse errors"
+    );
+    let out = format_source(src);
+    assert_eq!(
+        error_lines(&out),
+        before,
+        "{label}: formatting changed the error lines\n  in:  {src:?}\n  out: {out:?}"
+    );
+    assert_eq!(
+        format_source(&out),
+        out,
+        "{label}: formatting is not idempotent"
+    );
+}
+
+#[test]
+fn test_format_source_keeps_an_indented_first_line_star_an_error() {
+    assert_errors_kept("first line", "  * h\n2024-01-02 open Assets:B\n");
+    assert_errors_kept(
+        "after a leading blank line",
+        "\n  * h\n2024-01-02 open Assets:B\n",
+    );
+    assert_errors_kept(
+        "after a leading comment",
+        "; c\n  * h\n2024-01-02 open Assets:B\n",
+    );
+    assert_errors_kept(
+        "issue reproducer",
+        "  * h \"x\n2024-01-02 open Assets:B\n2024-01-03 open Assets:C\n",
+    );
+}
+
+#[test]
+fn test_format_source_keeps_an_indented_first_error_line_verbatim() {
+    let src = "  junk here\n2024-01-02 open Assets:B\n";
+    assert_errors_kept("junk", src);
+    assert!(format_source(src).starts_with("  junk here\n"));
+}
+
+/// Mid-file the indentation was already inside the error node and kept.
+#[test]
+fn test_format_source_keeps_a_mid_file_indented_star_an_error() {
+    assert_errors_kept(
+        "mid-file",
+        "2024-01-01 open Assets:A\n  * h\n2024-01-02 open Assets:B\n",
+    );
+}
+
+/// A whitespace-only first line is not an error line and stays blank.
+#[test]
+fn test_format_source_drops_whitespace_of_a_blank_first_line() {
+    assert_eq!(
+        format_source("   \n2024-01-02 open Assets:B\n"),
+        "\n2024-01-02 open Assets:B\n"
+    );
+}

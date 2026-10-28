@@ -1533,7 +1533,7 @@ fn emit_leading_comments(node: &crate::SyntaxNode, out: &mut String) {
             break;
         };
         match t.kind() {
-            crate::SyntaxKind::COMMENT | crate::SyntaxKind::PERCENT_COMMENT => {
+            k if super::convert::is_comment_kind(k) => {
                 for _ in 0..pending {
                     out.push('\n');
                 }
@@ -1584,11 +1584,9 @@ fn collect_trailing_comment(node: &crate::SyntaxNode) -> Option<String> {
         }
         if !matches!(
             k,
-            crate::SyntaxKind::WHITESPACE
-                | crate::SyntaxKind::NEWLINE
-                | crate::SyntaxKind::COMMENT
-                | crate::SyntaxKind::PERCENT_COMMENT
-        ) {
+            crate::SyntaxKind::WHITESPACE | crate::SyntaxKind::NEWLINE
+        ) && !super::convert::is_comment_kind(k)
+        {
             saw_content = true;
         }
     }
@@ -1606,10 +1604,7 @@ fn collect_trailing_comment(node: &crate::SyntaxNode) -> Option<String> {
     // separated only by WHITESPACE.
     for i in (0..nl_idx).rev() {
         let k = tokens[i].kind();
-        if matches!(
-            k,
-            crate::SyntaxKind::COMMENT | crate::SyntaxKind::PERCENT_COMMENT
-        ) {
+        if super::convert::is_comment_kind(k) {
             return Some(tokens[i].text().to_string());
         }
         if k != crate::SyntaxKind::WHITESPACE {
@@ -2093,7 +2088,7 @@ fn emit_transaction(
                 // Body tokens: preserve comment-only lines and emit
                 // continuation tags/links, each on its own indented line.
                 match t.kind() {
-                    crate::SyntaxKind::COMMENT | crate::SyntaxKind::PERCENT_COMMENT => {
+                    k if super::convert::is_comment_kind(k) => {
                         out.push_str(INDENT);
                         out.push_str(t.text().trim_end_matches(['\n', '\r']));
                         out.push('\n');
@@ -2268,10 +2263,7 @@ fn emit_posting(
                     }
                     continue;
                 }
-                if matches!(
-                    t.kind(),
-                    crate::SyntaxKind::COMMENT | crate::SyntaxKind::PERCENT_COMMENT
-                ) {
+                if super::convert::is_comment_kind(t.kind()) {
                     out.push_str("    ");
                     out.push_str(t.text().trim_end_matches(['\n', '\r']));
                     out.push('\n');
@@ -2728,10 +2720,7 @@ fn emit_meta_entries_of(node: &crate::SyntaxNode, group: GroupingStyle<'_>, out:
                     }
                     continue;
                 }
-                if matches!(
-                    t.kind(),
-                    crate::SyntaxKind::COMMENT | crate::SyntaxKind::PERCENT_COMMENT
-                ) {
+                if super::convert::is_comment_kind(t.kind()) {
                     out.push_str(INDENT);
                     out.push_str(t.text().trim_end_matches(['\n', '\r']));
                     out.push('\n');

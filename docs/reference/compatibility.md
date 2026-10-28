@@ -69,8 +69,6 @@ Rustledger has 33 native plugins. These 30 match Python beancount behavior:
 
 `long_short` deliberately diverges from its Python counterpart (`beancount_reds_plugins.capital_gains_classifier.long_short` 0.4.0, and `beancount_ln_plugins.ln.long_short`): closing a written option or any short position is always short-term whatever its holding period (US IRC 1234(b), and 1233(a) for short sales), where the Python plugin books it by holding period like a sale of a long lot, and a cover's gain carries the posting's sign. `rledger report capgains` already applied the short rule; the plugin now matches it (issue #2733).
 
-`long_short` deliberately diverges from its Python counterpart (`beancount_reds_plugins.capital_gains_classifier.long_short` 0.4.0, and `beancount_ln_plugins.ln.long_short`): closing a written option or any short position is always short-term whatever its holding period (US IRC 1234(b), and 1233(a) for short sales), where the Python plugin books it by holding period like a sale of a long lot, and a cover.s gain carries the posting.s sign. `rledger report capgains` already applied the short rule; the plugin now matches it (issue #2733).
-
 Additionally, `document_discovery` auto-discovers documents from `option "documents"` directories.
 
 **Workaround**: Use rustledger's native plugins where available, or remove unsupported plugin directives.

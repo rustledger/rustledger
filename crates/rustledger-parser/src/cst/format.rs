@@ -361,14 +361,16 @@ pub fn try_format_source_grouped(
 /// - String literals: bytes pass through verbatim. The user's
 ///   original line endings inside a multi-line narration / note /
 ///   document string are preserved.
-/// - Line comments (`;`, `%`, `#!`, `#+`): the comment's
-///   terminating newline IS a real structural line terminator, so
-///   it gets converted to CRLF; bytes inside the comment region
-///   (which can include arbitrary characters, notably stray `"`)
-///   pass through without flipping the in-string state. `#!` and
-///   `#+` open a comment at any column — the lexer's
+/// - Line comments (`;`, `%`, `#!`, `#+`, and a column-0 `#`): the
+///   comment's terminating newline IS a real structural line
+///   terminator, so it gets converted to CRLF; bytes inside the
+///   comment region (which can include arbitrary characters,
+///   notably stray `"`) pass through without flipping the in-string
+///   state. `#!` and `#+` open a comment at any column: the lexer's
 ///   `SHEBANG` / `EMACS_DIRECTIVE` regexes carry no line-start
-///   anchor, and the state machine matches that classification.
+///   anchor, and the state machine matches that classification. A
+///   bare `#` opens one only at line start (see
+///   `advance_source_state`).
 ///
 /// The helper lives in this module rather than the LSP crate
 /// because its correctness depends on the lexer's `STRING` and
@@ -389,6 +391,7 @@ pub fn lf_to_crlf_outside_strings(s: &str) -> String {
     let mut chars = body.chars().peekable();
     let mut state = SourceState::Code;
     let mut prev_was_backslash = false;
+    let mut at_line_start = true;
     while let Some(ch) = chars.next() {
         let peek = chars.peek().copied();
         match state {
@@ -401,7 +404,8 @@ pub fn lf_to_crlf_outside_strings(s: &str) -> String {
                 }
             }
         }
-        state = advance_source_state(ch, peek, state, &mut prev_was_backslash);
+        state = advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
+        at_line_start = next_at_line_start(ch, at_line_start);
     }
     out
 }
@@ -571,10 +575,10 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
         return std::borrow::Cow::Borrowed(src);
     }
     // Re-prepend the BOM verbatim and let the body start fresh in
-    // Code state. The state machine no longer needs line-start
-    // tracking — the lexer's `SHEBANG` / `EMACS_DIRECTIVE` regexes
-    // have no line-start anchor, so `#!`/`#+` open a comment at
-    // any column, and the state machine mirrors that.
+    // Code state, at line start. `#!`/`#+` open a comment at any
+    // column (the lexer's `SHEBANG` / `EMACS_DIRECTIVE` regexes have
+    // no line-start anchor); a column-0 `#` comment needs the
+    // line-start flag, which `advance_source_state` takes (#2775).
     let (body, bom) = match src.strip_prefix('\u{FEFF}') {
         Some(rest) => (rest, "\u{FEFF}"),
         None => (src, ""),
@@ -584,8 +588,12 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
     let mut chars = body.chars().peekable();
     let mut state = SourceState::Code;
     let mut prev_was_backslash = false;
+    let mut at_line_start = true;
     while let Some(ch) = chars.next() {
         let peek = chars.peek().copied();
+        // A CRLF pair outside a string is consumed whole here, so the
+        // `\n` never reaches `next_at_line_start`; it still ends the line.
+        let mut ate_lf = false;
         match state {
             SourceState::InString => out.push(ch),
             _ => {
@@ -593,13 +601,15 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
                     out.push('\n');
                     if peek == Some('\n') {
                         chars.next();
+                        ate_lf = true;
                     }
                 } else {
                     out.push(ch);
                 }
             }
         }
-        state = advance_source_state(ch, peek, state, &mut prev_was_backslash);
+        state = advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
+        at_line_start = ate_lf || next_at_line_start(ch, at_line_start);
     }
     std::borrow::Cow::Owned(out)
 }
@@ -628,12 +638,14 @@ pub fn cr_outside_strings_present(src: &str) -> bool {
     let mut chars = body.chars().peekable();
     let mut state = SourceState::Code;
     let mut prev_was_backslash = false;
+    let mut at_line_start = true;
     while let Some(ch) = chars.next() {
         let peek = chars.peek().copied();
         if matches!(state, SourceState::Code | SourceState::InComment) && ch == '\r' {
             return true;
         }
-        state = advance_source_state(ch, peek, state, &mut prev_was_backslash);
+        state = advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
+        at_line_start = next_at_line_start(ch, at_line_start);
     }
     false
 }
@@ -647,12 +659,13 @@ pub fn cr_outside_strings_present(src: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceState {
     /// In normal code. `"` opens a string; `;` / `%` / `#!` /
-    /// `#+` opens a comment; everything else is just bytes.
+    /// `#+`, or a column-0 `#`, opens a comment; everything else is
+    /// just bytes.
     Code,
     /// Inside `"…"`. Bytes pass through; an unescaped `"` exits.
     InString,
-    /// Inside `;…\n`, `%…\n`, `#!…\n`, or `#+…\n`. Bytes pass
-    /// through until LF/CR.
+    /// Inside `;…\n`, `%…\n`, `#!…\n`, `#+…\n`, or a column-0
+    /// `#…\n`. Bytes pass through until LF/CR.
     InComment,
 }
 
@@ -660,15 +673,25 @@ enum SourceState {
 ///
 /// Returns the state AFTER consuming `ch`. The string-escape
 /// bookkeeping (`prev_was_backslash`) updates in place. Comment
-/// opener detection covers all four line-comment lexemes: `;` and
+/// opener detection covers every line-comment lexeme: `;` and
 /// `%` open a comment unconditionally; `#!` and `#+` open one at
 /// any column — the lexer's `#![^\n\r]*` / `#\+[^\n\r]*` regexes
 /// have NO line-start anchor, so a mid-line `#!` or `#+` is still
-/// a `SHEBANG` / `EMACS_DIRECTIVE` token. A `#` followed by
-/// anything else is a `TAG` / `HASH` token, not a comment.
+/// a `SHEBANG` / `EMACS_DIRECTIVE` token. Any other `#` at the very
+/// start of a line (`at_line_start`: first char of the body, right
+/// after a `\n`, or after a BOM at line start; see
+/// `next_at_line_start`) is a column-0 `#` comment, the lexer's
+/// `Token::Hash` arm in `TokenIter`, unless a tag character follows,
+/// which makes it a `TAG` token instead (#2775). A `#` anywhere else
+/// is a `TAG` / `HASH` token, not a comment.
+///
+/// The column-0 `#` comment closes on the first `\n` or `\r`, like
+/// the others. The lexer keeps a lone `\r` inside it as comment text;
+/// a stray `\r` is the subject of #2774, and no fixture here has one.
 const fn advance_source_state(
     ch: char,
     peek: Option<char>,
+    at_line_start: bool,
     state: SourceState,
     prev_was_backslash: &mut bool,
 ) -> SourceState {
@@ -690,7 +713,9 @@ const fn advance_source_state(
             }
         }
         SourceState::Code => {
-            let is_hash_line_comment = ch == '#' && matches!(peek, Some('!' | '+'));
+            let is_hash_line_comment = ch == '#'
+                && (matches!(peek, Some('!' | '+'))
+                    || (at_line_start && !matches!(peek, Some(c) if is_tag_char(c))));
             if ch == '"' {
                 *prev_was_backslash = false;
                 SourceState::InString
@@ -701,6 +726,21 @@ const fn advance_source_state(
             }
         }
     }
+}
+
+/// A character the lexer's `Tag` regex (`#[a-zA-Z0-9-_/.]+`) accepts
+/// after the `#`. A column-0 `#` followed by one is a tag, not a comment.
+const fn is_tag_char(c: char) -> bool {
+    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.')
+}
+
+/// Whether the character after `ch` is at line start, as the lexer sees
+/// it: a `\n` ends the line (the lexer's `Newline` is `\r?\n`; a lone `\r`
+/// does not), and a BOM at line start keeps it there, because the lexer
+/// treats a BOM as layout-transparent (`apply_err_layout_transparency`), so
+/// a `#` after a mid-file or second BOM is still a column-0 comment.
+const fn next_at_line_start(ch: char, at_line_start: bool) -> bool {
+    ch == '\n' || (at_line_start && ch == '\u{FEFF}')
 }
 
 /// Format a `SOURCE_FILE` syntax node in opinionated canonical form.
@@ -3929,6 +3969,34 @@ mod tests {
             "emacs_directive_mid_line_with_quote",
             "2024-01-15 open Assets:A #+stray \"q\n",
         ),
+        // A `"` inside a column-0 `#` comment is comment text: the
+        // lexer skips the rest of the line, and the state machine has
+        // to stay InComment instead of opening a string that would
+        // trap it until the next `"` (#2775). The second fixture puts
+        // a string on the following line, so a machine stuck in
+        // InString would close on that string's opening quote and
+        // disagree with the lexer for the rest of the file.
+        (
+            "hash_comment_col0_with_quote",
+            "# 27\" monitor\n2024-01-15 open Assets:A\n",
+        ),
+        (
+            "hash_comment_col0_quote_then_string",
+            "# say \"hi\n2024-01-15 note Assets:A \"x\"\n",
+        ),
+        // The two edges of the column-0 rule. `#tag` is a TAG token even
+        // at line start, so its `"x"` is a real STRING: a machine that
+        // opened a comment on any column-0 `#` would disagree on it. And
+        // a BOM at line start is layout-transparent to the lexer, so the
+        // `#` after it is still a column-0 comment.
+        (
+            "hash_tag_col0_with_quote",
+            "#tag \"x\"\n2024-01-15 open Assets:A\n",
+        ),
+        (
+            "hash_comment_after_mid_file_bom",
+            "2024-01-15 open Assets:A\n\u{feff}# 27\" x\n2024-01-16 note Assets:A \"y\"\n",
+        ),
         ("pushtag_directive", "pushtag #active\n"),
         ("poptag_directive", "poptag #active\n"),
         ("pushmeta_directive", "pushmeta location: \"NYC\"\n"),
@@ -3964,6 +4032,11 @@ mod tests {
     /// - `options_and_includes` — option / include / plugin lines
     ///   live on separate `ParseResult` collections, not on
     ///   `.directives`.
+    /// - `hash_tag_col0_with_quote`, `hash_comment_after_mid_file_bom`:
+    ///   a column-0 `#tag` and a mid-file BOM are parse errors, so the
+    ///   skip-on-errors guard triggers. They exist for the line-ending
+    ///   state machine's lexer-agreement test (#2775), not the round-trip
+    ///   body.
     ///
     /// Note: `comment_containing_quote` and
     /// `emacs_directive_mid_line_with_quote` BOTH exercise the
@@ -3974,7 +4047,7 @@ mod tests {
     /// rule. Their purpose is the state-machine / lexer agreement
     /// property on a comment with an unbalanced `"`, not the
     /// zero-directive case.
-    const ROUNDTRIP_KNOWN_ZERO_DIRECTIVE_FIXTURES: usize = 8;
+    const ROUNDTRIP_KNOWN_ZERO_DIRECTIVE_FIXTURES: usize = 10;
 
     #[test]
     fn lf_to_crlf_outside_strings_preserves_string_interior() {
@@ -4847,6 +4920,7 @@ mod tests {
         let mut chars = body.char_indices().peekable();
         let mut state = SourceState::Code;
         let mut prev_was_backslash = false;
+        let mut at_line_start = true;
         while let Some((rel_i, ch)) = chars.next() {
             let i = bom_len + rel_i;
             let peek = chars.peek().map(|&(_, c)| c);
@@ -4855,7 +4929,9 @@ mod tests {
                 *byte = state;
             }
             let prev_state = state;
-            let next_state = advance_source_state(ch, peek, state, &mut prev_was_backslash);
+            let next_state =
+                advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
+            at_line_start = next_at_line_start(ch, at_line_start);
             // Record only OPENING transitions and the comment-
             // closing newline, where the state machine and lexer
             // legitimately disagree on this single byte:

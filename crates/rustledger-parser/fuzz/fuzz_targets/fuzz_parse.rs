@@ -3,10 +3,14 @@
 //!
 //! This fuzzer tests the parser's robustness against arbitrary input.
 //! It ensures the parser doesn't panic, crash, or exhibit undefined behavior
-//! when processing malformed or malicious input.
+//! when processing malformed or malicious input. It also asserts the
+//! lossless round-trip (see `common/lossless.rs`).
 
 use libfuzzer_sys::fuzz_target;
 use rustledger_parser::parse;
+
+#[path = "common/lossless.rs"]
+mod lossless;
 
 fuzz_target!(|data: &[u8]| {
     // Only process valid UTF-8 strings
@@ -14,5 +18,7 @@ fuzz_target!(|data: &[u8]| {
         // The parser should never panic, regardless of input
         // It may return errors, but should handle them gracefully
         let _ = parse(input);
+
+        lossless::assert_lossless(input);
     }
 });

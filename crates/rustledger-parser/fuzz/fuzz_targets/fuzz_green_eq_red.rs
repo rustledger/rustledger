@@ -8,6 +8,9 @@ use libfuzzer_sys::fuzz_target;
 use rustledger_parser::cst::parse_red_only;
 use rustledger_parser::parse;
 
+#[path = "common/lossless.rs"]
+mod lossless;
+
 fuzz_target!(|data: &[u8]| {
     let Ok(src) = std::str::from_utf8(data) else {
         return;
@@ -79,4 +82,8 @@ fuzz_target!(|data: &[u8]| {
         red.alignment(),
         "green vs red alignment diverged"
     );
+
+    // Most of the inputs that broke the round-trip (#2775) sit in THIS
+    // target's corpus, so it asserts the same property as `fuzz_parse`.
+    lossless::assert_lossless(src);
 });

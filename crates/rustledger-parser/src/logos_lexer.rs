@@ -704,9 +704,18 @@ impl<'src> Iterator for TokenIter<'src> {
                     // Hash at very start of line (no indentation) is a comment
                     // Find end of line and create a comment token for the whole line
                     let comment_start = span.start;
-                    let line_end = source[span.end..]
-                        .find('\n')
-                        .map_or(source.len(), |i| span.end + i);
+                    // End before the `Newline` token that follows. That
+                    // token is `\r?\n`, so on a CRLF line it starts at the
+                    // `\r`; ending at the `\n` would hand that byte to both
+                    // tokens and break the lossless round-trip (#2769).
+                    let line_end = source[span.end..].find('\n').map_or(source.len(), |i| {
+                        let nl = span.end + i;
+                        if source[span.end..nl].ends_with('\r') {
+                            nl - 1
+                        } else {
+                            nl
+                        }
+                    });
                     let comment_text = &source[comment_start..line_end];
                     // Skip lexer tokens until we reach the newline
                     while let Some(peek_result) = self.lexer.next() {

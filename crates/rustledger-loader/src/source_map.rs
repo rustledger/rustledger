@@ -4,6 +4,76 @@ use rustledger_parser::Span;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+/// Owned file contents, shared cheaply.
+///
+/// A newtype over `Arc<String>` rather than `Arc<str>`: `Arc<str>::from(String)`
+/// always copies the bytes into a fresh allocation (std has no zero-copy
+/// `String -> Arc<str>`), so every file read paid a second full-file buffer
+/// plus a `memcpy`. `Arc<String>` takes the `String`'s allocation as-is: a
+/// `read` keeps the buffer `String::from_utf8` already owns.
+///
+/// Migrating from `Arc<str>`: a `String` converts zero-copy with
+/// `SourceText::from(string)`; an `Arc<str>` converts with
+/// `SourceText::from(&*arc)`, which copies. Like `Arc<str>`, it derefs to
+/// `str` and implements `Display`, `Hash` and `Borrow<str>`, so it formats
+/// as the text and a `HashMap<SourceText, _>` can be looked up by `&str`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceText(Arc<String>);
+
+// Hand-written rather than derived so the `Borrow<str>` contract is explicit:
+// a `SourceText` must hash exactly as its `str` contents do.
+impl std::hash::Hash for SourceText {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_str().hash(state);
+    }
+}
+
+impl std::borrow::Borrow<str> for SourceText {
+    fn borrow(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl std::fmt::Display for SourceText {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+impl SourceText {
+    /// The contents as a `str`.
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl From<&str> for SourceText {
+    fn from(s: &str) -> Self {
+        Self(Arc::new(s.to_owned()))
+    }
+}
+
+impl From<String> for SourceText {
+    fn from(s: String) -> Self {
+        Self(Arc::new(s))
+    }
+}
+
+impl std::ops::Deref for SourceText {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl AsRef<str> for SourceText {
+    fn as_ref(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
 /// A source file in the source map.
 #[derive(Debug, Clone)]
 pub struct SourceFile {
@@ -19,8 +89,8 @@ pub struct SourceFile {
     /// against its parent, [`Self::dir`], as beancount resolves them (#2635).
     /// Equal to [`Self::path`] unless a symlink is on the way.
     pub opened_path: PathBuf,
-    /// Source content (shared via Arc to avoid cloning).
-    pub source: Arc<str>,
+    /// Source content (shared via [`SourceText`] to avoid cloning).
+    pub source: SourceText,
     /// Line start offsets (byte positions where each line starts).
     ///
     /// Built on first use, not on construction. Every consumer is a
@@ -131,13 +201,18 @@ impl<'a> LineIndex<'a> {
 impl SourceFile {
     /// Create a new source file.
     #[cfg(test)]
-    fn new(id: usize, path: PathBuf, source: Arc<str>) -> Self {
+    fn new(id: usize, path: PathBuf, source: SourceText) -> Self {
         let opened_path = path.clone();
         Self::new_opened(id, path, opened_path, source)
     }
 
     /// Create a new source file reached by `opened_path`.
-    const fn new_opened(id: usize, path: PathBuf, opened_path: PathBuf, source: Arc<str>) -> Self {
+    const fn new_opened(
+        id: usize,
+        path: PathBuf,
+        opened_path: PathBuf,
+        source: SourceText,
+    ) -> Self {
         Self {
             id,
             path,
@@ -262,7 +337,7 @@ impl SourceMap {
     /// for `file_id`, and the ids from there up are reserved for placeholder
     /// locations and the plugin-synthesized sentinel
     /// [`rustledger_parser::SYNTHESIZED_FILE_ID`].
-    pub fn add_file(&mut self, path: PathBuf, source: Arc<str>) -> usize {
+    pub fn add_file(&mut self, path: PathBuf, source: SourceText) -> usize {
         let opened_path = path.clone();
         self.add_opened_file(path, opened_path, source)
     }
@@ -279,7 +354,7 @@ impl SourceMap {
         &mut self,
         path: PathBuf,
         opened_path: PathBuf,
-        source: Arc<str>,
+        source: SourceText,
     ) -> usize {
         let id = self.files.len();
         assert!(
@@ -379,7 +454,7 @@ mod tests {
     #[test]
     fn placeholder_ids_resolve_and_are_not_source_files() {
         let mut map = SourceMap::new();
-        map.add_file(PathBuf::from("main.beancount"), Arc::from("x"));
+        map.add_file(PathBuf::from("main.beancount"), SourceText::from("x"));
         let a = map.placeholder_file_id(Path::new("<check_closing>"), 0);
         let b = map.placeholder_file_id(Path::new("main.beancount"), 0);
         assert_eq!(a, rustledger_parser::FIRST_PLACEHOLDER_FILE_ID);
@@ -427,7 +502,7 @@ mod tests {
 
     #[test]
     fn test_line_col() {
-        let source: Arc<str> = "line 1\nline 2\nline 3".into();
+        let source: SourceText = "line 1\nline 2\nline 3".into();
         let file = SourceFile::new(0, PathBuf::from("test.beancount"), source);
 
         assert_eq!(file.line_col(0), (1, 1)); // Start of line 1
@@ -473,7 +548,7 @@ mod tests {
 
     #[test]
     fn test_get_line() {
-        let source: Arc<str> = "line 1\nline 2\nline 3".into();
+        let source: SourceText = "line 1\nline 2\nline 3".into();
         let file = SourceFile::new(0, PathBuf::from("test.beancount"), source);
 
         assert_eq!(file.line(1), Some("line 1"));
@@ -485,7 +560,7 @@ mod tests {
 
     #[test]
     fn test_line_start() {
-        let source: Arc<str> = "line 1\nline 2\nline 3".into();
+        let source: SourceText = "line 1\nline 2\nline 3".into();
         let file = SourceFile::new(0, PathBuf::from("test.beancount"), source);
 
         // Happy path - valid line numbers
@@ -507,5 +582,65 @@ mod tests {
         assert_eq!(id, 0);
         assert!(sm.get(0).is_some());
         assert!(sm.get(1).is_none());
+    }
+
+    #[test]
+    fn test_source_text_from_string_keeps_allocation() {
+        let s = String::from("2024-01-01 open Assets:Cash\n");
+        let data = s.as_ptr();
+        let text = SourceText::from(s);
+        assert_eq!(text.as_str().as_ptr(), data);
+    }
+
+    #[test]
+    fn test_source_text_deref_to_str() {
+        let text = SourceText::from("line 1\nline 2");
+        let as_str: &str = &text;
+        assert_eq!(as_str, "line 1\nline 2");
+        // str methods resolve through `Deref`.
+        assert_eq!(text.lines().count(), 2);
+        assert_eq!(AsRef::<str>::as_ref(&text), "line 1\nline 2");
+    }
+
+    #[test]
+    fn test_source_text_eq_compares_contents() {
+        let a = SourceText::from("abc");
+        let b = SourceText::from(String::from("abc"));
+        assert_eq!(a, b);
+        assert_eq!(a.clone(), a);
+        assert_ne!(a, SourceText::from("xyz"));
+    }
+
+    #[test]
+    fn test_source_text_display_writes_contents() {
+        let text = SourceText::from("2024-01-01 open Assets:Cash");
+        assert_eq!(text.to_string(), "2024-01-01 open Assets:Cash");
+        assert_eq!(format!("[{text}]"), "[2024-01-01 open Assets:Cash]");
+    }
+
+    #[test]
+    fn test_source_text_hash_matches_str() {
+        use std::hash::BuildHasher;
+        let state = std::collections::hash_map::RandomState::new();
+        let text = SourceText::from("abc");
+        assert_eq!(state.hash_one(&text), state.hash_one("abc"));
+    }
+
+    #[test]
+    fn test_source_text_hashmap_lookup_by_str() {
+        let mut map = std::collections::HashMap::new();
+        map.insert(SourceText::from("main.beancount"), 1);
+        map.insert(SourceText::from(String::from("other.beancount")), 2);
+        assert_eq!(map.get("main.beancount"), Some(&1));
+        assert_eq!(map.get("other.beancount"), Some(&2));
+        assert_eq!(map.get("missing.beancount"), None);
+    }
+
+    #[test]
+    fn test_source_text_from_str_copies_contents() {
+        let original = "include \"other.beancount\"";
+        let text = SourceText::from(original);
+        assert_eq!(text.as_str(), original);
+        assert_ne!(text.as_str().as_ptr(), original.as_ptr());
     }
 }

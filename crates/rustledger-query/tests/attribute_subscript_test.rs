@@ -196,12 +196,11 @@ fn select_star_hides_structured_and_helper_columns() {
 /// directives have none, which would make the presence assert vacuous).
 #[test]
 fn entry_meta_carries_source_location() {
-    use rustledger_loader::SourceMap;
+    use rustledger_loader::{SourceMap, SourceText};
     use rustledger_parser::{Span, Spanned};
-    use std::sync::Arc;
 
     let mut source_map = SourceMap::new();
-    let source: Arc<str> =
+    let source: SourceText =
         "2026-07-01 open Assets:Cash\n2026-07-01 * \"Shop\" \"coffee\"\n  Assets:Cash  -1.00 USD\n"
             .into();
     let file_id = source_map.add_file("test.beancount".into(), source);

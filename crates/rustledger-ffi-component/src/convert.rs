@@ -982,7 +982,7 @@ impl rustledger_loader::FileSystem for HostDecryptFs {
     fn read(
         &self,
         path: &std::path::Path,
-    ) -> Result<std::sync::Arc<str>, rustledger_loader::LoadError> {
+    ) -> Result<rustledger_loader::SourceText, rustledger_loader::LoadError> {
         self.0.read(path)
     }
 
@@ -1017,7 +1017,7 @@ impl rustledger_loader::FileSystem for HostDecryptFs {
     fn decrypt(
         &self,
         path: &std::path::Path,
-    ) -> Result<std::sync::Arc<str>, rustledger_loader::LoadError> {
+    ) -> Result<rustledger_loader::SourceText, rustledger_loader::LoadError> {
         // Read the ciphertext from the sandbox, then hand it to the host to
         // decrypt with its keyring (the guest cannot) — #1667.
         let ciphertext =
@@ -1032,7 +1032,7 @@ impl rustledger_loader::FileSystem for HostDecryptFs {
                     message,
                 }
             })?;
-        Ok(std::sync::Arc::from(plaintext))
+        Ok(plaintext.into())
     }
 }
 

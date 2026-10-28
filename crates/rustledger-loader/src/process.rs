@@ -2232,7 +2232,6 @@ mod sanitize_tests {
         Transaction,
     };
     use std::path::PathBuf;
-    use std::sync::Arc;
 
     fn txn_with_postings(postings: Vec<Spanned<Posting>>) -> Directive {
         let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
@@ -2251,7 +2250,7 @@ mod sanitize_tests {
 
     fn source_map_with_one_file(source: &str) -> (SourceMap, u16) {
         let mut sm = SourceMap::new();
-        let id = sm.add_file(PathBuf::from("test.bean"), Arc::from(source));
+        let id = sm.add_file(PathBuf::from("test.bean"), source.into());
         (sm, id as u16)
     }
 

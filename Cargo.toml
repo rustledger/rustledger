@@ -80,7 +80,16 @@ unicode-normalization = "0.1"
 format_num_pattern = { version = "0.9.5", features = ["rust_decimal"] }
 chumsky = "1.0.0-alpha.7"
 miette = { version = "7", features = ["fancy"] }
-logos = "0.16"
+# `state_machine_codegen`: one looping state machine instead of logos's
+# default tail-calling state functions. Those recursed once per character or
+# repetition for several token patterns (string escapes, multi-byte text in
+# strings, accounts and comments, account segments, thousands groups in
+# numbers), so a long enough token overflowed the stack: in debug builds, and
+# in release wasm32 (no tail calls) at about 10 KB of `1,000,000,...` or
+# `Assets:B:B:...` (#2789). Same tokens either way; about 3% slower to lex.
+# The cost is one large lexer frame in debug builds (a few hundred KB), so
+# threads that lex need a debug stack of about 1 MB.
+logos = { version = "0.16", features = ["state_machine_codegen"] }
 # Lossless syntax tree (rust-analyzer's library). Used by
 # `rustledger-parser`'s CST module — see #1262.
 rowan = "0.17"

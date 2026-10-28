@@ -3,6 +3,17 @@
 //! This module provides a fast tokenizer for Beancount syntax using the Logos crate,
 //! which generates a DFA-based lexer with SIMD optimizations where available.
 
+// The `Logos` derive on `Token` generates one large lexer function: the
+// workspace builds logos with `state_machine_codegen`, which trades that
+// frame for no per-character recursion on long tokens (#2789). The lint
+// fires on the generated `impl`, which an attribute on the enum does not
+// reach. `expect` rather than `allow`: if the feature is dropped, the
+// expectation goes unfulfilled and clippy points back here.
+#![expect(
+    clippy::large_stack_frames,
+    reason = "state_machine_codegen trades one large lexer frame for no per-character recursion (#2789)"
+)]
+
 use logos::Logos;
 use std::fmt;
 use std::ops::Range;
@@ -58,6 +69,12 @@ impl From<Span> for Range<usize> {
 /// [`tokenize_lossless`] entry point keeps them so the CST can
 /// reconstruct source byte-for-byte. Both paths share the same Logos
 /// implementation — there is exactly one tokenization pass per file.
+///
+/// Built with logos's `state_machine_codegen` (workspace `Cargo.toml`): one
+/// looping state machine, because the default tail-calling functions
+/// recursed per character for long tokens and overflowed the stack (#2789).
+/// That one function has a large frame, which is the trade (see the
+/// module-level `expect` at the top of this file).
 #[derive(Logos, Debug, Clone, PartialEq, Eq)]
 pub enum Token<'src> {
     /// Horizontal whitespace (`[ \t]+`). Significant for the CST and
@@ -81,10 +98,8 @@ pub enum Token<'src> {
     Number(&'src str),
 
     /// A double-quoted string (handles escape sequences).
-    /// The slice includes the quotes. Scanned by `lex_string`, which
-    /// matches exactly what the regex `"([^"\\]|\\.)*"` did, without the
-    /// recursion logos generates for that regex (#2789).
-    #[token("\"", lex_string)]
+    /// The slice includes the quotes.
+    #[regex(r#""([^"\\]|\\.)*""#)]
     String(&'src str),
 
     /// An account name like Assets:Bank:Checking, Капитал:Retained-Earnings,
@@ -911,50 +926,6 @@ fn line_chunk_end(source: &str, from: usize) -> usize {
     source[from..]
         .find('\n')
         .map_or(source.len(), |i| from + i + 1)
-}
-
-/// Scan the rest of a string after its opening `"`, as the regex
-/// `"([^"\\]|\\.)*"` did, in a plain loop (#2789).
-///
-/// logos compiled that regex into mutually recursive state functions, one
-/// frame per escape pair, so a long run of escapes (`"\"\"\"...`) overflowed
-/// the stack: in debug builds at 50,000 pairs, and in any build where the
-/// recursion is not turned into a loop (wasm32 has no tail calls). This is
-/// byte-for-byte the same match:
-///
-/// - a `"` closes the string;
-/// - a `\` escapes the next character, which may be anything but `\n`
-///   (`\\.`; a `\r` counts, so `\` before `\r\n` continues the string);
-/// - anything else, `\n` included, is string content.
-///
-/// On failure the error covers the scan up to and including the offending
-/// `\` (a `\` before `\n` or at the end of the input), or to the end of the
-/// input when no closing `"` comes, which is where logos ended the regex's
-/// error. `TokenIter`'s `Err` arm relies on those spans (#2784). Every bump
-/// lands just after an ASCII byte or at the end, so on a char boundary;
-/// stepping over the bytes of a multi-byte character one at a time is safe
-/// because none of them is `"` or `\`.
-fn lex_string<'src>(lex: &mut logos::Lexer<'src, Token<'src>>) -> Result<&'src str, ()> {
-    let rest = lex.remainder().as_bytes();
-    let mut i = 0;
-    while i < rest.len() {
-        match rest[i] {
-            b'"' => {
-                lex.bump(i + 1);
-                return Ok(lex.slice());
-            }
-            b'\\' => match rest.get(i + 1) {
-                Some(b'\n') | None => {
-                    lex.bump(i + 1);
-                    return Err(());
-                }
-                Some(_) => i += 2,
-            },
-            _ => i += 1,
-        }
-    }
-    lex.bump(rest.len());
-    Err(())
 }
 
 /// Where a whole-line token that starts before `from` ends: before the

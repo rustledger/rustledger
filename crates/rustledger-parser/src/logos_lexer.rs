@@ -808,6 +808,25 @@ impl<'src> Iterator for TokenIter<'src> {
                 }
                 Err(()) => {
                     // Lexer error - produce an Error token with the invalid source text.
+                    let mut span = span;
+                    // An unterminated string: the `String` regex found no
+                    // closing `"` before the end of the file, and logos
+                    // reports everything it scanned as ONE error, so every
+                    // directive after the stray quote was lost behind a
+                    // single error (#2784). Beancount reports the quote and
+                    // carries on. End the error at its own line and resume
+                    // lexing there. Nothing after the cut can belong to a
+                    // string: any later unescaped `"` would have closed this
+                    // one, so a terminated multi-line string never gets here.
+                    if source[span.clone()].starts_with('"') {
+                        let line_end = line_end_before_newline(source, span.start);
+                        if line_end < span.end {
+                            span.end = line_end;
+                            let mut lexer = Token::lexer(source);
+                            lexer.bump(line_end);
+                            self.lexer = lexer;
+                        }
+                    }
                     let invalid_text = &source[span.clone()];
                     apply_err_layout_transparency(
                         invalid_text,

@@ -30,6 +30,18 @@ pub fn assert_lossless(input: &str) {
     }
     assert_eq!(at, input.len(), "lossless token stream stops short");
 
+    // An error token never spans a line ending: an unterminated `"` is
+    // reported on its own line and lexing resumes on the next (#2784).
+    // Before that fix it swallowed the rest of the file as one error.
+    for (token, span) in &tokens {
+        if matches!(token, Token::Error(_)) {
+            assert!(
+                !input[span.start..span.end].contains('\n'),
+                "an error token runs past its line"
+            );
+        }
+    }
+
     // A line is a heading when the lexer put a `Star` at its first byte after
     // any BOMs. Anchoring on the token (not on the text) keeps a line that
     // only LOOKS like one out, e.g. a `*` line inside a multi-line string.

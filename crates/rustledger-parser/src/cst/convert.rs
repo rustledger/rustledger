@@ -2813,6 +2813,29 @@ pub(super) const fn is_comment_kind(kind: crate::SyntaxKind) -> bool {
     )
 }
 
+/// Whether the first non-trivia token of a top-level `ERROR_NODE` line
+/// makes it an org-mode section marker: a `STAR` at column 0 of the source
+/// (only BOMs, which are layout-transparent, may precede it on its line).
+///
+/// Shared by the error-silencing and the section-comment walkers on both
+/// paths (`error_node_check` / `section_marker_check` here,
+/// `tl_error_node_check` / `tl_section_marker_check` in `green.rs`), so
+/// the four agree on which lines are headings. An INDENTED `*` line is
+/// not a heading (beancount reports it: `syntax error, unexpected
+/// INDENT`), so it is an ordinary error line (#2783); silencing it as a
+/// heading let a `"` on it swallow the following directives with no
+/// diagnostic. `offset` indexes `stripped`, the post-BOM-strip source.
+pub(super) fn is_section_marker(kind: crate::SyntaxKind, stripped: &str, offset: usize) -> bool {
+    if kind != crate::SyntaxKind::STAR {
+        return false;
+    }
+    let before = stripped
+        .get(..offset)
+        .unwrap_or("")
+        .trim_end_matches(crate::bom::BOM_CHAR);
+    before.is_empty() || before.ends_with('\n')
+}
+
 /// Output of the fused top-level pass [`walk_top_level_once`].
 pub(super) struct TopLevelWalkResult {
     pub(super) errors: Vec<crate::ParseError>,
@@ -2853,7 +2876,7 @@ fn walk_top_level_once(
             }
             crate::SyntaxKind::ERROR_NODE => {
                 error_node_check(&child, stripped, bom_offset, &mut errors);
-                section_marker_check(&child, bom_offset, &mut section_marker_comments);
+                section_marker_check(&child, stripped, bom_offset, &mut section_marker_comments);
             }
             _ => {}
         }
@@ -3474,13 +3497,13 @@ fn transaction_body_check(
 /// drifts between them.
 fn emit_error_node_line(
     first_non_trivia: Option<crate::SyntaxKind>,
+    is_section: bool,
     line_start: Option<u32>,
     end: u32,
     bom_offset: u32,
     stripped: &str,
     out: &mut Vec<crate::ParseError>,
 ) {
-    let is_section = matches!(first_non_trivia, Some(crate::SyntaxKind::STAR));
     let is_comment = matches!(first_non_trivia, Some(k) if is_comment_kind(k));
     if is_section || is_comment || first_non_trivia.is_none() {
         return;
@@ -3516,6 +3539,7 @@ fn error_node_check(
     {
         let mut line_start: Option<u32> = None;
         let mut first_non_trivia: Option<crate::SyntaxKind> = None;
+        let mut section = false;
         for el in child.children_with_tokens() {
             let rowan::NodeOrToken::Token(t) = el else {
                 continue;
@@ -3527,13 +3551,23 @@ fn error_node_check(
                 line_start = Some(start);
             }
             if t.kind() == crate::SyntaxKind::NEWLINE {
-                emit_error_node_line(first_non_trivia, line_start, end, bom_offset, stripped, out);
+                emit_error_node_line(
+                    first_non_trivia,
+                    section,
+                    line_start,
+                    end,
+                    bom_offset,
+                    stripped,
+                    out,
+                );
                 line_start = None;
                 first_non_trivia = None;
+                section = false;
                 continue;
             }
             if first_non_trivia.is_none() && !is_trivia_kind(t.kind()) {
                 first_non_trivia = Some(t.kind());
+                section = is_section_marker(t.kind(), stripped, start as usize);
             }
         }
         // EOF terminates the final line exactly as a NEWLINE would. Mirrors
@@ -3541,7 +3575,15 @@ fn error_node_check(
         // any input lacking a trailing newline, and a malformed last line
         // produced no diagnostic at all (#1884).
         let end: u32 = child.text_range().end().into();
-        emit_error_node_line(first_non_trivia, line_start, end, bom_offset, stripped, out);
+        emit_error_node_line(
+            first_non_trivia,
+            section,
+            line_start,
+            end,
+            bom_offset,
+            stripped,
+            out,
+        );
     }
 }
 
@@ -3774,6 +3816,7 @@ fn walk_descendants_once(
 /// have to walk them and synthesize the same shape.
 fn section_marker_check(
     child: &crate::SyntaxNode,
+    stripped: &str,
     bom_offset: u32,
     out: &mut Vec<Spanned<String>>,
 ) {
@@ -3783,6 +3826,7 @@ fn section_marker_check(
     // start) and ends at the next NEWLINE (inclusive).
     let mut line_start: Option<u32> = None;
     let mut first_non_trivia: Option<crate::SyntaxKind> = None;
+    let mut section = false;
     for el in child.children_with_tokens() {
         let rowan::NodeOrToken::Token(t) = el else {
             continue;
@@ -3794,24 +3838,22 @@ fn section_marker_check(
             line_start = Some(start);
         }
         if t.kind() == crate::SyntaxKind::NEWLINE {
-            if first_non_trivia == Some(crate::SyntaxKind::STAR)
-                && let Some(ls) = line_start
-            {
+            if section && let Some(ls) = line_start {
                 let span = Span::new((ls + bom_offset) as usize, (end + bom_offset) as usize);
                 out.push(Spanned::new(String::new(), span));
             }
             line_start = None;
             first_non_trivia = None;
+            section = false;
             continue;
         }
         if first_non_trivia.is_none() && !is_trivia_kind(t.kind()) {
             first_non_trivia = Some(t.kind());
+            section = is_section_marker(t.kind(), stripped, start as usize);
         }
     }
     // EOF terminates the final line. Mirrors `green::tl_section_marker_check`.
-    if first_non_trivia == Some(crate::SyntaxKind::STAR)
-        && let Some(ls) = line_start
-    {
+    if section && let Some(ls) = line_start {
         let end: u32 = child.text_range().end().into();
         let span = Span::new((ls + bom_offset) as usize, (end + bom_offset) as usize);
         out.push(Spanned::new(String::new(), span));

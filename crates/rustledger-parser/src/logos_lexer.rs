@@ -738,7 +738,11 @@ impl<'src> Iterator for TokenIter<'src> {
                     // `Error` token after the `Star`, so the line keeps its
                     // shape: a `STAR`-led `ERROR_NODE`, silenced by the
                     // section-marker checks in both conversion paths, and
-                    // copied verbatim by the formatter.
+                    // copied verbatim by the formatter. Which `STAR` lines
+                    // are SILENCED is decided separately, and more
+                    // narrowly, by `convert::is_section_marker` (#2783):
+                    // keep this arm at least as broad as that rule, so a
+                    // silenced line is always one whose rest was skipped.
                     let line_end = line_end_before_newline(source, span.end);
                     self.at_line_start = false;
                     if line_end > span.end {

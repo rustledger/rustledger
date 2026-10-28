@@ -2814,26 +2814,31 @@ pub(super) const fn is_comment_kind(kind: crate::SyntaxKind) -> bool {
 }
 
 /// Whether the first non-trivia token of a top-level `ERROR_NODE` line
-/// makes it an org-mode section marker: a `STAR` at column 0 of the source
-/// (only BOMs, which are layout-transparent, may precede it on its line).
+/// makes it an org-mode section marker: a `STAR` at column 0 of the source,
+/// with nothing before it on its line.
 ///
 /// Shared by the error-silencing and the section-comment walkers on both
 /// paths (`error_node_check` / `section_marker_check` here,
 /// `tl_error_node_check` / `tl_section_marker_check` in `green.rs`), so
 /// the four agree on which lines are headings. An INDENTED `*` line is
-/// not a heading (beancount reports it: `syntax error, unexpected
-/// INDENT`), so it is an ordinary error line (#2783); silencing it as a
-/// heading let a `"` on it swallow the following directives with no
-/// diagnostic. `offset` indexes `stripped`, the post-BOM-strip source.
+/// not a heading (beancount reports a syntax error: `unexpected INDENT`,
+/// or `unexpected ASTERISK` after a directive), so it is an ordinary error
+/// line (#2783); silencing it as a heading let a `"` on it swallow the
+/// following directives with no diagnostic. A `*` after a BOM is not one
+/// either: beancount rejects the BOM (`Invalid token`), as rledger does
+/// before a directive. `offset` indexes `stripped`, the post-BOM-strip
+/// source, so a file's single leading BOM is already gone.
+///
+/// The lexer has its own, deliberately broader, rule for the same line:
+/// `TokenIter`'s `Token::Star` arm in `logos_lexer.rs` (#2778) skips the
+/// rest of any line-start `*` line (BOMs included) without lexing it.
+/// The two may only disagree in the SAFE direction: a line the lexer
+/// skipped can still be reported here, but nothing is silenced here
+/// unless the lexer skipped it, so a silenced line can never swallow the
+/// lines after it.
 pub(super) fn is_section_marker(kind: crate::SyntaxKind, stripped: &str, offset: usize) -> bool {
-    if kind != crate::SyntaxKind::STAR {
-        return false;
-    }
-    let before = stripped
-        .get(..offset)
-        .unwrap_or("")
-        .trim_end_matches(crate::bom::BOM_CHAR);
-    before.is_empty() || before.ends_with('\n')
+    kind == crate::SyntaxKind::STAR
+        && (offset == 0 || stripped.as_bytes().get(offset - 1) == Some(&b'\n'))
 }
 
 /// Output of the fused top-level pass [`walk_top_level_once`].

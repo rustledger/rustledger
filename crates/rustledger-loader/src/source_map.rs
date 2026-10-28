@@ -90,6 +90,10 @@ pub struct SourceFile {
     /// Equal to [`Self::path`] unless a symlink is on the way.
     pub opened_path: PathBuf,
     /// Source content (shared via [`SourceText`] to avoid cloning).
+    ///
+    /// Empty and inert after [`SourceMap::drop_text`], which see: the
+    /// loader can shed the whole text once processing has resolved every
+    /// error location, for consumers that never draw a snippet.
     pub source: SourceText,
     /// Line start offsets (byte positions where each line starts).
     ///
@@ -100,6 +104,10 @@ pub struct SourceFile {
     /// per line: 3.9% of a warm `check` and 320 KB on a 40,000-line ledger,
     /// for a table nothing read.
     line_starts: std::sync::OnceLock<Vec<usize>>,
+    /// Whether [`Self::source`] still holds the file's text. False after
+    /// [`SourceMap::drop_text`]; line numbers still answer from the kept
+    /// offsets table, but no text is handable and columns are 0.
+    text_retained: bool,
 }
 
 /// Line and column (1-based, the column in CHARACTERS) for a byte offset in
@@ -219,6 +227,7 @@ impl SourceFile {
             opened_path,
             source,
             line_starts: std::sync::OnceLock::new(),
+            text_retained: true,
         }
     }
 
@@ -227,6 +236,12 @@ impl SourceFile {
     #[must_use]
     pub fn dir(&self) -> &Path {
         self.opened_path.parent().unwrap_or_else(|| Path::new("."))
+    }
+
+    /// Whether the file's text is still held. See [`SourceMap::drop_text`].
+    #[must_use]
+    pub const fn has_source(&self) -> bool {
+        self.text_retained
     }
 
     /// The line-start table, built on first use.
@@ -248,20 +263,47 @@ impl SourceFile {
     /// is still found with the cached line-start table and `partition_point`,
     /// and only the remainder of that one line is scanned. The helper this
     /// replaced rescanned from byte 0 on every call.
+    ///
+    /// The line survives [`SourceMap::drop_text`] (it comes from the
+    /// offsets table, which the drop keeps), but the column does not:
+    /// counting characters needs the text, so a dropped file answers
+    /// column 0, the same "no text to count in" convention as a
+    /// placeholder [`crate::ErrorLocation`]. Error locations on
+    /// [`crate::LedgerError`]s are computed during processing and keep
+    /// their real line AND column either way.
     #[must_use]
     pub fn line_col(&self, offset: usize) -> (usize, usize) {
+        if !self.text_retained {
+            let starts = self.line_starts();
+            // Same rule as `line_col_indexed`: entry 0 is always 0, so the
+            // count is at least 1 and the subtraction cannot underflow.
+            let line = starts.partition_point(|&start| start <= offset) - 1;
+            return (line + 1, 0);
+        }
         line_col_indexed(&self.source, self.line_starts(), offset)
     }
 
     /// Get the source text for a span.
+    ///
+    /// Empty once the text has been dropped; see [`SourceMap::drop_text`].
     #[must_use]
     pub fn span_text(&self, span: &Span) -> &str {
+        if !self.text_retained {
+            return "";
+        }
         &self.source[span.start..span.end.min(self.source.len())]
     }
 
     /// Get a specific line (1-based).
+    ///
+    /// `None` once the text has been dropped, whatever the line number:
+    /// the offsets table still knows where the line WAS, but there is no
+    /// text there to hand back. See [`SourceMap::drop_text`].
     #[must_use]
     pub fn line(&self, line_num: usize) -> Option<&str> {
+        if !self.text_retained {
+            return None;
+        }
         let starts = self.line_starts();
         if line_num == 0 || line_num > starts.len() {
             return None;
@@ -383,6 +425,35 @@ impl SourceMap {
     #[must_use]
     pub fn files(&self) -> &[SourceFile] {
         &self.files
+    }
+
+    /// Shed every file's text, keeping paths, file ids and line numbers.
+    ///
+    /// The point of the loader's memory diet on a server that loads a
+    /// large ledger once and answers questions about it forever: the text
+    /// of a 173 MB ledger is 173 MB of [`SourceText`] the query engine never
+    /// reads. `LoadOptions::retain_source_text: false` calls this at the
+    /// end of [`crate::process()`], which is the last moment the text is
+    /// needed: every error location has been resolved by then.
+    ///
+    /// Each file's line-start table is built first and kept: it is one
+    /// `usize` per line (megabytes on a huge ledger, against hundreds of
+    /// the text) and it is what answers `lineno` afterwards: BQL's
+    /// `filename`/`lineno` columns ([`crate::Ledger`] positions generally)
+    /// stay real. What goes is the text itself: [`SourceFile::line`] and
+    /// [`SourceFile::span_text`] hand back nothing, and
+    /// [`SourceFile::line_col`]'s column drops to 0 (the line stands), so
+    /// [`SourceMap::format_span`] renders `path:line:0`.
+    /// Snippet renderers like `rledger check`'s miette output want the
+    /// text and should keep it.
+    pub fn drop_text(&mut self) {
+        for file in &mut self.files {
+            // Materialize before emptying: after the drop the table can
+            // never be rebuilt from the text.
+            let _ = file.line_starts();
+            file.text_retained = false;
+            file.source = SourceText::from("");
+        }
     }
 
     /// The `file_id` of the placeholder location `name`, line `line`: a
@@ -582,6 +653,65 @@ mod tests {
         assert_eq!(id, 0);
         assert!(sm.get(0).is_some());
         assert!(sm.get(1).is_none());
+    }
+
+    /// [`SourceMap::drop_text`] sheds the bytes and keeps the positions:
+    /// a ledger that drops its text still knows WHICH file and WHICH line
+    /// an error is in (BQL's `filename`/`lineno` columns resolve from the
+    /// kept offsets table). Only the text and the columns counted from it
+    /// go.
+    #[test]
+    fn drop_text_sheds_bytes_but_keeps_identity() {
+        let mut sm = SourceMap::new();
+        let id = sm.add_file(PathBuf::from("test.beancount"), "a\nbb\nccc".into());
+        let before = sm.get(id).unwrap().source.len();
+        assert!(sm.get(id).unwrap().has_source());
+
+        sm.drop_text();
+
+        let file = sm.get(id).unwrap();
+        assert!(!file.has_source());
+        assert_eq!(file.source.len(), 0);
+        assert!(before > 0);
+        assert_eq!(file.path, PathBuf::from("test.beancount"));
+        assert_eq!(file.id, id);
+        // The line stands (from the kept table); the column is 0 without
+        // text to count characters in; no text is handable.
+        assert_eq!(file.num_lines(), 3);
+        assert_eq!(file.line_col(2), (2, 0));
+        assert_eq!(file.line_start(3), Some(5));
+        assert_eq!(file.line(1), None);
+        assert_eq!(file.span_text(&Span { start: 0, end: 3 }), "");
+    }
+
+    /// The contract `process` relies on: positions answer with real lines
+    /// and columns while the text is held (that is when every `LedgerError`
+    /// location is resolved), and the line survives the drop while the
+    /// column goes to 0.
+    #[test]
+    fn lines_resolve_before_the_drop_and_columns_do_not_after() {
+        let mut sm = SourceMap::new();
+        let id = sm.add_file(PathBuf::from("t.beancount"), "é\nbb".into());
+        // Char columns, 1-based: the `b` after `é\n` is line 2 column 1.
+        assert_eq!(sm.get(id).unwrap().line_col(3), (2, 1));
+
+        sm.drop_text();
+        assert_eq!(sm.get(id).unwrap().line_col(3), (2, 0));
+    }
+
+    /// The drop materializes the line-start table before emptying the text
+    /// (afterwards it can never be rebuilt) and keeps it, one `usize` per
+    /// line, because `lineno` answers from it. The pin: nothing touches the
+    /// lazily built table before the drop, so the 3 lines answered after it
+    /// can only come from a table the drop itself built from the text (a
+    /// table built from the emptied text would answer 1).
+    #[test]
+    fn drop_text_keeps_the_line_table() {
+        let mut sm = SourceMap::new();
+        let id = sm.add_file(PathBuf::from("t.beancount"), "a\nb\nc".into());
+        sm.drop_text();
+        assert_eq!(sm.get(id).unwrap().num_lines(), 3);
+        assert_eq!(sm.get(id).unwrap().line_start(3), Some(4));
     }
 
     #[test]

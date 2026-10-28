@@ -870,11 +870,12 @@ fn format_node_with_style(
     // keeps every one of its lines (#2506).
     let mut spacing = TopLevelSpacing::default();
     // A top-level WHITESPACE token directly before an `ERROR_NODE` is the
-    // indentation of the node's first line. Only at the top of the file does
-    // the parser leave it outside the node (mid-file it is inside), so it is
-    // carried over here to keep the line verbatim. Dropping it would move an
-    // indented `*` line to column 0, where it is a silenced org-mode heading
-    // instead of a reported error (#2786).
+    // indentation of the node's first line. Only before the first node (the
+    // file-leading region, comments and blank lines included) does the parser
+    // leave it outside the node; later it is inside. It is carried over here
+    // to keep the line verbatim. Dropping it would move an indented `*` line
+    // to column 0, where it is a silenced org-mode heading instead of a
+    // reported error (#2786).
     let mut indent: Option<crate::SyntaxToken> = None;
     for el in node.children_with_tokens() {
         let line_indent = indent.take();

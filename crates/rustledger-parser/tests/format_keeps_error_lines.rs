@@ -1,13 +1,16 @@
-//! The error-tolerant formatter must not change which lines are errors
-//! (#2786).
+//! The error-tolerant formatter must keep unparsable lines verbatim, so
+//! they stay errors (#2786).
 //!
 //! `format_source` formats a file despite parse errors (it backs the FFI
 //! component's best-effort `format.source`). It copies an unparsable line
-//! verbatim, but at the top of the file it used to drop the line's
-//! indentation, because only there does the parser leave that whitespace
-//! outside the error node. An indented `*` line is a reported error; moved
-//! to column 0 it becomes a silenced org-mode heading, so formatting erased
-//! the error and changed what the file means.
+//! verbatim, but before the first node of the file it used to drop the
+//! line's indentation, because only there does the parser leave that
+//! whitespace outside the error node. An indented `*` line is a reported
+//! error; moved to column 0 it becomes a silenced org-mode heading, so
+//! formatting erased the error and changed what the file means.
+//!
+//! An indented directive is a different case and is still moved to column 0:
+//! it parses either way, and the formatter repairs its indentation.
 
 use rustledger_parser::format::format_source;
 use rustledger_parser::parse;
@@ -55,6 +58,11 @@ fn test_format_source_keeps_an_indented_first_line_star_an_error() {
         "after a leading comment",
         "; c\n  * h\n2024-01-02 open Assets:B\n",
     );
+    assert_errors_kept(
+        "after a whitespace-only line",
+        "  \n  * h\n2024-01-02 open Assets:B\n",
+    );
+    assert_errors_kept("tab indent", "\t* h\n2024-01-02 open Assets:B\n");
     assert_errors_kept(
         "issue reproducer",
         "  * h \"x\n2024-01-02 open Assets:B\n2024-01-03 open Assets:C\n",

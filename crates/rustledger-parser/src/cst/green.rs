@@ -20,8 +20,8 @@ use super::ast::AstNode as _; // brings `Directive::can_cast` into scope
 use super::convert::{
     DescendantsWalkResult, HeaderEnd, TopLevelWalkResult, body_tag_joins_transaction,
     classify_recovery_error, cost_spec_from_tokens, decode_string_token, is_comment_kind,
-    is_trivia_kind, meta_value_from_tokens, parse_date_token, parse_decimal_token,
-    tags_after_posting_error,
+    is_section_marker, is_trivia_kind, meta_value_from_tokens, parse_date_token,
+    parse_decimal_token, tags_after_posting_error,
 };
 use rowan::{Language, NodeOrToken};
 use rustledger_core::cost::CostSpec;
@@ -905,7 +905,13 @@ pub(super) fn walk_top_level(
                 }
                 K::ERROR_NODE => {
                     tl_error_node_check(n, offset, bom_offset, stripped, &mut errors);
-                    tl_section_marker_check(n, offset, bom_offset, &mut section_marker_comments);
+                    tl_section_marker_check(
+                        n,
+                        offset,
+                        bom_offset,
+                        stripped,
+                        &mut section_marker_comments,
+                    );
                 }
                 _ => {}
             }
@@ -1163,14 +1169,13 @@ fn tl_transaction_body_check(
 /// sites is how the two would drift.
 fn emit_error_node_line(
     first_non_trivia: Option<crate::SyntaxKind>,
+    is_section: bool,
     line_start: Option<usize>,
     end: usize,
     bom_offset: u32,
     stripped: &str,
     out: &mut Vec<crate::ParseError>,
 ) {
-    use crate::SyntaxKind as K;
-    let is_section = first_non_trivia == Some(K::STAR);
     let is_comment = matches!(first_non_trivia, Some(k) if is_comment_kind(k));
     if is_section || is_comment || first_non_trivia.is_none() {
         return;
@@ -1209,6 +1214,7 @@ fn tl_error_node_check(
     use crate::SyntaxKind as K;
     let mut line_start: Option<usize> = None;
     let mut first_non_trivia: Option<crate::SyntaxKind> = None;
+    let mut section = false;
     let mut offset = base;
     for child in node.children() {
         let len = child_len(child);
@@ -1219,11 +1225,21 @@ fn tl_error_node_check(
                 line_start = Some(start);
             }
             if kind == K::NEWLINE {
-                emit_error_node_line(first_non_trivia, line_start, end, bom_offset, stripped, out);
+                emit_error_node_line(
+                    first_non_trivia,
+                    section,
+                    line_start,
+                    end,
+                    bom_offset,
+                    stripped,
+                    out,
+                );
                 line_start = None;
                 first_non_trivia = None;
+                section = false;
             } else if first_non_trivia.is_none() && !is_trivia_kind(kind) {
                 first_non_trivia = Some(kind);
+                section = is_section_marker(kind, stripped, start);
             }
         }
         offset += len;
@@ -1231,6 +1247,7 @@ fn tl_error_node_check(
     // EOF terminates the final line just as a newline would.
     emit_error_node_line(
         first_non_trivia,
+        section,
         line_start,
         offset,
         bom_offset,
@@ -1250,25 +1267,23 @@ fn tl_section_marker_check(
     node: &rowan::GreenNodeData,
     base: usize,
     bom_offset: u32,
+    stripped: &str,
     out: &mut Vec<Spanned<String>>,
 ) {
     use crate::SyntaxKind as K;
     let mut line_start: Option<usize> = None;
     let mut first_non_trivia: Option<crate::SyntaxKind> = None;
+    let mut section = false;
     let mut offset = base;
-    let emit = |first_non_trivia: Option<crate::SyntaxKind>,
-                line_start: Option<usize>,
-                end: usize,
-                out: &mut Vec<Spanned<String>>| {
-        if first_non_trivia == Some(K::STAR)
-            && let Some(ls) = line_start
-        {
-            out.push(Spanned::new(
-                String::new(),
-                Span::new(ls + bom_offset as usize, end + bom_offset as usize),
-            ));
-        }
-    };
+    let emit =
+        |section: bool, line_start: Option<usize>, end: usize, out: &mut Vec<Spanned<String>>| {
+            if section && let Some(ls) = line_start {
+                out.push(Spanned::new(
+                    String::new(),
+                    Span::new(ls + bom_offset as usize, end + bom_offset as usize),
+                ));
+            }
+        };
     for child in node.children() {
         let len = child_len(child);
         if let NodeOrToken::Token(t) = &child {
@@ -1278,16 +1293,18 @@ fn tl_section_marker_check(
                 line_start = Some(start);
             }
             if kind == K::NEWLINE {
-                emit(first_non_trivia, line_start, end, out);
+                emit(section, line_start, end, out);
                 line_start = None;
                 first_non_trivia = None;
+                section = false;
             } else if first_non_trivia.is_none() && !is_trivia_kind(kind) {
                 first_non_trivia = Some(kind);
+                section = is_section_marker(kind, stripped, start);
             }
         }
         offset += len;
     }
-    emit(first_non_trivia, line_start, offset, out);
+    emit(section, line_start, offset, out);
 }
 
 #[cfg(test)]

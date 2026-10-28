@@ -615,7 +615,8 @@ pub fn is_valid_currency(name: &str) -> bool {
 ///
 /// Filters out [`Token::Whitespace`] (mid-line horizontal whitespace)
 /// but otherwise emits everything the lexer produces, with
-/// post-processing for line-start `#` comments and indentation.
+/// post-processing for line-start `#` comments, org-mode `*` headings
+/// and indentation.
 /// Callers that need a fully-lossless token stream (the CST builder)
 /// use [`tokenize_lossless`] instead.
 pub fn tokenize(source: &str) -> Vec<(Token<'_>, Span)> {
@@ -661,8 +662,8 @@ impl<'src> TokenIter<'src> {
     /// Tokenize `source`, preserving or dropping mid-line
     /// [`Token::Whitespace`] per `keep_whitespace` (the AST path drops
     /// it, the CST path keeps it). Layout post-processing (line-start
-    /// `#` comments and `Indent`/`DeepIndent` synthesis) is identical
-    /// on both paths.
+    /// `#` comments, `*` headings and `Indent`/`DeepIndent` synthesis)
+    /// is identical on both paths.
     pub(crate) fn new(source: &'src str, keep_whitespace: bool) -> Self {
         Self {
             lexer: Token::lexer(source),
@@ -704,18 +705,7 @@ impl<'src> Iterator for TokenIter<'src> {
                     // Hash at very start of line (no indentation) is a comment
                     // Find end of line and create a comment token for the whole line
                     let comment_start = span.start;
-                    // End before the `Newline` token that follows. That
-                    // token is `\r?\n`, so on a CRLF line it starts at the
-                    // `\r`; ending at the `\n` would hand that byte to both
-                    // tokens and break the lossless round-trip (#2769).
-                    let line_end = source[span.end..].find('\n').map_or(source.len(), |i| {
-                        let nl = span.end + i;
-                        if source[span.end..nl].ends_with('\r') {
-                            nl - 1
-                        } else {
-                            nl
-                        }
-                    });
+                    let line_end = line_end_before_newline(source, span.end);
                     let comment_text = &source[comment_start..line_end];
                     // Skip the rest of the line without lexing it, as
                     // beancount's lexer does (`^#` enters an IGNORE state
@@ -736,6 +726,32 @@ impl<'src> Iterator for TokenIter<'src> {
                             end: line_end,
                         },
                     ));
+                }
+                Ok(Token::Star) if self.at_line_start && span.start == self.last_newline_end => {
+                    // An org-mode heading. Beancount ignores the whole line
+                    // (`^\*/.` enters the same IGNORE state as `^#`), so,
+                    // like the `#` arm, the rest of the line is not lexed.
+                    // Lexing it token by token let a `"` in the heading open
+                    // an unterminated string that ran to the end of the file
+                    // and swallowed every directive after it, with no error
+                    // (#2778). The rest of the line comes out as one
+                    // `Error` token after the `Star`, so the line keeps its
+                    // shape: a `STAR`-led `ERROR_NODE`, silenced by the
+                    // section-marker checks in both conversion paths, and
+                    // copied verbatim by the formatter.
+                    let line_end = line_end_before_newline(source, span.end);
+                    self.at_line_start = false;
+                    if line_end > span.end {
+                        self.lexer.bump(line_end - span.end);
+                        self.pending = Some((
+                            Token::Error(&source[span.end..line_end]),
+                            Span {
+                                start: span.end,
+                                end: line_end,
+                            },
+                        ));
+                    }
+                    return Some((Token::Star, span.into()));
                 }
                 Ok(token) => {
                     // Check for indentation at line start
@@ -801,6 +817,25 @@ impl<'src> Iterator for TokenIter<'src> {
         }
         None
     }
+}
+
+/// Where a whole-line token that starts before `from` ends: before the
+/// `Newline` token that follows it, or at the end of the source.
+///
+/// `Newline` is `\r?\n`, so on a CRLF line it starts at the `\r`; ending at
+/// the `\n` would hand that byte to both tokens and break the lossless
+/// round-trip (#2769). Any other `\r` stays in the line. The result sits on
+/// a `\r`, a `\n` or the end of the source, so it is always a char boundary.
+/// Shared by the column-0 `#` comment and `*` heading arms of `TokenIter`.
+fn line_end_before_newline(source: &str, from: usize) -> usize {
+    source[from..].find('\n').map_or(source.len(), |i| {
+        let nl = from + i;
+        if source[from..nl].ends_with('\r') {
+            nl - 1
+        } else {
+            nl
+        }
+    })
 }
 
 fn tokenize_inner(source: &str, keep_whitespace: bool) -> Vec<(Token<'_>, Span)> {

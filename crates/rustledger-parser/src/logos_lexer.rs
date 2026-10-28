@@ -615,7 +615,8 @@ pub fn is_valid_currency(name: &str) -> bool {
 ///
 /// Filters out [`Token::Whitespace`] (mid-line horizontal whitespace)
 /// but otherwise emits everything the lexer produces, with
-/// post-processing for line-start `#` comments and indentation.
+/// post-processing for line-start `#` comments, org-mode `*` headings
+/// and indentation.
 /// Callers that need a fully-lossless token stream (the CST builder)
 /// use [`tokenize_lossless`] instead.
 pub fn tokenize(source: &str) -> Vec<(Token<'_>, Span)> {
@@ -661,8 +662,8 @@ impl<'src> TokenIter<'src> {
     /// Tokenize `source`, preserving or dropping mid-line
     /// [`Token::Whitespace`] per `keep_whitespace` (the AST path drops
     /// it, the CST path keeps it). Layout post-processing (line-start
-    /// `#` comments and `Indent`/`DeepIndent` synthesis) is identical
-    /// on both paths.
+    /// `#` comments, `*` headings and `Indent`/`DeepIndent` synthesis)
+    /// is identical on both paths.
     pub(crate) fn new(source: &'src str, keep_whitespace: bool) -> Self {
         Self {
             lexer: Token::lexer(source),

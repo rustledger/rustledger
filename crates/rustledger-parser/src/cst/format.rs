@@ -361,7 +361,8 @@ pub fn try_format_source_grouped(
 /// - String literals: bytes pass through verbatim. The user's
 ///   original line endings inside a multi-line narration / note /
 ///   document string are preserved.
-/// - Line comments (`;`, `%`, `#!`, `#+`, and a column-0 `#`): the
+/// - Line comments (`;`, `%`, `#!`, `#+`, a column-0 `#`, and an
+///   org-mode `*` heading): the
 ///   comment's terminating newline IS a real structural line
 ///   terminator, so it gets converted to CRLF; bytes inside the
 ///   comment region (which can include arbitrary characters,
@@ -369,7 +370,7 @@ pub fn try_format_source_grouped(
 ///   state. `#!` and `#+` open a comment at any column: the lexer's
 ///   `SHEBANG` / `EMACS_DIRECTIVE` regexes carry no line-start
 ///   anchor, and the state machine matches that classification. A
-///   bare `#` opens one only at line start (see
+///   bare `#` or a `*` opens one only at line start (see
 ///   `advance_source_state`).
 ///
 /// The helper lives in this module rather than the LSP crate
@@ -659,13 +660,13 @@ pub fn cr_outside_strings_present(src: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceState {
     /// In normal code. `"` opens a string; `;` / `%` / `#!` /
-    /// `#+`, or a column-0 `#`, opens a comment; everything else is
-    /// just bytes.
+    /// `#+`, a column-0 `#`, or a column-0 `*` (an org-mode heading)
+    /// opens a comment; everything else is just bytes.
     Code,
     /// Inside `"…"`. Bytes pass through; an unescaped `"` exits.
     InString,
-    /// Inside `;…\n`, `%…\n`, `#!…\n`, `#+…\n`, or a column-0
-    /// `#…\n`. Bytes pass through until LF/CR.
+    /// Inside `;…\n`, `%…\n`, `#!…\n`, `#+…\n`, a column-0 `#…\n`,
+    /// or a heading `*…\n`. Bytes pass through until LF/CR.
     InComment,
 }
 
@@ -689,8 +690,9 @@ enum SourceState {
 /// heading text, and the line is treated as a comment here (#2778).
 ///
 /// The column-0 `#` comment and the heading close on the first `\n`
-/// or `\r`, like the others. The lexer keeps a lone `\r` inside it as comment text;
-/// a stray `\r` is the subject of #2774, and no fixture here has one.
+/// or `\r`, like the others. The lexer keeps a lone `\r` inside
+/// either as part of the line; a stray `\r` is the subject of #2774,
+/// and no fixture here has one.
 const fn advance_source_state(
     ch: char,
     peek: Option<char>,
@@ -4859,10 +4861,12 @@ mod tests {
     /// state machine's `InString` periods MUST line up with the
     /// lexer's STRING token spans, and its `InComment` periods MUST
     /// line up with the union of COMMENT / SHEBANG /
-    /// `EMACS_DIRECTIVE` token spans. A divergence — e.g. the lexer
-    /// gains a new comment lexeme that the state machine treats as
-    /// code — fails this test instead of silently mutating user
-    /// bytes inside the new lexeme on a line-ending round-trip.
+    /// `EMACS_DIRECTIVE` token spans, plus the one `ERROR_TOKEN` that
+    /// holds an org-mode heading's text after its column-0 `STAR`. A
+    /// divergence (e.g. the lexer gains a new comment lexeme that the
+    /// state machine treats as code) fails this test instead of
+    /// silently mutating user bytes inside the new lexeme on a
+    /// line-ending round-trip.
     #[test]
     fn source_state_classification_agrees_with_lexer() {
         use crate::logos_lexer::{Token, tokenize_lossless};

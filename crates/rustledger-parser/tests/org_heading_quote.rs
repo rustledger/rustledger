@@ -13,7 +13,7 @@ use rustledger_parser::format::{
     cr_outside_strings_present, crlf_to_lf_outside_strings, format_source,
     lf_to_crlf_outside_strings, try_format_source,
 };
-use rustledger_parser::logos_lexer::{Token, tokenize_lossless};
+use rustledger_parser::logos_lexer::{Token, tokenize, tokenize_lossless};
 use rustledger_parser::{parse, parse_structured};
 
 /// Every byte of `src` covered exactly once, in order, by the lossless
@@ -116,12 +116,30 @@ fn test_tokenize_lossless_org_heading_is_one_token_after_the_star() {
         matches!(tokens.as_slice(), [(Token::Star, _), (Token::Newline, _)]),
         "{tokens:?}"
     );
-    for src in [
-        "* \"",
-        "* \"\n",
-        "\u{feff}* 27\" x\n2024-01-02 open Assets:B\n",
-        "2024-01-01 open Assets:A\n* x \"y\r\r\n2024-01-02 open Assets:B\r\n",
-    ] {
+    for src in ["* \"", "* \"\n"] {
+        assert_lossless(src);
+    }
+}
+
+/// A heading after a leading BOM, and one on a `\r\r\n` line: the directives
+/// after them survive (on `main` both lost them while staying lossless, so
+/// the round-trip alone would not show the bug).
+#[test]
+fn test_parse_org_heading_after_bom_and_with_crcrlf_keeps_directives() {
+    let cases: [(&str, &[&str]); 2] = [
+        (
+            "\u{feff}* 27\" x\n2024-01-02 open Assets:B\n",
+            &["2024-01-02 Assets:B"],
+        ),
+        (
+            "2024-01-01 open Assets:A\n* x \"y\r\r\n2024-01-02 open Assets:B\r\n",
+            &["2024-01-01 Assets:A", "2024-01-02 Assets:B"],
+        ),
+    ];
+    for (src, expected) in cases {
+        let result = parse(src);
+        assert!(result.errors.is_empty(), "{src:?}: {:?}", result.errors);
+        assert_eq!(summary(src), expected, "{src:?}");
         assert_lossless(src);
     }
 }
@@ -135,6 +153,36 @@ fn test_parse_star_flag_is_unchanged() {
     assert_eq!(result.directives.len(), 1);
     assert!(result.comments.is_empty(), "{:?}", result.comments);
     assert_lossless(src);
+}
+
+/// An indented `*` is a posting flag, not a heading, on the AST token path
+/// too, where whitespace is dropped: the heading arm needs the `*` to start
+/// exactly at the line start, not merely to be the line's first token.
+#[test]
+fn test_tokenize_indented_star_posting_flag_is_not_a_heading() {
+    let src = "2024-01-01 * \"x\"\n  * Assets:A  1 USD\n  Assets:B\n";
+    let kinds: Vec<String> = tokenize(src)
+        .iter()
+        .map(|(t, _)| format!("{t:?}"))
+        .collect();
+    assert_eq!(
+        kinds,
+        [
+            "Date(\"2024-01-01\")",
+            "Star",
+            "String(\"\\\"x\\\"\")",
+            "Newline",
+            "Indent(2)",
+            "Star",
+            "Account(\"Assets:A\")",
+            "Number(\"1\")",
+            "Currency(\"USD\")",
+            "Newline",
+            "Indent(2)",
+            "Account(\"Assets:B\")",
+            "Newline",
+        ]
+    );
 }
 
 /// The line-ending helpers treat the heading as a comment: its line ending

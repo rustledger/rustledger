@@ -148,10 +148,6 @@ criteria = "safe-to-deploy"
 version = "1.4.6"
 criteria = "safe-to-deploy"
 
-[[exemptions.chacha20]]
-version = "0.10.2"
-criteria = "safe-to-deploy"
-
 [[exemptions.chumsky]]
 version = "1.0.0-alpha.8"
 criteria = "safe-to-deploy"
@@ -196,10 +192,6 @@ criteria = "safe-to-deploy"
 version = "0.2.17"
 criteria = "safe-to-deploy"
 
-[[exemptions.cpufeatures]]
-version = "0.3.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.crc32fast]]
 version = "1.5.2"
 criteria = "safe-to-deploy"
@@ -240,20 +232,12 @@ criteria = "safe-to-deploy"
 version = "0.11.3"
 criteria = "safe-to-deploy"
 
-[[exemptions.directories-next]]
-version = "2.0.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.dirs]]
 version = "7.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.dirs-sys]]
 version = "0.5.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.dirs-sys-next]]
-version = "0.1.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.edit]]
@@ -302,10 +286,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.getrandom]]
 version = "0.3.4"
-criteria = "safe-to-deploy"
-
-[[exemptions.getrandom]]
-version = "0.4.3"
 criteria = "safe-to-deploy"
 
 [[exemptions.glob]]
@@ -366,6 +346,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.js-sys]]
 version = "0.3.105"
+criteria = "safe-to-deploy"
+
+[[exemptions.libc]]
+version = "0.2.191"
 criteria = "safe-to-deploy"
 
 [[exemptions.libmimalloc-sys]]
@@ -572,10 +556,6 @@ criteria = "safe-to-deploy"
 version = "0.10.2"
 criteria = "safe-to-deploy"
 
-[[exemptions.rand_core]]
-version = "0.10.1"
-criteria = "safe-to-deploy"
-
 [[exemptions.rand_xorshift]]
 version = "0.5.0"
 criteria = "safe-to-run"
@@ -588,8 +568,8 @@ criteria = "safe-to-deploy"
 version = "0.5.18"
 criteria = "safe-to-deploy"
 
-[[exemptions.redox_users]]
-version = "0.4.6"
+[[exemptions.redox_syscall]]
+version = "0.9.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.redox_users]]
@@ -644,10 +624,6 @@ criteria = "safe-to-deploy"
 version = "1.15.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.rustls-webpki]]
-version = "0.103.16"
-criteria = "safe-to-deploy"
-
 [[exemptions.rustversion]]
 version = "1.0.23"
 criteria = "safe-to-deploy"
@@ -657,11 +633,11 @@ version = "0.3.1"
 criteria = "safe-to-run"
 
 [[exemptions.rustyline]]
-version = "18.0.1"
+version = "19.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.rustyline-derive]]
-version = "0.12.0"
+version = "0.13.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.safe_arch]]
@@ -788,10 +764,6 @@ criteria = "safe-to-deploy"
 version = "0.2.32"
 criteria = "safe-to-deploy"
 
-[[exemptions.tinyvec]]
-version = "1.13.3"
-criteria = "safe-to-deploy"
-
 [[exemptions.tracing]]
 version = "0.1.44"
 criteria = "safe-to-deploy"
@@ -820,16 +792,12 @@ criteria = "safe-to-deploy"
 version = "1.20.1"
 criteria = "safe-to-deploy"
 
-[[exemptions.untrusted]]
-version = "0.9.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.ureq]]
-version = "3.4.2"
+version = "3.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.ureq-proto]]
-version = "0.6.3"
+version = "0.6.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.utf8-zero]]
@@ -926,16 +894,4 @@ criteria = "safe-to-deploy"
 
 [[exemptions.zlib-rs]]
 version = "0.6.7"
-criteria = "safe-to-deploy"
-
-[[exemptions.zstd]]
-version = "0.13.3"
-criteria = "safe-to-deploy"
-
-[[exemptions.zstd-safe]]
-version = "7.3.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.zstd-sys]]
-version = "2.1.0+zstd.1.5.7"
 criteria = "safe-to-deploy"

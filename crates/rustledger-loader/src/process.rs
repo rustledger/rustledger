@@ -67,6 +67,26 @@ pub struct LoadOptions {
     /// and reports no error, so the host is responsible for telling the user
     /// (the LSP's E8006).
     pub native_plugins_only: bool,
+    /// Keep the source text of every loaded file in the returned
+    /// [`Ledger`]'s [`SourceMap`] (default: true).
+    ///
+    /// `false` calls [`SourceMap::drop_text`](crate::SourceMap::drop_text)
+    /// at the end of [`process`], after every error location has been
+    /// resolved from the text and before the `Ledger` is returned. The
+    /// trade is the text's bytes (173 MB on the 1M-beancount workload,
+    /// about 133 MB live once the kept line-start table is netted out) for
+    /// a map that still knows each file's paths, ids and line numbers.
+    ///
+    /// What is lost is post-load *text* access: snippet rendering
+    /// (`rledger check` draws one with miette) and the line's own text
+    /// (`SourceFile::line`, `SourceFile::span_text`). Positions keep
+    /// working: error locations on [`LedgerError`]s are computed during
+    /// processing and keep their real line and column, BQL's
+    /// `filename`/`lineno` columns resolve from the kept offsets table,
+    /// and `SourceFile::line_col`'s column drops to 0 (its line stands).
+    /// A consumer that never draws a snippet (`rledger query` prints
+    /// `code: message`) should set this false.
+    pub retain_source_text: bool,
 }
 
 impl Default for LoadOptions {
@@ -82,6 +102,7 @@ impl Default for LoadOptions {
             plugin_max_time_secs: None,
             plugin_max_memory_mb: None,
             native_plugins_only: false,
+            retain_source_text: true,
         }
     }
 }
@@ -104,6 +125,7 @@ impl LoadOptions {
             plugin_max_time_secs: None,
             plugin_max_memory_mb: None,
             native_plugins_only: false,
+            retain_source_text: true,
         }
     }
 }
@@ -597,11 +619,19 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
 
     let finalized = late_validated.finalize(failed);
 
+    // The text's last consumer was the pipeline above: every error location
+    // is resolved by now. Drop it here when the caller asked for the memory
+    // back (`LoadOptions::retain_source_text: false`).
+    let mut source_map = raw.source_map;
+    if !options.retain_source_text {
+        source_map.drop_text();
+    }
+
     Ok(Ledger {
         directives: finalized.into_inner(),
         options: raw.options,
         plugins: raw.plugins,
-        source_map: raw.source_map,
+        source_map,
         errors,
         display_context: raw.display_context,
         booking_method: effective_booking_method,
@@ -1113,20 +1143,23 @@ fn run_booking(
 
     // Partition into (booked, failed). Indices are valid in the current
     // `directives` vec (no mutation has happened since they were
-    // collected); after this consuming iteration the vec is gone and
-    // partition is fait accompli — no window where a caller could
-    // accidentally mutate between collection and partition.
+    // collected); the partition is fait accompli — no window where a
+    // caller could accidentally mutate between collection and partition.
+    //
+    // `extract_if` keeps the booked stream in the original buffer: the
+    // failed elements are removed in place and collected separately, so
+    // the partition does not allocate a second stream-sized `Vec` beside
+    // the one it consumes (a 2M-directive ledger freed a 384 MB buffer
+    // only after a second 384 MB one had been filled).
     let failed_set: rustc_hash::FxHashSet<usize> = failed_indices.iter().copied().collect();
-    let mut booked = Vec::with_capacity(directives.len() - failed_indices.len());
+    let mut i = 0;
     let mut failed = Vec::with_capacity(failed_indices.len());
-    for (i, d) in directives.into_iter().enumerate() {
-        if failed_set.contains(&i) {
-            failed.push(d);
-        } else {
-            booked.push(d);
-        }
-    }
-    (booked, failed)
+    failed.extend(directives.extract_if(.., |_| {
+        let take = failed_set.contains(&i);
+        i += 1;
+        take
+    }));
+    (directives, failed)
 }
 
 /// Which subset of plugins to run.
@@ -2229,7 +2262,6 @@ mod sanitize_tests {
         Transaction,
     };
     use std::path::PathBuf;
-    use std::sync::Arc;
 
     fn txn_with_postings(postings: Vec<Spanned<Posting>>) -> Directive {
         let date = rustledger_core::naive_date(2024, 1, 15).unwrap();
@@ -2248,7 +2280,7 @@ mod sanitize_tests {
 
     fn source_map_with_one_file(source: &str) -> (SourceMap, u16) {
         let mut sm = SourceMap::new();
-        let id = sm.add_file(PathBuf::from("test.bean"), Arc::from(source));
+        let id = sm.add_file(PathBuf::from("test.bean"), source.into());
         (sm, id as u16)
     }
 

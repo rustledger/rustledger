@@ -36,9 +36,8 @@
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
-use rustledger_loader::{FileSystem, LoadError};
+use rustledger_loader::{FileSystem, LoadError, SourceText};
 use wasm_bindgen::JsValue;
 
 /// The host functions installed for the duration of one entry-point call.
@@ -149,7 +148,7 @@ impl HostFs {
 }
 
 impl FileSystem for HostFs {
-    fn read(&self, path: &Path) -> Result<Arc<str>, LoadError> {
+    fn read(&self, path: &Path) -> Result<SourceText, LoadError> {
         let display = path.display().to_string();
         // Clone the handle out and DROP the borrow before calling into JS. A
         // callback is free to re-enter — a caching or logging host might — and
@@ -165,7 +164,7 @@ impl FileSystem for HostFs {
             Self::call1(&f, &receiver, &display).map_err(|message| not_found(path, &message))?;
         value
             .as_string()
-            .map(Arc::from)
+            .map(SourceText::from)
             // `null` is the host saying it cannot read this path. It is NOT an
             // error to raise here — a missing include is reported against the
             // file that asked for it, with that file's span.

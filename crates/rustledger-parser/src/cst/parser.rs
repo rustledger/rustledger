@@ -56,11 +56,12 @@
 //! `parse_flat` once `parse_structured` covers every byte in
 //! every corpus file.
 
+use std::collections::VecDeque;
 use std::ops::Range;
 
 use rowan::GreenNodeBuilder;
 
-use crate::cst::lossless_tokens::lossless_kind_tokens;
+use crate::cst::lossless_tokens::{KindTokenIter, lossless_kind_tokens};
 use crate::cst::syntax_kind::{SyntaxKind, SyntaxNode};
 
 /// Parse `source` to a flat lossless CST.
@@ -93,20 +94,100 @@ pub fn parse_flat(source: &str) -> SyntaxNode {
 /// behavior. Round-trip byte-identical for every UTF-8 input.
 #[must_use]
 pub fn parse_structured(source: &str) -> SyntaxNode {
-    let tokens: Vec<(SyntaxKind, Range<usize>)> = lossless_kind_tokens(source);
     let mut builder = GreenNodeBuilder::new();
     builder.start_node(SyntaxKind::SOURCE_FILE.into());
 
     let mut pending_leading: Vec<(SyntaxKind, Range<usize>)> = Vec::new();
     let mut seen_first_content = false;
+
+    // Streaming token window. Tokens are pulled from the lexer lazily,
+    // one top-level item at a time: every emit helper below terminates
+    // at the next non-indented line (blank line, col-0 comment,
+    // top-level content) or EOF, so a window that ends at the next
+    // top-level content token always holds the full current item plus
+    // the single boundary token the helpers test for. The whole-file
+    // `Vec` this replaces peaked at 1.6 GB of heap on a 173 MB ledger
+    // (issue #2742); this window is item-sized.
+    let mut tokens: Vec<(SyntaxKind, Range<usize>)> = Vec::new();
+    // Indices (into `tokens`) of buffered top-level content tokens:
+    // starts of top-level items, ascending. The window at `i` is
+    // complete iff the back is `> i` (or the stream is done).
+    let mut item_starts: VecDeque<usize> = VecDeque::new();
+    let mut stream = KindTokenIter::new(source);
+    let mut stream_done = false;
+    // Line-layout state of the tokens buffered so far (kept across
+    // fills): a content token starts a top-level item iff it is the
+    // first content of its line and the line has no leading
+    // whitespace.
+    let mut at_line_start = true;
+    let mut line_has_whitespace = false;
     let mut i = 0;
 
-    while i < tokens.len() {
-        let (kind, ref range) = tokens[i];
-        if kind.is_trivia() {
-            pending_leading.push((kind, range.clone()));
-            i += 1;
-            continue;
+    loop {
+        // Drop the consumed prefix so the window stays item-sized.
+        //
+        // Amortized: only compact once the consumed prefix is at least
+        // half the buffer. When no col-0 item follows (every remaining
+        // item is indented) the window holds the rest of the file, and
+        // draining on every item would shift the whole tail each time:
+        // O(N^2) (40k indented transactions took 6.5 s). With the
+        // half-buffer rule a drain moves at most as many tokens as it
+        // drops, so total movement is O(N). In the common case `i` sits
+        // at the next item start, i.e. at the end of an item-sized
+        // window, so the condition holds and the window stays small.
+        // Below the threshold `i` simply carries over as the read
+        // offset; `item_starts` stays in absolute window indices.
+        while matches!(item_starts.front(), Some(&k) if k <= i) {
+            item_starts.pop_front();
+        }
+        if i > 0 && i * 2 >= tokens.len() {
+            #[cfg(test)]
+            test_counters::TOKENS_MOVED.with(|c| c.set(c.get() + (tokens.len() - i)));
+            tokens.drain(..i);
+            for start in &mut item_starts {
+                *start -= i;
+            }
+            i = 0;
+        }
+
+        // Skip the next item's leading trivia (rule 2 accumulates it
+        // in `pending_leading`) and pull tokens until the window holds
+        // the item's first content token AND the start of the NEXT
+        // top-level item; the current item is then fully buffered,
+        // because every emit helper below terminates at the next
+        // non-indented line (blank line, col-0 comment, top-level
+        // content) or EOF.
+        loop {
+            while i < tokens.len() && tokens[i].0.is_trivia() {
+                pending_leading.push((tokens[i].0, tokens[i].1.clone()));
+                i += 1;
+            }
+            if matches!(item_starts.back(), Some(&k) if k > i) || stream_done {
+                break;
+            }
+            let Some((kind, range)) = stream.next() else {
+                stream_done = true;
+                break;
+            };
+            let idx = tokens.len();
+            let is_content = !kind.is_trivia();
+            if is_content && at_line_start && !line_has_whitespace {
+                item_starts.push_back(idx);
+            }
+            match kind {
+                SyntaxKind::NEWLINE => {
+                    at_line_start = true;
+                    line_has_whitespace = false;
+                }
+                SyntaxKind::WHITESPACE if at_line_start => line_has_whitespace = true,
+                _ if is_content => at_line_start = false,
+                _ => {}
+            }
+            tokens.push((kind, range));
+        }
+
+        if i >= tokens.len() {
+            break;
         }
 
         // Non-trivia at the top level. Identify what kind of line
@@ -140,6 +221,20 @@ pub fn parse_structured(source: &str) -> SyntaxNode {
 
     builder.finish_node();
     SyntaxNode::new_root(builder.finish())
+}
+
+/// Test-only instrumentation for [`parse_structured`]'s token window.
+#[cfg(test)]
+mod test_counters {
+    use std::cell::Cell;
+
+    thread_local! {
+        /// Total number of retained tokens shifted by window compaction
+        /// (`tokens.drain(..i)` moves `tokens.len() - i` entries). A
+        /// deterministic proxy for the compaction cost: it must stay
+        /// O(N) in the token count, never O(N^2).
+        pub(super) static TOKENS_MOVED: Cell<usize> = const { Cell::new(0) };
+    }
 }
 
 /// Emit a sequence of `(kind, range)` tokens into the builder.
@@ -1221,6 +1316,125 @@ mod tests {
         assert_eq!(tree.text().to_string(), source);
         let structured = parse_structured(source);
         assert_eq!(structured.text().to_string(), source);
+    }
+
+    /// `n` transactions, every line indented (no col-0 content), so the
+    /// streaming window can never find a following top-level item and
+    /// holds the rest of the file. `col0_every` (if non-zero) puts every
+    /// `col0_every`-th transaction at column 0 instead, mixing both
+    /// window shapes.
+    fn indented_transactions(n: usize, col0_every: usize) -> String {
+        use std::fmt::Write as _;
+        let mut s = String::new();
+        for k in 0..n {
+            let indent = if col0_every != 0 && k % col0_every == 0 {
+                ""
+            } else {
+                "  "
+            };
+            writeln!(
+                s,
+                "{indent}2024-01-{:02} * \"Payee {k}\" \"narration\"\n    \
+                 Assets:Bank:Checking  -{k}.00 USD\n    Expenses:Food\n",
+                k % 28 + 1
+            )
+            .expect("write to String");
+        }
+        s
+    }
+
+    fn tokens_moved_for(source: &str) -> usize {
+        test_counters::TOKENS_MOVED.with(|c| c.set(0));
+        let tree = parse_structured(source);
+        assert_eq!(tree.text().to_string(), source);
+        test_counters::TOKENS_MOVED.with(std::cell::Cell::get)
+    }
+
+    /// Regression guard for quadratic window compaction: with every item
+    /// indented the window holds the rest of the file, and draining the
+    /// consumed prefix on every item shifted the whole tail each time
+    /// (40k indented transactions took 6.5 s vs 81 ms). The counter of
+    /// tokens moved by compaction is deterministic, so this asserts the
+    /// O(N) bound directly instead of timing anything.
+    #[test]
+    fn test_parse_structured_indented_items_compaction_is_linear() {
+        for n in [500, 2000] {
+            let source = indented_transactions(n, 0);
+            let token_count = lossless_kind_tokens(&source).len();
+            let moved = tokens_moved_for(&source);
+            // Amortized halving moves at most `token_count` tokens in
+            // total; the quadratic version moved ~token_count^2 / 2
+            // (millions here).
+            assert!(
+                moved <= token_count,
+                "n={n}: compaction moved {moved} tokens for {token_count} total (quadratic?)"
+            );
+        }
+    }
+
+    /// Same bound for ordinary col-0 input and a mix of both shapes.
+    #[test]
+    fn test_parse_structured_mixed_items_compaction_is_linear() {
+        for col0_every in [1, 3, 50] {
+            let source = indented_transactions(2000, col0_every);
+            let token_count = lossless_kind_tokens(&source).len();
+            let moved = tokens_moved_for(&source);
+            assert!(
+                moved <= token_count,
+                "col0_every={col0_every}: compaction moved {moved} tokens for {token_count} total"
+            );
+        }
+    }
+
+    /// Correctness: indented items (alone and mixed with col-0 items, so
+    /// compaction fires at varying offsets with live `item_starts`) still
+    /// parse to one `TRANSACTION` per item, each with its two postings,
+    /// and the AST conversion sees every transaction.
+    #[test]
+    fn test_parse_structured_indented_items_tree_shape() {
+        for col0_every in [0, 1, 3, 7] {
+            let n = 300;
+            let source = indented_transactions(n, col0_every);
+            let tree = parse_structured(&source);
+            assert_eq!(tree.text().to_string(), source);
+            let txns: Vec<_> = tree
+                .children()
+                .filter(|c| c.kind() == SyntaxKind::TRANSACTION)
+                .collect();
+            assert_eq!(
+                tree.children().count(),
+                n,
+                "col0_every={col0_every}: unexpected non-transaction top-level nodes"
+            );
+            assert_eq!(txns.len(), n, "col0_every={col0_every}");
+            for (k, txn) in txns.iter().enumerate() {
+                let postings = txn
+                    .children()
+                    .filter(|c| c.kind() == SyntaxKind::POSTING)
+                    .count();
+                assert_eq!(postings, 2, "col0_every={col0_every}, txn {k}");
+                assert!(
+                    txn.text().to_string().contains(&format!("\"Payee {k}\"")),
+                    "col0_every={col0_every}: txn {k} out of order"
+                );
+            }
+            // The AST layer rejects each indented directive with exactly
+            // one column-0 error (Python beancount compat) and nothing
+            // else: no item was split, merged, or dropped by the window.
+            let indented = (0..n)
+                .filter(|k| col0_every == 0 || k % col0_every != 0)
+                .count();
+            let result = crate::cst::parse_via_cst(&source);
+            assert_eq!(result.errors.len(), indented, "col0_every={col0_every}");
+            assert!(
+                result
+                    .errors
+                    .iter()
+                    .all(|e| e.to_string().contains("must start at column 0")),
+                "col0_every={col0_every}: {:?}",
+                result.errors
+            );
+        }
     }
 
     /// Drift guard: `is_comment_token` and `is_trivia` must agree on

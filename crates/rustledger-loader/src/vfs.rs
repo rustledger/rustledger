@@ -5,10 +5,10 @@
 //! file maps (useful for WASM environments).
 
 use crate::LoadError;
+use crate::source_map::SourceText;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 
 /// Abstract file system interface for file loading.
 ///
@@ -21,7 +21,7 @@ pub trait FileSystem: Send + Sync + std::fmt::Debug {
     /// # Errors
     ///
     /// Returns [`LoadError::Io`] if the file cannot be read.
-    fn read(&self, path: &Path) -> Result<Arc<str>, LoadError>;
+    fn read(&self, path: &Path) -> Result<SourceText, LoadError>;
 
     /// Check if a file exists at the given path.
     fn exists(&self, path: &Path) -> bool;
@@ -94,8 +94,8 @@ pub trait FileSystem: Send + Sync + std::fmt::Debug {
     /// # Errors
     ///
     /// Returns [`LoadError::Decryption`] if decryption fails.
-    fn decrypt(&self, path: &Path) -> Result<Arc<str>, LoadError> {
-        crate::decrypt_gpg_file(path).map(Arc::from)
+    fn decrypt(&self, path: &Path) -> Result<SourceText, LoadError> {
+        crate::decrypt_gpg_file(path).map(SourceText::from)
     }
 }
 
@@ -113,7 +113,7 @@ impl FileSystem for DiskFileSystem {
         path.is_dir()
     }
 
-    fn read(&self, path: &Path) -> Result<Arc<str>, LoadError> {
+    fn read(&self, path: &Path) -> Result<SourceText, LoadError> {
         let bytes = fs::read(path).map_err(|e| LoadError::Io {
             path: path.to_path_buf(),
             error: e,
@@ -231,7 +231,7 @@ fn lexical_absolute(path: &Path) -> PathBuf {
 /// ```
 #[derive(Debug, Default, Clone)]
 pub struct VirtualFileSystem {
-    files: HashMap<PathBuf, Arc<str>>,
+    files: HashMap<PathBuf, SourceText>,
 }
 
 impl VirtualFileSystem {
@@ -286,7 +286,7 @@ impl VirtualFileSystem {
 }
 
 impl FileSystem for VirtualFileSystem {
-    fn read(&self, path: &Path) -> Result<Arc<str>, LoadError> {
+    fn read(&self, path: &Path) -> Result<SourceText, LoadError> {
         let normalized = normalize_vfs_path(path);
 
         self.files

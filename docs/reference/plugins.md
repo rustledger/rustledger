@@ -510,7 +510,7 @@ plugin "beancount_options.check_option_assignment"
 
 The correct entry drops the income line and writes the stock lot as `{222.00 USD}`.
 
-Its Python counterpart in [beancount-options](https://github.com/rustledger/beancount-options) is not released yet, so until it is, `bean-check` and Fava fail on this `plugin` line. To keep a file portable meanwhile, leave the line out and enable the plugin on the command line: `rledger check --native-plugin check_option_assignment ledger.beancount`.
+Its Python counterpart is `beancount_options.check_option_assignment` in [beancount-options](https://github.com/rustledger/beancount-options), so the same `plugin` line runs the native plugin under `rledger` and the Python one under `bean-check` and Fava, with the same messages at the same lines. Two results differ: amounts past the supported decimal range, which the Python plugin checks normally instead of reporting `assignment not checked`, and a config string, which beancount lists among its errors because it has no warning severity.
 
 Options: None. A config string gives a warning and is ignored.
 
@@ -934,6 +934,7 @@ Most Python beancount plugins have native equivalents:
 | `unrealized` | ✅ `unrealized` |
 | `rename_accounts` | ✅ `rename_accounts` |
 | `beancount_options.check_option_expiry` | ✅ `check_option_expiry` |
+| `beancount_options.check_option_assignment` | ✅ `check_option_assignment` |
 | Custom Python | Rewrite in Rust |
 
 ### Python Plugin Limitations

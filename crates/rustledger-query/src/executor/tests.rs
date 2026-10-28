@@ -1345,13 +1345,13 @@ fn test_source_location_columns_return_null_without_sources() {
 
 #[test]
 fn test_source_location_columns_with_sources() {
-    use rustledger_loader::SourceMap;
+    use rustledger_loader::{SourceMap, SourceText};
     use rustledger_parser::Spanned;
-    use std::sync::Arc;
 
     // Create a source map with a test file
     let mut source_map = SourceMap::new();
-    let source: Arc<str> = "2024-01-15 * \"Test\"\n  Assets:Bank  100 USD\n  Expenses:Food".into();
+    let source: SourceText =
+        "2024-01-15 * \"Test\"\n  Assets:Bank  100 USD\n  Expenses:Food".into();
     let file_id = source_map.add_file("test.beancount".into(), source);
 
     // Create a spanned directive
@@ -1414,12 +1414,11 @@ fn test_source_location_columns_with_sources() {
 /// `resolved_directives()` (like `SELECT`/`PRINT`/`BALANCES`).
 #[test]
 fn test_journal_via_source_mapped_executor_returns_rows() {
-    use rustledger_loader::SourceMap;
+    use rustledger_loader::{SourceMap, SourceText};
     use rustledger_parser::{Span, Spanned};
-    use std::sync::Arc;
 
     let mut source_map = SourceMap::new();
-    let source: Arc<str> =
+    let source: SourceText =
         "2024-01-15 * \"Lunch\"\n  Assets:Cash  -12.00 USD\n  Expenses:Food  12.00 USD".into();
     let file_id = source_map.add_file("test.beancount".into(), source);
 
@@ -1512,12 +1511,11 @@ fn test_system_table_via_source_mapped_executor() {
 
 #[test]
 fn test_per_posting_source_location() {
-    use rustledger_loader::SourceMap;
+    use rustledger_loader::{SourceMap, SourceText};
     use rustledger_parser::{Span, Spanned};
-    use std::sync::Arc;
 
     // Line 1: header, line 2: Assets:Bank, line 3: Expenses:Food.
-    let source: Arc<str> =
+    let source: SourceText =
         "2024-01-15 * \"Test\"\n  Assets:Bank  100 USD\n  Expenses:Food  -100 USD".into();
     let mut source_map = SourceMap::new();
     let file_id = source_map.add_file("test.beancount".into(), source) as u16;
@@ -1571,11 +1569,10 @@ fn test_per_posting_source_location() {
 
 #[test]
 fn test_meta_includes_source_location() {
-    use rustledger_loader::SourceMap;
+    use rustledger_loader::{SourceMap, SourceText};
     use rustledger_parser::{Span, Spanned};
-    use std::sync::Arc;
 
-    let source: Arc<str> =
+    let source: SourceText =
         "2024-01-15 * \"Test\"\n  Assets:Bank  100 USD\n  Expenses:Food  -100 USD".into();
     let mut source_map = SourceMap::new();
     let file_id = source_map.add_file("test.beancount".into(), source) as u16;
@@ -2450,10 +2447,10 @@ fn issue_2153_functions_guard_their_arguments() {
 /// currency path.
 #[test]
 fn commodity_meta_resolves_under_the_sourced_constructor() {
-    use rustledger_loader::SourceMap;
+    use rustledger_loader::{SourceMap, SourceText};
 
     let mut source_map = SourceMap::new();
-    let source: std::sync::Arc<str> = "2024-01-01 commodity USD\n  name: \"US Dollar\"\n".into();
+    let source: SourceText = "2024-01-01 commodity USD\n  name: \"US Dollar\"\n".into();
     let file_id = source_map.add_file("test.beancount".into(), source);
 
     let mut usd_meta: Metadata = Metadata::default();

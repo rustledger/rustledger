@@ -532,7 +532,7 @@ fn convert_open(
         account,
         currencies,
         booking,
-        meta,
+        meta: meta.into(),
     };
     Some(Spanned::new(Directive::Open(open), span))
 }
@@ -550,7 +550,7 @@ fn convert_close(
     let close = rustledger_core::directive::Close {
         date,
         account,
-        meta,
+        meta: meta.into(),
     };
     let span = node_span(node.syntax(), bom_offset);
     Some(Spanned::new(Directive::Close(close), span))
@@ -569,7 +569,7 @@ fn convert_commodity(
     let commodity = rustledger_core::directive::Commodity {
         date,
         currency,
-        meta,
+        meta: meta.into(),
     };
     let span = node_span(node.syntax(), bom_offset);
     Some(Spanned::new(Directive::Commodity(commodity), span))
@@ -642,7 +642,7 @@ fn convert_note(
         comment,
         tags,
         links,
-        meta,
+        meta: meta.into(),
     };
     let span = node_span(node.syntax(), bom_offset);
     Some(Spanned::new(Directive::Note(note), span))
@@ -671,7 +671,7 @@ fn convert_document(
         path,
         tags,
         links,
-        meta,
+        meta: meta.into(),
     };
     let span = node_span(node.syntax(), bom_offset);
     Some(Spanned::new(Directive::Document(document), span))
@@ -692,7 +692,7 @@ fn convert_event(
         date,
         event_type,
         value,
-        meta,
+        meta: meta.into(),
     };
     let span = node_span(node.syntax(), bom_offset);
     Some(Spanned::new(Directive::Event(event), span))
@@ -723,7 +723,7 @@ fn convert_query(
         date,
         name,
         query,
-        meta,
+        meta: meta.into(),
     };
     let span = node_span(node.syntax(), bom_offset);
     Some(Spanned::new(Directive::Query(q), span))
@@ -840,7 +840,7 @@ fn convert_price(
         date,
         currency: base_currency,
         amount,
-        meta,
+        meta: meta.into(),
     };
     let span = node_span(node.syntax(), bom_offset);
     Some(Spanned::new(Directive::Price(price), span))
@@ -896,7 +896,7 @@ fn convert_balance(
         account,
         amount,
         tolerance,
-        meta,
+        meta: meta.into(),
     };
     let span = node_span(node.syntax(), bom_offset);
     Some(Spanned::new(Directive::Balance(balance), span))
@@ -1105,7 +1105,7 @@ fn convert_pad(
         date,
         account,
         source_account,
-        meta,
+        meta: meta.into(),
     };
     let span = node_span(node.syntax(), bom_offset);
     Some(Spanned::new(Directive::Pad(pad), span))
@@ -1125,7 +1125,7 @@ fn convert_custom(
         date,
         custom_type,
         values,
-        meta,
+        meta: meta.into(),
     };
     let span = node_span(node.syntax(), bom_offset);
     Some(Spanned::new(Directive::Custom(custom), span))
@@ -2748,7 +2748,7 @@ fn apply_inherited_state(
         return;
     }
     let meta = match value {
-        Directive::Transaction(d) => d.meta.get_or_create_mut(),
+        Directive::Transaction(d) => &mut d.meta,
         Directive::Balance(d) => &mut d.meta,
         Directive::Open(d) => &mut d.meta,
         Directive::Close(d) => &mut d.meta,
@@ -6211,7 +6211,7 @@ mod tests {
         let Some(Directive::Open(open)) = result.directives.first().map(|d| &d.value) else {
             panic!("expected an Open from {src:?}, errors {:?}", result.errors);
         };
-        open.meta.clone()
+        open.meta.clone().into_inner()
     }
 
     fn custom_values(line: &str) -> Vec<MetaValue> {

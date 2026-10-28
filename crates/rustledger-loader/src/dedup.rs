@@ -26,7 +26,7 @@
 //! parsed-ledger constructor call it explicitly.
 
 use rustledger_core::intern::{InternedStr, StringInterner};
-use rustledger_core::{Directive, IncompleteAmount, MetaValue, Metadata};
+use rustledger_core::{Directive, IncompleteAmount, MetaMap, MetaValue};
 use rustledger_parser::Spanned;
 
 /// Re-intern all strings in directives to deduplicate memory.
@@ -107,7 +107,8 @@ fn intern_typed_set<T: Ord>(
     });
 }
 
-/// Re-intern the typed identifier payloads in a [`Metadata`] map.
+/// Re-intern the typed identifier payloads in a [`MetaMap`]. Visits only
+/// an attached map, so an empty one stays unallocated.
 ///
 /// `MetaValue::{Account, Currency, Tag, Link}` payloads went unwalked
 /// before this pass — meaning cross-file (and especially plugin-emitted)
@@ -115,7 +116,10 @@ fn intern_typed_set<T: Ord>(
 /// referenced identical strings. The Amount variant's currency field is
 /// also walked. Other variants (`String`, `Number`, `Date`, `Bool`,
 /// `None`) carry no interned data.
-fn intern_meta(meta: &mut Metadata, interner: &mut StringInterner, dedup_count: &mut usize) {
+fn intern_meta(meta: &mut MetaMap, interner: &mut StringInterner, dedup_count: &mut usize) {
+    let Some(meta) = meta.as_map_mut() else {
+        return;
+    };
     for value in meta.values_mut() {
         match value {
             MetaValue::Account(a) => {
@@ -186,17 +190,13 @@ fn reintern_directive(directive: &mut Directive, interner: &mut StringInterner) 
                 &mut dedup_count,
                 rustledger_core::Link::as_interned_mut,
             );
-            if let Some(meta) = txn.meta.as_map_mut() {
-                intern_meta(meta, interner, &mut dedup_count);
-            }
+            intern_meta(&mut txn.meta, interner, &mut dedup_count);
 
             for posting in &mut txn.postings {
                 if do_intern(posting.account.as_interned_mut(), interner) {
                     dedup_count += 1;
                 }
-                if let Some(meta) = posting.meta.as_map_mut() {
-                    intern_meta(meta, interner, &mut dedup_count);
-                }
+                intern_meta(&mut posting.meta, interner, &mut dedup_count);
                 // Units
                 if let Some(ref mut units) = posting.units {
                     match units {

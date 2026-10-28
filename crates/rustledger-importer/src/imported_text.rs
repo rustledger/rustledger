@@ -16,7 +16,7 @@
 //!   replacement character, so the text shows that something was there.
 
 use rustledger_core::format::is_display_unsafe;
-use rustledger_core::{Directive, MetaValue, Metadata};
+use rustledger_core::{Directive, MetaMap, MetaValue};
 
 /// `text` with its control characters neutralized, or `None` when it has
 /// none.
@@ -36,8 +36,12 @@ fn neutralize(text: &str) -> Option<String> {
 }
 
 /// Neutralize the string values of `meta`, naming each changed one in
-/// `changed` as `<prefix>metadata "<key>"`.
-fn neutralize_meta(meta: &mut Metadata, prefix: &str, changed: &mut Vec<String>) {
+/// `changed` as `<prefix>metadata "<key>"`. Visits only an attached map,
+/// so an empty one stays unallocated.
+fn neutralize_meta(meta: &mut MetaMap, prefix: &str, changed: &mut Vec<String>) {
+    let Some(meta) = meta.as_map_mut() else {
+        return;
+    };
     let mut keys: Vec<String> = Vec::new();
     for (key, value) in meta.iter_mut() {
         if let MetaValue::String(s) = value
@@ -77,14 +81,10 @@ pub fn neutralize_directive(directive: &mut Directive) -> Vec<String> {
                 txn.narration = clean.into();
                 changed.push("narration".to_string());
             }
-            if let Some(meta) = txn.meta.as_map_mut() {
-                neutralize_meta(meta, "", &mut changed);
-            }
+            neutralize_meta(&mut txn.meta, "", &mut changed);
             for posting in &mut txn.postings {
                 let prefix = format!("posting {} ", posting.account);
-                if let Some(meta) = posting.meta.as_map_mut() {
-                    neutralize_meta(meta, &prefix, &mut changed);
-                }
+                neutralize_meta(&mut posting.meta, &prefix, &mut changed);
             }
         }
         Directive::Note(note) => {

@@ -555,7 +555,10 @@ impl<'a> Executor<'a> {
                     // that declares `commodity USD` twice resolves to the
                     // later directive's metadata. `or_insert_with` here kept
                     // the FIRST and disagreed.
-                    commodity_meta.insert(commodity.currency.to_string(), commodity.meta.clone());
+                    commodity_meta.insert(
+                        commodity.currency.to_string(),
+                        commodity.meta.clone().into_inner(),
+                    );
                 }
                 _ => {}
             }
@@ -721,7 +724,10 @@ impl<'a> Executor<'a> {
                     // that declares `commodity USD` twice resolves to the
                     // later directive's metadata. `or_insert_with` here kept
                     // the FIRST and disagreed.
-                    commodity_meta.insert(commodity.currency.to_string(), commodity.meta.clone());
+                    commodity_meta.insert(
+                        commodity.currency.to_string(),
+                        commodity.meta.clone().into_inner(),
+                    );
                 }
                 _ => {}
             }

@@ -30,16 +30,31 @@ use std::ops::Deref;
 
 /// A sorted, duplicate-free list. See the [module docs](self).
 ///
+/// Stored as `Option<Box<Vec<T>>>`: 8 bytes on the directive and no
+/// allocation while empty, which is the overwhelmingly common case for
+/// tags and links. The `Option` niches through the box (a plain
+/// `Option<Box<[T]>>` would be a 16-byte fat pointer and a bare `Vec` 24).
+/// [`Self::as_slice`] and [`Deref`] read without allocating; the mutating
+/// methods allocate on first write only, and [`Self::remove`] /
+/// [`Self::retain`] drop the box when the set becomes empty, so `None` is
+/// the only empty representation a mutation leaves behind.
+///
 /// The rkyv archive stores the backing `Vec` as is. Archives are only ever
 /// written from a `SortedSet`, which already holds the invariant, so reading one
 /// back yields a valid set; a change to the invariant itself must bump the
 /// caches' `CACHE_VERSION`.
-#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
+#[derive(Debug, Clone)]
 #[cfg_attr(
     feature = "rkyv",
     derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)
 )]
-pub struct SortedSet<T>(Vec<T>);
+// `Box<Vec<_>>` is deliberate: the `Option` niches through the box to 8
+// bytes. The box IS the storage decision this type exists for.
+#[allow(
+    clippy::box_collection,
+    reason = "Option<Box<Vec<_>>> niches to 8 bytes"
+)]
+pub struct SortedSet<T>(Option<Box<Vec<T>>>);
 
 /// The tags of a transaction, note or document.
 pub type TagSet = SortedSet<crate::Tag>;
@@ -51,38 +66,44 @@ impl<T> SortedSet<T> {
     /// An empty set.
     #[must_use]
     pub const fn new() -> Self {
-        Self(Vec::new())
+        Self(None)
     }
 
     /// The elements, sorted and unique.
     #[must_use]
     pub fn as_slice(&self) -> &[T] {
-        &self.0
+        self.0.as_deref().map_or(&[], Vec::as_slice)
     }
 
     /// Unwrap into the backing `Vec`, sorted and unique.
     #[must_use]
     pub fn into_vec(self) -> Vec<T> {
-        self.0
+        self.0.map(|v| *v).unwrap_or_default()
     }
 }
 
 impl<T: Ord> SortedSet<T> {
     /// Sort and deduplicate `v`. Every constructor funnels through here.
+    /// An empty result is stored as `None`, the canonical empty set.
     #[must_use]
     pub fn from_vec(mut v: Vec<T>) -> Self {
         v.sort_unstable();
         v.dedup();
-        Self(v)
+        if v.is_empty() {
+            Self(None)
+        } else {
+            Self(Some(Box::new(v)))
+        }
     }
 
     /// Insert `value`, keeping the set sorted. Returns `false` if it was
     /// already present (the set is then unchanged).
     pub fn insert(&mut self, value: T) -> bool {
-        match self.0.binary_search(&value) {
+        let vec = self.0.get_or_insert_with(Default::default);
+        match vec.binary_search(&value) {
             Ok(_) => false,
             Err(at) => {
-                self.0.insert(at, value);
+                vec.insert(at, value);
                 true
             }
         }
@@ -94,9 +115,15 @@ impl<T: Ord> SortedSet<T> {
         T: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        match self.0.binary_search_by(|e| e.borrow().cmp(value)) {
+        let Some(vec) = self.0.as_mut() else {
+            return false;
+        };
+        match vec.binary_search_by(|e| e.borrow().cmp(value)) {
             Ok(at) => {
-                self.0.remove(at);
+                vec.remove(at);
+                if vec.is_empty() {
+                    self.0 = None;
+                }
                 true
             }
             Err(_) => false,
@@ -110,13 +137,20 @@ impl<T: Ord> SortedSet<T> {
         T: Borrow<Q>,
         Q: Ord + ?Sized,
     {
-        self.0.binary_search_by(|e| e.borrow().cmp(value)).is_ok()
+        self.as_slice()
+            .binary_search_by(|e| e.borrow().cmp(value))
+            .is_ok()
     }
 
     /// Keep only the elements for which `f` returns `true`. Removing elements
     /// cannot break the order, so no re-sort is needed.
     pub fn retain(&mut self, f: impl FnMut(&T) -> bool) {
-        self.0.retain(f);
+        if let Some(vec) = self.0.as_mut() {
+            vec.retain(f);
+            if vec.is_empty() {
+                self.0 = None;
+            }
+        }
     }
 
     /// Mutate every element in place, then restore the invariant.
@@ -125,10 +159,13 @@ impl<T: Ord> SortedSet<T> {
     /// identifier at the workspace interner's `Arc`. A closure that changes
     /// values is still safe: the set is re-sorted and re-deduplicated after.
     pub fn for_each_mut(&mut self, f: impl FnMut(&mut T)) {
-        self.0.iter_mut().for_each(f);
-        if !self.0.is_sorted_by(|a, b| a < b) {
-            self.0.sort_unstable();
-            self.0.dedup();
+        let Some(vec) = self.0.as_mut() else {
+            return;
+        };
+        vec.iter_mut().for_each(f);
+        if !vec.is_sorted_by(|a, b| a < b) {
+            vec.sort_unstable();
+            vec.dedup();
         }
     }
 }
@@ -142,13 +179,13 @@ impl<T> Default for SortedSet<T> {
 impl<T> Deref for SortedSet<T> {
     type Target = [T];
     fn deref(&self) -> &[T] {
-        &self.0
+        self.as_slice()
     }
 }
 
 impl<T> AsRef<[T]> for SortedSet<T> {
     fn as_ref(&self) -> &[T] {
-        &self.0
+        self.as_slice()
     }
 }
 
@@ -166,7 +203,7 @@ impl<T: Ord, const N: usize> From<[T; N]> for SortedSet<T> {
 
 impl<T> From<SortedSet<T>> for Vec<T> {
     fn from(s: SortedSet<T>) -> Self {
-        s.0
+        s.into_vec()
     }
 }
 
@@ -178,11 +215,19 @@ impl<T: Ord> FromIterator<T> for SortedSet<T> {
 
 impl<T: Ord> Extend<T> for SortedSet<T> {
     fn extend<I: IntoIterator<Item = T>>(&mut self, iter: I) {
-        let before = self.0.len();
-        self.0.extend(iter);
-        if self.0.len() != before {
-            self.0.sort_unstable();
-            self.0.dedup();
+        let Some(vec) = self.0.as_mut() else {
+            // An empty set stays unallocated when nothing is added.
+            let v: Vec<T> = iter.into_iter().collect();
+            if !v.is_empty() {
+                *self = Self::from_vec(v);
+            }
+            return;
+        };
+        let before = vec.len();
+        vec.extend(iter);
+        if vec.len() != before {
+            vec.sort_unstable();
+            vec.dedup();
         }
     }
 }
@@ -191,7 +236,7 @@ impl<T> IntoIterator for SortedSet<T> {
     type Item = T;
     type IntoIter = std::vec::IntoIter<T>;
     fn into_iter(self) -> Self::IntoIter {
-        self.0.into_iter()
+        self.into_vec().into_iter()
     }
 }
 
@@ -199,7 +244,35 @@ impl<'a, T> IntoIterator for &'a SortedSet<T> {
     type Item = &'a T;
     type IntoIter = std::slice::Iter<'a, T>;
     fn into_iter(self) -> Self::IntoIter {
-        self.0.iter()
+        self.as_slice().iter()
+    }
+}
+
+/// Equality is on the elements only: an empty set is `None` or
+/// `Some(empty)` with no observable difference.
+impl<T: PartialEq> PartialEq for SortedSet<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.as_slice() == other.as_slice()
+    }
+}
+
+impl<T: Eq> Eq for SortedSet<T> {}
+
+impl<T: PartialOrd> PartialOrd for SortedSet<T> {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        self.as_slice().partial_cmp(other.as_slice())
+    }
+}
+
+impl<T: Ord> Ord for SortedSet<T> {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        self.as_slice().cmp(other.as_slice())
+    }
+}
+
+impl<T: std::hash::Hash> std::hash::Hash for SortedSet<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.as_slice().hash(state);
     }
 }
 
@@ -207,27 +280,27 @@ impl<'a, T> IntoIterator for &'a SortedSet<T> {
 /// itself sorted and unique never equals a set.
 impl<T: PartialEq<U>, U> PartialEq<Vec<U>> for SortedSet<T> {
     fn eq(&self, other: &Vec<U>) -> bool {
-        self.0.as_slice() == other.as_slice()
+        self.as_slice() == other.as_slice()
     }
 }
 
 /// See the `PartialEq<Vec<U>>` impl.
 impl<T: PartialEq<U>, U> PartialEq<[U]> for SortedSet<T> {
     fn eq(&self, other: &[U]) -> bool {
-        self.0.as_slice() == other
+        self.as_slice() == other
     }
 }
 
 /// See the `PartialEq<Vec<U>>` impl.
 impl<T: PartialEq<U>, U, const N: usize> PartialEq<[U; N]> for SortedSet<T> {
     fn eq(&self, other: &[U; N]) -> bool {
-        self.0.as_slice() == other.as_slice()
+        self.as_slice() == other.as_slice()
     }
 }
 
 impl<T: serde::Serialize> serde::Serialize for SortedSet<T> {
     fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
-        self.0.serialize(serializer)
+        self.as_slice().serialize(serializer)
     }
 }
 
@@ -285,6 +358,34 @@ mod tests {
         // Both elements become "c": the set re-sorts and drops the duplicate.
         s.for_each_mut(|e| *e = "c".into());
         assert_eq!(s, ["c".to_string()]);
+    }
+
+    fn hash_of<T: std::hash::Hash>(value: &T) -> u64 {
+        use std::hash::{BuildHasher, BuildHasherDefault};
+        BuildHasherDefault::<std::collections::hash_map::DefaultHasher>::default().hash_one(value)
+    }
+
+    fn assert_canonical_empty(s: &TagSet) {
+        let empty = SortedSet::new();
+        assert!(s.0.is_none(), "an emptied set kept its box");
+        assert_eq!(*s, empty);
+        assert_eq!(s.cmp(&empty), std::cmp::Ordering::Equal);
+        assert_eq!(hash_of(s), hash_of(&empty));
+    }
+
+    #[test]
+    fn test_sorted_set_emptied_by_remove_equals_new() {
+        let mut s = TagSet::new();
+        assert!(s.insert(Tag::from("x")));
+        assert!(s.remove("x"));
+        assert_canonical_empty(&s);
+    }
+
+    #[test]
+    fn test_sorted_set_emptied_by_retain_equals_new() {
+        let mut s: TagSet = ["a", "b"].into_iter().map(Tag::from).collect();
+        s.retain(|_| false);
+        assert_canonical_empty(&s);
     }
 
     proptest! {

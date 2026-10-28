@@ -4577,7 +4577,7 @@ mod budget_validation_tests {
             date,
             custom_type: "budget".to_string(),
             values,
-            meta: rustledger_core::Metadata::default(),
+            meta: Default::default(),
         }
     }
 

@@ -306,7 +306,11 @@ use crate::types::{Error, LedgerOptions};
 /// `fix/option-assignment-fee-window-guard` (handed over `569cf8099b`)
 /// claimed v56 first for its plugin-error archive change, and parallel
 /// bumps keep DISTINCT numbers (see v55's note).
-pub const CACHE_VERSION: u32 = 57;
+/// v58: every variant's `meta` map is a `MetaMap` and `SortedSet` holds
+/// its elements in an `Option<Box<Vec<T>>>`, mirroring loader v43. The
+/// archived fields moved the same way v57's did, so a v57 blob reads the
+/// new structs at the wrong offsets.
+pub const CACHE_VERSION: u32 = 58;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -338,7 +342,7 @@ pub const CACHE_VERSION: u32 = 57;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 42;
+const LOADER_CACHE_VERSION_PIN: u32 = 43;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";
@@ -537,7 +541,11 @@ mod tests {
         // `Option<Box<..>>` where they were a bare map/`Vec`. That is a
         // layout change, not an output one -- the fixture's values parse
         // the same, the bytes sit at different offsets.
-        const DIRECTIVE_LAYOUT_HASH: u64 = 0x9616_8a8e_badf_9fef;
+        //
+        // Moved again for the variant `MetaMap`/`SortedSet` boxing (loader
+        // v43): same shape move on the other directives' meta maps and on
+        // every tag/link set.
+        const DIRECTIVE_LAYOUT_HASH: u64 = 0x9e33_32f4_02ec_1492;
 
         // One of every `Directive` variant, in declaration order.
         let src = "\
@@ -645,15 +653,13 @@ mod tests {
         //
         // Moved once more for the `MetaMap`/`CommentList` boxing, which is a
         // layout change in the archived directives rather than a reordering
-        // or a rebooking -- see `directive_archived_form_is_pinned`.
-        //
-        // And again, still within v57, when the load pipeline stopped
-        // leaving an empty `Some(Box<Metadata>)` on every posting and
-        // transaction it merely visited (the `MetaMap` `DerefMut` removal):
-        // those maps now archive as `None`.
-        // A blob holding the old `Some(empty)` still reads back as an equal
-        // empty map, so no further version bump is needed.
-        const PROCESSED_LAYOUT_HASH: u64 = 0x4126_ef98_6890_0872;
+        // or a rebooking -- see `directive_archived_form_is_pinned`. And
+        // once more for the variant `MetaMap`/`SortedSet` boxing (loader
+        // v43), the same shape move on the remaining meta maps and the
+        // tag/link sets. (Within v57 the hash had also moved when the load
+        // pipeline stopped leaving an empty `Some(Box<Metadata>)` on every
+        // posting and transaction it merely visited; v58 covers both.)
+        const PROCESSED_LAYOUT_HASH: u64 = 0xf09b_417e_6cb6_e098;
 
         let src = "\
 2024-01-01 open Assets:Bank USD\n\

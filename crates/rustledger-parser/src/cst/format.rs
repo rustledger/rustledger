@@ -1516,8 +1516,8 @@ fn leading_blank_lines(node: &crate::SyntaxNode) -> usize {
 }
 
 /// Walk the directive's direct-child tokens until the first
-/// non-trivia token, emitting each `COMMENT` (and `PERCENT_COMMENT`)
-/// on its own line. Whitespace and newlines in the leading region
+/// non-trivia token, emitting each line comment (every kind
+/// `convert::is_comment_kind` accepts) on its own line. Whitespace and newlines in the leading region
 /// are ignored — the canonical form controls inter-directive
 /// blank-line spacing separately.
 fn emit_leading_comments(node: &crate::SyntaxNode, out: &mut String) {

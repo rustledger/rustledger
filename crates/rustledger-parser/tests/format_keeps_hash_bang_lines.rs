@@ -68,3 +68,19 @@ fn test_try_format_source_keeps_hash_bang_lines_at_the_file_edges() {
     assert_kept("top of file", "#!x\n#+y\n2024-01-01 open Assets:A\n");
     assert_kept("end of file", "2024-01-01 open Assets:A\n#!x\n");
 }
+
+#[test]
+fn test_try_format_source_keeps_hash_bang_lines_in_metadata_blocks() {
+    assert_kept(
+        "posting metadata",
+        "2024-01-01 * \"x\"\n  Assets:A  1 USD\n    aa: \"v1\"\n    #!m\n    bb: \"v2\"\n  Assets:B\n",
+    );
+    assert_kept(
+        "directive metadata",
+        "2024-01-01 open Assets:A\n  aa: \"v1\"\n  #+m\n  bb: \"v2\"\n2024-01-02 open Assets:B\n",
+    );
+    assert_kept(
+        "posting same-line",
+        "2024-01-01 * \"x\"\n  Assets:A  1 USD #!p\n  Assets:B\n",
+    );
+}

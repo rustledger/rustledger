@@ -683,10 +683,13 @@ enum SourceState {
 /// `next_at_line_start`) is a column-0 `#` comment, the lexer's
 /// `Token::Hash` arm in `TokenIter`, unless a tag character follows,
 /// which makes it a `TAG` token instead (#2775). A `#` anywhere else
-/// is a `TAG` / `HASH` token, not a comment.
+/// is a `TAG` / `HASH` token, not a comment. A `*` at line start is
+/// an org-mode heading: the lexer's `Token::Star` arm emits the rest
+/// of the line as one token without lexing it, so a `"` there is
+/// heading text, and the line is treated as a comment here (#2778).
 ///
-/// The column-0 `#` comment closes on the first `\n` or `\r`, like
-/// the others. The lexer keeps a lone `\r` inside it as comment text;
+/// The column-0 `#` comment and the heading close on the first `\n`
+/// or `\r`, like the others. The lexer keeps a lone `\r` inside it as comment text;
 /// a stray `\r` is the subject of #2774, and no fixture here has one.
 const fn advance_source_state(
     ch: char,
@@ -716,10 +719,11 @@ const fn advance_source_state(
             let is_hash_line_comment = ch == '#'
                 && (matches!(peek, Some('!' | '+'))
                     || (at_line_start && !matches!(peek, Some(c) if is_tag_char(c))));
+            let is_org_heading = ch == '*' && at_line_start;
             if ch == '"' {
                 *prev_was_backslash = false;
                 SourceState::InString
-            } else if matches!(ch, ';' | '%') || is_hash_line_comment {
+            } else if matches!(ch, ';' | '%') || is_hash_line_comment || is_org_heading {
                 SourceState::InComment
             } else {
                 SourceState::Code
@@ -3997,6 +4001,18 @@ mod tests {
             "hash_comment_after_mid_file_bom",
             "2024-01-15 open Assets:A\n\u{feff}# 27\" x\n2024-01-16 note Assets:A \"y\"\n",
         ),
+        // An org-mode heading with a `"` is heading text: the lexer emits
+        // the rest of the line as one token and the state machine must
+        // stay out of string state (#2778). The second puts a string on a
+        // later line, which a machine stuck in InString would close on.
+        (
+            "org_heading_with_quote",
+            "* Heading with 27\" monitor\n2024-01-15 open Assets:A\n",
+        ),
+        (
+            "org_heading_quote_then_string",
+            "** Sub \"heading\n2024-01-15 note Assets:A \"x\"\n",
+        ),
         ("pushtag_directive", "pushtag #active\n"),
         ("poptag_directive", "poptag #active\n"),
         ("pushmeta_directive", "pushmeta location: \"NYC\"\n"),
@@ -4856,12 +4872,27 @@ mod tests {
             // each token. Build a per-byte map of expected state.
             let tokens = tokenize_lossless(src);
             let mut expected = vec![SourceState::Code; src.len()];
+            // A column-0 `*` (an org-mode heading) is followed by the
+            // rest of its line as ONE `Error` token that the lexer never
+            // tokenized (#2778): heading text, so comment-like. Requiring
+            // the `*` to sit at line start (after a `\n`, or only BOMs)
+            // keeps a mid-line `*@` (a flag next to junk) out of it.
+            let at_line_start = |pos: usize| {
+                let before = src[..pos].trim_end_matches('\u{FEFF}');
+                before.is_empty() || before.ends_with('\n')
+            };
+            let mut prev: Option<(&Token<'_>, &crate::logos_lexer::Span)> = None;
             for (token, span) in &tokens {
+                let heading_text = matches!(token, Token::Error(_))
+                    && matches!(prev, Some((Token::Star, star))
+                        if star.end == span.start && at_line_start(star.start));
+                prev = Some((token, span));
                 let classify = match token {
                     Token::String(_) => Some(SourceState::InString),
                     Token::Comment(_) | Token::Shebang(_) | Token::EmacsDirective(_) => {
                         Some(SourceState::InComment)
                     }
+                    Token::Error(_) if heading_text => Some(SourceState::InComment),
                     _ => None,
                 };
                 if let Some(state) = classify {

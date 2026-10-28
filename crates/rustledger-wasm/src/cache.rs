@@ -318,7 +318,11 @@ use crate::types::{Error, LedgerOptions};
 /// comment no longer swallows the directives after it; those files parsed
 /// with no errors, so a v59 blob would keep serving them without the
 /// swallowed directives.
-pub const CACHE_VERSION: u32 = 60;
+/// v61: loader v46, PARSER OUTPUT changed (#2778). A `"` in an org-mode `*`
+/// heading no longer swallows the directives after it; those files parsed
+/// with no errors, so a v60 blob would keep serving them without the
+/// swallowed directives.
+pub const CACHE_VERSION: u32 = 61;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -350,7 +354,7 @@ pub const CACHE_VERSION: u32 = 60;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 45;
+const LOADER_CACHE_VERSION_PIN: u32 = 46;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

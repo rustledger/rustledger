@@ -1031,6 +1031,34 @@ mod tests {
         assert!(matches!(tokens[0].0, Token::Comment("; This is a comment")));
     }
 
+    /// A column-0 `#` comment ends exactly where the following `Newline`
+    /// token starts: before the one `\r` that `\r?\n` claims, keeping any
+    /// extra `\r` (#2769).
+    #[test]
+    fn test_tokenize_lossless_hash_comment_ends_before_crlf() {
+        let span = |t: &(Token<'_>, Span)| (t.1.start, t.1.end);
+
+        let tokens = tokenize_lossless("# note\r\n");
+        assert_eq!(tokens.len(), 2);
+        assert!(matches!(tokens[0].0, Token::Comment("# note")));
+        assert!(matches!(tokens[1].0, Token::Newline));
+        assert_eq!((span(&tokens[0]), span(&tokens[1])), ((0, 6), (6, 8)));
+
+        let tokens = tokenize_lossless("# note\r\r\n");
+        assert_eq!(tokens.len(), 2);
+        assert!(matches!(tokens[0].0, Token::Comment("# note\r")));
+        assert_eq!((span(&tokens[0]), span(&tokens[1])), ((0, 7), (7, 9)));
+
+        let tokens = tokenize_lossless("# note\n");
+        assert!(matches!(tokens[0].0, Token::Comment("# note")));
+        assert_eq!((span(&tokens[0]), span(&tokens[1])), ((0, 6), (6, 7)));
+
+        // No `\n` follows, so no newline token claims the `\r`.
+        let tokens = tokenize_lossless("# note\r");
+        assert_eq!(tokens.len(), 1);
+        assert!(matches!(tokens[0].0, Token::Comment("# note\r")));
+    }
+
     #[test]
     fn test_tokenize_indentation() {
         let tokens = tokenize("txn\n  Assets:Bank 100 USD");

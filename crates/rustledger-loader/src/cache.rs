@@ -551,12 +551,18 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     `MetaValue`, `CostNumber` and the map's entry encoding are
 ///     untouched.
 ///
+/// v44: PARSER OUTPUT changed, no archived layout moved (#2769). A column-0
+///     `#` comment on a CRLF line no longer claims the `\r` its line ending
+///     also starts at, so a span that covered such a comment shrinks by one
+///     byte: a file ending in a CRLF `#` comment parsed clean before and
+///     cached its last directive's span one byte past the end of the file.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 43;
+pub const CACHE_VERSION: u32 = 44;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1324,7 +1330,9 @@ mod tests {
         // v43 boxes every variant's meta map and the `SortedSet` backing
         // store; no `CostNumber` is involved, so the byte arrays below
         // still hold.
-        const FIXTURE_VERSION: u32 = 43;
+        // v44 (#2769) changes the spans the parser produces around a CRLF
+        // `#` comment, not any archived encoding; the byte arrays still hold.
+        const FIXTURE_VERSION: u32 = 44;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1452,7 +1460,9 @@ mod tests {
         // v43 boxes every variant's meta map and the `SortedSet` backing
         // store; `MetaValue` itself is archived as before, so the hash
         // below is unchanged.
-        const FIXTURE_VERSION: u32 = 43;
+        // v44 (#2769) changes parser spans around a CRLF `#` comment, not
+        // how a `MetaValue` is archived; the hash below is unchanged.
+        const FIXTURE_VERSION: u32 = 44;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

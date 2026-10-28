@@ -232,20 +232,12 @@ criteria = "safe-to-deploy"
 version = "0.11.3"
 criteria = "safe-to-deploy"
 
-[[exemptions.directories-next]]
-version = "2.0.0"
-criteria = "safe-to-deploy"
-
 [[exemptions.dirs]]
 version = "7.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.dirs-sys]]
 version = "0.5.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.dirs-sys-next]]
-version = "0.1.2"
 criteria = "safe-to-deploy"
 
 [[exemptions.edit]]
@@ -581,10 +573,6 @@ version = "0.9.5"
 criteria = "safe-to-deploy"
 
 [[exemptions.redox_users]]
-version = "0.4.6"
-criteria = "safe-to-deploy"
-
-[[exemptions.redox_users]]
 version = "0.5.2"
 criteria = "safe-to-deploy"
 
@@ -906,16 +894,4 @@ criteria = "safe-to-deploy"
 
 [[exemptions.zlib-rs]]
 version = "0.6.7"
-criteria = "safe-to-deploy"
-
-[[exemptions.zstd]]
-version = "0.13.3"
-criteria = "safe-to-deploy"
-
-[[exemptions.zstd-safe]]
-version = "7.3.0"
-criteria = "safe-to-deploy"
-
-[[exemptions.zstd-sys]]
-version = "2.1.0+zstd.1.5.7"
 criteria = "safe-to-deploy"

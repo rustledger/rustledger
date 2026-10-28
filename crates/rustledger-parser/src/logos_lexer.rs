@@ -3,6 +3,17 @@
 //! This module provides a fast tokenizer for Beancount syntax using the Logos crate,
 //! which generates a DFA-based lexer with SIMD optimizations where available.
 
+// The `Logos` derive on `Token` generates one large lexer function: the
+// workspace builds logos with `state_machine_codegen`, which trades that
+// frame for no per-character recursion on long tokens (#2789). The lint
+// fires on the generated `impl`, which an attribute on the enum does not
+// reach. `expect` rather than `allow`: if the feature is dropped, the
+// expectation goes unfulfilled and clippy points back here.
+#![expect(
+    clippy::large_stack_frames,
+    reason = "state_machine_codegen trades one large lexer frame for no per-character recursion (#2789)"
+)]
+
 use logos::Logos;
 use std::fmt;
 use std::ops::Range;
@@ -58,6 +69,12 @@ impl From<Span> for Range<usize> {
 /// [`tokenize_lossless`] entry point keeps them so the CST can
 /// reconstruct source byte-for-byte. Both paths share the same Logos
 /// implementation — there is exactly one tokenization pass per file.
+///
+/// Built with logos's `state_machine_codegen` (workspace `Cargo.toml`): one
+/// looping state machine, because the default tail-calling functions
+/// recursed per character for long tokens and overflowed the stack (#2789).
+/// That one function has a large frame, which is the trade (see the
+/// module-level `expect` at the top of this file).
 #[derive(Logos, Debug, Clone, PartialEq, Eq)]
 pub enum Token<'src> {
     /// Horizontal whitespace (`[ \t]+`). Significant for the CST and

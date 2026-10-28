@@ -652,10 +652,14 @@ pub(crate) const TOKEN_CAPACITY_CAP: usize = 4 << 20;
 pub(crate) struct TokenIter<'src> {
     lexer: logos::Lexer<'src, Token<'src>>,
     source: &'src str,
-    /// End of the text the current `lexer` sees: the whole source, or,
-    /// after a string scan reached the end of the input, the end of the
-    /// current line (#2784).
+    /// End of the text the current `lexer` sees: the whole source, or, in
+    /// line-at-a-time mode, the end of the current line (#2784).
     lex_end: usize,
+    /// How far line-at-a-time mode lasts: the furthest end of any failed
+    /// string scan that was cut at its line (#2784). Before it, every `"`
+    /// is escaped in the cut scan's alignment, so no later scan can close
+    /// earlier; lexing one line at a time keeps each of them on its line.
+    chunk_until: usize,
     keep_whitespace: bool,
     at_line_start: bool,
     last_newline_end: usize,
@@ -673,6 +677,7 @@ impl<'src> TokenIter<'src> {
             lexer: Token::lexer(source),
             source,
             lex_end: source.len(),
+            chunk_until: 0,
             keep_whitespace,
             at_line_start: true,
             last_newline_end: 0,
@@ -714,10 +719,15 @@ impl<'src> Iterator for TokenIter<'src> {
         loop {
             let Some(result) = self.lexer.next() else {
                 // Line-at-a-time mode (see the `Err` arm): move on to the
-                // next line, or stop at the real end of the source.
+                // next line while still before `chunk_until`, then back to
+                // the whole rest of the source; stop at its real end.
                 if self.lex_end < source.len() {
                     let from = self.lex_end;
-                    self.lex_end = line_chunk_end(source, from);
+                    self.lex_end = if from < self.chunk_until {
+                        line_chunk_end(source, from)
+                    } else {
+                        source.len()
+                    };
                     self.restart_lexer(from);
                     continue;
                 }
@@ -863,16 +873,17 @@ impl<'src> Iterator for TokenIter<'src> {
                     if source[span.clone()].starts_with('"') {
                         let line_end = line_end_before_newline(source, span.start);
                         if line_end < span.end {
-                            // A scan that reached the end of the input proves
-                            // no later `"` can close either (none is
-                            // unescaped, and no `\`-before-newline stop is
-                            // left). From here on, lex one line at a time so
-                            // each later `"` scan stops at its own line:
-                            // restarting over the whole file let K stray
-                            // quotes cost O(K * n) (one `\"` per line).
-                            if span.end == self.lex_end {
-                                self.lex_end = line_chunk_end(source, line_end);
-                            }
+                            // Every `"` up to where this scan stopped is
+                            // escaped in its alignment, so any later scan
+                            // starting before that point reaches it (or the
+                            // end of its own line) too. Lex one line at a
+                            // time up to there, so each such scan stops at
+                            // its own line: restarting over the whole rest
+                            // of the file let K stray quotes cost O(K * n)
+                            // (one `\"` per line), whichever way the scans
+                            // stopped.
+                            self.chunk_until = self.chunk_until.max(span.end);
+                            self.lex_end = line_chunk_end(source, line_end);
                             span.end = line_end;
                             self.restart_lexer(line_end);
                         }
@@ -892,8 +903,8 @@ impl<'src> Iterator for TokenIter<'src> {
 }
 
 /// The end of the line that contains `from`, including its `\n` (or the end
-/// of the source). `TokenIter` lexes one such line at a time once a string
-/// scan has reached the end of the input (#2784).
+/// of the source). `TokenIter` lexes one such line at a time after a failed
+/// string scan was cut at its line, up to where that scan stopped (#2784).
 fn line_chunk_end(source: &str, from: usize) -> usize {
     source[from..]
         .find('\n')
@@ -1147,36 +1158,41 @@ mod tests {
         assert!(matches!(tokens[0].0, Token::Comment("; This is a comment")));
     }
 
-    /// Cutting an unterminated `"` at its line must not make lexing
-    /// quadratic (#2784 review). With one `\"` per line, every line's quote
-    /// opens a scan that cannot close; restarting the lexer over the rest
-    /// of the file for each one cost O(lines * size) (55 s on 900 KB).
-    /// The bytes visible to restarted lexers must stay linear in the input.
+    /// Cutting a failed `"` scan at its line must not make lexing quadratic
+    /// (#2784 review). With one `\"` per line, every line's quote opens a
+    /// scan that cannot close; restarting the lexer over the rest of the
+    /// file for each one cost O(lines * size) (55 s on 900 KB). The scans
+    /// fail either at the end of the input or, with a lone `\` line after
+    /// them, at that `\`-before-newline stop (43 s on 900 KB before the
+    /// line mode covered that case). The bytes visible to restarted lexers
+    /// must stay linear in the input either way.
     #[test]
     fn test_tokenize_lossless_unterminated_quotes_lex_in_linear_time() {
-        let src = "\\\"\n".repeat(2_000);
-        test_counters::RESTART_VISIBLE_BYTES.with(|c| c.set(0));
-        let tokens = tokenize_lossless(&src);
-        let visible = test_counters::RESTART_VISIBLE_BYTES.with(std::cell::Cell::get);
-        assert!(
-            visible <= 2 * src.len(),
-            "restarted lexers saw {visible} bytes of a {}-byte input",
-            src.len()
-        );
-        // And each line still comes out as `\`, the quote, its newline.
-        assert_eq!(tokens.len(), 3 * 2_000);
-        assert!(
-            tokens.chunks(3).all(|t| matches!(
-                t,
-                [
-                    (Token::Error("\\"), _),
-                    (Token::Error("\""), _),
-                    (Token::Newline, _)
-                ]
-            )),
-            "{:?}",
-            &tokens[..6]
-        );
+        const LINES: usize = 2_000;
+        for (label, tail) in [("end of input", ""), ("backslash stop", "\\\n")] {
+            let src = "\\\"\n".repeat(LINES) + tail;
+            test_counters::RESTART_VISIBLE_BYTES.with(|c| c.set(0));
+            let tokens = tokenize_lossless(&src);
+            let visible = test_counters::RESTART_VISIBLE_BYTES.with(std::cell::Cell::get);
+            assert!(
+                visible <= 2 * src.len(),
+                "{label}: restarted lexers saw {visible} bytes of a {}-byte input",
+                src.len()
+            );
+            // And each `\"` line still comes out as `\`, the quote, its newline.
+            assert!(
+                tokens[..3 * LINES].chunks(3).all(|t| matches!(
+                    t,
+                    [
+                        (Token::Error("\\"), _),
+                        (Token::Error("\""), _),
+                        (Token::Newline, _)
+                    ]
+                )),
+                "{label}: {:?}",
+                &tokens[..6]
+            );
+        }
     }
 
     /// A column-0 `#` comment ends exactly where the following `Newline`

@@ -98,8 +98,11 @@ fn test_parse_unterminated_quote_keeps_the_following_directives() {
     }
 }
 
-/// The reported shape: a narration typo. The transaction itself is kept
-/// (its header error is reported), and so is everything after it.
+/// The reported shape: a narration typo. Everything after it is kept, as in
+/// beancount. The transaction itself is kept too, with its header error
+/// reported; beancount drops it. Keeping it is a deliberate divergence
+/// (Python Compatibility Policy): its postings still get checked, and the
+/// error already marks it.
 #[test]
 fn test_parse_unterminated_narration_keeps_the_rest_of_the_ledger() {
     let src = "2024-01-01 * \"Lunch\n  Assets:A  1 USD\n  Assets:B\n2024-01-02 open Assets:B\n";
@@ -119,6 +122,32 @@ fn test_parse_unterminated_narration_keeps_the_rest_of_the_ledger() {
         summary(&result),
         ["2024-01-01 txn 2 postings", "2024-01-02 open Assets:B"]
     );
+    assert_invariants(src);
+}
+
+/// The other way a string scan fails: a `\` right before a line break
+/// (`\\.` does not match a newline) inside an otherwise closed multi-line
+/// string. The scan stops there, not at the end of the file, and the cut
+/// re-lexes from the first line's end: every quote in the scanned region
+/// was escaped, so re-lexing meets the same stop and the quotes pair up as
+/// before. Pinned here because the cut's comment reasons about this case.
+#[test]
+fn test_parse_backslash_before_newline_in_a_string_keeps_its_pairing() {
+    let src = "2024-01-01 note Assets:A \"ab\ncd\\\nef\"\n\
+               2024-01-02 open Assets:B\n\
+               2024-01-03 note Assets:A \"z\"\n\
+               2024-01-04 open Assets:C\n";
+    let result = parse(src);
+    assert_eq!(
+        errors(&result),
+        [
+            (UNEXPECTED.to_string(), 0, 29),
+            (UNEXPECTED.to_string(), 25, 28),
+            (UNEXPECTED.to_string(), 29, 33),
+            (UNEXPECTED.to_string(), 33, 91),
+        ]
+    );
+    assert_eq!(summary(&result), ["2024-01-04 open Assets:C"]);
     assert_invariants(src);
 }
 

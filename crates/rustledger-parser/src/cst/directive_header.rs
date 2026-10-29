@@ -70,8 +70,8 @@ use std::ops::Range;
 /// The first token of a header line that beancount's grammar does not accept.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(super) struct HeaderDefect {
-    /// The offending token, or an empty range at the end of the header when
-    /// the line ends before the grammar is satisfied.
+    /// The offending token; when the line ends before the grammar is
+    /// satisfied, the last token on it.
     pub(super) range: Range<usize>,
     /// What the grammar would have accepted there, for the message.
     pub(super) expected: &'static str,
@@ -110,8 +110,13 @@ type Step = Result<(), HeaderDefect>;
 /// A cursor over the header's significant tokens.
 struct Cursor<I: Iterator<Item = (K, Range<usize>)>> {
     tokens: std::iter::Peekable<I>,
-    /// Where the header ends, for a defect at the end of the line.
-    end: usize,
+    /// The last token consumed, where a defect at the end of the line points.
+    /// It must be a real token inside the directive, not an empty range at its
+    /// end: the error-tolerant formatter copies a directive verbatim only when
+    /// an error OVERLAPS it, and an empty range at the end of a file overlaps
+    /// nothing, so `pushtag` at EOF was rebuilt as `pushtag ` and then trimmed
+    /// to `pushtag` on the next pass, which is not idempotent.
+    last: Range<usize>,
 }
 
 impl<I: Iterator<Item = (K, Range<usize>)>> Cursor<I> {
@@ -120,7 +125,9 @@ impl<I: Iterator<Item = (K, Range<usize>)>> Cursor<I> {
     }
 
     fn bump(&mut self) {
-        self.tokens.next();
+        if let Some((_, range)) = self.tokens.next() {
+            self.last = range;
+        }
     }
 
     fn defect(&mut self, expected: &'static str) -> HeaderDefect {
@@ -137,7 +144,7 @@ impl<I: Iterator<Item = (K, Range<usize>)>> Cursor<I> {
                 found: Some(*kind),
             },
             None => HeaderDefect {
-                range: self.end..self.end,
+                range: self.last.clone(),
                 expected,
                 found: None,
             },
@@ -341,7 +348,7 @@ pub(super) fn first_header_defect(
             .filter(|(k, _)| !is_skipped(*k))
             .cloned()
             .peekable(),
-        end,
+        last: end..end,
     };
     // The leading `DATE` and the keyword are what made the parser build this
     // node, so they are present; consume them without re-checking which.
@@ -470,13 +477,13 @@ mod tests {
             ("2024-01-01 open Assets:A USD @\n", "@", false),
             ("2024-01-01 open Assets:A U*SD\n", "U", false),
             ("2024-01-01 open Assets:A ,,USD\n", ",", false),
-            ("2024-01-01 open Assets:A USD,\n", "", true),
+            ("2024-01-01 open Assets:A USD,\n", ",", true),
             ("2024-01-01 price HOOL ? 10 USD\n", "?", false),
             ("2024-01-01 close! Assets:A\n", "!", false),
             ("2024-01-01 balance Assets:A 1 ~ USD\n", "USD", false),
             ("2024-01-01 custom \"b\" NULL\n", "NULL", false),
             ("2024-01-01 custom \"b\" USD\n", "USD", false),
-            ("2024-01-01 event \"e\"\n", "", true),
+            ("2024-01-01 event \"e\"\n", "\"e\"", true),
             ("plugin \"a\" \"b\" \"c\"\n", "\"c\"", false),
             ("pushtag #a #b\n", "#b", false),
             ("popmeta kk: 1\n", "1", false),

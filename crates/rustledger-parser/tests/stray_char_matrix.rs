@@ -456,3 +456,84 @@ fn test_parse_rejects_a_currency_ending_in_punctuation() {
             .is_empty()
     );
 }
+
+/// A token left over after a posting's amount, cost or price is an error, as
+/// in beancount (`unexpected MINUS`). Ending a currency at its last letter or
+/// digit made `1 USD-` lex as `USD` then `-`, and the posting converter, which
+/// reads only its amount, cost and price, loaded `1 USD` and `rledger format`
+/// wrote it back that way.
+#[test]
+fn test_parse_rejects_a_token_left_over_after_a_posting_amount() {
+    for (posting, glued) in [
+        ("1 USD-", true),
+        ("1 HOOL @ 2 USD-", true),
+        ("1 HOOL @@ 2 USD-", true),
+        ("1 HOOL {2 USD} @ 3 USD-", true),
+        ("-1 USD-", true),
+        ("1 USD--", true),
+        ("1 USD- ; c", true),
+        ("1 USD+", true),
+        ("1 USD -", false),
+        ("1 USD *", false),
+    ] {
+        let src = format!("2024-01-01 *\n  Assets:A  {posting}\n  Equity:E\n");
+        let r = parse(&src);
+        assert_eq!(r.errors.len(), 1, "{src:?}: {:?}", r.errors);
+        let msg = r.errors[0].to_string();
+        assert!(msg.contains("after the posting amount"), "{msg}");
+        assert_eq!(msg.contains("a currency cannot end in"), glued, "{msg}");
+        // Reported, not deleted: the error-tolerant formatter keeps the line.
+        assert_eq!(rustledger_parser::format::format_source(&src), src);
+    }
+    for src in [
+        "2024-01-01 *\n  Assets:A  1 HOOL {2 USD}\n  Equity:E\n",
+        "2024-01-01 *\n  Assets:A  1 USD ; c\n  Equity:E\n",
+    ] {
+        assert!(parse(src).errors.is_empty(), "{src:?}");
+    }
+}
+
+/// The message for a character glued to the end of a currency names it.
+#[test]
+fn test_parse_names_the_character_a_currency_cannot_end_in() {
+    let r = parse("2024-01-01 commodity CAC_\n");
+    assert_eq!(r.errors.len(), 1, "{:?}", r.errors);
+    assert!(
+        r.errors[0]
+            .to_string()
+            .contains("a currency cannot end in `_`"),
+        "{}",
+        r.errors[0]
+    );
+}
+
+/// A bare `pushtag` (or `option`, `include`, ...) at the end of a file with no
+/// newline is an error that points at the keyword, so the error-tolerant
+/// formatter copies it verbatim; an empty span at the very end overlapped no
+/// directive, so the line was rebuilt as `pushtag ` and trimmed on the next
+/// pass, which is not idempotent.
+#[test]
+fn test_format_source_is_idempotent_on_a_bare_keyword_at_eof() {
+    use rustledger_parser::format::format_source;
+    for src in [
+        "pushtag", "poptag", "pushmeta", "popmeta", "option", "include", "plugin",
+    ] {
+        assert!(!parse(src).errors.is_empty(), "{src:?}");
+        let once = format_source(src);
+        assert_eq!(once, format!("{src}\n"), "{src:?}");
+        assert_eq!(format_source(&once), once, "{src:?}: not idempotent");
+    }
+}
+
+/// The character before a currency-like word can be multibyte; naming the
+/// glued tail must not slice inside it (it panicked on fuzz-corpus inputs).
+#[test]
+fn test_parse_does_not_panic_on_a_multibyte_char_before_a_currency_tail() {
+    for src in [
+        "2024-01-01 commodity éCAC_\n",
+        "2024-01-01 price HOOL 10 ¤USD.\n",
+        "€V'\n",
+    ] {
+        let _ = parse(src);
+    }
+}

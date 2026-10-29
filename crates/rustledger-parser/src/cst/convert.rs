@@ -196,7 +196,11 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
             ));
         }
     }
-    errors.extend(inline_errors);
+    errors.extend(
+        inline_errors
+            .into_iter()
+            .map(|e| name_a_currency_tail(e, stripped, bom_offset)),
+    );
     let warnings = Vec::new();
 
     // pushtag/poptag/pushmeta/popmeta state. The legacy parser
@@ -361,6 +365,16 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
             )
         {
             errors.push(err);
+        }
+        if pushed_directive.is_some() && cst_node.kind() == crate::SyntaxKind::TRANSACTION {
+            posting_stray_token_check(
+                &cst_node,
+                stripped,
+                bom_offset,
+                &prior_error_starts,
+                errors_before,
+                &mut errors,
+            );
         }
         if let Some(mut spanned) = pushed_directive {
             apply_inherited_state(&mut spanned.value, &tag_stack, &meta_stack);
@@ -3435,6 +3449,104 @@ fn directive_header_check(
         )),
         Span::new(defect.range.start + off, defect.range.end + off),
     ))
+}
+
+/// Report a token left over after a posting's amount, cost or price.
+///
+/// The posting converter reads its `AMOUNT`, `COST_SPEC` and
+/// `PRICE_ANNOTATION` children and nothing else, so a flat token after them
+/// was dropped in silence. That became reachable from ordinary text when the
+/// lexer started ending a currency at its last letter or digit, as beancount
+/// does (#2802): `1 USD-` is `USD` then `-`, which loaded as `1 USD` and was
+/// written back that way, where bean-check reports `unexpected MINUS`.
+///
+/// Comment kinds are left alone here: a mid-line `%`, `#!` or `#+` on a
+/// posting line is stage 3 of #2802, like the rest of the posting grammar.
+/// A posting that already has an error anywhere on it (`5 USD + 3 USD`'s
+/// trailing amount, an `ERROR_TOKEN`) is not reported twice.
+///
+/// Runs from the shared directive loop over GREEN children, so the green and
+/// red parse paths cannot disagree on it.
+fn posting_stray_token_check(
+    node: &crate::SyntaxNode,
+    stripped: &str,
+    bom_offset: u32,
+    prior_error_starts: &[usize],
+    errors_before: usize,
+    errors: &mut Vec<crate::ParseError>,
+) {
+    use crate::SyntaxKind as K;
+    let kind_of = <crate::BeancountLanguage as rowan::Language>::kind_from_raw;
+    let off = bom_offset as usize;
+    let mut at = usize::from(node.text_range().start());
+    for child in node.green().children() {
+        let len = match child {
+            rowan::NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
+            rowan::NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
+        };
+        let posting_start = at;
+        at += len;
+        let rowan::NodeOrToken::Node(posting) = child else {
+            continue;
+        };
+        if kind_of(posting.kind()) != K::POSTING {
+            continue;
+        }
+        let mut p = posting_start;
+        let mut after_amount: Option<usize> = None;
+        let mut stray: Option<std::ops::Range<usize>> = None;
+        for part in posting.children() {
+            let start = p;
+            p += match part {
+                rowan::NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
+                rowan::NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
+            };
+            match part {
+                rowan::NodeOrToken::Node(n) => match kind_of(n.kind()) {
+                    K::AMOUNT | K::COST_SPEC | K::PRICE_ANNOTATION => after_amount = Some(p),
+                    _ => break,
+                },
+                rowan::NodeOrToken::Token(t) => {
+                    let kind = kind_of(t.kind());
+                    if kind == K::NEWLINE {
+                        break;
+                    }
+                    if after_amount.is_some()
+                        && !is_trivia_kind(kind)
+                        && !matches!(kind, K::ERROR_TOKEN | K::BOM)
+                    {
+                        stray = Some(start..p);
+                        break;
+                    }
+                }
+            }
+        }
+        let (Some(range), Some(amount_end)) = (stray, after_amount) else {
+            continue;
+        };
+        let (from, to) = (posting_start + off, at + off);
+        let first_after = prior_error_starts.partition_point(|&s| s < from);
+        let reported = prior_error_starts.get(first_after).is_some_and(|&s| s < to)
+            || errors[errors_before..]
+                .iter()
+                .any(|e| (from..to).contains(&e.span.start));
+        if reported {
+            continue;
+        }
+        let text = stripped.get(range.clone()).unwrap_or_default();
+        // Glued to the amount: the lexer ended a currency before it.
+        let why = if range.start == amount_end {
+            format!(": a currency cannot end in `{text}`")
+        } else {
+            String::new()
+        };
+        errors.push(crate::ParseError::new(
+            crate::ParseErrorKind::SyntaxError(format!(
+                "unexpected {text:?} after the posting amount{why}"
+            )),
+            Span::new(range.start + off, range.end + off),
+        ));
+    }
 }
 
 /// Shared by both walkers so one defect cannot be reported two ways.
@@ -6665,5 +6777,52 @@ mod custom_rejected_values {
             Some(&MetaValue::Tag(Tag::new("kept"))),
             "the tag survives as a Tag in metadata; got {meta:?}",
         );
+    }
+}
+
+/// Name the problem when an unlexable character is glued to the end of a
+/// currency (`CAC_`, `HOOL'`, `USD.`).
+///
+/// A currency ends with a letter or digit, as in beancount (#2802), so the
+/// trailing `_`, `'` or `.` is left over as an `ERROR_TOKEN`, whose generic
+/// message is `unexpected input`. Shared by both parse paths: it rewrites the
+/// message of an error both walkers already produced, keyed only on the source
+/// text.
+fn name_a_currency_tail(
+    err: crate::ParseError,
+    stripped: &str,
+    bom_offset: u32,
+) -> crate::ParseError {
+    let crate::ParseErrorKind::SyntaxError(msg) = &err.kind else {
+        return err;
+    };
+    if msg != "unexpected input" {
+        return err;
+    }
+    let Some(start) = err.span.start.checked_sub(bom_offset as usize) else {
+        return err;
+    };
+    let Some(tail @ ('_' | '\'' | '.')) = stripped.get(start..).and_then(|s| s.chars().next())
+    else {
+        return err;
+    };
+    let before = &stripped[..start];
+    // `char_indices`, not `rfind + 1`: the character before the word may be
+    // multibyte, and slicing inside it would panic.
+    let word_start = before
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| !(c.is_ascii_alphanumeric() || "'._-/".contains(c)))
+        .map_or(0, |(i, c)| i + c.len_utf8());
+    let word = &before[word_start..];
+    // After a `:` it is the end of an account segment, not a currency.
+    if word.is_empty() || before[..word_start].ends_with(':') || !crate::is_valid_currency(word) {
+        return err;
+    }
+    crate::ParseError {
+        kind: crate::ParseErrorKind::SyntaxError(format!(
+            "unexpected `{tail}` after the currency `{word}`: a currency cannot end in `{tail}`"
+        )),
+        ..err
     }
 }

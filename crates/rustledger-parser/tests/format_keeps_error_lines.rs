@@ -13,7 +13,13 @@
 //! It is a reported error too (`top-level directive must start at column 0`),
 //! but `format_source` currently dedents it, which repairs the error. That
 //! pre-existing behavior is tracked as a separate follow-up.
+//!
+//! Unparsable text inside a directive (`2024-01-01 open Assets:A junk`) was
+//! deleted, because the directive was rebuilt from its typed values; it is now
+//! copied verbatim (#2794). A property test below checks that no text of a
+//! broken file is lost.
 
+use proptest::prelude::*;
 use rustledger_parser::format::format_source;
 use rustledger_parser::parse;
 
@@ -120,4 +126,224 @@ fn test_format_source_drops_whitespace_of_a_blank_first_line() {
         format_source("   \n2024-01-02 open Assets:B\n"),
         "\n2024-01-02 open Assets:B\n"
     );
+}
+
+// ---- Unparsable text inside a directive (#2794) ----------------------------
+//
+// Text the parser cannot read on a directive's own lines is part of no typed
+// value, so rebuilding the directive from its values deleted it, and the parse
+// error with it. A directive holding a parse error is now copied verbatim.
+
+#[test]
+fn test_format_source_keeps_junk_after_a_directive() {
+    assert_unchanged(
+        "word",
+        "2024-01-01 open Assets:A junk\n2024-01-02 open Assets:B\n",
+    );
+    assert_unchanged("star", "2024-01-01 open Assets:A* h\n");
+}
+
+/// The file's missing final newline is still added; the `"` stays.
+#[test]
+fn test_format_source_keeps_a_stray_quote_after_a_directive() {
+    let src = "2024-01-01 open Assets:A\"";
+    assert_errors_kept("quote", src);
+    assert_eq!(format_source(src), "2024-01-01 open Assets:A\"\n");
+}
+
+#[test]
+fn test_format_source_keeps_junk_after_a_transaction_header() {
+    assert_unchanged(
+        "header",
+        "2024-01-01 * \"p\" junk\n  Assets:A  1 USD\n  Assets:B\n",
+    );
+}
+
+#[test]
+fn test_format_source_keeps_junk_after_a_posting() {
+    assert_unchanged(
+        "posting",
+        "2024-01-01 *\n  Assets:A  1 USD junk\n  Assets:B\n",
+    );
+}
+
+#[test]
+fn test_format_source_keeps_junk_after_a_metadata_value() {
+    assert_unchanged(
+        "transaction metadata",
+        "2024-01-01 *\n  k: \"v\" junk\n  Assets:A  1 USD\n  Assets:B\n",
+    );
+    assert_unchanged(
+        "posting metadata",
+        "2024-01-01 *\n  Assets:A  1 USD\n    k: \"v\" junk\n  Assets:B\n",
+    );
+    assert_unchanged(
+        "open metadata",
+        "2024-01-01 open Assets:A\n  k: \"v\" junk\n",
+    );
+}
+
+#[test]
+fn test_format_source_keeps_an_error_token_mid_line() {
+    assert_unchanged("open", "2024-01-01 open Assets:A $ USD\n");
+    assert_unchanged("price", "2024-01-01 price HOOL $ 10 USD\n");
+    assert_unchanged("posting", "2024-01-01 *\n  Assets:A  1 $ USD\n  Assets:B\n");
+    assert_unchanged("pushtag", "pushtag! #t\n");
+}
+
+/// The broken directive is copied as written, unaligned spacing included; the
+/// directives around it are still formatted.
+#[test]
+fn test_format_source_formats_the_directives_around_a_broken_one() {
+    let src = "2024-01-01 *\n  Assets:A    1 USD junk\n  Assets:B\n\
+               2024-01-02 *\n  Assets:A    1 USD\n  Assets:B\n";
+    assert_errors_kept("neighbors", src);
+    assert_eq!(
+        format_source(src),
+        "2024-01-01 *\n  Assets:A    1 USD junk\n  Assets:B\n\
+         2024-01-02 *\n  Assets:A  1 USD\n  Assets:B\n"
+    );
+}
+
+// ---- Property: a broken file loses no text (#2794) -------------------------
+
+/// The text with every whitespace character removed, in order.
+///
+/// The formatter only moves whitespace: it realigns columns, trims trailing
+/// spaces, and normalizes blank lines and line endings. Every other character
+/// is the author's text. The snippet corpus below is already canonical, so the
+/// non-whitespace sequence must survive formatting exactly: no character
+/// dropped, added, or reordered. That is stricter than a multiset check, which
+/// would accept a reordering.
+fn non_whitespace(s: &str) -> String {
+    s.chars().filter(|c| !c.is_whitespace()).collect()
+}
+
+/// The 0-based numbers of the lines that hold a parse error.
+fn error_line_numbers(src: &str) -> Vec<usize> {
+    parse(src)
+        .errors
+        .iter()
+        .map(|e| src[..e.span.start.min(src.len())].matches('\n').count())
+        .collect()
+}
+
+/// Canonical, error-free snippets covering every directive kind, and the
+/// transaction shapes (header strings, tags and links, metadata, postings with
+/// cost and price) whose typed rebuild could drop a token it does not model.
+const SNIPPETS: &[&str] = &[
+    "2024-01-01 open Assets:A USD\n",
+    "2024-01-01 close Assets:A\n",
+    "2024-01-01 commodity USD\n",
+    "2024-01-01 note Assets:A \"n\"\n",
+    "2024-01-01 event \"loc\" \"Paris\"\n",
+    "2024-01-01 query \"q\" \"SELECT 1\"\n",
+    "2024-01-01 pad Assets:A Equity:B\n",
+    "2024-01-01 document Assets:A \"/f.pdf\"\n",
+    "2024-01-01 price HOOL 10 USD\n",
+    "2024-01-01 balance Assets:A 1 USD\n",
+    "2024-01-01 custom \"budget\" Assets:A \"monthly\" 10 USD\n",
+    "option \"title\" \"T\"\n",
+    "include \"other.beancount\"\n",
+    "plugin \"beancount.plugins.auto\"\n",
+    "pushtag #t\n",
+    "poptag #t\n",
+    "pushmeta k: \"v\"\n",
+    "popmeta k:\n",
+    "2024-01-01 open Assets:A\n  k: \"v\"\n",
+    "2024-01-01 * \"payee\" \"narration\" #tag ^link\n  k: \"v\"\n  Assets:A  1 USD\n  Assets:B\n",
+    "2024-01-01 * \"n\"\n  Assets:A  1 HOOL {10 USD}\n  Assets:B\n",
+    "2024-01-01 ! \"n\"\n  Assets:A  1 HOOL @ 10 USD\n    pk: 2\n  Assets:B\n",
+    "; a comment\n",
+];
+
+/// Text inserted into a snippet: a word, the characters that end or start
+/// another construct (`"`, `*`, `{`, `@`), and stray punctuation.
+const JUNK: &[&str] = &[
+    "junk", "\"", "*", "* h", "!", "@", "{", "}", "~", "#", "^", "x", "?", "$", ",", "|", "&",
+];
+
+/// A concatenation of snippets with junk inserted at random byte offsets,
+/// and the offset where each insertion now sits.
+fn broken_source() -> impl Strategy<Value = (String, Vec<usize>)> {
+    (
+        prop::collection::vec(prop::sample::select(SNIPPETS), 1..4),
+        prop::collection::vec(
+            (
+                any::<prop::sample::Index>(),
+                prop::sample::select(JUNK),
+                any::<bool>(),
+            ),
+            1..3,
+        ),
+    )
+        .prop_map(|(snippets, edits)| {
+            let mut src = snippets.concat();
+            let mut at: Vec<usize> = Vec::new();
+            for (index, junk, spaced) in edits {
+                // Every snippet and junk string is ASCII, so any byte offset
+                // is a char boundary.
+                let i = index.index(src.len() + 1);
+                let ins = if spaced {
+                    format!(" {junk}")
+                } else {
+                    junk.to_string()
+                };
+                for a in &mut at {
+                    if *a >= i {
+                        *a += ins.len();
+                    }
+                }
+                at.push(i);
+                src.insert_str(i, &ins);
+            }
+            (src, at)
+        })
+}
+
+proptest! {
+    // A fixed seed and no failure file: the same inputs run everywhere, in
+    // well under a second.
+    #![proptest_config(ProptestConfig {
+        cases: 512,
+        max_global_rejects: 8192,
+        rng_seed: proptest::test_runner::RngSeed::Fixed(2794),
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    /// For a file with parse errors, `format_source` keeps every non-whitespace
+    /// character in order, its output has the same error lines, and it is a
+    /// fixed point.
+    ///
+    /// Only inputs whose every insertion sits on a line holding a parse error
+    /// are checked. The parser silently accepts some stray characters inside
+    /// an otherwise valid directive (`open! Assets:A`), and the formatter's
+    /// rebuild drops them with no error to say so. That is a parser leniency,
+    /// not the loss of unparsable text this property is about.
+    #[test]
+    fn test_format_source_keeps_every_byte_of_a_broken_file((src, at) in broken_source()) {
+        let lines = error_line_numbers(&src);
+        prop_assume!(
+            !lines.is_empty()
+                && at.iter().all(|&i| lines.contains(&src[..i].matches('\n').count()))
+        );
+        let before = error_lines(&src);
+        let out = format_source(&src);
+        prop_assert_eq!(
+            non_whitespace(&out),
+            non_whitespace(&src),
+            "formatting lost text\n  in:  {:?}\n  out: {:?}",
+            &src,
+            &out
+        );
+        prop_assert_eq!(
+            error_lines(&out),
+            before,
+            "formatting changed the error lines\n  in:  {:?}\n  out: {:?}",
+            &src,
+            &out
+        );
+        prop_assert_eq!(format_source(&out), out, "not idempotent\n  in: {:?}", &src);
+    }
 }

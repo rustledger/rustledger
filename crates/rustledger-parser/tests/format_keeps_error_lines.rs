@@ -396,3 +396,36 @@ proptest! {
         prop_assert_eq!(format_source(&out), out, "not idempotent\n  in: {:?}", &src);
     }
 }
+
+/// A whitespace-only line next to an error node is one blank line, not two:
+/// its whitespace is trimmed before the node's leading and trailing blank
+/// lines are counted, so it is not emitted both as a gap and as an empty line
+/// of the node (#2796).
+#[test]
+fn test_format_source_keeps_one_blank_line_for_a_whitespace_only_line_by_an_error_node() {
+    for (label, src, expected) in [
+        (
+            "issue reproducer",
+            "2024-01-01 open Assets:A\n   \n  * h\n",
+            "2024-01-01 open Assets:A\n\n  * h\n",
+        ),
+        (
+            "before an indented star",
+            "2024-01-01 open Assets:A\n  \n  * h\n2024-01-02 open Assets:B\n",
+            "2024-01-01 open Assets:A\n\n  * h\n2024-01-02 open Assets:B\n",
+        ),
+        (
+            "among blank lines",
+            "2024-01-01 open Assets:A\n\n  \n\n  * h\n  \n\n2024-01-02 open Assets:B\n",
+            "2024-01-01 open Assets:A\n\n\n\n  * h\n\n\n2024-01-02 open Assets:B\n",
+        ),
+        (
+            "before a broken directive",
+            "2024-01-01 open Assets:A\n  \n2024-01-02 open Assets:B junk\n",
+            "2024-01-01 open Assets:A\n\n2024-01-02 open Assets:B junk\n",
+        ),
+    ] {
+        assert_errors_kept(label, src);
+        assert_eq!(format_source(src), expected, "{label}");
+    }
+}

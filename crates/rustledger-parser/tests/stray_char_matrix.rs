@@ -472,7 +472,7 @@ fn test_parse_rejects_a_token_left_over_after_a_posting_amount() {
         ("-1 USD-", true),
         ("1 USD--", true),
         ("1 USD- ; c", true),
-        ("1 USD+", true),
+        ("1 USD+", false),
         ("1 USD -", false),
         ("1 USD *", false),
     ] {
@@ -535,5 +535,49 @@ fn test_parse_does_not_panic_on_a_multibyte_char_before_a_currency_tail() {
         "€V'\n",
     ] {
         let _ = parse(src);
+    }
+}
+
+/// The currency wording is only for a currency-interior character glued to a
+/// currency. Anything else after a posting amount is a plain stray token.
+#[test]
+fn test_parse_names_a_currency_only_when_one_was_cut_short() {
+    for posting in [
+        "1-",
+        "1!",
+        "1 HOOL {1 USD}-",
+        "1 USD\"s\"",
+        "1 USD#t",
+        "1 USD)",
+        "1 USD,",
+        "1 USD:",
+        "1 USD/",
+        "1 USD!",
+        "1 USD+",
+    ] {
+        let src = format!("2024-01-01 *\n  Assets:A  {posting}\n  Equity:E\n");
+        let r = parse(&src);
+        assert!(!r.errors.is_empty(), "{src:?} must be rejected");
+        for e in &r.errors {
+            assert!(
+                !e.to_string().contains("a currency cannot end in"),
+                "{src:?}: {e}"
+            );
+        }
+    }
+    // A word glued to a non-ASCII character is not a currency, so its ASCII
+    // tail (`SD`) is not named as one.
+    for src in [
+        "2024-01-01 open Assets:A ÜSD_\n",
+        "2024-01-01 open Assets:A AÜSD_\n",
+    ] {
+        let r = parse(src);
+        assert!(!r.errors.is_empty(), "{src:?}");
+        for e in &r.errors {
+            assert!(
+                !e.to_string().contains("after the currency"),
+                "{src:?}: {e}"
+            );
+        }
     }
 }

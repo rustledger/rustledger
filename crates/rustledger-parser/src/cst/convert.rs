@@ -3494,6 +3494,8 @@ fn posting_stray_token_check(
         }
         let mut p = posting_start;
         let mut after_amount: Option<usize> = None;
+        // Whether the last amount-like child ends in a `CURRENCY` token.
+        let mut ends_in_currency = false;
         let mut stray: Option<std::ops::Range<usize>> = None;
         for part in posting.children() {
             let start = p;
@@ -3503,7 +3505,10 @@ fn posting_stray_token_check(
             };
             match part {
                 rowan::NodeOrToken::Node(n) => match kind_of(n.kind()) {
-                    K::AMOUNT | K::COST_SPEC | K::PRICE_ANNOTATION => after_amount = Some(p),
+                    K::AMOUNT | K::COST_SPEC | K::PRICE_ANNOTATION => {
+                        after_amount = Some(p);
+                        ends_in_currency = last_token_kind(n) == Some(K::CURRENCY);
+                    }
                     _ => break,
                 },
                 rowan::NodeOrToken::Token(t) => {
@@ -3534,8 +3539,13 @@ fn posting_stray_token_check(
             continue;
         }
         let text = stripped.get(range.clone()).unwrap_or_default();
-        // Glued to the amount: the lexer ended a currency before it.
-        let why = if range.start == amount_end {
+        // Glued to a currency, and a character a currency may hold inside it:
+        // the lexer ended the currency before it. Anything else (`1-`,
+        // `{1 USD}-`, `1 USD+`) is just a stray token.
+        let why = if range.start == amount_end
+            && ends_in_currency
+            && matches!(text, "-" | "'" | "." | "_")
+        {
             format!(": a currency cannot end in `{text}`")
         } else {
             String::new()
@@ -6809,11 +6819,16 @@ fn name_a_currency_tail(
     let before = &stripped[..start];
     // `char_indices`, not `rfind + 1`: the character before the word may be
     // multibyte, and slicing inside it would panic.
-    let word_start = before
+    let stop = before
         .char_indices()
         .rev()
-        .find(|&(_, c)| !(c.is_ascii_alphanumeric() || "'._-/".contains(c)))
-        .map_or(0, |(i, c)| i + c.len_utf8());
+        .find(|&(_, c)| !(c.is_ascii_alphanumeric() || "'._-/".contains(c)));
+    // A currency is ASCII, so a word glued to a non-ASCII character (`ÜSD_`) is
+    // not one; naming the ASCII fragment after it (`SD`) would mislead.
+    if stop.is_some_and(|(_, c)| !c.is_ascii()) {
+        return err;
+    }
+    let word_start = stop.map_or(0, |(i, c)| i + c.len_utf8());
     let word = &before[word_start..];
     // After a `:` it is the end of an account segment, not a currency.
     if word.is_empty() || before[..word_start].ends_with(':') || !crate::is_valid_currency(word) {
@@ -6824,5 +6839,14 @@ fn name_a_currency_tail(
             "unexpected `{tail}` after the currency `{word}`: a currency cannot end in `{tail}`"
         )),
         ..err
+    }
+}
+
+/// The kind of the last token under a green node, if it has one.
+fn last_token_kind(node: &rowan::GreenNodeData) -> Option<crate::SyntaxKind> {
+    let kind_of = <crate::BeancountLanguage as rowan::Language>::kind_from_raw;
+    match node.children().last()? {
+        rowan::NodeOrToken::Token(t) => Some(kind_of(t.kind())),
+        rowan::NodeOrToken::Node(n) => last_token_kind(n),
     }
 }

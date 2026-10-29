@@ -54,16 +54,17 @@ fn test_parse_structured_hash_comment_round_trips_every_line_ending() {
     }
 }
 
-/// The `;` control covers `\n` and `\r\n` only: a stray `\r` before the line
-/// ending outside a `#` comment is a separate divergence from beancount (it
-/// is reported as "unexpected input", which `bean-check` accepts) and is not
-/// what #2769 fixes.
+/// The `;` control covers every ending too: a stray `\r` before the line
+/// ending after a `;` comment was reported as "unexpected input" until #2774.
 #[test]
 fn test_parse_hash_comment_keeps_the_next_directive() {
-    let cases = ENDINGS
-        .iter()
-        .map(|&(label, eol)| ("# a comment", label, eol))
-        .chain([("; a comment", "LF", "\n"), ("; a comment", "CRLF", "\r\n")]);
+    let cases = ["# a comment", "; a comment"]
+        .into_iter()
+        .flat_map(|comment| {
+            ENDINGS
+                .iter()
+                .map(move |&(label, eol)| (comment, label, eol))
+        });
     for (comment, label, eol) in cases {
         let src = ledger(comment, eol);
         let result = parse(&src);
@@ -81,8 +82,8 @@ fn test_parse_hash_comment_keeps_the_next_directive() {
 }
 
 /// A `#` comment as the last line, with and without its line ending, and a
-/// lone trailing `\r` at EOF (no `\n` follows, so no newline token claims it
-/// and it stays in the comment).
+/// lone trailing `\r` at EOF (no `\n` follows, so no newline token claims it;
+/// it is trailing whitespace, #2774).
 #[test]
 fn test_parse_structured_hash_comment_at_eof_round_trips() {
     for src in [

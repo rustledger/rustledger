@@ -715,6 +715,68 @@ impl<'src> TokenIter<'src> {
     }
 }
 
+impl TokenIter<'_> {
+    /// Where a run of stray `\r` bytes that ends its line ends, if the token
+    /// the lexer just produced starts one (#2774).
+    ///
+    /// Beancount's lexer skips `\r` as whitespace (`[ \t\r]+`), so a `\r`
+    /// left over before the line ending (`\r\r\n`, which some editors and
+    /// converters write) or at the end of the file is accepted there. Ours
+    /// has no rule for a lone `\r`: the `Newline` token (`\r?\n`) claims
+    /// only the one right before the `\n`, so every other `\r` came out as an
+    /// error token. This turns the whole `[ \t\r]` run, starting at a
+    /// `Whitespace` token or a lone-`\r` error, into one `Whitespace` token
+    /// when it contains a `\r` and reaches the line ending (stopping before
+    /// the `\r` of a `\r\n`, which stays in the `Newline`) or the end of the
+    /// source. The bytes stay in the token stream, as trivia.
+    ///
+    /// Stricter than beancount, deliberately: a `\r` with more of the line
+    /// after it (`open\rAssets:Cash`, `; a\rb`, or before the first token of
+    /// a line) is still an error, where beancount takes it as a token
+    /// separator. The formatter folds such a bare `\r` into a line break
+    /// (`crlf_to_lf_outside_strings`, which is what keeps classic-Mac files
+    /// formattable), so accepting it would make `rledger format` split a
+    /// line that `rledger check` called valid. Pinned by
+    /// `test_parse_cr_with_more_of_the_line_after_it_stays_an_error` in
+    /// `tests/stray_cr.rs`.
+    ///
+    /// Returns `None`, after one byte comparison, for an ordinary
+    /// `Whitespace` token. Scans forward only, over bytes the run then
+    /// consumes, so it stays linear.
+    fn stray_cr_trivia_end(
+        &self,
+        result: &Result<Token<'_>, ()>,
+        span: &Range<usize>,
+    ) -> Option<usize> {
+        let bytes = self.source.as_bytes();
+        let mut has_cr = match result {
+            Ok(Token::Whitespace(_)) => false,
+            Err(()) if &bytes[span.clone()] == b"\r" => true,
+            _ => return None,
+        };
+        let mut end = span.end;
+        while end < self.lex_end {
+            match bytes[end] {
+                b' ' | b'\t' => end += 1,
+                b'\r' if bytes.get(end + 1) != Some(&b'\n') => {
+                    has_cr = true;
+                    end += 1;
+                }
+                _ => break,
+            }
+        }
+        // The run ends at a `\n`, at the `\r` of a `\r\n`, or at the end of
+        // the source. Line-at-a-time mode ends each chunk after a `\n`, so
+        // the scan stops at that `\n` before it reaches a chunk end.
+        let at_line_end = if end == self.lex_end {
+            end == self.source.len()
+        } else {
+            matches!(bytes[end], b'\n' | b'\r')
+        };
+        (has_cr && at_line_end).then_some(end)
+    }
+}
+
 #[cfg(test)]
 pub(crate) mod test_counters {
     thread_local! {
@@ -750,7 +812,13 @@ impl<'src> Iterator for TokenIter<'src> {
                 }
                 return None;
             };
-            let span = self.lexer.span();
+            let mut result = result;
+            let mut span = self.lexer.span();
+            if let Some(end) = self.stray_cr_trivia_end(&result, &span) {
+                self.lexer.bump(end - span.end);
+                span.end = end;
+                result = Ok(Token::Whitespace(&source[span.clone()]));
+            }
 
             if !self.keep_whitespace && matches!(result, Ok(Token::Whitespace(_))) {
                 // AST-path drops mid-line whitespace; the CST path keeps
@@ -929,22 +997,21 @@ fn line_chunk_end(source: &str, from: usize) -> usize {
 }
 
 /// Where a whole-line token that starts before `from` ends: before the
-/// `Newline` token that follows it, or at the end of the source.
+/// `Newline` token that follows it, or at the end of the source, and before
+/// any run of `\r` bytes right in front of either.
 ///
 /// `Newline` is `\r?\n`, so on a CRLF line it starts at the `\r`; ending at
 /// the `\n` would hand that byte to both tokens and break the lossless
-/// round-trip (#2769). Any other `\r` stays in the line. The result sits on
-/// a `\r`, a `\n` or the end of the source, so it is always a char boundary.
-/// Shared by the column-0 `#` comment and `*` heading arms of `TokenIter`.
+/// round-trip (#2769). Further `\r` bytes before it (`\r\r\n`), and a
+/// trailing `\r` at the end of the source, are left out too: they lex as the
+/// `Whitespace` trivia that follows the line (#2774), as after any other
+/// token. A `\r` with more of the line after it stays in the line. The
+/// result sits on a `\r`, a `\n` or the end of the source, so it is always a
+/// char boundary. Shared by the column-0 `#` comment and `*` heading arms of
+/// `TokenIter`, and by its cut of an unterminated string.
 fn line_end_before_newline(source: &str, from: usize) -> usize {
-    source[from..].find('\n').map_or(source.len(), |i| {
-        let nl = from + i;
-        if source[from..nl].ends_with('\r') {
-            nl - 1
-        } else {
-            nl
-        }
-    })
+    let nl = source[from..].find('\n').map_or(source.len(), |i| from + i);
+    from + source[from..nl].trim_end_matches('\r').len()
 }
 
 fn tokenize_inner(source: &str, keep_whitespace: bool) -> Vec<(Token<'_>, Span)> {
@@ -1213,8 +1280,10 @@ mod tests {
     }
 
     /// A column-0 `#` comment ends exactly where the following `Newline`
-    /// token starts: before the one `\r` that `\r?\n` claims, keeping any
-    /// extra `\r` (#2769).
+    /// token starts: before the one `\r` that `\r?\n` claims (#2769). Extra
+    /// `\r` bytes before it, and a trailing `\r` at EOF, are `Whitespace`
+    /// trivia after the comment, as after any other token (#2774); a `\r`
+    /// with more of the line after it stays in the comment.
     #[test]
     fn test_tokenize_lossless_hash_comment_ends_before_crlf() {
         let span = |t: &(Token<'_>, Span)| (t.1.start, t.1.end);
@@ -1226,18 +1295,28 @@ mod tests {
         assert_eq!((span(&tokens[0]), span(&tokens[1])), ((0, 6), (6, 8)));
 
         let tokens = tokenize_lossless("# note\r\r\n");
-        assert_eq!(tokens.len(), 2);
-        assert!(matches!(tokens[0].0, Token::Comment("# note\r")));
-        assert_eq!((span(&tokens[0]), span(&tokens[1])), ((0, 7), (7, 9)));
+        assert_eq!(tokens.len(), 3);
+        assert!(matches!(tokens[0].0, Token::Comment("# note")));
+        assert!(matches!(tokens[1].0, Token::Whitespace("\r")));
+        assert!(matches!(tokens[2].0, Token::Newline));
+        let spans: Vec<_> = tokens.iter().map(span).collect();
+        assert_eq!(spans, [(0, 6), (6, 7), (7, 9)]);
 
         let tokens = tokenize_lossless("# note\n");
         assert!(matches!(tokens[0].0, Token::Comment("# note")));
         assert_eq!((span(&tokens[0]), span(&tokens[1])), ((0, 6), (6, 7)));
 
-        // No `\n` follows, so no newline token claims the `\r`.
+        // No `\n` follows, so no newline token claims the `\r`: it is the
+        // trailing whitespace of the last line.
         let tokens = tokenize_lossless("# note\r");
-        assert_eq!(tokens.len(), 1);
-        assert!(matches!(tokens[0].0, Token::Comment("# note\r")));
+        assert_eq!(tokens.len(), 2);
+        assert!(matches!(tokens[0].0, Token::Comment("# note")));
+        assert!(matches!(tokens[1].0, Token::Whitespace("\r")));
+        assert_eq!(span(&tokens[1]), (6, 7));
+
+        let tokens = tokenize_lossless("# a\rb\r\n");
+        assert!(matches!(tokens[0].0, Token::Comment("# a\rb")));
+        assert!(matches!(tokens[1].0, Token::Newline));
     }
 
     #[test]

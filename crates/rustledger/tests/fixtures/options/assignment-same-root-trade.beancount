@@ -1,0 +1,19 @@
+; A second put of the same root and right bought in the assignment entry
+; (#2746). Its 200.00 moves the cash but is not a fee, so the fee window
+; stays shut and the inflated basis (line 15) is flagged. Native only until
+; beancount-options mirrors the fix (rustledger/beancount-options#6).
+plugin "beancount_options.check_option_assignment"
+
+2026-01-01 open Assets:Broker:Options
+2026-01-01 open Assets:Broker:Stock
+2026-01-01 open Assets:Broker:Cash
+
+2026-09-03 * "sell to open"
+  Assets:Broker:Options  -1 AAPL261016P00225000 {300.00 USD}
+  Assets:Broker:Cash  300.00 USD
+
+2026-10-16 * "assignment, plus a second put bought in the same entry"
+  Assets:Broker:Options   1 AAPL261016P00225000 {300.00 USD}
+  Assets:Broker:Stock   100 AAPL {224.00 USD}
+  Assets:Broker:Options   1 AAPL261016P00200000 {200.00 USD}
+  Assets:Broker:Cash  -22900.00 USD

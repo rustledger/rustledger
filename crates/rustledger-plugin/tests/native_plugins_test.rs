@@ -11483,6 +11483,42 @@ fn test_option_assignment_extra_purchase_falls_back() {
     );
 }
 
+/// A second put of the same root and right bought in the assignment entry
+/// is not one of the group's legs: its cost forces the exact rule, so the
+/// 200.00 it moved through the cash is not read as a fee (#2746).
+#[test]
+fn test_option_assignment_same_root_and_right_trade_falls_back() {
+    let errors = assignment_errors(put_assignment_settled(
+        "224.00",
+        "-22900.00",
+        vec![per_unit(
+            leg(OPT_ACCT, "1", "AAPL261016P00200000"),
+            "200.00",
+        )],
+    ));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016P00225000 assignment: AAPL basis 22400.00 USD, expected 22200.00 USD (strike 225 × 100 − premium 300.00)"
+    );
+}
+
+/// Control for the case above: the same entry with the second put on
+/// another root flags the same basis, so the two shapes agree (#2746).
+#[test]
+fn test_option_assignment_other_root_trade_falls_back() {
+    let errors = assignment_errors(put_assignment_settled(
+        "224.00",
+        "-22900.00",
+        vec![per_unit(leg(OPT_ACCT, "1", "QQQ261016P00500000"), "200.00")],
+    ));
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert_eq!(
+        errors[0].message,
+        "AAPL261016P00225000 assignment: AAPL basis 22400.00 USD, expected 22200.00 USD (strike 225 × 100 − premium 300.00)"
+    );
+}
+
 /// Two assignments in one entry share the cash, so neither may read a fee
 /// from it: both fall back to the exact rule, and each flags the premium
 /// the fee window would have absorbed.

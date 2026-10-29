@@ -680,6 +680,12 @@ pub(crate) struct TokenIter<'src> {
     keep_whitespace: bool,
     at_line_start: bool,
     last_newline_end: usize,
+    /// End of the last `[ \t\r]` run that `stray_cr_trivia_end` scanned and
+    /// found not to reach a line ending (#2804 review). A token that starts
+    /// before it lies inside that run, so its own scan would stop at the same
+    /// byte and fail too; skipping it keeps a long run linear instead of
+    /// rescanning the rest of the run for each of its `\r` bytes.
+    stray_cr_failed_until: usize,
     pending: Option<(Token<'src>, Span)>,
 }
 
@@ -698,6 +704,7 @@ impl<'src> TokenIter<'src> {
             keep_whitespace,
             at_line_start: true,
             last_newline_end: 0,
+            stray_cr_failed_until: 0,
             pending: None,
         }
     }
@@ -741,10 +748,18 @@ impl TokenIter<'_> {
     /// `tests/stray_cr.rs`.
     ///
     /// Returns `None`, after one byte comparison, for an ordinary
-    /// `Whitespace` token. Scans forward only, over bytes the run then
-    /// consumes, so it stays linear.
+    /// `Whitespace` token. Linear: a run that reaches the line ending is
+    /// consumed by the token, and a run that does not is remembered in
+    /// `stray_cr_failed_until`, so later tokens inside it (its `\r` bytes and
+    /// spaces, each a suffix of the run that would stop at the same byte)
+    /// return `None` without scanning. Each byte is scanned at most once.
+    ///
+    /// The offsets are absolute, like the spans. A restart never re-lexes
+    /// before a failed run's end: line-at-a-time mode restarts at the old
+    /// `lex_end`, and the `Err` arm at the end of the line of a `"` token,
+    /// which the lexer only reached by passing the run.
     fn stray_cr_trivia_end(
-        &self,
+        &mut self,
         result: &Result<Token<'_>, ()>,
         span: &Range<usize>,
     ) -> Option<usize> {
@@ -754,6 +769,9 @@ impl TokenIter<'_> {
             Err(()) if &bytes[span.clone()] == b"\r" => true,
             _ => return None,
         };
+        if span.start < self.stray_cr_failed_until {
+            return None;
+        }
         let mut end = span.end;
         while end < self.lex_end {
             match bytes[end] {
@@ -764,6 +782,8 @@ impl TokenIter<'_> {
                 }
                 _ => break,
             }
+            #[cfg(test)]
+            test_counters::STRAY_CR_SCANNED_BYTES.with(|c| c.set(c.get() + 1));
         }
         // The run ends at a `\n`, at the `\r` of a `\r\n`, or at the end of
         // the source. Line-at-a-time mode ends each chunk after a `\n`, so
@@ -773,7 +793,12 @@ impl TokenIter<'_> {
         } else {
             matches!(bytes[end], b'\n' | b'\r')
         };
-        (has_cr && at_line_end).then_some(end)
+        if has_cr && at_line_end {
+            Some(end)
+        } else {
+            self.stray_cr_failed_until = end;
+            None
+        }
     }
 }
 
@@ -783,6 +808,9 @@ pub(crate) mod test_counters {
         /// Total bytes visible to the lexers `TokenIter::restart_lexer`
         /// created on this thread.
         pub(crate) static RESTART_VISIBLE_BYTES: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
+        /// Bytes `TokenIter::stray_cr_trivia_end` stepped over on this thread.
+        pub(crate) static STRAY_CR_SCANNED_BYTES: std::cell::Cell<usize> =
             const { std::cell::Cell::new(0) };
     }
 }
@@ -1275,6 +1303,37 @@ mod tests {
                 )),
                 "{label}: {:?}",
                 &tokens[..6]
+            );
+        }
+    }
+
+    /// A long `[ \t\r]` run that does not reach its line ending must not
+    /// make lexing quadratic (#2804 review). Each of its `\r` bytes is a
+    /// lone-`\r` error token whose stray-`\r` scan ran to the end of the run
+    /// and failed, so a run of N bytes cost O(N^2) (over 120 s on 1 MB). The
+    /// bytes those scans step over must stay linear in the input.
+    #[test]
+    fn test_tokenize_lossless_long_cr_run_not_at_a_line_end_lexes_in_linear_time() {
+        const N: usize = 20_000;
+        for (label, src) in [
+            (
+                "\\r run",
+                "2024-01-01 open Assets:A\n".to_string() + &"\r".repeat(N) + "x\n",
+            ),
+            ("\\r and space run", "\r ".repeat(N) + "x\n"),
+        ] {
+            test_counters::STRAY_CR_SCANNED_BYTES.with(|c| c.set(0));
+            let tokens = tokenize_lossless(&src);
+            let scanned = test_counters::STRAY_CR_SCANNED_BYTES.with(std::cell::Cell::get);
+            assert!(
+                scanned <= 2 * src.len(),
+                "{label}: stray-\\r scans stepped over {scanned} bytes of a {}-byte input",
+                src.len()
+            );
+            // Still errors: the run is followed by more of the line.
+            assert!(
+                tokens.iter().any(|(t, _)| matches!(t, Token::Error("\r"))),
+                "{label}"
             );
         }
     }

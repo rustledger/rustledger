@@ -9,8 +9,10 @@
 //! error; moved to column 0 it becomes a silenced org-mode heading, so
 //! formatting erased the error and changed what the file means.
 //!
-//! An indented directive is a different case and is still moved to column 0:
-//! it parses either way, and the formatter repairs its indentation.
+//! An indented directive is a different case and is still moved to column 0.
+//! It is a reported error too (`top-level directive must start at column 0`),
+//! but `format_source` currently dedents it, which repairs the error. That
+//! pre-existing behavior is tracked as a separate follow-up.
 
 use rustledger_parser::format::format_source;
 use rustledger_parser::parse;
@@ -47,10 +49,21 @@ fn assert_errors_kept(label: &str, src: &str) {
     );
 }
 
+/// `src` is already canonical: formatting must keep its error lines and
+/// return it unchanged.
+fn assert_unchanged(label: &str, src: &str) {
+    assert_errors_kept(label, src);
+    assert_eq!(
+        format_source(src),
+        src,
+        "{label}: formatting changed the file"
+    );
+}
+
 #[test]
 fn test_format_source_keeps_an_indented_first_line_star_an_error() {
-    assert_errors_kept("first line", "  * h\n2024-01-02 open Assets:B\n");
-    assert_errors_kept(
+    assert_unchanged("first line", "  * h\n2024-01-02 open Assets:B\n");
+    assert_unchanged(
         "after a leading blank line",
         "\n  * h\n2024-01-02 open Assets:B\n",
     );
@@ -62,18 +75,33 @@ fn test_format_source_keeps_an_indented_first_line_star_an_error() {
         "after a whitespace-only line",
         "  \n  * h\n2024-01-02 open Assets:B\n",
     );
-    assert_errors_kept("tab indent", "\t* h\n2024-01-02 open Assets:B\n");
-    assert_errors_kept(
+    assert_unchanged("tab indent", "\t* h\n2024-01-02 open Assets:B\n");
+    assert_unchanged(
         "issue reproducer",
         "  * h \"x\n2024-01-02 open Assets:B\n2024-01-03 open Assets:C\n",
     );
 }
 
+/// A leading BOM is dropped and CRLF is normalized to LF (the formatter's
+/// documented output), but the indentation of the first error line is kept.
+#[test]
+fn test_format_source_keeps_an_indented_first_line_star_with_bom_or_crlf() {
+    let expected = "  * h\n2024-01-02 open Assets:B\n";
+    for (label, src) in [
+        ("BOM", "\u{FEFF}  * h\n2024-01-02 open Assets:B\n"),
+        ("CRLF", "  * h\r\n2024-01-02 open Assets:B\r\n"),
+        (
+            "BOM and CRLF",
+            "\u{FEFF}  * h\r\n2024-01-02 open Assets:B\r\n",
+        ),
+    ] {
+        assert_eq!(format_source(src), expected, "{label}");
+    }
+}
+
 #[test]
 fn test_format_source_keeps_an_indented_first_error_line_verbatim() {
-    let src = "  junk here\n2024-01-02 open Assets:B\n";
-    assert_errors_kept("junk", src);
-    assert!(format_source(src).starts_with("  junk here\n"));
+    assert_unchanged("junk", "  junk here\n2024-01-02 open Assets:B\n");
 }
 
 /// Mid-file the indentation was already inside the error node and kept.

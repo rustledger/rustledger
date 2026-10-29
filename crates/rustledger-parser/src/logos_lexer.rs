@@ -1321,6 +1321,12 @@ mod tests {
                 "2024-01-01 open Assets:A\n".to_string() + &"\r".repeat(N) + "x\n",
             ),
             ("\\r and space run", "\r ".repeat(N) + "x\n"),
+            // An unterminated quote puts the rest of the file in
+            // line-at-a-time mode, so the run is lexed after a restart.
+            (
+                "\\r run in line-at-a-time mode",
+                "\"x\n".to_string() + &"\r".repeat(N) + "y\n",
+            ),
         ] {
             test_counters::STRAY_CR_SCANNED_BYTES.with(|c| c.set(0));
             let tokens = tokenize_lossless(&src);

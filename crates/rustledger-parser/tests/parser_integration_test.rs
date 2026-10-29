@@ -55,10 +55,8 @@ fn balance_tolerance_follows_an_arithmetic_amount() {
     let forms = [
         ("100.00 USD", dec_str("100.00")),
         ("100.00 ~ 0.01 USD", dec_str("100.00")),
-        ("100.00 USD ~ 0.01 USD", dec_str("100.00")),
         ("0.25 + 0.75 USD", dec_str("1.00")),
         ("0.25 + 0.75 ~ 0.01 USD", dec_str("1.00")),
-        ("0.25 + 0.75 USD ~ 0.01 USD", dec_str("1.00")),
         ("(0.25 + 0.75) ~ 0.01 USD", dec_str("1.00")),
     ];
 
@@ -253,7 +251,7 @@ fn the_documented_tolerance_table_matches_behavior() {
         let claim = claim.trim();
         let expect_ok = match claim {
             "ok" | "accepted" | "ok (kept)" | "accepted (kept)" => true,
-            "diagnosed" => false,
+            "diagnosed" | "diagnosed (kept)" => false,
             other => panic!("unrecognized claim {other:?} for `{form}` -- add it here"),
         };
 
@@ -280,9 +278,9 @@ fn the_documented_tolerance_table_matches_behavior() {
 #[test]
 fn balance_tolerance_accepts_one_reading_and_diagnoses_none() {
     // beancount's grammar is `NUMBER ~ NUMBER CURRENCY` -- one currency,
-    // trailing -- and it rejects any currency before the `~`. We differ in
-    // both directions on one rule: accept what has exactly one meaning,
-    // diagnose what has none or contradicts itself (#2193).
+    // trailing -- and it rejects any currency before the `~`. We follow it
+    // exactly (#2802): every form it refuses is diagnosed here too, most for
+    // a specific reason (#2193).
     //
     // Every row below was checked against beancount 3.2.3; the `bc` column
     // records what it does, so a future reader can see which way each row
@@ -295,11 +293,12 @@ fn balance_tolerance_accepts_one_reading_and_diagnoses_none() {
         ("(0.25 + 0.75) ~ 0.01 USD", true, "ok"),
         ("1.00 ~ 0.005 + 0.005 USD", true, "ok"),
         ("1.00 ~ 0.005 * 2 USD", true, "ok"),
-        // Laxer than beancount ON PURPOSE: the currency is stated twice and
-        // agrees, so there is one reading, and it canonicalizes to
-        // `1.00 ~ 0.01 USD` losslessly.
-        ("1.00 USD ~ 0.01 USD", true, "syntax error"),
-        ("0.25 + 0.75 USD ~ 0.01 USD", true, "syntax error"),
+        // Once accepted on purpose (one reading, the currency stated twice and
+        // agreeing). beancount refuses them, and nothing about correctness
+        // needs the laxer reading, so they are refused here too (#2802).
+        ("1.00 USD ~ 0.01 USD", false, "syntax error"),
+        ("0.25 + 0.75 USD ~ 0.01 USD", false, "syntax error"),
+        ("1.00 USD ~ 0.01", false, "syntax error"),
         // Stricter than we used to be: these say something unkeepable and
         // were being read in part and discarded in part.
         ("1.00 USD ~ 0.01 EUR", false, "syntax error"),
@@ -322,8 +321,9 @@ fn balance_tolerance_accepts_one_reading_and_diagnoses_none() {
         );
     }
 
-    // The accepted redundant form must mean exactly what the canonical one
-    // means, or "one reading" is not true.
+    // Diagnosed, but the directive is kept (#2802 reports a stray header
+    // token without dropping the directive), and it must still mean exactly
+    // what the canonical spelling means.
     let redundant = rustledger_parser::parse("2024-01-15 balance Assets:C 1.00 USD ~ 0.01 USD\n");
     let canonical = rustledger_parser::parse("2024-01-15 balance Assets:C 1.00 ~ 0.01 USD\n");
     let bal = |r: &rustledger_parser::ParseResult| {

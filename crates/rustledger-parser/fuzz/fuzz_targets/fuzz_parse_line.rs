@@ -378,10 +378,12 @@ impl FuzzInput {
 
             // === Balance directive ===
             4 => {
-                let mut s = format!("{} balance {} {} {}", date, account, amount, currency);
+                // beancount's form: the one currency comes after the tolerance.
+                let mut s = format!("{} balance {} {}", date, account, amount);
                 if self.has_tolerance {
                     s.push_str(&format!(" ~ 0.{:02}", self.tolerance % 100));
                 }
+                s.push_str(&format!(" {}", currency));
                 s.push_str(&self.format_metadata());
                 s
             }

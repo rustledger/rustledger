@@ -1807,8 +1807,25 @@ fn emit_open(d: &ast::OpenDirective, group: GroupingStyle<'_>, out: &mut String)
     out.push_str(&account);
     // The currency constraint list is comma-separated (`USD,EUR`), not
     // space-separated — emitting spaces produces invalid beancount (#1405).
+    //
+    // beancount's `currency_list COMMA currency` also reduces from `%empty`, so
+    // one comma BEFORE the first currency is valid (`Assets:A , USD`). It means
+    // nothing, but it is the author's text, so it is kept (as `,USD`) rather
+    // than deleted (#2802).
+    let leading_comma = d
+        .syntax()
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .skip_while(|t| t.kind() != crate::SyntaxKind::ACCOUNT)
+        .skip(1)
+        .find(|t| t.kind() != crate::SyntaxKind::WHITESPACE)
+        .is_some_and(|t| t.kind() == crate::SyntaxKind::COMMA);
     for (i, currency) in d.currencies().enumerate() {
-        out.push_str(if i == 0 { " " } else { "," });
+        out.push_str(match (i, leading_comma) {
+            (0, false) => " ",
+            (0, true) => " ,",
+            _ => ",",
+        });
         out.push_str(currency.text());
     }
     if let Some(booking) = d.booking_method() {
@@ -3333,12 +3350,17 @@ mod tests {
         // `100.00 USD ~ 0.01 USD`, repeating the currency; that is not the
         // beancount form, and the emitter produced it by running the amount
         // expression past the tilde and then emitting the tolerance again.
-        // Input that repeats the currency now normalizes to the canonical form.
-        let src = "2024-01-15 balance Assets:Cash 100.00 USD ~ 0.01 USD\n";
+        let src = "2024-01-15 balance Assets:Cash  100.00  ~  0.01 USD\n";
         assert_eq!(
             format_source(src),
             "2024-01-15 balance Assets:Cash 100.00 ~ 0.01 USD\n"
         );
+        // Input that repeats the currency is a syntax error in beancount, and
+        // here too (#2802), so the error-tolerant formatter keeps it as
+        // written rather than rewriting a line it cannot vouch for.
+        let repeated = "2024-01-15 balance Assets:Cash 100.00 USD ~ 0.01 USD\n";
+        assert!(!crate::parse(repeated).errors.is_empty());
+        assert_eq!(format_source(repeated), repeated);
     }
 
     #[test]
@@ -4008,7 +4030,7 @@ mod tests {
         ),
         (
             "balance_with_arithmetic_and_tolerance",
-            "2024-01-15 balance Assets:Cash 0.25 + 0.75 USD ~ 0.01 USD\n",
+            "2024-01-15 balance Assets:Cash 0.25 + 0.75 ~ 0.01 USD\n",
         ),
         // Regression for Copilot #2: a previous emit_amount_expression
         // skipped tokens until the first NUMBER, which dropped a
@@ -4145,10 +4167,10 @@ mod tests {
         // gated the opener on `at_line_start` would stay in Code
         // when it hit the `#+`, then flip to InString on the next
         // `"` and trap there for the remainder of the file. The
-        // lexer-agreement property test catches that divergence,
-        // and the round-trip body runs too because the parser
-        // treats the mid-line EMACS_DIRECTIVE as same-line
-        // trailing trivia under the directive-terminator rule.
+        // lexer-agreement property test catches that divergence.
+        // The line is a parse error (a mid-line `#+` is not a
+        // comment in beancount, #2802), so the round-trip body
+        // skips it.
         (
             "emacs_directive_mid_line_with_quote",
             "2024-01-15 open Assets:A #+stray \"q\n",
@@ -4233,17 +4255,16 @@ mod tests {
     ///   skip-on-errors guard triggers. They exist for the line-ending
     ///   state machine's lexer-agreement test (#2775), not the round-trip
     ///   body.
+    /// - `emacs_directive_mid_line_with_quote`: a `#+` after a header's
+    ///   first token is a parse error, as in beancount (only `;` starts a
+    ///   comment mid-line, #2802), so the skip-on-errors guard triggers. It
+    ///   exists for the state machine's lexer-agreement test on a comment
+    ///   with an unbalanced `"`, not the round-trip body.
     ///
-    /// Note: `comment_containing_quote` and
-    /// `emacs_directive_mid_line_with_quote` BOTH exercise the
-    /// body — each is paired with a parseable directive on the
-    /// same line or an adjacent line, and the trivia token
-    /// (comment / `EMACS_DIRECTIVE`) attaches as same-line or
-    /// inter-directive trivia under the directive-terminator
-    /// rule. Their purpose is the state-machine / lexer agreement
-    /// property on a comment with an unbalanced `"`, not the
-    /// zero-directive case.
-    const ROUNDTRIP_KNOWN_ZERO_DIRECTIVE_FIXTURES: usize = 10;
+    /// Note: `comment_containing_quote` DOES exercise the body: it is
+    /// paired with a parseable directive, and its comment attaches as
+    /// inter-directive trivia under the directive-terminator rule.
+    const ROUNDTRIP_KNOWN_ZERO_DIRECTIVE_FIXTURES: usize = 11;
 
     #[test]
     fn lf_to_crlf_outside_strings_preserves_string_interior() {
@@ -6117,12 +6138,6 @@ mod tests {
             (
                 "2020-01-04 balance Assets:A 0.00 ~ 1234.5 USD\n",
                 "2020-01-04 balance Assets:A 0.00 ~ 1234.5 USD\n",
-            ),
-            // A source that repeats the currency collapses to the one-currency
-            // beancount form rather than keeping both.
-            (
-                "2020-01-04 balance Assets:A 0.00 USD ~ 0.05 USD\n",
-                "2020-01-04 balance Assets:A 0.00 ~ 0.05 USD\n",
             ),
             // No tolerance: unchanged.
             (

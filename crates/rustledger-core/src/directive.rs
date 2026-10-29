@@ -1389,11 +1389,16 @@ impl Balance {
 
 impl fmt::Display for Balance {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{} balance {} {}", self.date, self.account, self.amount)?;
-        if let Some(tol) = self.tolerance {
-            write!(f, " ~ {tol}")?;
+        // beancount's form, `NUMBER ~ TOLERANCE CURRENCY`: one currency, after
+        // the tolerance (#2802).
+        match self.tolerance {
+            Some(tol) => write!(
+                f,
+                "{} balance {} {} ~ {tol} {}",
+                self.date, self.account, self.amount.number, self.amount.currency
+            ),
+            None => write!(f, "{} balance {} {}", self.date, self.account, self.amount),
         }
-        Ok(())
     }
 }
 

@@ -8,7 +8,8 @@
 //! the scan, dropping the comments after it), as a same-line trailing
 //! comment, and inside a transaction body. At the top of the file a
 //! different path kept them. The emitters now use the parser's canonical
-//! `is_comment_kind`, which covers all four.
+//! `is_comment_kind`, which covers all four. (On a non-transaction header,
+//! a same-line `#!` or `#+` is now a parse error, as in beancount: #2802.)
 
 use rustledger_parser::format::try_format_source;
 
@@ -42,12 +43,20 @@ fn test_try_format_source_keeps_comments_around_a_hash_plus_line() {
     );
 }
 
+/// After a directive header's first token, `#+` is not a comment in
+/// beancount (only `;` is, mid-line), so the line is a parse error (#2802):
+/// `rledger format` refuses the file, and the error-tolerant formatter keeps
+/// the line as written.
 #[test]
-fn test_try_format_source_keeps_a_same_line_hash_plus_comment() {
-    assert_kept(
-        "same-line trailing",
-        "2024-01-01 open Assets:A #+stray\n2024-01-02 open Assets:B\n",
+fn test_format_source_keeps_a_same_line_hash_plus_on_a_header() {
+    let src = "2024-01-01 open Assets:A #+stray\n2024-01-02 open Assets:B\n";
+    assert!(
+        try_format_source(src).is_err(),
+        "a mid-line `#+` is a parse error"
     );
+    let out = rustledger_parser::format::format_source(src);
+    assert_eq!(out, src);
+    assert_eq!(rustledger_parser::format::format_source(&out), out);
 }
 
 #[test]

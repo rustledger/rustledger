@@ -196,7 +196,11 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
             ));
         }
     }
-    errors.extend(inline_errors);
+    errors.extend(
+        inline_errors
+            .into_iter()
+            .map(|e| name_a_currency_tail(e, stripped, bom_offset)),
+    );
     let warnings = Vec::new();
 
     // pushtag/poptag/pushmeta/popmeta state. The legacy parser
@@ -212,6 +216,13 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     // most recent, leaving x=1 active. A HashMap would have lost
     // the shadowed entry on the second push.
     let mut meta_stack: Vec<(String, MetaValue, Span)> = Vec::new();
+
+    // Starts of the errors the walks above already reported, for the header
+    // check below: a header that already has an error is not checked again
+    // (one error per problem, as beancount reports the first one on a line).
+    let mut prior_error_starts: Vec<usize> = errors.iter().map(|e| e.span.start).collect();
+    prior_error_starts.sort_unstable();
+    let mut header_tokens = Vec::new();
 
     for directive in source_file.directives() {
         // Helper to push a successfully-converted directive
@@ -337,6 +348,34 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
                 None
             }
         };
+        // A header line beancount's grammar refuses (#2802). Checked only when
+        // nothing else has reported an error on this directive yet, and it
+        // REPORTS BUT DOES NOT DROP, for the same reason as
+        // `reject_tags_and_links`: the directive still loads, so one stray
+        // character does not cascade into unopened-account errors.
+        let converted_or_stateful = pushed_directive.is_some() || !is_directive_producing;
+        if converted_or_stateful
+            && errors.len() == errors_before
+            && let Some(err) = directive_header_check(
+                &cst_node,
+                stripped,
+                bom_offset,
+                &prior_error_starts,
+                &mut header_tokens,
+            )
+        {
+            errors.push(err);
+        }
+        if pushed_directive.is_some() && cst_node.kind() == crate::SyntaxKind::TRANSACTION {
+            posting_stray_token_check(
+                &cst_node,
+                stripped,
+                bom_offset,
+                &prior_error_starts,
+                errors_before,
+                &mut errors,
+            );
+        }
         if let Some(mut spanned) = pushed_directive {
             apply_inherited_state(&mut spanned.value, &tag_stack, &meta_stack);
             directives.push(spanned);
@@ -904,15 +943,15 @@ fn convert_balance(
 
 /// Diagnose a tolerance clause that says something the model cannot keep.
 ///
-/// beancount's grammar is `NUMBER ~ NUMBER CURRENCY` — one currency, trailing —
-/// and rejects any currency before the `~`. We are deliberately laxer in one
-/// direction and stricter in another, on a single rule: **accept what has
-/// exactly one meaning, diagnose what has none or contradicts itself.**
+/// beancount's grammar is `NUMBER ~ NUMBER CURRENCY`: one currency, trailing,
+/// and it rejects any currency before the `~`. This function READS the
+/// tolerance of every spelling that has one meaning, and diagnoses the ones
+/// that have none or contradict themselves, each for its own reason:
 ///
-/// - `1.00 USD ~ 0.01 USD` is ACCEPTED, though beancount calls it a syntax
-///   error. The currency is stated twice and agrees, so there is one reading;
-///   it canonicalizes to `1.00 ~ 0.01 USD` losslessly. Rejecting it would
-///   refuse a file whose meaning is not in doubt.
+/// - `1.00 USD ~ 0.01 USD` is READ as `1.00 ~ 0.01 USD` (the currency is
+///   stated twice and agrees). It is still a syntax error, as in beancount:
+///   the header check (`directive_header`, #2802) reports the `~` after the
+///   currency, and the directive is kept with this one reading.
 /// - `1.00 USD ~ 0.01 EUR` is DIAGNOSED. A tolerance denominated in a
 ///   different currency than the amount is not redundancy, it is an
 ///   assertion the model has no field for — and `rledger format` used to
@@ -921,8 +960,7 @@ fn convert_balance(
 ///   operator have no reading at all; this took the first and dropped the
 ///   rest silently. (`~ 0.005 + 0.005` is arithmetic and still evaluates.)
 ///
-/// Recorded as a deliberate divergence in `docs/reference/compatibility.md`
-/// (#2193).
+/// The table is in `docs/reference/compatibility.md` (#2193, #2802).
 fn check_balance_tolerance(
     node: &crate::SyntaxNode,
     bom_offset: u32,
@@ -3348,6 +3386,176 @@ fn transaction_header_check(
     });
     if let Some((defect, range)) = super::txn_header::first_header_defect(tokens) {
         out.push(header_defect_error(defect, &range, stripped, bom_offset));
+    }
+}
+
+/// Reject a non-transaction directive header line that beancount's grammar
+/// refuses (#2802). The rule lives in [`super::directive_header`]; here we only
+/// enumerate the header tokens: the node's direct tokens from its first
+/// content token (past leading trivia) up to the `NEWLINE` that ends the line.
+/// Metadata lines are `META_ENTRY` child nodes, so the first node ends the
+/// header too.
+///
+/// `prior_error_starts` (sorted, BOM frame) are the errors the tree walks
+/// already reported. A directive with one of them anywhere on its header line
+/// (an `ERROR_TOKEN`, a mid-line BOM, an indented directive, a bare currency
+/// in a custom value, ...) is not checked again, so a problem is reported
+/// once.
+///
+/// Walks the GREEN children (kind and length, no red-node allocation) into
+/// `tokens`, a buffer the caller reuses across directives, so the check costs
+/// no allocation per directive.
+fn directive_header_check(
+    node: &crate::SyntaxNode,
+    stripped: &str,
+    bom_offset: u32,
+    prior_error_starts: &[usize],
+    tokens: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
+) -> Option<crate::ParseError> {
+    let keyword = super::directive_header::directive_keyword(node.kind())?;
+    tokens.clear();
+    let mut at = usize::from(node.text_range().start());
+    let mut end = usize::from(node.text_range().end());
+    for child in node.green().children() {
+        let rowan::NodeOrToken::Token(t) = child else {
+            break;
+        };
+        let kind = <crate::BeancountLanguage as rowan::Language>::kind_from_raw(t.kind());
+        let range = at..at + t.text().len();
+        at = range.end;
+        if tokens.is_empty() && (is_trivia_kind(kind) || kind == crate::SyntaxKind::BOM) {
+            continue;
+        }
+        if kind == crate::SyntaxKind::NEWLINE {
+            end = range.start;
+            break;
+        }
+        tokens.push((kind, range));
+    }
+    let off = bom_offset as usize;
+    let from = usize::from(node.text_range().start()) + off;
+    let first_after = prior_error_starts.partition_point(|&s| s < from);
+    if prior_error_starts
+        .get(first_after)
+        .is_some_and(|&s| s <= end + off)
+    {
+        return None;
+    }
+    let defect = super::directive_header::first_header_defect(node.kind(), tokens, end)?;
+    let text = stripped.get(defect.range.clone()).unwrap_or_default();
+    Some(crate::ParseError::new(
+        crate::ParseErrorKind::SyntaxError(super::directive_header::defect_message(
+            keyword, &defect, text,
+        )),
+        Span::new(defect.range.start + off, defect.range.end + off),
+    ))
+}
+
+/// Report a token left over after a posting's amount, cost or price.
+///
+/// The posting converter reads its `AMOUNT`, `COST_SPEC` and
+/// `PRICE_ANNOTATION` children and nothing else, so a flat token after them
+/// was dropped in silence. That became reachable from ordinary text when the
+/// lexer started ending a currency at its last letter or digit, as beancount
+/// does (#2802): `1 USD-` is `USD` then `-`, which loaded as `1 USD` and was
+/// written back that way, where bean-check reports `unexpected MINUS`.
+///
+/// Comment kinds are left alone here: a mid-line `%`, `#!` or `#+` on a
+/// posting line is stage 3 of #2802, like the rest of the posting grammar.
+/// A posting that already has an error anywhere on it (`5 USD + 3 USD`'s
+/// trailing amount, an `ERROR_TOKEN`) is not reported twice.
+///
+/// Runs from the shared directive loop over GREEN children, so the green and
+/// red parse paths cannot disagree on it.
+fn posting_stray_token_check(
+    node: &crate::SyntaxNode,
+    stripped: &str,
+    bom_offset: u32,
+    prior_error_starts: &[usize],
+    errors_before: usize,
+    errors: &mut Vec<crate::ParseError>,
+) {
+    use crate::SyntaxKind as K;
+    let kind_of = <crate::BeancountLanguage as rowan::Language>::kind_from_raw;
+    let off = bom_offset as usize;
+    let mut at = usize::from(node.text_range().start());
+    for child in node.green().children() {
+        let len = match child {
+            rowan::NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
+            rowan::NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
+        };
+        let posting_start = at;
+        at += len;
+        let rowan::NodeOrToken::Node(posting) = child else {
+            continue;
+        };
+        if kind_of(posting.kind()) != K::POSTING {
+            continue;
+        }
+        let mut p = posting_start;
+        let mut after_amount: Option<usize> = None;
+        // Whether the last amount-like child ends in a `CURRENCY` token.
+        let mut ends_in_currency = false;
+        let mut stray: Option<std::ops::Range<usize>> = None;
+        for part in posting.children() {
+            let start = p;
+            p += match part {
+                rowan::NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
+                rowan::NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
+            };
+            match part {
+                rowan::NodeOrToken::Node(n) => match kind_of(n.kind()) {
+                    K::AMOUNT | K::COST_SPEC | K::PRICE_ANNOTATION => {
+                        after_amount = Some(p);
+                        ends_in_currency = last_token_kind(n) == Some(K::CURRENCY);
+                    }
+                    _ => break,
+                },
+                rowan::NodeOrToken::Token(t) => {
+                    let kind = kind_of(t.kind());
+                    if kind == K::NEWLINE {
+                        break;
+                    }
+                    if after_amount.is_some()
+                        && !is_trivia_kind(kind)
+                        && !matches!(kind, K::ERROR_TOKEN | K::BOM)
+                    {
+                        stray = Some(start..p);
+                        break;
+                    }
+                }
+            }
+        }
+        let (Some(range), Some(amount_end)) = (stray, after_amount) else {
+            continue;
+        };
+        let (from, to) = (posting_start + off, at + off);
+        let first_after = prior_error_starts.partition_point(|&s| s < from);
+        let reported = prior_error_starts.get(first_after).is_some_and(|&s| s < to)
+            || errors[errors_before..]
+                .iter()
+                .any(|e| (from..to).contains(&e.span.start));
+        if reported {
+            continue;
+        }
+        let text = stripped.get(range.clone()).unwrap_or_default();
+        // Glued to a currency, and a character a currency may hold inside it:
+        // the lexer ended the currency before it. Anything else (`1-`,
+        // `{1 USD}-`, `1 USD+`) is just a stray token.
+        let why = if range.start == amount_end
+            && ends_in_currency
+            && matches!(text, "-" | "'" | "." | "_")
+        {
+            format!(": a currency cannot end in `{text}`")
+        } else {
+            String::new()
+        };
+        errors.push(crate::ParseError::new(
+            crate::ParseErrorKind::SyntaxError(format!(
+                "unexpected {text:?} after the posting amount{why}"
+            )),
+            Span::new(range.start + off, range.end + off),
+        ));
     }
 }
 
@@ -6579,5 +6787,66 @@ mod custom_rejected_values {
             Some(&MetaValue::Tag(Tag::new("kept"))),
             "the tag survives as a Tag in metadata; got {meta:?}",
         );
+    }
+}
+
+/// Name the problem when an unlexable character is glued to the end of a
+/// currency (`CAC_`, `HOOL'`, `USD.`).
+///
+/// A currency ends with a letter or digit, as in beancount (#2802), so the
+/// trailing `_`, `'` or `.` is left over as an `ERROR_TOKEN`, whose generic
+/// message is `unexpected input`. Shared by both parse paths: it rewrites the
+/// message of an error both walkers already produced, keyed only on the source
+/// text.
+fn name_a_currency_tail(
+    err: crate::ParseError,
+    stripped: &str,
+    bom_offset: u32,
+) -> crate::ParseError {
+    let crate::ParseErrorKind::SyntaxError(msg) = &err.kind else {
+        return err;
+    };
+    if msg != "unexpected input" {
+        return err;
+    }
+    let Some(start) = err.span.start.checked_sub(bom_offset as usize) else {
+        return err;
+    };
+    let Some(tail @ ('_' | '\'' | '.')) = stripped.get(start..).and_then(|s| s.chars().next())
+    else {
+        return err;
+    };
+    let before = &stripped[..start];
+    // `char_indices`, not `rfind + 1`: the character before the word may be
+    // multibyte, and slicing inside it would panic.
+    let stop = before
+        .char_indices()
+        .rev()
+        .find(|&(_, c)| !(c.is_ascii_alphanumeric() || "'._-/".contains(c)));
+    // A currency is ASCII, so a word glued to a non-ASCII character (`ÜSD_`) is
+    // not one; naming the ASCII fragment after it (`SD`) would mislead.
+    if stop.is_some_and(|(_, c)| !c.is_ascii()) {
+        return err;
+    }
+    let word_start = stop.map_or(0, |(i, c)| i + c.len_utf8());
+    let word = &before[word_start..];
+    // After a `:` it is the end of an account segment, not a currency.
+    if word.is_empty() || before[..word_start].ends_with(':') || !crate::is_valid_currency(word) {
+        return err;
+    }
+    crate::ParseError {
+        kind: crate::ParseErrorKind::SyntaxError(format!(
+            "unexpected `{tail}` after the currency `{word}`: a currency cannot end in `{tail}`"
+        )),
+        ..err
+    }
+}
+
+/// The kind of the last token under a green node, if it has one.
+fn last_token_kind(node: &rowan::GreenNodeData) -> Option<crate::SyntaxKind> {
+    let kind_of = <crate::BeancountLanguage as rowan::Language>::kind_from_raw;
+    match node.children().last()? {
+        rowan::NodeOrToken::Token(t) => Some(kind_of(t.kind())),
+        rowan::NodeOrToken::Node(n) => last_token_kind(n),
     }
 }

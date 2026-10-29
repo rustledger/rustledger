@@ -806,7 +806,7 @@ mod tests {
         let formatted = format_balance(&bal, &config);
         assert_eq!(
             formatted,
-            "2024-01-01 balance Assets:Bank  1000.00 USD ~ 0.01\n"
+            "2024-01-01 balance Assets:Bank  1000.00 ~ 0.01 USD\n"
         );
     }
 

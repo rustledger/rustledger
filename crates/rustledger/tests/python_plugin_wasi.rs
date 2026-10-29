@@ -43,7 +43,7 @@ impl Run {
     /// The exit status and everything the run printed, for an assertion
     /// message.
     fn report(&self) -> String {
-        format!("exit status: {}\n{}", self.status, self.out)
+        format!("{}\n{}", self.status, self.out)
     }
 }
 
@@ -325,21 +325,25 @@ def shout(entries, options_map):
 /// The host's time budget governs Python plugins, from the command line
 /// and from the config file.
 ///
-/// Nothing here depends on how fast the machine is (#2791). The plugin that
-/// must be stopped never returns on its own (`while True`), so a working
-/// budget always stops it, whichever of its two enforcements fires first:
-/// fuel (deterministic, `N * FUEL_PER_SECOND`) or the wall-clock deadline
-/// (N seconds). Both say "exceeded its N-second time budget", the
-/// observable asserted. A broken budget would hang instead, which
-/// [`WATCHDOG`] turns into a failure. The plugin prints a marker before
-/// looping, which shows `CPython` started and entered the plugin within the
-/// 3-second budget (startup is ~1.24G of its 3G fuel, ~0.2 s), so the
-/// budget stopped the plugin's own loop rather than the interpreter's
-/// startup. A 1-second budget (1G fuel) could not show that: it stops
-/// every Python plugin during startup.
+/// The plugin that must be stopped never returns on its own (`while True`),
+/// so a working budget always stops it (#2791), whichever of its two
+/// enforcements fires first: fuel (deterministic, `N * FUEL_PER_SECOND`)
+/// or the wall-clock deadline (N seconds, which on a contended runner can
+/// win). Both say "the plugin exceeded its N-second time budget", asserted
+/// for either path. A broken budget would hang instead, which [`WATCHDOG`]
+/// turns into a failure.
+///
+/// The plugin prints a marker before looping. When the fuel trap fired, the
+/// marker is required: 3G fuel is more than `CPython`'s ~1.24G startup, so
+/// a fuel stop must come after the plugin started, and the budget stopped
+/// the plugin's own loop rather than the interpreter's startup. A deadline
+/// stop says nothing about how far startup got (the deadline covers it too,
+/// and a contended runner can spend all 3 seconds there), so the marker is
+/// not required then. A 1-second budget (1G fuel) could not show this: it
+/// stops every Python plugin during startup.
 ///
 /// The plugin that must fit does a small, fixed amount of work, far under
-/// the default 30-second budget's fuel and deadline on any runner.
+/// the default 30-second budget's fuel and deadline.
 #[test]
 fn host_time_budget_applies_to_python_plugins() {
     let Some(bin) = rledger_with_python() else {
@@ -389,12 +393,23 @@ def spin(entries, options_map):
             "the failure must be {source}'s 3-second budget running out:\n{}",
             r.report()
         );
+        // The fuel trap (wasmtime's "all fuel consumed by WebAssembly") or
+        // the wall-clock deadline (`run_python` in rustledger-plugin's
+        // python/runtime.rs).
+        let by_fuel = r.out.contains("all fuel consumed");
         assert!(
-            r.out.contains("spin: started"),
-            "CPython must start and enter the plugin within {source}'s 3 seconds, \
-             so the budget stopped the plugin's loop:\n{}",
+            by_fuel || r.out.contains("time spent waiting or sleeping counts"),
+            "{source}'s budget must stop the plugin by fuel or by its deadline:\n{}",
             r.report()
         );
+        if by_fuel {
+            assert!(
+                r.out.contains("spin: started"),
+                "a fuel stop under {source} comes after CPython's startup, \
+                 so the plugin must have started:\n{}",
+                r.report()
+            );
+        }
     };
 
     let flag = run(

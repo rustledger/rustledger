@@ -28,7 +28,8 @@
 //! entry is plainly one assignment and its cash is an independent witness
 //! (#2732): exactly one closing group, every cash posting written rather
 //! than booking-interpolated, and no posting carrying a cost or price
-//! outside the group's option and stock legs. The fee the window allows is
+//! unless it is in the root commodity or one of the group's own contracts
+//! (#2746). The fee the window allows is
 //! the one the entry's cash proves it moved. Fees paid to acquire
 //! capitalize into basis (26 CFR §1.263(a)-4(c)(1)(i), (b)(1)(v),
 //! (e)(4)(iii)(B)); selling costs reduce the amount realized
@@ -36,13 +37,16 @@
 //! a fee from, the exact figure is required: the safe direction, since at
 //! worst a fee-folded ledger gets flagged.
 //!
-//! Two things this window knowingly misses. An explicitly typed cash
+//! Three things this window knowingly misses. An explicitly typed cash
 //! amount that is wrong by exactly the basis error still passes (only
 //! booking-interpolated cash forces the fallback); a `balance` assertion
 //! is what catches that. And a ledger whose basis matches its 1099-B —
 //! which carries the commission on the option's *opening* trade too — is
 //! flagged when it expensed that opening fee: a false alarm against the
-//! books, not a missed error.
+//! books, not a missed error. And every root-commodity posting counts as
+//! a group leg: rule 1 catches extra shares, but a buy and a sell of the
+//! root beside the assignment that cancel out still let the window open
+//! (#2746).
 //!
 //! Puts and calls on one root are separate assignments, so a put assigned
 //! beside a call bought back in the same entry is still checked. Same-day
@@ -188,15 +192,25 @@ fn is_cash_posting(
 /// is one assignment, the two guards accepted in #2555: exactly one
 /// closing group; every cash posting written (a booking-interpolated
 /// figure is filled from the very residual this would measure); and no
-/// posting carrying a cost or price outside the group's option and stock
-/// legs (a sweep purchase, a foreign-currency settlement priced with `@`,
-/// or a second trade would all move the cash). Any guard failing, a
-/// missing cost currency, or arithmetic out of range gives 0 — today's
-/// exact rule, the safe direction: at worst a fee-folded ledger gets
-/// flagged.
+/// posting carrying a cost or price unless its units are the root or one
+/// of `symbols`, the group's own contracts (a sweep purchase, a
+/// foreign-currency settlement priced with `@`, or a second option trade,
+/// even one of the same root and right, would all move the cash). Any
+/// guard failing, a missing cost currency, or arithmetic out of range
+/// gives 0: the exact rule, the safe direction, since at worst a
+/// fee-folded ledger gets flagged.
+///
+/// What the third guard does not reject: every posting in the root
+/// commodity counts as a group leg, whether or not it belongs to the
+/// assignment. A second root trade that changes the net share count never
+/// reaches this (rule 1 flags it first), but root postings beside the
+/// assignment that cancel each other out (a buy and a sell of the root in
+/// the same entry, leaving the net at 100 × contracts) pass the guard and
+/// can widen the window (#2746).
 fn commission(
     postings: &[PostingData],
     root: &str,
+    symbols: &[String],
     right: OptionRight,
     currency: Option<&str>,
     strike_value: Decimal,
@@ -213,10 +227,15 @@ fn commission(
         if posting.cost.is_none() && posting.price.is_none() {
             continue;
         }
-        let group_leg = posting.units.as_ref().is_some_and(|u| {
-            u.currency == root
-                || parse_occ(&u.currency).is_some_and(|o| o.root == root && o.right == right)
-        });
+        // The group's own contracts, not any option of the same root and
+        // right: a second such trade in the entry would pass and its
+        // premium widen the window (#2746). Stricter than the Python
+        // counterpart for now: rustledger/beancount-options has the
+        // identical old predicate, to be mirrored there.
+        let group_leg = posting
+            .units
+            .as_ref()
+            .is_some_and(|u| u.currency == root || symbols.contains(&u.currency));
         if !group_leg {
             return Decimal::ZERO;
         }
@@ -561,6 +580,7 @@ fn check(
     let fee = commission(
         postings,
         root,
+        &c.symbols,
         right,
         c.currency.as_deref(),
         strike_value,

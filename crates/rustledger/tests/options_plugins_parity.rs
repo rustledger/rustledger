@@ -19,7 +19,10 @@
 //! below), and a config string (a warning natively, an error in beancount,
 //! which has no warning severity;
 //! `test_option_assignment_config_is_ignored_with_a_warning` in
-//! `rustledger-plugin/tests/native_plugins_test.rs`).
+//! `rustledger-plugin/tests/native_plugins_test.rs`). A third is checked
+//! natively only until beancount-options mirrors it: a second option of
+//! the assigned root and right traded in the assignment entry
+//! (`check_option_assignment_same_root_trade_is_flagged`, #2746).
 //!
 //! Tool-gated: the parity tests need `bean-check` with beancount-options
 //! installed, and the shared cases need `BEANCOUNT_OPTIONS_DIR`. Where
@@ -272,6 +275,27 @@ fn check_option_assignment_overflow_is_reported() {
         [
             "12: AAPL261016P99999999 assignment: 1000000000000000000000000 contract(s) but 1 AAPL; expected 100000000000000000000000000",
             "19: MSFT261016P99999999 assignment not checked: amounts exceed the supported decimal range",
+        ],
+        "{text}"
+    );
+}
+
+/// The issue's ledger through `rledger check`: a second put of the
+/// assigned root and right, bought in the assignment entry, does not open
+/// the fee window, so the basis it inflated is flagged (#2746). Native
+/// only until beancount-options mirrors the fix; then it belongs in the
+/// shared cases.
+#[test]
+fn check_option_assignment_same_root_trade_is_flagged() {
+    let rledger = require_rledger!();
+    let path = fixture("assignment-same-root-trade.beancount");
+    let (ok, text) = run(&rledger, &["check"], &path);
+    assert!(!text.contains(PYTHON_RAN), "{text}");
+    assert!(!ok, "{text}");
+    assert_eq!(
+        errors(&text, &[&path]),
+        [
+            "15: AAPL261016P00225000 assignment: AAPL basis 22400.00 USD, expected 22200.00 USD (strike 225 × 100 − premium 300.00)",
         ],
         "{text}"
     );

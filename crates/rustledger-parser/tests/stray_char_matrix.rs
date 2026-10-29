@@ -1,4 +1,4 @@
-//! A stray character on a directive's header line is an error when beancount
+//! A stray character on a header or metadata line is an error when beancount
 //! says it is, and only then (#2802).
 //!
 //! The parser grouped a header line into tokens and each converter read the
@@ -13,8 +13,9 @@
 //! Python. The tests below check rledger's verdict against it, row by row.
 //!
 //! #2802 is fixed in stages. Stage 1 covers the header lines of the
-//! non-transaction directives; metadata lines (stage 2) and transactions and
-//! postings (stage 3) are generated but not yet checked: see [`in_scope`].
+//! non-transaction directives, stage 2 metadata lines (under any directive, a
+//! transaction or a posting); transactions and postings (stage 3) are
+//! generated but not yet checked: see [`stage`] and [`in_scope`].
 
 use proptest::prelude::*;
 use rustledger_parser::format::try_format_source;
@@ -24,6 +25,10 @@ use rustledger_parser::parse;
 const CHARS: &str = "!@?*~^$&|{}(),#%\"/_-'.A0";
 
 const DATA: &str = include_str!("data/stray_char_matrix.tsv");
+
+/// Rows pinned as known differences, by count: see the `known_*` functions.
+const KNOWN_COLUMN_0: usize = 120;
+const KNOWN_DATES: [usize; 3] = [259, 8, 0];
 
 /// One generated input.
 struct Case {
@@ -102,15 +107,36 @@ fn rows() -> Vec<Row> {
     rows
 }
 
-/// Which cases the fix so far covers.
-fn in_scope(row: &Row, case: &Case) -> bool {
-    match row.name.as_str() {
-        // Stage 3 of #2802.
-        "txn" | "txn-cost" | "txn-meta" => false,
-        // The header line only; the metadata line is stage 2.
-        "open-meta" => case.offset <= row.base.find('\n').expect("two lines"),
-        _ => true,
+/// The stage of #2802 a case belongs to, by the line the character lands on
+/// (a character inserted at a line's start lands on that line): 2 for a
+/// metadata line (`key: value` under a directive, transaction or posting), 3
+/// for a transaction's header or posting lines, 1 for any other line.
+fn stage(row: &Row, case: &Case) -> u8 {
+    let start = row.base[..case.offset].rfind('\n').map_or(0, |p| p + 1);
+    let line = &row.base[start..];
+    let line = &line[..line.find('\n').unwrap_or(line.len())];
+    let body = line.trim_start_matches(' ');
+    let is_meta = body.len() < line.len()
+        && body.split_once(':').is_some_and(|(key, _)| {
+            key.starts_with(|c: char| c.is_ascii_lowercase()) && !key.contains(' ')
+        });
+    let is_txn = row
+        .base
+        .split(' ')
+        .nth(1)
+        .is_some_and(|kw| kw.starts_with('*'));
+    if is_meta {
+        2
+    } else if is_txn {
+        3
+    } else {
+        1
     }
+}
+
+/// Which cases the fix so far covers: stages 1 and 2.
+fn in_scope(row: &Row, case: &Case) -> bool {
+    stage(row, case) <= 2
 }
 
 /// beancount ignores a whole line that starts with `!`, `?` or `&` at column
@@ -121,41 +147,68 @@ fn known_column_0_divergence(row: &Row, case: &Case) -> bool {
     "!?&".contains(case.ch) && (case.offset == 0 || row.base.as_bytes()[case.offset - 1] == b'\n')
 }
 
-/// A digit inserted into a directive's leading date: beancount's `DATE` is
+/// A digit inserted into a date: beancount's `DATE` is
 /// `[0-9]{4,}[-/][0-9]+[-/][0-9]+`, so `02024-01-01` and `2024-001-01` are
-/// dates there, and our lexer rejects them. A date-lexing difference, not a
-/// stray header token; pinned by count below until it is fixed separately.
+/// dates there, and our lexer rejects them; `20024-02-02` lexes as a date
+/// there and then fails as one, where ours reads the number expression
+/// `20024 - 02 - 02`. A date-lexing difference, not a stray token: #2808.
+/// Pinned by count below until it is fixed.
 fn known_date_digit_divergence(row: &Row, case: &Case) -> bool {
+    let b = row.base.as_bytes();
+    let is_date_at = |s: usize| {
+        b.get(s..s + 10).is_some_and(|w| {
+            w.iter().enumerate().all(|(i, c)| match i {
+                4 | 7 => *c == b'-',
+                _ => c.is_ascii_digit(),
+            })
+        }) && (s == 0 || !b[s - 1].is_ascii_digit())
+    };
     case.ch.is_ascii_digit()
-        && row.base.as_bytes()[0].is_ascii_digit()
-        && case.offset <= row.base.find(' ').expect("a dated header")
+        && (0..b.len()).any(|s| is_date_at(s) && (s..=s + 10).contains(&case.offset))
+}
+
+/// A character inserted right after a `\r` that the line goes on past: a
+/// mid-line `\r`, which we report and beancount accepts. A deliberate
+/// deviation (#2804): the formatter turns a bare `\r` into a line break, so
+/// accepting it would let `rledger check` pass a file `rledger format` then
+/// breaks. Pinned by count.
+const fn known_mid_line_cr(row: &Row, case: &Case) -> bool {
+    case.offset > 0 && row.base.as_bytes()[case.offset - 1] == b'\r'
 }
 
 #[test]
-fn test_parse_reports_a_stray_header_character_exactly_when_beancount_does() {
-    let mut checked = 0usize;
+fn test_parse_reports_a_stray_character_exactly_when_beancount_does() {
+    let mut checked = [0usize; 3];
     let mut known = 0usize;
-    let mut known_dates = 0usize;
+    let mut known_dates = [0usize; 3];
+    let mut known_cr = 0usize;
     let mut wrong = Vec::new();
     for row in rows() {
         for (case, verdict) in cases(&row.base).iter().zip(&row.verdicts) {
             if *verdict == 'x' || !in_scope(&row, case) {
                 continue;
             }
+            let stage = usize::from(stage(&row, case)) - 1;
             let beancount_rejects = *verdict == '1';
             let we_reject = !parse(&case.src).errors.is_empty();
+            let disagree = we_reject != beancount_rejects;
             if known_column_0_divergence(&row, case) && we_reject && !beancount_rejects {
                 known += 1;
                 continue;
             }
-            if known_date_digit_divergence(&row, case) && we_reject && !beancount_rejects {
-                known_dates += 1;
+            if known_date_digit_divergence(&row, case) && disagree {
+                known_dates[stage] += 1;
                 continue;
             }
-            checked += 1;
-            if we_reject != beancount_rejects {
+            if known_mid_line_cr(&row, case) && we_reject && !beancount_rejects {
+                known_cr += 1;
+                continue;
+            }
+            checked[stage] += 1;
+            if disagree {
                 wrong.push(format!(
-                    "{}@{}:{:?}  {:?}  beancount {}, rledger {}",
+                    "stage {}: {}@{}:{:?}  {:?}  beancount {}, rledger {}",
+                    stage + 1,
                     row.name,
                     case.offset,
                     case.ch,
@@ -170,13 +223,27 @@ fn test_parse_reports_a_stray_header_character_exactly_when_beancount_does() {
             }
         }
     }
-    assert!(checked > 9_000, "only {checked} cases checked");
-    assert_eq!(known, 60, "the #2779 rows changed");
-    assert_eq!(known_dates, 126, "the date-digit rows changed");
+    assert!(
+        checked[0] > 9_000,
+        "only {} header cases checked",
+        checked[0]
+    );
+    assert!(
+        checked[1] > 5_000,
+        "only {} metadata cases checked",
+        checked[1]
+    );
+    assert_eq!(known, KNOWN_COLUMN_0, "the #2779 rows changed");
+    assert_eq!(
+        known_dates, KNOWN_DATES,
+        "the date-digit (#2808) rows changed"
+    );
+    assert_eq!(known_cr, 1, "the mid-line `\\r` (#2804) rows changed");
     assert!(
         wrong.is_empty(),
-        "{} of {checked} cases disagree with beancount, first 20:\n{}",
+        "{} of {} cases disagree with beancount, first 20:\n{}",
         wrong.len(),
+        checked.iter().sum::<usize>(),
         wrong
             .iter()
             .take(20)
@@ -295,8 +362,22 @@ fn test_try_format_source_keeps_a_leading_comma_in_a_currency_list() {
     assert!(!parse("2024-01-01 open Assets:A ,,USD\n").errors.is_empty());
 }
 
+/// `s` without whitespace, and without a comma between two digits: the
+/// formatter drops thousands separators (a documented normalization, see the
+/// `cst::format` module docs), so `2,024` and `2024` are the same text here.
 fn non_whitespace(s: &str) -> String {
-    s.chars().filter(|c| !c.is_whitespace()).collect()
+    let chars: Vec<char> = s.chars().filter(|c| !c.is_whitespace()).collect();
+    chars
+        .iter()
+        .enumerate()
+        .filter(|&(i, &c)| {
+            !(c == ','
+                && i > 0
+                && chars[i - 1].is_ascii_digit()
+                && chars.get(i + 1).is_some_and(char::is_ascii_digit))
+        })
+        .map(|(_, &c)| c)
+        .collect()
 }
 
 /// Of the in-scope cases that parse clean, `rledger format` keeps every
@@ -579,5 +660,185 @@ fn test_parse_names_a_currency_only_when_one_was_cut_short() {
                 "{src:?}: {e}"
             );
         }
+    }
+}
+
+/// The metadata snippets of the matrix, one per value type and parent.
+const META_BASES: &[&str] = &[
+    "2024-01-01 open Assets:A\n  kk: \"v\"\n",
+    "2024-01-01 open Assets:A\n  kk: (1 + 2) * 3\n",
+    "2024-01-01 open Assets:A\n  kk: 10 USD\n",
+    "2024-01-01 open Assets:A\n  kk: USD\n",
+    "2024-01-01 open Assets:A\n  kk: Assets:B\n",
+    "2024-01-01 open Assets:A\n  kk: 2024-02-02\n",
+    "2024-01-01 open Assets:A\n  kk: TRUE\n",
+    "2024-01-01 open Assets:A\n  kk: #t\n",
+    "2024-01-01 open Assets:A\n  kk: NULL\n",
+    "2024-01-01 open Assets:A\n  kk:\n",
+    "2024-01-01 open Assets:A\n  kk: \"v\" ; c\n",
+    "2024-01-01 balance Assets:A 1 USD\n  kk: 1\n",
+    "2024-01-01 *\n  kk: \"v\"\n  Assets:A  1 USD\n  Assets:B\n",
+    "2024-01-01 *\n  Assets:A  1 USD\n    pk: 2 USD\n  Assets:B\n",
+];
+
+/// Up to three insertions into the value part of a snippet's first metadata
+/// line (after its `key:`), so every input is a metadata-line case.
+fn mutated_meta_line() -> impl Strategy<Value = String> {
+    let piece = proptest::sample::select(
+        CHARS
+            .chars()
+            .map(String::from)
+            .chain(
+                [
+                    " ",
+                    "USD",
+                    "1",
+                    "-",
+                    "+",
+                    "\"s\"",
+                    "#x",
+                    "^y",
+                    "Assets:Z",
+                    "2024-02-02",
+                    "TRUE",
+                    "NULL",
+                    ";",
+                ]
+                .iter()
+                .map(|s| (*s).to_string()),
+            )
+            .collect::<Vec<_>>(),
+    );
+    (
+        proptest::sample::select(META_BASES),
+        proptest::collection::vec((any::<proptest::sample::Index>(), piece), 1..=3),
+    )
+        .prop_map(|(base, edits)| {
+            let mut s = base.to_string();
+            let from = s
+                .find(": ")
+                .map_or_else(|| s.find(':').expect("a key") + 1, |i| i + 2);
+            for (at, text) in edits {
+                let line_end = from + s[from..].find('\n').expect("a newline");
+                let i = from + at.index(line_end - from + 1);
+                s.insert_str(i, &text);
+            }
+            s
+        })
+}
+
+proptest! {
+    #![proptest_config(ProptestConfig {
+        cases: 2048,
+        rng_seed: proptest::test_runner::RngSeed::Fixed(2802),
+        failure_persistence: None,
+        ..ProptestConfig::default()
+    })]
+
+    /// For a metadata line with zero parse errors, `rledger format` keeps every
+    /// non-whitespace character in order (thousands separators aside).
+    #[test]
+    fn test_try_format_source_keeps_the_text_of_a_clean_metadata_line(src in mutated_meta_line()) {
+        if parse(&src).errors.is_empty() {
+            let out = try_format_source(&src).expect("a clean file formats");
+            prop_assert_eq!(non_whitespace(&out), non_whitespace(&src), "{:?} -> {:?}", src, out);
+        }
+    }
+}
+
+/// Stage 2 of #2802: a token with no place in a metadata line was dropped in
+/// silence, as on a header line, because the metadata converter takes the
+/// first value token of each kind and ignores the rest. Each of these is a
+/// syntax error in beancount. The error names the metadata line, the
+/// directive is kept, `rledger format` refuses the file, and the
+/// error-tolerant formatter keeps the line as written.
+#[test]
+fn test_parse_reports_a_stray_character_in_a_metadata_line_and_keeps_the_directive() {
+    for (src, bad) in [
+        ("2024-01-01 open Assets:A\n  kk: \"v\" !\n", "!"),
+        ("2024-01-01 open Assets:A\n  kk: 10 USD @\n", "@"),
+        ("2024-01-01 open Assets:A\n  kk: USD,EUR\n", ","),
+        (
+            "2024-01-01 open Assets:A\n  kk: Assets:B Assets:C\n",
+            "Assets:C",
+        ),
+        ("2024-01-01 open Assets:A\n  kk: 1 USD EUR\n", "EUR"),
+        ("2024-01-01 open Assets:A\n  kk: TRUE FALSE\n", "FALSE"),
+        ("2024-01-01 open Assets:A\n  kk: 2024-02-02 USD\n", "USD"),
+        ("2024-01-01 open Assets:A\n  kk: \"v\" % c\n", "%"),
+        (
+            "2024-01-01 *\n  kk: 1 *\n  Assets:A  1 USD\n  Assets:B\n",
+            "*",
+        ),
+        (
+            "2024-01-01 *\n  Assets:A  1 USD\n    pk: 2 USD )\n  Assets:B\n",
+            ")",
+        ),
+    ] {
+        let result = parse(src);
+        assert_eq!(result.errors.len(), 1, "{src:?}: {:?}", result.errors);
+        let err = &result.errors[0];
+        assert_eq!(&src[err.span.start..err.span.end], bad, "{src:?}: {err:?}");
+        assert!(
+            err.message().contains("a metadata line"),
+            "{src:?}: {}",
+            err.message()
+        );
+        assert_eq!(result.directives.len(), 1, "{src:?}: the directive is kept");
+        assert!(try_format_source(src).is_err(), "{src:?}");
+        assert_eq!(
+            rustledger_parser::format::format_source(src),
+            src,
+            "{src:?}"
+        );
+    }
+}
+
+/// Every value type beancount accepts on a metadata line still parses clean,
+/// with a trailing `;` comment too.
+#[test]
+fn test_parse_accepts_every_metadata_value_type() {
+    for value in [
+        "\"v\"",
+        "1",
+        "-1.5",
+        "(1 + 2) * 3",
+        "10 USD",
+        "-(2) USD",
+        "USD",
+        "/6J",
+        "Assets:B",
+        "2024-02-02",
+        "TRUE",
+        "FALSE",
+        "NULL",
+        "#t",
+        "",
+    ] {
+        for tail in ["", " ; c"] {
+            let src = format!("2024-01-01 open Assets:A\n  kk: {value}{tail}\n");
+            let result = parse(&src);
+            assert!(result.errors.is_empty(), "{src:?}: {:?}", result.errors);
+        }
+    }
+}
+
+/// A date with a three-digit day is a date in beancount (`2024-02-002` is
+/// 2024-02-02: its `DATE` is `[0-9]{4,}[-/][0-9]+[-/][0-9]+`), and our lexer
+/// reads `DATE 2024-02-00` then `NUMBER 2`. Before stage 2 the metadata
+/// converter took the `2`, so `kk: 2024-02-002` silently loaded as the
+/// integer 2. It is now reported instead: stricter than beancount, which
+/// accepts it, because the alternative is a wrong value with no error. The
+/// lexer fix that reads it as the date beancount does is #2808, and these
+/// rows are pinned in `KNOWN_DATES` until it lands.
+#[test]
+fn test_parse_reports_a_three_digit_day_in_a_metadata_date_instead_of_misreading_it() {
+    for src in [
+        "2024-01-01 open Assets:A\n  kk: 2024-02-002\n",
+        "2024-01-01 open Assets:A\n  kk: 2024-02-020\n",
+    ] {
+        let result = parse(src);
+        assert_eq!(result.errors.len(), 1, "{src:?}: {:?}", result.errors);
+        assert_eq!(result.directives.len(), 1, "{src:?}: the directive is kept");
     }
 }

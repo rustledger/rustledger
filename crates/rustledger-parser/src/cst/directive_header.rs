@@ -1,5 +1,6 @@
-//! Header-line token-sequence validation for the non-transaction directives
-//! (#2802, stage 1).
+//! Token-sequence validation for the header lines of the non-transaction
+//! directives (#2802, stage 1) and for metadata lines (stage 2, see
+//! [`first_meta_defect`]).
 //!
 //! Our CST parser groups a directive's header line into flat tokens and each
 //! `convert_*` reads the fields it wants and ignores the rest, so a token with
@@ -221,6 +222,31 @@ fn tags_links<I: Iterator<Item = (K, Range<usize>)>>(c: &mut Cursor<I>) {
     }
 }
 
+/// `key_value_value`: what may follow a metadata key, on a metadata line or
+/// after `pushmeta`.
+fn key_value_value<I: Iterator<Item = (K, Range<usize>)>>(c: &mut Cursor<I>) -> Step {
+    match c.peek() {
+        Some(
+            K::STRING
+            | K::ACCOUNT
+            | K::DATE
+            | K::CURRENCY
+            | K::TAG
+            | K::BOOL_TRUE
+            | K::BOOL_FALSE
+            | K::NULL_KW,
+        ) => c.bump(),
+        k if starts_number_expr(k) => {
+            number_expr(c)?;
+            // `amount : number_expr currency`
+            c.eat(K::CURRENCY);
+        }
+        // `%empty`
+        _ => {}
+    }
+    Ok(())
+}
+
 /// The body of each directive's rule, after its `DATE` and keyword.
 fn directive_body<I: Iterator<Item = (K, Range<usize>)>>(directive: K, c: &mut Cursor<I>) -> Step {
     match directive {
@@ -292,24 +318,7 @@ fn directive_body<I: Iterator<Item = (K, Range<usize>)>>(directive: K, c: &mut C
         K::PUSHMETA_DIRECTIVE => {
             // Our lexer folds beancount's `KEY COLON` into one `META_KEY`.
             c.expect(K::META_KEY, "a metadata key")?;
-            match c.peek() {
-                Some(
-                    K::STRING
-                    | K::ACCOUNT
-                    | K::DATE
-                    | K::CURRENCY
-                    | K::TAG
-                    | K::BOOL_TRUE
-                    | K::BOOL_FALSE
-                    | K::NULL_KW,
-                ) => c.bump(),
-                k if starts_number_expr(k) => {
-                    number_expr(c)?;
-                    c.eat(K::CURRENCY);
-                }
-                // `%empty`
-                _ => {}
-            }
+            key_value_value(c)?;
         }
         K::POPMETA_DIRECTIVE => c.expect(K::META_KEY, "a metadata key")?,
         _ => {}
@@ -384,18 +393,55 @@ fn glued_one_letter_currency(tokens: &[(K, Range<usize>)]) -> Option<HeaderDefec
     })
 }
 
-/// Diagnostic text for a defect. `text` is the source slice of the reported
-/// range; the caller has the source, this module does not.
-pub(super) fn defect_message(directive: &str, defect: &HeaderDefect, text: &str) -> String {
+/// The first defect in a metadata line (`key: value` under a directive, a
+/// transaction or a posting; stage 2 of #2802), if any. beancount's rule is
+/// `key_value_line : INDENT key_value eol` with `key_value : KEY COLON
+/// key_value_value`, the same `key_value` that follows `pushmeta`.
+///
+/// `tokens` is the line from its `META_KEY` up to but not including the
+/// `NEWLINE`; `end` is where it ends. Ranges are echoed back in the caller's
+/// frame.
+///
+/// Stricter than beancount in one place, deliberately: a date with a
+/// three-digit day (`kk: 2024-02-002`) is a date there, and our lexer reads
+/// `DATE 2024-02-00` then `NUMBER 2`, which this reports. Not reporting it
+/// would load the value as the integer 2, as it did before this check. The
+/// fix that matches beancount is in the lexer (#2808); pinned by
+/// `test_parse_reports_a_three_digit_day_in_a_metadata_date_instead_of_misreading_it`.
+pub(super) fn first_meta_defect(tokens: &[(K, Range<usize>)], end: usize) -> Option<HeaderDefect> {
+    let glued = glued_one_letter_currency(tokens);
+    let mut c = Cursor {
+        tokens: tokens
+            .iter()
+            .filter(|(k, _)| !is_skipped(*k))
+            .cloned()
+            .peekable(),
+        last: end..end,
+    };
+    let grammar = c
+        .expect(K::META_KEY, "a metadata key")
+        .and_then(|()| key_value_value(&mut c))
+        .and_then(|()| c.finish())
+        .err();
+    match (grammar, glued) {
+        (Some(g), Some(l)) => Some(if l.range.start < g.range.start { l } else { g }),
+        (g, l) => g.or(l),
+    }
+}
+
+/// Diagnostic text for a defect. `place` names where it is (`"the open
+/// directive"`, `"a metadata line"`); `text` is the source slice of the
+/// reported range: the caller has the source, this module does not.
+pub(super) fn defect_message(place: &str, defect: &HeaderDefect, text: &str) -> String {
     let expected = defect.expected;
     match defect.found {
-        None => format!("unexpected end of line in the {directive} directive: expected {expected}"),
+        None => format!("unexpected end of line in {place}: expected {expected}"),
         Some(K::PERCENT_COMMENT | K::SHEBANG | K::EMACS_DIRECTIVE) => format!(
-            "unexpected {text:?} in the {directive} directive: expected {expected}. \
+            "unexpected {text:?} in {place}: expected {expected}. \
              Only `;` starts a comment in the middle of a line; `{text}` starts one \
              only at the beginning of a line"
         ),
-        Some(_) => format!("unexpected {text:?} in the {directive} directive: expected {expected}"),
+        Some(_) => format!("unexpected {text:?} in {place}: expected {expected}"),
     }
 }
 
@@ -506,7 +552,7 @@ mod tests {
             "2024-01-01 open Assets:A #+x\n",
         ] {
             let (d, _) = defect(line).unwrap_or_else(|| panic!("{line:?} must be rejected"));
-            let msg = defect_message("open", &d, &line[d.range.clone()]);
+            let msg = defect_message("the open directive", &d, &line[d.range.clone()]);
             assert!(msg.contains("Only `;` starts a comment"), "{msg}");
         }
     }

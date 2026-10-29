@@ -376,6 +376,17 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
                 &mut errors,
             );
         }
+        if converted_or_stateful {
+            meta_entry_check(
+                &cst_node,
+                stripped,
+                bom_offset,
+                &prior_error_starts,
+                errors_before,
+                &mut errors,
+                &mut header_tokens,
+            );
+        }
         if let Some(mut spanned) = pushed_directive {
             apply_inherited_state(&mut spanned.value, &tag_stack, &meta_stack);
             directives.push(spanned);
@@ -3445,10 +3456,142 @@ fn directive_header_check(
     let text = stripped.get(defect.range.clone()).unwrap_or_default();
     Some(crate::ParseError::new(
         crate::ParseErrorKind::SyntaxError(super::directive_header::defect_message(
-            keyword, &defect, text,
+            &format!("the {keyword} directive"),
+            &defect,
+            text,
         )),
         Span::new(defect.range.start + off, defect.range.end + off),
     ))
+}
+
+/// Reject a metadata line that beancount's grammar refuses (#2802, stage 2):
+/// the `META_ENTRY` children of `node`, and those of its `POSTING` children.
+/// The rule lives in [`super::directive_header::first_meta_defect`]; here we
+/// only enumerate each line's tokens.
+///
+/// The metadata converter (`meta_value_from_tokens`) takes the first value
+/// token of each kind and ignores the rest, so `kk: "v" !` loaded as `"v"` and
+/// `rledger format` deleted the `!`.
+///
+/// A line that already has an error on it (`prior_error_starts`, BOM frame, or
+/// one pushed for this directive since `errors_before`) is not checked again,
+/// so a problem is reported once. Like the header check, it reports and does
+/// not drop: the directive still loads. Walks GREEN children only, from the
+/// shared directive loop, so the green and red paths cannot disagree.
+fn meta_entry_check(
+    node: &crate::SyntaxNode,
+    stripped: &str,
+    bom_offset: u32,
+    prior_error_starts: &[usize],
+    errors_before: usize,
+    errors: &mut Vec<crate::ParseError>,
+    tokens: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
+) {
+    use crate::SyntaxKind as K;
+    let kind_of = <crate::BeancountLanguage as rowan::Language>::kind_from_raw;
+    let mut ctx = MetaCheck {
+        stripped,
+        off: bom_offset as usize,
+        prior_error_starts,
+        errors_before,
+        errors,
+        tokens,
+    };
+    let mut at = usize::from(node.text_range().start());
+    for child in node.green().children() {
+        let child_start = at;
+        at += green_len(child);
+        let rowan::NodeOrToken::Node(n) = child else {
+            continue;
+        };
+        match kind_of(n.kind()) {
+            K::META_ENTRY => ctx.line(n, child_start),
+            // Posting-attached metadata is a child of its `POSTING`.
+            K::POSTING => {
+                let mut p = child_start;
+                for part in n.children() {
+                    let part_start = p;
+                    p += green_len(part);
+                    if let rowan::NodeOrToken::Node(m) = part
+                        && kind_of(m.kind()) == K::META_ENTRY
+                    {
+                        ctx.line(m, part_start);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A green child's length in bytes.
+fn green_len(child: rowan::NodeOrToken<&rowan::GreenNodeData, &rowan::GreenTokenData>) -> usize {
+    match child {
+        rowan::NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
+        rowan::NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
+    }
+}
+
+/// [`meta_entry_check`]'s state, shared by every line of one directive.
+struct MetaCheck<'a> {
+    stripped: &'a str,
+    off: usize,
+    prior_error_starts: &'a [usize],
+    errors_before: usize,
+    errors: &'a mut Vec<crate::ParseError>,
+    tokens: &'a mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
+}
+
+impl MetaCheck<'_> {
+    /// Check one `META_ENTRY` starting at byte `start` (CST frame).
+    fn line(&mut self, entry: &rowan::GreenNodeData, start: usize) {
+        use crate::SyntaxKind as K;
+        let kind_of = <crate::BeancountLanguage as rowan::Language>::kind_from_raw;
+        self.tokens.clear();
+        let mut p = start;
+        let mut end = start + u32::from(entry.text_len()) as usize;
+        for part in entry.children() {
+            let rowan::NodeOrToken::Token(t) = part else {
+                break;
+            };
+            let kind = kind_of(t.kind());
+            let range = p..p + t.text().len();
+            p = range.end;
+            if self.tokens.is_empty() && (is_trivia_kind(kind) || kind == K::BOM) {
+                continue;
+            }
+            if kind == K::NEWLINE {
+                end = range.start;
+                break;
+            }
+            self.tokens.push((kind, range));
+        }
+        let off = self.off;
+        let (from, to) = (start + off, end + off);
+        let first_after = self.prior_error_starts.partition_point(|&s| s < from);
+        let reported = self
+            .prior_error_starts
+            .get(first_after)
+            .is_some_and(|&s| s <= to)
+            || self.errors[self.errors_before..]
+                .iter()
+                .any(|e| (from..=to).contains(&e.span.start));
+        if reported {
+            return;
+        }
+        let Some(defect) = super::directive_header::first_meta_defect(self.tokens, end) else {
+            return;
+        };
+        let text = self.stripped.get(defect.range.clone()).unwrap_or_default();
+        self.errors.push(crate::ParseError::new(
+            crate::ParseErrorKind::SyntaxError(super::directive_header::defect_message(
+                "a metadata line",
+                &defect,
+                text,
+            )),
+            Span::new(defect.range.start + off, defect.range.end + off),
+        ));
+    }
 }
 
 /// Report a token left over after a posting's amount, cost or price.

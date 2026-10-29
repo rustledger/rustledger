@@ -1176,88 +1176,52 @@ fn convert_custom(
 /// stream, with one structural pass that pairs an immediately-
 /// adjacent NUMBER+CURRENCY into an [`Amount`].
 fn extract_custom_values(node: &crate::SyntaxNode) -> Vec<MetaValue> {
-    let mut values = Vec::new();
-    let mut seen_type_string = false;
     // Collect tokens by kind, skipping trivia. We do a two-pass:
     // first form Amount pairs (NUMBER + CURRENCY adjacent, ignoring
     // whitespace), then emit remaining tokens individually.
     let raw: Vec<rowan::SyntaxToken<crate::BeancountLanguage>> = node
         .children_with_tokens()
         .filter_map(rowan::NodeOrToken::into_token)
-        .filter(|t| {
-            !matches!(
-                t.kind(),
-                crate::SyntaxKind::WHITESPACE
-                    | crate::SyntaxKind::NEWLINE
-                    | crate::SyntaxKind::COMMENT
-            )
-        })
+        .filter(|t| !is_value_walk_trivia(t.kind()))
         .collect();
 
-    let mut i = 0;
-    while i < raw.len() {
-        // Skip the directive's header tokens (DATE, CUSTOM_KW, and
-        // the first STRING which is the custom-type name).
-        if !seen_type_string {
-            if raw[i].kind() == crate::SyntaxKind::STRING {
-                seen_type_string = true;
-            }
-            i += 1;
-            continue;
-        }
-        // One value at a time through the shared discriminator — this is what
-        // gives custom directives the same MINUS-sign, Tag/Link and
-        // `NUMBER CURRENCY` → Amount handling as metadata entries.
-        // ONE advance for both branches, so the loop provably terminates.
+    // One value at a time through the shared walk — this is what gives custom
+    // directives the same MINUS-sign, Tag/Link, arithmetic and
+    // `NUMBER CURRENCY` → Amount handling as pushmeta, and the same value
+    // boundaries as the errors raised for them.
+    value_groups(&raw)
+        .into_iter()
+        .filter_map(|(_, group)| match group {
+            ValueGroup::Value(value, _) => Some(value),
+            // An expression with no value is rejected (by
+            // `unevaluable_value_expressions` or the header-line grammar
+            // check), so nothing is emitted for it (#2806).
+            ValueGroup::NoValue { .. } => None,
+        })
+        // Drop the values the directive is simultaneously being REJECTED
+        // for. `value_tokens_to_meta` is shared with metadata, where a
+        // `#tag` is legal, but a custom directive accepts none of these --
+        // matching beancount, measured across all eight value types.
         //
-        // It used to advance in two places, and only the value branch was
-        // guarded. That left the `else` free to move `i` BACKWARD, which does
-        // not merely spin: stepping back re-enters the branch above, pushes
-        // another value, steps forward, and repeats — allocating without
-        // bound. Memory runs out before any per-test timeout can fire, so on
-        // CI it takes the whole runner down and surfaces as "the runner has
-        // received a shutdown signal", indistinguishable from infrastructure.
-        // Two full mutation runs lost the same three parser shards to it
-        // (runs 30765289550 and 30768895946) before the cause was found.
+        // Emitting them anyway made `Custom.values` contain entries the
+        // parser had already errored on, so a consumer reading `values`
+        // without also reading `errors` saw data the parser had declared
+        // invalid (#2190). The errors themselves are raised by
+        // `custom_value_check` (bare currency) and
+        // `extract_custom_pushmeta_taglink_errors` (tag/link); this keeps
+        // the emitted values in step with them.
         //
-        // `value_tokens_to_meta` returns the index past what it consumed, so
-        // the assert is the contract and the clamp is the belt: in release a
-        // violation costs one wasted token rather than the process.
-        let next = if let Some((value, consumed)) = value_tokens_to_meta(&raw, i) {
-            // Drop the values the directive is simultaneously being REJECTED
-            // for. `value_tokens_to_meta` is shared with metadata, where a
-            // `#tag` is legal, but a custom directive accepts none of these --
-            // matching beancount, measured across all eight value types.
-            //
-            // Emitting them anyway made `Custom.values` contain entries the
-            // parser had already errored on, so a consumer reading `values`
-            // without also reading `errors` saw data the parser had declared
-            // invalid (#2190). The errors themselves are raised by
-            // `custom_value_check` (bare currency) and
-            // `extract_custom_pushmeta_taglink_errors` (tag/link); this keeps
-            // the emitted values in step with them.
-            //
-            // A CURRENCY that pairs with a preceding NUMBER has already become
-            // an `Amount` by here, so a surviving `Currency` is exactly the
-            // bare one those checks reject. Valid values on the same line are
-            // unaffected: `custom "b" "ok" #atag 42` keeps `"ok"` and `42`.
-            if !matches!(
+        // A CURRENCY that pairs with a preceding NUMBER has already become
+        // an `Amount` by here, so a surviving `Currency` is exactly the
+        // bare one those checks reject. Valid values on the same line are
+        // unaffected: `custom "b" "ok" #atag 42` keeps `"ok"` and `42`.
+        .filter(|value| {
+            !matches!(
                 value,
                 MetaValue::Tag(_) | MetaValue::Link(_) | MetaValue::Currency(_)
-            ) {
-                values.push(value);
-            }
-            consumed
-        } else {
-            i + 1
-        };
-        debug_assert!(
-            next > i,
-            "value_tokens_to_meta must advance: returned {next} at {i}"
-        );
-        i = next.max(i + 1);
-    }
-    values
+            )
+        })
+        .collect()
 }
 
 fn strip_string_quotes(raw: &str) -> Option<&str> {
@@ -1963,83 +1927,98 @@ fn amount_expression_tokens(amt: &ast::Amount) -> Vec<crate::SyntaxToken> {
 }
 
 /// `expr := term (('+' | '-') term)*` - left-associative.
+///
+/// The value of the expression at `cursor`, or `None` when it is malformed or
+/// does not evaluate. [`read_arith_expr`] tells those two apart.
 fn parse_arith_expr<T: TokenView>(tokens: &[T], cursor: &mut usize) -> Option<Decimal> {
-    let mut result = parse_arith_term(tokens, cursor)?;
+    read_arith_expr(tokens, cursor).ok().flatten()
+}
+
+/// The result of reading an arithmetic expression with [`read_arith_expr`].
+///
+/// `Err(())`: the expression is malformed (a dangling operator, an unclosed
+/// parenthesis), and the cursor stops where it breaks off. `Ok(None)`: it is
+/// well formed but has no value (division by zero, overflow), and the cursor
+/// is past it. `Ok(Some(value))`: it evaluates.
+type ArithRead = Result<Option<Decimal>, ()>;
+
+/// The canonical expression reader behind [`parse_arith_expr`]. It keeps
+/// reading after a step fails to evaluate, so the cursor always ends where
+/// the expression does, which is what a caller needs to report it (#2806).
+fn read_arith_expr<T: TokenView>(tokens: &[T], cursor: &mut usize) -> ArithRead {
+    let mut result = read_arith_term(tokens, cursor)?;
     while let Some(op) = tokens.get(*cursor).map(TokenView::kind) {
         match op {
             crate::SyntaxKind::PLUS => {
                 *cursor += 1;
-                let rhs = parse_arith_term(tokens, cursor)?;
-                result = result.checked_add(rhs)?;
+                let rhs = read_arith_term(tokens, cursor)?;
+                result = result.zip(rhs).and_then(|(a, b)| a.checked_add(b));
             }
             crate::SyntaxKind::MINUS => {
                 *cursor += 1;
-                let rhs = parse_arith_term(tokens, cursor)?;
-                result = result.checked_sub(rhs)?;
+                let rhs = read_arith_term(tokens, cursor)?;
+                result = result.zip(rhs).and_then(|(a, b)| a.checked_sub(b));
             }
             _ => break,
         }
     }
-    Some(result)
+    Ok(result)
 }
 
 /// `term := primary (('*' | '/') primary)*` - left-associative.
-fn parse_arith_term<T: TokenView>(tokens: &[T], cursor: &mut usize) -> Option<Decimal> {
-    let mut result = parse_arith_primary(tokens, cursor)?;
+fn read_arith_term<T: TokenView>(tokens: &[T], cursor: &mut usize) -> ArithRead {
+    let mut result = read_arith_primary(tokens, cursor)?;
     while let Some(op) = tokens.get(*cursor).map(TokenView::kind) {
         match op {
             crate::SyntaxKind::STAR => {
                 *cursor += 1;
-                let rhs = parse_arith_primary(tokens, cursor)?;
-                result = result.checked_mul(rhs)?;
+                let rhs = read_arith_primary(tokens, cursor)?;
+                result = result.zip(rhs).and_then(|(a, b)| a.checked_mul(b));
             }
             crate::SyntaxKind::SLASH => {
                 *cursor += 1;
-                let rhs = parse_arith_primary(tokens, cursor)?;
-                if rhs.is_zero() {
-                    return None;
-                }
-                result = result.checked_div(rhs)?;
+                let rhs = read_arith_primary(tokens, cursor)?;
+                result = result
+                    .zip(rhs)
+                    .and_then(|(a, b)| if b.is_zero() { None } else { a.checked_div(b) });
             }
             _ => break,
         }
     }
-    Some(result)
+    Ok(result)
 }
 
 /// `primary := '(' expr ')' | '-' primary | '+' primary | NUMBER`.
-fn parse_arith_primary<T: TokenView>(tokens: &[T], cursor: &mut usize) -> Option<Decimal> {
-    let t = tokens.get(*cursor)?;
+fn read_arith_primary<T: TokenView>(tokens: &[T], cursor: &mut usize) -> ArithRead {
+    let t = tokens.get(*cursor).ok_or(())?;
     match t.kind() {
         crate::SyntaxKind::L_PAREN => {
             *cursor += 1;
-            let inner = parse_arith_expr(tokens, cursor)?;
-            // Mandatory closer; bail (returning None) on unbalance
+            let inner = read_arith_expr(tokens, cursor)?;
+            // Mandatory closer; an unbalanced parenthesis is malformed
             // - `Amount::currency()` already refuses to surface a
             // currency for unbalanced parens, so the amount as a
             // whole degrades cleanly to `NumberOnly`/`None`.
-            let close = tokens.get(*cursor)?;
+            let close = tokens.get(*cursor).ok_or(())?;
             if close.kind() != crate::SyntaxKind::R_PAREN {
-                return None;
+                return Err(());
             }
             *cursor += 1;
-            Some(inner)
+            Ok(inner)
         }
         crate::SyntaxKind::MINUS => {
             *cursor += 1;
-            let inner = parse_arith_primary(tokens, cursor)?;
-            Some(-inner)
+            Ok(read_arith_primary(tokens, cursor)?.map(|inner| -inner))
         }
         crate::SyntaxKind::PLUS => {
             *cursor += 1;
-            parse_arith_primary(tokens, cursor)
+            read_arith_primary(tokens, cursor)
         }
         crate::SyntaxKind::NUMBER => {
-            let value = parse_decimal_token(t.text())?;
             *cursor += 1;
-            Some(value)
+            Ok(parse_decimal_token(t.text()))
         }
-        _ => None,
+        _ => Err(()),
     }
 }
 
@@ -2536,6 +2515,28 @@ fn node_has_minus_before_number(node: &crate::SyntaxNode) -> bool {
     false
 }
 
+/// One value group read by [`value_tokens_to_meta`].
+#[derive(Debug, PartialEq)]
+pub(super) enum ValueGroup {
+    /// A value, and the index just past it.
+    Value(MetaValue, usize),
+    /// An arithmetic expression with no value, and the index just past it
+    /// (and past an adjacent `CURRENCY`). `unevaluable` is true when it is
+    /// well formed but does not evaluate (division by zero, overflow), which
+    /// [`unevaluable_value_expressions`] reports. A malformed one (a dangling
+    /// operator, an unclosed parenthesis) is reported by the directive's
+    /// header-line grammar check instead, so it is not reported twice.
+    NoValue { end: usize, unevaluable: bool },
+}
+
+impl ValueGroup {
+    const fn end(&self) -> usize {
+        match self {
+            Self::Value(_, end) | Self::NoValue { end, .. } => *end,
+        }
+    }
+}
+
 /// Discriminate one *value group* of raw metadata/custom value tokens
 /// (`tokens[start..]`, trivia already filtered) into a [`MetaValue`], returning
 /// the value and the index just past it. This is the single source of truth for
@@ -2548,22 +2549,24 @@ fn node_has_minus_before_number(node: &crate::SyntaxNode) -> bool {
 /// Discrimination mirrors the typed [`meta_value_from_entry`] (the `META_ENTRY`
 /// sibling, which additionally escape-decodes strings via the typed AST). A
 /// leading `MINUS` negates the following `NUMBER`; an adjacent `CURRENCY` makes
-/// it an `Amount`. Returns `None` for a non-value token (the caller advances).
-fn value_tokens_to_meta(
-    tokens: &[rowan::SyntaxToken<crate::BeancountLanguage>],
-    start: usize,
-) -> Option<(MetaValue, usize)> {
+/// it an `Amount`. An arithmetic expression (`10/4 USD`, `(1+2)`) is evaluated
+/// and consumed whole, as beancount does. Returns `None` for a non-value token
+/// (the caller advances).
+fn value_tokens_to_meta<T: TokenView>(tokens: &[T], start: usize) -> Option<ValueGroup> {
+    if let Some(found) = arithmetic_meta_value(tokens, start) {
+        return Some(found);
+    }
     let mut i = start;
     let mut negate = false;
-    if tokens.get(i).map(rowan::SyntaxToken::kind) == Some(crate::SyntaxKind::MINUS) {
+    if tokens.get(i).map(TokenView::kind) == Some(crate::SyntaxKind::MINUS) {
         negate = true;
         i += 1;
     }
     let t = tokens.get(i)?;
-    match t.kind() {
+    let value = match t.kind() {
         crate::SyntaxKind::STRING => {
             let s = strip_string_quotes(t.text())?;
-            Some((MetaValue::String(s.to_string()), i + 1))
+            MetaValue::String(s.to_string())
         }
         crate::SyntaxKind::NUMBER => {
             let mut decimal = parse_decimal_token(t.text())?;
@@ -2574,28 +2577,167 @@ fn value_tokens_to_meta(
             if let Some(next) = tokens.get(i + 1)
                 && next.kind() == crate::SyntaxKind::CURRENCY
             {
-                return Some((
+                return Some(ValueGroup::Value(
                     MetaValue::Amount(Amount::new(decimal, Currency::new(next.text()))),
                     i + 2,
                 ));
             }
-            Some((number_meta_value(t.text(), decimal), i + 1))
+            number_meta_value(t.text(), decimal)
         }
-        crate::SyntaxKind::DATE => Some((MetaValue::Date(parse_date_token(t.text())?), i + 1)),
-        crate::SyntaxKind::ACCOUNT => Some((MetaValue::Account(Account::new(t.text())), i + 1)),
-        crate::SyntaxKind::CURRENCY => Some((MetaValue::Currency(Currency::new(t.text())), i + 1)),
-        crate::SyntaxKind::BOOL_TRUE => Some((MetaValue::Bool(true), i + 1)),
-        crate::SyntaxKind::BOOL_FALSE => Some((MetaValue::Bool(false), i + 1)),
-        crate::SyntaxKind::TAG => Some((
-            MetaValue::Tag(Tag::new(t.text().trim_start_matches('#'))),
-            i + 1,
-        )),
-        crate::SyntaxKind::LINK => Some((
-            MetaValue::Link(Link::new(t.text().trim_start_matches('^'))),
-            i + 1,
-        )),
-        _ => None,
+        crate::SyntaxKind::DATE => MetaValue::Date(parse_date_token(t.text())?),
+        crate::SyntaxKind::ACCOUNT => MetaValue::Account(Account::new(t.text())),
+        crate::SyntaxKind::CURRENCY => MetaValue::Currency(Currency::new(t.text())),
+        crate::SyntaxKind::BOOL_TRUE => MetaValue::Bool(true),
+        crate::SyntaxKind::BOOL_FALSE => MetaValue::Bool(false),
+        crate::SyntaxKind::TAG => MetaValue::Tag(Tag::new(t.text().trim_start_matches('#'))),
+        crate::SyntaxKind::LINK => MetaValue::Link(Link::new(t.text().trim_start_matches('^'))),
+        _ => return None,
+    };
+    Some(ValueGroup::Value(value, i + 1))
+}
+
+/// The arithmetic branch of [`value_tokens_to_meta`]: read the expression
+/// starting at `tokens[start]` with the shared [`read_arith_expr`], pairing an
+/// adjacent `CURRENCY` into an [`Amount`]. `custom "c" 10/4 USD` is `2.5 USD`
+/// in beancount and used to split into `10` and `4 USD`, with no error (#2806).
+///
+/// An expression with no value is one [`ValueGroup::NoValue`] group, never a
+/// split into the numbers around the operator: `10/0 USD` used to become `10`
+/// and `0 USD`.
+///
+/// Returns `None` when the run is not an expression: a lone, optionally
+/// negated, `NUMBER` keeps the literal path so its `Int` vs `Number` spelling
+/// is unchanged.
+fn arithmetic_meta_value<T: TokenView>(tokens: &[T], start: usize) -> Option<ValueGroup> {
+    use crate::SyntaxKind as K;
+    if !matches!(
+        tokens.get(start)?.kind(),
+        K::NUMBER | K::MINUS | K::PLUS | K::L_PAREN
+    ) {
+        return None;
     }
+    let mut cursor = start;
+    let Ok(value) = read_arith_expr(tokens, &mut cursor) else {
+        // Malformed. The group also takes the value token the read broke off
+        // at, where an operand was due (`10 + TRUE`, `(1+2 USD`), so nothing
+        // from the rejected expression is emitted: beancount rejects the
+        // whole directive. A token that cannot be a value (`~`) is left to the
+        // walk, which steps over it.
+        let stop = cursor.max(start + 1);
+        let broke_at_value = tokens.get(stop).is_some_and(|t| {
+            matches!(
+                t.kind(),
+                K::STRING
+                    | K::NUMBER
+                    | K::DATE
+                    | K::ACCOUNT
+                    | K::CURRENCY
+                    | K::BOOL_TRUE
+                    | K::BOOL_FALSE
+                    | K::TAG
+                    | K::LINK
+            )
+        });
+        return Some(ValueGroup::NoValue {
+            end: stop + usize::from(broke_at_value),
+            unevaluable: false,
+        });
+    };
+    let consumed: Vec<K> = tokens[start..cursor].iter().map(TokenView::kind).collect();
+    if matches!(consumed.as_slice(), [K::NUMBER] | [K::MINUS, K::NUMBER]) {
+        return None;
+    }
+    let currency = tokens.get(cursor).filter(|t| t.kind() == K::CURRENCY);
+    let end = cursor + usize::from(currency.is_some());
+    let Some(value) = value else {
+        return Some(ValueGroup::NoValue {
+            end,
+            unevaluable: true,
+        });
+    };
+    let value = match currency {
+        Some(c) => MetaValue::Amount(Amount::new(value, Currency::new(c.text()))),
+        // Render the RESULT to decide Int vs Number, as the metadata path does.
+        None => number_meta_value(&value.to_string(), value),
+    };
+    Some(ValueGroup::Value(value, end))
+}
+
+/// Every value group of a `custom` or `pushmeta` directive, with the index it
+/// starts at. `tokens` are the directive's non-trivia tokens; the values are
+/// the ones after the custom type-name string or the pushmeta key.
+///
+/// The one walk shared by [`extract_custom_values`], [`pushmeta_value`] and
+/// [`unevaluable_value_expressions`] (both trees), so the values emitted and
+/// the errors raised cannot disagree about where a value starts and ends.
+pub(super) fn value_groups<T: TokenView>(tokens: &[T]) -> Vec<(usize, ValueGroup)> {
+    use crate::SyntaxKind as K;
+    let mut groups = Vec::new();
+    let mut i = tokens
+        .iter()
+        .position(|t| matches!(t.kind(), K::STRING | K::META_KEY))
+        .map_or(tokens.len(), |p| p + 1);
+    while i < tokens.len() {
+        // ONE advance for both branches, so the loop provably terminates.
+        //
+        // It used to advance in two places, and only the value branch was
+        // guarded. That left the `else` free to move `i` BACKWARD, which does
+        // not merely spin: stepping back re-enters the branch above, pushes
+        // another value, steps forward, and repeats — allocating without
+        // bound. Memory runs out before any per-test timeout can fire, so on
+        // CI it takes the whole runner down and surfaces as "the runner has
+        // received a shutdown signal", indistinguishable from infrastructure.
+        // Two full mutation runs lost the same three parser shards to it
+        // (runs 30765289550 and 30768895946) before the cause was found.
+        //
+        // `value_tokens_to_meta` returns the index past what it consumed, so
+        // the assert is the contract and the clamp is the belt: in release a
+        // violation costs one wasted token rather than the process.
+        let next = match value_tokens_to_meta(tokens, i) {
+            Some(group) => {
+                let end = group.end();
+                groups.push((i, group));
+                end
+            }
+            None => i + 1,
+        };
+        debug_assert!(
+            next > i,
+            "value_tokens_to_meta must advance: returned {next} at {i}"
+        );
+        i = next.max(i + 1);
+    }
+    groups
+}
+
+/// The token ranges of the arithmetic expressions in a `custom` or `pushmeta`
+/// directive's values that are well formed but do not evaluate (division by
+/// zero, overflow). Each is a parse error, raised by both trees from this one
+/// walk; their values are not emitted (#2806).
+pub(super) fn unevaluable_value_expressions<T: TokenView>(
+    tokens: &[T],
+) -> Vec<std::ops::Range<usize>> {
+    value_groups(tokens)
+        .into_iter()
+        .filter_map(|(start, group)| match group {
+            ValueGroup::NoValue {
+                end,
+                unevaluable: true,
+            } => Some(start..end),
+            _ => None,
+        })
+        .collect()
+}
+
+/// The diagnostic for one of [`unevaluable_value_expressions`], in the style
+/// of the amount path's `invalid arithmetic expression in amount`.
+pub(super) fn unevaluable_value_error(what: &str, span: Span) -> crate::ParseError {
+    crate::ParseError::new(
+        crate::ParseErrorKind::SyntaxError(format!(
+            "invalid arithmetic expression in {what} value (overflow or division by zero)"
+        )),
+        span,
+    )
 }
 
 /// Discriminate the value tokens under a `META_ENTRY` into a typed
@@ -2809,31 +2951,25 @@ fn apply_inherited_state(
 /// direct-child tokens (the directive isn't a `META_ENTRY` so the
 /// typed-AST accessors aren't reusable).
 fn pushmeta_value(node: &crate::SyntaxNode) -> MetaValue {
-    // The first value token after the key wins. `value_tokens_to_meta` returns
-    // `None` for the key/colon (and any non-value token), so the loop walks to
-    // the first real value — sharing MINUS-sign, Tag/Link and
-    // `NUMBER CURRENCY` → Amount handling with metadata/custom values.
     let raw: Vec<rowan::SyntaxToken<crate::BeancountLanguage>> = node
         .children_with_tokens()
         .filter_map(rowan::NodeOrToken::into_token)
-        .filter(|t| {
-            !matches!(
-                t.kind(),
-                crate::SyntaxKind::WHITESPACE
-                    | crate::SyntaxKind::NEWLINE
-                    | crate::SyntaxKind::COMMENT
-            )
-        })
+        .filter(|t| !is_value_walk_trivia(t.kind()))
         .collect();
 
-    let mut i = 0;
-    while i < raw.len() {
-        if let Some((value, _)) = value_tokens_to_meta(&raw, i) {
-            return value;
-        }
-        i += 1;
+    // The first value after the key wins, read by the walk custom values use —
+    // sharing MINUS-sign, Tag/Link, arithmetic and `NUMBER CURRENCY` → Amount
+    // handling with metadata/custom values.
+    //
+    // An expression with no value (`pushmeta kk: 1/0`) is reported, like a
+    // custom one, and pushes the key with no value rather than the first
+    // number of the expression (`1`), which is what it used to push. The key
+    // is still pushed so that its `popmeta` does not add a second, misleading
+    // error (#2806).
+    match value_groups(&raw).into_iter().next() {
+        Some((_, ValueGroup::Value(value, _))) => value,
+        Some((_, ValueGroup::NoValue { .. })) | None => MetaValue::None,
     }
-    MetaValue::None
 }
 
 // ---- ParseResult.comments --------------------------------------
@@ -2912,6 +3048,10 @@ fn walk_top_level_once(
         match kind {
             crate::SyntaxKind::CUSTOM_DIRECTIVE => {
                 custom_value_check(&child, bom_offset, &mut errors);
+                value_expression_check(&child, "custom", bom_offset, &mut errors);
+            }
+            crate::SyntaxKind::PUSHMETA_DIRECTIVE => {
+                value_expression_check(&child, "pushmeta", bom_offset, &mut errors);
             }
             crate::SyntaxKind::TRANSACTION => {
                 transaction_header_check(&child, stripped, bom_offset, &mut errors);
@@ -3232,8 +3372,13 @@ fn custom_value_check(
                 // follow a NUMBER (Amount-pairing). The Amount
                 // pairing is handled by `extract_custom_values`
                 // via i+1 lookahead, so a CURRENCY that's NOT
-                // preceded by a NUMBER at i-1 is bare.
-                let preceded_by_number = i > 0 && raw[i - 1].kind() == crate::SyntaxKind::NUMBER;
+                // preceded by a NUMBER at i-1 is bare. A `)` closes an
+                // expression that pairs the same way: `(1+2) USD` (#2806).
+                let preceded_by_number = i > 0
+                    && matches!(
+                        raw[i - 1].kind(),
+                        crate::SyntaxKind::NUMBER | crate::SyntaxKind::R_PAREN
+                    );
                 if !preceded_by_number {
                     let range = t.text_range();
                     let start: u32 = range.start().into();
@@ -3251,6 +3396,32 @@ fn custom_value_check(
             }
             i += 1;
         }
+    }
+}
+
+/// Report each arithmetic expression in a `custom` or `pushmeta` value that
+/// is well formed but does not evaluate, such as `10/0 USD` (#2806). The
+/// expressions are found by the shared [`unevaluable_value_expressions`],
+/// which the green `tl_value_expression_check` calls too; the span covers the
+/// expression and its currency, as the amount path's diagnostic does.
+fn value_expression_check(
+    child: &crate::SyntaxNode,
+    what: &str,
+    bom_offset: u32,
+    out: &mut Vec<crate::ParseError>,
+) {
+    let raw: Vec<crate::SyntaxToken> = child
+        .children_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+        .filter(|t| !is_value_walk_trivia(t.kind()))
+        .collect();
+    for range in unevaluable_value_expressions(&raw) {
+        let start: u32 = raw[range.start].text_range().start().into();
+        let end: u32 = raw[range.end - 1].text_range().end().into();
+        out.push(unevaluable_value_error(
+            what,
+            Span::new((start + bom_offset) as usize, (end + bom_offset) as usize),
+        ));
     }
 }
 
@@ -4215,6 +4386,17 @@ fn node_span(node: &crate::SyntaxNode, bom_offset: u32) -> Span {
     let start: u32 = range.start().into();
     let end: u32 = range.end().into();
     Span::new((start + bom_offset) as usize, (end + bom_offset) as usize)
+}
+
+/// The tokens [`value_groups`] skips: whitespace, line ends and `;` comments.
+/// Every caller of the walk (custom values, pushmeta values, and the
+/// expression check in both trees) filters with this one predicate, so they
+/// all see the same token stream.
+pub(super) const fn is_value_walk_trivia(kind: crate::SyntaxKind) -> bool {
+    matches!(
+        kind,
+        crate::SyntaxKind::WHITESPACE | crate::SyntaxKind::NEWLINE | crate::SyntaxKind::COMMENT
+    )
 }
 
 /// Trivia kinds that don't count toward a span's start/end when
@@ -6693,11 +6875,314 @@ mod tests {
             vec![MetaValue::Int(42)],
             "a non-value token before the first value is stepped over"
         );
+        // Not `42 * 7`: that is one expression, evaluated to 294 (#2806).
         assert_eq!(
-            custom_values("2024-01-15 custom \"b\" 42 * 7\n"),
+            custom_values("2024-01-15 custom \"b\" 42 ~ 7\n"),
             vec![MetaValue::Int(42), MetaValue::Int(7)],
             "and between two values"
         );
+    }
+
+    /// An arithmetic expression in a custom value is evaluated whole, as in
+    /// beancount, instead of being split into separate values (#2806). The
+    /// expected values are beancount 3.2.3's for the same lines.
+    #[test]
+    fn test_custom_values_evaluate_arithmetic() {
+        use rust_decimal_macros::dec;
+        let amount = |n: Decimal, c: &str| MetaValue::Amount(Amount::new(n, c));
+        for (src, want) in [
+            (
+                "2024-01-01 custom \"c\" 10/4 USD\n",
+                vec![amount(dec!(2.5), "USD")],
+            ),
+            (
+                "2024-01-01 custom \"b\" 10/4\n",
+                vec![MetaValue::Number(dec!(2.5))],
+            ),
+            (
+                "2024-01-01 custom \"e\" 1+2 USD\n",
+                vec![amount(dec!(3), "USD")],
+            ),
+            (
+                "2024-01-01 custom \"m\" 10 - 5 USD\n",
+                vec![amount(dec!(5), "USD")],
+            ),
+            ("2024-01-01 custom \"f\" 10 -5\n", vec![MetaValue::Int(5)]),
+            ("2024-01-01 custom \"j\" 2 * 3\n", vec![MetaValue::Int(6)]),
+            ("2024-01-01 custom \"n\" 3 * -2\n", vec![MetaValue::Int(-6)]),
+            ("2024-01-01 custom \"p\" -(2+3)\n", vec![MetaValue::Int(-5)]),
+            (
+                "2024-01-01 custom \"h\" (1+2) USD\n",
+                vec![amount(dec!(3), "USD")],
+            ),
+            (
+                "2024-01-01 custom \"g\" -10/4 USD \"x\" 2*3\n",
+                vec![
+                    amount(dec!(-2.5), "USD"),
+                    MetaValue::String("x".into()),
+                    MetaValue::Int(6),
+                ],
+            ),
+            (
+                "2024-01-01 custom \"k\" \"s\" 1.50 + 1 USD TRUE\n",
+                vec![
+                    MetaValue::String("s".into()),
+                    amount(dec!(2.50), "USD"),
+                    MetaValue::Bool(true),
+                ],
+            ),
+            (
+                "2024-01-01 custom \"s\" 1 + 2 + 3 EUR 4\n",
+                vec![amount(dec!(6), "EUR"), MetaValue::Int(4)],
+            ),
+            // Unchanged: separate numbers stay separate values.
+            (
+                "2024-01-01 custom \"i\" 10 5\n",
+                vec![MetaValue::Int(10), MetaValue::Int(5)],
+            ),
+        ] {
+            let result = parse_via_cst(src);
+            assert!(result.errors.is_empty(), "{src:?}: {:?}", result.errors);
+            assert_eq!(custom_values(src), want, "{src:?}");
+        }
+    }
+
+    /// `pushmeta` reads its value through the same helper, so an expression
+    /// there is evaluated too, as in beancount (`kk: 1+2` is `3`).
+    #[test]
+    fn test_pushmeta_value_evaluates_arithmetic() {
+        let src = "pushmeta kk: 1+2\n\
+                   pushmeta mm: 10/4 USD\n\
+                   2024-01-01 open Assets:Bank USD\n\
+                   popmeta mm:\n\
+                   popmeta kk:\n";
+        let result = parse_via_cst(src);
+        let Directive::Open(open) = &result.directives[0].value else {
+            panic!("expected Open");
+        };
+        assert_eq!(open.meta.get("kk"), Some(&MetaValue::Int(3)));
+        assert_eq!(
+            open.meta.get("mm"),
+            Some(&MetaValue::Amount(Amount::new(
+                rust_decimal_macros::dec!(2.5),
+                "USD"
+            )))
+        );
+    }
+
+    /// The errors and the custom values of `src`, from the green-wired parse
+    /// and the red-only parse, after checking that the two agree.
+    fn custom_errors_and_values(src: &str) -> (Vec<(String, String)>, Vec<MetaValue>) {
+        let green = parse_via_cst(src);
+        let red = parse_red_only(src);
+        assert_eq!(
+            format!("{:?}", green.errors),
+            format!("{:?}", red.errors),
+            "trees disagree on errors for {src:?}"
+        );
+        assert_eq!(
+            format!("{:?}", green.directives),
+            format!("{:?}", red.directives),
+            "trees disagree on directives for {src:?}"
+        );
+        let errors = green
+            .errors
+            .iter()
+            .map(|e| (e.message(), src[e.span.start..e.span.end].to_string()))
+            .collect();
+        let values = match green.directives.first().map(|d| &d.value) {
+            Some(Directive::Custom(c)) => c.values.clone(),
+            _ => panic!("expected a Custom from {src:?}"),
+        };
+        (errors, values)
+    }
+
+    const UNEVALUABLE_CUSTOM: &str =
+        "parse error: invalid arithmetic expression in custom value (overflow or division by zero)";
+
+    /// An expression in a custom value that is well formed but has no value
+    /// is a parse error over the expression and its currency, in both trees,
+    /// and emits no value. It used to split silently: `10/0 USD` became `10`
+    /// and `0 USD` (#2806). beancount 3.2.3 crashes on `1/0` here.
+    #[test]
+    fn test_custom_values_report_an_unevaluable_expression() {
+        for (src, span) in [
+            ("2024-01-01 custom \"x\" 10/0 USD\n", "10/0 USD"),
+            ("2024-01-01 custom \"x\" 10/0\n", "10/0"),
+            (
+                "2024-01-01 custom \"x\" 1 / (2 - 2) USD\n",
+                "1 / (2 - 2) USD",
+            ),
+            (
+                "2024-01-01 custom \"x\" 79228162514264337593543950335 * 10 USD\n",
+                "79228162514264337593543950335 * 10 USD",
+            ),
+        ] {
+            let (errors, values) = custom_errors_and_values(src);
+            assert!(
+                errors.contains(&(UNEVALUABLE_CUSTOM.to_string(), span.to_string())),
+                "{src:?}: {errors:?}"
+            );
+            assert!(
+                !values.iter().any(|v| matches!(
+                    v,
+                    MetaValue::Int(_) | MetaValue::Number(_) | MetaValue::Amount(_)
+                )),
+                "{src:?} must not emit a number from the failed expression: {values:?}"
+            );
+        }
+
+        // The values around it are kept, and only the failed one is reported.
+        let (errors, values) =
+            custom_errors_and_values("2024-01-01 custom \"x\" \"a\" 10/0 USD 2*3 TRUE\n");
+        assert_eq!(
+            errors,
+            vec![(UNEVALUABLE_CUSTOM.to_string(), "10/0 USD".to_string())]
+        );
+        assert_eq!(
+            values,
+            vec![
+                MetaValue::String("a".into()),
+                MetaValue::Int(6),
+                MetaValue::Bool(true)
+            ]
+        );
+    }
+
+    /// A malformed expression is already a header-line syntax error, as in
+    /// beancount (which rejects the directive). It is not reported a second
+    /// time, and its numbers are not emitted as values.
+    #[test]
+    fn test_custom_values_drop_a_malformed_expression() {
+        for src in [
+            "2024-01-01 custom \"x\" 10 + USD\n",
+            "2024-01-01 custom \"x\" 10 *\n",
+            "2024-01-01 custom \"x\" (1+2 USD\n",
+            // The operand where the read broke off is part of the rejected
+            // expression, whatever value it would otherwise be; beancount
+            // 3.2.3 rejects each of these.
+            "2024-01-01 custom \"x\" 10 + TRUE\n",
+            "2024-01-01 custom \"x\" 10 + \"s\"\n",
+            "2024-01-01 custom \"x\" 10 + 2024-02-01\n",
+            "2024-01-01 custom \"x\" 10 + Assets:A\n",
+        ] {
+            let (errors, values) = custom_errors_and_values(src);
+            assert!(!errors.is_empty(), "{src:?} must be an error");
+            assert!(
+                !errors.iter().any(|(m, _)| m == UNEVALUABLE_CUSTOM),
+                "{src:?} is reported once, by the header check: {errors:?}"
+            );
+            assert_eq!(values, vec![], "{src:?}");
+        }
+    }
+
+    /// `10 + TRUE` used to emit `Bool(true)`: the malformed group ended
+    /// before the operand, and the walk then read it as a value of its own.
+    /// It is rejected whole, with the one header-line error.
+    #[test]
+    fn test_custom_values_malformed_expression_takes_its_operand() {
+        let (errors, values) = custom_errors_and_values("2024-01-01 custom \"x\" 10 + TRUE\n");
+        assert_eq!(values, vec![]);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+
+        // A value after the rejected expression is still read.
+        let (_, values) = custom_errors_and_values("2024-01-01 custom \"x\" 10 + TRUE \"after\"\n");
+        assert_eq!(values, vec![MetaValue::String("after".into())]);
+
+        // The same in a pushmeta value, in both trees: the key gets no value.
+        let src = "pushmeta kk: 1 + TRUE\n\
+                   2024-01-01 open Assets:Bank USD\n\
+                   popmeta kk:\n";
+        let green = parse_via_cst(src);
+        let red = parse_red_only(src);
+        assert_eq!(format!("{:?}", green.errors), format!("{:?}", red.errors));
+        assert_eq!(
+            format!("{:?}", green.directives),
+            format!("{:?}", red.directives)
+        );
+        assert!(!green.errors.is_empty());
+        let Directive::Open(open) = &green.directives[0].value else {
+            panic!("expected Open");
+        };
+        assert_eq!(open.meta.get("kk"), Some(&MetaValue::None));
+    }
+
+    /// A division that does not terminate gives beancount 3.2.3's digits for
+    /// these inputs. (`10/3` does not: `rust_decimal` keeps 28 decimal places,
+    /// `3.3333333333333333333333333333`, where beancount keeps 28 significant
+    /// digits, `3.333333333333333333333333333`. That is the shared evaluator,
+    /// and balance, price and metadata amounts give the same, so it is not
+    /// pinned here.)
+    #[test]
+    fn test_custom_values_non_terminating_division() {
+        use rust_decimal_macros::dec;
+        for (src, want) in [
+            (
+                "2024-01-01 custom \"x\" 1/3 USD\n",
+                MetaValue::Amount(Amount::new(dec!(0.3333333333333333333333333333), "USD")),
+            ),
+            (
+                "2024-01-01 custom \"x\" 2/7\n",
+                MetaValue::Number(dec!(0.2857142857142857142857142857)),
+            ),
+            (
+                "2024-01-01 custom \"x\" -1/3 USD\n",
+                MetaValue::Amount(Amount::new(dec!(-0.3333333333333333333333333333), "USD")),
+            ),
+        ] {
+            let (errors, values) = custom_errors_and_values(src);
+            assert_eq!(errors, vec![], "{src:?}");
+            assert_eq!(values, vec![want], "{src:?}");
+        }
+    }
+
+    /// Valid values are unchanged by the check.
+    #[test]
+    fn test_custom_values_valid_expressions_have_no_error() {
+        for (src, want) in [
+            ("2024-01-01 custom \"x\" 10 -5\n", vec![MetaValue::Int(5)]),
+            (
+                "2024-01-01 custom \"x\" 10 5\n",
+                vec![MetaValue::Int(10), MetaValue::Int(5)],
+            ),
+            ("2024-01-01 custom \"x\" -42\n", vec![MetaValue::Int(-42)]),
+        ] {
+            let (errors, values) = custom_errors_and_values(src);
+            assert_eq!(errors, vec![], "{src:?}");
+            assert_eq!(values, want, "{src:?}");
+        }
+    }
+
+    /// `pushmeta` reads its value through the same walk, so a failed
+    /// expression there is reported too, in both trees. The key is pushed
+    /// with no value rather than the expression's first number, and its
+    /// `popmeta` raises no second error.
+    #[test]
+    fn test_pushmeta_value_reports_an_unevaluable_expression() {
+        let src = "pushmeta kk: 1/0\n\
+                   2024-01-01 open Assets:Bank USD\n\
+                   popmeta kk:\n";
+        let green = parse_via_cst(src);
+        let red = parse_red_only(src);
+        assert_eq!(format!("{:?}", green.errors), format!("{:?}", red.errors));
+        let errors: Vec<(String, &str)> = green
+            .errors
+            .iter()
+            .map(|e| (e.message(), &src[e.span.start..e.span.end]))
+            .collect();
+        assert_eq!(
+            errors,
+            vec![(
+                "parse error: invalid arithmetic expression in pushmeta value \
+                 (overflow or division by zero)"
+                    .to_string(),
+                "1/0"
+            )]
+        );
+        let Directive::Open(open) = &green.directives[0].value else {
+            panic!("expected Open");
+        };
+        assert_eq!(open.meta.get("kk"), Some(&MetaValue::None));
     }
 }
 

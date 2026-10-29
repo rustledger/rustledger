@@ -898,7 +898,13 @@ pub(super) fn walk_top_level(
                 tl_indented_check(n, offset, bom_offset, stripped, &mut errors);
             }
             match kind {
-                K::CUSTOM_DIRECTIVE => tl_custom_check(n, offset, bom_offset, &mut errors),
+                K::CUSTOM_DIRECTIVE => {
+                    tl_custom_check(n, offset, bom_offset, &mut errors);
+                    tl_value_expression_check(n, "custom", offset, bom_offset, &mut errors);
+                }
+                K::PUSHMETA_DIRECTIVE => {
+                    tl_value_expression_check(n, "pushmeta", offset, bom_offset, &mut errors);
+                }
                 K::TRANSACTION => {
                     tl_transaction_header_check(n, offset, bom_offset, stripped, &mut errors);
                     tl_transaction_body_check(n, offset, bom_offset, &mut errors);
@@ -969,7 +975,8 @@ fn tl_indented_check(
 }
 
 /// `custom_value_check` on green: after the header (date / `custom` / type
-/// string), a bare CURRENCY (not paired as `NUMBER CURRENCY`) is invalid.
+/// string), a bare CURRENCY (not paired as `NUMBER CURRENCY` or
+/// `(expr) CURRENCY`) is invalid.
 fn tl_custom_check(
     node: &rowan::GreenNodeData,
     base: usize,
@@ -999,7 +1006,7 @@ fn tl_custom_check(
             }
             continue;
         }
-        if kind == K::CURRENCY && !(i > 0 && toks[i - 1].0 == K::NUMBER) {
+        if kind == K::CURRENCY && !(i > 0 && matches!(toks[i - 1].0, K::NUMBER | K::R_PAREN)) {
             let span = Span::new(
                 start + bom_offset as usize,
                 start + len + bom_offset as usize,
@@ -1011,6 +1018,41 @@ fn tl_custom_check(
                 span,
             ));
         }
+    }
+}
+
+/// `value_expression_check` on green: an arithmetic expression in a `custom`
+/// or `pushmeta` value that does not evaluate is an error (#2806). Found by
+/// the same [`super::convert::unevaluable_value_expressions`] walk as red.
+fn tl_value_expression_check(
+    node: &rowan::GreenNodeData,
+    what: &str,
+    base: usize,
+    bom_offset: u32,
+    out: &mut Vec<crate::ParseError>,
+) {
+    // Value-walk tokens with their stripped offsets.
+    let mut toks: Vec<&rowan::GreenTokenData> = Vec::new();
+    let mut spans: Vec<(usize, usize)> = Vec::new();
+    let mut offset = base;
+    for child in node.children() {
+        let len = child_len(child);
+        if let NodeOrToken::Token(t) = child {
+            let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
+            if !super::convert::is_value_walk_trivia(kind) {
+                toks.push(t);
+                spans.push((offset, offset + len));
+            }
+        }
+        offset += len;
+    }
+    for range in super::convert::unevaluable_value_expressions(&toks) {
+        let start = spans[range.start].0 + bom_offset as usize;
+        let end = spans[range.end - 1].1 + bom_offset as usize;
+        out.push(super::convert::unevaluable_value_error(
+            what,
+            Span::new(start, end),
+        ));
     }
 }
 
@@ -1582,6 +1624,17 @@ mod tests {
             "\t2020-01-01 close Assets:A\n",    // tab-indented directive
             "2020-01-01 custom \"budget\" USD\n", // bare currency in custom -> error
             "2020-01-01 custom \"b\" 10 USD \"ok\" NZD\n", // amount ok, trailing bare cur -> error
+            "2020-01-01 custom \"b\" (1+2) USD 10/4 EUR\n", // expression amounts, no error (#2806)
+            // #2806: an expression that does not evaluate is reported once, over
+            // the expression and its currency, in custom and pushmeta values.
+            "2020-01-01 custom \"b\" 10/0 USD \"ok\" 79228162514264337593543950335 * 10\n",
+            "pushmeta kk: 1/0\n2020-01-01 open A\npopmeta kk:\n",
+            "2020-01-01 custom \"b\" 10 + USD\n", // malformed: the header check reports it
+            "2020-01-01 custom \"b\" (1+2 USD\n",
+            "2020-01-01 custom \"b\" 10 *\n",
+            "2020-01-01 custom \"b\" 10 + TRUE \"after\"\n", // the operand is rejected too
+            "2020-01-01 custom \"b\" 10 + 2024-02-01 10 + Assets:A 10 + \"s\"\n",
+            "pushmeta kk: 1 + TRUE\n2020-01-01 open A\npopmeta kk:\n",
             "2020-01-01 * \"p\"\n  unexpected junk here\n  A 1 USD\n  B\n", // txn body catch-all
             "2020-01-01 * \"p\" #tag1\n  #pretag ^prelink\n  A 1 USD\n  B\n", // body tags before the first posting are valid (no error)
             // #2575: a tag/link line after the first posting is an error and

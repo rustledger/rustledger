@@ -95,47 +95,42 @@ This is a display-only difference - actual values are identical. Rustledger pres
 
 ### 6. Balance Tolerance Grammar
 
-Beancount's tolerance grammar is `NUMBER ~ NUMBER CURRENCY` — one currency,
-trailing — and it rejects any currency written before the `~`. Rustledger
-differs in both directions, on one rule: **accept what has exactly one meaning,
-diagnose what has none or contradicts itself.**
+Beancount's tolerance grammar is `NUMBER ~ NUMBER CURRENCY`: one currency,
+trailing, and it rejects any currency written before the `~`. Rustledger
+follows it exactly (#2802): every form beancount refuses is diagnosed here
+too.
 
 | form | beancount 3.2.3 | rustledger |
 |---|---|---|
 | `1.00 ~ 0.01 USD` | ok | ok |
 | `0.25 + 0.75 ~ 0.01 USD` | ok | ok |
 | `1.00 ~ 0.005 + 0.005 USD` | ok | ok |
-| `1.00 USD ~ 0.01 USD` | syntax error | **accepted** |
-| `0.25 + 0.75 USD ~ 0.01 USD` | syntax error | **accepted** |
+| `1.00 USD ~ 0.01 USD` | syntax error | **diagnosed (kept)** |
+| `0.25 + 0.75 USD ~ 0.01 USD` | syntax error | **diagnosed (kept)** |
 | `1.00 USD ~ 0.01 EUR` | syntax error | **diagnosed** |
 | `1.00 ~ 0.001 0.02 USD` | syntax error | **diagnosed** |
 | `1.00 ~ 0.01 ~ 0.02 USD` | syntax error | **diagnosed** |
-| `1.00 USD ~ 0.01` | syntax error | **accepted** |
+| `1.00 USD ~ 0.01` | syntax error | **diagnosed (kept)** |
 | `1.00 USD ~` | syntax error | **diagnosed** |
 
-**Laxer, deliberately.** `1.00 USD ~ 0.01 USD` states the currency twice and
-agrees with itself. There is one reading, and `rledger format` canonicalizes it
-to `1.00 ~ 0.01 USD` losslessly, so refusing it would reject a file whose
-meaning is not in doubt.
+**Once laxer, now aligned.** `1.00 USD ~ 0.01 USD` and `1.00 USD ~ 0.01` used
+to be accepted on purpose, because each has one reading. Nothing about
+correctness needs that leniency, and a file that loads here and not in
+beancount breaks for anyone who takes it back, so they are now syntax errors
+here as well. The error does not drop the directive: the assertion still
+loads with its one reading, so the file fails with one error rather than a
+cascade (rows marked *kept*).
 
-**Stricter, deliberately.** The other two are not redundancy. A tolerance
-denominated in a currency the amount does not use asserts something the model
-has no field for, and a second juxtaposed number has no reading at all. Both
-used to be accepted, read in part, and the remainder discarded without a word —
-and `rledger format` then wrote that loss back to the file, turning
-`1.00 USD ~ 0.01 EUR` into `1.00 ~ 0.01 USD`.
-
-`1.00 USD ~ 0.01` follows from the same rule: the currency is stated once and
-the tolerance inherits it, so there is one reading. Each rejection is diagnosed
-for its own reason rather than a generic one — a second `~` is reported as a
-second tolerance, not as juxtaposed numbers.
-
-**Portability note.** A file using the accepted-but-non-standard spelling loads
-in rustledger and is a syntax error in beancount and tools built on it. Prefer
-the single trailing currency if the file needs to load elsewhere.
+**Diagnosed for a reason.** The mismatched forms keep their specific
+messages. A tolerance denominated in a currency the amount does not use
+asserts something the model has no field for, a second juxtaposed number has
+no reading at all, and a second `~` is reported as a second tolerance, not as
+juxtaposed numbers. All of these used to be accepted, read in part, and the
+remainder discarded without a word, and `rledger format` then wrote that loss
+back to the file.
 
 Pinned by `balance_tolerance_accepts_one_reading_and_diagnoses_none`, whose
-table records what beancount does for each row (issue #2193).
+table records what beancount does for each row (issues #2193, #2802).
 
 ### 7. Cross-File Booking Order
 

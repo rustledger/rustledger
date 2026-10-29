@@ -49,15 +49,19 @@ fn amount_split(amount: &Amount, config: &FormatConfig) -> (String, String) {
 pub fn format_balance_lines(bal: &Balance, config: &FormatConfig) -> Vec<FormatLine> {
     let (number, mut suffix) = amount_split(&bal.amount, config);
     if let Some(tol) = &bal.tolerance {
+        // beancount's grammar is `number_expr TILDE number_expr currency`: ONE
+        // currency, after the tolerance. `1.00 USD ~ 0.01` is a syntax error
+        // there, and in our parser too since #2802, so writing it would emit
+        // text that neither can read back.
+        //
         // The tolerance shares the amount's currency and its display
-        // precision — mixed precision on one line reads as a typo
-        // (deep review of #1807).
-        write!(
-            suffix,
-            " ~ {}",
-            super::render_number(*tol, bal.amount.currency.as_str(), config)
-        )
-        .expect("write to String is infallible");
+        // precision; mixed precision on one line reads as a typo (deep review
+        // of #1807).
+        suffix = format!(
+            "~ {} {}",
+            super::render_number(*tol, bal.amount.currency.as_str(), config),
+            bal.amount.currency
+        );
     }
     let mut lines = vec![FormatLine::Aligned {
         prefix: format!("{} balance {}", bal.date, bal.account),

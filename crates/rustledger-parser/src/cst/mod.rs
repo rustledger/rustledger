@@ -51,6 +51,7 @@
 pub mod ast;
 mod convert;
 mod cost_spec_shape;
+mod directive_header;
 pub(crate) mod format;
 mod green;
 mod lossless_tokens;

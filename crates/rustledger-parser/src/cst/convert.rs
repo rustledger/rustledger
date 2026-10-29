@@ -213,6 +213,12 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     // the shadowed entry on the second push.
     let mut meta_stack: Vec<(String, MetaValue, Span)> = Vec::new();
 
+    // Starts of the errors the walks above already reported, for the header
+    // check below: a header that already has an error is not checked again
+    // (one error per problem, as beancount reports the first one on a line).
+    let mut prior_error_starts: Vec<usize> = errors.iter().map(|e| e.span.start).collect();
+    prior_error_starts.sort_unstable();
+
     for directive in source_file.directives() {
         // Helper to push a successfully-converted directive
         // alongside its CST node so the post-pass span fixup
@@ -337,6 +343,19 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
                 None
             }
         };
+        // A header line beancount's grammar refuses (#2802). Checked only when
+        // nothing else has reported an error on this directive yet, and it
+        // REPORTS BUT DOES NOT DROP, for the same reason as
+        // `reject_tags_and_links`: the directive still loads, so one stray
+        // character does not cascade into unopened-account errors.
+        let converted_or_stateful = pushed_directive.is_some() || !is_directive_producing;
+        if converted_or_stateful
+            && errors.len() == errors_before
+            && let Some(err) =
+                directive_header_check(&cst_node, stripped, bom_offset, &prior_error_starts)
+        {
+            errors.push(err);
+        }
         if let Some(mut spanned) = pushed_directive {
             apply_inherited_state(&mut spanned.value, &tag_stack, &meta_stack);
             directives.push(spanned);
@@ -904,15 +923,15 @@ fn convert_balance(
 
 /// Diagnose a tolerance clause that says something the model cannot keep.
 ///
-/// beancount's grammar is `NUMBER ~ NUMBER CURRENCY` — one currency, trailing —
-/// and rejects any currency before the `~`. We are deliberately laxer in one
-/// direction and stricter in another, on a single rule: **accept what has
-/// exactly one meaning, diagnose what has none or contradicts itself.**
+/// beancount's grammar is `NUMBER ~ NUMBER CURRENCY`: one currency, trailing,
+/// and it rejects any currency before the `~`. This function READS the
+/// tolerance of every spelling that has one meaning, and diagnoses the ones
+/// that have none or contradict themselves, each for its own reason:
 ///
-/// - `1.00 USD ~ 0.01 USD` is ACCEPTED, though beancount calls it a syntax
-///   error. The currency is stated twice and agrees, so there is one reading;
-///   it canonicalizes to `1.00 ~ 0.01 USD` losslessly. Rejecting it would
-///   refuse a file whose meaning is not in doubt.
+/// - `1.00 USD ~ 0.01 USD` is READ as `1.00 ~ 0.01 USD` (the currency is
+///   stated twice and agrees). It is still a syntax error, as in beancount:
+///   the header check (`directive_header`, #2802) reports the `~` after the
+///   currency, and the directive is kept with this one reading.
 /// - `1.00 USD ~ 0.01 EUR` is DIAGNOSED. A tolerance denominated in a
 ///   different currency than the amount is not redundancy, it is an
 ///   assertion the model has no field for — and `rledger format` used to
@@ -921,8 +940,7 @@ fn convert_balance(
 ///   operator have no reading at all; this took the first and dropped the
 ///   rest silently. (`~ 0.005 + 0.005` is arithmetic and still evaluates.)
 ///
-/// Recorded as a deliberate divergence in `docs/reference/compatibility.md`
-/// (#2193).
+/// The table is in `docs/reference/compatibility.md` (#2193, #2802).
 fn check_balance_tolerance(
     node: &crate::SyntaxNode,
     bom_offset: u32,
@@ -3349,6 +3367,60 @@ fn transaction_header_check(
     if let Some((defect, range)) = super::txn_header::first_header_defect(tokens) {
         out.push(header_defect_error(defect, &range, stripped, bom_offset));
     }
+}
+
+/// Reject a non-transaction directive header line that beancount's grammar
+/// refuses (#2802). The rule lives in [`super::directive_header`]; here we only
+/// enumerate the header tokens: the node's direct tokens from its first
+/// content token (past leading trivia) up to the `NEWLINE` that ends the line.
+/// Metadata lines are `META_ENTRY` child nodes, so the first node ends the
+/// header too.
+///
+/// `prior_error_starts` (sorted, BOM frame) are the errors the tree walks
+/// already reported. A directive with one of them anywhere on its header line
+/// (an `ERROR_TOKEN`, a mid-line BOM, an indented directive, a bare currency
+/// in a custom value, ...) is not checked again, so a problem is reported
+/// once.
+fn directive_header_check(
+    node: &crate::SyntaxNode,
+    stripped: &str,
+    bom_offset: u32,
+    prior_error_starts: &[usize],
+) -> Option<crate::ParseError> {
+    let keyword = super::directive_header::directive_keyword(node.kind())?;
+    let mut tokens = Vec::new();
+    let mut end = usize::from(node.text_range().end());
+    for el in node.children_with_tokens() {
+        let rowan::NodeOrToken::Token(t) = el else {
+            break;
+        };
+        let range = usize::from(t.text_range().start())..usize::from(t.text_range().end());
+        if tokens.is_empty() && (is_trivia_kind(t.kind()) || t.kind() == crate::SyntaxKind::BOM) {
+            continue;
+        }
+        if t.kind() == crate::SyntaxKind::NEWLINE {
+            end = range.start;
+            break;
+        }
+        tokens.push((t.kind(), range));
+    }
+    let off = bom_offset as usize;
+    let from = usize::from(node.text_range().start()) + off;
+    let first_after = prior_error_starts.partition_point(|&s| s < from);
+    if prior_error_starts
+        .get(first_after)
+        .is_some_and(|&s| s <= end + off)
+    {
+        return None;
+    }
+    let defect = super::directive_header::first_header_defect(node.kind(), tokens, end)?;
+    let text = stripped.get(defect.range.clone()).unwrap_or_default();
+    Some(crate::ParseError::new(
+        crate::ParseErrorKind::SyntaxError(super::directive_header::defect_message(
+            keyword, &defect, text,
+        )),
+        Span::new(defect.range.start + off, defect.range.end + off),
+    ))
 }
 
 /// Shared by both walkers so one defect cannot be reported two ways.

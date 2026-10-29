@@ -827,8 +827,10 @@ fn test_parse_accepts_every_metadata_value_type() {
 /// and our lexer splits (#2808). Read our way, each loaded as a wrong value
 /// with no error: `kk: 2024-002-02` as the integer 2020 (`2024 - 002 - 02`),
 /// `kk: 2024-02-002` as the integer 2 (`DATE 2024-02-00`, then `2`),
-/// `custom "x" 2024-02-002` as a date and a number, `balance ... 2024-002-02
-/// USD` as 2020 USD. It is now reported: stricter than beancount where its
+/// `custom "x" 2024-02-002` as just the number 2 (the invalid date is
+/// dropped, #2811), `balance ... 2024-002-02 USD` as 2020 USD,
+/// `kk: 2024-002-02.5` as 2019.5 (beancount takes the date's digits and
+/// then rejects the `.5`). It is now reported: stricter than beancount where its
 /// date is valid (`2024-002-02` is 2024-02-02 there), on purpose, since the
 /// alternative is a wrong value. Matching beancount is the lexer fix in
 /// #2808; the matrix rows are pinned in `KNOWN_DATES` until then.
@@ -848,6 +850,13 @@ fn test_parse_reports_a_split_beancount_date_instead_of_misreading_it() {
         // Invalid dates in beancount (it reports them), wrong numbers here.
         "20024-02-02",
         "99999-01-01",
+        // The last number runs on past the digits: beancount takes the date
+        // and rejects the rest; read our way it was arithmetic again.
+        "2024-002-02.5",
+        "2024-002-02,000",
+        "2024-02-002.5",
+        "2024-02-002.",
+        "2024-02-002,000",
     ] {
         // `pushmeta` and `popmeta` produce no directive.
         for (src, kept) in [
@@ -878,13 +887,17 @@ fn test_parse_reports_a_split_beancount_date_instead_of_misreading_it() {
         }
     }
     // Not a split date: a spaced expression, a thousands separator, a short
-    // first number, and a real date are all still read as before.
+    // first number, and a real date are all still read as before, and so is
+    // a decimal in the first two numbers (`2024.5-02-02`, `2024-0.5-02`),
+    // which is arithmetic in beancount too.
     for value in [
         "2024 - 002 - 02",
         "1,234-02-02",
         "202-002-02",
         "2024-02-02",
         "10000",
+        "2024.5-02-02",
+        "2024-0.5-02",
     ] {
         let src = format!("2024-01-01 open Assets:A\n  kk: {value}\n");
         let result = parse(&src);

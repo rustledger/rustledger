@@ -409,19 +409,26 @@ fn glued_one_letter_currency(tokens: &[(K, Range<usize>)]) -> Option<HeaderDefec
 /// - a `DATE` with a `NUMBER` right after it, when the last field has more
 ///   than two digits: `2024-02-002`, `2024/02/002`, `2024-2-002` and
 ///   `2024-02-0002` lex as `DATE 2024-02-00` (or `2024-2-00`) then a number;
-/// - `NUMBER`, `-` or `/`, `NUMBER`, `-` or `/`, `NUMBER`, all plain digits
-///   and the first at least four of them, when the year has more than four
-///   digits or the month more than two: `02024-02-02`, `20024-02-02` and
+/// - `NUMBER`, `-` or `/`, `NUMBER`, `-` or `/`, `NUMBER`, the first two plain
+///   digits and the first at least four of them, when the year has more than
+///   four digits or the month more than two: `02024-02-02`, `20024-02-02` and
 ///   `2024-002-02` lex as the number expression `2024 - 002 - 02`.
+///
+/// The last number may run on past the digits (`2024-002-02.5`,
+/// `2024-002-02,000`, `2024-02-002.`): beancount's `DATE` takes the leading
+/// digits and then reports what follows, and read our way the run is
+/// arithmetic again (2019.5, 22). The first two must be plain digits, since
+/// `2024.5-02-02` and `2024-0.5-02` are arithmetic in beancount too.
 ///
 /// Read our way, either shape loads as a wrong value with no error where a
 /// value may be a number (a metadata value, a `custom` value, a `pushmeta`
 /// value, an amount): `kk: 2024-002-02` was the integer 2020, `kk: 2024-02-002`
-/// the integer 2, `custom "x" 2024-02-002` a date and a number. beancount
-/// reads a date (or rejects an invalid one, `20024-02-02`), so the text is
-/// reported. That is stricter than beancount where its date is valid, and
-/// deliberately so: the alternative is a silently wrong value. The fix that
-/// matches beancount is in the lexer (#2808).
+/// the integer 2, `custom "x" 2024-02-002` just the number 2 (the invalid
+/// date `2024-02-00` is dropped, #2811). beancount reads a date (or rejects
+/// an invalid one, `20024-02-02`), so the text is reported. That is stricter
+/// than beancount where its date is valid, and deliberately so: the
+/// alternative is a silently wrong value. The fix that matches beancount is
+/// in the lexer (#2808).
 fn split_beancount_date(tokens: &[(K, Range<usize>)], src: &str) -> Option<HeaderDefect> {
     let digits = |r: &Range<usize>| {
         src.get(r.clone())
@@ -440,7 +447,6 @@ fn split_beancount_date(tokens: &[(K, Range<usize>)], src: &str) -> Option<Heade
                 if let Some(next) = tokens.get(i + 1)
                     && next.0 == K::NUMBER
                     && glued(&tokens[i..i + 2])
-                    && digits(&next.1)
                 {
                     return Some(defect(range.start, next.1.end));
                 }
@@ -455,7 +461,8 @@ fn split_beancount_date(tokens: &[(K, Range<usize>)], src: &str) -> Option<Heade
                     && matches!(run[3].0, K::MINUS | K::SLASH)
                     && run[4].0 == K::NUMBER
                     && run.windows(2).all(glued)
-                    && [&run[0].1, &run[2].1, &run[4].1].into_iter().all(digits);
+                    && digits(&run[0].1)
+                    && digits(&run[2].1);
                 if shape {
                     return Some(defect(range.start, run[4].1.end));
                 }

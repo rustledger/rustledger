@@ -1587,10 +1587,12 @@ fn emit_directive(
 /// Returns the number of blank lines that ended the node's text, which it
 /// trims; the caller keeps them as the gap before whatever follows (#2506).
 fn emit_error_node(node: &crate::SyntaxNode, out: &mut String) -> usize {
-    // Trim a line's trailing whitespace, but not past the end of the last
-    // string on it.
+    // Trim a line's trailing whitespace, but not past the start of the line
+    // (the newline ending the line before is not this line's, so a blank
+    // line stays) nor past the end of the last string on it.
     fn end_line(text: &mut String, string_end: usize) {
-        let keep = text.trim_end().len().max(string_end);
+        let line_start = text.rfind('\n').map_or(0, |i| i + 1);
+        let keep = text.trim_end().len().max(line_start).max(string_end);
         text.truncate(keep);
     }
     let mut text = String::new();

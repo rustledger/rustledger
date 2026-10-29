@@ -429,3 +429,39 @@ fn test_format_source_keeps_one_blank_line_for_a_whitespace_only_line_by_an_erro
         assert_eq!(format_source(src), expected, "{label}");
     }
 }
+
+/// Formatting leaves `src` byte-identical, and is idempotent.
+fn assert_verbatim(label: &str, src: &str) {
+    let out = format_source(src);
+    assert_eq!(out, src, "{label}: formatting changed the file");
+    assert_eq!(format_source(&out), out, "{label}: not idempotent");
+}
+
+/// Blank lines inside an error node, or inside a directive copied verbatim,
+/// are the author's and stay. Trimming a line's trailing whitespace must not
+/// reach back past the line's own start into the newline before it.
+#[test]
+fn test_format_source_keeps_blank_lines_inside_an_error_node() {
+    assert_verbatim("one", "2024-01-01 open Assets:A\n; c\n\n* h\n");
+    assert_verbatim(
+        "two, then a directive",
+        "2024-01-01 open Assets:A\n; c\n\n\n* h\n2024-01-02 open Assets:B\n",
+    );
+    assert_verbatim(
+        "between comments",
+        "2024-01-01 open Assets:A\n; c\n\n; d\n\n* h\n",
+    );
+    assert_verbatim(
+        "after a heading",
+        "2024-01-01 open Assets:A\n* h\n; c\n\n; d\n* i\n",
+    );
+    assert_verbatim(
+        "before a broken directive",
+        "2024-01-01 open Assets:A\n; c\n\n2024-01-02 open Assets:B junk\n",
+    );
+    assert_eq!(
+        format_source("2024-01-01 open Assets:A\n; c\n  \n* h\n"),
+        "2024-01-01 open Assets:A\n; c\n\n* h\n",
+        "a whitespace-only line stays one blank line"
+    );
+}

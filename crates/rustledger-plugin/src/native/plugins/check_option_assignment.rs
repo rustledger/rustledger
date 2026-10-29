@@ -67,7 +67,10 @@
 //! and both report the same thing. Two details are documented in its README
 //! (`### Configuration`) instead of matched: its config notice is an error
 //! (beancount has no warnings), and amounts past `Decimal`'s range are
-//! checked rather than reported unchecked.
+//! checked rather than reported unchecked. One more differs for now: an
+//! assignment entry that trades a second option of the same root and right
+//! (#2746) gets the exact rule here, until beancount-options mirrors the
+//! fix (rustledger/beancount-options#6).
 //!
 //! The plugin only reports: every directive is kept and nothing is inserted.
 
@@ -231,7 +234,8 @@ fn commission(
         // right: a second such trade in the entry would pass and its
         // premium widen the window (#2746). Stricter than the Python
         // counterpart for now: rustledger/beancount-options has the
-        // identical old predicate, to be mirrored there.
+        // identical old predicate, until it mirrors the fix
+        // (rustledger/beancount-options#6).
         let group_leg = posting
             .units
             .as_ref()

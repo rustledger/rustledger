@@ -20,7 +20,8 @@
 //! which has no warning severity;
 //! `test_option_assignment_config_is_ignored_with_a_warning` in
 //! `rustledger-plugin/tests/native_plugins_test.rs`). A third is checked
-//! natively only until beancount-options mirrors it: a second option of
+//! natively only until beancount-options mirrors the fix
+//! (rustledger/beancount-options#6): a second option of
 //! the assigned root and right traded in the assignment entry
 //! (`check_option_assignment_same_root_trade_is_flagged`, #2746).
 //!
@@ -283,7 +284,8 @@ fn check_option_assignment_overflow_is_reported() {
 /// The issue's ledger through `rledger check`: a second put of the
 /// assigned root and right, bought in the assignment entry, does not open
 /// the fee window, so the basis it inflated is flagged (#2746). Native
-/// only until beancount-options mirrors the fix; then it belongs in the
+/// only until beancount-options mirrors the fix
+/// (rustledger/beancount-options#6); then it belongs in the
 /// shared cases.
 #[test]
 fn check_option_assignment_same_root_trade_is_flagged() {

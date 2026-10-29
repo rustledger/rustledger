@@ -190,3 +190,60 @@ fn test_parse_terminated_multiline_strings_are_unchanged() {
         assert_invariants(src);
     }
 }
+
+/// A column-0 tag followed by a stray quote (#2781). `#TODO` lexes as a
+/// tag, as in beancount, and the line is an error; the quote no longer
+/// swallows the directives after it. Each case matches beancount 3.2.3: the
+/// error is on the tag's line and the same directives survive. When a later
+/// quote closes the string, the string legitimately spans lines and the
+/// lines inside it are lost in beancount too.
+#[test]
+fn test_parse_tag_line_with_a_stray_quote_keeps_the_following_directives() {
+    let cases: [(&str, &[(usize, usize)], &[&str]); 6] = [
+        // The reported shape.
+        (
+            "#TODO buy 27\" monitor\n2024-01-02 open Assets:B\n2024-01-03 open Assets:C\n",
+            &[(0, 22)],
+            &["2024-01-02 open Assets:B", "2024-01-03 open Assets:C"],
+        ),
+        (
+            "#TODO buy 27\" monitor\r\n2024-01-02 open Assets:B\r\n2024-01-03 open Assets:C\r\n",
+            &[(0, 23)],
+            &["2024-01-02 open Assets:B", "2024-01-03 open Assets:C"],
+        ),
+        (
+            "#TODO \"x\n2024-01-02 open Assets:B\n",
+            &[(0, 9)],
+            &["2024-01-02 open Assets:B"],
+        ),
+        // A directive-looking line after the tag.
+        (
+            "#TODO 2024-01-01 open Assets:A \"x\n2024-01-02 open Assets:B\n2024-01-03 open Assets:C\n",
+            &[(0, 34)],
+            &["2024-01-02 open Assets:B", "2024-01-03 open Assets:C"],
+        ),
+        // The last line: nothing follows.
+        (
+            "2024-01-01 open Assets:A\n#TODO \"x",
+            &[(25, 33)],
+            &["2024-01-01 open Assets:A"],
+        ),
+        // A later quote closes the string, so it spans lines 1 to 4.
+        (
+            "#TODO buy 27\" monitor\n2024-01-02 open Assets:B\n2024-01-03 open Assets:C\n\
+             2024-01-04 note Assets:B \"hello\"\n2024-01-05 open Assets:D\n",
+            &[(0, 105)],
+            &["2024-01-05 open Assets:D"],
+        ),
+    ];
+    for (src, spans, expected) in cases {
+        let result = parse(src);
+        let expected_errors: Vec<(String, usize, usize)> = spans
+            .iter()
+            .map(|&(s, e)| (UNEXPECTED.to_string(), s, e))
+            .collect();
+        assert_eq!(errors(&result), expected_errors, "{src:?}");
+        assert_eq!(summary(&result), expected, "{src:?}");
+        assert_invariants(src);
+    }
+}

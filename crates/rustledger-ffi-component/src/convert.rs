@@ -3817,3 +3817,18 @@ mod session_created_tables {
         );
     }
 }
+
+#[cfg(test)]
+mod format_source_tests {
+    /// `format.source` is best-effort: it formats a file with parse errors,
+    /// and must keep the text the parser could not read (#2794). It used to
+    /// rebuild `open Assets:A junk` as `open Assets:A`, erasing the error.
+    #[test]
+    fn test_format_source_keeps_unparsable_text_in_a_directive() {
+        let src = "2024-01-01 open Assets:A junk\n2024-01-02 *\n  Assets:A    1 USD\n  Assets:B\n";
+        assert_eq!(
+            super::format_source(src),
+            "2024-01-01 open Assets:A junk\n2024-01-02 *\n  Assets:A  1 USD\n  Assets:B\n"
+        );
+    }
+}

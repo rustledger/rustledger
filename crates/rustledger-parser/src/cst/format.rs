@@ -163,6 +163,11 @@ const INDENT: &str = "  ";
 /// bean-format keeps them, and an empty file formats to an empty
 /// string (#2506).
 ///
+/// **Parse errors.** Text the parser cannot read is never deleted.
+/// An unparsable top-level line is copied verbatim (#1335), and so
+/// is a whole directive that holds a parse error (#2794), since
+/// rebuilding it from its typed values would drop the unread text.
+///
 /// **Line-ending normalization runs BEFORE parsing.** The lexer
 /// does not treat bare `\r` as a line terminator, so a classic-
 /// Mac-authored `directive\r…\rdirective\r` would otherwise parse
@@ -190,8 +195,12 @@ pub fn format_source(source: &str) -> String {
 pub fn format_source_grouped(source: &str, style: GroupingStyle<'_>) -> String {
     let (stripped, _had_bom) = crate::bom::strip_leading(source);
     let normalized = crlf_to_lf_outside_strings(stripped);
-    let parsed = SourceFile::parse(&normalized);
-    format_node_grouped(parsed.syntax(), style)
+    // The full parse, not just the tree: its errors locate the directives
+    // that must be copied verbatim (#2794). `normalized` has its BOM
+    // stripped, so only a second BOM would offset the spans from the tree.
+    let parsed = crate::parse_without_occurrences(&normalized);
+    let broken = ErrorRanges::new(&parsed.errors, if parsed.has_leading_bom { 3 } else { 0 });
+    format_tree(&parsed.syntax_node(), style, &broken)
 }
 
 /// Like [`format_source`] but reuses the caller's
@@ -492,7 +501,12 @@ where
         .number_display
         .as_ref()
         .map_or_else(GroupingStyle::default, GroupingStyle::from_context);
-    Ok(format_source_grouped(&raw, style))
+    // Format the tree already in hand rather than `format_source_grouped`,
+    // which would parse `raw` a second time only to find the error ranges
+    // that the check above has already shown to be empty. `raw` comes from
+    // the core emitter, so it has no BOM and no `\r` outside strings for
+    // `format_source`'s normalization to act on.
+    Ok(format_node_grouped(&parse_result.syntax_node(), style))
 }
 
 /// Error returned by [`canonicalize_directives`].
@@ -793,7 +807,13 @@ const fn next_at_line_start(ch: char, at_line_start: bool) -> bool {
 ///
 /// The bare-node entry for callers that already parsed the CST
 /// (typically LSP formatting providers). Output rules are the
-/// same as [`format_source`].
+/// same as [`format_source`] for a tree without parse errors.
+///
+/// A tree does not carry its parse errors, so this rebuilds every
+/// directive, including one that holds an error, and the text the
+/// parser could not read in it is lost. Format a source with parse
+/// errors through [`format_source`], which copies such a directive
+/// verbatim (#2794).
 ///
 /// Internally runs [`compute_alignment`] on `node` to derive the
 /// file-wide column targets. Hot paths that hold a precomputed
@@ -811,12 +831,67 @@ pub fn format_node(node: &crate::SyntaxNode) -> String {
 /// [`format_node`], with the thousands-separator rule supplied by the caller.
 #[must_use]
 pub fn format_node_grouped(node: &crate::SyntaxNode, style: GroupingStyle<'_>) -> String {
+    format_tree(node, style, &ErrorRanges::default())
+}
+
+/// [`format_node_grouped`], copying verbatim every directive that overlaps
+/// one of `broken`'s ranges.
+fn format_tree(node: &crate::SyntaxNode, style: GroupingStyle<'_>, broken: &ErrorRanges) -> String {
     // Precondition as in `format_node`.
     #[allow(clippy::expect_used)]
     let source_file =
         SourceFile::cast(node.clone()).expect("format_node_grouped called on non-SOURCE_FILE node");
     let alignment = compute_alignment(&source_file, style);
-    format_node_with_style(node, alignment, style)
+    format_node_with_style(node, alignment, style, broken)
+}
+
+/// The byte ranges of a tree that hold a parse error, sorted and merged.
+///
+/// The formatter rebuilds a directive from its typed values, so text the
+/// parser could not read into one (`junk` after `open Assets:A`, a stray `"`,
+/// a `!` after `pushtag`) is part of no value and the rebuild deletes it,
+/// taking the parse error with it (#2794). A directive that overlaps one of
+/// these ranges is therefore copied verbatim, as a top-level `ERROR_NODE` is
+/// (#1335).
+///
+/// The ranges come from the parser's own error list rather than from a scan
+/// of the tree for error-shaped tokens: errors arise from many rules (error
+/// tokens, header defects, catch-all body lines, shape checks), and a second
+/// classifier here would drift from them (Canonical-Function Discipline).
+#[derive(Default)]
+struct ErrorRanges(Vec<(usize, usize)>);
+
+impl ErrorRanges {
+    /// The ranges of `errors`, whose spans are `bom_offset` bytes ahead of
+    /// the tree's offsets. An empty span still marks the byte it sits on.
+    fn new(errors: &[crate::ParseError], bom_offset: usize) -> Self {
+        let mut spans: Vec<(usize, usize)> = errors
+            .iter()
+            .map(|e| {
+                let start = e.span.start.saturating_sub(bom_offset);
+                let end = e.span.end.saturating_sub(bom_offset).max(start + 1);
+                (start, end)
+            })
+            .collect();
+        spans.sort_unstable();
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(spans.len());
+        for (start, end) in spans {
+            match merged.last_mut() {
+                Some(last) if start <= last.1 => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        Self(merged)
+    }
+
+    /// Whether `range` shares a byte with any error range.
+    fn overlaps(&self, range: rowan::TextRange) -> bool {
+        let (start, end) = (usize::from(range.start()), usize::from(range.end()));
+        // The merged ranges are disjoint and sorted, so their ends ascend:
+        // the first one ending after `start` is the only candidate.
+        let i = self.0.partition_point(|&(_, e)| e <= start);
+        self.0.get(i).is_some_and(|&(s, _)| s < end)
+    }
 }
 
 /// Like [`format_node`] but skips the per-call
@@ -840,7 +915,12 @@ pub fn format_node_grouped(node: &crate::SyntaxNode, style: GroupingStyle<'_>) -
 /// Panics if `node`'s kind is not `SOURCE_FILE`.
 #[must_use]
 pub fn format_node_with_alignment(node: &crate::SyntaxNode, alignment: PostingAlignment) -> String {
-    format_node_with_style(node, alignment, GroupingStyle::default())
+    format_node_with_style(
+        node,
+        alignment,
+        GroupingStyle::default(),
+        &ErrorRanges::default(),
+    )
 }
 
 /// [`format_node_with_alignment`] with an explicit grouping style.
@@ -864,6 +944,7 @@ fn format_node_with_style(
     node: &crate::SyntaxNode,
     alignment: PostingAlignment,
     group: GroupingStyle<'_>,
+    broken: &ErrorRanges,
 ) -> String {
     // Precondition check (debug-only). The bare `format_node`
     // delegate already validated the kind via the
@@ -921,12 +1002,23 @@ fn format_node_with_style(
         let line_indent = indent.take();
         match el {
             rowan::NodeOrToken::Node(n) => {
-                if let Some(directive) = ast::Directive::cast(n.clone()) {
+                if let Some(directive) = ast::Directive::cast(n.clone())
+                    && !broken.overlaps(n.text_range())
+                {
                     spacing.blank_lines(leading_blank_lines(directive.syntax()));
                     spacing.flush(&mut out);
                     emit_directive(&directive, alignment, group, &mut out);
                     spacing.after_node();
-                } else if n.kind() == crate::SyntaxKind::ERROR_NODE {
+                } else if n.kind() == crate::SyntaxKind::ERROR_NODE
+                    || ast::Directive::can_cast(n.kind())
+                {
+                    // A directive lands here only when a parse error falls
+                    // inside it (#2794): rebuilt from its typed values it
+                    // would lose the text the parser could not read, and the
+                    // error with it, so it is copied verbatim like an
+                    // ERROR_NODE. The rest of that directive is not
+                    // normalized either; it is once the error is fixed.
+                    //
                     // Preserve unparsable content verbatim (#1335): `format`
                     // must never delete the author's text. Org-mode `*`
                     // section headers (and any comments grouped with them)
@@ -1528,22 +1620,52 @@ fn emit_directive(
 /// are collapsed to one; everything else — including blank lines, comments and
 /// the unparsable lines themselves — is preserved exactly as written.
 ///
+/// The trimming works token by token, so it never reaches into a `STRING`: a
+/// multi-line string in a directive copied verbatim (#2794) keeps its spaces
+/// and `\r`s, which are part of its value.
+///
 /// Returns the number of blank lines that ended the node's text, which it
 /// trims; the caller keeps them as the gap before whatever follows (#2506).
 fn emit_error_node(node: &crate::SyntaxNode, out: &mut String) -> usize {
-    let text = node.text().to_string();
+    // Trim a line's trailing whitespace, but not past the start of the line
+    // (the newline ending the line before is not this line's, so a blank
+    // line stays) nor past the end of the last string on it.
+    fn end_line(text: &mut String, string_end: usize) {
+        let line_start = text.rfind('\n').map_or(0, |i| i + 1);
+        let keep = text.trim_end().len().max(line_start).max(string_end);
+        text.truncate(keep);
+    }
+    let mut text = String::new();
+    let mut string_end = 0;
+    for t in node
+        .descendants_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+    {
+        match t.kind() {
+            crate::SyntaxKind::NEWLINE if t.text().contains('\n') => {
+                end_line(&mut text, string_end);
+                text.push('\n');
+            }
+            crate::SyntaxKind::STRING => {
+                text.push_str(t.text());
+                string_end = text.len();
+            }
+            _ => text.push_str(t.text()),
+        }
+    }
+    end_line(&mut text, string_end);
     // Trim leading AND trailing blank lines: the caller emits the leading
     // blank lines (via `leading_blank_lines`) so emitting them here too would
     // double-count them and break idempotence. Internal blank lines and the
-    // content (org headers, grouped comments) are preserved.
-    let body = text.trim_matches(['\n', '\r']);
-    for line in body.split('\n') {
-        out.push_str(line.trim_end());
-        out.push('\n');
-    }
+    // content (org headers, grouped comments) are preserved. A string never
+    // starts or ends the text with a newline (it is quoted), so this does not
+    // reach into one.
+    let body = text.trim_matches('\n');
+    out.push_str(body);
+    out.push('\n');
     // The trailing newlines minus the one ending the last line.
-    let tail = &text[text.trim_end_matches(['\n', '\r']).len()..];
-    tail.matches('\n').count().saturating_sub(1)
+    let tail = &text[text.trim_end_matches('\n').len()..];
+    tail.len().saturating_sub(1)
 }
 
 /// Number of blank lines the author left immediately before this

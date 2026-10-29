@@ -9,15 +9,14 @@
 //! error; moved to column 0 it becomes a silenced org-mode heading, so
 //! formatting erased the error and changed what the file means.
 //!
-//! An indented directive is a different case and is still moved to column 0.
-//! It is a reported error too (`top-level directive must start at column 0`),
-//! but `format_source` currently dedents it, which repairs the error. That
-//! pre-existing behavior is tracked as a separate follow-up.
-//!
 //! Unparsable text inside a directive (`2024-01-01 open Assets:A junk`) was
 //! deleted, because the directive was rebuilt from its typed values; it is now
 //! copied verbatim (#2794). A property test below checks that no text of a
 //! broken file is lost.
+//!
+//! An indented directive is a reported error too (`top-level directive must
+//! start at column 0`), so it is now copied verbatim as well and keeps its
+//! error, where it used to be dedented, which silently repaired it (#2795).
 
 use proptest::prelude::*;
 use rustledger_parser::format::format_source;
@@ -203,6 +202,56 @@ fn test_format_source_formats_the_directives_around_a_broken_one() {
         "2024-01-01 *\n  Assets:A    1 USD junk\n  Assets:B\n\
          2024-01-02 *\n  Assets:A  1 USD\n  Assets:B\n"
     );
+}
+
+/// An indented directive keeps its indentation and its error; the directive
+/// beside it is still formatted (#2795).
+#[test]
+fn test_format_source_keeps_an_indented_directive_an_error() {
+    for (label, src, expected) in [
+        (
+            "first line",
+            "  2024-01-01 open Assets:A   USD\n2024-01-02 open Assets:B   USD\n",
+            "  2024-01-01 open Assets:A   USD\n2024-01-02 open Assets:B USD\n",
+        ),
+        (
+            "mid-file",
+            "2024-01-01 open Assets:A   USD\n  2024-01-02 open Assets:B   USD\n",
+            "2024-01-01 open Assets:A USD\n  2024-01-02 open Assets:B   USD\n",
+        ),
+    ] {
+        assert_errors_kept(label, src);
+        assert_eq!(format_source(src), expected, "{label}");
+    }
+}
+
+/// A broken directive is copied verbatim, but trailing whitespace is trimmed
+/// only outside strings: inside a multi-line string the spaces are part of
+/// its value and are kept.
+#[test]
+fn test_format_source_keeps_whitespace_inside_a_broken_directive_string() {
+    assert_unchanged("query", "2024-01-01 query \"q\" \"SELECT\n  1  \n\" junk\n");
+    assert_unchanged("note", "2024-01-01 note Assets:A \"a  \n  b\" junk\n");
+    // Trailing spaces outside the string are still trimmed.
+    assert_eq!(
+        format_source("2024-01-01 note Assets:A \"a  \n  b\" junk   \n"),
+        "2024-01-01 note Assets:A \"a  \n  b\" junk\n"
+    );
+}
+
+/// CRLF is normalized to LF outside strings only, so a `\r\n` inside a broken
+/// directive's string survives, as it does in a clean one.
+#[test]
+fn test_format_source_keeps_a_crlf_inside_a_broken_directive_string() {
+    let src = "2024-01-01 * \"multi  \r\nline\" junk\r\n  Assets:A  1 USD\r\n  Assets:B\r\n";
+    assert_errors_kept("CRLF", src);
+    assert_eq!(
+        format_source(src),
+        "2024-01-01 * \"multi  \r\nline\" junk\n  Assets:A  1 USD\n  Assets:B\n"
+    );
+    // The clean version keeps the same string bytes.
+    let clean = "2024-01-01 * \"multi  \r\nline\"\r\n  Assets:A  1 USD\r\n  Assets:B\r\n";
+    assert!(format_source(clean).starts_with("2024-01-01 * \"multi  \r\nline\"\n"));
 }
 
 // ---- Property: a broken file loses no text (#2794) -------------------------

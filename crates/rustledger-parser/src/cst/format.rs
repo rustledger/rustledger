@@ -501,7 +501,12 @@ where
         .number_display
         .as_ref()
         .map_or_else(GroupingStyle::default, GroupingStyle::from_context);
-    Ok(format_source_grouped(&raw, style))
+    // Format the tree already in hand rather than `format_source_grouped`,
+    // which would parse `raw` a second time only to find the error ranges
+    // that the check above has already shown to be empty. `raw` comes from
+    // the core emitter, so it has no BOM and no `\r` outside strings for
+    // `format_source`'s normalization to act on.
+    Ok(format_node_grouped(&parse_result.syntax_node(), style))
 }
 
 /// Error returned by [`canonicalize_directives`].
@@ -1575,22 +1580,50 @@ fn emit_directive(
 /// are collapsed to one; everything else — including blank lines, comments and
 /// the unparsable lines themselves — is preserved exactly as written.
 ///
+/// The trimming works token by token, so it never reaches into a `STRING`: a
+/// multi-line string in a directive copied verbatim (#2794) keeps its spaces
+/// and `\r`s, which are part of its value.
+///
 /// Returns the number of blank lines that ended the node's text, which it
 /// trims; the caller keeps them as the gap before whatever follows (#2506).
 fn emit_error_node(node: &crate::SyntaxNode, out: &mut String) -> usize {
-    let text = node.text().to_string();
+    // Trim a line's trailing whitespace, but not past the end of the last
+    // string on it.
+    fn end_line(text: &mut String, string_end: usize) {
+        let keep = text.trim_end().len().max(string_end);
+        text.truncate(keep);
+    }
+    let mut text = String::new();
+    let mut string_end = 0;
+    for t in node
+        .descendants_with_tokens()
+        .filter_map(rowan::NodeOrToken::into_token)
+    {
+        match t.kind() {
+            crate::SyntaxKind::NEWLINE if t.text().contains('\n') => {
+                end_line(&mut text, string_end);
+                text.push('\n');
+            }
+            crate::SyntaxKind::STRING => {
+                text.push_str(t.text());
+                string_end = text.len();
+            }
+            _ => text.push_str(t.text()),
+        }
+    }
+    end_line(&mut text, string_end);
     // Trim leading AND trailing blank lines: the caller emits the leading
     // blank lines (via `leading_blank_lines`) so emitting them here too would
     // double-count them and break idempotence. Internal blank lines and the
-    // content (org headers, grouped comments) are preserved.
-    let body = text.trim_matches(['\n', '\r']);
-    for line in body.split('\n') {
-        out.push_str(line.trim_end());
-        out.push('\n');
-    }
+    // content (org headers, grouped comments) are preserved. A string never
+    // starts or ends the text with a newline (it is quoted), so this does not
+    // reach into one.
+    let body = text.trim_matches('\n');
+    out.push_str(body);
+    out.push('\n');
     // The trailing newlines minus the one ending the last line.
-    let tail = &text[text.trim_end_matches(['\n', '\r']).len()..];
-    tail.matches('\n').count().saturating_sub(1)
+    let tail = &text[text.trim_end_matches('\n').len()..];
+    tail.len().saturating_sub(1)
 }
 
 /// Number of blank lines the author left immediately before this

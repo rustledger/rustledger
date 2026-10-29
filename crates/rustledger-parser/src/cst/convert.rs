@@ -218,6 +218,7 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     // (one error per problem, as beancount reports the first one on a line).
     let mut prior_error_starts: Vec<usize> = errors.iter().map(|e| e.span.start).collect();
     prior_error_starts.sort_unstable();
+    let mut header_tokens = Vec::new();
 
     for directive in source_file.directives() {
         // Helper to push a successfully-converted directive
@@ -351,8 +352,13 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
         let converted_or_stateful = pushed_directive.is_some() || !is_directive_producing;
         if converted_or_stateful
             && errors.len() == errors_before
-            && let Some(err) =
-                directive_header_check(&cst_node, stripped, bom_offset, &prior_error_starts)
+            && let Some(err) = directive_header_check(
+                &cst_node,
+                stripped,
+                bom_offset,
+                &prior_error_starts,
+                &mut header_tokens,
+            )
         {
             errors.push(err);
         }
@@ -3381,28 +3387,36 @@ fn transaction_header_check(
 /// (an `ERROR_TOKEN`, a mid-line BOM, an indented directive, a bare currency
 /// in a custom value, ...) is not checked again, so a problem is reported
 /// once.
+///
+/// Walks the GREEN children (kind and length, no red-node allocation) into
+/// `tokens`, a buffer the caller reuses across directives, so the check costs
+/// no allocation per directive.
 fn directive_header_check(
     node: &crate::SyntaxNode,
     stripped: &str,
     bom_offset: u32,
     prior_error_starts: &[usize],
+    tokens: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
 ) -> Option<crate::ParseError> {
     let keyword = super::directive_header::directive_keyword(node.kind())?;
-    let mut tokens = Vec::new();
+    tokens.clear();
+    let mut at = usize::from(node.text_range().start());
     let mut end = usize::from(node.text_range().end());
-    for el in node.children_with_tokens() {
-        let rowan::NodeOrToken::Token(t) = el else {
+    for child in node.green().children() {
+        let rowan::NodeOrToken::Token(t) = child else {
             break;
         };
-        let range = usize::from(t.text_range().start())..usize::from(t.text_range().end());
-        if tokens.is_empty() && (is_trivia_kind(t.kind()) || t.kind() == crate::SyntaxKind::BOM) {
+        let kind = <crate::BeancountLanguage as rowan::Language>::kind_from_raw(t.kind());
+        let range = at..at + t.text().len();
+        at = range.end;
+        if tokens.is_empty() && (is_trivia_kind(kind) || kind == crate::SyntaxKind::BOM) {
             continue;
         }
-        if t.kind() == crate::SyntaxKind::NEWLINE {
+        if kind == crate::SyntaxKind::NEWLINE {
             end = range.start;
             break;
         }
-        tokens.push((t.kind(), range));
+        tokens.push((kind, range));
     }
     let off = bom_offset as usize;
     let from = usize::from(node.text_range().start()) + off;

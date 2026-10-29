@@ -264,7 +264,7 @@ Checks at **beginning of day** (midnight). Single assertion per commodity:
 
 - Works on parent accounts (includes sub-account totals)
 - Aggregates across cost lots
-- Local tolerance override: `balance Account Amount ~ Tolerance`
+- Local tolerance override: `balance Account Number ~ Tolerance Currency` (one currency, after the tolerance; `Number Currency ~ Tolerance` is a syntax error)
 
 ### Pad
 

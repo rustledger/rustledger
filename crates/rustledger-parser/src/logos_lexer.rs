@@ -157,10 +157,18 @@ pub enum Token<'src> {
     /// Uppercase letters, can contain digits, apostrophes, dots, underscores, hyphens.
     /// Single-character currencies (e.g., T for AT&T, V for Visa) are valid NYSE/NASDAQ tickers.
     /// Note: Single-char currencies are disambiguated from transaction flags in the parser.
-    /// Also supports `/` prefix for options/futures contracts (e.g., `/ESM24`, `/LOX21_211204_P100.25`).
-    /// The `/` prefix requires an uppercase letter first to avoid matching `/1.14` as currency.
+    /// Also supports `/` prefix for options/futures contracts (e.g., `/ESM24`, `/6J`,
+    /// `/LOX21_211204_P100.25`). The `/` form is beancount's rule exactly
+    /// (`lexer.l`): after the slash it must contain an uppercase letter, and
+    /// it ends with a letter or digit, so `/1.14` is a division and `/6J` (a
+    /// futures symbol beancount's own comment uses) is a currency. Longest
+    /// match decides between it and `Slash`, as in flex: `10 /6J` is an amount
+    /// in `/6J`, `10/6` a division (#2802).
     /// Priority 3 ensures Currency wins over Flag for single uppercase letters.
-    #[regex(r"/[A-Z][A-Z0-9'._-]*|[A-Z][A-Z0-9'._-]*", priority = 3)]
+    #[regex(
+        r"/[A-Z0-9'._-]*[A-Z]([A-Z0-9'._-]*[A-Z0-9])?|[A-Z][A-Z0-9'._-]*",
+        priority = 3
+    )]
     Currency(&'src str),
 
     /// A tag like #tag-name.

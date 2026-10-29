@@ -587,7 +587,8 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 /// v50: PARSER OUTPUT changed, no archived layout moved (#2802). A stray token
 ///     on a non-transaction directive's header line (`open! Assets:A`,
 ///     `open Assets:A U*SD`) is a parse error where it loaded clean, and the
-///     directive is kept.
+///     directive is kept. A `/`-currency with a digit after the slash (`/6J`)
+///     lexes as one currency where it split into `/`, `6`, `J`.
 ///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that

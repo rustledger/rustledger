@@ -328,17 +328,18 @@ const fn is_skipped(kind: K) -> bool {
 /// whatever frame the caller uses.
 ///
 /// Returns `None` for a kind that [`directive_keyword`] does not name.
-pub(super) fn first_header_defect<I>(directive: K, tokens: I, end: usize) -> Option<HeaderDefect>
-where
-    I: IntoIterator<Item = (K, Range<usize>)>,
-{
+pub(super) fn first_header_defect(
+    directive: K,
+    tokens: &[(K, Range<usize>)],
+    end: usize,
+) -> Option<HeaderDefect> {
     directive_keyword(directive)?;
-    let tokens: Vec<(K, Range<usize>)> = tokens.into_iter().collect();
-    let glued = glued_one_letter_currency(&tokens);
+    let glued = glued_one_letter_currency(tokens);
     let mut c = Cursor {
         tokens: tokens
-            .into_iter()
+            .iter()
             .filter(|(k, _)| !is_skipped(*k))
+            .cloned()
             .peekable(),
         end,
     };
@@ -413,7 +414,7 @@ mod tests {
             }
             tokens.push((t.kind(), r));
         }
-        first_header_defect(node.kind(), tokens, end).map(|d| {
+        first_header_defect(node.kind(), &tokens, end).map(|d| {
             let text = line[d.range.clone()].to_string();
             (d, text)
         })
@@ -505,6 +506,6 @@ mod tests {
 
     #[test]
     fn test_first_header_defect_ignores_transactions() {
-        assert_eq!(first_header_defect(K::TRANSACTION, Vec::new(), 0), None);
+        assert_eq!(first_header_defect(K::TRANSACTION, &[], 0), None);
     }
 }

@@ -158,7 +158,7 @@ let tolerance = base_tolerance * options.inferred_tolerance_multiplier;
 Balance assertions can specify explicit tolerance:
 
 ```beancount
-2024-01-01 balance Assets:Checking  1000.00 USD ~ 0.01
+2024-01-01 balance Assets:Checking  1000.00 ~ 0.01 USD
 ```
 
 ### Tolerance from Cost

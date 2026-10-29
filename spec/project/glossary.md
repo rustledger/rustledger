@@ -250,4 +250,4 @@ Total cost specification. Example: `{{1000 USD}}`
 
 ### `~` (Tilde)
 
-Explicit tolerance in balance assertions. Example: `1000 USD ~ 0.01`
+Explicit tolerance in balance assertions. Example: `1000 ~ 0.01 USD` (one currency, after the tolerance)

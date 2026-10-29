@@ -156,7 +156,7 @@ fn test_parse_reports_a_stray_header_character_exactly_when_beancount_does() {
         }
     }
     assert!(checked > 9_000, "only {checked} cases checked");
-    assert_eq!(known, 45, "the #2779 rows changed");
+    assert_eq!(known, 60, "the #2779 rows changed");
     assert!(
         wrong.is_empty(),
         "{} of {checked} cases disagree with beancount, first 20:\n{}",
@@ -197,6 +197,63 @@ fn test_parse_reports_the_issue_2802_rows_and_keeps_the_directive() {
     };
     assert_eq!(open.account.as_str(), "Assets:A");
     assert_eq!(open.currencies.len(), 1);
+}
+
+/// A `/`-currency (a futures symbol) may have a digit right after the slash,
+/// as beancount's lexer allows: `/[A-Z0-9'._-]*[A-Z]([A-Z0-9'._-]*[A-Z0-9])?`,
+/// its own example being `/6J`. Ours required a letter first, so `/6J` lexed
+/// as `/`, `6`, `J`: `price /6J 10 USD` became a price of `J`, and
+/// `price HOOL 10 /6J` an amount of `10 / 6` in `J`.
+#[test]
+fn test_parse_reads_a_slash_currency_with_a_digit_after_the_slash() {
+    use rustledger_core::Directive as D;
+    let one = |src: &str| {
+        let r = parse(src);
+        assert!(r.errors.is_empty(), "{src:?}: {:?}", r.errors);
+        assert_eq!(r.directives.len(), 1, "{src:?}");
+        r.directives[0].value.clone()
+    };
+    let D::Commodity(c) = one("2024-01-01 commodity /6J\n") else {
+        panic!()
+    };
+    assert_eq!(c.currency.as_str(), "/6J");
+    let D::Open(o) = one("2024-01-01 open Assets:A USD,/6J,/6E_X\n") else {
+        panic!()
+    };
+    let cs: Vec<&str> = o
+        .currencies
+        .iter()
+        .map(rustledger_core::Currency::as_str)
+        .collect();
+    assert_eq!(cs, ["USD", "/6J", "/6E_X"]);
+    let D::Price(p) = one("2024-01-01 price /6J 10 USD\n") else {
+        panic!()
+    };
+    assert_eq!(
+        (p.currency.as_str(), p.amount.currency.as_str()),
+        ("/6J", "USD")
+    );
+    let D::Price(p) = one("2024-01-01 price HOOL 10 /6J\n") else {
+        panic!()
+    };
+    assert_eq!(p.amount.to_string(), "10 /6J");
+    let D::Balance(b) = one("2024-01-01 balance Assets:A 1 /6J\n") else {
+        panic!()
+    };
+    assert_eq!(b.amount.to_string(), "1 /6J");
+    // Longest match, as in flex: with no letter after the slash it is still a
+    // division.
+    let D::Price(p) = one("2024-01-01 price HOOL 10/4 USD\n") else {
+        panic!()
+    };
+    assert_eq!(p.amount.to_string(), "2.50 USD");
+    // And `rledger format` keeps the currency whole.
+    for src in [
+        "2024-01-01 price HOOL 10 /6J\n",
+        "2024-01-01 custom \"b\" 10 /6J\n",
+    ] {
+        assert_eq!(try_format_source(src).expect("formats"), src);
+    }
 }
 
 /// beancount's `currency_list COMMA currency` reduces from `%empty`, so one
@@ -270,6 +327,8 @@ const HEADER_BASES: &[&str] = &[
     "include \"x.beancount\"\n",
     "pushtag #t\npoptag #t\n",
     "pushmeta kk: 1\npopmeta kk:\n",
+    "2024-01-01 price /6E_X 10 /6J\n",
+    "2024-01-01 open Assets:A USD,/6J\n",
 ];
 
 /// Up to three insertions of characters, words and numbers into a header.

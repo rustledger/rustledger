@@ -55,6 +55,12 @@ BASES = [
     ("include", 'include "x.beancount"\n'),
     ("pushtag", "pushtag #t\npoptag #t\n"),
     ("pushmeta", "pushmeta kk: 1\npopmeta kk:\n"),
+    # `/`-currencies (futures), including a digit right after the slash.
+    ("slash-commodity", "2024-01-01 commodity /6J\n"),
+    ("slash-open", "2024-01-01 open Assets:A USD,/6J\n"),
+    ("slash-price", "2024-01-01 price /6E_X 10 /6J\n"),
+    ("slash-balance", "2024-01-01 balance Assets:A 1 /ESM24\n"),
+    ("slash-custom", "2024-01-01 custom \"b\" 10 /6J\n"),
     ("txn", '2024-01-01 * "p" "n" #t ^l\n  Assets:A  1 USD\n  Assets:B\n'),
     ("txn-cost", "2024-01-01 *\n  Assets:A  1 HOOL {2 USD} @ 3 USD\n  Assets:B\n"),
     ("txn-meta", '2024-01-01 *\n  kk: "v"\n  Assets:A  1 USD\n    pk: 2\n  Assets:B\n'),

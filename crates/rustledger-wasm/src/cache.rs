@@ -332,8 +332,9 @@ use crate::types::{Error, LedgerOptions};
 /// line ending is trivia instead of an error; a v63 blob (which archives the
 /// parse errors) would keep serving such a file with them.
 /// v65: loader v50, PARSER OUTPUT changed (#2802). A stray token on a
-/// non-transaction header line is a parse error; a v64 blob would keep
-/// serving such a file without it.
+/// non-transaction header line is a parse error, and `/6J` is one currency;
+/// a v64 blob would keep serving such a file without the error or the
+/// currency.
 pub const CACHE_VERSION: u32 = 65;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.

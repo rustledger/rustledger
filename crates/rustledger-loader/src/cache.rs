@@ -579,12 +579,17 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     after it are kept, where they were lost behind one error that ran to
 ///     the end of the file.
 ///
+/// v49: PARSER OUTPUT changed, no archived layout moved (#2774). A run of
+///     stray `\r` bytes before a line ending, or at the end of the file, is
+///     trivia where it was an error, so such a file now parses with no errors
+///     and its directives intact.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 48;
+pub const CACHE_VERSION: u32 = 49;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1362,7 +1367,9 @@ mod tests {
         // no archived encoding moves, so the arrays still hold.
         // v48 (#2784) keeps the directives after an unterminated `"`; no
         // archived encoding moves, so the arrays still hold.
-        const FIXTURE_VERSION: u32 = 48;
+        // v49 (#2774) accepts a stray `\r` before a line ending; no archived
+        // encoding moves, so the arrays still hold.
+        const FIXTURE_VERSION: u32 = 49;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1500,7 +1507,9 @@ mod tests {
         // unchanged.
         // v48 (#2784) keeps the directives after an unterminated `"`; the
         // hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 48;
+        // v49 (#2774) accepts a stray `\r` before a line ending; the hash
+        // below is unchanged.
+        const FIXTURE_VERSION: u32 = 49;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

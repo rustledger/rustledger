@@ -1617,6 +1617,9 @@ mod tests {
             "2020-01-01 open A\n\n2020-01-02 * \"p\"\n  meta: \"x\"\n  A 1 USD\n  B\n",
             // #2672: `\b` / `\f` decode on both paths.
             "2020-01-01 * \"p\\bq\" \"x\\fy\"\n  A 1 USD\n  B\n",
+            // #2774: stray `\r` before the line ending is trivia, on a header
+            // (with its tags), a posting, metadata and at EOF.
+            "2020-01-01 * \"p\" #t\r\r\n  m: \"x\"\r\r\n  A 1 USD \r\r\n  B\r\n2020-01-02 open A\r",
         ];
         for src in corpus {
             let g = crate::parse(src);

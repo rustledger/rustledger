@@ -328,7 +328,10 @@ use crate::types::{Error, LedgerOptions};
 /// v63: loader v48, PARSER OUTPUT changed (#2784). The directives after an
 /// unterminated `"` are kept; a v62 blob (which archives the parse errors
 /// and directives) would keep serving the file without them.
-pub const CACHE_VERSION: u32 = 63;
+/// v64: loader v49, PARSER OUTPUT changed (#2774). A stray `\r` before a
+/// line ending is trivia instead of an error; a v63 blob (which archives the
+/// parse errors) would keep serving such a file with them.
+pub const CACHE_VERSION: u32 = 64;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -360,7 +363,7 @@ pub const CACHE_VERSION: u32 = 63;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 48;
+const LOADER_CACHE_VERSION_PIN: u32 = 49;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

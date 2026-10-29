@@ -600,23 +600,40 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
     };
     let mut out = String::with_capacity(src.len());
     out.push_str(bom);
-    let mut chars = body.chars().peekable();
+    let mut chars = body.char_indices().peekable();
     let mut state = SourceState::Code;
     let mut prev_was_backslash = false;
     let mut at_line_start = true;
-    while let Some(ch) = chars.next() {
-        let peek = chars.peek().copied();
+    // The `[ \t\r]` run that starts at the last bare `\r` seen outside a
+    // string: where it ends, and whether it reaches the line ending or the
+    // end of the source (see `stray_cr_run`). Cached so a long run is
+    // scanned once, not once per `\r`.
+    let mut run_end = 0;
+    let mut run_is_stray = false;
+    while let Some((i, ch)) = chars.next() {
+        let peek = chars.peek().map(|&(_, c)| c);
         // A CRLF pair outside a string is consumed whole here, so the
         // `\n` never reaches `next_at_line_start`; it still ends the line.
         let mut ate_lf = false;
         match state {
             SourceState::InString => out.push(ch),
             _ => {
-                if ch == '\r' {
+                if ch == '\r' && peek == Some('\n') {
                     out.push('\n');
-                    if peek == Some('\n') {
-                        chars.next();
-                        ate_lf = true;
+                    chars.next();
+                    ate_lf = true;
+                } else if matches!(ch, '\r' | ' ' | '\t') && i < run_end && run_is_stray {
+                    // The rest of a stray run: dropped with its `\r`.
+                } else if ch == '\r' {
+                    if i >= run_end {
+                        (run_end, run_is_stray) = stray_cr_run(body, i);
+                    }
+                    // A stray `\r` is trivia to the lexer (#2774); folding
+                    // it into a line break would add a blank line, which
+                    // ends a transaction. Any other bare `\r` is a
+                    // classic-Mac line terminator.
+                    if !run_is_stray {
+                        out.push('\n');
                     }
                 } else {
                     out.push(ch);
@@ -627,6 +644,26 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
         at_line_start = ate_lf || next_at_line_start(ch, at_line_start);
     }
     std::borrow::Cow::Owned(out)
+}
+
+/// The `[ \t\r]` run that starts at the bare `\r` at `body[at]`: where it
+/// ends, and whether it is stray, i.e. reaches a `\n` (possibly as the `\r`
+/// of a `\r\n`) or the end of `body`.
+///
+/// Mirrors `TokenIter::stray_cr_trivia_end` in the lexer, which makes such
+/// a run one `Whitespace` token (#2774): the line ends after it, so it is
+/// trivia, not a line terminator. A `\r` with more of the line after it is
+/// still an error to the lexer, and [`crlf_to_lf_outside_strings`] keeps
+/// folding it into a line break (classic-Mac files). Agreement is pinned by
+/// `crlf_to_lf_keeps_the_lexer_line_structure` in this file's tests.
+fn stray_cr_run(body: &str, at: usize) -> (usize, bool) {
+    let rest = &body.as_bytes()[at..];
+    let len = rest
+        .iter()
+        .position(|b| !matches!(b, b' ' | b'\t' | b'\r'))
+        .unwrap_or(rest.len());
+    let end = at + len;
+    (end, end == body.len() || body.as_bytes()[end] == b'\n')
 }
 
 /// `true` iff `src` contains at least one `\r` byte OUTSIDE a
@@ -704,9 +741,12 @@ enum SourceState {
 /// heading text, and the line is treated as a comment here (#2778).
 ///
 /// The column-0 `#` comment and the heading close on the first `\n`
-/// or `\r`, like the others. The lexer keeps a lone `\r` inside
-/// either as part of the line; a stray `\r` is the subject of #2774,
-/// and no fixture here has one.
+/// or `\r`, like the others. A run of stray `\r` bytes before the
+/// line ending (or the end of the source) is `Whitespace` trivia after
+/// the comment in the lexer, so the two agree there (#2774; the
+/// `stray_cr_before_line_ending` fixture). The lexer keeps a `\r` with
+/// more of the line after it inside either line, where this closes
+/// the comment; no fixture here has one.
 const fn advance_source_state(
     ch: char,
     peek: Option<char>,
@@ -4040,6 +4080,15 @@ mod tests {
             "bare_cr_input",
             "2024-01-01 open Assets:A\r2024-01-02 open Assets:B\r",
         ),
+        // Stray `\r` bytes before the line ending are trivia (#2774),
+        // including after each comment form and a lone `\r` at EOF.
+        (
+            "stray_cr_before_line_ending",
+            "* Heading\r\r\n# hash\r\r\n#! bang\r\r\n; semi \"q\r\r\n\
+             2024-01-01 open Assets:A\r\r\n  key: \"v\"\r\r\n\
+             2024-01-02 * \"x\"\r\r\n  Assets:A  1 USD \r\r\n  Equity:B\r \r\n\
+             2024-01-03 open Equity:B\r",
+        ),
         (
             "file_with_trailing_newlines",
             "2024-01-01 open Assets:A\n\n\n",
@@ -5061,6 +5110,77 @@ mod tests {
                     src.as_bytes()[i] as char
                 );
             }
+        }
+    }
+
+    /// `crlf_to_lf_outside_strings` must not change the line structure
+    /// the lexer sees when a run of stray `\r` bytes ends a line (#2774).
+    ///
+    /// The lexer makes such a run `Whitespace` trivia; folding each `\r`
+    /// into a `\n`, as this helper did, added a blank line, which ends a
+    /// transaction, so `format_source` dropped the postings after it
+    /// while `try_format_source` (which formats the parsed tree) kept
+    /// them. Each source here parses clean, and must parse to the same
+    /// directives after the fold, with no errors, and both format entry
+    /// points must emit the same text. `stray_cr_run` mirrors the
+    /// lexer's `stray_cr_trivia_end`; this is the guard that they agree.
+    #[test]
+    fn crlf_to_lf_keeps_the_lexer_line_structure() {
+        let txn = |eol: &str| {
+            format!(
+                "2024-01-01 open Assets:A\r\n2024-01-01 open Equity:B\r\n\
+                 2024-01-02 * \"x\"{eol}  Assets:A  1 USD{eol}  Equity:B{eol}\
+                 2024-01-03 open Assets:C{eol}"
+            )
+        };
+        let mut sources: Vec<String> = ["\r\r\n", "\r\r\r\n", " \r\r\n", "\r \r\n", "\r\t\r\n"]
+            .iter()
+            .map(|eol| txn(eol))
+            .collect();
+        sources.extend(
+            [
+                "; c\r\r\n",
+                "; c\r \r\n",
+                "# c\r\r\n",
+                "% c\r\r\n",
+                "#! c\r\r\n",
+                "#+ c\r\r\n",
+                "* c\r\r\n",
+                "\r\r\n",
+                "  \r\r\n",
+            ]
+            .iter()
+            .map(|line| format!("2024-01-01 open Assets:A\r\n{line}2024-01-02 open Assets:B\r\n")),
+        );
+        sources.extend(
+            [
+                "2024-01-01 open Assets:A\r",
+                "2024-01-01 open Assets:A\r\r",
+                "2024-01-01 open Assets:A\r\n; c\r",
+                "2024-01-01 open Assets:A\r\n\r",
+                "\r",
+            ]
+            .map(String::from),
+        );
+        for src in &sources {
+            let parsed = crate::parse(src);
+            assert!(parsed.errors.is_empty(), "{src:?}: {:?}", parsed.errors);
+            let folded = crlf_to_lf_outside_strings(src);
+            assert!(!folded.contains('\r'), "{src:?} folded to {folded:?}");
+            let refolded = crate::parse(&folded);
+            assert!(
+                refolded.errors.is_empty(),
+                "{folded:?}: {:?}",
+                refolded.errors
+            );
+            let values = |r: &crate::ParseResult| {
+                r.directives
+                    .iter()
+                    .map(|d| d.value.clone())
+                    .collect::<Vec<_>>()
+            };
+            assert_eq!(values(&parsed), values(&refolded), "{src:?}");
+            assert_eq!(try_format_source(src), Ok(format_source(src)), "{src:?}");
         }
     }
 

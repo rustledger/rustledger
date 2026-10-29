@@ -1257,7 +1257,7 @@ fn tl_error_node_check(
 }
 
 /// `section_marker_check` on green: emit an empty-string comment for each
-/// `*`-starting (org-mode section) line inside an `ERROR_NODE`.
+/// column-0 `*` (org-mode section) line, per `is_section_marker`, inside an `ERROR_NODE`.
 ///
 /// EOF terminates the final line, same as [`tl_error_node_check`] — a file
 /// ending `* Section` with no trailing newline used to yield no comment at all.

@@ -3487,7 +3487,7 @@ fn transaction_body_check(
 
 /// Walk an `ERROR_NODE` and emit a
 /// `ParseError` for each line that is NEITHER a section marker
-/// (`*`-starting) NOR a column-0 comment. The variant emitted
+/// (a column-0 `*`, per `is_section_marker`) NOR a column-0 comment. The variant emitted
 /// mirrors the legacy parser's error-recovery classifier
 /// (`parser.rs:2186-2249`): BOM-in-line → `BomInDirectiveBody`
 /// (with `BOM_REMOVAL_HINT`); Unicode-character account →

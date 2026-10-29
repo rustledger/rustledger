@@ -154,7 +154,12 @@ pub enum Token<'src> {
     Account(&'src str),
 
     /// A currency/commodity code like USD, EUR, AAPL, BTC, or single-char tickers like T, V, F.
-    /// Uppercase letters, can contain digits, apostrophes, dots, underscores, hyphens.
+    /// Uppercase letters, can contain digits, apostrophes, dots, underscores, hyphens,
+    /// and must END with a letter or digit: `CAC_` is `CAC` followed by a stray `_`.
+    /// BOTH alternatives are beancount's rules exactly (`lexer.l`, #2802): the plain
+    /// form is `[A-Z][A-Z0-9'._-]*[A-Z0-9]` or a lone capital letter (beancount's
+    /// `CAPITAL`, which it lexes only before whitespace; that part is checked on
+    /// directive header lines by `cst::directive_header`, not here).
     /// Single-character currencies (e.g., T for AT&T, V for Visa) are valid NYSE/NASDAQ tickers.
     /// Note: Single-char currencies are disambiguated from transaction flags in the parser.
     /// Also supports `/` prefix for options/futures contracts (e.g., `/ESM24`, `/6J`,
@@ -163,10 +168,10 @@ pub enum Token<'src> {
     /// it ends with a letter or digit, so `/1.14` is a division and `/6J` (a
     /// futures symbol beancount's own comment uses) is a currency. Longest
     /// match decides between it and `Slash`, as in flex: `10 /6J` is an amount
-    /// in `/6J`, `10/6` a division (#2802).
+    /// in `/6J`, `10/6` a division.
     /// Priority 3 ensures Currency wins over Flag for single uppercase letters.
     #[regex(
-        r"/[A-Z0-9'._-]*[A-Z]([A-Z0-9'._-]*[A-Z0-9])?|[A-Z][A-Z0-9'._-]*",
+        r"/[A-Z0-9'._-]*[A-Z]([A-Z0-9'._-]*[A-Z0-9])?|[A-Z]([A-Z0-9'._-]*[A-Z0-9])?",
         priority = 3
     )]
     Currency(&'src str),

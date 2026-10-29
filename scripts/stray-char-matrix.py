@@ -22,9 +22,9 @@ Output format, one line per snippet, tab-separated:
 
 `<expectations>` has one character per generated case, in generation order:
 `0` beancount accepts the input, `1` it reports an error, `x` excluded
-because the verdict is not a syntax verdict (beancount crashed, or rejected
-an option NAME, which rledger validates when it loads options rather than
-when it parses). The case order is defined by `cases()` below and mirrored
+because the verdict is not a syntax verdict (beancount raised or crashed, or
+rejected an option name or an account name, which rledger validates when it
+loads the file rather than when it parses). The case order is defined by `cases()` below and mirrored
 by `cases()` in the Rust test; the test checks the lengths agree, so the two
 cannot drift silently.
 
@@ -32,6 +32,7 @@ Changing BASES or CHARS here means changing them in the test too.
 """
 
 import json
+import os
 import sys
 
 from beancount.parser import parser
@@ -66,7 +67,7 @@ BASES = [
     ("txn-meta", '2024-01-01 *\n  kk: "v"\n  Assets:A  1 USD\n    pk: 2\n  Assets:B\n'),
 ]
 
-CHARS = '!@?*~^$&|{}(),#%"'
+CHARS = "!@?*~^$&|{}(),#%\"/_-'.A0"
 
 
 def cases(base):
@@ -86,14 +87,33 @@ def cases(base):
     return out
 
 
-def verdict(src):
+def verdict_in_process(src):
     try:
         _, errors, _ = parser.parse_string(src)
-    except Exception:  # beancount itself crashed: no verdict to match
+    except Exception:  # beancount raised: no verdict to match
         return "x"
-    if any("Invalid option" in str(e.message) for e in errors):
+    if any(
+        "Invalid option" in str(e.message) or "Invalid account name" in str(e.message)
+        for e in errors
+    ):
         return "x"
     return "1" if errors else "0"
+
+
+def verdict(src):
+    """`verdict_in_process`, in a forked child.
+
+    beancount's C parser can crash the process outright: `1./00` divides by
+    zero and segfaults. A crashed child is no verdict, so it is excluded.
+    """
+    pid = os.fork()
+    if pid == 0:
+        code = {"0": 0, "1": 1, "x": 2}[verdict_in_process(src)]
+        os._exit(code)
+    _, status = os.waitpid(pid, 0)
+    if not os.WIFEXITED(status):
+        return "x"
+    return {0: "0", 1: "1"}.get(os.WEXITSTATUS(status), "x")
 
 
 def main():

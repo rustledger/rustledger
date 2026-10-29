@@ -21,7 +21,7 @@ use rustledger_parser::format::try_format_source;
 use rustledger_parser::parse;
 
 /// Must match `CHARS` in `scripts/stray-char-matrix.py`.
-const CHARS: &str = "!@?*~^$&|{}(),#%\"";
+const CHARS: &str = "!@?*~^$&|{}(),#%\"/_-'.A0";
 
 const DATA: &str = include_str!("data/stray_char_matrix.tsv");
 
@@ -121,10 +121,21 @@ fn known_column_0_divergence(row: &Row, case: &Case) -> bool {
     "!?&".contains(case.ch) && (case.offset == 0 || row.base.as_bytes()[case.offset - 1] == b'\n')
 }
 
+/// A digit inserted into a directive's leading date: beancount's `DATE` is
+/// `[0-9]{4,}[-/][0-9]+[-/][0-9]+`, so `02024-01-01` and `2024-001-01` are
+/// dates there, and our lexer rejects them. A date-lexing difference, not a
+/// stray header token; pinned by count below until it is fixed separately.
+fn known_date_digit_divergence(row: &Row, case: &Case) -> bool {
+    case.ch.is_ascii_digit()
+        && row.base.as_bytes()[0].is_ascii_digit()
+        && case.offset <= row.base.find(' ').expect("a dated header")
+}
+
 #[test]
 fn test_parse_reports_a_stray_header_character_exactly_when_beancount_does() {
     let mut checked = 0usize;
     let mut known = 0usize;
+    let mut known_dates = 0usize;
     let mut wrong = Vec::new();
     for row in rows() {
         for (case, verdict) in cases(&row.base).iter().zip(&row.verdicts) {
@@ -135,6 +146,10 @@ fn test_parse_reports_a_stray_header_character_exactly_when_beancount_does() {
             let we_reject = !parse(&case.src).errors.is_empty();
             if known_column_0_divergence(&row, case) && we_reject && !beancount_rejects {
                 known += 1;
+                continue;
+            }
+            if known_date_digit_divergence(&row, case) && we_reject && !beancount_rejects {
+                known_dates += 1;
                 continue;
             }
             checked += 1;
@@ -157,6 +172,7 @@ fn test_parse_reports_a_stray_header_character_exactly_when_beancount_does() {
     }
     assert!(checked > 9_000, "only {checked} cases checked");
     assert_eq!(known, 60, "the #2779 rows changed");
+    assert_eq!(known_dates, 126, "the date-digit rows changed");
     assert!(
         wrong.is_empty(),
         "{} of {checked} cases disagree with beancount, first 20:\n{}",
@@ -395,4 +411,48 @@ proptest! {
             prop_assert_eq!(non_whitespace(&out), non_whitespace(&src), "{:?} -> {:?}", src, out);
         }
     }
+}
+
+/// A plain currency must END with a letter or digit, as in beancount
+/// (`[A-Z][A-Z0-9'._-]*[A-Z0-9]`, or one capital letter). Ours let it end in
+/// `_`, `-`, `'` or `.`, so `commodity CAC_` loaded clean and bean-check
+/// refused it. The trailing character is now left over, and an error.
+#[test]
+fn test_parse_rejects_a_currency_ending_in_punctuation() {
+    for src in [
+        "2024-01-01 commodity CAC_\n",
+        "2024-01-01 price HOOL_ 10 USD\n",
+        "2024-01-01 price HOOL' 10 USD\n",
+        "2024-01-01 price HOOL. 10 USD\n",
+        "2024-01-01 price HOOL 10 CAC-\n",
+        "2024-01-01 open Assets:A USD_,EUR\n",
+        "2024-01-01 open Assets:A USD-,EUR\n",
+        "2024-01-01 open Assets:A USD',EUR\n",
+        "2024-01-01 open Assets:A USD.,EUR\n",
+        "2024-01-01 open Assets:A USD,EUR_\n",
+        "2024-01-01 custom \"budget\" Assets:A \"x\" 10 USD_ TRUE\n",
+        "2024-01-01 *\n  Assets:A  1 CAC_\n  Assets:B\n",
+    ] {
+        assert!(!parse(src).errors.is_empty(), "{src:?} must be rejected");
+    }
+    // Inner punctuation is still part of the currency, and quotes in strings
+    // are not currencies at all.
+    for (src, want) in [
+        ("2024-01-01 commodity NT.TO\n", "NT.TO"),
+        ("2024-01-01 commodity BRK-B\n", "BRK-B"),
+        ("2024-01-01 commodity TLT_040921C144\n", "TLT_040921C144"),
+        ("2024-01-01 commodity USD.5\n", "USD.5"),
+    ] {
+        let r = parse(src);
+        assert!(r.errors.is_empty(), "{src:?}: {:?}", r.errors);
+        let rustledger_core::Directive::Commodity(c) = &r.directives[0].value else {
+            panic!("{src:?}");
+        };
+        assert_eq!(c.currency.as_str(), want);
+    }
+    assert!(
+        parse("2024-01-01 note Assets:A \"HOOL' and CAC_\"\n")
+            .errors
+            .is_empty()
+    );
 }

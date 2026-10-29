@@ -18,36 +18,85 @@
 
 mod common;
 
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-/// What a fuel trap reads like.
-const TRAP: &str = "all fuel consumed";
+use std::process::{Command, ExitStatus, Stdio};
+use std::time::{Duration, Instant};
 
 const PASSTHROUGH: &str = "__plugins__ = ['passthrough']\n\
     def passthrough(entries, options_map):\n    return entries, []\n";
 
+/// How long one `rledger` run may take before [`run`] kills it and fails
+/// the test. A working build ends every run here well within it (the
+/// longest is bounded by the default 30-second plugin budget), so it fires
+/// only when a budget is broken and a plugin that never returns would
+/// otherwise hang the test.
+const WATCHDOG: Duration = Duration::from_secs(120);
+
 struct Run {
     out: String,
     success: bool,
+    status: ExitStatus,
+}
+
+impl Run {
+    /// The exit status and everything the run printed, for an assertion
+    /// message.
+    fn report(&self) -> String {
+        format!("exit status: {}\n{}", self.status, self.out)
+    }
 }
 
 /// Run `rledger <args>` in `dir`, with `dir` as the only config source.
+///
+/// A run still going after [`WATCHDOG`] is killed, and the test fails with
+/// what it had printed.
 fn run(bin: &Path, dir: &Path, args: &[&str]) -> Run {
-    let output = Command::new(bin)
+    // Each pipe drains on a thread of its own, so a run that prints a lot
+    // cannot block on a full pipe while this thread waits for it to exit.
+    fn drain(mut pipe: impl Read + Send + 'static) -> std::thread::JoinHandle<Vec<u8>> {
+        std::thread::spawn(move || {
+            let mut bytes = Vec::new();
+            pipe.read_to_end(&mut bytes).expect("read rledger output");
+            bytes
+        })
+    }
+    let mut child = Command::new(bin)
         .args(args)
         .current_dir(dir)
         .env("RLEDGER_CONFIG_DIR", dir)
         .env("PROGRAMDATA", dir)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("run rledger");
+    let stdout = drain(child.stdout.take().expect("piped stdout"));
+    let stderr = drain(child.stderr.take().expect("piped stderr"));
+    let started = Instant::now();
+    let (status, timed_out) = loop {
+        if let Some(status) = child.try_wait().expect("wait for rledger") {
+            break (status, false);
+        }
+        if started.elapsed() > WATCHDOG {
+            child.kill().expect("kill rledger");
+            break (child.wait().expect("reap rledger"), true);
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let out = format!(
+        "{}{}",
+        String::from_utf8_lossy(&stdout.join().expect("stdout reader")),
+        String::from_utf8_lossy(&stderr.join().expect("stderr reader"))
+    );
+    assert!(
+        !timed_out,
+        "rledger {args:?} was still running after {WATCHDOG:?} and was killed:\n{out}"
+    );
     Run {
-        out: format!(
-            "{}{}",
-            String::from_utf8_lossy(&output.stdout),
-            String::from_utf8_lossy(&output.stderr)
-        ),
-        success: output.status.success(),
+        out,
+        success: status.success(),
+        status,
     }
 }
 
@@ -273,46 +322,87 @@ def shout(entries, options_map):
     assert!(!q.out.contains("SHOUTED"), "{}", q.out);
 }
 
-/// The host's time budget governs Python plugins. The plugin burns about
-/// 7G fuel (5M loop iterations at ~1.1k fuel each, plus ~1.2G of `CPython`
-/// startup, measured), which fits the default 30-second budget (30G) and
-/// traps on a 3-second one (3G), where a passthrough plugin still runs.
+/// The host's time budget governs Python plugins, from the command line
+/// and from the config file.
+///
+/// Nothing here depends on how fast the machine is (#2791). The plugin that
+/// must be stopped never returns on its own (`while True`), so a working
+/// budget always stops it, whichever of its two enforcements fires first:
+/// fuel (deterministic, `N * FUEL_PER_SECOND`) or the wall-clock deadline
+/// (N seconds). Both say "exceeded its N-second time budget", the
+/// observable asserted. A broken budget would hang instead, which
+/// [`WATCHDOG`] turns into a failure. The plugin prints a marker before
+/// looping, which shows `CPython` started and entered the plugin within the
+/// 3-second budget (startup is ~1.24G of its 3G fuel, ~0.2 s), so the
+/// budget stopped the plugin's own loop rather than the interpreter's
+/// startup. A 1-second budget (1G fuel) could not show that: it stops
+/// every Python plugin during startup.
+///
+/// The plugin that must fit does a small, fixed amount of work, far under
+/// the default 30-second budget's fuel and deadline on any runner.
 #[test]
 fn host_time_budget_applies_to_python_plugins() {
     let Some(bin) = rledger_with_python() else {
         return;
     };
-    let burn = "\
-__plugins__ = ['burn']
 
-def burn(entries, options_map):
+    // The default budget covers a plugin doing a little work.
+    let small = "\
+__plugins__ = ['small']
+
+def small(entries, options_map):
     n = 0
-    for i in range(5_000_000):
+    for i in range(1_000):
         n += i
     return entries, []
 ";
-    let (dir, ledger) = setup(burn, "plugin \"plugin.py\"");
-    let ledger = ledger.to_str().unwrap();
-
-    let fits = run(&bin, dir.path(), &["check", ledger]);
+    let (dir, ledger) = setup(small, "plugin \"plugin.py\"");
+    let fits = run(&bin, dir.path(), &["check", ledger.to_str().unwrap()]);
     assert!(
-        fits.success,
-        "the default budget must cover it:\n{}",
-        fits.out
+        fits.success && fits.out.contains("No errors found"),
+        "the default budget must cover a small plugin:\n{}",
+        fits.report()
     );
 
-    let tight = run(
+    // A plugin that never returns is stopped by a 3-second budget.
+    let spin = "\
+import sys
+
+__plugins__ = ['spin']
+
+def spin(entries, options_map):
+    print('spin: started', file=sys.stderr, flush=True)
+    while True:
+        pass
+";
+    let (dir, ledger) = setup(spin, "plugin \"plugin.py\"");
+    let ledger = ledger.to_str().unwrap();
+    let stopped = |r: &Run, source: &str| {
+        assert!(
+            !r.success,
+            "a never-ending plugin must fail under {source}:\n{}",
+            r.report()
+        );
+        assert!(
+            r.out
+                .contains("the plugin exceeded its 3-second time budget"),
+            "the failure must be {source}'s 3-second budget running out:\n{}",
+            r.report()
+        );
+        assert!(
+            r.out.contains("spin: started"),
+            "CPython must start and enter the plugin within {source}'s 3 seconds, \
+             so the budget stopped the plugin's loop:\n{}",
+            r.report()
+        );
+    };
+
+    let flag = run(
         &bin,
         dir.path(),
         &["--plugin-max-time-secs", "3", "check", ledger],
     );
-    assert!(!tight.success, "{}", tight.out);
-    assert!(tight.out.contains(TRAP), "{}", tight.out);
-    assert!(
-        tight.out.contains("exceeded its 3-second time budget"),
-        "the trap must name the budget that ran out:\n{}",
-        tight.out
-    );
+    stopped(&flag, "--plugin-max-time-secs 3");
 
     // The config file sets it too.
     std::fs::write(
@@ -321,21 +411,7 @@ def burn(entries, options_map):
     )
     .unwrap();
     let configured = run(&bin, dir.path(), &["check", ledger]);
-    assert!(configured.out.contains(TRAP), "{}", configured.out);
-
-    // ...and 3 seconds is enough for CPython to start and run a small plugin.
-    let (dir, ledger) = setup(PASSTHROUGH, "plugin \"plugin.py\"");
-    let small = run(
-        &bin,
-        dir.path(),
-        &[
-            "--plugin-max-time-secs",
-            "3",
-            "check",
-            ledger.to_str().unwrap(),
-        ],
-    );
-    assert!(small.success, "{}", small.out);
+    stopped(&configured, "[plugins] max_time_secs = 3");
 }
 
 /// `ag-rledger <args>` in `dir`, with `env` set: the envelope and what the

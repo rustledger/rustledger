@@ -340,17 +340,18 @@ const fn is_skipped(kind: K) -> bool {
 /// `tokens` is the header region only: from the directive's first content
 /// token (its `DATE`, or the keyword of an undated directive) up to but not
 /// including the `NEWLINE` that ends the line. `end` is where that region
-/// ends, used for a defect at the end of the line. Ranges are echoed back in
-/// whatever frame the caller uses.
+/// ends, used for a defect at the end of the line. `src` is the text the
+/// ranges index (read only to tell a run of plain digits apart). Ranges are
+/// echoed back in whatever frame the caller uses.
 ///
 /// Returns `None` for a kind that [`directive_keyword`] does not name.
 pub(super) fn first_header_defect(
     directive: K,
     tokens: &[(K, Range<usize>)],
     end: usize,
+    src: &str,
 ) -> Option<HeaderDefect> {
     directive_keyword(directive)?;
-    let glued = glued_one_letter_currency(tokens);
     let mut c = Cursor {
         tokens: tokens
             .iter()
@@ -366,11 +367,17 @@ pub(super) fn first_header_defect(
     }
     c.bump();
     let grammar = directive_body(directive, &mut c).err();
-    // Whichever comes first on the line.
-    match (grammar, glued) {
-        (Some(g), Some(l)) => Some(if l.range.start < g.range.start { l } else { g }),
-        (g, l) => g.or(l),
-    }
+    // On a tie the split date wins: it says why the token is unexpected.
+    earliest([
+        split_beancount_date(tokens, src),
+        grammar,
+        glued_one_letter_currency(tokens),
+    ])
+}
+
+/// The defect that starts first on the line; on a tie, the first listed.
+fn earliest<const N: usize>(defects: [Option<HeaderDefect>; N]) -> Option<HeaderDefect> {
+    defects.into_iter().flatten().min_by_key(|d| d.range.start)
 }
 
 /// A one-letter currency with something other than whitespace right after it.
@@ -393,23 +400,101 @@ fn glued_one_letter_currency(tokens: &[(K, Range<usize>)]) -> Option<HeaderDefec
     })
 }
 
+/// Text that beancount lexes as ONE date and our lexer splits (#2808).
+///
+/// beancount's `DATE` is `[0-9]{4,}[-/][0-9]+[-/][0-9]+`; ours is
+/// `\d{4}[-/]\d{1,2}[-/]\d{1,2}`. Where they differ, our tokens are glued
+/// together with no whitespace between them, in one of two shapes:
+///
+/// - a `DATE` with a `NUMBER` right after it, when the last field has more
+///   than two digits: `2024-02-002`, `2024/02/002`, `2024-2-002` and
+///   `2024-02-0002` lex as `DATE 2024-02-00` (or `2024-2-00`) then a number;
+/// - `NUMBER`, `-` or `/`, `NUMBER`, `-` or `/`, `NUMBER`, all plain digits
+///   and the first at least four of them, when the year has more than four
+///   digits or the month more than two: `02024-02-02`, `20024-02-02` and
+///   `2024-002-02` lex as the number expression `2024 - 002 - 02`.
+///
+/// Read our way, either shape loads as a wrong value with no error where a
+/// value may be a number (a metadata value, a `custom` value, a `pushmeta`
+/// value, an amount): `kk: 2024-002-02` was the integer 2020, `kk: 2024-02-002`
+/// the integer 2, `custom "x" 2024-02-002` a date and a number. beancount
+/// reads a date (or rejects an invalid one, `20024-02-02`), so the text is
+/// reported. That is stricter than beancount where its date is valid, and
+/// deliberately so: the alternative is a silently wrong value. The fix that
+/// matches beancount is in the lexer (#2808).
+fn split_beancount_date(tokens: &[(K, Range<usize>)], src: &str) -> Option<HeaderDefect> {
+    let digits = |r: &Range<usize>| {
+        src.get(r.clone())
+            .is_some_and(|t| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))
+    };
+    let glued = |pair: &[(K, Range<usize>)]| pair[0].1.end == pair[1].1.start;
+    let defect = |from: usize, to: usize| HeaderDefect {
+        range: from..to,
+        expected: "YYYY-MM-DD if this is a date: beancount reads it as one \
+                   date, which rledger does not support yet (#2808)",
+        found: Some(K::NUMBER),
+    };
+    for (i, (kind, range)) in tokens.iter().enumerate() {
+        match kind {
+            K::DATE => {
+                if let Some(next) = tokens.get(i + 1)
+                    && next.0 == K::NUMBER
+                    && glued(&tokens[i..i + 2])
+                    && digits(&next.1)
+                {
+                    return Some(defect(range.start, next.1.end));
+                }
+            }
+            K::NUMBER => {
+                let Some(run) = tokens.get(i..i + 5) else {
+                    continue;
+                };
+                let shape = run[0].1.len() >= 4
+                    && matches!(run[1].0, K::MINUS | K::SLASH)
+                    && run[2].0 == K::NUMBER
+                    && matches!(run[3].0, K::MINUS | K::SLASH)
+                    && run[4].0 == K::NUMBER
+                    && run.windows(2).all(glued)
+                    && [&run[0].1, &run[2].1, &run[4].1].into_iter().all(digits);
+                if shape {
+                    return Some(defect(range.start, run[4].1.end));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
 /// The first defect in a metadata line (`key: value` under a directive, a
 /// transaction or a posting; stage 2 of #2802), if any. beancount's rule is
 /// `key_value_line : INDENT key_value eol` with `key_value : KEY COLON
 /// key_value_value`, the same `key_value` that follows `pushmeta`.
 ///
 /// `tokens` is the line from its `META_KEY` up to but not including the
-/// `NEWLINE`; `end` is where it ends. Ranges are echoed back in the caller's
-/// frame.
+/// `NEWLINE`; `end` is where it ends; `src` is the text the ranges index.
+/// Ranges are echoed back in the caller's frame.
 ///
-/// Stricter than beancount in one place, deliberately: a date with a
-/// three-digit day (`kk: 2024-02-002`) is a date there, and our lexer reads
-/// `DATE 2024-02-00` then `NUMBER 2`, which this reports. Not reporting it
-/// would load the value as the integer 2, as it did before this check. The
-/// fix that matches beancount is in the lexer (#2808); pinned by
-/// `test_parse_reports_a_three_digit_day_in_a_metadata_date_instead_of_misreading_it`.
-pub(super) fn first_meta_defect(tokens: &[(K, Range<usize>)], end: usize) -> Option<HeaderDefect> {
-    let glued = glued_one_letter_currency(tokens);
+/// Stricter than beancount in two places, deliberately, both because our
+/// lexer splits a token beancount reads whole and the pieces used to load as
+/// a wrong value with no error:
+///
+/// - a date beancount's `DATE` takes and ours does not
+///   ([`split_beancount_date`]): `kk: 2024-02-002` loaded as the integer 2,
+///   `kk: 2024-002-02` as 2020. Fixed properly in the lexer by #2808.
+/// - a number with doubled thousands separators: beancount's `NUMBER` is
+///   `[0-9][0-9,]+[0-9]`, so `kk: 1,,000` is 1000 there, and ours lexes `1`,
+///   `,`, `,`, `000`, which loaded as the integer 1. The stray comma is
+///   reported here by the grammar; a posting amount (`1,,000 USD`) and a
+///   header amount (`balance Assets:A 1,,000 USD`) already reported it.
+///
+/// Pinned by `test_parse_reports_a_split_beancount_date_instead_of_misreading_it`
+/// and `test_parse_reports_doubled_thousands_separators_instead_of_misreading_them`.
+pub(super) fn first_meta_defect(
+    tokens: &[(K, Range<usize>)],
+    end: usize,
+    src: &str,
+) -> Option<HeaderDefect> {
     let mut c = Cursor {
         tokens: tokens
             .iter()
@@ -423,10 +508,12 @@ pub(super) fn first_meta_defect(tokens: &[(K, Range<usize>)], end: usize) -> Opt
         .and_then(|()| key_value_value(&mut c))
         .and_then(|()| c.finish())
         .err();
-    match (grammar, glued) {
-        (Some(g), Some(l)) => Some(if l.range.start < g.range.start { l } else { g }),
-        (g, l) => g.or(l),
-    }
+    // On a tie the split date wins: it says why the token is unexpected.
+    earliest([
+        split_beancount_date(tokens, src),
+        grammar,
+        glued_one_letter_currency(tokens),
+    ])
 }
 
 /// Diagnostic text for a defect. `place` names where it is (`"the open
@@ -467,7 +554,7 @@ mod tests {
             }
             tokens.push((t.kind(), r));
         }
-        first_header_defect(node.kind(), &tokens, end).map(|d| {
+        first_header_defect(node.kind(), &tokens, end, line).map(|d| {
             let text = line[d.range.clone()].to_string();
             (d, text)
         })
@@ -559,6 +646,6 @@ mod tests {
 
     #[test]
     fn test_first_header_defect_ignores_transactions() {
-        assert_eq!(first_header_defect(K::TRANSACTION, &[], 0), None);
+        assert_eq!(first_header_defect(K::TRANSACTION, &[], 0, ""), None);
     }
 }

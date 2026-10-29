@@ -3452,7 +3452,7 @@ fn directive_header_check(
     {
         return None;
     }
-    let defect = super::directive_header::first_header_defect(node.kind(), tokens, end)?;
+    let defect = super::directive_header::first_header_defect(node.kind(), tokens, end, stripped)?;
     let text = stripped.get(defect.range.clone()).unwrap_or_default();
     Some(crate::ParseError::new(
         crate::ParseErrorKind::SyntaxError(super::directive_header::defect_message(
@@ -3579,7 +3579,9 @@ impl MetaCheck<'_> {
         if reported {
             return;
         }
-        let Some(defect) = super::directive_header::first_meta_defect(self.tokens, end) else {
+        let Some(defect) =
+            super::directive_header::first_meta_defect(self.tokens, end, self.stripped)
+        else {
             return;
         };
         let text = self.stripped.get(defect.range.clone()).unwrap_or_default();

@@ -28,7 +28,7 @@ const DATA: &str = include_str!("data/stray_char_matrix.tsv");
 
 /// Rows pinned as known differences, by count: see the `known_*` functions.
 const KNOWN_COLUMN_0: usize = 120;
-const KNOWN_DATES: [usize; 3] = [259, 8, 0];
+const KNOWN_DATES: [usize; 3] = [259, 6, 0];
 
 /// One generated input.
 struct Case {
@@ -823,22 +823,90 @@ fn test_parse_accepts_every_metadata_value_type() {
     }
 }
 
-/// A date with a three-digit day is a date in beancount (`2024-02-002` is
-/// 2024-02-02: its `DATE` is `[0-9]{4,}[-/][0-9]+[-/][0-9]+`), and our lexer
-/// reads `DATE 2024-02-00` then `NUMBER 2`. Before stage 2 the metadata
-/// converter took the `2`, so `kk: 2024-02-002` silently loaded as the
-/// integer 2. It is now reported instead: stricter than beancount, which
-/// accepts it, because the alternative is a wrong value with no error. The
-/// lexer fix that reads it as the date beancount does is #2808, and these
-/// rows are pinned in `KNOWN_DATES` until it lands.
+/// Text beancount's `DATE` (`[0-9]{4,}[-/][0-9]+[-/][0-9]+`) reads as one date
+/// and our lexer splits (#2808). Read our way, each loaded as a wrong value
+/// with no error: `kk: 2024-002-02` as the integer 2020 (`2024 - 002 - 02`),
+/// `kk: 2024-02-002` as the integer 2 (`DATE 2024-02-00`, then `2`),
+/// `custom "x" 2024-02-002` as a date and a number, `balance ... 2024-002-02
+/// USD` as 2020 USD. It is now reported: stricter than beancount where its
+/// date is valid (`2024-002-02` is 2024-02-02 there), on purpose, since the
+/// alternative is a wrong value. Matching beancount is the lexer fix in
+/// #2808; the matrix rows are pinned in `KNOWN_DATES` until then.
 #[test]
-fn test_parse_reports_a_three_digit_day_in_a_metadata_date_instead_of_misreading_it() {
+fn test_parse_reports_a_split_beancount_date_instead_of_misreading_it() {
+    for value in [
+        // A glued `DATE` and `NUMBER`: the last field has more than two digits.
+        "2024-02-002",
+        "2024-02-020",
+        "2024/02/002",
+        "2024-2-002",
+        "2024-02-0002",
+        // A glued number run: the year or the month is too long for our DATE.
+        "2024-002-02",
+        "02024-02-02",
+        "2024/002/02",
+        // Invalid dates in beancount (it reports them), wrong numbers here.
+        "20024-02-02",
+        "99999-01-01",
+    ] {
+        // `pushmeta` and `popmeta` produce no directive.
+        for (src, kept) in [
+            (format!("2024-01-01 open Assets:A\n  kk: {value}\n"), 1),
+            (format!("2024-01-01 custom \"x\" {value}\n"), 1),
+            (format!("pushmeta kk: {value}\npopmeta kk:\n"), 0),
+            (format!("2024-01-01 balance Assets:A {value} USD\n"), 1),
+            (format!("2024-01-01 price HOOL {value} USD\n"), 1),
+        ] {
+            let result = parse(&src);
+            assert_eq!(result.errors.len(), 1, "{src:?}: {:?}", result.errors);
+            let err = &result.errors[0];
+            assert_eq!(
+                &src[err.span.start..err.span.end],
+                value,
+                "{src:?}: {err:?}"
+            );
+            assert!(
+                err.message().contains("#2808"),
+                "{src:?}: {}",
+                err.message()
+            );
+            assert_eq!(
+                result.directives.len(),
+                kept,
+                "{src:?}: the directive is kept"
+            );
+        }
+    }
+    // Not a split date: a spaced expression, a thousands separator, a short
+    // first number, and a real date are all still read as before.
+    for value in [
+        "2024 - 002 - 02",
+        "1,234-02-02",
+        "202-002-02",
+        "2024-02-02",
+        "10000",
+    ] {
+        let src = format!("2024-01-01 open Assets:A\n  kk: {value}\n");
+        let result = parse(&src);
+        assert!(result.errors.is_empty(), "{src:?}: {:?}", result.errors);
+    }
+}
+
+/// beancount's `NUMBER` is `[0-9][0-9,]+[0-9]`, so `1,,000` is 1000 there;
+/// ours lexes `1`, `,`, `,`, `000`, and a metadata value loaded as the
+/// integer 1 with no error. It is now reported, stricter than beancount on
+/// purpose (a wrong value is worse than an error), as a posting amount and a
+/// header amount already were. (The `balance` row's older malformed-amount error
+/// also drops its directive; that predates this check.)
+#[test]
+fn test_parse_reports_doubled_thousands_separators_instead_of_misreading_them() {
     for src in [
-        "2024-01-01 open Assets:A\n  kk: 2024-02-002\n",
-        "2024-01-01 open Assets:A\n  kk: 2024-02-020\n",
+        "2024-01-01 open Assets:A\n  kk: 1,,000\n",
+        "2024-01-01 open Assets:A\n  kk: 1,,000 USD\n",
+        "2024-01-01 *\n  Assets:A  1,,000 USD\n  Assets:B\n",
+        "2024-01-01 balance Assets:A 1,,000 USD\n",
     ] {
         let result = parse(src);
         assert_eq!(result.errors.len(), 1, "{src:?}: {:?}", result.errors);
-        assert_eq!(result.directives.len(), 1, "{src:?}: the directive is kept");
     }
 }

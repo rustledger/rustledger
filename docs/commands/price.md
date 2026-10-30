@@ -220,7 +220,7 @@ Rustledger supports 11 built-in price sources and external commands.
 | `coinbase` | Coinbase — cryptocurrency spot prices |
 | `coincap` | CoinCap — cryptocurrency market data |
 | `ecb` | European Central Bank — EUR exchange rates |
-| `ratesapi` | Rates API — forex rates |
+| `ratesapi` | Rates API — forex rates (exchangerate.host, falling back to the keyless [AllRatesToday](https://allratestoday.com) mirror of the same EU reference series) |
 | `tsp` | US Thrift Savings Plan fund prices |
 | `eastmoneyfund` | East Money Fund — Chinese fund prices |
 

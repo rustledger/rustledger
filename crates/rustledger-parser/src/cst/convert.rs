@@ -3114,17 +3114,48 @@ fn pushmeta_value(node: &crate::SyntaxNode) -> Option<MetaValue> {
         }
         header.push((t.kind(), range));
     }
-    // Except a split date (`pushmeta kk: 2024-02-002`): beancount reads it as
-    // one valid date and pushes it, and rledger reports it only until #2808,
-    // so it still pushes here rather than adding a second error at `popmeta`.
-    if let Some(defect) =
-        super::directive_header::first_header_defect(node.kind(), &header, end, &text)
-        && super::directive_header::split_beancount_date(&header, &text)
-            .is_none_or(|split| split.range != defect.range)
+    // Except a value that is exactly one split date (`pushmeta kk:
+    // 2024-02-002`): beancount reads it as one valid date and pushes it, and
+    // rledger reports it only until #2808, so it still pushes here rather than
+    // adding a second error at `popmeta`. Anything else on the line, or a run
+    // past the date (`2024-02-002.`, `2024-002-02,000`), is a syntax error in
+    // beancount too, so it pushes nothing.
+    if super::directive_header::first_header_defect(node.kind(), &header, end, &text).is_some()
+        && !is_only_a_split_date(&header, &text)
     {
         return None;
     }
     Some(meta_value_from_tokens(tokens.into_iter()))
+}
+
+/// Whether the `pushmeta` value (everything after its `META_KEY`) is exactly
+/// one date in beancount's `DATE` shape, `[0-9]{4,}[-/][0-9]+[-/][0-9]+`, that
+/// rledger's lexer splits (#2808).
+fn is_only_a_split_date(
+    header: &[(crate::SyntaxKind, std::ops::Range<usize>)],
+    text: &str,
+) -> bool {
+    let Some(split) = super::directive_header::split_beancount_date(header, text) else {
+        return false;
+    };
+    let mut value = header
+        .iter()
+        .skip_while(|(k, _)| *k != crate::SyntaxKind::META_KEY)
+        .skip(1)
+        .filter(|(k, _)| !is_trivia_kind(*k));
+    let (Some((_, first)), last) = (value.next(), value.last()) else {
+        return false;
+    };
+    let value_end = last.map_or(first.end, |(_, r)| r.end);
+    if split.range.start != first.start || split.range.end != value_end {
+        return false;
+    }
+    let Some(date) = text.get(split.range) else {
+        return false;
+    };
+    let fields: Vec<&str> = date.split(['-', '/']).collect();
+    matches!(fields.as_slice(), [y, m, d]
+        if y.len() >= 4 && [y, m, d].iter().all(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit())))
 }
 
 // ---- ParseResult.comments --------------------------------------
@@ -7540,6 +7571,14 @@ mod tests {
             "pushmeta kk: 10 USD EUR\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n",
             "pushmeta kk: 1 + 2 USD 3\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n",
             "pushmeta kk: ^link\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n",
+            // A split date (#2808) with anything else on the line, before or
+            // after it or run on from it, is still a syntax error in beancount.
+            "pushmeta kk: 2024-02-002 !\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n",
+            "pushmeta kk: 2024-02-002 5\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n",
+            "pushmeta kk: 2024-02-002 USD\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n",
+            "pushmeta kk: 2024-02-002.\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n",
+            "pushmeta kk: 2024-002-02,000\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n",
+            "pushmeta kk: \"v\" 2024-02-002\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n",
         ] {
             let green = parse_via_cst(src);
             let red = parse_red_only(src);

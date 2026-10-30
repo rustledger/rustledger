@@ -1,6 +1,11 @@
 //! Rates API price source.
 //!
 //! Fetches currency exchange rates from exchangerate.host or similar free APIs.
+//!
+//! exchangerate.host now rejects unkeyed requests (`missing_access_key`),
+//! so each request falls back to a keyless exchangerate.host-compatible
+//! mirror of the same EU reference series (Exchange rates by
+//! AllRatesToday, <https://allratestoday.com>).
 
 use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, user_agent};
 use crate::cmd::price::PriceResponse;
@@ -21,6 +26,9 @@ use std::time::Duration;
 #[derive(Debug)]
 pub struct RatesApiSource {}
 
+const PRIMARY_BASE_URL: &str = "https://api.exchangerate.host";
+const FALLBACK_BASE_URL: &str = "https://allratestoday.com/api/compat/exchangerate-host";
+
 impl RatesApiSource {
     /// Create a new Rates API source.
     pub const fn new(_timeout: Duration) -> Self {
@@ -30,9 +38,40 @@ impl RatesApiSource {
     /// Build the API URL. The date-path form serves the historical
     /// EU-reference rate for that day (#1802).
     fn build_url(&self, base: &str, target: &str, date: Option<NaiveDate>) -> String {
+        Self::url_for(PRIMARY_BASE_URL, base, target, date)
+    }
+
+    /// Same request against the keyless exchangerate.host-compatible
+    /// fallback (identical path and response shape).
+    fn build_fallback_url(&self, base: &str, target: &str, date: Option<NaiveDate>) -> String {
+        Self::url_for(FALLBACK_BASE_URL, base, target, date)
+    }
+
+    fn url_for(root: &str, base: &str, target: &str, date: Option<NaiveDate>) -> String {
         match date {
-            Some(d) => format!("https://api.exchangerate.host/{d}?base={base}&symbols={target}"),
-            None => format!("https://api.exchangerate.host/latest?base={base}&symbols={target}"),
+            Some(d) => format!("{root}/{d}?base={base}&symbols={target}"),
+            None => format!("{root}/latest?base={base}&symbols={target}"),
+        }
+    }
+
+    /// Try exchangerate.host first; on any error (HTTP, parse, API
+    /// error, missing rate) retry the same request on the fallback.
+    fn fetch_rate_with_fallback(
+        &self,
+        pair: &PricePair,
+        date: Option<NaiveDate>,
+        date_fallback: NaiveDate,
+    ) -> Result<(Decimal, NaiveDate)> {
+        let base = pair.ticker.to_uppercase();
+        let target = pair.currency.to_uppercase();
+        let primary = self.build_url(&base, &target, date);
+        match self.fetch_rate(&primary, pair, date_fallback) {
+            Ok(found) => Ok(found),
+            Err(primary_err) => {
+                let fallback = self.build_fallback_url(&base, &target, date);
+                self.fetch_rate(&fallback, pair, date_fallback)
+                    .with_context(|| format!("exchangerate.host failed first: {primary_err:#}"))
+            }
         }
     }
 
@@ -134,12 +173,7 @@ impl PriceSource for RatesApiSource {
     }
 
     fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
-        let url = self.build_url(
-            &pair.ticker.to_uppercase(),
-            &pair.currency.to_uppercase(),
-            None,
-        );
-        let (price, date) = self.fetch_rate(&url, pair, jiff::Zoned::now().date())?;
+        let (price, date) = self.fetch_rate_with_fallback(pair, None, jiff::Zoned::now().date())?;
 
         Ok(PriceResponse {
             price,
@@ -171,12 +205,7 @@ impl PriceSource for RatesApiSource {
         // window's end covers the dispatch's on-or-before selection.
         // The feed's date label is trusted EXCEPT when it echoes a
         // weekend day — see eu_reference_label.
-        let url = self.build_url(
-            &pair.ticker.to_uppercase(),
-            &pair.currency.to_uppercase(),
-            Some(window.end),
-        );
-        let (price, date) = self.fetch_rate(&url, pair, window.end)?;
+        let (price, date) = self.fetch_rate_with_fallback(pair, Some(window.end), window.end)?;
         Ok(vec![PricePoint {
             date: Self::eu_reference_label(date),
             price,
@@ -205,6 +234,21 @@ mod tests {
         let url = source.build_url("EUR", "USD", Some(d));
         assert!(url.contains("/2024-01-15?"), "{url}");
         assert!(!url.contains("latest"), "{url}");
+    }
+
+    #[test]
+    fn test_build_fallback_url_matches_primary_paths() {
+        let source = RatesApiSource::new(Duration::from_secs(30));
+        let d = rustledger_core::naive_date(2024, 1, 15).unwrap();
+        for date in [None, Some(d)] {
+            let primary = source.build_url("EUR", "USD", date);
+            let fallback = source.build_fallback_url("EUR", "USD", date);
+            assert_eq!(
+                fallback.strip_prefix(FALLBACK_BASE_URL),
+                primary.strip_prefix(PRIMARY_BASE_URL),
+                "{fallback} vs {primary}"
+            );
+        }
     }
 
     #[test]

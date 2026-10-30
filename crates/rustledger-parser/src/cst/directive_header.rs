@@ -429,7 +429,10 @@ fn glued_one_letter_currency(tokens: &[(K, Range<usize>)]) -> Option<HeaderDefec
 /// than beancount where its date is valid, and deliberately so: the
 /// alternative is a silently wrong value. The fix that matches beancount is
 /// in the lexer (#2808).
-fn split_beancount_date(tokens: &[(K, Range<usize>)], src: &str) -> Option<HeaderDefect> {
+pub(super) fn split_beancount_date(
+    tokens: &[(K, Range<usize>)],
+    src: &str,
+) -> Option<HeaderDefect> {
     let digits = |r: &Range<usize>| {
         src.get(r.clone())
             .is_some_and(|t| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))

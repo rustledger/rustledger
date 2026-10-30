@@ -867,7 +867,32 @@ fn test_parse_reports_a_split_beancount_date_instead_of_misreading_it() {
             (format!("2024-01-01 price HOOL {value} USD\n"), 1),
         ] {
             let result = parse(&src);
-            assert_eq!(result.errors.len(), 1, "{src:?}: {:?}", result.errors);
+            // A value that runs on past the date (`2024-002-02.5`) is a syntax
+            // error in beancount too, so its `pushmeta` pushes nothing and the
+            // `popmeta` reports the absent key, as beancount does; a value that
+            // is exactly one date is pushed, as beancount pushes it.
+            let runs_on = value.contains(['.', ',']);
+            let expected = if src.starts_with("pushmeta") && runs_on {
+                2
+            } else {
+                1
+            };
+            assert_eq!(
+                result.errors.len(),
+                expected,
+                "{src:?}: {:?}",
+                result.errors
+            );
+            if expected == 2 {
+                assert!(
+                    matches!(
+                        result.errors[1].kind,
+                        rustledger_parser::ParseErrorKind::InvalidPopmeta(ref key) if key == "kk"
+                    ),
+                    "{src:?}: {:?}",
+                    result.errors
+                );
+            }
             let err = &result.errors[0];
             assert_eq!(
                 &src[err.span.start..err.span.end],

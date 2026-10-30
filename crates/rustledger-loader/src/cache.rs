@@ -594,12 +594,18 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     stray token on a metadata line (`kk: "v" !`, `kk: USD,EUR`) is a parse
 ///     error where it loaded clean, and the directive is kept.
 ///
+/// v52: PARSER OUTPUT changed, no archived layout moved (#2806, #2812). An
+///     arithmetic expression in a `custom` value is evaluated (`10/4 USD` is
+///     `2.5 USD`, not `10` and `4 USD`), a `pushmeta` value is read like a
+///     metadata value, and a metadata or `pushmeta` expression with no value
+///     (`1/0`) is an error with no value instead of its first number.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 51;
+pub const CACHE_VERSION: u32 = 52;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1382,7 +1388,7 @@ mod tests {
         // v50 (#2802) reports a stray header token; no archived encoding
         // moves, so the arrays still hold.
         // v51 (#2802) reports a stray metadata token; likewise.
-        const FIXTURE_VERSION: u32 = 51;
+        const FIXTURE_VERSION: u32 = 52;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1525,7 +1531,7 @@ mod tests {
         // v50 (#2802) reports a stray header token; the hash below is
         // unchanged.
         // v51 (#2802) reports a stray metadata token; likewise.
-        const FIXTURE_VERSION: u32 = 51;
+        const FIXTURE_VERSION: u32 = 52;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

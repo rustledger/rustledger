@@ -902,9 +902,6 @@ pub(super) fn walk_top_level(
                     tl_custom_check(n, offset, bom_offset, &mut errors);
                     tl_value_expression_check(n, "custom", offset, bom_offset, &mut errors);
                 }
-                K::PUSHMETA_DIRECTIVE => {
-                    tl_value_expression_check(n, "pushmeta", offset, bom_offset, &mut errors);
-                }
                 K::TRANSACTION => {
                     tl_transaction_header_check(n, offset, bom_offset, stripped, &mut errors);
                     tl_transaction_body_check(n, offset, bom_offset, &mut errors);
@@ -1022,7 +1019,7 @@ fn tl_custom_check(
 }
 
 /// `value_expression_check` on green: an arithmetic expression in a `custom`
-/// or `pushmeta` value that does not evaluate is an error (#2806). Found by
+/// value that does not evaluate is an error (#2806). Found by
 /// the same [`super::convert::unevaluable_value_expressions`] walk as red.
 fn tl_value_expression_check(
     node: &rowan::GreenNodeData,

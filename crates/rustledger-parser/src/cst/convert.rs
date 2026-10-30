@@ -1197,7 +1197,7 @@ fn extract_custom_values(node: &crate::SyntaxNode) -> Vec<MetaValue> {
         .filter(|t| !is_value_walk_trivia(t.kind()))
         .collect();
 
-    // One value at a time through the shared walk — this is what gives custom
+    // One value at a time through the shared walk: this is what gives custom
     // directives the same MINUS-sign, Tag/Link, arithmetic and
     // `NUMBER CURRENCY` → Amount handling as pushmeta, and the same value
     // boundaries as the errors raised for them.
@@ -2733,7 +2733,7 @@ pub(super) fn value_groups<T: TokenView>(tokens: &[T]) -> Vec<(usize, ValueGroup
         // It used to advance in two places, and only the value branch was
         // guarded. That left the `else` free to move `i` BACKWARD, which does
         // not merely spin: stepping back re-enters the branch above, pushes
-        // another value, steps forward, and repeats — allocating without
+        // another value, steps forward, and repeats, allocating without
         // bound. Memory runs out before any per-test timeout can fire, so on
         // CI it takes the whole runner down and surfaces as "the runner has
         // received a shutdown signal", indistinguishable from infrastructure.
@@ -3072,8 +3072,10 @@ fn apply_inherited_state(
 /// to be read by the custom-value walk instead, which drifted: `pushmeta kk:
 /// (1+2)` pushed `1`, and `"a\"b"` kept its escape (#2812).
 ///
-/// A malformed expression (`pushmeta kk: 1 + TRUE`, `10 *`) pushes nothing,
-/// as in beancount, whose grammar rejects the directive; its `popmeta` then
+/// A line with any syntax error (a malformed expression such as `pushmeta kk:
+/// 1 + TRUE` or `10 *`, or anything left over after the value, such as
+/// `pushmeta kk: "v" !` or `1 2`) pushes nothing, as in beancount, whose
+/// grammar rejects the directive; its `popmeta` then
 /// reports the absent key, as beancount does. The syntax error itself comes
 /// from the header-line check. An expression with no value (`1/0`) is
 /// grammatical, so it pushes the key with no value, the same `MetaValue` a
@@ -3089,6 +3091,37 @@ fn pushmeta_value(node: &crate::SyntaxNode) -> Option<MetaValue> {
         .filter(|t| !is_trivia_kind(t.kind()) && t.kind() != crate::SyntaxKind::META_KEY)
         .collect();
     if cost_region_read(&value_region) == Some(ArithRead::Malformed) {
+        return None;
+    }
+    // Any syntax error on the line pushes nothing, as in beancount, so the
+    // matching `popmeta` then reports the absent key. Ask the same rule that
+    // reports the error, in node-relative offsets over the node's own text.
+    let text = node.text().to_string();
+    let start = usize::from(node.text_range().start());
+    let mut end = text.len();
+    let mut header = Vec::new();
+    for t in &tokens {
+        let range =
+            usize::from(t.text_range().start()) - start..usize::from(t.text_range().end()) - start;
+        // Leading blank lines belong to the node too: skip them before
+        // looking for the NEWLINE that ends the line, as the header check does.
+        if header.is_empty() && (is_trivia_kind(t.kind()) || t.kind() == crate::SyntaxKind::BOM) {
+            continue;
+        }
+        if t.kind() == crate::SyntaxKind::NEWLINE {
+            end = range.start;
+            break;
+        }
+        header.push((t.kind(), range));
+    }
+    // Except a split date (`pushmeta kk: 2024-02-002`): beancount reads it as
+    // one valid date and pushes it, and rledger reports it only until #2808,
+    // so it still pushes here rather than adding a second error at `popmeta`.
+    if let Some(defect) =
+        super::directive_header::first_header_defect(node.kind(), &header, end, &text)
+        && super::directive_header::split_beancount_date(&header, &text)
+            .is_none_or(|split| split.range != defect.range)
+    {
         return None;
     }
     Some(meta_value_from_tokens(tokens.into_iter()))
@@ -7498,6 +7531,15 @@ mod tests {
         for src in [
             "pushmeta kk: 1 + TRUE\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n",
             "pushmeta kk: 10 *\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n",
+            // Anything else left on the line is a syntax error too, and also
+            // pushes nothing (beancount: "unexpected ..." then the absent key).
+            "pushmeta kk: \"v\" !\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n",
+            "pushmeta kk: 10 USD @\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n",
+            "pushmeta kk: USD,EUR\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n",
+            "pushmeta kk: 1 2\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n",
+            "pushmeta kk: 10 USD EUR\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n",
+            "pushmeta kk: 1 + 2 USD 3\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n",
+            "pushmeta kk: ^link\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n",
         ] {
             let green = parse_via_cst(src);
             let red = parse_red_only(src);

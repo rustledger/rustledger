@@ -335,7 +335,10 @@ use crate::types::{Error, LedgerOptions};
 /// non-transaction header line is a parse error, and `/6J` is one currency;
 /// a v64 blob would keep serving such a file without the error or the
 /// currency.
-pub const CACHE_VERSION: u32 = 65;
+/// v66: loader v51, PARSER OUTPUT changed (#2802, stage 2). A stray token on a
+/// metadata line is a parse error; a v65 blob would keep serving such a file
+/// without the error.
+pub const CACHE_VERSION: u32 = 66;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -367,7 +370,7 @@ pub const CACHE_VERSION: u32 = 65;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 50;
+const LOADER_CACHE_VERSION_PIN: u32 = 51;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

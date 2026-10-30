@@ -65,6 +65,30 @@ BASES = [
     ("txn", '2024-01-01 * "p" "n" #t ^l\n  Assets:A  1 USD\n  Assets:B\n'),
     ("txn-cost", "2024-01-01 *\n  Assets:A  1 HOOL {2 USD} @ 3 USD\n  Assets:B\n"),
     ("txn-meta", '2024-01-01 *\n  kk: "v"\n  Assets:A  1 USD\n    pk: 2\n  Assets:B\n'),
+    # Metadata lines (stage 2 of #2802): every value type, under several
+    # directive kinds, a transaction and a posting.
+    ("meta-number", "2024-01-01 open Assets:A\n  kk: 1.5\n"),
+    ("meta-expr", "2024-01-01 open Assets:A\n  kk: (1 + 2) * 3\n"),
+    ("meta-amount", "2024-01-01 open Assets:A\n  kk: 10 USD\n"),
+    ("meta-currency", "2024-01-01 open Assets:A\n  kk: USD\n"),
+    ("meta-account", "2024-01-01 open Assets:A\n  kk: Assets:B\n"),
+    ("meta-date", "2024-01-01 open Assets:A\n  kk: 2024-02-02\n"),
+    ("meta-bool", "2024-01-01 open Assets:A\n  kk: TRUE\n"),
+    ("meta-false", "2024-01-01 open Assets:A\n  kk: FALSE\n"),
+    ("meta-tag", "2024-01-01 open Assets:A\n  kk: #t\n"),
+    ("meta-null", "2024-01-01 open Assets:A\n  kk: NULL\n"),
+    ("meta-empty", "2024-01-01 open Assets:A\n  kk:\n"),
+    ("meta-comment", '2024-01-01 open Assets:A\n  kk: "v" ; c\n'),
+    ("meta-key", "2024-01-01 open Assets:A\n  k-k_1: 1\n"),
+    ("meta-crlf", '2024-01-01 open Assets:A\r\n  kk: "v"\r\n'),
+    ("meta-two", '2024-01-01 open Assets:A\n  kk: 1\n  jj: "v"\n'),
+    ("meta-balance", "2024-01-01 balance Assets:A 1 USD\n  kk: 1\n"),
+    ("meta-price", "2024-01-01 price HOOL 10 USD\n  kk: 1\n"),
+    ("meta-custom", '2024-01-01 custom "b" 1\n  kk: 1\n'),
+    ("meta-note", '2024-01-01 note Assets:A "n"\n  kk: 1\n'),
+    ("meta-txn", '2024-01-01 *\n  kk: "v"\n  Assets:A  1 USD\n  Assets:B\n'),
+    ("meta-posting", "2024-01-01 *\n  Assets:A  1 USD\n    pk: 2\n  Assets:B\n"),
+    ("meta-posting-amount", "2024-01-01 *\n  Assets:A  1 USD\n    pk: 2 USD\n  Assets:B\n"),
 ]
 
 CHARS = "!@?*~^$&|{}(),#%\"/_-'.A0"

@@ -59,6 +59,13 @@ fn number() -> impl Strategy<Value = String> {
     ]
 }
 
+/// A price number: never negative, which beancount reports (and, since
+/// #2802, so do we). The arithmetic price branches below still reach a
+/// negative value now and then, which keeps that error path exercised.
+fn price_number() -> impl Strategy<Value = String> {
+    number().prop_map(|n| n.trim_start_matches('-').to_owned())
+}
+
 /// A cost spec, including the shapes that historically diverged.
 ///
 /// `{}` (empty), `{{...}}` (total), the compound `{N # M CCY}` from #1713, and
@@ -66,44 +73,42 @@ fn number() -> impl Strategy<Value = String> {
 /// converter's `cost_spec_from_tokens` mirror.
 fn cost() -> impl Strategy<Value = String> {
     prop_oneof![
-        Just(String::new()),
-        Just(" {}".to_owned()),
-        (number(), 0usize..CURRENCIES.len())
-            .prop_map(|(n, c)| format!(" {{{n} {}}}", CURRENCIES[c])),
-        (number(), 0usize..CURRENCIES.len())
-            .prop_map(|(n, c)| format!(" {{{{{n} {}}}}}", CURRENCIES[c])),
-        (number(), number(), 0usize..CURRENCIES.len())
-            .prop_map(|(a, b, c)| format!(" {{{a} # {b} {}}}", CURRENCIES[c])),
-        (number(), 0usize..CURRENCIES.len(), 1u32..28)
-            .prop_map(|(n, c, d)| format!(" {{{n} {}, 2024-01-{d:02}}}", CURRENCIES[c])),
-        (number(), 0usize..CURRENCIES.len())
-            .prop_map(|(n, c)| format!(" {{{n} {}, \"lot-a\"}}", CURRENCIES[c])),
-        // `*` merge, and a bare date-only spec.
-        Just(" {*}".to_owned()),
-        Just(" {2024-03-01}".to_owned()),
+        3 => Just(String::new()),
+        3 => Just(" {}".to_owned()),
+        // `CCY` is the posting's cost-and-price currency, filled in by
+        // `posting()`.
+        3 => number().prop_map(|n| format!(" {{{n} CCY}}")),
+        3 => number().prop_map(|n| format!(" {{{{{n} CCY}}}}")),
+        3 => (number(), number()).prop_map(|(a, b)| format!(" {{{a} # {b} CCY}}")),
+        3 => (number(), 1u32..28).prop_map(|(n, d)| format!(" {{{n} CCY, 2024-01-{d:02}}}")),
+        3 => number().prop_map(|n| format!(" {{{n} CCY, \"lot-a\"}}")),
+        // `*` merge (always an error now, as in beancount: "Cost merging is not
+        // supported yet", #2802; weighted down so most ledgers stay clean), and
+        // a bare date-only spec.
+        1 => Just(" {*}".to_owned()),
+        3 => Just(" {2024-03-01}".to_owned()),
     ]
 }
 
 /// A price annotation: absent, per-unit `@`, or total `@@`.
 fn price() -> impl Strategy<Value = String> {
     prop_oneof![
-        Just(String::new()),
-        (number(), 0usize..CURRENCIES.len()).prop_map(|(n, c)| format!(" @ {n} {}", CURRENCIES[c])),
-        (number(), 0usize..CURRENCIES.len())
-            .prop_map(|(n, c)| format!(" @@ {n} {}", CURRENCIES[c])),
-        Just(" @".to_owned()),
+        3 => Just(String::new()),
+        3 => price_number().prop_map(|n| format!(" @ {n} CCY")),
+        3 => price_number().prop_map(|n| format!(" @@ {n} CCY")),
+        3 => Just(" @".to_owned()),
         // ARITHMETIC price amounts. Green must bail on these and let the
         // later increment evaluate them — a branch nothing reached before:
         // deleting the bail outright (`amount_present && amount.is_none()`)
         // failed no test in the crate, and neither did making the amount
         // latch the LAST token instead of the first, which is the #1713 shape
         // one level down. Both are caught now.
-        (number(), number(), 0usize..CURRENCIES.len())
-            .prop_map(|(a, b, c)| format!(" @ {a} + {b} {}", CURRENCIES[c])),
-        (number(), number(), 0usize..CURRENCIES.len())
-            .prop_map(|(a, b, c)| format!(" @@ {a} * {b} {}", CURRENCIES[c])),
-        (number(), number(), 0usize..CURRENCIES.len())
-            .prop_map(|(a, b, c)| format!(" @ ({a} - {b}) {}", CURRENCIES[c])),
+        3 => (price_number(), price_number()).prop_map(|(a, b)| format!(" @ {a} + {b} CCY")),
+        3 => (price_number(), price_number()).prop_map(|(a, b)| format!(" @@ {a} * {b} CCY")),
+        3 => (1u32..1000, 0u32..1000).prop_map(|(a, b)| format!(" @ ({} - {b}) CCY", a + b)),
+        // A difference that may go negative: a negative price is an error, as
+        // in beancount (#2802). Weighted down so most ledgers stay clean.
+        1 => (number(), number()).prop_map(|(a, b)| format!(" @ ({a} - {b}) CCY")),
     ]
 }
 
@@ -119,11 +124,18 @@ fn posting() -> impl Strategy<Value = String> {
         prop::option::of((number(), 0usize..CURRENCIES.len())),
         cost(),
         price(),
+        0usize..CURRENCIES.len(),
     )
-        .prop_map(|(flag, acct, units, cost, price)| match units {
+        .prop_map(|(flag, acct, units, cost, price, cc)| match units {
+            // One currency for the cost and the price: beancount reports a
+            // mismatch (#2802), and a generator that mostly built errors would
+            // exercise error recovery rather than the green converter.
             Some((n, c)) => format!(
-                "  {flag}{} {n} {}{cost}{price}",
-                ACCOUNTS[acct], CURRENCIES[c]
+                "  {flag}{} {n} {}{}{}",
+                ACCOUNTS[acct],
+                CURRENCIES[c],
+                cost.replace("CCY", CURRENCIES[cc]),
+                price.replace("CCY", CURRENCIES[cc])
             ),
             None => format!("  {flag}{}", ACCOUNTS[acct]),
         })

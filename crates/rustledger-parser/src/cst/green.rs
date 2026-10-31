@@ -200,6 +200,7 @@ pub(super) fn convert_transaction_header(
 fn simple_amount(node: &rowan::GreenNodeData) -> Option<IncompleteAmount> {
     use crate::SyntaxKind as K;
     let mut sign_minus = false;
+    let mut signs = 0usize;
     let mut number: Option<rust_decimal::Decimal> = None;
     let mut number_seen = false;
     let mut currency: Option<Currency> = None;
@@ -210,8 +211,15 @@ fn simple_amount(node: &rowan::GreenNodeData) -> Option<IncompleteAmount> {
             continue;
         };
         match crate::BeancountLanguage::kind_from_raw(t.kind()) {
-            K::MINUS if !number_seen => sign_minus = true,
-            K::PLUS if !number_seen => {}
+            // A second sign (`--1`, `- -1`) is an expression: bail to red,
+            // whose evaluator reads `--1` as 1 (mirrors `Amount::is_arithmetic`,
+            // #2802).
+            K::MINUS | K::PLUS if !number_seen && signs > 0 => complex = true,
+            K::MINUS if !number_seen => {
+                signs += 1;
+                sign_minus = true;
+            }
+            K::PLUS if !number_seen => signs += 1,
             K::NUMBER if !number_seen => {
                 number_seen = true;
                 number = parse_decimal_token(t.text());

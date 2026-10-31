@@ -1090,6 +1090,7 @@ impl Amount {
     #[must_use]
     pub fn is_arithmetic(&self) -> bool {
         let mut seen_first_operand = false;
+        let mut signs = 0usize;
         for el in self.syntax().children_with_tokens() {
             if let rowan::NodeOrToken::Token(t) = el {
                 match t.kind() {
@@ -1097,6 +1098,14 @@ impl Amount {
                     SyntaxKind::L_PAREN | SyntaxKind::R_PAREN => return true,
                     SyntaxKind::STAR | SyntaxKind::SLASH => return true,
                     SyntaxKind::PLUS | SyntaxKind::MINUS if seen_first_operand => return true,
+                    // Stacked signs (`--1`, `- -1`) are an expression: the
+                    // single-sign shortcut would read `--1` as -1 (#2802).
+                    SyntaxKind::PLUS | SyntaxKind::MINUS => {
+                        signs += 1;
+                        if signs > 1 {
+                            return true;
+                        }
+                    }
                     _ => {}
                 }
             }

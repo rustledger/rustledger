@@ -65,6 +65,23 @@ BASES = [
     ("txn", '2024-01-01 * "p" "n" #t ^l\n  Assets:A  1 USD\n  Assets:B\n'),
     ("txn-cost", "2024-01-01 *\n  Assets:A  1 HOOL {2 USD} @ 3 USD\n  Assets:B\n"),
     ("txn-meta", '2024-01-01 *\n  kk: "v"\n  Assets:A  1 USD\n    pk: 2\n  Assets:B\n'),
+    # Transactions and postings (stage 3 of #2802): every flag form, posting
+    # flags, expressions, each cost-spec shape, prices, an amount-less
+    # posting, trailing comments, an indented tags line, CRLF.
+    ("txn-narration", '2024-01-01 ! "n"\n  Assets:A  1 USD\n  Assets:B  -1 USD\n'),
+    ("txn-bare", "2024-01-01 txn\n  Assets:A  1 USD\n  Assets:B\n"),
+    ("txn-letter", '2024-01-01 P "n"\n  Assets:A  1 USD\n  Assets:B\n'),
+    ("txn-posting-flag", "2024-01-01 *\n  ! Assets:A  1 USD\n  * Assets:B\n"),
+    ("txn-glued-flag", "2024-01-01 *\n  !Assets:A  1 USD\n  Assets:B\n"),
+    ("txn-expr", "2024-01-01 *\n  Assets:A  (1 + 2) * 3 USD\n  Assets:B\n"),
+    ("txn-cost-full", '2024-01-01 *\n  Assets:A  1 HOOL {2 USD, 2024-01-01, "lot"}\n  Assets:B\n'),
+    ("txn-cost-total", "2024-01-01 *\n  Assets:A  1 HOOL {{2 USD}} @@ 3 USD\n  Assets:B\n"),
+    ("txn-cost-compound", "2024-01-01 *\n  Assets:A  1 HOOL {1 # 5 USD}\n  Assets:B\n"),
+    ("txn-cost-empty", "2024-01-01 *\n  Assets:A  1 HOOL {}\n  Assets:B\n"),
+    ("txn-no-amount", "2024-01-01 *\n  Assets:A\n  Assets:B  1 USD\n"),
+    ("txn-comment", '2024-01-01 * "n" ; c\n  Assets:A  1 USD ; c\n  Assets:B\n'),
+    ("txn-crlf", "2024-01-01 *\r\n  Assets:A  1 USD\r\n  Assets:B\r\n"),
+    ("txn-tags-line", "2024-01-01 *\n  #t ^l\n  Assets:A  1 USD\n  Assets:B\n"),
     # Metadata lines (stage 2 of #2802): every value type, under several
     # directive kinds, a transaction and a posting.
     ("meta-number", "2024-01-01 open Assets:A\n  kk: 1.5\n"),

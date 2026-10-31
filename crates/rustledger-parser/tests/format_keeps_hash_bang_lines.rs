@@ -9,9 +9,12 @@
 //! comment, and inside a transaction body. At the top of the file a
 //! different path kept them. The emitters now use the parser's canonical
 //! `is_comment_kind`, which covers all four. (On a non-transaction header,
-//! a same-line `#!` or `#+` is now a parse error, as in beancount: #2802.)
+//! a same-line `#!` or `#+` is now a parse error, as in beancount: #2802. So
+//! is one that is indented inside a transaction, or after a posting's
+//! amount: beancount lexes `#` as a HASH there. Those are reported, and the
+//! error-tolerant formatter keeps the line as written.)
 
-use rustledger_parser::format::try_format_source;
+use rustledger_parser::format::{format_source, try_format_source};
 
 /// Each input is already canonical, so formatting must return it byte for
 /// byte, and formatting again must be a no-op.
@@ -23,6 +26,16 @@ fn assert_kept(label: &str, src: &str) {
         formatted,
         "{label}: not idempotent"
     );
+}
+
+/// A line beancount rejects (#2802): reported, and kept as written by the
+/// error-tolerant formatter.
+fn assert_reported_and_kept(label: &str, src: &str) {
+    assert!(
+        try_format_source(src).is_err(),
+        "{label}: must be a parse error"
+    );
+    assert_eq!(format_source(src), src, "{label}");
 }
 
 #[test]
@@ -61,11 +74,11 @@ fn test_format_source_keeps_a_same_line_hash_plus_on_a_header() {
 
 #[test]
 fn test_try_format_source_keeps_hash_bang_lines_in_a_transaction_body() {
-    assert_kept(
+    assert_reported_and_kept(
         "before the postings",
         "2024-01-01 * \"x\"\n  #+note\n  Assets:A  1 USD\n  Assets:B\n",
     );
-    assert_kept(
+    assert_reported_and_kept(
         "between postings",
         "2024-01-01 * \"x\"\n  Assets:A  1 USD\n  #!p\n  Assets:B\n",
     );
@@ -80,7 +93,7 @@ fn test_try_format_source_keeps_hash_bang_lines_at_the_file_edges() {
 
 #[test]
 fn test_try_format_source_keeps_hash_bang_lines_in_metadata_blocks() {
-    assert_kept(
+    assert_reported_and_kept(
         "posting metadata",
         "2024-01-01 * \"x\"\n  Assets:A  1 USD\n    aa: \"v1\"\n    #!m\n    bb: \"v2\"\n  Assets:B\n",
     );
@@ -88,7 +101,7 @@ fn test_try_format_source_keeps_hash_bang_lines_in_metadata_blocks() {
         "directive metadata",
         "2024-01-01 open Assets:A\n  aa: \"v1\"\n  #+m\n  bb: \"v2\"\n2024-01-02 open Assets:B\n",
     );
-    assert_kept(
+    assert_reported_and_kept(
         "posting same-line",
         "2024-01-01 * \"x\"\n  Assets:A  1 USD #!p\n  Assets:B\n",
     );

@@ -368,13 +368,23 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
             errors.push(err);
         }
         if pushed_directive.is_some() && cst_node.kind() == crate::SyntaxKind::TRANSACTION {
-            posting_stray_token_check(
+            posting_line_check(
                 &cst_node,
                 stripped,
                 bom_offset,
                 &prior_error_starts,
                 errors_before,
                 &mut errors,
+                &mut header_tokens,
+            );
+            indented_comment_check(
+                &cst_node,
+                stripped,
+                bom_offset,
+                &prior_error_starts,
+                errors_before,
+                &mut errors,
+                &mut header_tokens,
             );
         }
         if converted_or_stateful {
@@ -3961,85 +3971,81 @@ impl MetaCheck<'_> {
     }
 }
 
-/// Report a token left over after a posting's amount, cost or price.
+/// Check each posting line against beancount's posting rule (#2802, stage 3;
+/// the rule is [`super::directive_header::first_posting_defect`]).
 ///
-/// The posting converter reads its `AMOUNT`, `COST_SPEC` and
-/// `PRICE_ANNOTATION` children and nothing else, so a flat token after them
-/// was dropped in silence. That became reachable from ordinary text when the
-/// lexer started ending a currency at its last letter or digit, as beancount
-/// does (#2802): `1 USD-` is `USD` then `-`, which loaded as `1 USD` and was
-/// written back that way, where bean-check reports `unexpected MINUS`.
+/// The posting converter reads its flag, account and `AMOUNT`, `COST_SPEC`
+/// and `PRICE_ANNOTATION` children and nothing else, so a token with no place
+/// in a posting was dropped in silence: `Assets:A ! 1 USD`, `1 USD %`, or a
+/// second cost spec loaded clean, and `rledger format` deleted the stray
+/// text. The posting is still KEPT, as a directive with a stray character on
+/// its header is (#2805): the error is reported, nothing cascades.
 ///
-/// Comment kinds are left alone here: a mid-line `%`, `#!` or `#+` on a
-/// posting line is stage 3 of #2802, like the rest of the posting grammar.
 /// A posting that already has an error anywhere on it (`5 USD + 3 USD`'s
-/// trailing amount, an `ERROR_TOKEN`) is not reported twice.
+/// trailing amount, a cost-spec shape error, an `ERROR_TOKEN`) is not
+/// reported twice.
 ///
 /// Runs from the shared directive loop over GREEN children, so the green and
 /// red parse paths cannot disagree on it.
-fn posting_stray_token_check(
+fn posting_line_check(
     node: &crate::SyntaxNode,
     stripped: &str,
     bom_offset: u32,
     prior_error_starts: &[usize],
     errors_before: usize,
     errors: &mut Vec<crate::ParseError>,
+    tokens: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
 ) {
     use crate::SyntaxKind as K;
     let kind_of = <crate::BeancountLanguage as rowan::Language>::kind_from_raw;
     let off = bom_offset as usize;
     let mut at = usize::from(node.text_range().start());
     for child in node.green().children() {
-        let len = match child {
+        let posting_start = at;
+        at += match child {
             rowan::NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
             rowan::NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
         };
-        let posting_start = at;
-        at += len;
         let rowan::NodeOrToken::Node(posting) = child else {
             continue;
         };
         if kind_of(posting.kind()) != K::POSTING {
             continue;
         }
+        tokens.clear();
+        let mut end = at;
         let mut p = posting_start;
-        let mut after_amount: Option<usize> = None;
-        // Whether the last amount-like child ends in a `CURRENCY` token.
-        let mut ends_in_currency = false;
-        let mut stray: Option<std::ops::Range<usize>> = None;
+        // Flatten the line: its own tokens, and those of its amount, cost and
+        // price nodes. Stop at the NEWLINE, or at a metadata child.
+        let mut done = false;
         for part in posting.children() {
-            let start = p;
-            p += match part {
-                rowan::NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
-                rowan::NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
-            };
+            if done {
+                break;
+            }
             match part {
-                rowan::NodeOrToken::Node(n) => match kind_of(n.kind()) {
-                    K::AMOUNT | K::COST_SPEC | K::PRICE_ANNOTATION => {
-                        after_amount = Some(p);
-                        ends_in_currency = last_token_kind(n) == Some(K::CURRENCY);
-                    }
-                    _ => break,
-                },
                 rowan::NodeOrToken::Token(t) => {
                     let kind = kind_of(t.kind());
+                    let range = p..p + u32::from(t.text_len()) as usize;
+                    p = range.end;
                     if kind == K::NEWLINE {
-                        break;
-                    }
-                    if after_amount.is_some()
-                        && !is_trivia_kind(kind)
-                        && !matches!(kind, K::ERROR_TOKEN | K::BOM)
-                    {
-                        stray = Some(start..p);
-                        break;
+                        end = range.start;
+                        done = true;
+                    } else if !(tokens.is_empty() && kind == K::WHITESPACE) {
+                        tokens.push((kind, range));
                     }
                 }
+                rowan::NodeOrToken::Node(n) => match kind_of(n.kind()) {
+                    K::AMOUNT | K::COST_SPEC | K::PRICE_ANNOTATION => {
+                        flatten_green(n, &mut p, tokens);
+                    }
+                    _ => {
+                        end = p;
+                        done = true;
+                    }
+                },
             }
         }
-        let (Some(range), Some(amount_end)) = (stray, after_amount) else {
-            continue;
-        };
-        let (from, to) = (posting_start + off, at + off);
+        let (from, to) = (posting_start + off, end + off);
         let first_after = prior_error_starts.partition_point(|&s| s < from);
         let reported = prior_error_starts.get(first_after).is_some_and(|&s| s < to)
             || errors[errors_before..]
@@ -4048,24 +4054,309 @@ fn posting_stray_token_check(
         if reported {
             continue;
         }
-        let text = stripped.get(range.clone()).unwrap_or_default();
-        // Glued to a currency, and a character a currency may hold inside it:
-        // the lexer ended the currency before it. Anything else (`1-`,
-        // `{1 USD}-`, `1 USD+`) is just a stray token.
-        let why = if range.start == amount_end
-            && ends_in_currency
-            && matches!(text, "-" | "'" | "." | "_")
-        {
-            format!(": a currency cannot end in `{text}`")
+        let Some(defect) = super::directive_header::first_posting_defect(tokens, end, stripped)
+        else {
+            // Grammatical; beancount's builder still rejects some postings.
+            if let Some((range, message)) = posting_builder_error(tokens, stripped) {
+                errors.push(crate::ParseError::new(
+                    crate::ParseErrorKind::SyntaxError(message),
+                    Span::new(range.start + off, range.end + off),
+                ));
+            }
+            continue;
+        };
+        let text = stripped.get(defect.range.clone()).unwrap_or_default();
+        // Glued to the currency that ended the amount, and a character a
+        // currency may hold inside it: the lexer ended the currency before it
+        // (`1 USD-`, where beancount reads one invalid token).
+        let glued_to_currency = tokens
+            .iter()
+            .position(|(_, r)| r.start == defect.range.start)
+            .and_then(|i| i.checked_sub(1))
+            .is_some_and(|i| tokens[i].0 == K::CURRENCY && tokens[i].1.end == defect.range.start);
+        let message = if glued_to_currency && matches!(text, "-" | "'" | "." | "_") {
+            format!(
+                "unexpected {text:?} after the posting amount: a currency cannot end in `{text}`"
+            )
         } else {
-            String::new()
+            super::directive_header::defect_message("a posting", &defect, text)
         };
         errors.push(crate::ParseError::new(
-            crate::ParseErrorKind::SyntaxError(format!(
-                "unexpected {text:?} after the posting amount{why}"
-            )),
-            Span::new(range.start + off, range.end + off),
+            crate::ParseErrorKind::SyntaxError(message),
+            Span::new(defect.range.start + off, defect.range.end + off),
         ));
+    }
+}
+
+/// What beancount's grammar BUILDER rejects in a grammatical posting line
+/// (`grammar.py`'s `cost_spec` and `posting`), reported at parse time there
+/// like a syntax error, so here too (#2802, stage 3). The first, in
+/// beancount's order:
+///
+/// - a cost spec with two numbers-and-currencies, two dates or two labels
+///   (`{2, USD}` is the number `2` and the currency `USD`, two costs);
+/// - a `#` in a `{{ }}` total cost ("Per-unit cost may not be specified using
+///   total cost syntax");
+/// - a negative price (`@ -3 USD`), evaluated by the shared reader;
+/// - `@@` on a posting without a number for its units.
+///
+/// Not here: a cost and a price in different currencies, which beancount's
+/// builder also rejects. Booking already reports it for a sale (E4001,
+/// `BookingError::CostPriceCurrencyMismatch`, with the reason), and reporting
+/// it here too reported every such sale twice. A buy with mismatched
+/// currencies still loads, unlike in beancount; the matrix pins those rows
+/// (`known_currency_mismatch`) until the one rule is moved to a single place.
+///
+/// `tokens` is the posting line as [`posting_line_check`] flattens it, and
+/// grammatical: [`super::directive_header::first_posting_defect`] found
+/// nothing.
+fn posting_builder_error(
+    tokens: &[(crate::SyntaxKind, std::ops::Range<usize>)],
+    src: &str,
+) -> Option<(std::ops::Range<usize>, String)> {
+    use crate::SyntaxKind as K;
+    // Most postings have neither a cost spec nor a price: nothing to check.
+    if !tokens.iter().any(|(k, _)| {
+        matches!(
+            k,
+            K::L_BRACE | K::L_BRACE_HASH | K::L_DOUBLE_BRACE | K::AT | K::AT_AT
+        )
+    }) {
+        return None;
+    }
+    let sig: Vec<&(K, std::ops::Range<usize>)> = tokens
+        .iter()
+        .filter(|(k, _)| !is_trivia_kind(*k) && *k != K::BOM)
+        .collect();
+    let text = |r: &std::ops::Range<usize>| src.get(r.clone()).unwrap_or_default();
+    let account = sig.iter().position(|(k, _)| *k == K::ACCOUNT)?;
+    let opener = |k: K| matches!(k, K::L_BRACE | K::L_BRACE_HASH | K::L_DOUBLE_BRACE);
+    let units_end = sig[account + 1..]
+        .iter()
+        .position(|(k, _)| opener(*k) || matches!(k, K::AT | K::AT_AT))
+        .map_or(sig.len(), |i| account + 1 + i);
+    let units_have_number = sig[account + 1..units_end]
+        .iter()
+        .any(|(k, _)| *k == K::NUMBER);
+
+    // The cost spec, component by component.
+    let mut i = units_end;
+    if let Some((open, _)) = sig.get(i).copied()
+        && opener(*open)
+    {
+        let is_total = *open == K::L_DOUBLE_BRACE;
+        let close = if is_total {
+            K::R_DOUBLE_BRACE
+        } else {
+            K::R_BRACE
+        };
+        let (mut costs, mut dates, mut labels) = (0usize, 0usize, 0usize);
+        let mut component: Vec<&(K, std::ops::Range<usize>)> = Vec::new();
+        // `{#` begins the first component with its `#`.
+        let mut component_has_hash = *open == K::L_BRACE_HASH;
+        i += 1;
+        loop {
+            let token = sig.get(i).copied();
+            let ends = token.is_none_or(|(k, _)| *k == K::COMMA || *k == close);
+            if !ends {
+                let token = token?;
+                component_has_hash |= token.0 == K::HASH;
+                component.push(token);
+                i += 1;
+                continue;
+            }
+            if let Some(first) = component.first().copied().or_else(|| {
+                // `{# 2 USD}`: the hash was the opener.
+                component_has_hash.then_some(sig[units_end])
+            }) {
+                let duplicate = |n: &mut usize, what: &str| {
+                    *n += 1;
+                    (*n > 1).then(|| {
+                        (
+                            first.1.start..component.last().map_or(first.1.end, |t| t.1.end),
+                            format!("duplicate {what} in the cost spec, as beancount reports"),
+                        )
+                    })
+                };
+                let found = match (component.len(), first.0) {
+                    (1, K::DATE) => duplicate(&mut dates, "date"),
+                    (1, K::STRING) => duplicate(&mut labels, "label"),
+                    // Cost merging, `{*}`. Deliberately NOT reported, unlike
+                    // beancount 3.2.3 ("Cost merging is not supported yet"):
+                    // rledger implements it (average-cost merge booking, see
+                    // `rustledger_core::inventory::booking`), and turning a
+                    // supported feature into a parse error is a product
+                    // decision, not a stray-character fix. The matrix pins
+                    // these rows (`known_cost_merge`) until it is made (#2802).
+                    (1, K::STAR) => None,
+                    _ => duplicate(&mut costs, "cost"),
+                };
+                if found.is_some() {
+                    return found;
+                }
+                if is_total && component_has_hash {
+                    let hash = component.iter().find(|(k, _)| *k == K::HASH)?;
+                    return Some((
+                        hash.1.clone(),
+                        "a per-unit cost (`#`) cannot be written with the total-cost `{{ }}` \
+                         syntax, as beancount reports"
+                            .to_string(),
+                    ));
+                }
+            }
+            component.clear();
+            component_has_hash = false;
+            i += 1;
+            if token.is_none_or(|(k, _)| *k == close) {
+                break;
+            }
+        }
+    }
+
+    // The price.
+    let (at, at_range) = sig.get(i).copied()?;
+    if !matches!(at, K::AT | K::AT_AT) {
+        return None;
+    }
+    let price = &sig[i + 1..];
+    let number_tokens = match price.last() {
+        Some((K::CURRENCY, _)) => &price[..price.len() - 1],
+        _ => price,
+    };
+    if !number_tokens.is_empty() {
+        let view: Vec<TextToken<'_>> = number_tokens
+            .iter()
+            .map(|(k, r)| TextToken {
+                kind: *k,
+                text: text(r),
+            })
+            .collect();
+        let mut cursor = 0;
+        if let Some(value) = parse_arith_expr(&view, &mut cursor)
+            && value.is_sign_negative()
+            && !value.is_zero()
+        {
+            let from = number_tokens[0].1.start;
+            let to = price.last().map_or(from, |t| t.1.end);
+            return Some((
+                from..to,
+                format!(
+                    "negative prices are not allowed: {}, as in beancount",
+                    src.get(from..to).unwrap_or_default()
+                ),
+            ));
+        }
+    }
+    if *at == K::AT_AT && !units_have_number {
+        return Some((
+            at_range.clone(),
+            "a total price (`@@`) on a posting without a number for its units, \
+             as beancount reports"
+                .to_string(),
+        ));
+    }
+    None
+}
+
+/// Report a `%`, `#!` or `#+` that is not at column 0 anywhere in a
+/// transaction (#2802, stage 3).
+///
+/// Only `;` starts a comment that is indented or in the middle of a line in
+/// beancount: `%` lexes as a FLAG and `#` as a HASH, so `  % note`, `  #!t`
+/// or `  #t ^l %` inside a transaction is a syntax error there, and ours read
+/// each as a comment to the end of the line. At column 0 they are whole-line
+/// comments in both (#2769, #2779). The header line and posting lines report
+/// theirs from their own rules; a token one of those already reported is not
+/// reported again, so this catches the rest: tag lines, and indented comment
+/// lines in the body or under a posting.
+///
+/// Runs from the shared directive loop over GREEN tokens, so the green and
+/// red parse paths cannot disagree on it.
+fn indented_comment_check(
+    node: &crate::SyntaxNode,
+    stripped: &str,
+    bom_offset: u32,
+    prior_error_starts: &[usize],
+    errors_before: usize,
+    errors: &mut Vec<crate::ParseError>,
+    tokens: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
+) {
+    use crate::SyntaxKind as K;
+    tokens.clear();
+    let mut at = usize::from(node.text_range().start());
+    // Only the comment kinds are collected: they are rare, and this runs on
+    // every transaction.
+    flatten_green_matching(node.green(), &mut at, tokens, |k| {
+        matches!(k, K::PERCENT_COMMENT | K::SHEBANG | K::EMACS_DIRECTIVE)
+    });
+    let off = bom_offset as usize;
+    for (kind, range) in tokens.iter() {
+        if range.start == 0 || stripped.as_bytes().get(range.start - 1) == Some(&b'\n') {
+            continue;
+        }
+        let start = range.start + off;
+        let reported = prior_error_starts.binary_search(&start).is_ok()
+            || errors[errors_before..]
+                .iter()
+                .any(|e| e.span.start == start);
+        if reported {
+            continue;
+        }
+        let width = if *kind == K::PERCENT_COMMENT { 1 } else { 2 };
+        let end = (range.start + width).min(range.end);
+        let text = stripped.get(range.start..end).unwrap_or_default();
+        errors.push(crate::ParseError::new(
+            crate::ParseErrorKind::SyntaxError(format!(
+                "unexpected {text:?} in a transaction: only `;` starts a comment \
+                 that is indented or in the middle of a line; `{text}` starts one only \
+                 at the beginning of a line"
+            )),
+            Span::new(start, end + off),
+        ));
+    }
+}
+
+/// [`flatten_green`], keeping only the tokens whose kind `keep` accepts (the
+/// offsets still advance over the others).
+fn flatten_green_matching(
+    node: &rowan::GreenNodeData,
+    at: &mut usize,
+    out: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
+    keep: impl Fn(crate::SyntaxKind) -> bool + Copy,
+) {
+    let kind_of = <crate::BeancountLanguage as rowan::Language>::kind_from_raw;
+    for child in node.children() {
+        match child {
+            rowan::NodeOrToken::Token(t) => {
+                let range = *at..*at + u32::from(t.text_len()) as usize;
+                *at = range.end;
+                let kind = kind_of(t.kind());
+                if keep(kind) {
+                    out.push((kind, range));
+                }
+            }
+            rowan::NodeOrToken::Node(n) => flatten_green_matching(n, at, out, keep),
+        }
+    }
+}
+
+/// Append every token under `node` to `out`, with absolute ranges starting at
+/// `*at`, which it advances.
+fn flatten_green(
+    node: &rowan::GreenNodeData,
+    at: &mut usize,
+    out: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
+) {
+    let kind_of = <crate::BeancountLanguage as rowan::Language>::kind_from_raw;
+    for child in node.children() {
+        match child {
+            rowan::NodeOrToken::Token(t) => {
+                let range = *at..*at + u32::from(t.text_len()) as usize;
+                *at = range.end;
+                out.push((kind_of(t.kind()), range));
+            }
+            rowan::NodeOrToken::Node(n) => flatten_green(n, at, out),
+        }
     }
 }
 
@@ -7820,14 +8111,5 @@ fn name_a_currency_tail(
             "unexpected `{tail}` after the currency `{word}`: a currency cannot end in `{tail}`"
         )),
         ..err
-    }
-}
-
-/// The kind of the last token under a green node, if it has one.
-fn last_token_kind(node: &rowan::GreenNodeData) -> Option<crate::SyntaxKind> {
-    let kind_of = <crate::BeancountLanguage as rowan::Language>::kind_from_raw;
-    match node.children().last()? {
-        rowan::NodeOrToken::Token(t) => Some(kind_of(t.kind())),
-        rowan::NodeOrToken::Node(n) => last_token_kind(n),
     }
 }

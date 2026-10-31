@@ -87,10 +87,10 @@ const fn is_header_trivia(kind: SyntaxKind) -> bool {
 /// `STRING`/`TAG`/`LINK`. Mirrors `TransactionFlag::cast`, including its
 /// single-character rule for `CURRENCY` (a ticker letter used as a flag).
 ///
-/// Deliberately does NOT enforce *at most one* flag: `2014-01-01 * * "x"` is
-/// rejected by beancount but is outside #2008's seven cases, and widening a
-/// parser rejection beyond its evidence is how a compatibility fix starts
-/// breaking real files.
+/// beancount's `txn` is ONE token (`TXN | FLAG | ASTERISK | HASH | CAPITAL`),
+/// so a second flag (`2024-01-01 * * "x"`, `2024-01-01 !*`, `2024-01-01 * A
+/// "x"`) is a syntax error there. [`first_header_defect`] counts them (#2802,
+/// stage 3); this only says which tokens may stand in the flag position.
 fn is_flag_position_token(kind: SyntaxKind, range: &Range<usize>) -> bool {
     match kind {
         SyntaxKind::DATE
@@ -120,9 +120,42 @@ where
     let mut third_string: Option<Range<usize>> = None;
     let mut seen_tag_or_link = false;
     let mut seen_header_content = false;
+    let mut seen_token = false;
+    let mut flags: usize = 0;
 
     for (kind, range) in tokens {
+        // A `%`, `#!` or `#+` after the header's first token is not a comment
+        // in beancount: only `;` starts one mid-line, and these lex as a FLAG,
+        // or a HASH and a flag, so they are a syntax error there (#2802). Ours
+        // read them as a comment to the end of the line, so the rest of the
+        // header vanished in silence. Report the one or two characters
+        // beancount objects to. Before the first token they are leading
+        // trivia (a comment line above the transaction), as before.
+        if seen_token
+            && matches!(
+                kind,
+                SyntaxKind::PERCENT_COMMENT | SyntaxKind::SHEBANG | SyntaxKind::EMACS_DIRECTIVE
+            )
+        {
+            let width = if kind == SyntaxKind::PERCENT_COMMENT {
+                1
+            } else {
+                2
+            };
+            let end = (range.start + width).min(range.end);
+            return Some((HeaderDefect::UnexpectedToken, range.start..end));
+        }
         if is_header_trivia(kind) {
+            continue;
+        }
+        seen_token = true;
+        // One flag only, as in beancount (see `is_flag_position_token`).
+        if kind != SyntaxKind::DATE && !seen_header_content && is_flag_position_token(kind, &range)
+        {
+            flags += 1;
+            if flags > 1 {
+                return Some((HeaderDefect::UnexpectedToken, range));
+            }
             continue;
         }
         match kind {

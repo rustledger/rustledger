@@ -3561,10 +3561,13 @@ mod tests {
                 "2024-01-15 * \"x\"\n  Assets:Bank  -5.00 USD\n  Assets:Other USD\n",
                 "Assets:Other  USD",
             ),
+            // `@@` with no number for the units is a parse error, as in
+            // beancount ("Total price on a posting without units", #2802), so
+            // the error-tolerant formatter copies the transaction as written.
             (
                 "price with no amount node at all",
                 "2013-05-18 * \"x\"\n  Assets:MSFT @@ 2000.00 USD\n  Assets:Cash  -2000.00 USD\n",
-                "Assets:MSFT  @@ 2000.00 USD",
+                "Assets:MSFT @@ 2000.00 USD",
             ),
             (
                 "cost with no amount node at all",
@@ -3574,7 +3577,7 @@ mod tests {
             (
                 "total price without units",
                 "2013-05-18 * \"x\"\n  Assets:MSFT  MSFT @@ 2000.00 USD\n  Assets:Cash  -2000.00 USD\n",
-                "Assets:MSFT  MSFT  @@ 2000.00 USD",
+                "Assets:MSFT  MSFT @@ 2000.00 USD",
             ),
             (
                 "cost without units",

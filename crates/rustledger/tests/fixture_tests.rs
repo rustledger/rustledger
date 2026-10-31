@@ -231,6 +231,13 @@ fn lima_test_expects_parse_error(name: &str) -> bool {
         // A tag line after the first posting: beancount reports "Tags or links
         // not allowed after first Posting" (#2575).
         || name.contains("TagsAfterFirstPosting")
+        // What beancount's grammar builder rejects in a posting (#2802): a
+        // negative price, `@@` with no number for the units.
+        || name.contains("TotalPriceInverted")
+        || name.ends_with(".PriceNegative")
+        || name.contains("TotalPriceWithMissing")
+        // A duplicate cost, date or label in a cost spec (#2802).
+        || name.contains("CostRepeated")
 }
 
 /// The seven constructs from #2008 that beancount rejects, and whether rledger
@@ -667,13 +674,17 @@ lima_test!(
     lima_total_price_negative,
     "TotalsAndSigns.TotalPriceNegative.beancount"
 );
+// A negative price and `@@` on a posting with no number for its units are
+// parse errors, as beancount's grammar builder reports them (#2802).
 lima_test!(
     lima_total_price_inverted,
-    "TotalsAndSigns.TotalPriceInverted.beancount"
+    "TotalsAndSigns.TotalPriceInverted.beancount",
+    expect_error
 );
 lima_test!(
     lima_total_price_with_missing,
-    "TotalsAndSigns.TotalPriceWithMissing.beancount"
+    "TotalsAndSigns.TotalPriceWithMissing.beancount",
+    expect_error
 );
 lima_test!(lima_cost_negative, "TotalsAndSigns.CostNegative.beancount");
 

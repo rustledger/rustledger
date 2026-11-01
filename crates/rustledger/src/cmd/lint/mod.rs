@@ -11,6 +11,7 @@ use std::process::ExitCode;
 
 pub mod closed_nonempty;
 pub mod control_chars;
+pub mod linked_transit;
 pub mod transfers;
 
 /// Run non-fatal advisory passes over one or more beancount files.
@@ -27,6 +28,8 @@ pub struct Args {
 pub enum LintKind {
     /// Detect inter-account transfer pairs.
     Transfers(transfers::Args),
+    /// Check explicitly linked transfer legs through configured transit accounts.
+    LinkedTransit(linked_transit::Args),
     /// Report accounts closed while still holding a non-zero balance.
     ///
     /// `check` stays silent on this to match `bean-check`; this lint is the
@@ -47,6 +50,7 @@ pub enum LintKind {
 pub fn run(args: &Args) -> Result<ExitCode> {
     match &args.lint {
         LintKind::Transfers(t_args) => transfers::run(t_args),
+        LintKind::LinkedTransit(t_args) => linked_transit::run(t_args),
         LintKind::ClosedNonempty(c_args) => closed_nonempty::run(c_args),
         LintKind::ControlChars(c_args) => control_chars::run(c_args),
     }
@@ -62,6 +66,7 @@ pub fn run(args: &Args) -> Result<ExitCode> {
 pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<ExitCode> {
     match &args.lint {
         LintKind::Transfers(t_args) => transfers::run_with_writer(t_args, out),
+        LintKind::LinkedTransit(t_args) => linked_transit::run_with_writer(t_args, out),
         LintKind::ClosedNonempty(c_args) => closed_nonempty::run_with_writer(c_args, out),
         LintKind::ControlChars(c_args) => control_chars::run_with_writer(c_args, out),
     }

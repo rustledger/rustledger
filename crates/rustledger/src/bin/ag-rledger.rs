@@ -814,9 +814,10 @@ fn build_explain_args(req: &Req<'_>) -> Result<rustledger::cmd::explain::Args, C
 fn lint_command() -> Command {
     Command::new("lint", "Run non-fatal advisory passes")
         .usage(with_globals(
-            "ag-rledger lint <transfers|closed-nonempty|control-chars> <file>... [--format <format>]  |  \
+            "ag-rledger lint <transfers|linked-transit|closed-nonempty|control-chars> <file>... [--format <format>]  |  \
              transfers: [--min-confidence <n>] [--date-window <days>] \
-             [--amount-tolerance <amount>] [--apply]",
+             [--amount-tolerance <amount>] [--apply]  |  \
+             linked-transit: --link-prefix <prefix> --account <account>...",
         ))
         .allow_unknown_flags()
         .allow_extra_args()
@@ -1968,10 +1969,17 @@ fn build_add_args(req: &Req<'_>) -> Result<rustledger::cmd::add_cmd::Args, Comma
 }
 
 /// The lints `ag-rledger lint` runs: every `rledger lint` subcommand.
-const LINTS: &[&str] = &["transfers", "closed-nonempty", "control-chars"];
+const LINTS: &[&str] = &[
+    "transfers",
+    "linked-transit",
+    "closed-nonempty",
+    "control-chars",
+];
 
 fn build_lint_args(req: &Req<'_>) -> Result<rustledger::cmd::lint::Args, CommandError> {
-    use rustledger::cmd::lint::{Args, LintKind, closed_nonempty, control_chars, transfers};
+    use rustledger::cmd::lint::{
+        Args, LintKind, closed_nonempty, control_chars, linked_transit, transfers,
+    };
     let subcommand = req.arg(0).ok_or_else(|| {
         CommandError::new(
             "lint name is required",
@@ -1996,6 +2004,16 @@ fn build_lint_args(req: &Req<'_>) -> Result<rustledger::cmd::lint::Args, Command
                 other => return Err(invalid_enum("format", other, &["text", "json"])),
             },
         }),
+        "linked-transit" => LintKind::LinkedTransit(linked_transit::Args {
+            files,
+            link_prefix: string_flag(req, "link-prefix", None).unwrap_or_default(),
+            account: flag_values(req, "account", None),
+            format: match format {
+                "text" => closed_nonempty::OutputFormat::Text,
+                "json" => closed_nonempty::OutputFormat::Json,
+                other => return Err(invalid_enum("format", other, &["text", "json"])),
+            },
+        }),
         "closed-nonempty" => LintKind::ClosedNonempty(closed_nonempty::Args {
             files,
             format: match format {
@@ -2016,6 +2034,7 @@ fn build_lint_args(req: &Req<'_>) -> Result<rustledger::cmd::lint::Args, Command
     };
     let files = match &lint {
         LintKind::Transfers(args) => &args.files,
+        LintKind::LinkedTransit(args) => &args.files,
         LintKind::ClosedNonempty(args) => &args.files,
         LintKind::ControlChars(args) => &args.files,
     };

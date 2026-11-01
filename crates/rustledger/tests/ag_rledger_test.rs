@@ -61,6 +61,43 @@ const BAD_LEDGER: &str = "\
 ";
 
 #[test]
+fn linked_transit_matches_cli_and_accepts_repeated_accounts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        tmp.path(),
+        "transfer.beancount",
+        "2024-01-01 * \"first\" ^xfer-demo\n  Assets:Transit 100 USD\n  Assets:Cash -100 USD\n\
+         2024-01-02 * \"second\" ^xfer-demo\n  Assets:Transit -90 USD\n  Assets:Cash 90 USD\n",
+    );
+    let file = file.to_str().unwrap();
+    let args = [
+        "lint",
+        "linked-transit",
+        file,
+        "--link-prefix",
+        "xfer-",
+        "--account",
+        "Assets:Other",
+        "--account",
+        "Assets:Transit",
+        "--format",
+        "json",
+    ];
+    let (ag_code, envelope, _) = run_in(tmp.path(), &args);
+    let (cli_code, output) = rledger_stdout(tmp.path(), &args);
+    assert_eq!(ag_code, cli_code, "{envelope}");
+    assert_eq!(
+        envelope["result"]["stdout"].as_str(),
+        Some(output.as_str()),
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["result"]["data"]["findings"][0]["status"],
+        "mismatch"
+    );
+}
+
+#[test]
 fn check_good_file_exits_zero_with_ok_envelope() {
     let tmp = tempfile::tempdir().unwrap();
     let file = write_fixture(tmp.path(), "good.beancount", GOOD_LEDGER);

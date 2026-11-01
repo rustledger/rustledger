@@ -38,6 +38,31 @@ rledger check [OPTIONS] [FILE]
 | `--include-rules <CODES>` | Report only these rule codes (comma-separated, e.g. `E2001,E1001`) |
 | `--exclude-rules <CODES>` | Report everything except these rule codes (comma-separated) |
 
+## Linked transit lint
+
+For explicitly linked transfers, opt in to a separate read-only source
+inspection (it does not alter `check` or the transfer-pairing lint):
+
+```bash
+rledger lint linked-transit main.beancount --link-prefix xfer- \
+  --account Assets:Transit --format json
+```
+
+Repeat `--account` for additional exact transit account names. Only links
+beginning with the supplied prefix and having at least one posting to a
+configured account are reported. A match requires exactly two distinct source
+transactions, each with one posting to the same configured transit account,
+with equal nonzero amounts in the same currency and opposite signs. Other
+results are `missing`, `mismatch`, or `ambiguous`, with source locations.
+Includes and repeated input paths are deduplicated.
+
+The lint conservatively marks extra postings, multiple scoped links, prices,
+costs, or inferred transit amounts as ambiguous. Files with load errors or
+plugin directives are rejected. It inspects raw source, not a booked or
+validated ledger; run `rledger check` separately. Findings are advisory and
+do not change the exit status. A match is not evidence of external settlement,
+domain isolation, or a persistent transfer lifecycle.
+
 ## Examples
 
 ### Basic Validation

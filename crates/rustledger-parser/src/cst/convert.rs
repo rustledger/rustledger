@@ -4303,10 +4303,10 @@ fn indented_comment_check(
     tokens.clear();
     let mut at = usize::from(node.text_range().start());
     flatten_green_matching(node.green(), &mut at, tokens, |k| {
-        matches!(k, K::PERCENT_COMMENT | K::SHEBANG | K::EMACS_DIRECTIVE)
+        matches!(k, K::SHEBANG | K::EMACS_DIRECTIVE)
     });
     let off = bom_offset as usize;
-    for (kind, range) in tokens.iter() {
+    for (_, range) in tokens.iter() {
         if range.start == 0 || stripped.as_bytes().get(range.start - 1) == Some(&b'\n') {
             continue;
         }
@@ -4318,8 +4318,7 @@ fn indented_comment_check(
         if reported {
             continue;
         }
-        let width = if *kind == K::PERCENT_COMMENT { 1 } else { 2 };
-        let end = (range.start + width).min(range.end);
+        let end = (range.start + 2).min(range.end);
         let text = stripped.get(range.start..end).unwrap_or_default();
         errors.push(crate::ParseError::new(
             crate::ParseErrorKind::SyntaxError(format!(

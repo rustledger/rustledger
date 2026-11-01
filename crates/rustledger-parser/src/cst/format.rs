@@ -4017,6 +4017,12 @@ mod tests {
 
     const IDEMPOTENCE_MATRIX: &[(&str, &str)] = &[
         ("empty", ""),
+        // `%` is a comment only as a column-0 line; elsewhere the lexer reads a
+        // FLAG (#2802), and a `"` after a column-0 `%` stays in the comment.
+        (
+            "percent_flag_and_comment",
+            "% c \"q\n2024-01-01 % \"n\"\n  % Assets:A  1 USD ; x\n  %Assets:B\n",
+        ),
         ("only_comment", "; header comment\n"),
         ("only_directive", "2024-01-01 open Assets:Cash\n"),
         (
@@ -5099,9 +5105,10 @@ mod tests {
                 prev = Some((token, span));
                 let classify = match token {
                     Token::String(_) => Some(SourceState::InString),
-                    Token::Comment(_) | Token::Shebang(_) | Token::EmacsDirective(_) => {
-                        Some(SourceState::InComment)
-                    }
+                    Token::Comment(_)
+                    | Token::PercentComment(_)
+                    | Token::Shebang(_)
+                    | Token::EmacsDirective(_) => Some(SourceState::InComment),
                     Token::Error(_) if heading_text => Some(SourceState::InComment),
                     _ => None,
                 };

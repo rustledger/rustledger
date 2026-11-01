@@ -136,18 +136,10 @@ where
         // header vanished in silence. Report the one or two characters
         // beancount objects to. Before the first token they are leading
         // trivia (a comment line above the transaction), as before.
-        if seen_token
-            && matches!(
-                kind,
-                SyntaxKind::PERCENT_COMMENT | SyntaxKind::SHEBANG | SyntaxKind::EMACS_DIRECTIVE
-            )
-        {
-            let width = if kind == SyntaxKind::PERCENT_COMMENT {
-                1
-            } else {
-                2
-            };
-            let end = (range.start + width).min(range.end);
+        if seen_token && matches!(kind, SyntaxKind::SHEBANG | SyntaxKind::EMACS_DIRECTIVE) {
+            // (A mid-line `%` is a FLAG token, not a comment, so it never
+            // reaches here.)
+            let end = (range.start + 2).min(range.end);
             return Some((HeaderDefect::UnexpectedToken, range.start..end));
         }
         if is_header_trivia(kind) {

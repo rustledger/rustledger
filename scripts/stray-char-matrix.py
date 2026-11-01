@@ -82,6 +82,13 @@ BASES = [
     ("txn-comment", '2024-01-01 * "n" ; c\n  Assets:A  1 USD ; c\n  Assets:B\n'),
     ("txn-crlf", "2024-01-01 *\r\n  Assets:A  1 USD\r\n  Assets:B\r\n"),
     ("txn-tags-line", "2024-01-01 *\n  #t ^l\n  Assets:A  1 USD\n  Assets:B\n"),
+    # Every posting flag, spaced and glued (`cases()` never inserts at a
+    # posting's first character, so the flag position needs bases of its own),
+    # and a `%`-flagged transaction: beancount's FLAG set is `[!&#?%]`.
+    ("txn-flag-percent", "2024-01-01 *\n  % Assets:A  1 USD\n  %Assets:B\n"),
+    ("txn-flag-marks", "2024-01-01 *\n  ? Assets:A  1 USD\n  &Assets:B\n"),
+    ("txn-flag-hash-letter", "2024-01-01 *\n  # Assets:A  1 USD\n  P Assets:B\n"),
+    ("txn-percent", '2024-01-01 % "n"\n  Assets:A  1 USD\n  Assets:B\n'),
     # Metadata lines (stage 2 of #2802): every value type, under several
     # directive kinds, a transaction and a posting.
     ("meta-number", "2024-01-01 open Assets:A\n  kk: 1.5\n"),

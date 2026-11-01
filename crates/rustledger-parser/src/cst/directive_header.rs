@@ -708,11 +708,15 @@ pub(super) fn defect_message(place: &str, defect: &HeaderDefect, text: &str) -> 
     let expected = defect.expected;
     match defect.found {
         None => format!("unexpected end of line in {place}: expected {expected}"),
-        Some(K::PERCENT_COMMENT | K::SHEBANG | K::EMACS_DIRECTIVE) => format!(
-            "unexpected {text:?} in {place}: expected {expected}. \
+        Some(K::PERCENT_COMMENT | K::SHEBANG | K::EMACS_DIRECTIVE | K::FLAG)
+            if defect.found != Some(K::FLAG) || text == "%" =>
+        {
+            format!(
+                "unexpected {text:?} in {place}: expected {expected}. \
              Only `;` starts a comment in the middle of a line; `{text}` starts one \
              only at the beginning of a line"
-        ),
+            )
+        }
         Some(_) => format!("unexpected {text:?} in {place}: expected {expected}"),
     }
 }

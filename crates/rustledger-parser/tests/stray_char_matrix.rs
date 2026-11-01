@@ -27,8 +27,8 @@ const CHARS: &str = "!@?*~^$&|{}(),#%\"/_-'.A0";
 const DATA: &str = include_str!("data/stray_char_matrix.tsv");
 
 /// Rows pinned as known differences, by count: see the `known_*` functions.
-const KNOWN_COLUMN_0: usize = 180;
-const KNOWN_DATES: [usize; 3] = [259, 6, 147];
+const KNOWN_COLUMN_0: usize = 192;
+const KNOWN_DATES: [usize; 3] = [259, 6, 175];
 
 /// One generated input.
 struct Case {
@@ -123,7 +123,7 @@ fn stage(row: &Row, case: &Case) -> u8 {
     // A transaction's second word is its flag: `*`, `!`, `txn`, or a capital
     // letter (`P`).
     let is_txn = row.base.split([' ', '\r', '\n']).nth(1).is_some_and(|kw| {
-        matches!(kw, "*" | "!" | "txn")
+        matches!(kw, "*" | "!" | "txn" | "%" | "#" | "?" | "&")
             || (kw.len() == 1 && kw.bytes().all(|b| b.is_ascii_uppercase()))
     });
     if is_meta {
@@ -174,8 +174,8 @@ const fn known_mid_line_cr(row: &Row, case: &Case) -> bool {
 
 /// A `*` inserted as a component of its own in a cost spec: cost merging,
 /// which beancount 3.2.3 rejects ("Cost merging is not supported yet") and
-/// rledger implements. Kept until that decision is made (#2802); pinned by
-/// count. See `test_parse_accepts_cost_merging_unlike_beancount`.
+/// rledger implements, a correct feature it keeps deliberately (#2802);
+/// pinned by count. See `test_parse_accepts_cost_merging_unlike_beancount`.
 /// A posting whose cost and price name different currencies: beancount's
 /// builder rejects it at parse time; we leave it to booking, which reports it
 /// for a sale (E4001) but not for a buy. Pinned by count until the one rule
@@ -848,7 +848,7 @@ fn test_parse_reports_a_stray_character_in_a_metadata_line_and_keeps_the_directi
         ("2024-01-01 open Assets:A\n  kk: 1 USD EUR\n", "EUR"),
         ("2024-01-01 open Assets:A\n  kk: TRUE FALSE\n", "FALSE"),
         ("2024-01-01 open Assets:A\n  kk: 2024-02-02 USD\n", "USD"),
-        ("2024-01-01 open Assets:A\n  kk: \"v\" % c\n", "%"),
+        ("2024-01-01 open Assets:A\n  kk: \"v\" % 1\n", "%"),
         (
             "2024-01-01 *\n  kk: 1 *\n  Assets:A  1 USD\n  Assets:B\n",
             "*",
@@ -1102,7 +1102,7 @@ fn test_parse_reports_a_percent_or_hash_comment_inside_a_transaction() {
     for (label, src) in [
         (
             "header",
-            "2024-01-01 * \"p\" % x\n  Assets:A  1 USD\n  Assets:B\n",
+            "2024-01-01 * \"p\" % 1\n  Assets:A  1 USD\n  Assets:B\n",
         ),
         (
             "header #!",
@@ -1110,7 +1110,7 @@ fn test_parse_reports_a_percent_or_hash_comment_inside_a_transaction() {
         ),
         (
             "posting",
-            "2024-01-01 *\n  Assets:A  1 USD % x\n  Assets:B\n",
+            "2024-01-01 *\n  Assets:A  1 USD % 1\n  Assets:B\n",
         ),
         (
             "posting #+",
@@ -1118,7 +1118,7 @@ fn test_parse_reports_a_percent_or_hash_comment_inside_a_transaction() {
         ),
         (
             "tags line",
-            "2024-01-01 *\n  #t % x\n  Assets:A  1 USD\n  Assets:B\n",
+            "2024-01-01 *\n  #t % 1\n  Assets:A  1 USD\n  Assets:B\n",
         ),
         (
             "indented line",
@@ -1207,12 +1207,12 @@ fn test_parse_reports_what_beancount_rejects_in_a_cost_or_price() {
     }
 }
 
-/// Cost merging (`{*}`) is the one builder error we do not report:
+/// Cost merging (`{*}`) is a builder error we deliberately do not report:
 /// beancount 3.2.3 rejects it ("Cost merging is not supported yet"), and
-/// rledger implements it (average-cost merge booking). Turning a supported
-/// feature into a parse error is a decision of its own, not a stray-character
-/// fix, so it is pinned here as a known difference (and in the matrix, by
-/// `known_cost_merge`) until that decision is made (#2802).
+/// rledger implements it (average-cost merge booking). It is a correct feature
+/// beancount lacks, and rledger keeps such features: the rule is to match
+/// beancount on correctness, not on what it does not support (#2802). Pinned
+/// here, and in the matrix by `known_cost_merge`.
 #[test]
 fn test_parse_accepts_cost_merging_unlike_beancount() {
     for posting in ["1 HOOL {*}", "1 HOOL {1 USD, *}", "-1 HOOL {*} @ 3 USD"] {
@@ -1329,4 +1329,53 @@ fn test_parse_reports_a_one_letter_currency_before_cr_but_not_at_eof() {
             "{src:?}"
         );
     }
+}
+
+/// `%` is a FLAG in beancount (`[!&#?%]`), and a comment only as a whole line
+/// at column 0. As a posting flag, spaced or glued, and as a transaction flag
+/// it is valid; it was lexed as a comment to the end of the line, so the
+/// posting, or the rest of the header, vanished in silence.
+#[test]
+fn test_parse_reads_percent_as_a_flag_outside_column_0() {
+    let r = parse_both("2024-01-01 *\n  % Assets:A  1 USD\n  %Assets:B  -1 USD\n");
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let rustledger_core::Directive::Transaction(t) = &r.directives[0].value else {
+        panic!("a transaction");
+    };
+    let flags: Vec<Option<char>> = t.postings.iter().map(|p| p.flag).collect();
+    assert_eq!(flags, [Some('%'), Some('%')]);
+    let r = parse_both("2024-01-01 % \"n\"\n  Assets:A  1 USD\n  Assets:B\n");
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let rustledger_core::Directive::Transaction(t) = &r.directives[0].value else {
+        panic!("a transaction");
+    };
+    assert_eq!(t.flag, '%');
+    // At column 0 it is still a comment line.
+    assert!(
+        parse_both("% note\n2024-01-01 open Assets:A\n")
+            .errors
+            .is_empty()
+    );
+}
+
+/// A one-letter transaction flag must be followed by a space, a tab or a
+/// `\n`, as for a one-letter currency: `P;c` and `P\r\n` are an invalid token
+/// in beancount.
+#[test]
+fn test_parse_reports_a_one_letter_transaction_flag_glued_to_what_follows() {
+    assert_reported_once(
+        "P;c",
+        "2024-01-01 P;c\n  Assets:A  1 USD\n  Assets:B\n",
+        "one-letter flag",
+    );
+    // `rledger format` normalizes the CRLF first, after which the flag is
+    // valid, so only the parse error is checked here.
+    let r = parse_both("2024-01-01 P\r\n  Assets:A  1 USD\r\n  Assets:B\r\n");
+    assert_eq!(r.errors.len(), 1, "{:?}", r.errors);
+    assert!(r.errors[0].to_string().contains("one-letter flag"));
+    assert!(
+        parse_both("2024-01-01 P ;c\n  Assets:A  1 USD\n  Assets:B\n")
+            .errors
+            .is_empty()
+    );
 }

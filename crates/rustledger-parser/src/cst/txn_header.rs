@@ -55,6 +55,11 @@ pub(super) enum HeaderDefect {
     TooManyStrings(usize),
     /// A token with no place in a transaction header at all.
     UnexpectedToken,
+    /// A one-letter flag (`P`) with something other than a space, a tab or a
+    /// `\n` right after it: beancount reads a lone capital as its `CAPITAL`
+    /// token only there, so `P"x"`, `P;c` and `P\r\n` are an invalid token
+    /// (#2802).
+    GluedLetterFlag,
 }
 
 /// Trivia and separators that may appear anywhere in a header.
@@ -189,6 +194,32 @@ where
     third_string.map(|r| (HeaderDefect::TooManyStrings(strings), r))
 }
 
+/// [`first_header_defect`], plus the one check that needs the source text: a
+/// one-letter flag glued to what follows it ([`HeaderDefect::GluedLetterFlag`]).
+/// `src` is the text the ranges index. Like the one-letter-currency rule in
+/// `directive_header`, the end of the file counts as a separator, so that
+/// formatting, which adds the final newline, stays idempotent.
+pub(super) fn first_header_defect_in(
+    tokens: Vec<(SyntaxKind, Range<usize>)>,
+    src: &str,
+) -> Option<(HeaderDefect, Range<usize>)> {
+    let glued = tokens
+        .iter()
+        .filter(|(k, _)| !is_header_trivia(*k))
+        .take_while(|(k, _)| !matches!(k, SyntaxKind::STRING | SyntaxKind::TAG | SyntaxKind::LINK))
+        .find(|(k, r)| {
+            *k == SyntaxKind::CURRENCY
+                && r.len() == 1
+                && !matches!(src.as_bytes().get(r.end), None | Some(b' ' | b'\t' | b'\n'))
+        })
+        .map(|(_, r)| (HeaderDefect::GluedLetterFlag, r.clone()));
+    let grammar = first_header_defect(tokens);
+    match (glued, grammar) {
+        (Some(g), Some(d)) => Some(if g.1.start <= d.1.start { g } else { d }),
+        (g, d) => g.or(d),
+    }
+}
+
 /// Diagnostic text for a defect. `text` is the source slice of the reported
 /// range — the caller has the source, this module does not.
 ///
@@ -207,6 +238,10 @@ pub(super) fn defect_message(defect: HeaderDefect, text: &str) -> String {
         HeaderDefect::UnexpectedToken => {
             format!("unexpected {text:?} in transaction header")
         }
+        HeaderDefect::GluedLetterFlag => format!(
+            "unexpected {text:?} in transaction header: a one-letter flag must be \
+             followed by a space, as beancount reads it"
+        ),
     }
 }
 

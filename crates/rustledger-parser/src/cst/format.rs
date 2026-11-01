@@ -776,10 +776,14 @@ const fn advance_source_state(
                 && (matches!(peek, Some('!' | '+'))
                     || (at_line_start && !matches!(peek, Some(c) if is_tag_char(c))));
             let is_org_heading = ch == '*' && at_line_start;
+            // A `%` is a comment only at column 0; elsewhere the lexer reads a
+            // flag, as beancount does (#2802).
+            let is_percent_line_comment = ch == '%' && at_line_start;
             if ch == '"' {
                 *prev_was_backslash = false;
                 SourceState::InString
-            } else if matches!(ch, ';' | '%') || is_hash_line_comment || is_org_heading {
+            } else if ch == ';' || is_percent_line_comment || is_hash_line_comment || is_org_heading
+            {
                 SourceState::InComment
             } else {
                 SourceState::Code

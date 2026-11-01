@@ -875,6 +875,29 @@ impl<'src> Iterator for TokenIter<'src> {
                     self.last_newline_end = span.end;
                     return Some((Token::Newline, span.into()));
                 }
+                Ok(Token::PercentComment(_))
+                    if !(self.at_line_start && span.start == self.last_newline_end) =>
+                {
+                    // A `%` that is not at column 0 is a FLAG in beancount
+                    // (`[!&#?%]`), never a comment: `  % Assets:A  1 USD` is a
+                    // flagged posting and `2024-01-01 % "x"` a transaction
+                    // there (#2802). Only a column-0 `%` line is skipped, as a
+                    // whole-line comment. Lexing it as a comment to the end of
+                    // the line dropped the posting, or the rest of the line,
+                    // in silence. Emit the one-character flag and resume right
+                    // after it; a stray `%` elsewhere is then reported by the
+                    // line's own rule.
+                    let at = span.start;
+                    self.restart_lexer(at + 1);
+                    self.at_line_start = false;
+                    return Some((
+                        Token::Flag(&source[at..=at]),
+                        Span {
+                            start: at,
+                            end: at + 1,
+                        },
+                    ));
+                }
                 Ok(Token::Hash) if self.at_line_start && span.start == self.last_newline_end => {
                     // Hash at very start of line (no indentation) is a comment
                     // Find end of line and create a comment token for the whole line

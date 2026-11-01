@@ -3744,11 +3744,14 @@ fn transaction_header_check(
     let Some(txn) = ast::Transaction::cast(child.clone()) else {
         return;
     };
-    let tokens = txn.header_tokens().map(|t| {
-        let r = t.text_range();
-        (t.kind(), usize::from(r.start())..usize::from(r.end()))
-    });
-    if let Some((defect, range)) = super::txn_header::first_header_defect(tokens) {
+    let tokens = txn
+        .header_tokens()
+        .map(|t| {
+            let r = t.text_range();
+            (t.kind(), usize::from(r.start())..usize::from(r.end()))
+        })
+        .collect();
+    if let Some((defect, range)) = super::txn_header::first_header_defect_in(tokens, stripped) {
         out.push(header_defect_error(defect, &range, stripped, bom_offset));
     }
 }
@@ -4111,7 +4114,7 @@ fn posting_line_check(
 /// grammatical: [`super::directive_header::first_posting_defect`] found
 /// nothing.
 fn posting_builder_error(
-    tokens: &[(crate::SyntaxKind, std::ops::Range<usize>)],
+    tokens: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
     src: &str,
 ) -> Option<(std::ops::Range<usize>, String)> {
     use crate::SyntaxKind as K;
@@ -4124,11 +4127,10 @@ fn posting_builder_error(
     }) {
         return None;
     }
-    let sig: Vec<&(K, std::ops::Range<usize>)> = tokens
-        .iter()
-        .filter(|(k, _)| !is_trivia_kind(*k) && *k != K::BOM)
-        .collect();
-    let text = |r: &std::ops::Range<usize>| src.get(r.clone()).unwrap_or_default();
+    // In place, so the caller's reused buffer is the only allocation: this
+    // runs on every posting with a cost or a price.
+    tokens.retain(|(k, _)| !is_trivia_kind(*k) && *k != K::BOM);
+    let sig = tokens.as_slice();
     let account = sig.iter().position(|(k, _)| *k == K::ACCOUNT)?;
     let opener = |k: K| matches!(k, K::L_BRACE | K::L_BRACE_HASH | K::L_DOUBLE_BRACE);
     let units_end = sig[account + 1..]
@@ -4139,9 +4141,9 @@ fn posting_builder_error(
         .iter()
         .any(|(k, _)| *k == K::NUMBER);
 
-    // The cost spec, component by component.
+    // The cost spec, component by component; a component is `sig[start..i]`.
     let mut i = units_end;
-    if let Some((open, _)) = sig.get(i).copied()
+    if let Some((open, _)) = sig.get(i)
         && opener(*open)
     {
         let is_total = *open == K::L_DOUBLE_BRACE;
@@ -4151,23 +4153,22 @@ fn posting_builder_error(
             K::R_BRACE
         };
         let (mut costs, mut dates, mut labels) = (0usize, 0usize, 0usize);
-        let mut component: Vec<&(K, std::ops::Range<usize>)> = Vec::new();
         // `{#` begins the first component with its `#`.
         let mut component_has_hash = *open == K::L_BRACE_HASH;
         i += 1;
+        let mut start = i;
         loop {
-            let token = sig.get(i).copied();
+            let token = sig.get(i);
             let ends = token.is_none_or(|(k, _)| *k == K::COMMA || *k == close);
             if !ends {
-                let token = token?;
-                component_has_hash |= token.0 == K::HASH;
-                component.push(token);
+                component_has_hash |= token?.0 == K::HASH;
                 i += 1;
                 continue;
             }
-            if let Some(first) = component.first().copied().or_else(|| {
+            let component = &sig[start..i];
+            if let Some(first) = component.first().or_else(|| {
                 // `{# 2 USD}`: the hash was the opener.
-                component_has_hash.then_some(sig[units_end])
+                component_has_hash.then_some(&sig[units_end])
             }) {
                 let duplicate = |n: &mut usize, what: &str| {
                     *n += 1;
@@ -4184,10 +4185,9 @@ fn posting_builder_error(
                     // Cost merging, `{*}`. Deliberately NOT reported, unlike
                     // beancount 3.2.3 ("Cost merging is not supported yet"):
                     // rledger implements it (average-cost merge booking, see
-                    // `rustledger_core::inventory::booking`), and turning a
-                    // supported feature into a parse error is a product
-                    // decision, not a stray-character fix. The matrix pins
-                    // these rows (`known_cost_merge`) until it is made (#2802).
+                    // `rustledger_core::inventory::booking`), a correct
+                    // feature beancount lacks, which we keep. The matrix pins
+                    // its rows (`known_cost_merge`).
                     (1, K::STAR) => None,
                     _ => duplicate(&mut costs, "cost"),
                 };
@@ -4204,9 +4204,9 @@ fn posting_builder_error(
                     ));
                 }
             }
-            component.clear();
             component_has_hash = false;
             i += 1;
+            start = i;
             if token.is_none_or(|(k, _)| *k == close) {
                 break;
             }
@@ -4214,7 +4214,7 @@ fn posting_builder_error(
     }
 
     // The price.
-    let (at, at_range) = sig.get(i).copied()?;
+    let (at, at_range) = sig.get(i)?;
     if !matches!(at, K::AT | K::AT_AT) {
         return None;
     }
@@ -4223,12 +4223,14 @@ fn posting_builder_error(
         Some((K::CURRENCY, _)) => &price[..price.len() - 1],
         _ => price,
     };
-    if !number_tokens.is_empty() {
+    // Only an expression with a `-` can be negative; skip the evaluator (and
+    // its token view) for every other price.
+    if number_tokens.iter().any(|(k, _)| *k == K::MINUS) {
         let view: Vec<TextToken<'_>> = number_tokens
             .iter()
             .map(|(k, r)| TextToken {
                 kind: *k,
-                text: text(r),
+                text: src.get(r.clone()).unwrap_or_default(),
             })
             .collect();
         let mut cursor = 0;
@@ -4258,8 +4260,9 @@ fn posting_builder_error(
     None
 }
 
-/// Report a `%`, `#!` or `#+` that is not at column 0 anywhere in a
-/// transaction (#2802, stage 3).
+/// Report a `#!` or `#+` that is not at column 0 anywhere in a transaction
+/// (#2802, stage 3). (A `%` there is no longer a comment token at all: the
+/// lexer reads it as a FLAG, as beancount does.)
 ///
 /// Only `;` starts a comment that is indented or in the middle of a line in
 /// beancount: `%` lexes as a FLAG and `#` as a HASH, so `  % note`, `  #!t`
@@ -4282,10 +4285,23 @@ fn indented_comment_check(
     tokens: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
 ) {
     use crate::SyntaxKind as K;
+    // Runs on every transaction, and the kinds it looks for are rare: only a
+    // `#!` or a `#+` can be one (`%` is a comment only at column 0, where it
+    // is fine, and a FLAG anywhere else). A byte search of the transaction's
+    // own source is far cheaper than walking its tree, or than `text()`,
+    // which builds red nodes.
+    let (from, to) = (
+        usize::from(node.text_range().start()),
+        usize::from(node.text_range().end()),
+    );
+    let Some(source) = stripped.get(from..to) else {
+        return;
+    };
+    if !source.contains("#!") && !source.contains("#+") {
+        return;
+    }
     tokens.clear();
     let mut at = usize::from(node.text_range().start());
-    // Only the comment kinds are collected: they are rare, and this runs on
-    // every transaction.
     flatten_green_matching(node.green(), &mut at, tokens, |k| {
         matches!(k, K::PERCENT_COMMENT | K::SHEBANG | K::EMACS_DIRECTIVE)
     });

@@ -602,10 +602,10 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///
 /// v53: PARSER OUTPUT changed, no archived layout moved (#2802, stage 3). A
 ///     stray token in a transaction header or posting line is a parse error
-///     where it loaded clean (the transaction is kept), as are the posting
+///     where it loaded clean (the transaction is kept), as are some posting
 ///     errors beancount's builder reports (a negative price, a duplicate cost,
-///     `{*}`, mismatched cost and price currencies); `!Assets:A` is a flagged
-///     posting and `--1 USD` is 1 USD, where both were errors.
+///     date or label); `!Assets:A` and `% Assets:A` are flagged postings and
+///     `--1 USD` is 1 USD, where they were errors or dropped.
 ///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that

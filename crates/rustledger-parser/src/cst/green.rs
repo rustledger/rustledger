@@ -1125,7 +1125,7 @@ fn tl_transaction_header_check(
         }
         offset += len;
     }
-    if let Some((defect, range)) = super::txn_header::first_header_defect(tokens) {
+    if let Some((defect, range)) = super::txn_header::first_header_defect_in(tokens, stripped) {
         out.push(super::convert::header_defect_error(
             defect, &range, stripped, bom_offset,
         ));

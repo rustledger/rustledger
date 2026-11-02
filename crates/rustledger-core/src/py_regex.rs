@@ -1951,6 +1951,10 @@ mod tests {
     /// 3.14. A code point it missed would let a word boundary answer
     /// differently from Python with no error.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "walks every code point through `regex`; far past the Miri job's 40-minute cap, and touches no unsafe code"
+    )]
     fn word_disagreement_table_is_exact() {
         assert_sorted_disjoint("PY_WORD", word_tables::PY_WORD);
         assert_sorted_disjoint("PY_WORD_VARIES", word_tables::PY_WORD_VARIES);
@@ -1973,6 +1977,10 @@ mod tests {
     /// The exhaustive comparison cannot pass vacuously: dropping one code
     /// point from the table, at either end of a range or alone, is found.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "walks every code point through `regex` three times; far past the Miri job's 40-minute cap, and touches no unsafe code"
+    )]
     fn word_disagreement_check_finds_a_missing_code_point() {
         let table = word_tables::WORD_DISAGREE;
         for index in [0, table.len() / 2, table.len() - 1] {

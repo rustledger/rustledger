@@ -701,16 +701,24 @@ pub fn cr_outside_strings_present(src: &str) -> bool {
         return false;
     }
     let body = src.strip_prefix('\u{FEFF}').unwrap_or(src);
-    let mut chars = body.chars().peekable();
+    let mut chars = body.char_indices().peekable();
     let mut state = SourceState::Code;
     let mut prev_was_backslash = false;
     let mut at_line_start = true;
-    while let Some(ch) = chars.next() {
-        let peek = chars.peek().copied();
+    let mut unclosed_until = 0;
+    while let Some((i, ch)) = chars.next() {
+        let peek = chars.peek().map(|&(_, c)| c);
         if matches!(state, SourceState::Code | SourceState::InComment) && ch == '\r' {
             return true;
         }
-        state = advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
+        // The same quote rule as the two helpers it mirrors (#2803).
+        state = lexer_source_state(
+            body,
+            i,
+            state,
+            advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash),
+            &mut unclosed_until,
+        );
         at_line_start = next_at_line_start(ch, at_line_start);
     }
     false
@@ -838,6 +846,8 @@ fn lexer_source_state(
     let bytes = body.as_bytes();
     let mut i = at + 1;
     while i < bytes.len() {
+        #[cfg(test)]
+        QUOTE_SCAN_BYTES.with(|c| c.set(c.get() + 1));
         match bytes[i] {
             b'"' => return SourceState::InString,
             // `\\.`: an escape takes the next character, but `.` does not
@@ -851,6 +861,13 @@ fn lexer_source_state(
     }
     *unclosed_until = i;
     SourceState::InComment
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Bytes `lexer_source_state` has scanned looking for a closing quote,
+    /// for the linear-cost test.
+    static QUOTE_SCAN_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// A character the lexer's `Tag` regex (`#[a-zA-Z0-9-_/.]+`) accepts
@@ -4173,6 +4190,13 @@ mod tests {
             "unterminated_quote_backslash_newline",
             "2024-01-01 note Assets:A \"a\\\n2024-01-02 open Assets:C\n",
         ),
+        // The same with a later quote: a scan that skipped the `\` with the
+        // line break as an escape would pair the first quote with the one
+        // before `x`, swallowing a line ending.
+        (
+            "unterminated_quote_backslash_newline_later_quote",
+            "2024-01-01 note Assets:A \"a\\\n2024-01-02 note Assets:C \"x\"\n2024-01-03 open Assets:D\n",
+        ),
         ("only_comment", "; header comment\n"),
         ("only_directive", "2024-01-01 open Assets:Cash\n"),
         (
@@ -4423,7 +4447,8 @@ mod tests {
     ///   comment mid-line, #2802), so the skip-on-errors guard triggers. It
     ///   exists for the state machine's lexer-agreement test on a comment
     ///   with an unbalanced `"`, not the round-trip body.
-    /// - `unterminated_quote`, `unterminated_quote_backslash_newline`: an
+    /// - `unterminated_quote`, `unterminated_quote_backslash_newline`,
+    ///   `unterminated_quote_backslash_newline_later_quote`: an
     ///   unterminated quote is a parse error by design (#2788), so the
     ///   skip-on-errors guard triggers. They exist for the state machine's
     ///   lexer-agreement test on a quote the lexer cuts at its own line
@@ -4432,7 +4457,7 @@ mod tests {
     /// Note: `comment_containing_quote` DOES exercise the body: it is
     /// paired with a parseable directive, and its comment attaches as
     /// inter-directive trivia under the directive-terminator rule.
-    const ROUNDTRIP_KNOWN_ZERO_DIRECTIVE_FIXTURES: usize = 13;
+    const ROUNDTRIP_KNOWN_ZERO_DIRECTIVE_FIXTURES: usize = 14;
 
     #[test]
     fn lf_to_crlf_outside_strings_preserves_string_interior() {
@@ -5304,6 +5329,46 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// Looking for a quote's close stays linear: a failed scan is
+    /// remembered, so a quote it already passed is not scanned again. One
+    /// stray quote followed by many `\"` lines (escaped from its scan's
+    /// point of view, so none closes it) would rescan to the end once per
+    /// line without the memo.
+    #[test]
+    fn lexer_source_state_scans_each_byte_once() {
+        let src = format!("2024-01-01 open Assets:A \"\n{}", "\\\"\n".repeat(20_000));
+        QUOTE_SCAN_BYTES.with(|c| c.set(0));
+        let crlf = lf_to_crlf_outside_strings(&src);
+        let scanned = QUOTE_SCAN_BYTES.with(std::cell::Cell::get);
+        assert!(
+            scanned <= 2 * src.len(),
+            "quote scans stepped over {scanned} bytes of a {}-byte input",
+            src.len()
+        );
+        assert_eq!(crlf, src.replace('\n', "\r\n"));
+    }
+
+    /// `cr_outside_strings_present` reads quotes as the line-ending helpers
+    /// do: a stray quote ends at its own line, so the `\r` after it is
+    /// outside a string, as `crlf_to_lf_outside_strings` folds it (#2803).
+    #[test]
+    fn cr_outside_strings_present_ends_an_unterminated_quote_at_its_line() {
+        for src in [
+            "2024-01-01 open Assets:A \"\r\n2024-01-02 note Assets:A \"ok\"\r\n2024-01-03 open Assets:C\r\n",
+            "2024-01-01 open Assets:A \"\r\n",
+        ] {
+            assert!(cr_outside_strings_present(src), "{src:?}");
+            assert!(
+                matches!(crlf_to_lf_outside_strings(src), std::borrow::Cow::Owned(ref s) if s != src),
+                "{src:?}"
+            );
+        }
+        // A `\r` inside a string that does close is still not outside one.
+        assert!(!cr_outside_strings_present(
+            "2024-01-01 note Assets:A \"a\rb\"\n"
+        ));
     }
 
     /// `crlf_to_lf_outside_strings` must not change the line structure

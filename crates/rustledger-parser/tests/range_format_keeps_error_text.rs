@@ -181,10 +181,22 @@ fn test_lf_to_crlf_outside_strings_ends_an_unterminated_quote_at_its_line() {
             "backslash before the line break",
             "2024-01-01 note Assets:A \"a\\\n2024-01-02 open Assets:C\n",
         ),
+        // With a later quote: an escape does not take a line break, so the
+        // `\` still ends the quote at its line instead of pairing it with
+        // the quote before `x`.
+        (
+            "backslash before the line break, later quote",
+            "2024-01-01 note Assets:A \"a\\\n2024-01-02 note Assets:C \"x\"\n2024-01-03 open Assets:D\n",
+        ),
     ] {
         let crlf = lf_to_crlf_outside_strings(lf);
         assert_eq!(crlf, lf.replace('\n', "\r\n"), "{label}");
-        assert_eq!(crlf_to_lf_outside_strings(&crlf), lf, "{label}: round trip");
+        // Not for a `\` right before the line break: in the CRLF text it
+        // escapes the `\r` (the lexer's `.` matches it), so the quote does
+        // pair with a later one there, and folding back leaves that `\r\n`.
+        if !lf.contains("\\\n") {
+            assert_eq!(crlf_to_lf_outside_strings(&crlf), lf, "{label}: round trip");
+        }
     }
     // A string that does close still keeps its own line endings.
     let multi = "2024-01-01 note Assets:A \"a\nb\"\n2024-01-02 open Assets:C\n";
@@ -202,6 +214,10 @@ fn test_format_parsed_range_on_crlf_keeps_crlf_after_a_stray_quote() {
     for src in [
         "2024-01-01 open   Assets:A\r\n2024-01-02 open   Assets:B \"\r\n2024-01-03 open   Assets:C\r\n2024-01-04 open   Assets:D\r\n",
         "2024-01-01 note Assets:A \"unterminated\r\n2024-01-02 open   Assets:C\r\n",
+        // A `\` before `\r\n` escapes the `\r` (the lexer's `.` matches
+        // it), so this string runs on to the later quote in the lexer too;
+        // the edit still has CRLF throughout.
+        "2024-01-01 note Assets:A \"a\\\r\n2024-01-02 note Assets:B \"x\"\r\n2024-01-03 open   Assets:C\r\n",
     ] {
         let (_, out) = format_all(src);
         let edit = lf_to_crlf_outside_strings(&out);
@@ -211,4 +227,17 @@ fn test_format_parsed_range_on_crlf_keeps_crlf_after_a_stray_quote() {
         );
         assert!(edit.contains("open Assets:C\r\n"), "{src:?}: {edit:?}");
     }
+}
+
+/// The error-tolerant formatter's line-ending fold: a bare `\r`
+/// (classic-Mac) line ending after a stray quote is a line break, so the
+/// directive after it is read and formatted, instead of being kept inside
+/// a string the quote never opened.
+#[test]
+fn test_format_source_folds_a_bare_cr_after_a_stray_quote() {
+    let out = format_source("2024-01-01 open Assets:A \"\r2024-01-02 open   Assets:B\r");
+    assert_eq!(
+        out,
+        "2024-01-01 open Assets:A \"\n2024-01-02 open Assets:B\n"
+    );
 }

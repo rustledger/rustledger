@@ -776,10 +776,14 @@ const fn advance_source_state(
                 && (matches!(peek, Some('!' | '+'))
                     || (at_line_start && !matches!(peek, Some(c) if is_tag_char(c))));
             let is_org_heading = ch == '*' && at_line_start;
+            // A `%` is a comment only at column 0; elsewhere the lexer reads a
+            // flag, as beancount does (#2802).
+            let is_percent_line_comment = ch == '%' && at_line_start;
             if ch == '"' {
                 *prev_was_backslash = false;
                 SourceState::InString
-            } else if matches!(ch, ';' | '%') || is_hash_line_comment || is_org_heading {
+            } else if ch == ';' || is_percent_line_comment || is_hash_line_comment || is_org_heading
+            {
                 SourceState::InComment
             } else {
                 SourceState::Code
@@ -3561,10 +3565,13 @@ mod tests {
                 "2024-01-15 * \"x\"\n  Assets:Bank  -5.00 USD\n  Assets:Other USD\n",
                 "Assets:Other  USD",
             ),
+            // `@@` with no number for the units is a parse error, as in
+            // beancount ("Total price on a posting without units", #2802), so
+            // the error-tolerant formatter copies the transaction as written.
             (
                 "price with no amount node at all",
                 "2013-05-18 * \"x\"\n  Assets:MSFT @@ 2000.00 USD\n  Assets:Cash  -2000.00 USD\n",
-                "Assets:MSFT  @@ 2000.00 USD",
+                "Assets:MSFT @@ 2000.00 USD",
             ),
             (
                 "cost with no amount node at all",
@@ -3574,7 +3581,7 @@ mod tests {
             (
                 "total price without units",
                 "2013-05-18 * \"x\"\n  Assets:MSFT  MSFT @@ 2000.00 USD\n  Assets:Cash  -2000.00 USD\n",
-                "Assets:MSFT  MSFT  @@ 2000.00 USD",
+                "Assets:MSFT  MSFT @@ 2000.00 USD",
             ),
             (
                 "cost without units",
@@ -4010,6 +4017,12 @@ mod tests {
 
     const IDEMPOTENCE_MATRIX: &[(&str, &str)] = &[
         ("empty", ""),
+        // `%` is a comment only as a column-0 line; elsewhere the lexer reads a
+        // FLAG (#2802), and a `"` after a column-0 `%` stays in the comment.
+        (
+            "percent_flag_and_comment",
+            "% c \"q\n2024-01-01 % \"n\"\n  % Assets:A  1 USD ; x\n  %Assets:B\n",
+        ),
         ("only_comment", "; header comment\n"),
         ("only_directive", "2024-01-01 open Assets:Cash\n"),
         (
@@ -5092,9 +5105,10 @@ mod tests {
                 prev = Some((token, span));
                 let classify = match token {
                     Token::String(_) => Some(SourceState::InString),
-                    Token::Comment(_) | Token::Shebang(_) | Token::EmacsDirective(_) => {
-                        Some(SourceState::InComment)
-                    }
+                    Token::Comment(_)
+                    | Token::PercentComment(_)
+                    | Token::Shebang(_)
+                    | Token::EmacsDirective(_) => Some(SourceState::InComment),
                     Token::Error(_) if heading_text => Some(SourceState::InComment),
                     _ => None,
                 };

@@ -650,17 +650,25 @@ fn starts_amount(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> bool {
             // as **+7.5**, silently, and the user saw only a downstream
             // "does not balance". Found while fixing the same silent drop for
             // `-,123.00` (issue #1892 discussion).
-            let mut j = i + 1;
-            while matches!(tokens.get(j).map(|(k, _)| *k), Some(SyntaxKind::WHITESPACE)) {
-                j += 1;
-            }
-            matches!(
-                tokens.get(j).map(|(k, _)| *k),
-                Some(SyntaxKind::NUMBER | SyntaxKind::L_PAREN),
-            )
+            starts_amount_operand(tokens, skip_signs(tokens, i))
         }
         _ => false,
     }
+}
+
+/// The index past a run of unary signs at `tokens[i]` and the whitespace
+/// around them. beancount's `number_expr` takes any number of them (`(MINUS |
+/// PLUS) number_expr` nests), so `--1`, `- -1` and `2 * - 3` are numbers
+/// there (#2802); a run that stopped at the first sign left the rest outside
+/// the `AMOUNT` node, which then reported a valid amount as malformed.
+fn skip_signs(tokens: &[(SyntaxKind, Range<usize>)], mut i: usize) -> usize {
+    while matches!(
+        tokens.get(i).map(|(k, _)| *k),
+        Some(SyntaxKind::MINUS | SyntaxKind::PLUS | SyntaxKind::WHITESPACE)
+    ) {
+        i += 1;
+    }
+    i
 }
 
 /// Returns true iff `tokens[i]` is an arithmetic operator
@@ -713,16 +721,15 @@ fn emit_amount(
     // amounts (`AMOUNT(MINUS)` and `AMOUNT(NUMBER CURRENCY)`) and the sign was
     // never read — the posting booked as **+7.5**. `starts_amount` has already
     // confirmed an operand follows, so this cannot swallow a trailing space.
+    // Any number of signs may stack (`--1`, `- -1`), see `skip_signs`.
     if matches!(
         tokens.get(i).map(|(k, _)| *k),
         Some(SyntaxKind::MINUS | SyntaxKind::PLUS),
     ) {
-        let (kind, range) = (tokens[i].0, tokens[i].1.clone());
-        builder.token(kind.into(), &source[range]);
-        i += 1;
-        while matches!(tokens.get(i).map(|(k, _)| *k), Some(SyntaxKind::WHITESPACE)) {
-            let range = tokens[i].1.clone();
-            builder.token(SyntaxKind::WHITESPACE.into(), &source[range]);
+        let operand = skip_signs(tokens, i);
+        while i < operand {
+            let (kind, range) = (tokens[i].0, tokens[i].1.clone());
+            builder.token(kind.into(), &source[range]);
             i += 1;
         }
     }
@@ -753,17 +760,21 @@ fn emit_amount(
         if matches!(tokens.get(j).map(|(k, _)| *k), Some(SyntaxKind::WHITESPACE)) {
             j += 1;
         }
-        // Optional sign before next operand.
-        let signed = matches!(
+        // Optional signs before the next operand, any number of them
+        // (`2 * - 3`, `2 * --3`), see `skip_signs`.
+        let operand_start = if matches!(
             tokens.get(j).map(|(k, _)| *k),
             Some(SyntaxKind::MINUS | SyntaxKind::PLUS),
-        );
-        let operand_start = if signed { j + 1 } else { j };
+        ) {
+            skip_signs(tokens, j)
+        } else {
+            j
+        };
         if !starts_amount_operand(tokens, operand_start) {
             break;
         }
-        // Commit tokens [i..j) (WS? op WS?) into AMOUNT.
-        while i < j {
+        // Commit tokens [i..operand_start) (WS? op WS? signs) into AMOUNT.
+        while i < operand_start {
             let (kind, range) = (tokens[i].0, tokens[i].1.clone());
             // Sanity: the only non-op tokens we should be committing
             // here are WHITESPACE. The op token itself was already
@@ -772,11 +783,6 @@ fn emit_amount(
                 kind == SyntaxKind::WHITESPACE || kind == op_kind || is_arith_op(kind),
                 "unexpected token kind {kind:?} during op-prefix commit",
             );
-            builder.token(kind.into(), &source[range]);
-            i += 1;
-        }
-        if signed {
-            let (kind, range) = (tokens[i].0, tokens[i].1.clone());
             builder.token(kind.into(), &source[range]);
             i += 1;
         }
@@ -1031,8 +1037,16 @@ fn starts_posting_sub_line(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> b
     if !has_flag {
         return false;
     }
-    matches!(tokens.get(i + 2), Some((SyntaxKind::WHITESPACE, _)))
-        && matches!(tokens.get(i + 3), Some((SyntaxKind::ACCOUNT, _)))
+    // The space after the flag is optional, as in beancount, where the flag
+    // and the account are separate tokens either way: `  !Assets:A  1 USD` is
+    // a flagged posting there (#2802), and was an unrecognized line here.
+    match tokens.get(i + 2) {
+        Some((SyntaxKind::ACCOUNT, _)) => true,
+        Some((SyntaxKind::WHITESPACE, _)) => {
+            matches!(tokens.get(i + 3), Some((SyntaxKind::ACCOUNT, _)))
+        }
+        _ => false,
+    }
 }
 
 /// Byte length of the leading `WHITESPACE` token at `tokens[i]`,

@@ -64,8 +64,11 @@ fn posting_line() -> impl Strategy<Value = String> {
         )),
         (account(), "1[0-9]{0,3} HOOL", amount_str())
             .prop_map(|(acct, units, cost)| format!("  {acct}  {units} {{{cost}}}")),
-        (account(), "1[0-9]{0,3} HOOL", amount_str())
-            .prop_map(|(acct, units, price)| format!("  {acct}  {units} @ {price}")),
+        // A price may not be negative: beancount reports it, and so do we
+        // (#2802).
+        (account(), "1[0-9]{0,3} HOOL", amount_str()).prop_map(|(acct, units, price)| {
+            format!("  {acct}  {units} @ {}", price.trim_start_matches('-'))
+        }),
     ]
 }
 

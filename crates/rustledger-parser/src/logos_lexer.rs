@@ -860,6 +860,22 @@ impl<'src> Iterator for TokenIter<'src> {
                 span.end = end;
                 result = Ok(Token::Whitespace(&source[span.clone()]));
             }
+            // A `%` that is not at column 0 is a FLAG in beancount (`[!&#?%]`),
+            // never a comment: `  % Assets:A  1 USD` is a flagged posting and
+            // `2024-01-01 % "x"` a transaction there (#2802). Only a column-0 `%`
+            // line is skipped, as a whole-line comment. Lexing it as a comment to
+            // the end of the line dropped the posting, or the rest of the line, in
+            // silence. Rewritten here, before the arms below, so an indented one
+            // still gets its `Indent` like any other token; the lexer resumes
+            // right after it, and a stray `%` elsewhere is reported by the line's
+            // own rule.
+            if matches!(result, Ok(Token::PercentComment(_)))
+                && !(self.at_line_start && span.start == self.last_newline_end)
+            {
+                self.restart_lexer(span.start + 1);
+                span.end = span.start + 1;
+                result = Ok(Token::Flag(&source[span.clone()]));
+            }
 
             if !self.keep_whitespace && matches!(result, Ok(Token::Whitespace(_))) {
                 // AST-path drops mid-line whitespace; the CST path keeps
@@ -1416,6 +1432,27 @@ mod tests {
         let s = format!("{}", Token::Error(payload));
         assert_eq!(s, "foo<BOM>bar");
         assert!(!s.contains(crate::bom::BOM_CHAR));
+    }
+
+    /// A `%` that is not at column 0 is a FLAG, as in beancount (#2802), and an
+    /// indented one still gets its `Indent`, like any token starting a line. At
+    /// column 0 it is a whole-line comment.
+    #[test]
+    fn test_tokenize_percent_is_a_flag_outside_column_0() {
+        let tokens = tokenize("2024-01-01 *\n  % Assets:A  1 USD\n% note\n");
+        let kinds: Vec<String> = tokens.iter().map(|(t, _)| format!("{t:?}")).collect();
+        let at = kinds
+            .iter()
+            .position(|k| k.starts_with("Flag(\"%\")"))
+            .expect("a `%` flag");
+        assert!(kinds[at - 1].starts_with("Indent("), "{kinds:?}");
+        assert!(kinds[at + 1].starts_with("Account("), "{kinds:?}");
+        assert!(
+            kinds
+                .iter()
+                .any(|k| k.starts_with("PercentComment(\"% note\")")),
+            "{kinds:?}"
+        );
     }
 
     /// A mid-file BOM (any U+FEFF not at strict byte 0) reaches the

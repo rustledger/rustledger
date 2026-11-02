@@ -72,12 +72,15 @@ pub enum BookingError {
     /// The price says what the units fetched in one currency and the lot what
     /// they cost in another, and with no rate between the two the gain cannot
     /// be computed: an interpolated gains posting absorbed both currencies
-    /// and reported nothing. Beancount refuses the same posting with the same
-    /// words.
+    /// and reported nothing. So the sale is not booked, deliberately, where
+    /// beancount books it. For a ledger file the parser has already reported
+    /// the posting ("Cost and price currencies must match", as beancount
+    /// does); this error says what follows from it, that the sale was not
+    /// booked, which is why a later balance assertion may not hold.
     #[error(
-        "Cost and price currencies must match: {cost} != {price} \
-         (a sale from {account} priced in another currency than its cost has no gain \
-         without an exchange rate)"
+        "sale from {account} not booked: its price currency ({price}) differs from its \
+         cost currency ({cost}), so it has no gain without an exchange rate \
+         (rledger refuses it; beancount books it)"
     )]
     CostPriceCurrencyMismatch {
         /// The account being reduced.
@@ -175,34 +178,6 @@ impl BookingError {
             .iter()
             .find(|p| &p.value.account == account)
             .map(|p| p.span)
-    }
-
-    /// Whether this is a [`Self::CostPriceCurrencyMismatch`] on a posting
-    /// that writes both currencies (`{100 USD} @ 120 EUR`).
-    ///
-    /// The parser reports every such posting it reads ("Cost and price
-    /// currencies must match", for a buy and a sale alike, as beancount
-    /// does), so for a transaction read from a source file this failure
-    /// restates that parse error and a caller reports it once. It is still a
-    /// failure: the sale has no gain to book. A cost currency booking filled
-    /// in itself, or a transaction no parser read, is not covered here and
-    /// is reported as usual. Shared by `rledger check` and the LSP.
-    #[must_use]
-    pub fn restates_a_parse_error(&self, txn: &Transaction) -> bool {
-        let Self::CostPriceCurrencyMismatch { account, .. } = self else {
-            return false;
-        };
-        txn.postings.iter().any(|p| {
-            let p = &p.value;
-            let cost = p.cost.as_ref().and_then(|c| c.currency.as_ref());
-            let price = p
-                .price
-                .as_ref()
-                .and_then(|price| price.amount.as_ref())
-                .and_then(IncompleteAmount::currency);
-            &p.account == account
-                && matches!((cost, price), (Some(cost), Some(price)) if cost.as_str() != price)
-        })
     }
 
     /// The message a diagnostic for this failure carries: the failure,
@@ -745,13 +720,15 @@ impl BookingEngine {
                 // A reduction priced in another currency than its cost has no
                 // computable gain: the price says what the units fetched in
                 // one currency, the lot what they cost in another, and nothing
-                // relates the two. Beancount refuses every such posting ("Cost
-                // and price currencies must match"); a reduction is refused
-                // below once it is known to be one, and a sale that is not
-                // a reduction just after. A purchase is deliberately not: it
-                // disposes of nothing, so no gain is computed from the two,
-                // and its price is only a price (compatibility.md, Known
-                // Differences 17).
+                // relates the two, so the sale is not booked (#2571): a
+                // reduction is refused below once it is known to be one, and a
+                // sale that is not a reduction just after. Beancount books it;
+                // its parser, and ours, report the posting as an error first
+                // ("Cost and price currencies must match"). A purchase is not
+                // refused here: it disposes of nothing, so no gain is computed
+                // from the two, and the parser has reported it for a ledger
+                // file; booking alone (a plugin's or an API caller's
+                // transaction) books its lot.
                 let price_currency: Option<&str> = posting
                     .price
                     .as_ref()

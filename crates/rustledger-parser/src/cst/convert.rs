@@ -4105,10 +4105,10 @@ fn posting_line_check(
 /// - a cost and a price whose currencies are both written and differ
 ///   (`{100 USD} @ 120 EUR`): "Cost and price currencies must match", for a
 ///   buy and a sale alike. A cost spec written without a currency (`{}`,
-///   `{100}`) or a price without one is not checked, as in beancount; booking
-///   reports the case it can see and the parser cannot, a cost currency that
-///   booking filled in (`BookingError::CostPriceCurrencyMismatch`), so each
-///   mismatch is reported once.
+///   `{100}`) or a price without one is not checked, as in beancount. A sale
+///   with mismatched currencies is then not booked, deliberately, where
+///   beancount books it, and booking says so
+///   (`BookingError::CostPriceCurrencyMismatch`, #2571).
 ///
 /// `tokens` is the posting line as [`posting_line_check`] flattens it, and
 /// grammatical: [`super::directive_header::first_posting_defect`] found

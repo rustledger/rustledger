@@ -486,14 +486,20 @@ listed elsewhere on this page (decimal precision, booking, plugins), which
 
 ### 17. Cost Currencies Beancount Refuses to Categorize
 
-Both engines refuse a posting whose cost and price currencies are both written
+Both engines report a posting whose cost and price currencies are both written
 and differ (`2 HOOL {11.00 EUR} @ 14.50 USD`: `Cost and price currencies must
-match`), a purchase and a sale alike, at parse time; booking also refuses such
-a sale built without the parser (a plugin or an API caller), whether it reduces
-a lot, opens a short or sells under NONE. Both give a cost spec written
-without a currency (`{}`) the currency of beancount's `categorize_by_currency`,
-so `-1 HOOL {}` beside `Assets:Cash 13.00 USD` matches no EUR lot (issue
-#2571). Two cases differ:
+match`), a purchase and a sale alike, at parse time. What follows differs for
+a sale: beancount books it, and rledger does not, whether it reduces a lot,
+opens a short or sells under NONE. The price says what the units fetched in one
+currency and the lot what they cost in another, so with no exchange rate the
+sale has no computable gain, and booking it put a gain in two currencies
+(#2571). rledger reports that it did not book the sale (`sale from ... not
+booked`), since a later balance assertion then sees the unsold units.
+
+Both engines give a cost spec written without a currency (`{}`) the currency
+of beancount's `categorize_by_currency`, so `-1 HOOL {}` beside
+`Assets:Cash 13.00 USD` matches no EUR lot (issue #2571). Two more cases
+differ:
 
 | Ledger | rustledger | Python beancount |
 |---|---|---|
@@ -501,12 +507,12 @@ so `-1 HOOL {}` beside `Assets:Cash 13.00 USD` matches no EUR lot (issue
 | A `{}` sale of X whose only other group is X itself (`10 X` moved in beside `-4 X {}`) | reads the cost currency from the account's lots, and sells | takes X as the cost currency, and `No position matches` |
 
 In the unresolved `{}` sale nothing names a currency: the account's method
-names the lot, as for any `{}` sale, and the auto-postings absorb whatever it cost. Beside a posting
-that does name one, rustledger refuses the sale too. And no lot of X is held
-at a cost in X, so the commodity's own postings say nothing about which lot a
-sale takes (a purchase there keeps beancount's cost in X). Each answer is
-well defined and is what rustledger booked before #2571, so it is kept;
-whether to refuse them as beancount does is an open decision.
+names the lot, as for any `{}` sale, and the auto-postings absorb whatever it
+cost. Beside a posting that does name one, rustledger refuses the sale too.
+And no lot of X is held at a cost in X, so the commodity's own postings say
+nothing about which lot a sale takes (a purchase there keeps beancount's cost
+in X). Each answer is well defined and is what rustledger booked before #2571,
+so it is kept; whether to refuse them as beancount does is an open decision.
 
 One more, older than #2571 and outside it: a cost spec with no currency on
 a posting that does not reduce a lot (a purchase, a sale under NONE, or one

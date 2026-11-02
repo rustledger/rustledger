@@ -199,9 +199,8 @@ impl std::error::Error for ParseError {}
 ///
 /// Reported when both currencies are written and differ
 /// (`{100 USD} @ 120 EUR`), in beancount's own wording, for a buy and a sale
-/// alike. Booking refuses the same sale (`CostPriceCurrencyMismatch`); the
-/// loader and the LSP drop that second report for a posting read from a
-/// source file, which the parser has already reported with this message.
+/// alike. For a sale, booking then reports that it did not book it
+/// (`CostPriceCurrencyMismatch`, #2571), a consequence rather than a repeat.
 pub const COST_PRICE_CURRENCY_MISMATCH: &str = "Cost and price currencies must match";
 
 /// Kinds of parse errors.

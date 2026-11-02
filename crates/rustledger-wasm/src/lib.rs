@@ -345,6 +345,37 @@ mod tests {
         assert!(!v.is_empty());
     }
 
+    /// A cost and a price in different currencies, both written, is the parse
+    /// error, for a purchase and a sale alike, as in beancount. WASM books
+    /// nothing while a file has parse errors, so unlike `rledger check` the
+    /// sale has no booking note here (it would say the sale was not booked,
+    /// #2571).
+    #[test]
+    fn test_load_and_book_reports_a_cost_price_currency_mismatch() {
+        use helpers::load_and_book;
+
+        let head = "2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n\
+                    2024-01-01 open Income:Gains\n";
+        let buy = "2024-01-02 * \"buy\"\n  Assets:Stock  10 HOOL {100 USD} @ 90 EUR\n  \
+                   Assets:Cash  -1000 USD\n";
+        let sale = "2024-01-02 * \"buy\"\n  Assets:Stock  10 HOOL {100 USD}\n  Assets:Cash\n\
+                    2024-02-01 * \"sell\"\n  Assets:Stock  -5 HOOL {100 USD} @ 90 EUR\n  \
+                    Assets:Cash  450 EUR\n  Income:Gains\n";
+        for (label, body, expected) in [("buy", buy, 1), ("sale", sale, 1)] {
+            let load = load_and_book(&format!("{head}{body}"));
+            let messages: Vec<String> = load
+                .reported_errors()
+                .into_iter()
+                .map(|e| e.message)
+                .filter(|m| {
+                    m.contains(rustledger_parser::COST_PRICE_CURRENCY_MISMATCH)
+                        || m.contains("not booked: its price currency")
+                })
+                .collect();
+            assert_eq!(messages.len(), expected, "{label}: {messages:?}");
+        }
+    }
+
     #[test]
     fn test_load_and_book() {
         use helpers::load_and_book;

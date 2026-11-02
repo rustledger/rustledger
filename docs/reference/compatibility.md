@@ -486,23 +486,22 @@ listed elsewhere on this page (decimal precision, booking, plugins), which
 
 ### 17. Cost Currencies Beancount Refuses to Categorize
 
-Both engines refuse a sale priced in another currency than its cost
-(`-2 HOOL {11.00 EUR} @ 14.50 USD`: `Cost and price currencies must match`),
-whether it reduces a lot, opens a short or sells under NONE, and both give a
-cost spec written without a currency (`{}`) the currency of beancount's
-`categorize_by_currency`, so `-1 HOOL {}` beside `Assets:Cash 13.00 USD`
-matches no EUR lot (issue #2571). Three cases differ:
+Both engines refuse a posting whose cost and price currencies are both written
+and differ (`2 HOOL {11.00 EUR} @ 14.50 USD`: `Cost and price currencies must
+match`), a purchase and a sale alike, at parse time; booking also refuses such
+a sale built without the parser (a plugin or an API caller), whether it reduces
+a lot, opens a short or sells under NONE. Both give a cost spec written
+without a currency (`{}`) the currency of beancount's `categorize_by_currency`,
+so `-1 HOOL {}` beside `Assets:Cash 13.00 USD` matches no EUR lot (issue
+#2571). Two cases differ:
 
 | Ledger | rustledger | Python beancount |
 |---|---|---|
-| A purchase priced in another currency than its cost, `2 HOOL {11.00 EUR} @ 14.50 USD` | books the lot | `Cost and price currencies must match` |
 | A `{}` sale whose only other postings are auto-postings, from an account holding lots in two cost currencies | sells by the account's booking method (FIFO: the oldest lot) | `Failed to categorize posting` |
 | A `{}` sale of X whose only other group is X itself (`10 X` moved in beside `-4 X {}`) | reads the cost currency from the account's lots, and sells | takes X as the cost currency, and `No position matches` |
 
-A purchase disposes of nothing, so no gain is computed from the two
-currencies; its price is recorded as a price. In the unresolved `{}` sale
-nothing names a currency: the account's method names the lot, as for any
-`{}` sale, and the auto-postings absorb whatever it cost. Beside a posting
+In the unresolved `{}` sale nothing names a currency: the account's method
+names the lot, as for any `{}` sale, and the auto-postings absorb whatever it cost. Beside a posting
 that does name one, rustledger refuses the sale too. And no lot of X is held
 at a cost in X, so the commodity's own postings say nothing about which lot a
 sale takes (a purchase there keeps beancount's cost in X). Each answer is
@@ -516,9 +515,10 @@ still takes the currency rustledger infers from the other postings, where
 beancount refuses (`Failed to categorize posting`). No gain lands in two
 currencies there.
 
-Pinned by `crates/rustledger-booking/tests/cost_currency_2571.rs`
-(`an_augmentation_priced_in_another_currency_still_books`,
-`an_unresolved_empty_cost_sells_by_the_accounts_method`,
+Pinned by `test_parse_reports_a_cost_and_price_currency_mismatch`
+(`crates/rustledger-parser/tests/stray_char_matrix.rs`) and by
+`crates/rustledger-booking/tests/cost_currency_2571.rs`
+(`an_unresolved_empty_cost_sells_by_the_accounts_method`,
 `the_commoditys_own_postings_do_not_name_its_cost_currency`).
 
 ## BQL Query Compatibility

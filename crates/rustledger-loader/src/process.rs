@@ -1124,6 +1124,18 @@ fn run_booking(
                     // text renderer papered over it by appending the date and
                     // narration to the message, which is why it went unnoticed.
                     let span = e.posting_span(txn).unwrap_or(directive_span);
+                    // A sale whose cost and price currencies are both written in
+                    // a loaded file was already reported by the parser, as
+                    // beancount reports it (`posting_builder_error`, the same rule
+                    // for every parsed posting); booking refusing the same posting
+                    // is not a second error. It still fails: it has no gain to
+                    // book. A cost currency booking filled in, or a transaction
+                    // no parser saw (a synthesized one), keeps this error.
+                    if rustledger_core::is_source_file_id(file_id) && e.restates_a_parse_error(txn)
+                    {
+                        failed_indices.push(i);
+                        continue;
+                    }
                     let mut err =
                         LedgerError::error(booking_failure_code(&e), e.diagnostic_message(txn))
                             .with_source_span((span.start, span.end), file_id);

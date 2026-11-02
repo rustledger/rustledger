@@ -413,6 +413,10 @@ pub(crate) fn run_ledger_validation(
             // Leave the transaction as written; it is set aside below.
             Err(e) => {
                 failed[index] = true;
+                // The parser already reported it, as `rledger check` reasons.
+                if rustledger_core::is_source_file_id(file_id) && e.restates_a_parse_error(txn) {
+                    continue;
+                }
                 booking_errors.push((
                     BookingDiagnostic {
                         code: rustledger_validate::ErrorCode::booking_failure_code_str(&e),
@@ -3570,7 +3574,10 @@ plugin "auto_accounts"
     /// `interpolation_failures_match_check_code_message_and_line`; one stands
     /// for them here. (`NotBooked` needs an unbooked ledger handed to
     /// validation, which no file can produce; its code is pinned in
-    /// rustledger-validate.)
+    /// rustledger-validate.) `CostPriceCurrencyMismatch` is not here either: a file
+    /// that writes both currencies gets the parse error instead, and booking
+    /// only fills a cost currency from the price itself; see
+    /// `a_written_cost_price_currency_mismatch_is_reported_once`.
     #[test]
     fn every_booking_failure_has_one_code_on_both_surfaces() {
         let head = "2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n\
@@ -3579,7 +3586,7 @@ plugin "auto_accounts"
                     2024-01-01 open Income:Gains\n";
         let buy = "2024-01-02 * \"buy\"\n  Assets:Stock  10 AAPL {100 USD}\n  Assets:Cash\n\
                    2024-01-03 * \"buy\"\n  Assets:Stock  10 AAPL {110 USD}\n  Assets:Cash\n";
-        let cases: [(&str, String, &str, &str); 12] = [
+        let cases: [(&str, String, &str, &str); 11] = [
             (
                 "NoMatchingLot",
                 format!(
@@ -3644,15 +3651,6 @@ plugin "auto_accounts"
                  2024-02-01 * \"sell\"\n  Assets:Avg  -1 X {2024-01-02}\n  Assets:Cash\n"
                     .to_string(),
                 "describes no lot",
-                "E4001",
-            ),
-            (
-                "CostPriceCurrencyMismatch",
-                format!(
-                    "{buy}2024-02-01 * \"sell\"\n  Assets:Stock  -5 AAPL {{100 USD}} @ 90 EUR\n  \
-                     Assets:Cash  450 EUR\n  Income:Gains\n"
-                ),
-                "Cost and price currencies must match",
                 "E4001",
             ),
             (
@@ -3731,6 +3729,44 @@ plugin "auto_accounts"
                 .collect();
             assert_eq!(lsp, check, "{variant}: the LSP's diagnostic: {diags:?}");
         }
+    }
+
+    /// A sale whose cost and price currencies are both written is a parse
+    /// error, as beancount reports it, and booking refusing the same posting
+    /// is not reported again: `rledger check` and the LSP each report it once.
+    #[test]
+    fn a_written_cost_price_currency_mismatch_is_reported_once() {
+        let source = "2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock\n\
+                      2024-01-01 open Income:Gains\n\
+                      2024-01-02 * \"buy\"\n  Assets:Stock  10 AAPL {100 USD}\n  Assets:Cash\n\
+                      2024-02-01 * \"sell\"\n  Assets:Stock  -5 AAPL {100 USD} @ 90 EUR\n  \
+                      Assets:Cash  450 EUR\n  Income:Gains\n";
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("main.beancount");
+        std::fs::write(&path, source).unwrap();
+        let ledger = rustledger_loader::load(&path, &rustledger_loader::LoadOptions::default())
+            .expect("load");
+        assert!(
+            ledger.errors.iter().all(|e| !e.is_booking_failure()),
+            "check reports it again from booking: {:?}",
+            ledger.errors
+        );
+        let parsed = parse(source);
+        let diags = all_diagnostics(
+            &parsed,
+            source,
+            None,
+            None,
+            None,
+            &[],
+            PositionEncoding::Utf16,
+        );
+        let mismatches: Vec<&str> = diags
+            .iter()
+            .map(|d| d.message.as_str())
+            .filter(|m| m.contains(rustledger_parser::COST_PRICE_CURRENCY_MISMATCH))
+            .collect();
+        assert_eq!(mismatches.len(), 1, "{diags:?}");
     }
 
     /// #2655: the LSP books in the loader's order, by the loader's own key

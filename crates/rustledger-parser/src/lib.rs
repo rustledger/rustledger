@@ -95,7 +95,7 @@ pub use cst::{
 // crate, NOT with `rowan` directly. A rowan minor bump that
 // changes any of these will require a coordinated bump of this
 // crate so the re-export contract holds at THIS crate's semver.
-pub use error::{ParseError, ParseErrorKind};
+pub use error::{COST_PRICE_CURRENCY_MISMATCH, ParseError, ParseErrorKind};
 pub use logos_lexer::{is_valid_account_name, is_valid_currency};
 pub use rowan::{Direction, NodeOrToken, TextRange, TextSize, TokenAtOffset, WalkEvent};
 pub use rustledger_core::{

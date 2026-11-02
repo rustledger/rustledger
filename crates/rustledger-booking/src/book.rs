@@ -177,6 +177,34 @@ impl BookingError {
             .map(|p| p.span)
     }
 
+    /// Whether this is a [`Self::CostPriceCurrencyMismatch`] on a posting
+    /// that writes both currencies (`{100 USD} @ 120 EUR`).
+    ///
+    /// The parser reports every such posting it reads ("Cost and price
+    /// currencies must match", for a buy and a sale alike, as beancount
+    /// does), so for a transaction read from a source file this failure
+    /// restates that parse error and a caller reports it once. It is still a
+    /// failure: the sale has no gain to book. A cost currency booking filled
+    /// in itself, or a transaction no parser read, is not covered here and
+    /// is reported as usual. Shared by `rledger check` and the LSP.
+    #[must_use]
+    pub fn restates_a_parse_error(&self, txn: &Transaction) -> bool {
+        let Self::CostPriceCurrencyMismatch { account, .. } = self else {
+            return false;
+        };
+        txn.postings.iter().any(|p| {
+            let p = &p.value;
+            let cost = p.cost.as_ref().and_then(|c| c.currency.as_ref());
+            let price = p
+                .price
+                .as_ref()
+                .and_then(|price| price.amount.as_ref())
+                .and_then(IncompleteAmount::currency);
+            &p.account == account
+                && matches!((cost, price), (Some(cost), Some(price)) if cost.as_str() != price)
+        })
+    }
+
     /// The message a diagnostic for this failure carries: the failure,
     /// then the transaction's date and narration so the reader can find it.
     ///

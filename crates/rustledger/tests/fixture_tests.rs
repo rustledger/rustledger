@@ -238,6 +238,9 @@ fn lima_test_expects_parse_error(name: &str) -> bool {
         || name.contains("TotalPriceWithMissing")
         // A duplicate cost, date or label in a cost spec (#2802).
         || name.contains("CostRepeated")
+        // A cost and a price whose written currencies differ ("Cost and price
+        // currencies must match"), for a buy too.
+        || name.contains("DifferentCostAndPriceCurrency")
 }
 
 /// The seven constructs from #2008 that beancount rejects, and whether rledger

@@ -195,6 +195,15 @@ impl fmt::Display for ParseError {
 
 impl std::error::Error for ParseError {}
 
+/// The start of the parse error for a cost and price in different currencies.
+///
+/// Reported when both currencies are written and differ
+/// (`{100 USD} @ 120 EUR`), in beancount's own wording, for a buy and a sale
+/// alike. Booking refuses the same sale (`CostPriceCurrencyMismatch`); the
+/// loader and the LSP drop that second report for a posting read from a
+/// source file, which the parser has already reported with this message.
+pub const COST_PRICE_CURRENCY_MISMATCH: &str = "Cost and price currencies must match";
+
 /// Kinds of parse errors.
 ///
 /// Marked `#[non_exhaustive]` because new variants land routinely

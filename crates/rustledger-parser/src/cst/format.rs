@@ -849,6 +849,62 @@ fn format_tree(node: &crate::SyntaxNode, style: GroupingStyle<'_>, broken: &Erro
     format_node_with_style(node, alignment, style, broken)
 }
 
+/// How one top-level node is written, shared by the whole-file walk
+/// (`format_node_with_style`) and the range walk
+/// (`format_node_range_with_style`), so the two cannot disagree on which
+/// directives are rebuilt and which are copied verbatim (#2803).
+struct NodeEmitter<'a, 'g> {
+    alignment: PostingAlignment,
+    group: GroupingStyle<'g>,
+    broken: &'a ErrorRanges,
+}
+
+impl NodeEmitter<'_, '_> {
+    /// Write the top-level node `n`. `line_indent` is a top-level
+    /// WHITESPACE token directly before it (see the whole-file walk).
+    fn emit(
+        &self,
+        n: &crate::SyntaxNode,
+        line_indent: Option<&crate::SyntaxToken>,
+        spacing: &mut TopLevelSpacing,
+        out: &mut String,
+    ) {
+        if let Some(directive) = ast::Directive::cast(n.clone())
+            && !self.broken.overlaps(n.text_range())
+        {
+            spacing.blank_lines(leading_blank_lines(directive.syntax()));
+            spacing.flush(out);
+            emit_directive(&directive, self.alignment, self.group, out);
+            spacing.after_node();
+        } else if n.kind() == crate::SyntaxKind::ERROR_NODE || ast::Directive::can_cast(n.kind()) {
+            // A directive lands here only when a parse error falls inside it
+            // (#2794): rebuilt from its typed values it would lose the text
+            // the parser could not read, and the error with it, so it is
+            // copied verbatim like an ERROR_NODE. The rest of that directive
+            // is not normalized either; it is once the error is fixed.
+            //
+            // Preserve unparsable content verbatim (#1335): `format` must
+            // never delete the author's text. Org-mode `*` section headers
+            // (and any comments grouped with them) parse into ERROR_NODEs;
+            // emit them as-is rather than dropping them. Treated like a
+            // directive for spacing: an ERROR_NODE is a top-level content
+            // block, so the author's blank lines around it (before it, and
+            // before the next directive) are preserved, not flushed.
+            spacing.blank_lines(leading_blank_lines(n));
+            spacing.flush(out);
+            if let Some(ws) = line_indent {
+                out.push_str(ws.text());
+            }
+            let trailing = emit_error_node(n, out);
+            spacing.after_node();
+            // The node's own trailing blank lines were trimmed off its text;
+            // they still separate it from what follows.
+            spacing.blank_lines(trailing);
+        }
+        // Any other non-directive node: nothing to emit.
+    }
+}
+
 /// The byte ranges of a tree that hold a parse error, sorted and merged.
 ///
 /// The formatter rebuilds a directive from its typed values, so text the
@@ -1006,43 +1062,12 @@ fn format_node_with_style(
         let line_indent = indent.take();
         match el {
             rowan::NodeOrToken::Node(n) => {
-                if let Some(directive) = ast::Directive::cast(n.clone())
-                    && !broken.overlaps(n.text_range())
-                {
-                    spacing.blank_lines(leading_blank_lines(directive.syntax()));
-                    spacing.flush(&mut out);
-                    emit_directive(&directive, alignment, group, &mut out);
-                    spacing.after_node();
-                } else if n.kind() == crate::SyntaxKind::ERROR_NODE
-                    || ast::Directive::can_cast(n.kind())
-                {
-                    // A directive lands here only when a parse error falls
-                    // inside it (#2794): rebuilt from its typed values it
-                    // would lose the text the parser could not read, and the
-                    // error with it, so it is copied verbatim like an
-                    // ERROR_NODE. The rest of that directive is not
-                    // normalized either; it is once the error is fixed.
-                    //
-                    // Preserve unparsable content verbatim (#1335): `format`
-                    // must never delete the author's text. Org-mode `*`
-                    // section headers (and any comments grouped with them)
-                    // parse into ERROR_NODEs; emit them as-is rather than
-                    // dropping them. Treated like a directive for spacing — an
-                    // ERROR_NODE is a top-level content block, so the author's
-                    // blank lines around it (before it, and before the next
-                    // directive) are preserved, not flushed.
-                    spacing.blank_lines(leading_blank_lines(&n));
-                    spacing.flush(&mut out);
-                    if let Some(ws) = line_indent {
-                        out.push_str(ws.text());
-                    }
-                    let trailing = emit_error_node(&n, &mut out);
-                    spacing.after_node();
-                    // The node's own trailing blank lines were trimmed off
-                    // its text; they still separate it from what follows.
-                    spacing.blank_lines(trailing);
-                }
-                // Any other non-directive node: nothing to emit.
+                let emitter = NodeEmitter {
+                    alignment,
+                    group,
+                    broken,
+                };
+                emitter.emit(&n, line_indent.as_ref(), &mut spacing, &mut out);
             }
             rowan::NodeOrToken::Token(t) => {
                 if t.kind() == crate::SyntaxKind::WHITESPACE {
@@ -1157,15 +1182,14 @@ impl TopLevelSpacing {
 ///   as `[]`); the client treats it as "nothing to format".
 /// - If the computed snap range would cover any top-level
 ///   `ERROR_NODE` byte, returns `None`. **Range formatting refuses
-///   to delete user content the parser couldn't classify.** This
-///   diverges from [`format_node`], which silently drops
-///   `ERROR_NODE` children on the whole-file path; the rationale
-///   is the per-handler asymmetry the LSP exposes — the user
-///   pressing "Format Selection" expects either a clean
-///   reformat or a no-op, never a silent partial delete of an
-///   in-progress directive. Tooling that genuinely wants to drop
-///   broken regions can still call [`format_node`] on the same
-///   node.
+///   to delete user content the parser couldn't classify.** The
+///   whole-file path copies an `ERROR_NODE` verbatim instead
+///   (#1335); the range path refuses, because the user pressing
+///   "Format Selection" expects either a clean reformat or a
+///   no-op. A *directive* that holds a parse error is different:
+///   [`format_parsed_range`] copies it verbatim, as the whole-file
+///   path does (#2803). The other range entry points have no error
+///   list and treat every directive as well formed.
 /// - Otherwise returns `Some((snap, text))` where `snap` is the
 ///   union of the included children's text ranges (so it begins at
 ///   the first included child's start and ends at the last
@@ -1237,7 +1261,13 @@ pub fn format_node_range_with_alignment(
     range: rowan::TextRange,
     alignment: PostingAlignment,
 ) -> Option<(rowan::TextRange, String)> {
-    format_node_range_with_style(node, range, alignment, GroupingStyle::default())
+    format_node_range_with_style(
+        node,
+        range,
+        alignment,
+        GroupingStyle::default(),
+        &ErrorRanges::default(),
+    )
 }
 
 /// [`format_node_range`] under an explicit grouping style, measuring the
@@ -1254,7 +1284,41 @@ pub fn format_node_range_grouped(
 ) -> Option<(rowan::TextRange, String)> {
     let source_file = SourceFile::cast(node.clone())?;
     let alignment = compute_alignment(&source_file, style);
-    format_node_range_with_style(node, range, alignment, style)
+    format_node_range_with_style(node, range, alignment, style, &ErrorRanges::default())
+}
+
+/// [`format_node_range`] for a tree that may hold parse errors.
+///
+/// A directive that overlaps one of `parse_result`'s errors is copied verbatim
+/// instead of being rebuilt from its typed values, which would delete the text
+/// the parser could not read (#2803). This is the same rule, from the same
+/// `ErrorRanges`, as the whole-file error-tolerant formatter
+/// ([`format_source`], #2794), so the two agree on which directives they
+/// keep as written.
+///
+/// `range` is in the CST frame, as for [`format_node_range`]. Under the
+/// default `style` the alignment cached on `parse_result` is reused;
+/// otherwise it is measured under `style` (the cache is measured ungrouped).
+///
+/// The other range entry points know nothing of parse errors and are for
+/// trees without them.
+#[must_use]
+pub fn format_parsed_range(
+    parse_result: &crate::ParseResult,
+    range: rowan::TextRange,
+    style: GroupingStyle<'_>,
+) -> Option<(rowan::TextRange, String)> {
+    let node = parse_result.syntax_node();
+    let alignment = if style.groups_anything() {
+        compute_alignment(&SourceFile::cast(node.clone())?, style)
+    } else {
+        parse_result.alignment()
+    };
+    let broken = ErrorRanges::new(
+        &parse_result.errors,
+        if parse_result.has_leading_bom { 3 } else { 0 },
+    );
+    format_node_range_with_style(&node, range, alignment, style, &broken)
 }
 
 /// [`format_node_range_with_alignment`] with an explicit grouping style.
@@ -1269,6 +1333,7 @@ fn format_node_range_with_style(
     range: rowan::TextRange,
     alignment: PostingAlignment,
     style: GroupingStyle<'_>,
+    broken: &ErrorRanges,
 ) -> Option<(rowan::TextRange, String)> {
     // Precondition check (debug-only). Same rationale as
     // `format_node_with_alignment`: the bare delegate already
@@ -1386,18 +1451,20 @@ fn format_node_range_with_style(
         match el {
             rowan::NodeOrToken::Node(n) => {
                 // ERROR_NODEs never reach here: the range path bails out
-                // above (returns None) when the snap covers one, so it
-                // refuses to format rather than risk touching unparsable
-                // content. Only the whole-file path preserves them verbatim.
-                let Some(directive) = ast::Directive::cast(n) else {
+                // above (returns None) when the snap covers one. A directive
+                // holding a parse error is copied verbatim by the same
+                // emitter the whole-file walk uses (#2803), so its unparsable
+                // text is kept; the author's blank lines are preserved
+                // identically too (#1325, #2506).
+                if !ast::Directive::can_cast(n.kind()) {
                     continue;
+                }
+                let emitter = NodeEmitter {
+                    alignment,
+                    group: style,
+                    broken,
                 };
-                // Preserve the author's blank lines (#1325, #2506)
-                // identically to whole-file formatting.
-                spacing.blank_lines(leading_blank_lines(directive.syntax()));
-                spacing.flush(&mut out);
-                emit_directive(&directive, alignment, style, &mut out);
-                spacing.after_node();
+                emitter.emit(&n, None, &mut spacing, &mut out);
             }
             rowan::NodeOrToken::Token(t) => spacing.top_level_token(&t, &mut out),
         }

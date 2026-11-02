@@ -17,8 +17,10 @@
 //!
 //! Three cases are NOT beancount's answer, and are pinned so that changing them
 //! is a decision rather than an accident; see the #2571 PR:
-//! - a purchase priced in another currency than its cost still books
-//!   (beancount: "Cost and price currencies must match"); nothing is
+//! - a purchase priced in another currency than its cost still books when
+//!   it reaches booking without the parser (a plugin's or an API caller's
+//!   transaction); in a ledger file both rledger's parser and beancount's
+//!   report it first ("Cost and price currencies must match"). Nothing is
 //!   disposed of, so no gain is computed from the two;
 //! - a `{}` sale no step resolves (only auto-postings beside it, lots in two
 //!   cost currencies) sells by the account's method (beancount: "Failed to
@@ -334,8 +336,10 @@ fn two_empty_costs_each_take_their_accounts_cost_currency() {
     assert_eq!(got[1], "Assets:Stock2 -1 HOOL {11.00 EUR}");
 }
 
-/// Pinned divergence: beancount refuses this augmentation; it disposes of
-/// nothing, so no gain is computed across the two currencies.
+/// Booking alone books this augmentation: it disposes of nothing, so no gain
+/// is computed across the two currencies. In a ledger file the parser reports
+/// the posting first, as beancount does; this pins booking for a transaction
+/// no parser read (a plugin's or an API caller's).
 #[test]
 fn an_augmentation_priced_in_another_currency_still_books() {
     let buy_priced = txn(

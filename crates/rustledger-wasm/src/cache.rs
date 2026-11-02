@@ -345,7 +345,10 @@ use crate::types::{Error, LedgerOptions};
 /// transaction or posting line is a parse error, and `!Assets:A` and `--1 USD`
 /// parse; a v67 blob would keep serving such a file without the error, or
 /// with one.
-pub const CACHE_VERSION: u32 = 68;
+/// v69: loader v54, PARSER OUTPUT changed. A posting whose cost and price
+/// currencies are both written and differ is a parse error, a purchase too; a
+/// v68 blob would keep serving such a purchase without the error.
+pub const CACHE_VERSION: u32 = 69;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -377,7 +380,7 @@ pub const CACHE_VERSION: u32 = 68;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 53;
+const LOADER_CACHE_VERSION_PIN: u32 = 54;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

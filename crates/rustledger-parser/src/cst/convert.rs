@@ -4101,14 +4101,14 @@ fn posting_line_check(
 /// - a `#` in a `{{ }}` total cost ("Per-unit cost may not be specified using
 ///   total cost syntax");
 /// - a negative price (`@ -3 USD`), evaluated by the shared reader;
-/// - `@@` on a posting without a number for its units.
-///
-/// Not here: a cost and a price in different currencies, which beancount's
-/// builder also rejects. Booking already reports it for a sale (E4001,
-/// `BookingError::CostPriceCurrencyMismatch`, with the reason), and reporting
-/// it here too reported every such sale twice. A buy with mismatched
-/// currencies still loads, unlike in beancount; the matrix pins those rows
-/// (`known_currency_mismatch`) until the one rule is moved to a single place.
+/// - `@@` on a posting without a number for its units;
+/// - a cost and a price whose currencies are both written and differ
+///   (`{100 USD} @ 120 EUR`): "Cost and price currencies must match", for a
+///   buy and a sale alike. A cost spec written without a currency (`{}`,
+///   `{100}`) or a price without one is not checked, as in beancount. A sale
+///   with mismatched currencies is then not booked, deliberately, where
+///   beancount books it, and booking says so
+///   (`BookingError::CostPriceCurrencyMismatch`, #2571).
 ///
 /// `tokens` is the posting line as [`posting_line_check`] flattens it, and
 /// grammatical: [`super::directive_header::first_posting_defect`] found
@@ -4256,6 +4256,26 @@ fn posting_builder_error(
              as beancount reports"
                 .to_string(),
         ));
+    }
+    // Both currencies written and different: beancount's builder rejects the
+    // posting for a buy and a sale alike (`grammar.py` `posting`). A cost
+    // spec's currency is its one `CURRENCY` token (dates and labels have
+    // none); the price's is its last token.
+    let cost_currency = sig[units_end..i].iter().find(|(k, _)| *k == K::CURRENCY);
+    if let (Some((_, cost)), Some((K::CURRENCY, price_currency))) = (cost_currency, price.last()) {
+        let (cost_text, price_text) = (
+            src.get(cost.clone()).unwrap_or_default(),
+            src.get(price_currency.clone()).unwrap_or_default(),
+        );
+        if cost_text != price_text {
+            return Some((
+                cost.start..price_currency.end,
+                format!(
+                    "{}: {cost_text} != {price_text}",
+                    crate::COST_PRICE_CURRENCY_MISMATCH
+                ),
+            ));
+        }
     }
     None
 }

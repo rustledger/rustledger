@@ -176,32 +176,6 @@ const fn known_mid_line_cr(row: &Row, case: &Case) -> bool {
 /// which beancount 3.2.3 rejects ("Cost merging is not supported yet") and
 /// rledger implements, a correct feature it keeps deliberately (#2802);
 /// pinned by count. See `test_parse_accepts_cost_merging_unlike_beancount`.
-/// A posting whose cost and price name different currencies: beancount's
-/// builder rejects it at parse time; we leave it to booking, which reports it
-/// for a sale (E4001) but not for a buy. Pinned by count until the one rule
-/// is moved to a single place (#2802). See
-/// `test_parse_leaves_a_cost_and_price_currency_mismatch_to_booking`.
-fn known_currency_mismatch(src: &str) -> bool {
-    parse(src).directives.iter().any(|d| {
-        let rustledger_core::Directive::Transaction(t) = &d.value else {
-            return false;
-        };
-        t.postings.iter().any(|p| {
-            let cost = p
-                .cost
-                .as_ref()
-                .and_then(|c| c.currency.as_ref())
-                .map(rustledger_core::Currency::as_str);
-            let price = p
-                .price
-                .as_ref()
-                .and_then(|a| a.amount.as_ref())
-                .and_then(|a| a.currency());
-            matches!((cost, price), (Some(c), Some(q)) if c != q)
-        })
-    })
-}
-
 fn known_cost_merge(case: &Case) -> bool {
     if case.ch != '*' {
         return false;
@@ -221,7 +195,6 @@ fn test_parse_reports_a_stray_character_exactly_when_beancount_does() {
     let mut known_dates = [0usize; 3];
     let mut known_cr = 0usize;
     let mut known_merge = 0usize;
-    let mut known_mismatch = 0usize;
     let mut wrong = Vec::new();
     for row in rows() {
         for (case, verdict) in cases(&row.base).iter().zip(&row.verdicts) {
@@ -246,10 +219,6 @@ fn test_parse_reports_a_stray_character_exactly_when_beancount_does() {
             }
             if known_cost_merge(case) && !we_reject && beancount_rejects {
                 known_merge += 1;
-                continue;
-            }
-            if !we_reject && beancount_rejects && known_currency_mismatch(&case.src) {
-                known_mismatch += 1;
                 continue;
             }
             checked[stage] += 1;
@@ -293,7 +262,6 @@ fn test_parse_reports_a_stray_character_exactly_when_beancount_does() {
     );
     assert_eq!(known_cr, 5, "the mid-line `\\r` (#2804) rows changed");
     assert_eq!(known_merge, 1, "the cost-merge (`{{*}}`) rows changed");
-    assert_eq!(known_mismatch, 64, "the cost/price currency rows changed");
     assert!(
         wrong.is_empty(),
         "{} of {} cases disagree with beancount, first 20:\n{}",
@@ -1221,14 +1189,41 @@ fn test_parse_accepts_cost_merging_unlike_beancount() {
     }
 }
 
-/// A cost and a price in different currencies is left to booking, which reports
-/// it for a sale (E4001, with the reason); beancount's builder rejects it at
-/// parse time for a buy too. Reporting it at parse time as well reported every
-/// such sale twice, so the parser does not, pending one rule in one place
-/// (#2802).
+/// A cost and a price whose currencies are both written and differ is a
+/// parse error, for a buy and a sale alike, as beancount's builder reports
+/// it ("Cost and price currencies must match: USD != EUR"); the transaction
+/// is kept. A cost or a price written without a currency is not checked, as
+/// in beancount. Results from bean-check 3.2.3.
 #[test]
-fn test_parse_leaves_a_cost_and_price_currency_mismatch_to_booking() {
-    for posting in ["1 HOOL {2 USD} @ 3 EUR", "-1 HOOL {2 USD} @ 3 EUR"] {
+fn test_parse_reports_a_cost_and_price_currency_mismatch() {
+    for posting in [
+        "10 HOOL {100 USD} @ 120 EUR",
+        "-10 HOOL {100 USD} @ 120 EUR",
+        "10 HOOL {100 USD} @@ 1200 EUR",
+        "10 HOOL {{1000 USD}} @ 120 EUR",
+        "10 HOOL {100 USD, 2024-01-01} @ 120 EUR",
+        "10 HOOL {10 # 5 USD} @ 120 EUR",
+    ] {
+        let src = format!("2024-01-01 *\n  Assets:A  {posting}\n  Assets:B\n");
+        let r = parse_both(&src);
+        assert_eq!(r.errors.len(), 1, "{src:?}: {:?}", r.errors);
+        assert_eq!(
+            r.errors[0].message(),
+            format!(
+                "parse error: {}: USD != EUR",
+                rustledger_parser::COST_PRICE_CURRENCY_MISMATCH
+            ),
+            "{src:?}"
+        );
+        assert_eq!(r.directives.len(), 1, "{src:?}: the transaction is kept");
+    }
+    for posting in [
+        "10 HOOL @ 120 EUR",
+        "10 HOOL {100} @ 120 EUR",
+        "10 HOOL {100 USD} @ 120",
+        "10 HOOL {100 USD} @ 120 USD",
+        "-10 HOOL {} @ 120 EUR",
+    ] {
         let src = format!("2024-01-01 *\n  Assets:A  {posting}\n  Assets:B\n");
         assert!(parse_both(&src).errors.is_empty(), "{src:?}");
     }

@@ -20,7 +20,7 @@
 //! so the report's end-of-run figures (`t-end`) are the retained journal, not
 //! an empty heap. The same numbers are printed to stderr as a `retained:` line
 //! from a snapshot taken while the ledger is alive, next to the run's peak and
-//! total allocation. (Before #2742 the ledger was dropped first, so `t-end`
+//! total allocation. (Previously the ledger was dropped first, so `t-end`
 //! measured nothing.)
 //!
 //! Set `PROFILE_DROP_SOURCE_TEXT=1` to load with `retain_source_text: false`

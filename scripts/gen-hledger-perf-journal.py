@@ -5,13 +5,20 @@ Usage:
 
     python3 scripts/gen-hledger-perf-journal.py [transactions] [--meta] > journal.beancount
 
-The shape follows hledger's `tools/generatejournal 1000000 1000 10` as used on
-hledger.org/PERFORMANCE.html (the benchmark #2742 answers): one transaction a
-day, 1000 accounts nested up to 10 levels deep, 26 commodities, two postings
-per transaction, two transactions in three carrying a price annotation (`@`
-or `@@`), and one `price` directive per transaction. hledger is not needed:
-this writes beancount directly, deterministically, so a measurement can be
-repeated byte for byte.
+The shape approximates the counts of hledger's `tools/generatejournal 1000000
+1000 10`, as used on hledger.org/PERFORMANCE.html (the benchmark #2742
+answers): one transaction a day, 1000 accounts nested up to 10 levels deep,
+26 commodities, two postings per transaction, two transactions in three
+carrying a price annotation (`@` or `@@`), and one `price` directive per
+transaction. It is not byte-comparable with hledger's output: every amount is
+`1` (hledger uses the transaction number), prices are in `USD` (hledger uses
+the next of its single-letter commodities, so this file has 27 commodities),
+each `price` directive is in its transaction's commodity (hledger writes
+`A -> B` rates), the rate cycle is 61 transactions (hledger: 60), and the
+accounts share `L1..Lk` parents with a unique leaf (hledger nests chains whose
+prefixes are accounts too). That is close enough for the memory analysis.
+hledger is not needed: this writes beancount directly, deterministically, so a
+measurement can be repeated byte for byte.
 
 `--meta` adds what the synthetic journal leaves out and real ledgers have: a
 comment line before every transaction, two metadata lines on each transaction

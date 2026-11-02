@@ -28,13 +28,12 @@ checksum = "320119579fcad9c21884f5c4861d16174d0e06250625266f50fe6898340abefa"
 
 [[package]]
 name = "agcli"
-version = "0.17.0"
+version = "0.19.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4a479e06539ad8156acbe2c24a85b350ca3c95c19843fdc231b5ba416304b1ac"
+checksum = "d7639488bbe876ddb12e257f02427b4885d898dbd704cb6916ccf2d7011460d1"
 dependencies = [
  "serde",
  "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -4043,7 +4042,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.3.4",
+ "getrandom 0.4.3",
  "once_cell",
  "rustix 1.1.4",
  "windows-sys 0.61.2",

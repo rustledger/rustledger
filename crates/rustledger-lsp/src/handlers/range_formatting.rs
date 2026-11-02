@@ -688,6 +688,12 @@ mod tests {
                 "2024-01-01 * \"x\"\n  Assets:A    1 USD junk\n  Assets:B\n2024-01-02 open   Assets:B\n",
                 "2024-01-01 * \"x\"\n  Assets:A    1 USD junk\n  Assets:B\n2024-01-02 open Assets:B\n",
             ),
+            // A CRLF file: the copied stray quote must not stop CRLF
+            // re-injection for the lines after it.
+            (
+                "2024-01-01 open   Assets:A\r\n2024-01-02 open   Assets:B \"\r\n2024-01-03 open   Assets:C\r\n",
+                "2024-01-01 open Assets:A\r\n2024-01-02 open   Assets:B \"\r\n2024-01-03 open Assets:C\r\n",
+            ),
         ] {
             let result = parse(source);
             assert!(

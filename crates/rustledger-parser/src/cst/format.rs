@@ -398,12 +398,13 @@ pub fn lf_to_crlf_outside_strings(s: &str) -> String {
         None => (s, ""),
     };
     out.push_str(bom);
-    let mut chars = body.chars().peekable();
+    let mut chars = body.char_indices().peekable();
     let mut state = SourceState::Code;
     let mut prev_was_backslash = false;
     let mut at_line_start = true;
-    while let Some(ch) = chars.next() {
-        let peek = chars.peek().copied();
+    let mut unclosed_until = 0;
+    while let Some((i, ch)) = chars.next() {
+        let peek = chars.peek().map(|&(_, c)| c);
         match state {
             SourceState::InString => out.push(ch),
             SourceState::InComment | SourceState::Code => {
@@ -414,7 +415,13 @@ pub fn lf_to_crlf_outside_strings(s: &str) -> String {
                 }
             }
         }
-        state = advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
+        state = lexer_source_state(
+            body,
+            i,
+            state,
+            advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash),
+            &mut unclosed_until,
+        );
         at_line_start = next_at_line_start(ch, at_line_start);
     }
     out
@@ -610,6 +617,7 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
     // scanned once, not once per `\r`.
     let mut run_end = 0;
     let mut run_is_stray = false;
+    let mut unclosed_until = 0;
     while let Some((i, ch)) = chars.next() {
         let peek = chars.peek().map(|&(_, c)| c);
         // A CRLF pair outside a string is consumed whole here, so the
@@ -640,7 +648,13 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
                 }
             }
         }
-        state = advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
+        state = lexer_source_state(
+            body,
+            i,
+            state,
+            advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash),
+            &mut unclosed_until,
+        );
         at_line_start = ate_lf || next_at_line_start(ch, at_line_start);
     }
     std::borrow::Cow::Owned(out)
@@ -790,6 +804,53 @@ const fn advance_source_state(
             }
         }
     }
+}
+
+/// The state after the character at `body[at]`, given the state `before` it
+/// and the state `advance_source_state` proposes `after` it, corrected for
+/// a quote the lexer does not read as a string.
+///
+/// `advance_source_state` opens a string at every `"` in code. The lexer's
+/// `STRING` (`"([^"\\]|\\.)*"`) only matches a quote that closes; one that
+/// does not (no later unescaped `"`, or a `\` before a line break first) is
+/// an error token cut at the end of its own line, and lexing resumes there
+/// (#2788). So such a quote makes the rest of its line opaque, like a
+/// comment, instead of swallowing every later line ending (#2803: a stray
+/// `"` copied verbatim into a CRLF edit left the following lines LF).
+///
+/// `unclosed_until` remembers where the last failed scan stopped: every `"`
+/// before it is escaped in that scan's alignment, so a scan from it stops
+/// there too, and is skipped. That keeps many stray quotes linear, as the
+/// lexer's own `chunk_until` does.
+fn lexer_source_state(
+    body: &str,
+    at: usize,
+    before: SourceState,
+    after: SourceState,
+    unclosed_until: &mut usize,
+) -> SourceState {
+    if before != SourceState::Code || after != SourceState::InString {
+        return after;
+    }
+    if at < *unclosed_until {
+        return SourceState::InComment;
+    }
+    let bytes = body.as_bytes();
+    let mut i = at + 1;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => return SourceState::InString,
+            // `\\.`: an escape takes the next character, but `.` does not
+            // match a line break, so `\` before `\n` ends the scan. Skipping
+            // one byte of a multibyte character is harmless: continuation
+            // bytes are never `"` or `\`.
+            b'\\' if bytes.get(i + 1).is_some_and(|&b| b != b'\n') => i += 2,
+            b'\\' => break,
+            _ => i += 1,
+        }
+    }
+    *unclosed_until = i;
+    SourceState::InComment
 }
 
 /// A character the lexer's `Tag` regex (`#[a-zA-Z0-9-_/.]+`) accepts
@@ -1355,9 +1416,10 @@ fn format_node_range_with_style(
     //   - Directive nodes whose `text_range` intersects `range`
     //   - top-level COMMENT/PERCENT_COMMENT/SHEBANG/EMACS_DIRECTIVE
     //     tokens whose range intersects `range`
-    // ERROR_NODE and other non-Directive nodes are skipped (matches
-    // `format_node`); a selection that lands only on them returns
-    // None below.
+    // ERROR_NODE and other non-Directive nodes are not included (the
+    // whole-file walk copies an ERROR_NODE verbatim, #1335; the range
+    // path declines instead, below); a selection that lands only on them
+    // returns None.
     let mut snap_start: Option<rowan::TextSize> = None;
     let mut snap_end: Option<rowan::TextSize> = None;
     let mut any_included = false;
@@ -1402,11 +1464,9 @@ fn format_node_range_with_style(
     // just the two formatted directives, deleting the user's
     // in-progress source bytes.
     //
-    // This is the deliberate divergence from `format_node`'s
-    // whole-file policy: the whole-file path runs on the
-    // assumption that the caller (CLI / FFI / `try_format_source`)
-    // has already decided to accept content loss; the per-handler
-    // LSP path has no such opt-in. The cost is occasional
+    // The whole-file path copies an ERROR_NODE verbatim instead (#1335);
+    // the range path declines, since "Format Selection" should give a
+    // clean reformat or a no-op. The cost is occasional
     // "format-selection did nothing" UX while a parse error sits
     // inside the snap; the benefit is no data loss.
     for el in node.children_with_tokens() {
@@ -1431,7 +1491,12 @@ fn format_node_range_with_style(
     // computation and emission are two distinct concerns.)
     let mut out = String::new();
     let mut spacing = TopLevelSpacing::default();
+    // A top-level WHITESPACE token directly before a node, tracked as the
+    // whole-file walk tracks it, so a verbatim copy keeps its first line's
+    // indentation (#2786) here too.
+    let mut indent: Option<crate::SyntaxToken> = None;
     for el in node.children_with_tokens() {
+        let line_indent = indent.take();
         let child_range = el.text_range();
         // Use the snap range (not the input `range`) so we emit
         // every child WITHIN the snap, even those that the
@@ -1464,9 +1529,15 @@ fn format_node_range_with_style(
                     group: style,
                     broken,
                 };
-                emitter.emit(&n, None, &mut spacing, &mut out);
+                emitter.emit(&n, line_indent.as_ref(), &mut spacing, &mut out);
             }
-            rowan::NodeOrToken::Token(t) => spacing.top_level_token(&t, &mut out),
+            rowan::NodeOrToken::Token(t) => {
+                if t.kind() == crate::SyntaxKind::WHITESPACE {
+                    indent = Some(t);
+                } else {
+                    spacing.top_level_token(&t, &mut out);
+                }
+            }
         }
     }
     spacing.flush(&mut out);
@@ -4090,6 +4161,18 @@ mod tests {
             "percent_flag_and_comment",
             "% c \"q\n2024-01-01 % \"n\"\n  % Assets:A  1 USD ; x\n  %Assets:B\n",
         ),
+        // An unterminated quote is an error token cut at its own line
+        // (#2788); the line-ending helpers must not read the lines after it
+        // as one string (#2803). Also with a `\` before the line break,
+        // which ends the lexer's string scan.
+        (
+            "unterminated_quote",
+            "2024-01-01 open Assets:A\n2024-01-02 open Assets:B \"\n2024-01-03 open Assets:C\n",
+        ),
+        (
+            "unterminated_quote_backslash_newline",
+            "2024-01-01 note Assets:A \"a\\\n2024-01-02 open Assets:C\n",
+        ),
         ("only_comment", "; header comment\n"),
         ("only_directive", "2024-01-01 open Assets:Cash\n"),
         (
@@ -4340,11 +4423,16 @@ mod tests {
     ///   comment mid-line, #2802), so the skip-on-errors guard triggers. It
     ///   exists for the state machine's lexer-agreement test on a comment
     ///   with an unbalanced `"`, not the round-trip body.
+    /// - `unterminated_quote`, `unterminated_quote_backslash_newline`: an
+    ///   unterminated quote is a parse error by design (#2788), so the
+    ///   skip-on-errors guard triggers. They exist for the state machine's
+    ///   lexer-agreement test on a quote the lexer cuts at its own line
+    ///   (#2803), not the round-trip body.
     ///
     /// Note: `comment_containing_quote` DOES exercise the body: it is
     /// paired with a parseable directive, and its comment attaches as
     /// inter-directive trivia under the directive-terminator rule.
-    const ROUNDTRIP_KNOWN_ZERO_DIRECTIVE_FIXTURES: usize = 11;
+    const ROUNDTRIP_KNOWN_ZERO_DIRECTIVE_FIXTURES: usize = 13;
 
     #[test]
     fn lf_to_crlf_outside_strings_preserves_string_interior() {
@@ -5177,6 +5265,9 @@ mod tests {
                     | Token::Shebang(_)
                     | Token::EmacsDirective(_) => Some(SourceState::InComment),
                     Token::Error(_) if heading_text => Some(SourceState::InComment),
+                    // An unterminated quote: one error token from the `"` to
+                    // the end of its line (#2788), opaque like a comment.
+                    Token::Error(text) if text.starts_with('"') => Some(SourceState::InComment),
                     _ => None,
                 };
                 if let Some(state) = classify {
@@ -5307,6 +5398,7 @@ mod tests {
         let mut state = SourceState::Code;
         let mut prev_was_backslash = false;
         let mut at_line_start = true;
+        let mut unclosed_until = 0;
         while let Some((rel_i, ch)) = chars.next() {
             let i = bom_len + rel_i;
             let peek = chars.peek().map(|&(_, c)| c);
@@ -5315,8 +5407,13 @@ mod tests {
                 *byte = state;
             }
             let prev_state = state;
-            let next_state =
-                advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
+            let next_state = lexer_source_state(
+                body,
+                rel_i,
+                state,
+                advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash),
+                &mut unclosed_until,
+            );
             at_line_start = next_at_line_start(ch, at_line_start);
             // Record only OPENING transitions and the comment-
             // closing newline, where the state machine and lexer

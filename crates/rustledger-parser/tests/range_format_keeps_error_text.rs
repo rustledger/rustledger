@@ -8,7 +8,10 @@
 //! now copied verbatim, by the same rule and the same error ranges as the
 //! whole-file error-tolerant formatter (`format_source`, #2794).
 
-use rustledger_parser::format::{GroupingStyle, format_parsed_range, format_source};
+use rustledger_parser::format::{
+    GroupingStyle, crlf_to_lf_outside_strings, format_parsed_range, format_source,
+    lf_to_crlf_outside_strings,
+};
 use rustledger_parser::{TextRange, TextSize, parse};
 
 /// Broken inputs: each holds a directive with a parse error between two
@@ -113,7 +116,21 @@ fn test_format_parsed_range_is_idempotent_on_broken_input() {
 /// formatting declines the request rather than touch it.)
 #[test]
 fn test_format_parsed_range_matches_format_source_over_the_whole_file() {
-    for (label, src) in CASES {
+    // Plus an indented first directive after a leading comment: its
+    // indentation is a top-level token before it, which both walks must
+    // keep (#2786). Dropping it would also remove the indentation's parse
+    // error, so the second shape would reformat on the next pass.
+    let indented: &[(&str, &str)] = &[
+        (
+            "indented broken directive after a comment",
+            "; c\n  2024-01-01 open   Assets:A junk\n2024-01-02 open   Assets:B\n",
+        ),
+        (
+            "indented directive after a comment, broken one after",
+            "; c\n  2024-01-01 open   Assets:A\n2024-01-02 open   Assets:B junk\n",
+        ),
+    ];
+    for (label, src) in CASES.iter().chain(indented) {
         let (snap, out) = format_all(src);
         assert_eq!(
             usize::from(snap.start()),
@@ -143,4 +160,55 @@ fn test_format_parsed_range_on_only_the_broken_directive_returns_it_verbatim() {
         "2024-01-02 open   Assets:B junk\n"
     );
     assert_eq!(out, "2024-01-02 open   Assets:B junk\n");
+}
+
+/// CRLF re-injection follows the lexer's line structure: a quote the lexer
+/// does not read as a string (none closes it, or a `\` comes before the line
+/// break) ends at its own line (#2788), so the lines after it are not inside
+/// a string and keep CRLF. A copied stray `"` used to leave them LF.
+#[test]
+fn test_lf_to_crlf_outside_strings_ends_an_unterminated_quote_at_its_line() {
+    for (label, lf) in [
+        (
+            "stray quote",
+            "2024-01-01 open Assets:A\n2024-01-02 open Assets:B \"\n2024-01-03 open Assets:C\n2024-01-04 open Assets:D\n",
+        ),
+        (
+            "unterminated string",
+            "2024-01-01 note Assets:A \"unterminated\n2024-01-02 open Assets:C\n",
+        ),
+        (
+            "backslash before the line break",
+            "2024-01-01 note Assets:A \"a\\\n2024-01-02 open Assets:C\n",
+        ),
+    ] {
+        let crlf = lf_to_crlf_outside_strings(lf);
+        assert_eq!(crlf, lf.replace('\n', "\r\n"), "{label}");
+        assert_eq!(crlf_to_lf_outside_strings(&crlf), lf, "{label}: round trip");
+    }
+    // A string that does close still keeps its own line endings.
+    let multi = "2024-01-01 note Assets:A \"a\nb\"\n2024-01-02 open Assets:C\n";
+    assert_eq!(
+        lf_to_crlf_outside_strings(multi),
+        "2024-01-01 note Assets:A \"a\nb\"\r\n2024-01-02 open Assets:C\r\n"
+    );
+}
+
+/// The same over a range edit on a CRLF file with a copied stray quote:
+/// format the CRLF source as the LSP does (parse it as is, format the range,
+/// re-inject CRLF), and every line ending in the edit is CRLF.
+#[test]
+fn test_format_parsed_range_on_crlf_keeps_crlf_after_a_stray_quote() {
+    for src in [
+        "2024-01-01 open   Assets:A\r\n2024-01-02 open   Assets:B \"\r\n2024-01-03 open   Assets:C\r\n2024-01-04 open   Assets:D\r\n",
+        "2024-01-01 note Assets:A \"unterminated\r\n2024-01-02 open   Assets:C\r\n",
+    ] {
+        let (_, out) = format_all(src);
+        let edit = lf_to_crlf_outside_strings(&out);
+        assert!(
+            !edit.replace("\r\n", "").contains('\n'),
+            "{src:?}: a bare LF in the CRLF edit: {edit:?}"
+        );
+        assert!(edit.contains("open Assets:C\r\n"), "{src:?}: {edit:?}");
+    }
 }

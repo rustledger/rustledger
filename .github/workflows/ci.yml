@@ -183,7 +183,7 @@ jobs:
       # it, cargo's `-vV` probe fails with "could not execute process
       # sccache" (E2 / ENOENT).
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           shared-key: bindings
       - name: Regenerate + diff bindings (TS, JSON Schema, Python)
@@ -284,7 +284,7 @@ jobs:
       # "could not execute process sccache" — which is how this job failed the
       # first time it ran.
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Test rustledger-lsp on Windows
         run: cargo test -p rustledger-lsp
 
@@ -601,7 +601,7 @@ jobs:
           # commit history.
           targets: wasm32-unknown-unknown
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Install nextest
         if: matrix.install == 'nextest'
         uses: taiki-e/install-action@3f74d7c16a4242f1c95561e98edc25d36adb4375 # v2.87.12
@@ -630,7 +630,7 @@ jobs:
         with:
           toolchain: 1.98.1 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Run doctests
         run: cargo test --doc --all-features
   # Regression tests - user-reported issues (only on code changes)
@@ -645,7 +645,7 @@ jobs:
         with:
           toolchain: 1.98.1 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Build rledger
         run: cargo build --release --bin rledger
       - name: Run regression tests
@@ -677,7 +677,7 @@ jobs:
         with:
           toolchain: 1.98.1 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       # `cargo bench` compiles the lib WITHOUT its `#[test]` fns (only `#[bench]`
       # + the lib), so test-only helpers used solely by `#[test]` look dead here
       # and the workflow-wide `-Dwarnings` (env above) would fail the gate on
@@ -735,7 +735,7 @@ jobs:
       # anything must install it: without this step the `cargo test` below
       # died with "could not execute process `sccache ...`" (main, 612e162f).
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Forbid wasmtime in --no-default-features build
         run: ./scripts/check-slim-no-wasmtime.sh
       # The CLI crate as the release builds it, plus the three crates whose
@@ -790,7 +790,7 @@ jobs:
           toolchain: 1.98.1 # pinned stable — bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
           targets: wasm32-wasip2
       - uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
       - name: Build the wasip2 component
         run: cargo build -p rustledger-ffi-component --target wasm32-wasip2
       # The parity tests gracefully skip when the component artifact is

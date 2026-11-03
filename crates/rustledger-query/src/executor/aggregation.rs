@@ -663,11 +663,22 @@ impl<'a> Executor<'a> {
                         // writeup in tests/compatibility/exclusions.toml, and
                         // re-verifiable via
                         // scripts/verify-first-balance-divergence.py.
-                        if let Some(ctx) = group.iter().min_by_key(|c| c.transaction.date) {
-                            self.evaluate_expr(&func.args[0], ctx)
-                        } else {
-                            Ok(Value::Null)
+                        //
+                        // NULLs are skipped, as beanquery's `First.update`
+                        // keeps its store empty until a non-NULL value
+                        // arrives: `first(payee)` over a group whose earliest
+                        // transaction has no payee is the first payee, not
+                        // NULL (#2828). The stable sort keeps scan order among
+                        // same-date postings, the tie rule above.
+                        let mut ordered: Vec<_> = group.iter().collect();
+                        ordered.sort_by_key(|c| c.transaction.date);
+                        for ctx in ordered {
+                            let value = self.evaluate_expr(&func.args[0], ctx)?;
+                            if !matches!(value, Value::Null) {
+                                return Ok(value);
+                            }
                         }
+                        Ok(Value::Null)
                     }
                     "LAST" => {
                         if func.args.len() != 1 {
@@ -1173,11 +1184,16 @@ impl<'a> Executor<'a> {
                                 "expected 1 argument".to_string(),
                             ));
                         }
-                        if let Some(&row) = group.first() {
-                            self.evaluate_subquery_expr(&func.args[0], row, column_map)
-                        } else {
-                            Ok(Value::Null)
+                        // The first non-NULL value, as beanquery's
+                        // `First.update` keeps (#2828).
+                        for &row in group {
+                            let value =
+                                self.evaluate_subquery_expr(&func.args[0], row, column_map)?;
+                            if !matches!(value, Value::Null) {
+                                return Ok(value);
+                            }
                         }
+                        Ok(Value::Null)
                     }
                     "LAST" => {
                         if func.args.len() != 1 {

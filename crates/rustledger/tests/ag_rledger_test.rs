@@ -2181,7 +2181,8 @@ fn more_refusals_map_to_their_codes() {
             "NOT_IN_LEDGER",
             2,
         ),
-        (vec!["merge", "--yes"], "MISSING_FILE", 2),
+        // The loop adds `--yes`; agcli 0.18+ refuses a flag given twice.
+        (vec!["merge"], "MISSING_FILE", 2),
         (
             vec!["split", latin1.to_str().unwrap(), "--by", "year"],
             "NOT_UTF8",

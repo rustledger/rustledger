@@ -24,14 +24,111 @@ impl<'a> Executor<'a> {
             || query.having.is_some()
     }
 
+    /// Refuse aggregates where bean-query's compiler refuses them, with its
+    /// messages (beanquery 0.2.0, `compiler.py`): in WHERE and FROM, as a
+    /// GROUP BY expression or a GROUP BY reference (ordinal or name) to an
+    /// aggregate target, and an aggregate of an aggregate in a target. Each
+    /// was accepted and answered something plausible and wrong: `WHERE
+    /// count(*) > 1` an empty result, `GROUP BY count(*)` one row (#2827).
+    ///
+    /// # Errors
+    ///
+    /// [`QueryError::Aggregation`] naming the misplaced aggregate.
+    pub(super) fn check_aggregate_placement(
+        query: &crate::ast::SelectQuery,
+    ) -> Result<(), QueryError> {
+        let refuse = |message: String| Err(QueryError::Aggregation(message));
+        if query
+            .where_clause
+            .as_ref()
+            .is_some_and(Self::is_aggregate_expr)
+        {
+            return refuse("aggregates are not allowed in WHERE clause".to_string());
+        }
+        if query
+            .from
+            .as_ref()
+            .and_then(|from| from.filter.as_ref())
+            .is_some_and(Self::is_aggregate_expr)
+        {
+            return refuse("aggregates are not allowed in FROM clause".to_string());
+        }
+        for target in &query.targets {
+            if Self::has_aggregate_of_aggregate(&target.expr) {
+                return refuse("aggregates of aggregates are not allowed".to_string());
+            }
+        }
+        let names: HashMap<String, &Expr> = query
+            .targets
+            .iter()
+            .filter_map(|t| t.alias.as_ref().map(|a| (a.to_uppercase(), &t.expr)))
+            .collect();
+        for column in query.group_by.iter().flatten() {
+            // A reference to a target, by 1-based position or by name. An
+            // out-of-range position is reported where it is resolved.
+            let referenced = match column {
+                Expr::Literal(Literal::Integer(n)) => usize::try_from(*n)
+                    .ok()
+                    .and_then(|n| n.checked_sub(1))
+                    .and_then(|i| query.targets.get(i))
+                    .map(|t| &t.expr),
+                Expr::Column(name) => names.get(&name.to_uppercase()).copied(),
+                _ => None,
+            };
+            match referenced {
+                Some(target) if Self::is_aggregate_expr(target) => {
+                    return refuse(format!(
+                        "GROUP-BY expressions may not reference aggregates: \"{column}\""
+                    ));
+                }
+                Some(_) => {}
+                None if Self::is_aggregate_expr(column) => {
+                    return refuse(format!(
+                        "GROUP-BY expressions may not be aggregates: \"{column}\""
+                    ));
+                }
+                None => {}
+            }
+        }
+        Ok(())
+    }
+
+    /// Whether an aggregate in `expr` (not under another aggregate) has an
+    /// aggregate among its arguments, as `sum(cost(sum(position)))` does.
+    /// bean-query collects a target's top-level aggregates the same way
+    /// (`get_columns_and_aggregates`) and refuses a nested one.
+    fn has_aggregate_of_aggregate(expr: &Expr) -> bool {
+        match expr {
+            Expr::Function(func) if Self::is_aggregate_function(&func.name) => {
+                func.args.iter().any(Self::is_aggregate_expr)
+            }
+            Expr::Function(func) => func.args.iter().any(Self::has_aggregate_of_aggregate),
+            Expr::BinaryOp(op) => {
+                Self::has_aggregate_of_aggregate(&op.left)
+                    || Self::has_aggregate_of_aggregate(&op.right)
+            }
+            Expr::UnaryOp(op) => Self::has_aggregate_of_aggregate(&op.operand),
+            Expr::Paren(inner) => Self::has_aggregate_of_aggregate(inner),
+            Expr::Attribute { operand, .. } | Expr::Subscript { operand, .. } => {
+                Self::has_aggregate_of_aggregate(operand)
+            }
+            _ => false,
+        }
+    }
+
+    /// The aggregate functions, by name.
+    pub(super) fn is_aggregate_function(name: &str) -> bool {
+        matches!(
+            name.to_uppercase().as_str(),
+            "SUM" | "COUNT" | "MIN" | "MAX" | "FIRST" | "LAST" | "AVG"
+        )
+    }
+
     pub(super) fn is_aggregate_expr(expr: &Expr) -> bool {
         match expr {
             Expr::Function(func) => {
                 // Check if this function itself is an aggregate
-                if matches!(
-                    func.name.to_uppercase().as_str(),
-                    "SUM" | "COUNT" | "MIN" | "MAX" | "FIRST" | "LAST" | "AVG"
-                ) {
+                if Self::is_aggregate_function(&func.name) {
                     return true;
                 }
                 // Also check if any argument contains an aggregate (e.g., units(sum(position)))

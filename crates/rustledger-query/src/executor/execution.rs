@@ -69,6 +69,9 @@ impl Executor<'_> {
         query: &SelectQuery,
         keep_origins: bool,
     ) -> Result<QueryResult, QueryError> {
+        // Aggregates where bean-query's compiler refuses them (#2827), before
+        // any path runs the query.
+        Self::check_aggregate_placement(query)?;
         // Check if we have a subquery
         if let Some(from) = &query.from {
             if let Some(subquery) = &from.subquery {

@@ -47,6 +47,10 @@ pub fn describe_invalid_date(s: &str) -> String {
             parts[2].parse::<u32>(),
         )
     {
+        // Year 0 is refused as beancount refuses it (#2811).
+        if year < 1 {
+            return format!("year {year} out of range");
+        }
         if !(1..=12).contains(&month) {
             return format!("month {month} out of range");
         }

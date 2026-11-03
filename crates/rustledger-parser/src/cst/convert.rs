@@ -1444,7 +1444,16 @@ fn collect_postings_with_comments(
     bom_offset: u32,
     errors: &mut Vec<crate::ParseError>,
 ) -> (Vec<Spanned<Posting>>, Vec<String>) {
-    let mut out = Vec::new();
+    // Sized to the POSTING children up front, as the green fast path does
+    // (`green.rs`, `posting_count`): growing by push left a 2-posting
+    // transaction at capacity 4, 256 unused bytes held for the life of the
+    // ledger on every transaction that takes this path (#2834).
+    let posting_count = node
+        .syntax()
+        .children()
+        .filter(|n| n.kind() == crate::SyntaxKind::POSTING)
+        .count();
+    let mut out = Vec::with_capacity(posting_count);
     let mut pending: Vec<String> = Vec::new();
     // Leading trivia (blank lines, comment lines) sits inside the node before
     // the header; only the NEWLINE after the header content ends it (#2628).

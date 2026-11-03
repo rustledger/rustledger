@@ -527,6 +527,31 @@ Pinned by `test_parse_reports_a_cost_and_price_currency_mismatch`
 (`an_unresolved_empty_cost_sells_by_the_accounts_method`,
 `the_commoditys_own_postings_do_not_name_its_cost_currency`).
 
+### 18. Total Prices That Do Not Divide Evenly
+
+rustledger weighs a total price (`@@`) at the total as written. Beancount
+divides it into a per-unit price, rounded to 28 significant digits, and
+multiplies that back when it checks the balance. When the total does not
+divide evenly by the units, beancount is left with a tiny residual:
+
+```beancount
+2024-01-02 * "buy"
+  Assets:Stock  3 HOOL @@ 1000 USD
+  Assets:Bank  -1000 USD
+```
+
+The `@@` posting weighs `999.9999999999999999999999999 USD` in beancount, so
+with whole-number amounts (a zero tolerance) bean-check reports `Transaction
+does not balance: (-0.0000000000000000000000001 USD)`. rustledger weighs it
+at `1000 USD` and the transaction balances, as written. With a non-zero
+tolerance (`1000.00 USD`) both accept it.
+
+This is deliberate: the residual comes only from rounding the division, and
+refusing a transaction balanced to the cent would be wrong. A total that is
+really off (`-999.99 USD` here) is still refused. The BQL `weight` column
+uses the same written total (#2031). Pinned by
+`crates/rustledger-loader/tests/total_price_face_value_test.rs` (issue #2831).
+
 ## BQL Query Compatibility
 
 BQL (Beancount Query Language) compatibility was tested with 11 standard queries on 50 files:

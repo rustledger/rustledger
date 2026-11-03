@@ -929,6 +929,14 @@ pub fn cost_number_weight(
 /// `price × sign(units)` — credit-side postings flip to `−price`
 /// (issue #1052). Zero units weigh zero for both kinds. Same single-source
 /// rule as [`cost_number_weight`], including its `None`-on-overflow contract.
+///
+/// Deliberately more exact than beancount: an `@@` total is weighed at the
+/// total as written (#2031). Beancount divides it to a per-unit price at 28
+/// significant digits and multiplies back, so `3 HOOL @@ 1000 USD` weighs
+/// `999.9999999999999999999999999 USD` there and, with a zero tolerance, a
+/// transaction balanced to the cent is refused (#2831). See
+/// `docs/reference/compatibility.md`, "Total Prices That Do Not Divide
+/// Evenly"; pinned by `crates/rustledger-loader/tests/total_price_face_value_test.rs`.
 #[must_use]
 pub fn price_weight(
     units_number: Decimal,

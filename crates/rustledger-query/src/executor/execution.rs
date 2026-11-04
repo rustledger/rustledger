@@ -1596,11 +1596,66 @@ impl Executor<'_> {
         }
     }
 
+    /// `BALANCES AT f` for any `f` but `cost` / `units`: bean-query's
+    /// `transform_balances`, `SELECT account, SUM(f(position)) GROUP BY
+    /// account`, run through the SELECT path with the query's FROM (into which
+    /// the WHERE has been folded), its rows in BALANCES' account order.
+    ///
+    /// # Errors
+    ///
+    /// Whatever the SELECT reports: `f` failing on a position, or a sum it
+    /// cannot form.
+    fn balances_at_function(
+        &self,
+        query: &crate::ast::BalancesQuery,
+        at_func: &str,
+    ) -> Result<QueryResult, QueryError> {
+        // `at_func` was parsed as an identifier, so it cannot change the
+        // statement's shape.
+        let crate::ast::Query::Select(mut select) = crate::parse(&format!(
+            "SELECT account, sum({at_func}(position)) GROUP BY account"
+        ))?
+        else {
+            return Err(QueryError::Evaluation(format!(
+                "BALANCES AT {at_func}: not a function name"
+            )));
+        };
+        select.from.clone_from(&query.from);
+        let summed = self.execute_select(&select)?;
+        let mut rows: Vec<(String, Value)> = summed
+            .rows
+            .into_iter()
+            .filter_map(|row| {
+                let mut row = row.into_iter();
+                match (row.next(), row.next()) {
+                    (Some(Value::String(account)), Some(value)) => Some((account, value)),
+                    _ => None,
+                }
+            })
+            .collect();
+        rows.sort_by_cached_key(|(account, _)| (self.account_type_index(account), account.clone()));
+        let mut result = QueryResult::new(vec!["account".to_string(), "balance".to_string()]);
+        for (account, value) in rows {
+            result.add_row(vec![Value::String(account), value]);
+        }
+        Ok(result)
+    }
+
     /// Execute a BALANCES query.
     pub(super) fn execute_balances(
         &self,
         query: &crate::ast::BalancesQuery,
     ) -> Result<QueryResult, QueryError> {
+        // An `AT f` other than `cost` / `units` is checked before anything
+        // else, so an unknown function is an error even when no row matches,
+        // as bean-query's compiler refuses it (#2826).
+        let at_other = query
+            .at_function
+            .as_deref()
+            .filter(|f| !f.eq_ignore_ascii_case("COST") && !f.eq_ignore_ascii_case("UNITS"));
+        if let Some(at_func) = at_other {
+            self.check_at_function(at_func)?;
+        }
         // A double-quoted string naming a posting column, in the FROM filter
         // or the WHERE, is that column, as in bean-query, whose BALANCES is a
         // SELECT over the postings (#2596).
@@ -1642,6 +1697,15 @@ impl Executor<'_> {
             return self.execute_balances(&fold_balances_where(query, where_clause)?);
         }
 
+        // Any other `AT f` is bean-query's `SELECT account, SUM(f(position))
+        // GROUP BY account` (`transform_balances`), run as that SELECT: `f`
+        // applies to each posting before the sum, which is what makes a
+        // non-linear `f` (`abs`) or a per-position choice (`value` over mixed
+        // cost currencies) come out as bean-query's (#2826).
+        if let Some(at_func) = at_other {
+            return self.balances_at_function(query, at_func);
+        }
+
         // Build up balances by processing all transactions (with FROM filtering).
         // Local map rather than struct state — see issue #958.
         let balances = self.build_balances_with_filter(query.from.as_ref())?;
@@ -1680,34 +1744,9 @@ impl Executor<'_> {
                             .map_err(|e| QueryError::Evaluation(e.to_string()))?;
                         Value::Inventory(std::sync::Arc::new(units_inventory))
                     }
-                    // `AT value` and any other function, applied to the
-                    // account's summed balance. bean-query sums `f(position)`
-                    // instead (`transform_balances`); for the functions that
-                    // map a position to an amount or inventory (`value`,
-                    // `weight`, ...) the two are the same sum. One that gives
-                    // anything else is refused rather than answered
-                    // differently. This arm used to show the units (#2826).
-                    _ => {
-                        self.check_at_function(at_func)?;
-                        let value = self.evaluate_function_on_values(
-                            at_func,
-                            &[Value::Inventory(std::sync::Arc::new(balance.clone()))],
-                        )?;
-                        if !matches!(
-                            value,
-                            Value::Inventory(_)
-                                | Value::Amount(_)
-                                | Value::Position(_)
-                                | Value::Null
-                        ) {
-                            return Err(QueryError::Evaluation(format!(
-                                "BALANCES AT {at_func}: {at_func} of a balance is not an \
-                                 amount or inventory; use SELECT account, \
-                                 sum({at_func}(position)) GROUP BY account"
-                            )));
-                        }
-                        value
-                    }
+                    // Every other `AT f` returned through
+                    // `balances_at_function` above.
+                    _ => Value::Inventory(std::sync::Arc::new(balance.clone())),
                 }
             } else {
                 Value::Inventory(std::sync::Arc::new(balance.clone()))

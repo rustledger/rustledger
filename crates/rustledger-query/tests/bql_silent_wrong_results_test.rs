@@ -106,6 +106,9 @@ fn test_at_refuses_an_unknown_function_or_an_aggregate() {
         "JOURNAL 'Nothing:Matches' AT nosuchfn",
         "BALANCES AT sum",
         "JOURNAL 'Assets:Stock' AT sum",
+        // Refused even when no row matches, as bean-query's compiler is.
+        "BALANCES AT nosuchfn WHERE account ~ 'XYZ'",
+        "BALANCES AT sum WHERE account ~ 'XYZ'",
     ] {
         assert!(run(PRICED, query).is_err(), "{query} should be refused");
     }
@@ -208,4 +211,175 @@ fn test_first_skips_a_leading_null() {
         first_row("SELECT first(payee), last(payee)"),
         vec![acme.clone(), acme]
     );
+}
+
+/// The amounts in a cell, as `(number, currency)` pairs sorted by currency.
+fn amounts(value: &Value) -> Vec<(Decimal, String)> {
+    let mut out: Vec<(Decimal, String)> = match value {
+        Value::Amount(a) => vec![(a.number, a.currency.to_string())],
+        Value::Position(p) => vec![(p.units.number, p.units.currency.to_string())],
+        Value::Inventory(inv) => inv
+            .positions()
+            .map(|p| (p.units.number, p.units.currency.to_string()))
+            .collect(),
+        other => panic!("not an amount: {other:?}"),
+    };
+    out.sort_by(|a, b| a.1.cmp(&b.1));
+    out
+}
+
+fn d(n: i64) -> Decimal {
+    Decimal::from(n)
+}
+
+/// An account holding lots at a USD cost, lots at an EUR cost and EUR cash:
+/// bean-query values each position in its own cost currency (#2826).
+const MIXED: &str = "\
+2024-01-01 open Assets:Mix
+2024-01-01 open Assets:Bank
+2024-01-01 open Equity:Opening
+2024-01-02 * \"vht\"
+  Assets:Mix  2 VHT {100 USD}
+  Assets:Bank  -200 USD
+2024-01-03 * \"abc\"
+  Assets:Mix  3 ABC {10 EUR}
+  Assets:Bank  -30 EUR
+2024-01-04 * \"eur in\"
+  Assets:Mix  50 EUR
+  Equity:Opening  -50 EUR
+2024-01-05 * \"eur out\"
+  Assets:Mix  -20 EUR
+  Equity:Opening  20 EUR
+2024-01-06 price VHT 130 USD
+2024-01-06 price ABC 12 EUR
+2024-01-06 price ABC 15 USD
+2024-01-06 price EUR 1.20 USD
+";
+
+fn account_cell(result: &QueryResult, account: &str, column: usize) -> Value {
+    result
+        .rows
+        .iter()
+        .find(|r| matches!(&r[0], Value::String(a) if a == account))
+        .unwrap_or_else(|| panic!("a row for {account}"))[column]
+        .clone()
+}
+
+/// bean-query: `Assets:Mix  66 EUR  260 USD`, not one sum in USD.
+#[test]
+fn test_balances_at_value_values_each_position_in_its_own_cost_currency() {
+    let result = run(MIXED, "BALANCES AT value").expect("runs");
+    assert_eq!(
+        amounts(&account_cell(&result, "Assets:Mix", 1)),
+        vec![(d(66), "EUR".into()), (d(260), "USD".into())]
+    );
+    let summed = run(
+        MIXED,
+        "SELECT value(sum(position)) WHERE account = 'Assets:Mix'",
+    )
+    .expect("runs");
+    assert_eq!(
+        amounts(&summed.rows[0][0]),
+        vec![(d(66), "EUR".into()), (d(260), "USD".into())],
+        "value() of an inventory, outside BALANCES"
+    );
+}
+
+/// bean-query's `value(balance)` on each JOURNAL row: `260 USD`, then
+/// `36 EUR 260 USD`, `86 EUR 260 USD`, `66 EUR 260 USD`.
+#[test]
+fn test_journal_at_value_balance_values_each_position() {
+    let result = run(MIXED, "JOURNAL 'Assets:Mix' AT value").expect("runs");
+    let balances: Vec<_> = result.rows.iter().map(|r| amounts(&r[6])).collect();
+    assert_eq!(
+        balances,
+        vec![
+            vec![(d(260), "USD".into())],
+            vec![(d(36), "EUR".into()), (d(260), "USD".into())],
+            vec![(d(86), "EUR".into()), (d(260), "USD".into())],
+            vec![(d(66), "EUR".into()), (d(260), "USD".into())],
+        ]
+    );
+}
+
+/// A non-linear `AT f`: bean-query sums `abs(position)` per posting, so the
+/// bank shows 1540 USD (every movement), not `abs` of its 670 USD balance.
+const MOVEMENTS: &str = "\
+2024-01-01 open Assets:Bank
+2024-01-01 open Assets:Stock
+2024-01-01 open Expenses:Food
+2024-01-01 open Equity:Opening
+2024-01-01 * \"open\"
+  Assets:Bank  1000 USD
+  Equity:Opening
+2024-01-02 * \"buy\"
+  Assets:Stock  4 VHT {100 USD}
+  Assets:Bank  -400 USD
+2024-01-03 * \"food\"
+  Expenses:Food  35 USD
+  Assets:Bank  -35 USD
+2024-01-04 * \"refund\"
+  Expenses:Food  -5 USD
+  Assets:Bank  5 USD
+2024-01-05 * \"sell\"
+  Assets:Stock  -1 VHT {100 USD}
+  Assets:Bank  100 USD
+";
+
+#[test]
+fn test_balances_at_abs_sums_abs_of_each_posting() {
+    let result = run(MOVEMENTS, "BALANCES AT abs").expect("runs");
+    assert_eq!(
+        amounts(&account_cell(&result, "Assets:Bank", 1)),
+        vec![(d(1540), "USD".into())]
+    );
+    assert_eq!(
+        amounts(&account_cell(&result, "Expenses:Food", 1)),
+        vec![(d(40), "USD".into())]
+    );
+    assert_eq!(
+        amounts(&account_cell(&result, "Equity:Opening", 1)),
+        vec![(d(1000), "USD".into())]
+    );
+    assert_eq!(
+        amounts(&account_cell(&result, "Assets:Stock", 1)),
+        vec![(d(5), "VHT".into())]
+    );
+}
+
+/// bean-query: `abs(position)` 4 then 1 VHT, `abs(balance)` 4 then 3 VHT.
+#[test]
+fn test_journal_at_abs_applies_abs_per_row() {
+    let result = run(MOVEMENTS, "JOURNAL 'Assets:Stock' AT abs").expect("runs");
+    let cells: Vec<_> = result
+        .rows
+        .iter()
+        .map(|r| (amounts(&r[5]), amounts(&r[6])))
+        .collect();
+    assert_eq!(
+        cells,
+        vec![
+            (vec![(d(4), "VHT".into())], vec![(d(4), "VHT".into())]),
+            (vec![(d(1), "VHT".into())], vec![(d(3), "VHT".into())]),
+        ]
+    );
+}
+
+/// An aggregate inside BETWEEN or a set is still an aggregate in WHERE.
+#[test]
+fn test_where_refuses_an_aggregate_inside_between_or_a_set() {
+    for query in [
+        "SELECT date WHERE number BETWEEN 0 AND count(*)",
+        "SELECT date WHERE number IN (count(*), 2)",
+    ] {
+        match run(TWO, query) {
+            Err(QueryError::Aggregation(message)) => {
+                assert!(
+                    message.contains("aggregates are not allowed in WHERE clause"),
+                    "{query}: {message}"
+                );
+            }
+            other => panic!("{query}: expected a refusal, got {other:?}"),
+        }
+    }
 }

@@ -112,6 +112,10 @@ impl<'a> Executor<'a> {
             Expr::Attribute { operand, .. } | Expr::Subscript { operand, .. } => {
                 Self::has_aggregate_of_aggregate(operand)
             }
+            Expr::Between { value, low, high } => [value, low, high]
+                .into_iter()
+                .any(|e| Self::has_aggregate_of_aggregate(e)),
+            Expr::Set(elements) => elements.iter().any(Self::has_aggregate_of_aggregate),
             _ => false,
         }
     }
@@ -145,6 +149,14 @@ impl<'a> Executor<'a> {
             Expr::Attribute { operand, .. } | Expr::Subscript { operand, .. } => {
                 Self::is_aggregate_expr(operand)
             }
+            // `number BETWEEN 0 AND count(*)`, `number IN (count(*), 2)`: the
+            // aggregate is an operand like any other, so WHERE refuses it
+            // with bean-query's reason rather than failing to compare, or
+            // matching nothing (#2827).
+            Expr::Between { value, low, high } => [value, low, high]
+                .into_iter()
+                .any(|e| Self::is_aggregate_expr(e)),
+            Expr::Set(elements) => elements.iter().any(Self::is_aggregate_expr),
             _ => false,
         }
     }

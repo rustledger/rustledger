@@ -876,6 +876,7 @@ option "operating_currency" "USD"
         let payload = cache::ParsedLedgerPayload {
             directives: processed.directives.clone(),
             directive_spans: processed.directive_spans.clone(),
+            placeholders: Vec::new(),
             options: processed.options.clone(),
             parse_errors: Vec::new(),
             option_errors: Vec::new(),

@@ -1757,6 +1757,10 @@ pub struct SessionState {
     lines: Vec<u32>,
     files: Vec<String>,
     errors: Vec<wit::Error>,
+    /// Whether `errors` holds one that leaves the ledger incomplete, so a
+    /// query refuses. A duplicate include alone does not: the file was loaded
+    /// once, and `rledger query` answers too.
+    query_blocked: bool,
     options: wit::LedgerOptions,
     plugins: Vec<ffi::Plugin>,
     includes: Vec<(String, u32)>,
@@ -1788,13 +1792,16 @@ pub struct SessionState {
 ///
 /// The span starts at the directive's line, which is all the directive-level
 /// columns read; a posting's own columns come from the posting's span, which
-/// the directive carries. A directive whose file is not in `source_map`, or
-/// whose line is 0 (one a plugin synthesized), is synthesized: its source
-/// columns read NULL.
+/// the directive carries. A `(file, line)` that is one of `source_map`'s
+/// placeholder locations (a load-time plugin's, such as `<auto_accounts>`, 0)
+/// gets that placeholder's id, so it reads as the CLI reads it. Any other
+/// directive whose file is not in `source_map`, or whose line is 0 (one a
+/// session plugin synthesized), is synthesized: its source columns read NULL.
 fn spans_from_lines(
     lines: &[u32],
     files: &[String],
     source_map: &rustledger_loader::SourceMap,
+    placeholders: &std::collections::HashSet<(String, u32)>,
 ) -> Vec<(rustledger_core::Span, u16)> {
     let ids: std::collections::HashMap<String, usize> = source_map
         .files()
@@ -1813,6 +1820,14 @@ fn spans_from_lines(
                         rustledger_core::Span::new(start, start),
                         u16::try_from(id).ok()?,
                     ))
+                })
+                .or_else(|| {
+                    placeholders.contains(&(file.clone(), line)).then(|| {
+                        (
+                            rustledger_core::Span::ZERO,
+                            source_map.placeholder_file_id(std::path::Path::new(file), line),
+                        )
+                    })
                 })
                 .unwrap_or((
                     rustledger_core::Span::ZERO,
@@ -1836,6 +1851,7 @@ impl SessionState {
             directives: loaded.directives,
             lines: loaded.directive_lines,
             files,
+            query_blocked: !loaded.errors.is_empty(),
             errors: loaded.errors.into_iter().map(error).collect(),
             options: options(loaded.options),
             plugins: loaded.plugins,
@@ -1904,6 +1920,7 @@ impl SessionState {
             lines: vec![0; n],
             files: vec!["<entries>".to_string(); n],
             errors: vec![],
+            query_blocked: false,
             options,
             plugins: vec![],
             includes: vec![],
@@ -1925,16 +1942,37 @@ impl SessionState {
         let path_security = !allow_unrestricted_includes;
         match ffi::helpers::load_file(std::path::Path::new(path), path_security) {
             Ok(fl) => {
-                let mut errors = fl.errors;
+                // A duplicate include is reported but neither stops the session
+                // plugins nor blocks a query: the ledger is complete.
+                let (mut errors, mut notices) = (Vec::new(), Vec::new());
+                for (e, blocks) in fl.errors.into_iter().zip(fl.error_blocks_queries) {
+                    if blocks {
+                        errors.push(e);
+                    } else {
+                        notices.push(e);
+                    }
+                }
                 let opts = fl.options;
                 let plugin_dtos = fl.plugins;
                 let loaded_files = fl.loaded_files;
                 let plugin_names: Vec<&str> = plugins.iter().map(String::as_str).collect();
-                let (directives, lines, files) = ffi::helpers::apply_plugins(
+                // A load-time plugin's directive travels with its placeholder
+                // location, not the flattened `<unknown>`, 0, so the session
+                // plugins keep it and a query reports it (#2825).
+                let (mut in_lines, mut in_files) = (fl.directive_lines, fl.directive_files);
+                let mut placeholders = std::collections::HashSet::new();
+                for (i, placeholder) in fl.directive_placeholders.into_iter().enumerate() {
+                    if let Some((name, line)) = placeholder {
+                        in_lines[i] = line;
+                        in_files[i].clone_from(&name);
+                        placeholders.insert((name, line));
+                    }
+                }
+                let (directives, mut lines, mut files) = ffi::helpers::apply_plugins(
                     &plugin_names,
                     fl.directives,
-                    fl.directive_lines,
-                    fl.directive_files,
+                    in_lines,
+                    in_files,
                     &mut errors,
                     &opts,
                 );
@@ -1942,12 +1980,23 @@ impl SessionState {
                 // plugins ran: they can add or drop directives, and `lines` /
                 // `files` follow them where a load-time span list would not.
                 let fl_source_map = fl.source_map;
-                let spans = spans_from_lines(&lines, &files, &fl_source_map);
+                let spans = spans_from_lines(&lines, &files, &fl_source_map, &placeholders);
+                // Entries still carry `<unknown>`, 0 for these, the "generated
+                // entry" fingerprint embedders key on, as `load-file` does.
+                for (i, (_, file_id)) in spans.iter().enumerate() {
+                    if fl_source_map.placeholder(*file_id).is_some()
+                        && placeholders.contains(&(files[i].clone(), lines[i]))
+                    {
+                        lines[i] = 0;
+                        files[i] = "<unknown>".to_string();
+                    }
+                }
                 Self {
                     directives,
                     lines,
                     files,
-                    errors: errors.into_iter().map(error).collect(),
+                    query_blocked: !errors.is_empty(),
+                    errors: notices.into_iter().chain(errors).map(error).collect(),
                     options: options(opts),
                     plugins: plugin_dtos,
                     includes: loaded_files.into_iter().map(|p| (p, 0)).collect(),
@@ -1965,6 +2014,7 @@ impl SessionState {
                 lines: vec![],
                 files: vec![],
                 errors: vec![simple_error(e)],
+                query_blocked: true,
                 options: options(ffi::LedgerOptions::default()),
                 plugins: vec![],
                 includes: vec![],
@@ -2019,7 +2069,7 @@ impl SessionState {
 
     /// Run a BQL query against the held ledger (no re-parse).
     pub fn query(&self, query_str: &str) -> out::QueryResult {
-        if !self.errors.is_empty() {
+        if self.query_blocked {
             return out::QueryResult {
                 columns: vec![],
                 rows: vec![],
@@ -2031,7 +2081,7 @@ impl SessionState {
                 &rustledger_query::executor::spanned_from_parts(&self.directives, &self.spans),
             )
         });
-        run_query_with_tables(
+        let mut result = run_query_with_tables(
             directives,
             &self.source_map,
             rustledger_query::executor::LedgerContext {
@@ -2047,7 +2097,11 @@ impl SessionState {
             },
             query_str,
             Some(&self.created_tables),
-        )
+        );
+        // The non-blocking load errors (a duplicate include) still reach the
+        // caller, ahead of the query's own, as `rledger query` prints them.
+        result.errors.splice(0..0, self.errors.iter().cloned());
+        result
     }
 
     /// The load options the discrepancy rerun uses: the session's plugins
@@ -4228,6 +4282,98 @@ mod query_file_sources_tests {
                 vec!["<auto_accounts>".to_string(), "0".to_string()],
                 vec!["<auto_accounts>".to_string(), "1".to_string()],
             ]
+        );
+    }
+
+    /// The same through a FILE: `query-file`, `batch-file` and a session from
+    /// the file name the plugin, as the CLI does. They read NULL, the loader's
+    /// placeholder flattened to `<unknown>`, 0. The session's entries keep
+    /// that fingerprint.
+    #[test]
+    fn test_file_queries_name_the_plugin_that_created_a_directive() {
+        let tree = Tree::new("auto-accounts");
+        std::fs::write(
+            tree.0.join("main.beancount"),
+            "plugin \"beancount.plugins.auto_accounts\"\n\n2024-01-02 *\n  Assets:Bank     10 USD\n  Equity:Opening\n",
+        )
+        .expect("write main");
+        let q = "SELECT type, filename, lineno FROM #entries WHERE type = 'open' ORDER BY lineno";
+        let want = vec![
+            vec![
+                "open".to_string(),
+                "<auto_accounts>".to_string(),
+                "0".to_string(),
+            ],
+            vec![
+                "open".to_string(),
+                "<auto_accounts>".to_string(),
+                "1".to_string(),
+            ],
+        ];
+        assert_eq!(rows(&super::query_file(&tree.main(), q)), want);
+        let batch = super::batch_file(&tree.main(), &[q.to_string()]);
+        assert_eq!(rows(&batch.queries[0]), want);
+        // With a session plugin, which runs on the placeholder locations.
+        for plugins in [vec![], vec!["noduplicates".to_string()]] {
+            let session = super::SessionState::from_file(&tree.main(), false, &plugins);
+            assert_eq!(rows(&session.query(q)), want, "{plugins:?}");
+            let opens: Vec<_> = session
+                .directives
+                .iter()
+                .zip(session.lines.iter().zip(&session.files))
+                .filter(|(d, _)| matches!(d, rustledger_core::Directive::Open(_)))
+                .map(|(_, (line, file))| (*line, file.as_str()))
+                .collect();
+            assert_eq!(opens, vec![(0, "<unknown>"), (0, "<unknown>")]);
+        }
+    }
+
+    /// A file included twice is loaded once, so the ledger is complete: the
+    /// file queries answer and report the duplicate, as `rledger query` does
+    /// (`LoadError::leaves_ledger_complete`). They returned no rows. An error
+    /// that does leave it incomplete, an include outside the root, still
+    /// refuses.
+    #[test]
+    fn test_file_queries_answer_over_a_duplicate_include() {
+        let tree = Tree::new("duplicate");
+        std::fs::write(
+            tree.0.join("main.beancount"),
+            "2024-01-01 open Assets:Bank\n2024-01-01 open Equity:Opening\ninclude \"txn.beancount\"\ninclude \"txn.beancount\"\n",
+        )
+        .expect("write main");
+        let duplicate = |errors: &[wit::Error]| {
+            assert_eq!(errors.len(), 1, "{errors:?}");
+            assert!(
+                errors[0].message.contains("Duplicate filename parsed"),
+                "{errors:?}"
+            );
+        };
+        let answered = |result: &super::out::QueryResult| {
+            duplicate(&result.errors);
+            let got: Vec<Vec<String>> = result
+                .rows
+                .iter()
+                .map(|row| row.iter().map(cell).collect())
+                .collect();
+            assert_eq!(got, expected(&tree));
+        };
+        answered(&super::query_file(&tree.main(), Q));
+        let batch = super::batch_file(&tree.main(), &[Q.to_string()]);
+        duplicate(&batch.load.errors);
+        answered(&batch.queries[0]);
+        let session =
+            super::SessionState::from_file(&tree.main(), false, &["noduplicates".to_string()]);
+        answered(&session.query(Q));
+
+        std::fs::write(
+            tree.0.join("main.beancount"),
+            "include \"txn.beancount\"\ninclude \"../outside.beancount\"\n",
+        )
+        .expect("write main");
+        let refused = super::query_file(&tree.main(), Q);
+        assert!(
+            refused.rows.is_empty() && !refused.errors.is_empty(),
+            "{refused:?}"
         );
     }
 

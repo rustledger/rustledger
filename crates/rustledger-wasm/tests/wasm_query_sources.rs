@@ -124,3 +124,39 @@ fn ledger_from_files_resolves_sources_and_discrepancy() {
         rustledger_wasm::Ledger::from_files(files(), "main.beancount").expect("from files");
     check(|q| ledger.query(q).expect("query"), "main.beancount");
 }
+
+/// A directive a plugin created names the plugin, fresh and restored from
+/// the cache alike (bean-query: `open`, `<auto_accounts>`, 0 and 1). A
+/// restored ledger read NULL: its source map lost the placeholders.
+#[wasm_bindgen_test]
+fn parsed_ledger_names_the_plugin_that_created_a_directive_after_the_cache() {
+    let source = "plugin \"beancount.plugins.auto_accounts\"
+
+2024-01-02 *
+  Assets:Bank     10 USD
+  Equity:Opening
+";
+    let q = "SELECT type, filename, lineno FROM #entries WHERE type = 'open' ORDER BY lineno";
+    let rows = |ledger: &rustledger_wasm::ParsedLedger| -> Vec<(String, String, f64)> {
+        let rows = js_sys::Array::from(&get_field(&ledger.query(q).expect("query"), "rows"));
+        rows.iter()
+            .map(|row| {
+                let row = js_sys::Array::from(&row);
+                (
+                    string_cell(&row, 0),
+                    string_cell(&row, 1),
+                    number_cell(&row, 2),
+                )
+            })
+            .collect()
+    };
+    let want = vec![
+        ("open".to_string(), "<auto_accounts>".to_string(), 0.0),
+        ("open".to_string(), "<auto_accounts>".to_string(), 1.0),
+    ];
+    let fresh = rustledger_wasm::ParsedLedger::new(source);
+    assert_eq!(rows(&fresh), want, "fresh");
+    let bytes = fresh.serialize().expect("serialize");
+    let restored = rustledger_wasm::ParsedLedger::from_cache(&bytes, source).expect("from cache");
+    assert_eq!(rows(&restored), want, "restored");
+}

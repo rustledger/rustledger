@@ -468,6 +468,29 @@ pub fn string_source_map(source: &str) -> rustledger_loader::SourceMap {
     map
 }
 
+/// `source_map`'s placeholder locations (name, line), in id order: the
+/// locations of directives a plugin created, such as `<auto_accounts>`, 0.
+/// [`restore_placeholders`] gives each the same id again, so a cached
+/// ledger's spans still resolve (#2825).
+#[must_use]
+pub fn placeholder_locations(source_map: &rustledger_loader::SourceMap) -> Vec<(String, u32)> {
+    (rustledger_parser::FIRST_PLACEHOLDER_FILE_ID..rustledger_parser::SYNTHESIZED_FILE_ID)
+        .map_while(|id| source_map.placeholder(id))
+        .map(|(name, line)| (name.display().to_string(), line))
+        .collect()
+}
+
+/// Register `locations` (from [`placeholder_locations`]) in a map that has
+/// none yet, so each gets the id it had.
+pub fn restore_placeholders(
+    source_map: &rustledger_loader::SourceMap,
+    locations: &[(String, u32)],
+) {
+    for (name, line) in locations {
+        source_map.placeholder_file_id(Path::new(name), *line);
+    }
+}
+
 /// The context of a query over a source that was loaded WITHOUT validation:
 /// `#balances.discrepancy` is computed from `source_map` only when a query
 /// reads it, and kept in `memo` (#2823; see

@@ -559,14 +559,27 @@ interface ledger {
   /// Run a BQL query against source text.
   query: func(source: string, query: string) -> query-result;
   /// Like `query`, but the ledger is loaded from a file path, with its
-  /// includes (confined as `load-file` confines them by default), so the
-  /// source columns name the real files (3.16.0, #2825).
+  /// includes, so the source columns name the real files (3.16.0, #2825;
+  /// before, the file's text was read and queried as an unnamed source,
+  /// its includes unread). Includes are confined to the entry file's
+  /// directory tree, as `load-file` confines them by default, with no
+  /// opt-out here (use `session.from-file` for one): an include outside it
+  /// is a load error. Any load error but a duplicate include (a file the
+  /// loader read once, so the ledger is complete) makes the result empty,
+  /// carrying the errors; a duplicate include is reported in `errors` beside
+  /// the rows, as `rledger query` reports it. A file that cannot be read
+  /// reports `Failed to load file: ...` (was `Failed to read file ...`).
   query-file: func(path: string, query: string) -> query-result;
 
   /// Load source once, then run several queries against it.
   batch: func(source: string, queries: list<string>) -> batch-result;
   /// Like `batch`, but the ledger is loaded from a file path, as `query-file`
-  /// loads it (3.16.0, #2825).
+  /// loads it, confinement and load-error rule included (3.16.0, #2825).
+  /// `load` has the `load-file` shape: entries carry their real files and
+  /// lines (a directive a plugin created, `<unknown>` and 0), and `includes`
+  /// lists the loaded files. Each query's `errors` repeats the load errors
+  /// (all of them when they make it refuse, a duplicate include beside its
+  /// rows), so every result stands alone.
   batch-file: func(path: string, queries: list<string>) -> batch-result;
 
   /// A loaded, booked ledger held inside the component (#1421).
@@ -635,6 +648,10 @@ interface ledger {
     /// two are drop-in interchangeable.
     account-type: func(account: string) -> string;
     /// Run a BQL query against the held ledger.
+    ///
+    /// It refuses, with no rows and the held errors, when the load left an
+    /// error, except a duplicate include (the ledger is complete, the file
+    /// read once), which is reported in `errors` beside the rows (3.16.0).
     ///
     /// A table a `CREATE TABLE` makes stays for this session's later
     /// queries, and `INSERT INTO` adds to it (3.15.0, #2579); before, each

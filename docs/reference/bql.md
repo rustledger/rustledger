@@ -109,7 +109,7 @@ An `AVERAGE` account is shown as its pool on every surface, before a sale and af
 | `lineno` | Integer? | Line number in that file |
 | `location` | String? | `"filename:lineno:"`, with the trailing colon bean-query prints |
 
-An in-memory source (the WASM `query`, a `ParsedLedger`, the FFI `query`) is named `<string>`, as beancount's `load_string` names it. A directive a plugin created names the plugin, as beancount does: an `auto_accounts` Open reports `<auto_accounts>` and its position in the plugin's output. A pad's synthesized transaction is at its `pad` line in `#entries`, and its postings at the `balance` they satisfy. The columns are NULL only for a directive with no origin at all, such as entries an embedder hands in.
+An in-memory source (the WASM `query`, a `ParsedLedger`, the FFI `query`) is named `<string>`, as beancount's `load_string` names it. A directive a plugin created is where the plugin located it, as in beancount: an `auto_accounts` Open reports `<auto_accounts>` and its position in the plugin's output, and a Python plugin's `new_metadata('<myplug>', 7)` reports `<myplug>`, 7. A WASM `Ledger` restored with `fromCache` keeps no source, so its source columns are NULL. A pad's synthesized transaction is at its `pad` line in `#entries`, and its postings at the `balance` they satisfy. The columns are NULL only for a directive with no origin at all, such as entries an embedder hands in.
 
 #### Attribute access
 

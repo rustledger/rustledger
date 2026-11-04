@@ -150,8 +150,12 @@ fn test_recompute_balance_discrepancies_follows_a_symlinked_include() {
         "2024-01-02 *\n  Assets:Bank  10 USD\n  Equity:Opening\ninclude \"../other.beancount\"\n",
     )
     .expect("write inc");
-    // `../other.beancount` from `top/link/inc.beancount` is `top/other.beancount`
-    // lexically, the file beancount reads.
+    // The loader resolves `../other.beancount` from `top/link/inc.beancount`
+    // lexically, to `top/other.beancount` (#2635), so that is the file the
+    // load reads and the rerun must read too. beancount 3.2.3 differs: it
+    // globs the joined path without normalizing it, so `..` resolves
+    // physically, from `elsewhere/real`, and `bean-check` reports `File glob
+    // "../other.beancount" does not match any files`.
     std::fs::write(
         root.join("top/other.beancount"),
         "2024-01-03 *\n  Assets:Bank  20 USD\n  Equity:Opening\n",

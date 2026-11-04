@@ -295,7 +295,16 @@ pub struct FileLoad {
     /// The files the ledger was loaded from, keyed by the paths in
     /// `directive_files`, so a query's source columns resolve (#2825).
     pub source_map: rustledger_loader::SourceMap,
+    /// Parallel to `directives`: the placeholder location (name, line) of a
+    /// directive a load-time plugin created, such as `auto_accounts`'s
+    /// `<auto_accounts>`, 0, which `directive_files` / `directive_lines`
+    /// flatten to `<unknown>`, 0. A query reports it, as the CLI does (#2825).
+    pub directive_placeholders: Vec<Option<(String, u32)>>,
     pub errors: Vec<Error>,
+    /// Parallel to `errors`: whether the error leaves the ledger incomplete,
+    /// so a query over it must not answer. A duplicate include does not
+    /// ([`rustledger_loader::LoadError::leaves_ledger_complete`]).
+    pub error_blocks_queries: Vec<bool>,
     pub options: LedgerOptions,
     pub plugins: Vec<Plugin>,
     pub loaded_files: Vec<String>,
@@ -393,8 +402,15 @@ pub fn load_file_with_fs(
     let mut directives: Vec<Directive> = Vec::new();
     let mut directive_lines: Vec<u32> = Vec::new();
     let mut directive_files: Vec<String> = Vec::new();
+    let mut directive_placeholders: Vec<Option<(String, u32)>> = Vec::new();
     for spanned in &ledger.directives {
         directives.push(spanned.value.clone());
+        directive_placeholders.push(
+            ledger
+                .source_map
+                .placeholder(spanned.file_id)
+                .map(|(name, line)| (name.display().to_string(), line)),
+        );
         let file_id = spanned.file_id as usize;
         if let Some(sf) = ledger.source_map.get(file_id) {
             let (line, _col) = sf.line_col(spanned.span.start);
@@ -407,6 +423,11 @@ pub fn load_file_with_fs(
     }
 
     let errors: Vec<Error> = ledger.errors.iter().map(ledger_error_to_ffi).collect();
+    let error_blocks_queries: Vec<bool> = ledger
+        .errors
+        .iter()
+        .map(|e| !e.leaves_ledger_complete())
+        .collect();
     let options = build_ledger_options(&ledger.options, &ledger.display_context);
     let plugins: Vec<Plugin> = ledger
         .plugins
@@ -428,7 +449,9 @@ pub fn load_file_with_fs(
         directive_lines,
         directive_files,
         source_map: ledger.source_map,
+        directive_placeholders,
         errors,
+        error_blocks_queries,
         options,
         plugins,
         loaded_files,

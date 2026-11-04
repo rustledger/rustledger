@@ -513,6 +513,7 @@ impl ParsedLedger {
         let payload = cache::ParsedLedgerPayload {
             directives: self.directives.clone(),
             directive_spans: self.directive_spans.clone(),
+            placeholders: crate::helpers::placeholder_locations(&self.source_map),
             options: self.options.clone(),
             parse_errors: self.parse_errors.clone(),
             option_errors: self.option_errors.clone(),
@@ -548,7 +549,11 @@ impl ParsedLedger {
             directives: payload.directives,
             directive_spans: payload.directive_spans,
             discrepancies: std::sync::OnceLock::new(),
-            source_map: crate::helpers::string_source_map(source),
+            source_map: {
+                let map = crate::helpers::string_source_map(source);
+                crate::helpers::restore_placeholders(&map, &payload.placeholders);
+                map
+            },
             query_directives: std::cell::OnceCell::new(),
             options: payload.options,
             parse_errors: payload.parse_errors,

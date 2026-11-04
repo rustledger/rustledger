@@ -365,6 +365,9 @@ pub struct LedgerError {
     /// that transaction out of the booked stream. See
     /// [`Self::is_booking_failure`].
     booking_failure: bool,
+    /// Whether this is a load error that leaves the ledger complete. See
+    /// [`Self::leaves_ledger_complete`].
+    complete_load: bool,
 }
 
 /// Error severity level.
@@ -403,6 +406,7 @@ impl LedgerError {
             phase: "validate".to_string(),
             hint: None,
             booking_failure: false,
+            complete_load: false,
         }
     }
 
@@ -418,6 +422,7 @@ impl LedgerError {
             phase: "validate".to_string(),
             hint: None,
             booking_failure: false,
+            complete_load: false,
         }
     }
 
@@ -441,6 +446,14 @@ impl LedgerError {
     #[must_use]
     pub const fn is_booking_failure(&self) -> bool {
         self.booking_failure
+    }
+
+    /// Whether this is a load error after which the ledger is still complete
+    /// (a duplicate include), so a query over it may answer. See
+    /// [`LoadError::leaves_ledger_complete`].
+    #[must_use]
+    pub const fn leaves_ledger_complete(&self) -> bool {
+        self.complete_load
     }
 
     /// Set the processing phase for this error.
@@ -482,6 +495,7 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // (the phase transitions and validator setup below borrow it).
     for load_err in &raw.errors {
         let mut err = LedgerError::error("LOAD", load_err.to_string()).with_phase("parse");
+        err.complete_load = load_err.leaves_ledger_complete();
         if let Some(site) = load_err.include_site() {
             // Prefer the source map for line/col so byte spans stay authoritative.
             if let Some(file) = raw.source_map.get(site.file_id as usize) {
@@ -2017,6 +2031,7 @@ fn ledger_errors_extend(
             phase: phase.to_string(),
             hint: err.hint,
             booking_failure: false,
+            complete_load: false,
         });
     }
 }

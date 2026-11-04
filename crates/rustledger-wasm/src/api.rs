@@ -37,8 +37,11 @@ use crate::utils::LineLookup;
 /// with a shared prices file included from two journals returned NO rows,
 /// where the CLI returns them. The same shape as a warning being treated as an
 /// error, one layer down.
+///
+/// The rule is the loader's [`LoadError::leaves_ledger_complete`], which the
+/// FFI's file queries share.
 fn load_error_is_fatal(error: &LoadError) -> bool {
-    !matches!(error, LoadError::DuplicateInclude { .. })
+    !error.leaves_ledger_complete()
 }
 
 /// Convert [`LoadResult`] errors to detailed Error objects with line/column info.

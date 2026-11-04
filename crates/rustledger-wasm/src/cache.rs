@@ -352,7 +352,10 @@ use crate::types::{Error, LedgerOptions};
 /// ledger's queries resolve the `filename` / `lineno` / `location` columns
 /// (#2825). Loader output is unchanged; a v69 blob has no spans and would
 /// not deserialize as this layout.
-pub const CACHE_VERSION: u32 = 70;
+/// v71: the `ParsedLedger` payload gained `placeholders`, the source map's
+/// placeholder locations, so a restored ledger still names the plugin that
+/// created a directive (`<auto_accounts>`, 0) where v70 read NULL (#2825).
+pub const CACHE_VERSION: u32 = 71;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -406,6 +409,9 @@ pub struct ParsedLedgerPayload {
     /// Each directive's span and file id, so a restored ledger's queries
     /// still resolve the source columns (#2825).
     pub directive_spans: Vec<(rustledger_core::Span, u16)>,
+    /// The source map's placeholder locations (name, line), in id order, so
+    /// the restored map gives each the id `directive_spans` holds (#2825).
+    pub placeholders: Vec<(String, u32)>,
     pub options: LedgerOptions,
     pub parse_errors: Vec<Error>,
     /// Option diagnostics, archived apart from `parse_errors` because the
@@ -830,6 +836,7 @@ option "operating_currency" "USD"
         let payload = ParsedLedgerPayload {
             directives: processed.directives.clone(),
             directive_spans: processed.directive_spans.clone(),
+            placeholders: Vec::new(),
             options: processed.options.clone(),
             parse_errors: Vec::new(),
             option_errors: Vec::new(),
@@ -928,6 +935,7 @@ option "operating_currency" "USD"
         let bytes = serialize_parsed(&ParsedLedgerPayload {
             directives: Vec::new(),
             directive_spans: Vec::new(),
+            placeholders: Vec::new(),
             options: LedgerOptions::default(),
             parse_errors: Vec::new(),
             option_errors: Vec::new(),

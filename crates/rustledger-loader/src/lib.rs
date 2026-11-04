@@ -248,6 +248,17 @@ pub enum LoadError {
 }
 
 impl LoadError {
+    /// Whether the ledger the load produced is still complete despite this
+    /// error, so a figure derived from it is right: true only for a duplicate
+    /// include, whose file the loader loaded exactly once. It is still
+    /// reported (beancount says `Duplicate filename parsed`), but a query or
+    /// report answers, as `rledger query` does. Every other load error leaves
+    /// files unread.
+    #[must_use]
+    pub const fn leaves_ledger_complete(&self) -> bool {
+        matches!(self, Self::DuplicateInclude { .. })
+    }
+
     /// Attach the `include` site that caused this failure.
     ///
     /// Only [`LoadError::Io`] carries an include site today — other variants

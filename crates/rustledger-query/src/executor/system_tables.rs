@@ -165,7 +165,7 @@ pub(super) const POSTINGS_TABLE_COLUMNS: &[ColumnInfo] = &[
     col("day", "int", "Day of the date"),
     col("filename", "str", "Source file"),
     col("lineno", "int", "Source line of the posting"),
-    col("location", "str", "`filename:lineno`"),
+    col("location", "str", "`filename:lineno:`"),
     col("flag", "str", "Transaction flag"),
     col("payee", "str", "Payee, else NULL"),
     col("narration", "str", "Narration"),
@@ -293,7 +293,12 @@ impl Executor<'_> {
     /// NULL on a passing assertion, matching beancount: its checker sets
     /// `diff_amount` only on a failing entry, so an assertion that is off by
     /// less than its tolerance reports nothing rather than a small number.
-    pub(super) fn build_balances_table(&self) -> Table {
+    ///
+    /// `reads_discrepancy` says whether the query observes the column; a
+    /// deferred discrepancy source (an embedder that loaded without
+    /// validation) runs only then (#2823).
+    pub(super) fn build_balances_table(&self, reads_discrepancy: bool) -> Table {
+        let discrepancies = self.balance_discrepancies_for(reads_discrepancy);
         let columns = column_names(BALANCES_COLUMNS);
         let mut table = Table::new(columns).with_hidden(&["meta"]);
 
@@ -335,8 +340,7 @@ impl Executor<'_> {
         balances.sort_by_key(|(date, ..)| *date);
 
         for (date, account, amount, tolerance, meta) in balances {
-            let discrepancy = self
-                .balance_discrepancies
+            let discrepancy = discrepancies
                 .get(&(
                     date,
                     account.to_string(),

@@ -112,11 +112,13 @@ impl Executor<'_> {
         loc.map_or(Value::Null, |l| Value::Integer(Self::lineno_i64(l)))
     }
 
-    /// The synthetic `location` source-location column value (`filename:lineno`),
-    /// using the same saturated line number as [`Self::source_lineno_value`].
+    /// The synthetic `location` source-location column value, `filename:lineno:`
+    /// with a trailing colon as bean-query prints it (its `location` column is
+    /// `"{}:{:d}:".format(filename, lineno)`, #2825), using the same saturated
+    /// line number as [`Self::source_lineno_value`].
     pub(crate) fn source_location_value(loc: Option<&SourceLocation>) -> Value {
         loc.map_or(Value::Null, |l| {
-            Value::String(format!("{}:{}", l.filename, Self::lineno_i64(l)))
+            Value::String(format!("{}:{}:", l.filename, Self::lineno_i64(l)))
         })
     }
 
@@ -300,7 +302,7 @@ mod tests {
         // `location` must use the same saturated value so the two columns agree.
         assert_eq!(
             Executor::source_location_value(Some(&loc(usize::MAX))),
-            Value::String(format!("f.bean:{}", i64::MAX))
+            Value::String(format!("f.bean:{}:", i64::MAX))
         );
     }
 
@@ -312,7 +314,7 @@ mod tests {
         );
         assert_eq!(
             Executor::source_location_value(Some(&loc(7))),
-            Value::String("f.bean:7".to_string())
+            Value::String("f.bean:7:".to_string())
         );
         assert_eq!(Executor::source_filename_value(None), Value::Null);
         assert_eq!(Executor::source_location_value(None), Value::Null);

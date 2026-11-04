@@ -746,12 +746,22 @@ def dump_entries(entries, f, inputs=()):
         i = by_id.get(id(e))
         if i is None or i in used:
             i = by_meta.get(id(getattr(e, 'meta', None)))
-        entry = json.dumps(_directive_to_dict(e), default=str)
+        d = _directive_to_dict(e)
         if i is not None and i not in used:
             used.add(i)
-            f.write('{"modify": %d, "entry": %s}\n' % (i, entry))
+            f.write('{"modify": %d, "entry": %s}\n' % (i, json.dumps(d, default=str)))
         else:
-            f.write('{"insert": %s}\n' % entry)
+            # A new entry's `meta` filename / lineno, such as
+            # `new_metadata('<myplug>', 7)`, is its location, as in
+            # beancount: the host resolves it to the source line, or to a
+            # placeholder location `bean-query` reports as written.
+            meta = getattr(e, 'meta', None) or {}
+            filename, lineno = meta.get('filename'), meta.get('lineno')
+            if (isinstance(filename, str) and isinstance(lineno, int)
+                    and not isinstance(lineno, bool) and 0 <= lineno < 2 ** 32):
+                d['filename'] = filename
+                d['lineno'] = lineno
+            f.write('{"insert": %s}\n' % json.dumps(d, default=str))
 
 
 def _error_to_dict(e):

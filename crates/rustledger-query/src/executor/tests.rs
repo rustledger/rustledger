@@ -1397,12 +1397,13 @@ fn test_source_location_columns_with_sources() {
     let result = executor.execute(&query).unwrap();
     assert_eq!(result.rows[0][0], Value::Integer(1));
 
-    // Test location column returns formatted location
+    // `location` is `filename:lineno:`, with the trailing colon bean-query
+    // prints (#2825).
     let query = parse("SELECT location").unwrap();
     let result = executor.execute(&query).unwrap();
     assert_eq!(
         result.rows[0][0],
-        Value::String("test.beancount:1".to_string())
+        Value::String("test.beancount:1:".to_string())
     );
 }
 

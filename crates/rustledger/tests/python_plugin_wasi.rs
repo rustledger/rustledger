@@ -170,6 +170,38 @@ def shout(entries, options_map):
     assert!(q.out.contains(r#"SALARY "QUOTED" BACK\SLASH"#), "{}", q.out);
 }
 
+/// #2825: an entry a Python plugin creates is located where its `meta`
+/// says, as `bean-query` reports it (`<myplug>`, 7). It was NULL.
+#[test]
+fn a_created_entry_is_located_at_its_meta() {
+    let Some(bin) = rledger_with_python() else {
+        return;
+    };
+    let plugin = "\
+__plugins__ = ['add_open']
+
+def add_open(entries, options_map):
+    new = Open(new_metadata('<myplug>', 7), entries[0].date, 'Assets:Other', None, None)
+    return entries + [new], []
+";
+    let (dir, ledger) = setup(plugin, "plugin \"plugin.py\"");
+    let q = query(
+        &bin,
+        dir.path(),
+        &ledger,
+        "SELECT type, filename, lineno FROM #entries",
+    );
+    assert!(q.success, "{}", q.out);
+    assert!(
+        q.out.lines().any(|l| {
+            let cols: Vec<&str> = l.split_whitespace().collect();
+            cols == ["open", "<myplug>", "7"]
+        }),
+        "{}",
+        q.out
+    );
+}
+
 /// #2686: a transaction a plugin deletes is not validated, as in beancount,
 /// which validates only what its plugins return. Its unopened account was
 /// reported anyway, from the early phase's held judgment, which was meant

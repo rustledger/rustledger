@@ -850,11 +850,22 @@ function handleQueryFile(args: ToolArguments | undefined): ToolResponse {
     // Same as `validate_file`: the loader resolves the includes, not us.
     const { files, entry } = collectLedgerFiles(absolutePath);
     const result = rustledger.queryMultiFile(files, entry, args!.query!);
-    const blocking = fatalErrors(result.errors);
-    if (blocking.length > 0) {
-      return errorResponse(formatErrors(blocking));
+    // `queryMultiFile` decides whether the ledger could be queried, with the
+    // rule `rledger query` uses: a parse or booking failure, or a query that
+    // does not parse, gives no columns. Anything else it reports, such as a
+    // failing balance assertion, is a diagnostic shown beside the rows: a
+    // ledger with one must still answer (#2823).
+    if (!result.columns || result.columns.length === 0) {
+      const blocking = fatalErrors(result.errors);
+      if (blocking.length > 0) {
+        return errorResponse(formatErrors(blocking));
+      }
     }
-    return textResponse(formatQueryResult(result));
+    const table = formatQueryResult(result);
+    const diagnostics = result.errors ?? [];
+    return textResponse(
+      diagnostics.length > 0 ? `${table}\n\n${formatErrors(diagnostics)}` : table
+    );
   } catch (error) {
     return errorResponse(
       `Error: ${error instanceof Error ? error.message : String(error)}`

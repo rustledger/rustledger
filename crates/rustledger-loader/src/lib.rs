@@ -91,8 +91,9 @@ pub fn is_glob_pattern(path: &str) -> bool {
     path.contains(['*', '?', '['])
 }
 pub use process::{
-    CanonicalSortKey, ErrorLocation, ErrorSeverity, ExtraPlugin, Ledger, LedgerError, LoadOptions,
-    ProcessError, canonical_sort_key, load, load_raw, load_with_fs, process,
+    BalanceDiscrepancy, CanonicalSortKey, ErrorLocation, ErrorSeverity, ExtraPlugin, Ledger,
+    LedgerError, LoadOptions, ProcessError, canonical_sort_key, load, load_raw, load_with_fs,
+    process,
 };
 #[cfg(feature = "plugins")]
 pub use process::{PluginPass, run_plugins};
@@ -247,6 +248,27 @@ pub enum LoadError {
 }
 
 impl LoadError {
+    /// Whether the ledger the load produced is still every file the include
+    /// graph names, read once, despite this error, so a figure derived from it
+    /// is right. True for a duplicate include and an include cycle (the file
+    /// included again is one the loader already read; beancount says
+    /// `Duplicate filename parsed` for both), and for an include glob that
+    /// matches nothing (there is nothing to read). The error is still
+    /// reported, but the FFI file queries and WASM `queryMultiFile` answer, as
+    /// `bean-query` does. The other load errors leave a named file unread
+    /// (I/O, decryption, a confined path, a bad glob, too many files) or
+    /// unparsed.
+    ///
+    /// `rledger query` has its own, looser rule: it refuses only on a parse or
+    /// booking error, so it also answers over a missing include.
+    #[must_use]
+    pub const fn leaves_ledger_complete(&self) -> bool {
+        matches!(
+            self,
+            Self::DuplicateInclude { .. } | Self::IncludeCycle { .. } | Self::GlobNoMatch { .. }
+        )
+    }
+
     /// Attach the `include` site that caused this failure.
     ///
     /// Only [`LoadError::Io`] carries an include site today — other variants
@@ -896,6 +918,57 @@ fn build_display_context(directives: &[Spanned<Directive>], options: &Options) -
             .map(|(c, p)| (c.as_str(), *p)),
         options.render_commas,
     )
+}
+
+/// The balance discrepancies of a ledger that was loaded WITHOUT validation,
+/// recomputed from the sources it was loaded from (#2823).
+///
+/// `#balances.discrepancy` comes from the balance checker, which only runs
+/// when a load validates. Embedders that load without validation (the WASM
+/// and FFI query paths keep that cost off ordinary queries) call this only
+/// when a query actually reads the column. It re-runs the loader's own
+/// pipeline (`load` then [`process()`] with `validate: true`) over an in-memory
+/// filesystem holding every file in `source_map`, so the answer is exactly the
+/// [`Ledger::balance_discrepancies`] a validating load returns: one
+/// computation, not a second copy of the balance check. Files an embedder
+/// decrypted or read through its own filesystem are already plain text in the
+/// source map, so nothing is read from disk again.
+///
+/// `options` should be the ones the ledger was loaded with; `validate` is
+/// forced on. The first file in `source_map` is the entry point.
+///
+/// Returns an empty list when the sources cannot be loaded again, for example
+/// when the source map's text was dropped (`retain_source_text: false`); the
+/// column then reports NULL, as it does for a load that did not validate.
+#[must_use]
+pub fn recompute_balance_discrepancies(
+    source_map: &SourceMap,
+    options: &LoadOptions,
+) -> Vec<BalanceDiscrepancy> {
+    let Some(entry) = source_map.files().first() else {
+        return Vec::new();
+    };
+    // Keyed by the path each file was OPENED by, not its identity: the loader
+    // resolves an include against the including file's opened path (#2635),
+    // so behind a symlinked directory the identity is a different directory
+    // and the rerun would not find the included files.
+    let mut vfs = VirtualFileSystem::new();
+    for file in source_map.files() {
+        vfs.add_file(&file.opened_path, file.source.as_str());
+    }
+    let Ok(raw) = Loader::new()
+        .with_filesystem(Box::new(vfs))
+        .load(&entry.opened_path)
+    else {
+        return Vec::new();
+    };
+    let options = LoadOptions {
+        validate: true,
+        ..options.clone()
+    };
+    process(raw, &options)
+        .map(|ledger| ledger.balance_discrepancies)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

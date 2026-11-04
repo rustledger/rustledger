@@ -150,6 +150,183 @@ pub(super) fn compute_posting_cost(
     )
 }
 
+/// `#balances.discrepancy` values keyed by `(date, account, currency,
+/// asserted)`; see [`Executor::set_balance_discrepancies`].
+type DiscrepancyMap = FxHashMap<
+    (
+        rustledger_core::NaiveDate,
+        String,
+        String,
+        rustledger_core::Decimal,
+    ),
+    Amount,
+>;
+
+/// A deferred computation of a ledger's balance discrepancies.
+type LazyDiscrepancies<'a> =
+    Box<dyn Fn() -> Vec<rustledger_loader::BalanceDiscrepancy> + Send + Sync + 'a>;
+
+/// Where a query's `#balances.discrepancy` values come from.
+///
+/// The balance checker computes them, so they exist only for a load that
+/// validated (#2180). A host that loaded without validation can defer the
+/// work with [`Self::Lazy`]: it runs only when a query reads the column
+/// (#2823).
+pub enum BalanceDiscrepancies<'a> {
+    /// Nothing can supply them: the column reports NULL.
+    Unavailable,
+    /// The list a validating load returned
+    /// ([`rustledger_loader::Ledger::balance_discrepancies`]).
+    Known(Vec<rustledger_loader::BalanceDiscrepancy>),
+    /// Computed at most once, and only when a query reads the column, from
+    /// its compiled form (a `SELECT *`, a subquery, or a `CREATE TABLE AS`
+    /// over `#balances` counts). Typically
+    /// [`rustledger_loader::recompute_balance_discrepancies`].
+    Lazy(LazyDiscrepancies<'a>),
+}
+
+impl<'a> BalanceDiscrepancies<'a> {
+    /// Deferred discrepancies for a ledger loaded WITHOUT validation: on the
+    /// first query that reads the column they are recomputed from the files
+    /// in `source_map` by the loader's own validating pipeline
+    /// ([`rustledger_loader::recompute_balance_discrepancies`]), and kept in
+    /// `memo`, so a session or batch that builds an executor per query
+    /// computes them once (#2823). [`Self::Unavailable`] when `source_map`
+    /// holds no file (directives an embedder handed in, with no source).
+    ///
+    /// `options` are the ones the ledger was loaded with, including any
+    /// plugins a host ran on top of the file's own (`extra_plugins`), so the
+    /// rerun validates the same data the queries see.
+    #[must_use]
+    pub fn recomputed_from(
+        source_map: &'a SourceMap,
+        options: rustledger_loader::LoadOptions,
+        memo: &'a std::sync::OnceLock<Vec<rustledger_loader::BalanceDiscrepancy>>,
+    ) -> Self {
+        if source_map.files().is_empty() {
+            return Self::Unavailable;
+        }
+        Self::Lazy(Box::new(move || {
+            memo.get_or_init(|| {
+                rustledger_loader::recompute_balance_discrepancies(source_map, &options)
+            })
+            .clone()
+        }))
+    }
+}
+
+/// What a loaded ledger tells the query engine besides its directives.
+///
+/// Built by every host that runs user queries (the CLI, the WASM API, the
+/// FFI component) and handed to [`Executor::for_ledger`], so they configure
+/// an executor the same way rather than each copying the setup (#2825).
+pub struct LedgerContext<'a> {
+    /// Config-aware account classification (`name_*` options).
+    pub account_types: rustledger_core::AccountTypes,
+    /// The ledger's effective booking method.
+    pub booking_method: rustledger_core::BookingMethod,
+    /// The `CLOSE` / `CLEAR` summary accounts from the options.
+    pub summary_accounts: SummaryAccounts,
+    /// Where `#balances.discrepancy` comes from.
+    pub balance_discrepancies: BalanceDiscrepancies<'a>,
+}
+
+impl LedgerContext<'_> {
+    /// The context of a ledger the loader produced, with the discrepancies
+    /// its load computed ([`BalanceDiscrepancies::Known`]; empty, and so
+    /// NULL, when the load did not validate).
+    #[must_use]
+    pub fn from_ledger(ledger: &rustledger_loader::Ledger) -> Self {
+        Self {
+            account_types: ledger.options.to_account_types(),
+            booking_method: ledger.booking_method,
+            summary_accounts: SummaryAccounts::from_options(&ledger.options),
+            balance_discrepancies: BalanceDiscrepancies::Known(
+                ledger.balance_discrepancies.clone(),
+            ),
+        }
+    }
+}
+
+/// Pair plain `directives` with the `(span, file_id)` an embedder kept beside
+/// each one, for [`Executor::for_ledger`] (#2825).
+///
+/// The WASM and FFI ledgers hold plain directives for everything else they
+/// do and keep the spans in a side vector; this is the one place they are
+/// put back together. When there is no kept span per directive (the vectors
+/// differ in length, as for a ledger restored from a cache that carries
+/// none), every directive is [`Spanned::synthesized`], so the source columns
+/// read NULL rather than another directive's line.
+#[must_use]
+pub fn spanned_from_parts(
+    directives: &[Directive],
+    spans: &[(rustledger_core::Span, u16)],
+) -> Vec<Spanned<Directive>> {
+    if spans.len() != directives.len() {
+        return directives
+            .iter()
+            .cloned()
+            .map(Spanned::synthesized)
+            .collect();
+    }
+    directives
+        .iter()
+        .zip(spans)
+        .map(|(d, &(span, file_id))| Spanned {
+            value: d.clone(),
+            span,
+            file_id,
+        })
+        .collect()
+}
+
+/// The source location of a span in `file_id`, as bean-query reports it.
+///
+/// A source file gives its path and the span's line. A placeholder id, which
+/// the loader gives a directive a plugin created with a location of its own
+/// (`<auto_accounts>`, line 0, 1, ...), gives that name and line, as
+/// beancount's plugin metadata does (#2825). A synthesized id, or one the map
+/// does not know (an entry an embedder handed in), has no location: its
+/// source columns read NULL.
+fn location_in(source_map: &SourceMap, file_id: u16, span_start: usize) -> Option<SourceLocation> {
+    if file_id == rustledger_core::SYNTHESIZED_FILE_ID {
+        return None;
+    }
+    if let Some(file) = source_map.get(file_id as usize) {
+        let (line, _) = file.line_col(span_start);
+        return Some(SourceLocation {
+            filename: file.path.display().to_string(),
+            lineno: line,
+        });
+    }
+    let (name, line) = source_map.placeholder(file_id)?;
+    Some(SourceLocation {
+        filename: name.display().to_string(),
+        lineno: line as usize,
+    })
+}
+
+/// Key a list of discrepancies the way [`Executor::set_balance_discrepancies`]
+/// does.
+fn discrepancy_map(
+    discrepancies: impl IntoIterator<Item = rustledger_loader::BalanceDiscrepancy>,
+) -> DiscrepancyMap {
+    discrepancies
+        .into_iter()
+        .map(|d| {
+            (
+                (
+                    d.date,
+                    d.account.to_string(),
+                    d.amount.currency.to_string(),
+                    d.asserted,
+                ),
+                d.amount,
+            )
+        })
+        .collect()
+}
+
 /// Query executor.
 pub struct Executor<'a> {
     /// All directives to query over.
@@ -195,8 +372,11 @@ pub struct Executor<'a> {
     /// Backs `COMMODITY_META` / `CURRENCY_META`, which beanquery answers from
     /// the commodity directive rather than from any posting (#2153).
     commodity_meta: FxHashMap<String, rustledger_core::Metadata>,
-    /// Source locations for directives (indexed by directive index).
-    source_locations: Option<Vec<SourceLocation>>,
+    /// Source locations for directives (indexed by directive index); `None`
+    /// for a directive with no file in the source map (a synthesized pad
+    /// transaction, an entry an embedder handed in), whose source columns
+    /// then read NULL rather than an empty name and line 0 (#2825).
+    source_locations: Option<Vec<Option<SourceLocation>>>,
     /// The source map, kept so per-posting source locations (the `lineno` /
     /// `filename` / `location` columns on posting rows) can be resolved from
     /// each posting's own span, not just the enclosing directive's.
@@ -227,6 +407,14 @@ pub struct Executor<'a> {
         ),
         Amount,
     >,
+    /// Computes [`Self::balance_discrepancies`] on demand, for a host that
+    /// loaded without validation: called at most once, and only when a query
+    /// reads `#balances.discrepancy`, so a query that does not pays nothing
+    /// (#2823). See [`BalanceDiscrepancies::Lazy`].
+    lazy_balance_discrepancies: Option<LazyDiscrepancies<'a>>,
+    /// What [`Self::lazy_balance_discrepancies`] returned, keyed as
+    /// [`Self::balance_discrepancies`] is.
+    lazy_discrepancy_cache: std::sync::OnceLock<DiscrepancyMap>,
 }
 
 // Sub-modules for focused functionality
@@ -328,7 +516,7 @@ pub const POSTING_COLUMNS: &[ColumnInfo] = &[
     ColumnInfo {
         name: "location",
         type_name: "str",
-        description: "Source location as filename:lineno",
+        description: "Source location as filename:lineno:",
     },
     ColumnInfo {
         name: "flag",
@@ -581,6 +769,8 @@ impl<'a> Executor<'a> {
             source_map: None,
             tables: CreatedTables::default(),
             balance_discrepancies: FxHashMap::default(),
+            lazy_balance_discrepancies: None,
+            lazy_discrepancy_cache: std::sync::OnceLock::new(),
         }
     }
 
@@ -690,16 +880,9 @@ impl<'a> Executor<'a> {
         price_db.sort_prices();
 
         // Build source locations
-        let source_locations: Vec<SourceLocation> = spanned_directives
+        let source_locations: Vec<Option<SourceLocation>> = spanned_directives
             .iter()
-            .map(|spanned| {
-                let file = source_map.get(spanned.file_id as usize);
-                let (line, _col) = file.map_or((0, 0), |f| f.line_col(spanned.span.start));
-                SourceLocation {
-                    filename: file.map_or_else(String::new, |f| f.path.display().to_string()),
-                    lineno: line,
-                }
-            })
+            .map(|spanned| location_in(source_map, spanned.file_id, spanned.span.start))
             .collect();
 
         // Build account info cache from Open/Close directives
@@ -750,6 +933,59 @@ impl<'a> Executor<'a> {
             source_map: Some(source_map),
             tables: CreatedTables::default(),
             balance_discrepancies: FxHashMap::default(),
+            lazy_balance_discrepancies: None,
+            lazy_discrepancy_cache: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// The executor a user's query runs on, configured from the loaded ledger.
+    ///
+    /// The one constructor every host that runs user queries goes through:
+    /// the CLI, every WASM query entry point and every FFI query entry point
+    /// (#2823, #2825). It resolves the `filename` / `lineno` / `location`
+    /// columns and the metadata accessors from `source_map` (#2825), and
+    /// takes the account types, booking method, summary accounts and
+    /// `#balances.discrepancy` source from `context`. A host that set the
+    /// executor up by hand drifted from the others: the WASM and FFI paths
+    /// passed no source map and no discrepancies, so those columns read NULL
+    /// there while the CLI filled them.
+    ///
+    /// `directives` are the pad-expanded, spanned directives
+    /// (`merge_with_padding_spanned`). A host with no source for some or all
+    /// of them (entries handed in by an embedder) passes them
+    /// [`Spanned::synthesized`] and an empty [`SourceMap`]; their source
+    /// columns read NULL.
+    #[must_use]
+    pub fn for_ledger(
+        directives: &'a [Spanned<Directive>],
+        source_map: &'a SourceMap,
+        context: LedgerContext<'a>,
+    ) -> Self {
+        let mut executor = Self::new_with_sources(directives, source_map);
+        executor.set_account_types(context.account_types);
+        executor.set_booking_method(context.booking_method);
+        executor.set_summary_accounts(context.summary_accounts);
+        match context.balance_discrepancies {
+            BalanceDiscrepancies::Unavailable => {}
+            BalanceDiscrepancies::Known(list) => {
+                executor.balance_discrepancies = discrepancy_map(list);
+            }
+            BalanceDiscrepancies::Lazy(compute) => {
+                executor.lazy_balance_discrepancies = Some(compute);
+            }
+        }
+        executor
+    }
+
+    /// The `#balances.discrepancy` values for a query; `reads` says whether
+    /// the query observes the column at all. A deferred source runs only
+    /// when it does, and at most once per executor.
+    fn balance_discrepancies_for(&self, reads: bool) -> &DiscrepancyMap {
+        match &self.lazy_balance_discrepancies {
+            Some(compute) if reads => self
+                .lazy_discrepancy_cache
+                .get_or_init(|| discrepancy_map(compute())),
+            _ => &self.balance_discrepancies,
         }
     }
 
@@ -758,25 +994,17 @@ impl<'a> Executor<'a> {
         self.source_locations
             .as_ref()
             .and_then(|locs| locs.get(directive_index))
+            .and_then(Option::as_ref)
     }
 
-    /// Resolve a (file + line) source location from a span's start offset.
-    /// Returns `None` for synthesized spans (pad/booking-generated, which carry
-    /// no real source) or when no source map is available.
+    /// Resolve a (file + line) source location from a span's start offset; see
+    /// [`location_in`]. `None` when no source map is available.
     pub(super) fn span_source_location(
         &self,
         file_id: u16,
         span_start: usize,
     ) -> Option<SourceLocation> {
-        if file_id == rustledger_core::SYNTHESIZED_FILE_ID {
-            return None;
-        }
-        let file = self.source_map?.get(file_id as usize)?;
-        let (line, _) = file.line_col(span_start);
-        Some(SourceLocation {
-            filename: file.path.display().to_string(),
-            lineno: line,
-        })
+        location_in(self.source_map?, file_id, span_start)
     }
 
     /// Resolve a posting's OWN source location from its span, rather than the
@@ -3436,7 +3664,7 @@ impl<'a> Executor<'a> {
 
         Ok(match normalized {
             "PRICES" => Some(self.build_prices_table()),
-            "BALANCES" => Some(self.build_balances_table()),
+            "BALANCES" => Some(self.build_balances_table(query_reads_column(query, "discrepancy"))),
             "COMMODITIES" => Some(self.build_commodities_table()),
             "EVENTS" => Some(self.build_events_table()),
             "NOTES" => Some(self.build_notes_table()),
@@ -3685,6 +3913,17 @@ fn query_calls_any_function(query: &SelectQuery, names: &[&str]) -> bool {
 /// transaction (#2580).
 fn filter_reads_txn_accounts(filter: &Expr) -> bool {
     expr_references_column(filter, "accounts") || expr_references_column(filter, "other_accounts")
+}
+
+/// Whether `query` can observe column `name` of the table it reads: it names
+/// the column in any clause ([`query_references_column`]), or selects `*`,
+/// which includes every visible column.
+fn query_reads_column(query: &SelectQuery, name: &str) -> bool {
+    query_references_column(query, name)
+        || query
+            .targets
+            .iter()
+            .any(|t| matches!(t.expr, Expr::Wildcard))
 }
 
 fn query_references_column(query: &SelectQuery, name: &str) -> bool {

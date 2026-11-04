@@ -927,13 +927,17 @@ pub fn recompute_balance_discrepancies(
     let Some(entry) = source_map.files().first() else {
         return Vec::new();
     };
+    // Keyed by the path each file was OPENED by, not its identity: the loader
+    // resolves an include against the including file's opened path (#2635),
+    // so behind a symlinked directory the identity is a different directory
+    // and the rerun would not find the included files.
     let mut vfs = VirtualFileSystem::new();
     for file in source_map.files() {
-        vfs.add_file(&file.path, file.source.as_str());
+        vfs.add_file(&file.opened_path, file.source.as_str());
     }
     let Ok(raw) = Loader::new()
         .with_filesystem(Box::new(vfs))
-        .load(&entry.path)
+        .load(&entry.opened_path)
     else {
         return Vec::new();
     };

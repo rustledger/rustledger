@@ -200,16 +200,16 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
     // Spanned, with the text named `<string>`, so the source columns resolve
     // (#2825); `#balances.discrepancy` is computed only if the query reads it
     // (#2823). The same constructor as the CLI and the FFI component.
-    let source_map = crate::helpers::string_source_map(source);
+    let source_map = &load.source_map;
     let spanned = crate::helpers::spanned_directives(&load.directives, &load.directive_spans);
     let directives = merge_with_padding_spanned(&spanned);
     let options = &load.parse_result.options;
     let memo = std::sync::OnceLock::new();
     let mut executor = Executor::for_ledger(
         &directives,
-        &source_map,
+        source_map,
         crate::helpers::lazy_query_context(
-            &source_map,
+            source_map,
             &memo,
             crate::helpers::account_types_from_raw(options),
             crate::helpers::booking_method_from_raw(options),
@@ -843,8 +843,11 @@ fn query_with_filesystem(
         .errors
         .iter()
         .any(rustledger_loader::LedgerError::is_booking_failure);
+    // Advisory-only codes (E1004, closing an account with a balance) are not
+    // reported by `rledger query` either: the same canonical predicate.
     let errors: Vec<Error> = std::mem::take(&mut ledger.errors)
         .into_iter()
+        .filter(|e| !rustledger_validate::is_advisory_only_code(&e.code))
         .map(Error::from)
         .collect();
     if booking_failed {

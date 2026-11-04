@@ -193,9 +193,14 @@ impl<'a> BalanceDiscrepancies<'a> {
     /// `memo`, so a session or batch that builds an executor per query
     /// computes them once (#2823). [`Self::Unavailable`] when `source_map`
     /// holds no file (directives an embedder handed in, with no source).
+    ///
+    /// `options` are the ones the ledger was loaded with, including any
+    /// plugins a host ran on top of the file's own (`extra_plugins`), so the
+    /// rerun validates the same data the queries see.
     #[must_use]
     pub fn recomputed_from(
         source_map: &'a SourceMap,
+        options: rustledger_loader::LoadOptions,
         memo: &'a std::sync::OnceLock<Vec<rustledger_loader::BalanceDiscrepancy>>,
     ) -> Self {
         if source_map.files().is_empty() {
@@ -203,10 +208,7 @@ impl<'a> BalanceDiscrepancies<'a> {
         }
         Self::Lazy(Box::new(move || {
             memo.get_or_init(|| {
-                rustledger_loader::recompute_balance_discrepancies(
-                    source_map,
-                    &rustledger_loader::LoadOptions::default(),
-                )
+                rustledger_loader::recompute_balance_discrepancies(source_map, &options)
             })
             .clone()
         }))
@@ -276,6 +278,32 @@ pub fn spanned_from_parts(
             file_id,
         })
         .collect()
+}
+
+/// The source location of a span in `file_id`, as bean-query reports it.
+///
+/// A source file gives its path and the span's line. A placeholder id, which
+/// the loader gives a directive a plugin created with a location of its own
+/// (`<auto_accounts>`, line 0, 1, ...), gives that name and line, as
+/// beancount's plugin metadata does (#2825). A synthesized id, or one the map
+/// does not know (an entry an embedder handed in), has no location: its
+/// source columns read NULL.
+fn location_in(source_map: &SourceMap, file_id: u16, span_start: usize) -> Option<SourceLocation> {
+    if file_id == rustledger_core::SYNTHESIZED_FILE_ID {
+        return None;
+    }
+    if let Some(file) = source_map.get(file_id as usize) {
+        let (line, _) = file.line_col(span_start);
+        return Some(SourceLocation {
+            filename: file.path.display().to_string(),
+            lineno: line,
+        });
+    }
+    let (name, line) = source_map.placeholder(file_id)?;
+    Some(SourceLocation {
+        filename: name.display().to_string(),
+        lineno: line as usize,
+    })
 }
 
 /// Key a list of discrepancies the way [`Executor::set_balance_discrepancies`]
@@ -854,14 +882,7 @@ impl<'a> Executor<'a> {
         // Build source locations
         let source_locations: Vec<Option<SourceLocation>> = spanned_directives
             .iter()
-            .map(|spanned| {
-                let file = source_map.get(spanned.file_id as usize)?;
-                let (line, _col) = file.line_col(spanned.span.start);
-                Some(SourceLocation {
-                    filename: file.path.display().to_string(),
-                    lineno: line,
-                })
-            })
+            .map(|spanned| location_in(source_map, spanned.file_id, spanned.span.start))
             .collect();
 
         // Build account info cache from Open/Close directives
@@ -976,23 +997,14 @@ impl<'a> Executor<'a> {
             .and_then(Option::as_ref)
     }
 
-    /// Resolve a (file + line) source location from a span's start offset.
-    /// Returns `None` for synthesized spans (pad/booking-generated, which carry
-    /// no real source) or when no source map is available.
+    /// Resolve a (file + line) source location from a span's start offset; see
+    /// [`location_in`]. `None` when no source map is available.
     pub(super) fn span_source_location(
         &self,
         file_id: u16,
         span_start: usize,
     ) -> Option<SourceLocation> {
-        if file_id == rustledger_core::SYNTHESIZED_FILE_ID {
-            return None;
-        }
-        let file = self.source_map?.get(file_id as usize)?;
-        let (line, _) = file.line_col(span_start);
-        Some(SourceLocation {
-            filename: file.path.display().to_string(),
-            lineno: line,
-        })
+        location_in(self.source_map?, file_id, span_start)
     }
 
     /// Resolve a posting's OWN source location from its span, rather than the

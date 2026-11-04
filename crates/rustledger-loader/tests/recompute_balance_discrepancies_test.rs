@@ -126,3 +126,39 @@ fn test_recompute_balance_discrepancies_is_empty_without_sources() {
     let empty = rustledger_loader::SourceMap::new();
     assert!(recompute_balance_discrepancies(&empty, &options(false)).is_empty());
 }
+
+/// Behind a symlinked include directory the rerun finds every file: the
+/// loader resolves an include against the including file's OPENED path, so
+/// the rerun's files are keyed by that, not by the symlink-resolved identity.
+/// Keyed by identity, the rerun dropped both included files and reported
+/// `-30 USD` for an assertion a validating load passes.
+#[cfg(unix)]
+#[test]
+fn test_recompute_balance_discrepancies_follows_a_symlinked_include() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("top")).expect("mkdir top");
+    std::fs::create_dir_all(root.join("elsewhere/real")).expect("mkdir real");
+    std::os::unix::fs::symlink("../elsewhere/real", root.join("top/link")).expect("symlink");
+    std::fs::write(
+        root.join("top/main.beancount"),
+        "2024-01-01 open Assets:Bank\n2024-01-01 open Equity:Opening\ninclude \"link/inc.beancount\"\n2024-01-05 balance Assets:Bank 30 USD\n",
+    )
+    .expect("write main");
+    std::fs::write(
+        root.join("elsewhere/real/inc.beancount"),
+        "2024-01-02 *\n  Assets:Bank  10 USD\n  Equity:Opening\ninclude \"../other.beancount\"\n",
+    )
+    .expect("write inc");
+    // `../other.beancount` from `top/link/inc.beancount` is `top/other.beancount`
+    // lexically, the file beancount reads.
+    std::fs::write(
+        root.join("top/other.beancount"),
+        "2024-01-03 *\n  Assets:Bank  20 USD\n  Equity:Opening\n",
+    )
+    .expect("write other");
+
+    let (validated, recomputed) = both(&root.join("top/main.beancount")).expect("loads");
+    assert!(validated.is_empty(), "the assertion passes: {validated:?}");
+    assert_eq!(recomputed, validated);
+}

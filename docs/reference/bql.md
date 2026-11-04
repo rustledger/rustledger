@@ -107,7 +107,9 @@ An `AVERAGE` account is shown as its pool on every surface, before a sale and af
 |--------|------|-------------|
 | `filename` | String? | Source file the directive came from |
 | `lineno` | Integer? | Line number in that file |
-| `location` | String? | `"filename:lineno"` shortcut |
+| `location` | String? | `"filename:lineno:"`, with the trailing colon bean-query prints |
+
+An in-memory source (the WASM `query`, a `ParsedLedger`, the FFI `query`) is named `<string>`, as beancount's `load_string` names it. A directive a plugin created names the plugin, as beancount does: an `auto_accounts` Open reports `<auto_accounts>` and its position in the plugin's output. A pad's synthesized transaction is at its `pad` line in `#entries`, and its postings at the `balance` they satisfy. The columns are NULL only for a directive with no origin at all, such as entries an embedder hands in.
 
 #### Attribute access
 

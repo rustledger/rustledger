@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.15.0;
+package rustledger:ledger@3.16.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -558,12 +558,15 @@ interface ledger {
 
   /// Run a BQL query against source text.
   query: func(source: string, query: string) -> query-result;
-  /// Like `query`, but the ledger is loaded from a file path.
+  /// Like `query`, but the ledger is loaded from a file path, with its
+  /// includes (confined as `load-file` confines them by default), so the
+  /// source columns name the real files (3.16.0, #2825).
   query-file: func(path: string, query: string) -> query-result;
 
   /// Load source once, then run several queries against it.
   batch: func(source: string, queries: list<string>) -> batch-result;
-  /// Like `batch`, but the ledger is loaded from a file path.
+  /// Like `batch`, but the ledger is loaded from a file path, as `query-file`
+  /// loads it (3.16.0, #2825).
   batch-file: func(path: string, queries: list<string>) -> batch-result;
 
   /// A loaded, booked ledger held inside the component (#1421).

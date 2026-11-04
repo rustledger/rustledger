@@ -76,6 +76,10 @@ pub struct ProcessedLedger {
     /// Each directive's span and file id, in `directives` order, so a query
     /// can resolve the `filename` / `lineno` / `location` columns (#2825).
     pub directive_spans: Vec<DirectiveSpan>,
+    /// The loader's source map: the text, named `<string>`, and the
+    /// placeholder locations plugins gave the directives they created, so a
+    /// query resolves both (#2825). Empty when the source did not load.
+    pub source_map: rustledger_loader::SourceMap,
     pub options: LedgerOptions,
     pub errors: Vec<Error>,
     /// Option diagnostics (E7001, E7002, E7003, E7009, ...), kept apart from
@@ -141,6 +145,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
         return ProcessedLedger {
             directives: Vec::new(),
             directive_spans: Vec::new(),
+            source_map: rustledger_loader::SourceMap::new(),
             options,
             errors,
             option_errors,
@@ -151,10 +156,12 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
 
     // Use Loader with a single-file VFS to produce a LoadResult
     let mut vfs = VirtualFileSystem::new();
-    vfs.add_file("input.beancount", source);
+    // Named `<string>`, as beancount's `load_string` names an in-memory
+    // source: the name a query's `filename` column reports (#2825).
+    vfs.add_file("<string>", source);
     let mut loader = Loader::new().with_filesystem(Box::new(vfs));
 
-    let raw = match loader.load(Path::new("input.beancount")) {
+    let raw = match loader.load(Path::new("<string>")) {
         Ok(raw) => raw,
         Err(e) => {
             let options = extract_options(&parse_result.options);
@@ -162,6 +169,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             return ProcessedLedger {
                 directives: Vec::new(),
                 directive_spans: Vec::new(),
+                source_map: rustledger_loader::SourceMap::new(),
                 options,
                 errors: vec![Error::new(format!("Load error: {e}"))],
                 option_errors,
@@ -191,6 +199,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
 
     match process(raw, &load_options) {
         Ok(ledger) => {
+            let source_map = ledger.source_map;
             let (directives, directive_spans) = ledger
                 .directives
                 .into_iter()
@@ -202,6 +211,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             ProcessedLedger {
                 directives,
                 directive_spans,
+                source_map,
                 options,
                 errors,
                 option_errors,
@@ -212,6 +222,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
         Err(e) => ProcessedLedger {
             directives: Vec::new(),
             directive_spans: Vec::new(),
+            source_map: rustledger_loader::SourceMap::new(),
             options,
             errors: vec![Error::new(format!("Processing error: {e}"))],
             option_errors,
@@ -474,7 +485,9 @@ pub fn lazy_query_context<'a>(
         booking_method,
         summary_accounts,
         balance_discrepancies: rustledger_query::executor::BalanceDiscrepancies::recomputed_from(
-            source_map, memo,
+            source_map,
+            LoadOptions::default(),
+            memo,
         ),
     }
 }

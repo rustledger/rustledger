@@ -23,12 +23,26 @@ use crate::types::{Error, FormatResult, LedgerOptions, PadResult, QueryResult};
 // Shared query/directive logic (used by both ParsedLedger and Ledger)
 // =============================================================================
 
-/// Run one query over `directives` (spanned, so the source columns resolve
-/// from `source_map`, #2825) with the ledger's `context`, through
+/// The pad-expanded, spanned directives a ledger's queries run on, built
+/// once per ledger from its plain directives and kept spans (#2825).
+fn query_directives<'c>(
+    cache: &'c std::cell::OnceCell<Vec<rustledger_core::Spanned<Directive>>>,
+    directives: &[Directive],
+    spans: &[crate::helpers::DirectiveSpan],
+) -> &'c [rustledger_core::Spanned<Directive>] {
+    cache.get_or_init(|| {
+        rustledger_booking::merge_with_padding_spanned(&crate::helpers::spanned_directives(
+            directives, spans,
+        ))
+    })
+}
+
+/// Run one query over `expanded` (pad-expanded and spanned, so the source
+/// columns resolve from `source_map`, #2825) with the ledger's `context`, through
 /// [`rustledger_query::Executor::for_ledger`], the constructor the CLI and the
 /// FFI component use too.
 fn execute_query(
-    directives: &[rustledger_core::Spanned<Directive>],
+    expanded: &[rustledger_core::Spanned<Directive>],
     source_map: &rustledger_loader::SourceMap,
     context: rustledger_query::executor::LedgerContext<'_>,
     query_str: &str,
@@ -49,18 +63,14 @@ fn execute_query(
         }
     };
 
-    // BQL is a balance-computing consumer; expand pads explicitly
-    // before handing the directive list to the executor (#1288).
-    // `ParsedLedger.directives` / `Ledger.directives` are
-    // source-faithful per the architectural rule documented on
-    // `rustledger_loader::Ledger.directives`; the executor needs
-    // the expanded view to compute `sum(position)` with pad effects
-    // included.
-    let expanded = rustledger_booking::merge_with_padding_spanned(directives);
+    // `expanded` is pad-expanded (BQL is a balance-computing consumer, #1288):
+    // `ParsedLedger.directives` / `Ledger.directives` are source-faithful, and
+    // each ledger builds the expanded, spanned view once, in
+    // [`query_directives`].
     // Config-aware classification (POSSIGN/ACCOUNT_SORTKEY honor name_*
     // renames) comes in `context`: the wasm wire LedgerOptions deliberately
     // lacks name_*, so callers supply it from their construction source.
-    let mut executor = Executor::for_ledger(&expanded, source_map, context);
+    let mut executor = Executor::for_ledger(expanded, source_map, context);
     // The tables earlier queries made, handed back whatever this one does:
     // a failed query leaves them as they were (#2579).
     executor.set_created_tables(created_tables.take());
@@ -207,6 +217,12 @@ pub struct ParsedLedger {
     /// `#balances.discrepancy`, recomputed from the source the first time a
     /// query reads it and kept for the next (#2823).
     discrepancies: std::sync::OnceLock<Vec<rustledger_loader::BalanceDiscrepancy>>,
+    /// The loader's source map (the text named `<string>`, and plugin
+    /// placeholder locations), for the source columns (#2825). Rebuilt from the
+    /// text alone for a ledger restored from a cache.
+    source_map: rustledger_loader::SourceMap,
+    /// The pad-expanded, spanned directives queries run on, built once.
+    query_directives: std::cell::OnceCell<Vec<rustledger_core::Spanned<Directive>>>,
     /// Ledger options.
     options: LedgerOptions,
     /// Parse errors.
@@ -252,6 +268,8 @@ impl ParsedLedger {
             directives: load.directives,
             directive_spans: load.directive_spans,
             discrepancies: std::sync::OnceLock::new(),
+            source_map: load.source_map,
+            query_directives: std::cell::OnceCell::new(),
             options: load.options,
             parse_errors: load.errors,
             option_errors: load.option_errors,
@@ -332,17 +350,20 @@ impl ParsedLedger {
             };
             return to_js(&result);
         }
-        // The one text, named `<string>` as beancount's `load_string` names
-        // it (#2825); `#balances.discrepancy` is computed from it only if the
+        // The text is named `<string>`, as beancount's `load_string` names it
+        // (#2825); `#balances.discrepancy` is computed from it only if the
         // query reads the column (#2823).
-        let source_map = crate::helpers::string_source_map(&self.source);
-        let spanned = crate::helpers::spanned_directives(&self.directives, &self.directive_spans);
+        let expanded = query_directives(
+            &self.query_directives,
+            &self.directives,
+            &self.directive_spans,
+        );
         let options = &self.parse_result.options;
         execute_query(
-            &spanned,
-            &source_map,
+            expanded,
+            &self.source_map,
             crate::helpers::lazy_query_context(
-                &source_map,
+                &self.source_map,
                 &self.discrepancies,
                 crate::helpers::account_types_from_raw(options),
                 crate::helpers::booking_method_from_raw(options),
@@ -527,6 +548,8 @@ impl ParsedLedger {
             directives: payload.directives,
             directive_spans: payload.directive_spans,
             discrepancies: std::sync::OnceLock::new(),
+            source_map: crate::helpers::string_source_map(source),
+            query_directives: std::cell::OnceCell::new(),
             options: payload.options,
             parse_errors: payload.parse_errors,
             option_errors: payload.option_errors,
@@ -575,6 +598,8 @@ pub struct Ledger {
     /// The validating load's failing assertions, for `#balances.discrepancy`
     /// (#2823). Empty for a ledger restored from a cache.
     balance_discrepancies: Vec<rustledger_loader::BalanceDiscrepancy>,
+    /// The pad-expanded, spanned directives queries run on, built once.
+    query_directives: std::cell::OnceCell<Vec<rustledger_core::Spanned<Directive>>>,
     /// Ledger options.
     options: LedgerOptions,
     /// Configured account-type roots (`name_*` renames) for query
@@ -640,6 +665,8 @@ impl Ledger {
                     directive_spans: Vec::new(),
                     source_map: rustledger_loader::SourceMap::new(),
                     balance_discrepancies: Vec::new(),
+
+                    query_directives: std::cell::OnceCell::new(),
                     options: LedgerOptions::default(),
                     account_types: rustledger_core::AccountTypes::default(),
                     booking_method: LoadOptions::default().booking_method,
@@ -687,6 +714,8 @@ impl Ledger {
                     directive_spans,
                     source_map,
                     balance_discrepancies,
+
+                    query_directives: std::cell::OnceCell::new(),
                     options,
                     account_types,
                     booking_method,
@@ -701,6 +730,8 @@ impl Ledger {
                 directive_spans: Vec::new(),
                 source_map: rustledger_loader::SourceMap::new(),
                 balance_discrepancies: Vec::new(),
+
+                query_directives: std::cell::OnceCell::new(),
                 options,
                 account_types,
                 booking_method,
@@ -754,9 +785,13 @@ impl Ledger {
     /// (#2579).
     #[wasm_bindgen]
     pub fn query(&self, query_str: &str) -> Result<JsValue, JsError> {
-        let spanned = crate::helpers::spanned_directives(&self.directives, &self.directive_spans);
+        let expanded = query_directives(
+            &self.query_directives,
+            &self.directives,
+            &self.directive_spans,
+        );
         execute_query(
-            &spanned,
+            expanded,
             &self.source_map,
             rustledger_query::executor::LedgerContext {
                 account_types: self.account_types.clone(),
@@ -902,6 +937,8 @@ impl Ledger {
             directive_spans: Vec::new(),
             source_map: rustledger_loader::SourceMap::new(),
             balance_discrepancies: Vec::new(),
+
+            query_directives: std::cell::OnceCell::new(),
             options: payload.options,
             account_types,
             booking_method,
@@ -995,6 +1032,8 @@ mod option_warning_severity_tests {
             directive_spans: Vec::new(),
             source_map: rustledger_loader::SourceMap::new(),
             balance_discrepancies: Vec::new(),
+
+            query_directives: std::cell::OnceCell::new(),
             options: LedgerOptions::default(),
             account_types: rustledger_core::AccountTypes::default(),
             booking_method: rustledger_core::BookingMethod::Strict,
@@ -1018,6 +1057,8 @@ mod option_warning_severity_tests {
             directive_spans: Vec::new(),
             source_map: rustledger_loader::SourceMap::new(),
             balance_discrepancies: Vec::new(),
+
+            query_directives: std::cell::OnceCell::new(),
             options: LedgerOptions::default(),
             account_types: rustledger_core::AccountTypes::default(),
             booking_method: rustledger_core::BookingMethod::Strict,
@@ -1057,6 +1098,8 @@ mod option_warning_severity_tests {
                 directive_spans: Vec::new(),
                 source_map: rustledger_loader::SourceMap::new(),
                 balance_discrepancies: Vec::new(),
+
+                query_directives: std::cell::OnceCell::new(),
                 options: LedgerOptions::default(),
                 account_types: rustledger_core::AccountTypes::default(),
                 booking_method: rustledger_core::BookingMethod::Strict,

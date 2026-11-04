@@ -805,6 +805,7 @@ fn loaded_query_context<'a>(
         summary_accounts: summary_accounts_from(&summary_options!(loaded.options)),
         balance_discrepancies: rustledger_query::executor::BalanceDiscrepancies::recomputed_from(
             &loaded.source_map,
+            rustledger_loader::LoadOptions::default(),
             memo,
         ),
     }
@@ -1149,37 +1150,25 @@ pub fn validate_file(path: &str) -> out::ValidateResult {
     }
 }
 
-/// Run a single BQL query against the ledger at `path`. Reads the file and
-/// runs the single-source [`query`] path (no include resolution); a read
-/// failure becomes an errored result carrying the I/O error.
+/// Run a single BQL query against the ledger at `path`, loaded as a file, as
+/// a [`SessionState::from_file`] with no extra plugins loads it: its includes
+/// resolve (confined to the ledger's tree, as `load-file` confines them by
+/// default) and the source columns name the real files, as bean-query's do
+/// (#2825). It used to read the text and query it as an unnamed source, with
+/// no include resolution. A load failure becomes an errored result.
 pub fn query_file(path: &str, query_str: &str) -> out::QueryResult {
-    match read_file(path) {
-        Ok(src) => query(&src, query_str),
-        Err(e) => out::QueryResult {
-            columns: vec![],
-            rows: vec![],
-            errors: vec![simple_error(e)],
-        },
-    }
+    SessionState::from_file(path, false, &[]).query(query_str)
 }
 
-/// Run several BQL queries against the ledger at `path`, loading it once.
-/// Reads the file and runs the single-source [`batch`] path (no include
-/// resolution); a read failure becomes an errored result carrying the I/O
-/// error.
+/// Run several BQL queries against the ledger at `path`, loading it once as
+/// a file, as [`query_file`] does (#2825). The discrepancies a query reads
+/// are computed once for the batch.
 pub fn batch_file(path: &str, queries: &[String]) -> out::BatchResult {
-    match read_file(path) {
-        Ok(src) => batch(&src, queries),
-        Err(e) => out::BatchResult {
-            load: out::LoadResult {
-                entries: vec![],
-                errors: vec![simple_error(e)],
-                options: options(ffi::LedgerOptions::default()),
-                plugins: vec![],
-                includes: vec![],
-            },
-            queries: vec![],
-        },
+    let session = SessionState::from_file(path, false, &[]);
+    let queries = queries.iter().map(|q| session.query(q)).collect();
+    out::BatchResult {
+        load: session.info(),
+        queries,
     }
 }
 
@@ -1784,6 +1773,10 @@ pub struct SessionState {
     /// `#balances.discrepancy`, recomputed from the sources the first time a
     /// query reads it and kept for the session (#2823).
     discrepancies: std::sync::OnceLock<Vec<rustledger_loader::BalanceDiscrepancy>>,
+    /// The plugins the session ran on top of the file's own (`from_file`'s
+    /// `plugins`), so the discrepancy rerun runs them too and validates the
+    /// data the queries see.
+    session_plugins: Vec<String>,
     /// The tables this session's `CREATE TABLE`s made, there for its later
     /// queries (#2579). Each `query` builds a fresh executor over the held
     /// directives and lends it these.
@@ -1856,6 +1849,7 @@ impl SessionState {
             source_map: loaded.source_map,
             padded_spanned: std::cell::OnceCell::new(),
             discrepancies: std::sync::OnceLock::new(),
+            session_plugins: Vec::new(),
             created_tables: std::cell::RefCell::default(),
         }
     }
@@ -1918,6 +1912,7 @@ impl SessionState {
             source_map: rustledger_loader::SourceMap::new(),
             padded_spanned: std::cell::OnceCell::new(),
             discrepancies: std::sync::OnceLock::new(),
+            session_plugins: Vec::new(),
             created_tables: std::cell::RefCell::default(),
         }
     }
@@ -1961,6 +1956,7 @@ impl SessionState {
                     source_map: fl_source_map,
                     padded_spanned: std::cell::OnceCell::new(),
                     discrepancies: std::sync::OnceLock::new(),
+                    session_plugins: plugins.to_vec(),
                     created_tables: std::cell::RefCell::default(),
                 }
             }
@@ -1977,6 +1973,7 @@ impl SessionState {
                 source_map: rustledger_loader::SourceMap::new(),
                 padded_spanned: std::cell::OnceCell::new(),
                 discrepancies: std::sync::OnceLock::new(),
+                session_plugins: Vec::new(),
                 created_tables: std::cell::RefCell::default(),
             },
         }
@@ -2044,12 +2041,30 @@ impl SessionState {
                 balance_discrepancies:
                     rustledger_query::executor::BalanceDiscrepancies::recomputed_from(
                         &self.source_map,
+                        self.rerun_options(),
                         &self.discrepancies,
                     ),
             },
             query_str,
             Some(&self.created_tables),
         )
+    }
+
+    /// The load options the discrepancy rerun uses: the session's plugins
+    /// run after the file's own, as `from_file` ran them, so the rerun
+    /// validates the data the session's queries see (#2823).
+    fn rerun_options(&self) -> rustledger_loader::LoadOptions {
+        rustledger_loader::LoadOptions {
+            extra_plugins: self
+                .session_plugins
+                .iter()
+                .map(|name| rustledger_loader::ExtraPlugin {
+                    name: name.clone(),
+                    config: None,
+                })
+                .collect(),
+            ..Default::default()
+        }
     }
 
     /// The held options' account-root classifier — the single place the
@@ -4110,5 +4125,132 @@ mod query_sources_tests {
                 .collect();
             assert_eq!(rows(&session.query(q)), cli, "{q}");
         }
+    }
+}
+
+/// `query-file` / `batch-file` load the ledger as a file, so its includes
+/// resolve and the source columns name the real files, as bean-query's do
+/// (#2825); plugin-created directives name their plugin.
+#[cfg(test)]
+mod query_file_sources_tests {
+    use super::wit;
+
+    fn cell(value: &wit::QueryValue) -> String {
+        match value {
+            wit::QueryValue::Null => "NULL".to_string(),
+            wit::QueryValue::Integer(i) => i.to_string(),
+            wit::QueryValue::Text(s) => s.clone(),
+            wit::QueryValue::Amount(a) => format!("{} {}", a.number, a.currency),
+            other => panic!("unexpected cell {other:?}"),
+        }
+    }
+
+    fn rows(result: &super::out::QueryResult) -> Vec<Vec<String>> {
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        result
+            .rows
+            .iter()
+            .map(|row| row.iter().map(cell).collect())
+            .collect()
+    }
+
+    /// A ledger split over an include, in a fresh temp directory removed on
+    /// drop: `main.beancount` opens the accounts and includes `txn.beancount`.
+    struct Tree(std::path::PathBuf);
+
+    impl Tree {
+        fn new(tag: &str) -> Self {
+            let dir =
+                std::env::temp_dir().join(format!("rl-query-file-{tag}-{}", std::process::id()));
+            std::fs::create_dir_all(&dir).expect("create the directory");
+            std::fs::write(
+                dir.join("main.beancount"),
+                "2024-01-01 open Assets:Bank\n2024-01-01 open Equity:Opening\ninclude \"txn.beancount\"\n",
+            )
+            .expect("write main");
+            std::fs::write(
+                dir.join("txn.beancount"),
+                "2024-01-02 *\n  Assets:Bank     10 USD\n  Equity:Opening\n",
+            )
+            .expect("write txn");
+            Self(dir)
+        }
+
+        fn main(&self) -> String {
+            self.0.join("main.beancount").display().to_string()
+        }
+    }
+
+    impl Drop for Tree {
+        fn drop(&mut self) {
+            std::fs::remove_dir_all(&self.0).expect("remove the directory");
+        }
+    }
+
+    const Q: &str = "SELECT filename, lineno, location FROM postings LIMIT 1";
+
+    /// The posting is in the INCLUDED file, at its line 2.
+    fn expected(tree: &Tree) -> Vec<Vec<String>> {
+        let txn = std::fs::canonicalize(tree.0.join("txn.beancount"))
+            .expect("canonical")
+            .display()
+            .to_string();
+        vec![vec![txn.clone(), "2".to_string(), format!("{txn}:2:")]]
+    }
+
+    #[test]
+    fn test_query_file_resolves_includes_and_real_paths() {
+        let tree = Tree::new("query");
+        assert_eq!(rows(&super::query_file(&tree.main(), Q)), expected(&tree));
+    }
+
+    #[test]
+    fn test_batch_file_resolves_includes_and_real_paths() {
+        let tree = Tree::new("batch");
+        let batch = super::batch_file(&tree.main(), &[Q.to_string(), Q.to_string()]);
+        assert!(batch.load.errors.is_empty(), "{:?}", batch.load.errors);
+        let got: Vec<_> = batch.queries.iter().map(rows).collect();
+        assert_eq!(got, vec![expected(&tree), expected(&tree)]);
+    }
+
+    /// bean-query 0.2.0: an Open `auto_accounts` created reports filename
+    /// `<auto_accounts>` and its position in the plugin's output as lineno.
+    #[test]
+    fn test_query_names_the_plugin_that_created_a_directive() {
+        let src = "plugin \"beancount.plugins.auto_accounts\"\n\n2024-01-02 *\n  Assets:Bank     10 USD\n  Equity:Opening\n";
+        let got = rows(&super::query(
+            src,
+            "SELECT filename, lineno FROM #entries WHERE type = 'open' ORDER BY lineno",
+        ));
+        assert_eq!(
+            got,
+            vec![
+                vec!["<auto_accounts>".to_string(), "0".to_string()],
+                vec!["<auto_accounts>".to_string(), "1".to_string()],
+            ]
+        );
+    }
+
+    /// The discrepancy rerun runs the session's plugins after the file's
+    /// own, as `from_file` ran them, so it validates the data the session's
+    /// queries see.
+    #[test]
+    fn test_session_rerun_runs_the_session_plugins() {
+        let tree = Tree::new("plugins");
+        let plugins = vec!["noduplicates".to_string()];
+        let session = super::SessionState::from_file(&tree.main(), false, &plugins);
+        let names: Vec<_> = session
+            .rerun_options()
+            .extra_plugins
+            .into_iter()
+            .map(|p| p.name)
+            .collect();
+        assert_eq!(names, plugins);
+        assert!(
+            super::SessionState::from_file(&tree.main(), false, &[])
+                .rerun_options()
+                .extra_plugins
+                .is_empty()
+        );
     }
 }

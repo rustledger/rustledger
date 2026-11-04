@@ -203,10 +203,11 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     );
     let warnings = Vec::new();
 
-    // pushtag/poptag/pushmeta/popmeta state. The legacy parser
-    // maintains a stack across directives; each Transaction
-    // inherits the active pushed-tag set, and EVERY directive
-    // inherits the active pushed-meta set. We pair each entry
+    // pushtag/poptag/pushmeta/popmeta state, a stack across directives:
+    // transactions, notes and documents inherit the active pushed-tag set
+    // (#2544), and only transactions inherit the pushed-meta set, under
+    // their own keys (#2812), as in beancount. See `apply_inherited_state`.
+    // We pair each entry
     // with the originating directive's span so unclosed-at-EOF
     // diagnostics can point at the offending push.
     let mut tag_stack: Vec<(Tag, Span)> = Vec::new();

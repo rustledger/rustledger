@@ -101,6 +101,12 @@ pushtag #trip
 2024-01-09 custom \"c\" \"v\"
 2024-01-09 document Assets:A \"x.pdf\"
 2024-01-09 close Assets:B
+2024-01-09 pad Assets:A Assets:B
+2024-01-09 query \"q\" \"SELECT 1\"
+2024-01-09 * \"empty own key\"
+  loc:
+  Assets:A  1 USD
+  Assets:B
 pushmeta loc: \"Bern\"
 2024-01-10 * \"w\"
   Assets:A  1 USD
@@ -127,6 +133,11 @@ poptag #trip
         row("2024-01-09", "custom", None, &[]),
         row("2024-01-09", "document", None, &["trip"]),
         row("2024-01-09", "close", None, &[]),
+        row("2024-01-09", "pad", None, &[]),
+        row("2024-01-09", "query", None, &[]),
+        // An explicit empty value (`loc:`) is the transaction's own key too,
+        // so it beats the push, as in beancount.
+        row("2024-01-09", "transaction", Some("None"), &["trip"]),
         row("2024-01-10", "transaction", Some("Bern"), &["trip"]),
         row("2024-01-11", "transaction", Some("Lausanne"), &["trip"]),
     ];

@@ -383,3 +383,45 @@ fn test_where_refuses_an_aggregate_inside_between_or_a_set() {
         }
     }
 }
+
+/// An `AT f` that does not map a position to an amount, position or
+/// inventory is refused before any row is read, as bean-query's compiler
+/// refuses `number(position)` (`no function matches`). `AT number` summed
+/// bare numbers across currencies; `AT currency` failed only on a row.
+/// `JOURNAL ... AT str` is stricter than bean-query, which prints the
+/// position as text: rledger's `str()` does not take a position yet (#2822),
+/// so it is refused rather than failing on the first row.
+#[test]
+fn test_at_refuses_a_function_that_does_not_give_an_amount() {
+    for f in ["number", "currency", "str"] {
+        for query in [
+            format!("BALANCES AT {f}"),
+            format!("BALANCES AT {f} WHERE account ~ 'XYZ'"),
+            format!("JOURNAL 'Assets:Stock' AT {f}"),
+            format!("JOURNAL 'Nothing:Matches' AT {f}"),
+        ] {
+            match run(MOVEMENTS, &query) {
+                Err(QueryError::UnknownFunction(sig)) => {
+                    assert_eq!(sig, format!("{f}(position)"), "{query}");
+                }
+                other => panic!("{query}: expected a refusal, got {other:?}"),
+            }
+        }
+    }
+}
+
+/// The functions that do map a position to an amount, position or inventory
+/// still work. `weight` is an rledger extension: bean-query has no
+/// `weight(position)` and refuses `AT weight`.
+#[test]
+fn test_at_keeps_the_amount_valued_functions() {
+    for f in ["value", "abs", "neg", "weight", "cost", "units"] {
+        for query in [
+            format!("BALANCES AT {f}"),
+            format!("JOURNAL 'Assets:Stock' AT {f}"),
+        ] {
+            let result = run(MOVEMENTS, &query).unwrap_or_else(|e| panic!("{query}: {e}"));
+            assert!(!result.rows.is_empty(), "{query}");
+        }
+    }
+}

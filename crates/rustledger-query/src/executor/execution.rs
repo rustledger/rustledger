@@ -1575,14 +1575,17 @@ impl Executor<'_> {
     }
 
     /// Check an `AT f` function name the way bean-query's compiler checks
-    /// `f(position)` (#2826): an unknown function, or one that does not take
-    /// a single argument, is an error before any row is read, and an
+    /// `f(position)` (#2826): an unknown function, one that does not take a
+    /// single argument, or one that does not map a position to an amount,
+    /// position or inventory is an error before any row is read, and an
     /// aggregate is refused as `sum(sum(position))` is.
     ///
     /// # Errors
     ///
     /// [`QueryError::Aggregation`] for an aggregate; the function lookup's
-    /// own error for an unknown name or a wrong argument count.
+    /// own error for an unknown name or a wrong argument count; and
+    /// [`QueryError::UnknownFunction`] naming `f(position)` for a function
+    /// that does not take or give a position, as bean-query words it.
     fn check_at_function(&self, name: &str) -> Result<(), QueryError> {
         if Self::is_aggregate_function(name) {
             return Err(QueryError::Aggregation(
@@ -1590,9 +1593,27 @@ impl Executor<'_> {
             ));
         }
         // A NULL argument answers from the name and arity alone.
-        match self.evaluate_function_on_values(name, &[Value::Null]) {
-            Err(e @ (QueryError::UnknownFunction(_) | QueryError::InvalidArguments(..))) => Err(e),
-            _ => Ok(()),
+        if let Err(e @ (QueryError::UnknownFunction(_) | QueryError::InvalidArguments(..))) =
+            self.evaluate_function_on_values(name, &[Value::Null])
+        {
+            return Err(e);
+        }
+        // bean-query types `f(position)` at compile time, so `AT number` or
+        // `AT currency` is refused before any row is read. The query crate
+        // has no signature table to consult, so the type is read off one
+        // call on a representative position, a unit held at a cost: an `f`
+        // that refuses a position, or answers with something other than an
+        // amount, position or inventory, is refused. Without this, `BALANCES
+        // AT number` summed bare numbers across currencies (`50 EUR + 5 HOOL`
+        // gave `55`), and `AT currency` failed only on the first row, so an
+        // empty selection answered nothing (#2826).
+        let sample = Value::Position(Box::new(Position::with_cost(
+            Amount::new(rust_decimal::Decimal::ONE, "X"),
+            rustledger_core::Cost::new(rust_decimal::Decimal::ONE, "Y"),
+        )));
+        match self.evaluate_function_on_values(name, &[sample]) {
+            Ok(Value::Amount(_) | Value::Position(_) | Value::Inventory(_)) => Ok(()),
+            _ => Err(QueryError::UnknownFunction(format!("{name}(position)"))),
         }
     }
 

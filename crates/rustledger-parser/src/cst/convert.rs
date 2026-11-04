@@ -203,10 +203,11 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     );
     let warnings = Vec::new();
 
-    // pushtag/poptag/pushmeta/popmeta state. The legacy parser
-    // maintains a stack across directives; each Transaction
-    // inherits the active pushed-tag set, and EVERY directive
-    // inherits the active pushed-meta set. We pair each entry
+    // pushtag/poptag/pushmeta/popmeta state, a stack across directives:
+    // transactions, notes and documents inherit the active pushed-tag set
+    // (#2544), and only transactions inherit the pushed-meta set, under
+    // their own keys (#2812), as in beancount. See `apply_inherited_state`.
+    // We pair each entry
     // with the originating directive's span so unclosed-at-EOF
     // diagnostics can point at the offending push.
     let mut tag_stack: Vec<(Tag, Span)> = Vec::new();
@@ -3031,15 +3032,21 @@ pub(super) fn meta_value_from_tokens(tokens: impl Iterator<Item = impl TokenView
 /// `Document` and `Note`, as beancount 3 does (its grammar unions the tag
 /// stack into each of those three). They used to apply to transactions only
 /// (#2544). The tags are a [`TagSet`], so a pushed tag the line already
-/// wrote is not added twice (#2545). Meta applies to every directive's
-/// `meta` field.
+/// wrote is not added twice (#2545).
+///
+/// Pushed metadata applies to transactions only, as in beancount 3, whose
+/// grammar reads its meta stack in `transaction()` and nowhere else; an
+/// `open`, `balance`, `note` or any other directive gets none (#2812). A key
+/// the transaction writes itself wins over a pushed one, as beancount
+/// applies the pushed values first and its explicit metadata on top (#2812;
+/// rledger used to let the push override it). Postings get no pushed
+/// metadata in either.
 ///
 /// The meta stack is a `Vec` (not a map) to preserve shadow/pop
 /// semantics - `pushmeta x: 1; pushmeta x: 2; popmeta x` should
 /// leave `x = 1` active, which a map-replacing-on-insert can't
-/// express. Iterating in push order and inserting into the
-/// directive's meta means later entries naturally win, matching
-/// "topmost-shadow wins" behavior.
+/// express. Iterating in push order means the latest push of a key
+/// wins over earlier ones, as beancount's `value_list[-1]`.
 fn apply_inherited_state(
     value: &mut Directive,
     tag_stack: &[(Tag, Span)],
@@ -3065,22 +3072,17 @@ fn apply_inherited_state(
     if meta_stack.is_empty() {
         return;
     }
-    let meta = match value {
-        Directive::Transaction(d) => &mut d.meta,
-        Directive::Balance(d) => &mut d.meta,
-        Directive::Open(d) => &mut d.meta,
-        Directive::Close(d) => &mut d.meta,
-        Directive::Commodity(d) => &mut d.meta,
-        Directive::Pad(d) => &mut d.meta,
-        Directive::Event(d) => &mut d.meta,
-        Directive::Query(d) => &mut d.meta,
-        Directive::Note(d) => &mut d.meta,
-        Directive::Document(d) => &mut d.meta,
-        Directive::Price(d) => &mut d.meta,
-        Directive::Custom(d) => &mut d.meta,
+    let Directive::Transaction(txn) = value else {
+        return;
     };
-    for (k, v, _) in meta_stack {
-        meta.insert(k.clone(), v.clone());
+    let explicit = txn.meta.as_map();
+    let pushed: Vec<(String, MetaValue)> = meta_stack
+        .iter()
+        .filter(|(k, _, _)| !explicit.contains_key(k))
+        .map(|(k, v, _)| (k.clone(), v.clone()))
+        .collect();
+    for (k, v) in pushed {
+        txn.meta.insert(k, v);
     }
 }
 
@@ -6038,17 +6040,17 @@ mod tests {
         let src = "pushmeta loc: \"NYC\"\n\
                    pushmeta loc: \"LDN\"\n\
                    popmeta loc:\n\
-                   2024-01-01 open Assets:Bank USD\n\
+                   2024-01-01 * \"t\"\n  Assets:A  1 USD\n  Assets:B\n\
                    popmeta loc:\n";
         let result = parse_via_cst(src);
-        let Directive::Open(open) = &result.directives[0].value else {
-            panic!("expected Open");
+        let Directive::Transaction(txn) = &result.directives[0].value else {
+            panic!("expected Transaction");
         };
         assert_eq!(
-            open.meta.get("loc"),
+            txn.meta.get("loc"),
             Some(&MetaValue::String("NYC".to_string())),
             "shadow pop should restore NYC, got {:?}",
-            open.meta.get("loc"),
+            txn.meta.get("loc"),
         );
     }
 
@@ -7708,10 +7710,13 @@ mod tests {
         }
     }
 
-    /// The value `pushmeta key: <value>` pushes onto the directive after it,
-    /// from the green-wired parse, after checking both trees agree.
+    /// The value `pushmeta key: <value>` pushes onto the transaction after
+    /// it (pushed metadata reaches transactions only, #2812), from the
+    /// green-wired parse, after checking both trees agree.
     fn pushed_value(value: &str) -> (Vec<String>, Option<MetaValue>) {
-        let src = format!("pushmeta kk: {value}\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n");
+        let src = format!(
+            "pushmeta kk: {value}\n2024-01-01 * \"t\"\n  Assets:A  1 USD\n  Assets:B\npopmeta kk:\n"
+        );
         let green = parse_via_cst(&src);
         let red = parse_red_only(&src);
         assert_eq!(
@@ -7724,15 +7729,15 @@ mod tests {
             format!("{:?}", red.directives),
             "trees disagree on directives for {src:?}"
         );
-        let Directive::Open(open) = &green.directives[0].value else {
-            panic!("expected Open from {src:?}");
+        let Directive::Transaction(txn) = &green.directives[0].value else {
+            panic!("expected Transaction from {src:?}");
         };
         let errors = green
             .errors
             .iter()
             .map(crate::ParseError::message)
             .collect();
-        (errors, open.meta.get("kk").cloned())
+        (errors, txn.meta.get("kk").cloned())
     }
 
     /// The value a metadata line `kk: <value>` gives, from the green-wired
@@ -8073,7 +8078,7 @@ mod tests {
     #[test]
     fn test_pushmeta_value_reports_an_unevaluable_expression() {
         let src = "pushmeta kk: 1/0\n\
-                   2024-01-01 open Assets:Bank USD\n\
+                   2024-01-01 * \"t\"\n  Assets:A  1 USD\n  Assets:B\n\
                    popmeta kk:\n";
         let green = parse_via_cst(src);
         let red = parse_red_only(src);
@@ -8092,10 +8097,10 @@ mod tests {
                 "1/0"
             )]
         );
-        let Directive::Open(open) = &green.directives[0].value else {
-            panic!("expected Open");
+        let Directive::Transaction(txn) = &green.directives[0].value else {
+            panic!("expected Transaction");
         };
-        assert_eq!(open.meta.get("kk"), Some(&MetaValue::None));
+        assert_eq!(txn.meta.get("kk"), Some(&MetaValue::None));
     }
 }
 

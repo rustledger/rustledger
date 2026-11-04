@@ -351,7 +351,10 @@ use crate::types::{Error, LedgerOptions};
 /// v70: loader v55, PARSER OUTPUT changed (#2811). A value date that is not a
 /// real calendar date, and a year-0 date, are parse errors; a v69 blob would
 /// keep serving such a file without the error.
-pub const CACHE_VERSION: u32 = 70;
+/// v71: loader v56, PARSER OUTPUT changed (#2812). Pushed metadata reaches
+/// transactions only, and a transaction's own key wins over a pushed one; a v70
+/// blob would keep serving the old attachment.
+pub const CACHE_VERSION: u32 = 71;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -383,7 +386,7 @@ pub const CACHE_VERSION: u32 = 70;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 55;
+const LOADER_CACHE_VERSION_PIN: u32 = 56;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

@@ -35,7 +35,11 @@ const SCHEMA_VERSION: &str = "ag-rledger.v1";
 
 #[tokio::main]
 async fn main() {
-    let args = merge_repeated_value_flags(expand_config_aliases(std::env::args().collect()));
+    let args = std::env::args().collect();
+    let args = merge_repeated_value_flags(
+        expand_config_aliases(attach_global_values(args, is_config_alias)),
+        is_config_alias,
+    );
     let cli = build_cli();
     // `run`, not `run_env`: the argv is rewritten first (config aliases).
     // `run` installs no panic hook, so a handler panic is caught here, as a
@@ -212,7 +216,9 @@ fn check_command(name: &'static str, description: &'static str) -> Command {
         .usage(usage_for(
             name,
             "ag-rledger check [<file>] [--format <format>] [-f <format>] [--json] [--verbose] [-v] [--quiet] \
-             [-q] [--no-cache] [-C] [--auto] [-a] [--native-plugin <name>] [--lint <name>]",
+             [-q] [--no-cache] [-C] [--auto] [-a] [--native-plugin <name>] [--lint <name>] [--plugin <path>] [--include-rules <rules>] \
+             [--exclude-rules <rules>] [--cache-filename <file>] [--lint-min-confidence <n>] \
+             [--file <file>] [--show-summary]",
         ))
         .allow_unknown_flags()
         .allow_extra_args()
@@ -645,7 +651,13 @@ fn extract_command(name: &'static str, description: &'static str) -> Command {
             "ag-rledger extract [<file>] [--file <file>] [--list-importers] [--importer <name>] [-i <name>] \
              [--config <file>] [--account <account>] [-a <account>] [--currency <currency>] [-c <currency>] [--auto] \
              [--invert-sign] [--include-zero-amounts] [--no-header] \
-             [--output <file>] [-o <file>] [--existing <file>] [--suggest-categories] [--balance <amount>]",
+             [--output <file>] [-o <file>] [--existing <file>] [--suggest-categories] [--balance <amount>] \
+             [--wasm-importer <path>] [--wasm-importer-dir <dir>] [--delimiter <char>] \
+             [--importers-config <file>] [--date-column <col>] [--date-format <fmt>] \
+             [--narration-column <col>] [--payee-column <col>] [--amount-column <col>] \
+             [--currency-column <col>] [--amount-locale <locale>] [--amount-format <fmt>] \
+             [--debit-column <col>] [--credit-column <col>] [--skip-rows <n>] \
+             [--balance-date <date>] [--use-merchant-dict] [--force] [--ledger <root>]",
         ))
         .allow_unknown_flags()
         .allow_extra_args()
@@ -699,7 +711,7 @@ fn price_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
         .usage(usage_for(name,
             "ag-rledger price [<symbol>...] [--file <file>] [-f <file>] [--currency <currency>] [-c <currency>] [--date <date>] [-d <date>] \
-             [--beancount] [-b] [--verbose] [-v] [--mapping <from:to>] [-m <from:to>] [--source <source>] [-s <source>] \
+             [--beancount] [-b] [--verbose] [-v] [--mapping <from:to>] [-m <from:to>] [--source <source>] [-s <source>] [--source-meta] \
              [--source-cmd <cmd>] [--list-sources] [--clear-cache] [--inactive] \
              [--undeclared] [--all-commodities] [-n] [--clobber] [-C]",
         ))
@@ -760,7 +772,7 @@ fn add_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
         .usage(usage_for(name,
             "ag-rledger add [<file>] --quick <payee> <narration> <account> <amount> <account> \
-             [--file <file>] [--date <date>] [-d <date>] [--no-completion] [-n] [-y]",
+             [--file <file>] [--date <date>] [-d <date>] [-q <payee>] [--no-completion] [-n] [-y]",
         ))
         .allow_unknown_flags()
         .allow_extra_args()
@@ -2772,8 +2784,8 @@ const MULTI_VALUE_SHORTS: &[(&[&str], char, &str)] = &[
 /// (a value containing a comma was split there before too). A flag given
 /// once is left as written, so `command` echoes it unchanged, and a repeated
 /// boolean (`--json --json`) is left for agcli to refuse. Stops at `--`.
-fn merge_repeated_value_flags(args: Vec<String>) -> Vec<String> {
-    let command = first_command_index(&args).map(|idx| args[idx].clone());
+fn merge_repeated_value_flags(args: Vec<String>, is_alias: impl Fn(&str) -> bool) -> Vec<String> {
+    let command = first_command_index(&args, is_alias).map(|idx| args[idx].clone());
     let long_of = |arg: &str| -> Option<(&'static str, Option<String>)> {
         if let Some(rest) = arg.strip_prefix("--") {
             let (name, value) = match rest.split_once('=') {
@@ -2870,12 +2882,20 @@ fn merge_repeated_value_flags(args: Vec<String>) -> Vec<String> {
     merged
 }
 
+/// Whether `name` is an alias in the rledger config (none if it failed to
+/// load; the command that runs reports that).
+fn is_config_alias(name: &str) -> bool {
+    config_result()
+        .as_ref()
+        .is_ok_and(|config| config.resolve_alias(name).is_some())
+}
+
 fn expand_config_aliases(args: Vec<String>) -> Vec<String> {
     // A config that failed to load yields no aliases here; the command that
     // runs reports the error (`load_config`), as `rledger` does.
     let default = Config::default();
     let config = config_result().as_ref().unwrap_or(&default);
-    let Some(idx) = first_command_index(&args) else {
+    let Some(idx) = first_command_index(&args, |name| config.resolve_alias(name).is_some()) else {
         return args;
     };
     let Some(expansion) = config.resolve_alias(&args[idx]) else {
@@ -2888,31 +2908,100 @@ fn expand_config_aliases(args: Vec<String>) -> Vec<String> {
     expanded
 }
 
-fn first_command_index(args: &[String]) -> Option<usize> {
-    // Global flags whose value can follow as its own argument. Their value
-    // is not the command: `--plugin-max-time-secs 5 bal` must expand `bal`.
-    let mut value_flags = vec!["-P".to_string(), "--profile".to_string()];
-    value_flags.extend(
+/// Every command and alias [`build_cli`] registers. agcli has no way to list
+/// them, so `every_registered_command_is_in_command_names` compares this with
+/// the root command tree.
+const COMMAND_NAMES: &[&str] = &[
+    "check",
+    "c",
+    "query",
+    "q",
+    "format",
+    "fmt",
+    "report",
+    "r",
+    "doctor",
+    "d",
+    "extract",
+    "x",
+    "price",
+    "p",
+    "config",
+    "cfg",
+    "add",
+    "a",
+    "compat",
+    "explain",
+    "lint",
+    "split",
+    "merge",
+    "completions",
+];
+
+/// The global flags whose value can follow as its own argument: `-P`,
+/// `--profile` and the plugin budget.
+fn global_value_flags() -> Vec<String> {
+    let mut flags = vec!["-P".to_string(), "--profile".to_string()];
+    flags.extend(
         PluginBudgetArgs::flags()
             .into_iter()
             .map(|(long, _)| format!("--{long}")),
     );
+    flags
+}
+
+/// The index of the command word: the first argument that names a
+/// registered command or a config alias (`is_alias`), as agcli itself finds
+/// it, so a value flag before it (`--format json report`, `-f json price`)
+/// is not taken for the command. The value of a global value flag is never
+/// the command (`--plugin-max-time-secs 5 bal` expands `bal`, `-P x check`
+/// runs `check`), and nothing after `--` is.
+fn first_command_index(args: &[String], is_alias: impl Fn(&str) -> bool) -> Option<usize> {
+    let value_flags = global_value_flags();
     let mut skip_next = false;
     for (idx, arg) in args.iter().enumerate().skip(1) {
         if skip_next {
             skip_next = false;
             continue;
         }
+        if arg == "--" {
+            return None;
+        }
         if value_flags.iter().any(|f| f == arg) {
             skip_next = true;
             continue;
         }
-        if arg.starts_with('-') {
-            continue;
+        if COMMAND_NAMES.contains(&arg.as_str()) || is_alias(arg) {
+            return Some(idx);
         }
-        return Some(idx);
     }
     None
+}
+
+/// Write each global value flag before the command word with its value
+/// attached (`-P x` becomes `-P=x`).
+///
+/// agcli 0.19 never takes a command's name as a bare flag's value, so with
+/// `-P x check l.beancount` it ran the `x` alias (`extract`) on the file
+/// `check`, where `rledger` (and agcli 0.17) took `x` as the profile.
+/// Declaring `-P` does not change that rule; the attached value does.
+fn attach_global_values(args: Vec<String>, is_alias: impl Fn(&str) -> bool) -> Vec<String> {
+    let end = first_command_index(&args, is_alias).unwrap_or(args.len());
+    let value_flags = global_value_flags();
+    let mut out = Vec::with_capacity(args.len());
+    let mut iter = args.into_iter().enumerate().peekable();
+    while let Some((idx, arg)) = iter.next() {
+        if idx > 0
+            && idx < end
+            && value_flags.contains(&arg)
+            && let Some((_, value)) = iter.next_if(|(next, _)| *next < end)
+        {
+            out.push(format!("{arg}={value}"));
+            continue;
+        }
+        out.push(arg);
+    }
+    out
 }
 
 fn parse_alias_expansion(expansion: &str) -> Vec<String> {
@@ -3572,7 +3661,7 @@ mod tests {
         .iter()
         .map(ToString::to_string)
         .collect();
-        assert_eq!(first_command_index(&args), Some(7));
+        assert_eq!(first_command_index(&args, |name| name == "bal"), Some(7));
     }
 
     /// A panicking handler is answered with agcli's own `HANDLER_PANIC`
@@ -3617,7 +3706,7 @@ mod tests {
     /// What `flag_values` reads for `long` (and `short`) after the merge, and
     /// that the merged argv parses (agcli refuses a repeated flag).
     fn merged_values(argv: &[&str], long: &str, short: Option<&str>) -> Vec<String> {
-        let merged = merge_repeated_value_flags(strings(argv));
+        let merged = merge_repeated_value_flags(strings(argv), |_| false);
         let invocation = agcli::Invocation::parse(merged.clone(), |_| false)
             .unwrap_or_else(|e| panic!("{merged:?} does not parse: {e:?}"));
         let req = Req::new(&invocation, &invocation.positionals()[1..]);
@@ -3720,7 +3809,7 @@ mod tests {
         }
         // `format -i` is `--in-place`: a boolean, not merged, left for agcli.
         let argv = strings(&["ag-rledger", "format", "f", "-i", "-i"]);
-        assert_eq!(merge_repeated_value_flags(argv.clone()), argv);
+        assert_eq!(merge_repeated_value_flags(argv.clone(), |_| false), argv);
     }
 
     /// A flag given once, a repeated boolean, and anything after `--` are
@@ -3749,7 +3838,227 @@ mod tests {
             vec!["ag-rledger", "query", "f", "-m", "-m"],
         ] {
             let argv = strings(&argv);
-            assert_eq!(merge_repeated_value_flags(argv.clone()), argv);
+            assert_eq!(merge_repeated_value_flags(argv.clone(), |_| false), argv);
         }
+    }
+
+    /// The root command tree agcli prints: each command's name and usage.
+    async fn registered_usages() -> std::collections::BTreeMap<String, String> {
+        let run = build_cli().run(["ag-rledger"]).await;
+        let root: Value = serde_json::from_str(&run.to_json()).expect("root is JSON");
+        root["result"]["commands"]
+            .as_array()
+            .expect("result.commands")
+            .iter()
+            .map(|c| {
+                (
+                    c["name"].as_str().expect("name").to_string(),
+                    c["usage"].as_str().expect("usage").to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// `COMMAND_NAMES`, which finds the command word, lists exactly the
+    /// commands `build_cli` registers.
+    #[tokio::test]
+    async fn every_registered_command_is_in_command_names() {
+        let registered: BTreeSet<String> = registered_usages().await.into_keys().collect();
+        let listed: BTreeSet<String> = COMMAND_NAMES.iter().map(ToString::to_string).collect();
+        assert_eq!(registered, listed);
+    }
+
+    /// Every flag a handler reads, long or short, is declared in its
+    /// command's usage, so agcli echoes its value in `command` rather than
+    /// masking it as an undeclared flag's. agcli's reserved flags are its own.
+    #[tokio::test]
+    async fn usage_declares_every_flag_the_handler_reads() {
+        use clap::Args as _;
+        use rustledger::cmd;
+        let usages = registered_usages().await;
+        let reserved: BTreeSet<&str> = agcli::reserved_flag_names().iter().copied().collect();
+        let command = |name: &'static str| clap::Command::new(name);
+        let mut reads: Vec<(&str, BTreeSet<String>)> = vec![
+            (
+                "check",
+                flags_read(&["check", "f.beancount"], build_check_args),
+            ),
+            (
+                "query",
+                flags_read(&["query", "f.beancount", "SELECT 1"], build_query_args),
+            ),
+            (
+                "format",
+                flags_read(&["format", "f.beancount"], build_format_args),
+            ),
+            (
+                "extract",
+                flags_read(&["extract", "bank.csv"], build_extract_args),
+            ),
+            ("price", flags_read(&["price"], build_price_args)),
+            (
+                "add",
+                flags_read(
+                    &[
+                        "add",
+                        "f.beancount",
+                        "--quick",
+                        "p",
+                        "n",
+                        "Assets:A",
+                        "1 USD",
+                    ],
+                    build_add_args,
+                ),
+            ),
+            (
+                "explain",
+                flags_read(&["explain", "E2001"], build_explain_args),
+            ),
+            (
+                "split",
+                flags_read(&["split", "f.beancount", "--by", "year"], build_split_args),
+            ),
+            (
+                "merge",
+                flags_read(&["merge", "f.beancount"], build_merge_args),
+            ),
+        ];
+        for sub in cmd::report_cmd::Args::augment_args(command("report")).get_subcommands() {
+            let mut argv = vec!["report", "f.beancount", sub.get_name()];
+            if sub.get_name() == "returns" {
+                argv.extend(["--investments", "Assets"]);
+            }
+            reads.push(("report", flags_read(&argv, build_report_args)));
+        }
+        for sub in cmd::doctor::Args::augment_args(command("doctor")).get_subcommands() {
+            let argv = ["doctor", sub.get_name(), "f.beancount", "1", "2"];
+            reads.push(("doctor", flags_read(&argv, build_doctor_command)));
+        }
+        for sub in cmd::config_cmd::Args::augment_args(command("config")).get_subcommands() {
+            reads.push((
+                "config",
+                flags_read(&["config", sub.get_name()], build_config_args),
+            ));
+        }
+        for lint in LINTS {
+            reads.push((
+                "lint",
+                flags_read(&["lint", lint, "f.beancount"], build_lint_args),
+            ));
+        }
+        let mut gaps = Vec::new();
+        for (name, read) in reads {
+            let usage = &usages[name];
+            let declared: BTreeSet<&str> = usage
+                .split(|c: char| c.is_whitespace() || "[]|;".contains(c))
+                .filter(|token| token.starts_with('-'))
+                .collect();
+            let missing: Vec<String> = read
+                .iter()
+                .filter(|key| !reserved.contains(key.as_str()))
+                .map(|key| {
+                    if key.len() == 1 {
+                        format!("-{key}")
+                    } else {
+                        format!("--{key}")
+                    }
+                })
+                .filter(|flag| !declared.contains(flag.as_str()))
+                .collect();
+            if !missing.is_empty() {
+                gaps.push(format!("`{name}` reads {missing:?}"));
+            }
+        }
+        gaps.sort();
+        gaps.dedup();
+        assert!(
+            gaps.is_empty(),
+            "usage does not declare flags the handler reads:\n{}",
+            gaps.join("\n")
+        );
+    }
+
+    /// A value flag before the command word does not hide the command, so
+    /// its short list flags still merge.
+    #[test]
+    fn test_merge_repeated_value_flags_after_a_value_flag_before_the_command() {
+        assert_eq!(
+            merged_values(
+                &[
+                    "ag-rledger",
+                    "--format",
+                    "json",
+                    "report",
+                    "l",
+                    "returns",
+                    "-i",
+                    "A",
+                    "-i",
+                    "B"
+                ],
+                "investments",
+                Some("i"),
+            ),
+            vec!["A", "B"]
+        );
+        assert_eq!(
+            merged_values(
+                &[
+                    "ag-rledger",
+                    "-f",
+                    "json",
+                    "price",
+                    "-m",
+                    "A:B",
+                    "-m",
+                    "C:D",
+                    "--list-sources"
+                ],
+                "mapping",
+                Some("m"),
+            ),
+            vec!["A:B", "C:D"]
+        );
+    }
+
+    /// A global value flag before the command word gets its value attached,
+    /// so agcli does not take a value that names a command (`-P x`: `x` is the
+    /// `extract` alias) for the command. After the command word, nothing is
+    /// rewritten.
+    #[test]
+    fn test_attach_global_values_before_the_command_word() {
+        for (argv, want) in [
+            (
+                vec!["ag-rledger", "-P", "x", "check", "l"],
+                vec!["ag-rledger", "-P=x", "check", "l"],
+            ),
+            (
+                vec!["ag-rledger", "--profile", "check", "check", "l"],
+                vec!["ag-rledger", "--profile=check", "check", "l"],
+            ),
+            (
+                vec!["ag-rledger", "--plugin-max-time-secs", "5", "bal"],
+                vec!["ag-rledger", "--plugin-max-time-secs=5", "bal"],
+            ),
+            (
+                vec!["ag-rledger", "check", "l", "-P", "x"],
+                vec!["ag-rledger", "check", "l", "-P", "x"],
+            ),
+            (
+                vec!["ag-rledger", "-P=x", "check"],
+                vec!["ag-rledger", "-P=x", "check"],
+            ),
+        ] {
+            assert_eq!(
+                attach_global_values(strings(&argv), |name| name == "bal"),
+                strings(&want),
+                "{argv:?}"
+            );
+        }
+        // The rewritten argv names `check` as agcli resolves it.
+        let argv =
+            attach_global_values(strings(&["ag-rledger", "-P", "x", "check", "l"]), |_| false);
+        assert_eq!(first_command_index(&argv, |_| false), Some(2));
     }
 }

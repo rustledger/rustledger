@@ -2346,3 +2346,78 @@ fn repeated_list_flags_are_accepted() {
     );
     assert_eq!(code, 0, "{envelope}");
 }
+
+/// A value flag before the command word: the short list flags still merge,
+/// and `-P x`, whose value names the `extract` alias, is the profile, not
+/// the command (agcli 0.19 never takes a command's name as a bare value).
+#[test]
+fn flags_before_the_command_word_are_not_taken_for_it() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "ledger.beancount", TWO_YEARS);
+    let file = file.to_str().unwrap();
+    for args in [
+        vec![
+            "--format",
+            "json",
+            "report",
+            file,
+            "returns",
+            "-i",
+            "Assets:Bank",
+            "-i",
+            "Assets:Cash",
+        ],
+        vec![
+            "-f",
+            "json",
+            "price",
+            "-m",
+            "A:B",
+            "-m",
+            "C:D",
+            "--list-sources",
+        ],
+    ] {
+        let (code, envelope, _) = run_in(tmp.path(), &args);
+        assert_eq!(code, 0, "{args:?}: {envelope}");
+    }
+    let (code, envelope, _) = run_in(tmp.path(), &["-P", "x", "check", file]);
+    assert_eq!(code, 0, "-P x check: {envelope}");
+    let command = envelope["command"].as_str().expect("command");
+    assert!(command.contains(" check "), "ran check: {command}");
+}
+
+/// The value flags `check`, `extract` and `add` read are declared, so a
+/// merged `--plugin=a,b` and the rest echo their values.
+#[test]
+fn declared_value_flags_echo_their_values() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "ledger.beancount", TWO_YEARS);
+    let file = file.to_str().unwrap();
+    for (args, echoed) in [
+        (
+            vec!["check", file, "--plugin", "a.wasm", "--plugin", "b.wasm"],
+            "--plugin=a.wasm,b.wasm",
+        ),
+        (
+            vec!["check", file, "--cache-filename", "c.cache"],
+            "--cache-filename c.cache",
+        ),
+        (
+            vec!["check", file, "--include-rules", "r1"],
+            "--include-rules r1",
+        ),
+        (
+            vec!["extract", "bank.csv", "--delimiter", ";"],
+            "--delimiter ';'",
+        ),
+    ] {
+        let (_, envelope, _) = run_in(tmp.path(), &args);
+        let command = envelope["command"].as_str().expect("command");
+        assert!(
+            command.ends_with(echoed),
+            "{args:?}: {command} does not end with {echoed}"
+        );
+        assert!(!command.contains("<redacted>"), "{args:?}: {command}");
+    }
+}

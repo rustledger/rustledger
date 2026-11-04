@@ -614,7 +614,8 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 /// v55: PARSER OUTPUT changed, no archived layout moved. A date in a value
 ///     position that is not a real calendar date (`kk: 2024-02-30`, a `custom`
 ///     or `pushmeta` value, a cost date), and a year-0 date, are parse errors,
-///     where they loaded as no value (#2811).///
+///     where they loaded as no value (#2811).
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was

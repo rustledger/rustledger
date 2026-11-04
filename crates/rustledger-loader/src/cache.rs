@@ -611,12 +611,17 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     and price currencies are both written and differ (`{100 USD} @ 120 EUR`)
 ///     is a parse error, a purchase too, where a purchase loaded clean.
 ///
+/// v55: PARSER OUTPUT changed, no archived layout moved. A date in a value
+///     position that is not a real calendar date (`kk: 2024-02-30`, a `custom`
+///     or `pushmeta` value, a cost date), and a year-0 date, are parse errors,
+///     where they loaded as no value (#2811).
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 54;
+pub const CACHE_VERSION: u32 = 55;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1399,7 +1404,7 @@ mod tests {
         // v50 (#2802) reports a stray header token; no archived encoding
         // moves, so the arrays still hold.
         // v51 (#2802) reports a stray metadata token; likewise.
-        const FIXTURE_VERSION: u32 = 54;
+        const FIXTURE_VERSION: u32 = 55;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1542,7 +1547,7 @@ mod tests {
         // v50 (#2802) reports a stray header token; the hash below is
         // unchanged.
         // v51 (#2802) reports a stray metadata token; likewise.
-        const FIXTURE_VERSION: u32 = 54;
+        const FIXTURE_VERSION: u32 = 55;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

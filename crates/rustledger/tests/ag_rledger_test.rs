@@ -2250,3 +2250,99 @@ fn envelope_escapes_display_unsafe_characters_and_keeps_the_values() {
         "the narration decodes unchanged: {envelope}"
     );
 }
+
+/// A short value flag is declared in the usage, so `command` echoes its
+/// value. agcli 0.19 masks the value of an undeclared flag, and reads
+/// `--account/-a <ACCOUNT>` as declaring `--account` only.
+#[test]
+fn short_value_flags_are_echoed_not_redacted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "ledger.beancount", TWO_YEARS);
+    let file = file.to_str().unwrap();
+    for (args, echoed) in [
+        (
+            vec!["report", file, "balances", "-a", "Assets"],
+            "-a Assets",
+        ),
+        (vec!["report", file, "journal", "-l", "5"], "-l 5"),
+        (vec!["check", file, "-f", "json"], "-f json"),
+        (vec!["query", file, "SELECT 1", "-f", "json"], "-f json"),
+    ] {
+        let (_, envelope, _) = run_in(tmp.path(), &args);
+        let command = envelope["command"].as_str().expect("command");
+        assert!(
+            command.ends_with(echoed),
+            "{args:?}: {command} does not echo {echoed}"
+        );
+        assert!(!command.contains("<redacted>"), "{args:?}: {command}");
+    }
+}
+
+/// The list flags `rledger` takes more than once are accepted repeated, as
+/// before agcli 0.18 (which refuses a repeated flag with `PARSE_ERROR`).
+#[test]
+fn repeated_list_flags_are_accepted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(tmp.path(), "ledger.beancount", TWO_YEARS);
+    let file = file.to_str().unwrap();
+    for args in [
+        vec![
+            "check",
+            file,
+            "--native-plugin",
+            "auto_accounts",
+            "--native-plugin",
+            "noduplicates",
+        ],
+        vec![
+            "report",
+            file,
+            "returns",
+            "--investments",
+            "Assets:Bank",
+            "--investments",
+            "Assets:Cash",
+        ],
+        vec![
+            "report",
+            file,
+            "returns",
+            "-i",
+            "Assets:Bank",
+            "-i",
+            "Assets:Cash",
+            "-n",
+            "Income:A",
+            "-n",
+            "Income:B",
+        ],
+        vec![
+            "price",
+            "--mapping",
+            "A:B",
+            "--mapping",
+            "C:D",
+            "--list-sources",
+        ],
+    ] {
+        let (_, envelope, _) = run_in(tmp.path(), &args);
+        let code = envelope["error"]["code"].as_str().unwrap_or("");
+        assert!(
+            code != "PARSE_ERROR" && code != "UNKNOWN_FLAG" && code != "INVALID_FLAG",
+            "{args:?}: {envelope}"
+        );
+    }
+    // The two native plugins both ran: `check` with both is clean.
+    let (code, envelope, _) = run_in(
+        tmp.path(),
+        &[
+            "check",
+            file,
+            "--native-plugin",
+            "auto_accounts",
+            "--native-plugin",
+            "noduplicates",
+        ],
+    );
+    assert_eq!(code, 0, "{envelope}");
+}

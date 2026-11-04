@@ -35,7 +35,7 @@ const SCHEMA_VERSION: &str = "ag-rledger.v1";
 
 #[tokio::main]
 async fn main() {
-    let args = expand_config_aliases(std::env::args().collect());
+    let args = merge_repeated_value_flags(expand_config_aliases(std::env::args().collect()));
     let cli = build_cli();
     // `run`, not `run_env`: the argv is rewritten first (config aliases).
     // `run` installs no panic hook, so a handler panic is caught here, as a
@@ -55,12 +55,18 @@ async fn main() {
     std::process::exit(i32::from(run.exit_code().get()));
 }
 
+/// The `fix` of a `HANDLER_PANIC` envelope, as agcli 0.17 wrote it.
+const HANDLER_PANIC_FIX: &str = "This is a bug in the command handler, not the invocation. \
+                                 Inspect the root command tree and report the panic.";
+
 /// The `HANDLER_PANIC` envelope for a run whose handler panicked, exit code
 /// [`agcli::ExitCode::ERROR`], as agcli 0.17's `run_argv_with_context` gave.
 ///
 /// agcli 0.18 dropped `catch_unwind`, and its panic hook only guards
 /// `run_env`. The envelope is still agcli's own: the same argv is answered by
-/// a CLI whose one command, the one the argv names, returns the error.
+/// the same command tree with every handler returning the error, so the
+/// command is resolved, its flags redacted and its next actions chosen as in
+/// the run that panicked, whatever precedes the command word.
 async fn handler_panic(args: Vec<String>, error: tokio::task::JoinError) -> agcli::Execution {
     let detail = match error.try_into_panic() {
         Ok(payload) => payload
@@ -70,29 +76,20 @@ async fn handler_panic(args: Vec<String>, error: tokio::task::JoinError) -> agcl
             .unwrap_or_else(|| "unknown panic".to_string()),
         Err(_) => "the handler task was cancelled".to_string(),
     };
-    let name = agcli::Invocation::parse(args.iter().skip(1).cloned(), |_| false)
-        .ok()
-        .and_then(|invocation| invocation.positionals().first().cloned())
-        .unwrap_or_else(|| "ag-rledger".to_string());
     let message = format!("handler panicked: {detail}");
-    let fallback = AgentCli::new("ag-rledger", "Agent-native plain-text accounting CLI")
-        .schema_version(SCHEMA_VERSION)
-        .command(
-            Command::new(name, "The command whose handler panicked")
-                .allow_unknown_flags()
-                .allow_extra_args()
-                .handler(move |_req| {
-                    let message = message.clone();
-                    async move {
-                        Err(CommandError::new(
-                            agcli::ErrorCode::HANDLER_PANIC,
-                            message,
-                            "This is a bug in ag-rledger, not the invocation. \
-                             Report it with the command line.",
-                        ))
-                    }
-                }),
-        );
+    let fallback = build_cli_with(&|command| {
+        let message = message.clone();
+        command.handler(move |_req| {
+            let message = message.clone();
+            async move {
+                Err(CommandError::new(
+                    agcli::ErrorCode::HANDLER_PANIC,
+                    message,
+                    HANDLER_PANIC_FIX,
+                ))
+            }
+        })
+    });
     fallback.run(args).await
 }
 
@@ -109,6 +106,15 @@ const UNSUPPORTED_COMMANDS: &[(&str, &str)] = &[(
 )];
 
 fn build_cli() -> AgentCli {
+    build_cli_with(&|command| command)
+}
+
+/// The command tree, with every command passed through `wrap` before it is
+/// registered. [`build_cli`] registers them as they are; [`handler_panic`]
+/// swaps every handler for one that answers `HANDLER_PANIC`, so the fallback
+/// resolves the command, its flags, redaction and next actions exactly as the
+/// run that panicked did.
+fn build_cli_with(wrap: &dyn Fn(Command) -> Command) -> AgentCli {
     let mut cli = AgentCli::new("ag-rledger", "Agent-native plain-text accounting CLI")
         .version(env!("CARGO_PKG_VERSION"))
         .schema_version(SCHEMA_VERSION)
@@ -121,35 +127,41 @@ fn build_cli() -> AgentCli {
                 "attribution": "command surface adapted from matthiasdebernardini/agledger (#1291)"
             }),
         )
-        .command(check_command("check", "Validate beancount files"))
-        .command(check_command("c", "Alias for check"))
-        .command(query_command("query", "Query beancount files with BQL"))
-        .command(query_command("q", "Alias for query"))
-        .command(format_command("format", "Format beancount files"))
-        .command(format_command("fmt", "Alias for format"))
-        .command(report_command("report", "Generate financial reports"))
-        .command(report_command("r", "Alias for report"))
-        .command(doctor_command(
+        .command(wrap(check_command("check", "Validate beancount files")))
+        .command(wrap(check_command("c", "Alias for check")))
+        .command(wrap(query_command(
+            "query",
+            "Query beancount files with BQL",
+        )))
+        .command(wrap(query_command("q", "Alias for query")))
+        .command(wrap(format_command("format", "Format beancount files")))
+        .command(wrap(format_command("fmt", "Alias for format")))
+        .command(wrap(report_command("report", "Generate financial reports")))
+        .command(wrap(report_command("r", "Alias for report")))
+        .command(wrap(doctor_command(
             "doctor",
             "Debug and inspect beancount files",
-        ))
-        .command(doctor_command("d", "Alias for doctor"))
-        .command(extract_command(
+        )))
+        .command(wrap(doctor_command("d", "Alias for doctor")))
+        .command(wrap(extract_command(
             "extract",
             "Extract transactions from bank files",
-        ))
-        .command(extract_command("x", "Alias for extract"))
-        .command(price_command("price", "Fetch commodity prices"))
-        .command(price_command("p", "Alias for price"))
-        .command(config_command("config", "Manage rledger configuration"))
-        .command(config_command("cfg", "Alias for config"))
-        .command(add_command("add", "Add a transaction in quick mode"))
-        .command(add_command("a", "Alias for add"))
-        .command(compat_command())
-        .command(explain_command())
-        .command(lint_command())
-        .command(split_command())
-        .command(merge_command())
+        )))
+        .command(wrap(extract_command("x", "Alias for extract")))
+        .command(wrap(price_command("price", "Fetch commodity prices")))
+        .command(wrap(price_command("p", "Alias for price")))
+        .command(wrap(config_command(
+            "config",
+            "Manage rledger configuration",
+        )))
+        .command(wrap(config_command("cfg", "Alias for config")))
+        .command(wrap(add_command("add", "Add a transaction in quick mode")))
+        .command(wrap(add_command("a", "Alias for add")))
+        .command(wrap(compat_command()))
+        .command(wrap(explain_command()))
+        .command(wrap(lint_command()))
+        .command(wrap(split_command()))
+        .command(wrap(merge_command()))
         .root_field(
             "unsupported_commands",
             json!(
@@ -160,7 +172,7 @@ fn build_cli() -> AgentCli {
             ),
         );
     for (name, why) in UNSUPPORTED_COMMANDS {
-        cli = cli.command(unsupported_command(name, why));
+        cli = cli.command(wrap(unsupported_command(name, why)));
     }
 
     debug_assert!(
@@ -199,7 +211,7 @@ fn check_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
         .usage(usage_for(
             name,
-            "ag-rledger check [<file>] [--format <format>] [--json] [--verbose] [-v] [--quiet] \
+            "ag-rledger check [<file>] [--format <format>] [-f <format>] [--json] [--verbose] [-v] [--quiet] \
              [-q] [--no-cache] [-C] [--auto] [-a] [--native-plugin <name>] [--lint <name>]",
         ))
         .allow_unknown_flags()
@@ -226,8 +238,8 @@ fn check_command(name: &'static str, description: &'static str) -> Command {
 fn query_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
         .usage(usage_for(name,
-            "ag-rledger query [<file>] <query...> [--file <file>] [--query-file <file>] \
-             [--output <file>] [--format <format>] [--numberify] [-m] [--no-errors] [-q] \
+            "ag-rledger query [<file>] <query...> [--file <file>] [--query-file <file>] [-F <file>] \
+             [--output <file>] [-o <file>] [--format <format>] [-f <format>] [--numberify] [-m] [--no-errors] [-q] \
              [--verbose] [-v]",
         ))
         .allow_unknown_flags()
@@ -273,7 +285,7 @@ fn format_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
         .usage(usage_for(
             name,
-            "ag-rledger format [<file>...] [--output <file>] [--in-place] [-i] [--check] [--diff] \
+            "ag-rledger format [<file>...] [--output <file>] [-o <file>] [--in-place] [-i] [--check] [--diff] \
              [--ledger <root>] [--no-ledger] [--verbose] [-v]",
         ))
         .allow_unknown_flags()
@@ -382,14 +394,19 @@ fn report_flag_usage() -> String {
             let rendered: Vec<String> = flags
                 .iter()
                 .map(|f| {
-                    let mut spelled = format!("--{}", f.long);
-                    if let Some(short) = f.short {
-                        spelled.push_str(&format!("/-{short}"));
-                    }
-                    match &f.value {
+                    // The short form is its own token: agcli reads
+                    // `--account/-a <ACCOUNT>` as declaring `--account` only, and
+                    // masks the value of an undeclared flag in `command`.
+                    let one = |spelled: String| match &f.value {
                         Some(value) => format!("[{spelled} <{value}>]"),
                         None => format!("[{spelled}]"),
+                    };
+                    let mut tokens = one(format!("--{}", f.long));
+                    if let Some(short) = f.short {
+                        tokens.push(' ');
+                        tokens.push_str(&one(format!("-{short}")));
                     }
+                    tokens
                 })
                 .collect();
             format!("{report}: {}", rendered.join(" "))
@@ -512,7 +529,7 @@ fn report_usage() -> &'static str {
     USAGE
         .get_or_init(|| {
             format!(
-                "ag-rledger report [<file>] <report> [--file <file>] [--format <format>] \
+                "ag-rledger report [<file>] <report> [--file <file>] [--format <format>] [-f <format>] \
              [--verbose] [-v] [--no-cache]  |  report-specific flags \u{2014} {}",
                 report_flag_usage()
             )
@@ -520,9 +537,6 @@ fn report_usage() -> &'static str {
         .as_str()
 }
 
-/// A command's usage string, with the flags `rledger` takes on every
-/// command appended. The plugin-budget part is generated from
-/// [`PluginBudgetArgs`], the definition both binaries parse.
 /// [`with_globals`] for the command `name`: the template's command word is
 /// `name`, so an alias (`c`, `q`, `fmt`) advertises itself rather than the
 /// command it stands for. agcli 0.19's audit refuses a usage that names
@@ -538,6 +552,9 @@ fn usage_for(name: &str, base: &str) -> String {
     }
 }
 
+/// A command's usage string, with the flags `rledger` takes on every
+/// command appended. The plugin-budget part is generated from
+/// [`PluginBudgetArgs`], the definition both binaries parse.
 fn with_globals(base: &str) -> String {
     let mut usage = format!("{base} [--profile <name>] [-P <name>]");
     for (long, value) in PluginBudgetArgs::flags() {
@@ -598,7 +615,7 @@ fn doctor_command(name: &'static str, description: &'static str) -> Command {
         .usage(usage_for(
             name,
             "ag-rledger doctor <subcommand> [args...] [--verbose] [-v] [--conversion <value>] \
-             [--output <dir>] [--count <n>] [--seed <n>] [--skip-validation] [--manifest] \
+             [--output <dir>] [-o <dir>] [--count <n>] [-c <n>] [--seed <n>] [-s <n>] [--skip-validation] [--manifest] \
              [--edge-cases-only]",
         ))
         .allow_unknown_flags()
@@ -625,10 +642,10 @@ fn extract_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
         .usage(usage_for(
             name,
-            "ag-rledger extract [<file>] [--file <file>] [--list-importers] [--importer <name>] \
-             [--config <file>] [--account <account>] [--currency <currency>] [--auto] \
+            "ag-rledger extract [<file>] [--file <file>] [--list-importers] [--importer <name>] [-i <name>] \
+             [--config <file>] [--account <account>] [-a <account>] [--currency <currency>] [-c <currency>] [--auto] \
              [--invert-sign] [--include-zero-amounts] [--no-header] \
-             [--output <file>] [--existing <file>] [--suggest-categories] [--balance <amount>]",
+             [--output <file>] [-o <file>] [--existing <file>] [--suggest-categories] [--balance <amount>]",
         ))
         .allow_unknown_flags()
         .allow_extra_args()
@@ -681,8 +698,8 @@ fn extract_command(name: &'static str, description: &'static str) -> Command {
 fn price_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
         .usage(usage_for(name,
-            "ag-rledger price [<symbol>...] [--file <file>] [--currency <currency>] [--date <date>] \
-             [--beancount] [-b] [--verbose] [-v] [--mapping <from:to>] [--source <source>] \
+            "ag-rledger price [<symbol>...] [--file <file>] [-f <file>] [--currency <currency>] [-c <currency>] [--date <date>] [-d <date>] \
+             [--beancount] [-b] [--verbose] [-v] [--mapping <from:to>] [-m <from:to>] [--source <source>] [-s <source>] \
              [--source-cmd <cmd>] [--list-sources] [--clear-cache] [--inactive] \
              [--undeclared] [--all-commodities] [-n] [--clobber] [-C]",
         ))
@@ -743,7 +760,7 @@ fn add_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
         .usage(usage_for(name,
             "ag-rledger add [<file>] --quick <payee> <narration> <account> <amount> <account> \
-             [--file <file>] [--date <date>] [--no-completion] [-n] [-y]",
+             [--file <file>] [--date <date>] [-d <date>] [--no-completion] [-n] [-y]",
         ))
         .allow_unknown_flags()
         .allow_extra_args()
@@ -878,7 +895,7 @@ fn build_explain_args(req: &Req<'_>) -> Result<rustledger::cmd::explain::Args, C
 fn lint_command() -> Command {
     Command::new("lint", "Run non-fatal advisory passes")
         .usage(with_globals(
-            "ag-rledger lint <transfers|closed-nonempty|control-chars> <file>... [--format <format>]  |  \
+            "ag-rledger lint <transfers|closed-nonempty|control-chars> <file>... [--format <format>] [-f <format>]  |  \
              transfers: [--min-confidence <n>] [--date-window <days>] \
              [--amount-tolerance <amount>] [--apply]",
         ))
@@ -2723,6 +2740,136 @@ fn exit_code_to_i32(code: ProcessExitCode) -> i32 {
     i32::from(code != ProcessExitCode::SUCCESS)
 }
 
+/// The flags `rledger` takes more than once (clap `Vec`s), which
+/// [`flag_values`] collects: long forms, for every command.
+const MULTI_VALUE_FLAGS: &[&str] = &[
+    "plugin",
+    "native-plugin",
+    "include-rules",
+    "exclude-rules",
+    "investments",
+    "income",
+    "wasm-importer",
+    "wasm-importer-dir",
+    "mapping",
+];
+
+/// The short forms of [`MULTI_VALUE_FLAGS`], by the commands that own them:
+/// elsewhere the same letter is another flag (`format -i` is `--in-place`).
+const MULTI_VALUE_SHORTS: &[(&[&str], char, &str)] = &[
+    (&["report", "r"], 'i', "investments"),
+    (&["report", "r"], 'n', "income"),
+    (&["price", "p"], 'm', "mapping"),
+];
+
+/// Merge every repeated [`MULTI_VALUE_FLAGS`] flag into one comma-joined
+/// `--flag=a,b` at its first occurrence.
+///
+/// agcli 0.18 refuses a flag given twice (`PARSE_ERROR`), with no opt-out,
+/// but these flags are lists in `rledger` (`--investments A --investments B`)
+/// and were accepted by `ag-rledger` before. [`flag_values`] already splits
+/// each value on commas, so the merged flag reads exactly as the repeats did
+/// (a value containing a comma was split there before too). A flag given
+/// once is left as written, so `command` echoes it unchanged, and a repeated
+/// boolean (`--json --json`) is left for agcli to refuse. Stops at `--`.
+fn merge_repeated_value_flags(args: Vec<String>) -> Vec<String> {
+    let command = first_command_index(&args).map(|idx| args[idx].clone());
+    let long_of = |arg: &str| -> Option<(&'static str, Option<String>)> {
+        if let Some(rest) = arg.strip_prefix("--") {
+            let (name, value) = match rest.split_once('=') {
+                Some((name, value)) => (name, Some(value.to_string())),
+                None => (rest, None),
+            };
+            return MULTI_VALUE_FLAGS
+                .iter()
+                .find(|long| **long == name)
+                .map(|long| (*long, value));
+        }
+        let rest = arg.strip_prefix('-')?;
+        let mut chars = rest.chars();
+        let letter = chars.next()?;
+        let value = match chars.as_str() {
+            "" => None,
+            tail => Some(tail.strip_prefix('=')?.to_string()),
+        };
+        MULTI_VALUE_SHORTS
+            .iter()
+            .find(|(commands, short, _)| {
+                *short == letter
+                    && command
+                        .as_deref()
+                        .is_some_and(|command| commands.contains(&command))
+            })
+            .map(|(_, _, long)| (*long, value))
+    };
+
+    // (position, flag, value) of each occurrence that has a value.
+    let mut found: Vec<(usize, usize, &'static str, String)> = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--" {
+            break;
+        }
+        if let Some((long, inline)) = long_of(&args[i]) {
+            match inline {
+                Some(value) => found.push((i, 1, long, value)),
+                None => {
+                    if let Some(value) = args.get(i + 1)
+                        && !value.starts_with('-')
+                    {
+                        found.push((i, 2, long, value.clone()));
+                        i += 2;
+                        continue;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let repeated: BTreeSet<&str> = found
+        .iter()
+        .filter(|(_, _, long, _)| {
+            found
+                .iter()
+                .filter(|(_, _, other, _)| other == long)
+                .count()
+                > 1
+        })
+        .map(|(_, _, long, _)| *long)
+        .collect();
+    if repeated.is_empty() {
+        return args;
+    }
+    let mut drop = vec![false; args.len()];
+    let mut replace: Vec<(usize, String)> = Vec::new();
+    for long in &repeated {
+        let mut occurrences = found.iter().filter(|(_, _, other, _)| other == long);
+        let Some((first, _, _, _)) = occurrences.clone().next() else {
+            continue;
+        };
+        let joined: Vec<&str> = occurrences
+            .clone()
+            .map(|(_, _, _, value)| value.as_str())
+            .collect();
+        replace.push((*first, format!("--{long}={}", joined.join(","))));
+        for (pos, width, _, _) in occurrences.by_ref() {
+            for slot in drop.iter_mut().skip(*pos).take(*width) {
+                *slot = true;
+            }
+        }
+    }
+    let mut merged = Vec::with_capacity(args.len());
+    for (pos, arg) in args.into_iter().enumerate() {
+        if let Some((_, flag)) = replace.iter().find(|(at, _)| *at == pos) {
+            merged.push(flag.clone());
+        } else if !drop[pos] {
+            merged.push(arg);
+        }
+    }
+    merged
+}
+
 fn expand_config_aliases(args: Vec<String>) -> Vec<String> {
     // A config that failed to load yields no aliases here; the command that
     // runs reports the error (`load_config`), as `rledger` does.
@@ -2870,7 +3017,14 @@ mod tests {
                 .map(|f| f.trim_matches(['[', ']']))
                 .map(|f| f.split([' ', '/']).next().unwrap_or_default())
                 .collect();
-            let expected: Vec<String> = flags.iter().map(|f| format!("--{}", f.long)).collect();
+            // Each flag's long form, then its short form as its own token.
+            let expected: Vec<String> = flags
+                .iter()
+                .flat_map(|f| {
+                    std::iter::once(format!("--{}", f.long))
+                        .chain(f.short.map(|short| format!("-{short}")))
+                })
+                .collect();
             assert_eq!(listed, expected, "`{report}`'s usage segment disagrees");
         }
     }
@@ -2884,7 +3038,11 @@ mod tests {
         for switch in ["[--irr]", "[--by-group]", "[--no-zero]", "[--children]"] {
             assert!(usage.contains(switch), "{switch} missing from {usage}");
         }
-        assert!(usage.contains("[--account/-a <ACCOUNT>]"), "{usage}");
+        // The short form is its own token, so agcli declares it with its value.
+        assert!(
+            usage.contains("[--account <ACCOUNT>] [-a <ACCOUNT>]"),
+            "{usage}"
+        );
         assert!(
             usage.contains("[--long-term-days <LONG_TERM_DAYS>]"),
             "{usage}"
@@ -3415,5 +3573,183 @@ mod tests {
         .map(ToString::to_string)
         .collect();
         assert_eq!(first_command_index(&args), Some(7));
+    }
+
+    /// A panicking handler is answered with agcli's own `HANDLER_PANIC`
+    /// envelope, exit code 1, for the command the argv names: also with a
+    /// framework boolean before the command word, and with no arguments.
+    #[tokio::test]
+    async fn test_handler_panic_answers_for_the_command_that_panicked() {
+        for argv in [
+            vec!["ag-rledger", "check", "f.beancount"],
+            vec!["ag-rledger", "--json", "check", "f.beancount"],
+            vec!["ag-rledger", "check"],
+            vec!["ag-rledger", "r", "f.beancount", "balances", "-a", "Assets"],
+        ] {
+            let error = tokio::spawn(async { std::panic::panic_any("boom") })
+                .await
+                .expect_err("the task panics");
+            let args: Vec<String> = argv.iter().map(ToString::to_string).collect();
+            let run = handler_panic(args, error).await;
+            let envelope: Value = serde_json::from_str(&run.to_json()).expect("envelope is JSON");
+            assert_eq!(
+                envelope["error"]["code"], "HANDLER_PANIC",
+                "{argv:?}: {envelope}"
+            );
+            assert_eq!(
+                envelope["error"]["message"], "handler panicked: boom",
+                "{argv:?}"
+            );
+            assert_eq!(envelope["fix"], HANDLER_PANIC_FIX, "{argv:?}");
+            assert_eq!(run.exit_code(), agcli::ExitCode::ERROR, "{argv:?}");
+            let command = envelope["command"].as_str().expect("command");
+            assert!(
+                command.ends_with(&argv[1..].join(" ")),
+                "{argv:?}: the command echoed as written: {command}"
+            );
+        }
+    }
+
+    fn strings(argv: &[&str]) -> Vec<String> {
+        argv.iter().map(ToString::to_string).collect()
+    }
+
+    /// What `flag_values` reads for `long` (and `short`) after the merge, and
+    /// that the merged argv parses (agcli refuses a repeated flag).
+    fn merged_values(argv: &[&str], long: &str, short: Option<&str>) -> Vec<String> {
+        let merged = merge_repeated_value_flags(strings(argv));
+        let invocation = agcli::Invocation::parse(merged.clone(), |_| false)
+            .unwrap_or_else(|e| panic!("{merged:?} does not parse: {e:?}"));
+        let req = Req::new(&invocation, &invocation.positionals()[1..]);
+        flag_values(&req, long, short)
+    }
+
+    /// Each multi-value flag given twice reaches the handler as both values,
+    /// in order, in every spelling.
+    #[test]
+    fn test_merge_repeated_value_flags_keeps_every_value() {
+        for long in MULTI_VALUE_FLAGS {
+            for argv in [
+                vec![
+                    "ag-rledger",
+                    "check",
+                    "f.beancount",
+                    &format!("--{long}"),
+                    "A",
+                    &format!("--{long}"),
+                    "B",
+                ],
+                vec![
+                    "ag-rledger",
+                    "check",
+                    "f.beancount",
+                    &format!("--{long}=A"),
+                    &format!("--{long}=B"),
+                ],
+                vec![
+                    "ag-rledger",
+                    "check",
+                    "f.beancount",
+                    &format!("--{long}"),
+                    "A",
+                    &format!("--{long}=B"),
+                ],
+            ] {
+                assert_eq!(merged_values(&argv, long, None), vec!["A", "B"], "{argv:?}");
+            }
+        }
+    }
+
+    /// The short forms merge for the command that owns them, and only there.
+    #[test]
+    fn test_merge_repeated_value_flags_merges_short_forms_for_their_command() {
+        for (argv, long, short, expected) in [
+            (
+                vec!["ag-rledger", "report", "f", "returns", "-i", "A", "-i", "B"],
+                "investments",
+                "i",
+                vec!["A", "B"],
+            ),
+            (
+                vec![
+                    "ag-rledger",
+                    "r",
+                    "f",
+                    "returns",
+                    "--investments",
+                    "A",
+                    "-i=B",
+                ],
+                "investments",
+                "i",
+                vec!["A", "B"],
+            ),
+            (
+                vec![
+                    "ag-rledger",
+                    "report",
+                    "f",
+                    "returns",
+                    "-n",
+                    "A",
+                    "--income",
+                    "B",
+                ],
+                "income",
+                "n",
+                vec!["A", "B"],
+            ),
+            (
+                vec!["ag-rledger", "price", "-m", "A:B", "-m", "C:D", "--dry-run"],
+                "mapping",
+                "m",
+                vec!["A:B", "C:D"],
+            ),
+            (
+                vec!["ag-rledger", "p", "--mapping", "A:B", "-m", "C:D"],
+                "mapping",
+                "m",
+                vec!["A:B", "C:D"],
+            ),
+        ] {
+            assert_eq!(
+                merged_values(&argv, long, Some(short)),
+                expected,
+                "{argv:?}"
+            );
+        }
+        // `format -i` is `--in-place`: a boolean, not merged, left for agcli.
+        let argv = strings(&["ag-rledger", "format", "f", "-i", "-i"]);
+        assert_eq!(merge_repeated_value_flags(argv.clone()), argv);
+    }
+
+    /// A flag given once, a repeated boolean, and anything after `--` are
+    /// left exactly as written.
+    #[test]
+    fn test_merge_repeated_value_flags_leaves_other_argv_alone() {
+        for argv in [
+            vec![
+                "ag-rledger",
+                "check",
+                "f",
+                "--native-plugin",
+                "auto_accounts",
+            ],
+            vec!["ag-rledger", "check", "f", "--json", "--json"],
+            vec![
+                "ag-rledger",
+                "check",
+                "f",
+                "--",
+                "--plugin",
+                "a",
+                "--plugin",
+                "b",
+            ],
+            vec!["ag-rledger", "query", "f", "-m", "-m"],
+        ] {
+            let argv = strings(&argv);
+            assert_eq!(merge_repeated_value_flags(argv.clone()), argv);
+        }
     }
 }

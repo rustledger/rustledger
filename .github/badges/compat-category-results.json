@@ -1,15 +1,10 @@
 {
   "other": {
-    "total": 732,
-    "check_match": 732,
-    "full_match": 732
+    "total": 737,
+    "check_match": 737,
+    "full_match": 737
   },
   "plugins": {
-    "total": 3,
-    "check_match": 3,
-    "full_match": 3
-  },
-  "synthetic-bean-example": {
     "total": 3,
     "check_match": 3,
     "full_match": 3
@@ -18,6 +13,11 @@
     "total": 7,
     "check_match": 7,
     "full_match": 7
+  },
+  "synthetic-bean-example": {
+    "total": 3,
+    "check_match": 3,
+    "full_match": 3
   },
   "synthetic-proptest": {
     "total": 500,

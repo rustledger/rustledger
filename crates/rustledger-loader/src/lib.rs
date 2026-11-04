@@ -91,8 +91,9 @@ pub fn is_glob_pattern(path: &str) -> bool {
     path.contains(['*', '?', '['])
 }
 pub use process::{
-    CanonicalSortKey, ErrorLocation, ErrorSeverity, ExtraPlugin, Ledger, LedgerError, LoadOptions,
-    ProcessError, canonical_sort_key, load, load_raw, load_with_fs, process,
+    BalanceDiscrepancy, CanonicalSortKey, ErrorLocation, ErrorSeverity, ExtraPlugin, Ledger,
+    LedgerError, LoadOptions, ProcessError, canonical_sort_key, load, load_raw, load_with_fs,
+    process,
 };
 #[cfg(feature = "plugins")]
 pub use process::{PluginPass, run_plugins};
@@ -896,6 +897,53 @@ fn build_display_context(directives: &[Spanned<Directive>], options: &Options) -
             .map(|(c, p)| (c.as_str(), *p)),
         options.render_commas,
     )
+}
+
+/// The balance discrepancies of a ledger that was loaded WITHOUT validation,
+/// recomputed from the sources it was loaded from (#2823).
+///
+/// `#balances.discrepancy` comes from the balance checker, which only runs
+/// when a load validates. Embedders that load without validation (the WASM
+/// and FFI query paths keep that cost off ordinary queries) call this only
+/// when a query actually reads the column. It re-runs the loader's own
+/// pipeline (`load` then [`process()`] with `validate: true`) over an in-memory
+/// filesystem holding every file in `source_map`, so the answer is exactly the
+/// [`Ledger::balance_discrepancies`] a validating load returns: one
+/// computation, not a second copy of the balance check. Files an embedder
+/// decrypted or read through its own filesystem are already plain text in the
+/// source map, so nothing is read from disk again.
+///
+/// `options` should be the ones the ledger was loaded with; `validate` is
+/// forced on. The first file in `source_map` is the entry point.
+///
+/// Returns an empty list when the sources cannot be loaded again, for example
+/// when the source map's text was dropped (`retain_source_text: false`); the
+/// column then reports NULL, as it does for a load that did not validate.
+#[must_use]
+pub fn recompute_balance_discrepancies(
+    source_map: &SourceMap,
+    options: &LoadOptions,
+) -> Vec<BalanceDiscrepancy> {
+    let Some(entry) = source_map.files().first() else {
+        return Vec::new();
+    };
+    let mut vfs = VirtualFileSystem::new();
+    for file in source_map.files() {
+        vfs.add_file(&file.path, file.source.as_str());
+    }
+    let Ok(raw) = Loader::new()
+        .with_filesystem(Box::new(vfs))
+        .load(&entry.path)
+    else {
+        return Vec::new();
+    };
+    let options = LoadOptions {
+        validate: true,
+        ..options.clone()
+    };
+    process(raw, &options)
+        .map(|ledger| ledger.balance_discrepancies)
+        .unwrap_or_default()
 }
 
 #[cfg(test)]

@@ -18,7 +18,7 @@ use crate::helpers::{
 #[cfg(feature = "completions")]
 use crate::types::{CompletionJson, CompletionResultJson};
 use crate::types::{
-    Error, FormatResult, Ledger, PadResult, ParseResult, QueryResult, Severity, ValidationResult,
+    Error, FormatResult, Ledger, PadResult, ParseResult, QueryResult, ValidationResult,
 };
 #[cfg(feature = "plugins")]
 use crate::types::{PluginInfo, PluginResult};
@@ -157,7 +157,7 @@ pub fn validate_source(source: &str) -> Result<JsValue, JsError> {
 /// Returns a `QueryResult` with columns, rows, and any errors.
 #[wasm_bindgen]
 pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
-    use rustledger_booking::merge_with_padding;
+    use rustledger_booking::merge_with_padding_spanned;
     use rustledger_query::{Executor, parse as parse_query};
 
     let load = load_and_book(source);
@@ -197,19 +197,25 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
     // Pad directives so `FROM #entries WHERE type = 'pad'` audits
     // continue to enumerate them, AND handles multi-pad shadowing
     // (#1300) correctly by construction via `process_pads`.
-    let directives = merge_with_padding(&load.directives);
-    let mut executor = Executor::new(&directives);
-    // Config-aware classification (POSSIGN/ACCOUNT_SORTKEY honor name_*
-    // renames) — same wiring as the CLI query path.
-    executor.set_account_types(crate::helpers::account_types_from_raw(
-        &load.parse_result.options,
-    ));
-    executor.set_booking_method(crate::helpers::booking_method_from_raw(
-        &load.parse_result.options,
-    ));
-    executor.set_summary_accounts(crate::helpers::summary_accounts_from_raw(
-        &load.parse_result.options,
-    ));
+    // Spanned, with the text named `<string>`, so the source columns resolve
+    // (#2825); `#balances.discrepancy` is computed only if the query reads it
+    // (#2823). The same constructor as the CLI and the FFI component.
+    let source_map = crate::helpers::string_source_map(source);
+    let spanned = crate::helpers::spanned_directives(&load.directives, &load.directive_spans);
+    let directives = merge_with_padding_spanned(&spanned);
+    let options = &load.parse_result.options;
+    let memo = std::sync::OnceLock::new();
+    let mut executor = Executor::for_ledger(
+        &directives,
+        &source_map,
+        crate::helpers::lazy_query_context(
+            &source_map,
+            &memo,
+            crate::helpers::account_types_from_raw(options),
+            crate::helpers::booking_method_from_raw(options),
+            crate::helpers::summary_accounts_from_raw(options),
+        ),
+    );
     match executor.execute(&query) {
         Ok(result) => {
             let rows: Vec<Vec<_>> = result
@@ -778,8 +784,9 @@ fn query_with_filesystem(
     entry_point: &str,
     query_str: &str,
 ) -> Result<JsValue, JsError> {
-    use rustledger_booking::merge_with_padding;
+    use rustledger_booking::merge_with_padding_spanned;
     use rustledger_loader::{LoadOptions, Loader, process};
+    use rustledger_query::executor::LedgerContext;
     use rustledger_query::{Executor, parse as parse_query};
     let mut loader = Loader::new().with_filesystem(fs);
 
@@ -809,14 +816,18 @@ fn query_with_filesystem(
         return to_js(&result);
     }
 
-    // Run the shared processing pipeline (queries skip validation):
-    // sort → synth-plugins → book → regular-plugins → finalize
+    // Run the shared processing pipeline WITH validation, as `rledger query`
+    // does: `#balances.discrepancy` comes from the balance checker, which runs
+    // only in a validating load (#2823). As in the CLI, only a booking
+    // failure (an unbooked directive stream) stops the query; validation
+    // diagnostics are reported alongside the rows. A failing assertion is
+    // one of them, and a query about it must still answer.
     let options = LoadOptions {
-        validate: false,
+        validate: true,
         ..Default::default()
     };
 
-    let ledger = match process(load_result, &options) {
+    let mut ledger = match process(load_result, &options) {
         Ok(ledger) => ledger,
         Err(e) => {
             let result = QueryResult {
@@ -828,18 +839,15 @@ fn query_with_filesystem(
         }
     };
 
-    // Only abort on actual errors, not warnings (matching CLI query behavior)
-    // — and not on a LOAD-phase notice either. `process` turns every load
-    // error into a blocking `LOAD` ledger error, which is right for `check`
-    // but not here: anything genuinely unusable already aborted above via
-    // `load_error_is_fatal`, so what survives to this point is reportable and
-    // no reason to throw away a correct answer. `rledger query` prints
-    // `LOAD: Duplicate filename parsed` and still returns the rows.
-    let errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
-    let has_errors = errors
+    let booking_failed = ledger
+        .errors
         .iter()
-        .any(|e| e.severity == Severity::Error && e.code.as_deref() != Some("LOAD"));
-    if has_errors {
+        .any(rustledger_loader::LedgerError::is_booking_failure);
+    let errors: Vec<Error> = std::mem::take(&mut ledger.errors)
+        .into_iter()
+        .map(Error::from)
+        .collect();
+    if booking_failed {
         let result = QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
@@ -847,36 +855,33 @@ fn query_with_filesystem(
         };
         return to_js(&result);
     }
-
-    // Merge pad-synthesized transactions into the directive stream
-    // (matching CLI query pipeline). See `wasm::query` above for the
-    // architectural rule.
-    // Grab the configured account types before `ledger` fields are moved.
-    let account_types = ledger.options.to_account_types();
-    let booking_method = ledger.booking_method;
-    let summary_accounts =
-        rustledger_query::executor::SummaryAccounts::from_options(&ledger.options);
-    let booked_directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
-    let directives = merge_with_padding(&booked_directives);
-
     // Parse the query
     let query = match parse_query(query_str) {
         Ok(q) => q,
         Err(e) => {
+            let mut errors = errors;
+            errors.push(Error::new(e.to_string()));
             let result = QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
-                errors: vec![Error::new(e.to_string())],
+                errors,
             };
             return to_js(&result);
         }
     };
 
-    // Execute query
-    let mut executor = Executor::new(&directives);
-    executor.set_account_types(account_types);
-    executor.set_booking_method(booking_method);
-    executor.set_summary_accounts(summary_accounts);
+    // Pad-expanded and spanned, so the source columns resolve (#2825); the
+    // context carries the validating load's discrepancies (#2823). The same
+    // constructor as the CLI and the FFI component.
+    let directives = merge_with_padding_spanned(&ledger.directives);
+    let mut executor = Executor::for_ledger(
+        &directives,
+        &ledger.source_map,
+        LedgerContext::from_ledger(&ledger),
+    );
+    // `process` already carries every load error as a `LOAD` ledger error,
+    // so the reported list is the ledger's, not the load's again.
+    let load_errors = errors;
     match executor.execute(&query) {
         Ok(result) => {
             let rows: Vec<Vec<_>> = result

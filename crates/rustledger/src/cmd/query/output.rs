@@ -6,6 +6,7 @@ use rustledger_core::format::escape_csv;
 use rustledger_core::{Directive, DisplayContext, Spanned};
 use rustledger_loader::SourceMap;
 use rustledger_plugin::escape_untrusted_line;
+use rustledger_query::executor::{BalanceDiscrepancies, LedgerContext};
 use rustledger_query::{Executor, Value, parse as parse_query};
 use std::io::Write;
 
@@ -28,20 +29,27 @@ const MAX_COLUMN_WIDTH: usize = u16::MAX as usize;
 /// (#2518). A batch run (`rledger query FILE QUERY`, `-F`) is one statement
 /// and gets one executor.
 ///
-/// Uses the source-map-aware constructor so the `filename`/`lineno` columns
-/// (and `meta`-derived location lookups) resolve to real source positions
-/// instead of NULL.
+/// Built with [`Executor::for_ledger`], the constructor the WASM and FFI
+/// query paths use too, so the `filename` / `lineno` / `location` columns,
+/// the metadata accessors and `#balances.discrepancy` resolve the same way
+/// everywhere (#2823, #2825).
 pub(super) fn session_executor<'a>(
     directives: &'a [Spanned<Directive>],
     source_map: &'a SourceMap,
     settings: &ShellSettings,
 ) -> Executor<'a> {
-    let mut executor = Executor::new_with_sources(directives, source_map);
-    executor.set_account_types(settings.account_types.clone());
-    executor.set_booking_method(settings.booking_method);
-    executor.set_summary_accounts(settings.summary_accounts.clone());
-    executor.set_balance_discrepancies(settings.balance_discrepancies.iter().cloned());
-    executor
+    Executor::for_ledger(
+        directives,
+        source_map,
+        LedgerContext {
+            account_types: settings.account_types.clone(),
+            booking_method: settings.booking_method,
+            summary_accounts: settings.summary_accounts.clone(),
+            balance_discrepancies: BalanceDiscrepancies::Known(
+                settings.balance_discrepancies.clone(),
+            ),
+        },
+    )
 }
 
 /// Parse `query_str`, run it on `executor` and write the result.

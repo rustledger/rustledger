@@ -73,6 +73,9 @@ pub fn validation_error_to_wasm(
 /// Result of loading and processing a source file.
 pub struct ProcessedLedger {
     pub directives: Vec<Directive>,
+    /// Each directive's span and file id, in `directives` order, so a query
+    /// can resolve the `filename` / `lineno` / `location` columns (#2825).
+    pub directive_spans: Vec<DirectiveSpan>,
     pub options: LedgerOptions,
     pub errors: Vec<Error>,
     /// Option diagnostics (E7001, E7002, E7003, E7009, ...), kept apart from
@@ -137,6 +140,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
 
         return ProcessedLedger {
             directives: Vec::new(),
+            directive_spans: Vec::new(),
             options,
             errors,
             option_errors,
@@ -157,6 +161,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             let option_errors = validate_option_tuples(&parse_result.options);
             return ProcessedLedger {
                 directives: Vec::new(),
+                directive_spans: Vec::new(),
                 options,
                 errors: vec![Error::new(format!("Load error: {e}"))],
                 option_errors,
@@ -186,12 +191,17 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
 
     match process(raw, &load_options) {
         Ok(ledger) => {
-            let directives = ledger.directives.into_iter().map(|s| s.value).collect();
+            let (directives, directive_spans) = ledger
+                .directives
+                .into_iter()
+                .map(|s| (s.value, (s.span, s.file_id)))
+                .unzip();
 
             let errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
 
             ProcessedLedger {
                 directives,
+                directive_spans,
                 options,
                 errors,
                 option_errors,
@@ -201,6 +211,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
         }
         Err(e) => ProcessedLedger {
             directives: Vec::new(),
+            directive_spans: Vec::new(),
             options,
             errors: vec![Error::new(format!("Processing error: {e}"))],
             option_errors,
@@ -419,6 +430,52 @@ fn extract_loader_options(options: &rustledger_loader::Options) -> LedgerOptions
     LedgerOptions {
         title: options.title.clone(),
         operating_currencies: options.operating_currency.clone(),
+    }
+}
+
+/// A directive's span and file id, kept beside the plain directive so a
+/// query can resolve its source columns (#2825).
+pub type DirectiveSpan = (rustledger_core::Span, u16);
+
+/// Pair `directives` with their kept spans for a query; see
+/// [`rustledger_query::executor::spanned_from_parts`].
+#[must_use]
+pub fn spanned_directives(
+    directives: &[Directive],
+    spans: &[DirectiveSpan],
+) -> Vec<rustledger_core::Spanned<Directive>> {
+    rustledger_query::executor::spanned_from_parts(directives, spans)
+}
+
+/// The source map a query over an unnamed in-memory source reads its source
+/// columns from: the one text, named `<string>` as beancount's `load_string`
+/// names it (#2825). File id 0, the id the source's directives carry.
+#[must_use]
+pub fn string_source_map(source: &str) -> rustledger_loader::SourceMap {
+    let mut map = rustledger_loader::SourceMap::new();
+    map.add_file(Path::new("<string>").to_path_buf(), source.into());
+    map
+}
+
+/// The context of a query over a source that was loaded WITHOUT validation:
+/// `#balances.discrepancy` is computed from `source_map` only when a query
+/// reads it, and kept in `memo` (#2823; see
+/// [`rustledger_query::executor::BalanceDiscrepancies::recomputed_from`]).
+#[must_use]
+pub fn lazy_query_context<'a>(
+    source_map: &'a rustledger_loader::SourceMap,
+    memo: &'a std::sync::OnceLock<Vec<rustledger_loader::BalanceDiscrepancy>>,
+    account_types: rustledger_core::AccountTypes,
+    booking_method: rustledger_core::BookingMethod,
+    summary_accounts: rustledger_query::executor::SummaryAccounts,
+) -> rustledger_query::executor::LedgerContext<'a> {
+    rustledger_query::executor::LedgerContext {
+        account_types,
+        booking_method,
+        summary_accounts,
+        balance_discrepancies: rustledger_query::executor::BalanceDiscrepancies::recomputed_from(
+            source_map, memo,
+        ),
     }
 }
 

@@ -6828,7 +6828,10 @@ fn entries_meta_carries_filename_and_lineno() {
             file_id: 0,
         })
         .collect();
-    let source_map = SourceMap::new();
+    // A real file behind `file_id` 0: a directive with no file has no
+    // location, and so no `filename` / `lineno` keys (#2825).
+    let mut source_map = SourceMap::new();
+    source_map.add_file("ledger.beancount".into(), "x".repeat(64).into());
     let mut executor = Executor::new_with_sources(&spanned, &source_map);
     let result = executor
         .execute(&parse("SELECT meta FROM #entries").expect("should parse"))
@@ -6872,7 +6875,10 @@ fn source_keys_reach_entries_meta_but_not_per_table_meta() {
             file_id: 0,
         })
         .collect();
-    let source_map = SourceMap::new();
+    // A real file behind `file_id` 0: a directive with no file has no
+    // location, and so no `filename` / `lineno` keys (#2825).
+    let mut source_map = SourceMap::new();
+    source_map.add_file("ledger.beancount".into(), "x".repeat(64).into());
     let mut executor = Executor::new_with_sources(&spanned, &source_map);
 
     let entries = executor

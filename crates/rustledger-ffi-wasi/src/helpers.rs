@@ -35,6 +35,10 @@ impl LineLookup {
 pub struct LoadResult {
     pub directives: Vec<Directive>,
     pub spanned_directives: Vec<Spanned<Directive>>,
+    /// The files `spanned_directives` index into: the source, named
+    /// `<string>` as beancount's `load_string` names it, so a query's
+    /// `filename` / `lineno` / `location` columns resolve (#2825).
+    pub source_map: rustledger_loader::SourceMap,
     pub directive_lines: Vec<u32>,
     pub line_lookup: LineLookup,
     pub errors: Vec<Error>,
@@ -70,14 +74,16 @@ pub fn load_source(source: &str) -> LoadResult {
     // `validate: false` preserves this surface's load-only error contract
     // (booking errors surface; semantic validation is `ledger.validate`'s job).
     let mut vfs = rustledger_loader::VirtualFileSystem::new();
-    vfs.add_file("<source>", source);
+    // Named `<string>`, as beancount's `load_string` names an in-memory
+    // source: the name a query's `filename` column reports (#2825).
+    vfs.add_file("<string>", source);
     let load_opts = rustledger_loader::LoadOptions {
         validate: false,
         ..Default::default()
     };
     let ledger = match rustledger_loader::Loader::new()
         .with_filesystem(Box::new(vfs))
-        .load(std::path::Path::new("<source>"))
+        .load(std::path::Path::new("<string>"))
         .map_err(|e| e.to_string())
         .and_then(|raw| rustledger_loader::process(raw, &load_opts).map_err(|e| e.to_string()))
     {
@@ -91,6 +97,7 @@ pub fn load_source(source: &str) -> LoadResult {
             return LoadResult {
                 directives: Vec::new(),
                 spanned_directives: Vec::new(),
+                source_map: rustledger_loader::SourceMap::new(),
                 directive_lines: Vec::new(),
                 line_lookup: lookup,
                 errors: vec![Error::new(e).validate_phase()],
@@ -197,6 +204,7 @@ pub fn load_source(source: &str) -> LoadResult {
     LoadResult {
         directives,
         spanned_directives: ledger.directives,
+        source_map: ledger.source_map,
         directive_lines,
         line_lookup: lookup,
         errors,
@@ -284,6 +292,9 @@ pub struct FileLoad {
     pub directives: Vec<Directive>,
     pub directive_lines: Vec<u32>,
     pub directive_files: Vec<String>,
+    /// The files the ledger was loaded from, keyed by the paths in
+    /// `directive_files`, so a query's source columns resolve (#2825).
+    pub source_map: rustledger_loader::SourceMap,
     pub errors: Vec<Error>,
     pub options: LedgerOptions,
     pub plugins: Vec<Plugin>,
@@ -416,6 +427,7 @@ pub fn load_file_with_fs(
         directives,
         directive_lines,
         directive_files,
+        source_map: ledger.source_map,
         errors,
         options,
         plugins,

@@ -348,7 +348,11 @@ use crate::types::{Error, LedgerOptions};
 /// v69: loader v54, PARSER OUTPUT changed. A posting whose cost and price
 /// currencies are both written and differ is a parse error, a purchase too; a
 /// v68 blob would keep serving such a purchase without the error.
-pub const CACHE_VERSION: u32 = 69;
+/// v70: the `ParsedLedger` payload gained `directive_spans`, so a restored
+/// ledger's queries resolve the `filename` / `lineno` / `location` columns
+/// (#2825). Loader output is unchanged; a v69 blob has no spans and would
+/// not deserialize as this layout.
+pub const CACHE_VERSION: u32 = 70;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -399,6 +403,9 @@ const HEADER_SIZE: usize = 12;
 #[derive(Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ParsedLedgerPayload {
     pub directives: Vec<Directive>,
+    /// Each directive's span and file id, so a restored ledger's queries
+    /// still resolve the source columns (#2825).
+    pub directive_spans: Vec<(rustledger_core::Span, u16)>,
     pub options: LedgerOptions,
     pub parse_errors: Vec<Error>,
     /// Option diagnostics, archived apart from `parse_errors` because the
@@ -822,6 +829,7 @@ option "operating_currency" "USD"
 
         let payload = ParsedLedgerPayload {
             directives: processed.directives.clone(),
+            directive_spans: processed.directive_spans.clone(),
             options: processed.options.clone(),
             parse_errors: Vec::new(),
             option_errors: Vec::new(),
@@ -919,6 +927,7 @@ option "operating_currency" "USD"
         // Serialized ParsedLedger bytes should not deserialize as Ledger
         let bytes = serialize_parsed(&ParsedLedgerPayload {
             directives: Vec::new(),
+            directive_spans: Vec::new(),
             options: LedgerOptions::default(),
             parse_errors: Vec::new(),
             option_errors: Vec::new(),

@@ -23,12 +23,15 @@ use crate::types::{Error, FormatResult, LedgerOptions, PadResult, QueryResult};
 // Shared query/directive logic (used by both ParsedLedger and Ledger)
 // =============================================================================
 
+/// Run one query over `directives` (spanned, so the source columns resolve
+/// from `source_map`, #2825) with the ledger's `context`, through
+/// [`rustledger_query::Executor::for_ledger`], the constructor the CLI and the
+/// FFI component use too.
 fn execute_query(
-    directives: &[Directive],
+    directives: &[rustledger_core::Spanned<Directive>],
+    source_map: &rustledger_loader::SourceMap,
+    context: rustledger_query::executor::LedgerContext<'_>,
     query_str: &str,
-    account_types: rustledger_core::AccountTypes,
-    booking_method: rustledger_core::BookingMethod,
-    summary_accounts: rustledger_query::executor::SummaryAccounts,
     created_tables: &std::cell::RefCell<rustledger_query::executor::CreatedTables>,
 ) -> Result<JsValue, JsError> {
     use crate::convert::value_to_cell;
@@ -53,14 +56,11 @@ fn execute_query(
     // `rustledger_loader::Ledger.directives`; the executor needs
     // the expanded view to compute `sum(position)` with pad effects
     // included.
-    let expanded = rustledger_booking::merge_with_padding(directives);
-    let mut executor = Executor::new(&expanded);
+    let expanded = rustledger_booking::merge_with_padding_spanned(directives);
     // Config-aware classification (POSSIGN/ACCOUNT_SORTKEY honor name_*
-    // renames) — the wasm wire LedgerOptions deliberately lacks name_*,
-    // so callers supply core AccountTypes from their construction source.
-    executor.set_account_types(account_types);
-    executor.set_booking_method(booking_method);
-    executor.set_summary_accounts(summary_accounts);
+    // renames) comes in `context`: the wasm wire LedgerOptions deliberately
+    // lacks name_*, so callers supply it from their construction source.
+    let mut executor = Executor::for_ledger(&expanded, source_map, context);
     // The tables earlier queries made, handed back whatever this one does:
     // a failed query leaves them as they were (#2579).
     executor.set_created_tables(created_tables.take());
@@ -201,6 +201,12 @@ pub struct ParsedLedger {
     parse_result: ParserResult,
     /// The booked directives.
     directives: Vec<Directive>,
+    /// Each booked directive's span and file id, for the source columns
+    /// of a query (#2825).
+    directive_spans: Vec<crate::helpers::DirectiveSpan>,
+    /// `#balances.discrepancy`, recomputed from the source the first time a
+    /// query reads it and kept for the next (#2823).
+    discrepancies: std::sync::OnceLock<Vec<rustledger_loader::BalanceDiscrepancy>>,
     /// Ledger options.
     options: LedgerOptions,
     /// Parse errors.
@@ -244,6 +250,8 @@ impl ParsedLedger {
             source: source.to_string(),
             parse_result: load.parse_result,
             directives: load.directives,
+            directive_spans: load.directive_spans,
+            discrepancies: std::sync::OnceLock::new(),
             options: load.options,
             parse_errors: load.errors,
             option_errors: load.option_errors,
@@ -324,12 +332,23 @@ impl ParsedLedger {
             };
             return to_js(&result);
         }
+        // The one text, named `<string>` as beancount's `load_string` names
+        // it (#2825); `#balances.discrepancy` is computed from it only if the
+        // query reads the column (#2823).
+        let source_map = crate::helpers::string_source_map(&self.source);
+        let spanned = crate::helpers::spanned_directives(&self.directives, &self.directive_spans);
+        let options = &self.parse_result.options;
         execute_query(
-            &self.directives,
+            &spanned,
+            &source_map,
+            crate::helpers::lazy_query_context(
+                &source_map,
+                &self.discrepancies,
+                crate::helpers::account_types_from_raw(options),
+                crate::helpers::booking_method_from_raw(options),
+                crate::helpers::summary_accounts_from_raw(options),
+            ),
             query_str,
-            crate::helpers::account_types_from_raw(&self.parse_result.options),
-            crate::helpers::booking_method_from_raw(&self.parse_result.options),
-            crate::helpers::summary_accounts_from_raw(&self.parse_result.options),
             &self.created_tables,
         )
     }
@@ -472,6 +491,7 @@ impl ParsedLedger {
         // for minimal gain since serialize() is called once per cache write.
         let payload = cache::ParsedLedgerPayload {
             directives: self.directives.clone(),
+            directive_spans: self.directive_spans.clone(),
             options: self.options.clone(),
             parse_errors: self.parse_errors.clone(),
             option_errors: self.option_errors.clone(),
@@ -505,6 +525,8 @@ impl ParsedLedger {
             source: source.to_string(),
             parse_result,
             directives: payload.directives,
+            directive_spans: payload.directive_spans,
+            discrepancies: std::sync::OnceLock::new(),
             options: payload.options,
             parse_errors: payload.parse_errors,
             option_errors: payload.option_errors,
@@ -543,6 +565,16 @@ impl ParsedLedger {
 pub struct Ledger {
     /// The booked directives from all files.
     directives: Vec<Directive>,
+    /// Each directive's span and file id, for the source columns of a query
+    /// (#2825). Empty for a ledger restored from a cache.
+    directive_spans: Vec<crate::helpers::DirectiveSpan>,
+    /// The files the ledger was loaded from, so a query resolves `filename` /
+    /// `lineno` / `location` (#2825). Empty for a ledger restored from a
+    /// cache, whose source columns read NULL.
+    source_map: rustledger_loader::SourceMap,
+    /// The validating load's failing assertions, for `#balances.discrepancy`
+    /// (#2823). Empty for a ledger restored from a cache.
+    balance_discrepancies: Vec<rustledger_loader::BalanceDiscrepancy>,
     /// Ledger options.
     options: LedgerOptions,
     /// Configured account-type roots (`name_*` renames) for query
@@ -605,6 +637,9 @@ impl Ledger {
             Err(e) => {
                 return Ok(Self {
                     directives: Vec::new(),
+                    directive_spans: Vec::new(),
+                    source_map: rustledger_loader::SourceMap::new(),
+                    balance_discrepancies: Vec::new(),
                     options: LedgerOptions::default(),
                     account_types: rustledger_core::AccountTypes::default(),
                     booking_method: LoadOptions::default().booking_method,
@@ -636,14 +671,22 @@ impl Ledger {
 
         match process(load_result, &load_options) {
             Ok(ledger) => {
-                let directives: Vec<Directive> =
-                    ledger.directives.into_iter().map(|s| s.value).collect();
+                let balance_discrepancies = ledger.balance_discrepancies;
+                let source_map = ledger.source_map;
+                let (directives, directive_spans): (Vec<Directive>, Vec<_>) = ledger
+                    .directives
+                    .into_iter()
+                    .map(|s| (s.value, (s.span, s.file_id)))
+                    .unzip();
                 let mut errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
                 errors.extend(option_warnings_to_errors(&ledger.options.warnings));
                 let editor_cache = editor::EditorCache::from_directives(&directives);
 
                 Ok(Self {
                     directives,
+                    directive_spans,
+                    source_map,
+                    balance_discrepancies,
                     options,
                     account_types,
                     booking_method,
@@ -655,6 +698,9 @@ impl Ledger {
             }
             Err(e) => Ok(Self {
                 directives: Vec::new(),
+                directive_spans: Vec::new(),
+                source_map: rustledger_loader::SourceMap::new(),
+                balance_discrepancies: Vec::new(),
                 options,
                 account_types,
                 booking_method,
@@ -708,12 +754,19 @@ impl Ledger {
     /// (#2579).
     #[wasm_bindgen]
     pub fn query(&self, query_str: &str) -> Result<JsValue, JsError> {
+        let spanned = crate::helpers::spanned_directives(&self.directives, &self.directive_spans);
         execute_query(
-            &self.directives,
+            &spanned,
+            &self.source_map,
+            rustledger_query::executor::LedgerContext {
+                account_types: self.account_types.clone(),
+                booking_method: self.booking_method,
+                summary_accounts: self.summary_accounts.clone(),
+                balance_discrepancies: rustledger_query::executor::BalanceDiscrepancies::Known(
+                    self.balance_discrepancies.clone(),
+                ),
+            },
             query_str,
-            self.account_types.clone(),
-            self.booking_method,
-            self.summary_accounts.clone(),
             &self.created_tables,
         )
     }
@@ -846,6 +899,9 @@ impl Ledger {
 
         Ok(Self {
             directives: payload.directives,
+            directive_spans: Vec::new(),
+            source_map: rustledger_loader::SourceMap::new(),
+            balance_discrepancies: Vec::new(),
             options: payload.options,
             account_types,
             booking_method,
@@ -936,6 +992,9 @@ mod option_warning_severity_tests {
     fn a_warning_only_ledger_is_valid() {
         let ledger = Ledger {
             directives: Vec::new(),
+            directive_spans: Vec::new(),
+            source_map: rustledger_loader::SourceMap::new(),
+            balance_discrepancies: Vec::new(),
             options: LedgerOptions::default(),
             account_types: rustledger_core::AccountTypes::default(),
             booking_method: rustledger_core::BookingMethod::Strict,
@@ -956,6 +1015,9 @@ mod option_warning_severity_tests {
 
         let broken = Ledger {
             directives: Vec::new(),
+            directive_spans: Vec::new(),
+            source_map: rustledger_loader::SourceMap::new(),
+            balance_discrepancies: Vec::new(),
             options: LedgerOptions::default(),
             account_types: rustledger_core::AccountTypes::default(),
             booking_method: rustledger_core::BookingMethod::Strict,
@@ -992,6 +1054,9 @@ mod option_warning_severity_tests {
         ] {
             let ledger = Ledger {
                 directives: Vec::new(),
+                directive_spans: Vec::new(),
+                source_map: rustledger_loader::SourceMap::new(),
+                balance_discrepancies: Vec::new(),
                 options: LedgerOptions::default(),
                 account_types: rustledger_core::AccountTypes::default(),
                 booking_method: rustledger_core::BookingMethod::Strict,

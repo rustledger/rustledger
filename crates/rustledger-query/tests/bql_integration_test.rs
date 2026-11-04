@@ -9389,7 +9389,9 @@ fn test_convert_unconvertible_currency_kept_original() {
 
     // Query positions converting to EUR - JPY has no conversion rate
     let result = execute_query(
-        "SELECT convert(sum(position), 'EUR') WHERE account ~ '^Assets:Bank' GROUP BY 1",
+        // No `GROUP BY 1`: it would reference the aggregate column, which
+        // bean-query refuses (#2827).
+        "SELECT convert(sum(position), 'EUR') WHERE account ~ '^Assets:Bank'",
         &directives,
     );
 

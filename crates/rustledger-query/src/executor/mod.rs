@@ -3194,20 +3194,16 @@ impl<'a> Executor<'a> {
     /// # Returns
     /// - `Value::Amount` when conversion succeeds, or when the input is a
     ///   single `Position`/`Amount` that can't be priced (raw units returned).
-    /// - `Value::Inventory` when no target currency can be determined and the
-    ///   input is an `Inventory`.
+    /// - `Value::Inventory` for an `Inventory` in the one-argument form: each
+    ///   position valued on its own, as Python beancount's
+    ///   `inventory.reduce(get_value, ...)` does (its own cost currency, else
+    ///   the executor's `target_currency`, else left as its units), so an
+    ///   inventory holding lots at a USD cost and lots at an EUR cost values
+    ///   to USD and EUR, and a position with no price keeps its units (#2826).
+    /// - `Value::Amount` for an `Inventory` in the two-argument form, summed
+    ///   in the explicit currency. A position that cannot be priced there is
+    ///   left out of that sum (beancount would keep it as its units).
     /// - `Value::Null` when the input is null.
-    ///
-    /// # Inventory caveat
-    ///
-    /// For `Value::Inventory` inputs with a determined target currency, this
-    /// function returns a single `Value::Amount` summed in the target currency.
-    /// Positions within the inventory that cannot be priced at `at_date` (or
-    /// have no latest price) are silently dropped from the sum. This differs
-    /// from Python beancount's `inventory.reduce(get_value, ...)`, which
-    /// preserves unpriced positions as raw units in the resulting inventory.
-    /// Reconciling this is tracked as a separate follow-up and is out of scope
-    /// for #892.
     pub(crate) fn convert_to_market_value(
         &self,
         val: &Value,
@@ -3225,6 +3221,27 @@ impl<'a> Executor<'a> {
         //     (beanquery parity: value(inventory) is inventory-typed), whether
         //     or not a target currency could be inferred for this row.
         let inventory_stays_inventory = explicit_currency.is_none();
+        // One argument over an inventory: each position is valued on its own
+        // terms, as beanquery's `inv.reduce(get_value)` values them. Inferring
+        // one target from the first lot's cost currency put an EUR lot (and
+        // an EUR cash position) into USD, and summed lots in two cost
+        // currencies as one (#2826).
+        if inventory_stays_inventory && let Value::Inventory(inv) = val {
+            let mut out = rustledger_core::Inventory::new();
+            for pos in inv.positions() {
+                let units = match self.convert_to_market_value(
+                    &Value::Position(Box::new(pos.clone())),
+                    None,
+                    at_date,
+                )? {
+                    Value::Amount(amount) => amount,
+                    _ => pos.units.clone(),
+                };
+                out.add(rustledger_core::Position::simple(units))
+                    .map_err(|e| QueryError::Evaluation(e.to_string()))?;
+            }
+            return Ok(Value::Inventory(std::sync::Arc::new(out)));
+        }
         // Determine target currency:
         // 1. Explicit argument takes precedence
         // 2. Infer from position's cost currency (beancount compatibility)
@@ -3292,24 +3309,7 @@ impl<'a> Executor<'a> {
                 }
             }
             Value::Inventory(inv) => {
-                if inventory_stays_inventory {
-                    // Convert per position; a position with no available price
-                    // keeps its raw units (matching the Position/Amount arms
-                    // above and beanquery, which never drops positions).
-                    let mut out = rustledger_core::Inventory::new();
-                    for pos in inv.positions() {
-                        let units = if pos.units.currency == target_currency {
-                            pos.units.clone()
-                        } else if let Some(converted) = convert_one(&pos.units) {
-                            converted
-                        } else {
-                            pos.units.clone()
-                        };
-                        out.add(rustledger_core::Position::simple(units))
-                            .map_err(|e| QueryError::Evaluation(e.to_string()))?;
-                    }
-                    return Ok(Value::Inventory(std::sync::Arc::new(out)));
-                }
+                // The one-argument form returned above, position by position.
                 // Two-arg form: collapse to a single Amount in the explicit
                 // target currency. NOTE (pre-existing beanquery divergence,
                 // out of #1701's scope): positions with no available price are

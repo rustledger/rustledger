@@ -20,7 +20,8 @@ use super::types::{DayCount, Interval, PostingContext, Value};
 ///
 /// `IS NULL` / `IS NOT NULL` are excluded on purpose -- they are null TESTS,
 /// and must answer TRUE/FALSE precisely when the operand is NULL. `AND` and
-/// `OR` are excluded too: they coerce, as `NOT` does.
+/// `OR` are excluded too: they follow beanquery's own NULL rule (see
+/// `binary_op_on_values`, #2828), and `NOT` coerces (`NOT NULL` is TRUE there).
 ///
 /// Note this fires only on a genuine NULL. An empty `tags` is an empty SET,
 /// not NULL, so `'food' IN tags` on an untagged posting is still FALSE --
@@ -387,6 +388,10 @@ impl Executor<'_> {
     /// row whose flag is not `P`, and so cannot fail on it (#2656). The
     /// value is the one [`Self::binary_op_on_values`] would give.
     ///
+    /// A NULL left operand decides `AND` too: `EvalAnd` returns NULL at the
+    /// first NULL argument without looking further (#2828). It does not
+    /// decide `OR`, which goes on to look for a TRUE.
+    ///
     /// # Errors
     ///
     /// The left operand cannot be read as a truth value.
@@ -396,6 +401,7 @@ impl Executor<'_> {
         left: &Value,
     ) -> Result<Option<Value>, QueryError> {
         Ok(match op {
+            BinaryOperator::And if matches!(left, Value::Null) => Some(Value::Null),
             BinaryOperator::And if !self.to_bool(left)? => Some(Value::Boolean(false)),
             BinaryOperator::Or if self.to_bool(left)? => Some(Value::Boolean(true)),
             _ => None,
@@ -462,15 +468,35 @@ impl Executor<'_> {
             BinaryOperator::Le => self.compare_values(left, right, std::cmp::Ordering::is_le),
             BinaryOperator::Gt => self.compare_values(left, right, std::cmp::Ordering::is_gt),
             BinaryOperator::Ge => self.compare_values(left, right, std::cmp::Ordering::is_ge),
+            // bean-query's `EvalAnd` / `EvalOr` (beanquery 0.2.0), applied to
+            // the two operands in order (#2828). AND: the first NULL makes it
+            // NULL, the first false before any NULL makes it FALSE, so `NULL
+            // AND FALSE` is NULL but `FALSE AND NULL` is FALSE. OR: any TRUE
+            // makes it TRUE, else NULL if an operand was NULL, else FALSE.
+            // Nesting (`(a AND b) AND c`) gives the same answer as beanquery's
+            // flat argument list. This is not SQL's three-valued logic, where
+            // `NULL AND FALSE` is FALSE; it is the engine we match.
             BinaryOperator::And => {
-                let l = self.to_bool(left)?;
-                let r = self.to_bool(right)?;
-                Ok(Value::Boolean(l && r))
+                for v in [left, right] {
+                    if matches!(v, Value::Null) {
+                        return Ok(Value::Null);
+                    }
+                    if !self.to_bool(v)? {
+                        return Ok(Value::Boolean(false));
+                    }
+                }
+                Ok(Value::Boolean(true))
             }
             BinaryOperator::Or => {
-                let l = self.to_bool(left)?;
-                let r = self.to_bool(right)?;
-                Ok(Value::Boolean(l || r))
+                let mut result = Value::Boolean(false);
+                for v in [left, right] {
+                    if matches!(v, Value::Null) {
+                        result = Value::Null;
+                    } else if self.to_bool(v)? {
+                        return Ok(Value::Boolean(true));
+                    }
+                }
+                Ok(result)
             }
             BinaryOperator::Regex => {
                 // ~ operator: string matches regex pattern. A NULL operand

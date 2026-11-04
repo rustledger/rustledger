@@ -1758,8 +1758,9 @@ pub struct SessionState {
     files: Vec<String>,
     errors: Vec<wit::Error>,
     /// Whether `errors` holds one that leaves the ledger incomplete, so a
-    /// query refuses. A duplicate include alone does not: the file was loaded
-    /// once, and `rledger query` answers too.
+    /// query refuses. A duplicate include, an include cycle or a glob matching
+    /// nothing does not: every file was read once
+    /// ([`rustledger_loader::LoadError::leaves_ledger_complete`]).
     query_blocked: bool,
     options: wit::LedgerOptions,
     plugins: Vec<ffi::Plugin>,
@@ -1942,8 +1943,10 @@ impl SessionState {
         let path_security = !allow_unrestricted_includes;
         match ffi::helpers::load_file(std::path::Path::new(path), path_security) {
             Ok(fl) => {
-                // A duplicate include is reported but neither stops the session
-                // plugins nor blocks a query: the ledger is complete.
+                // A load error that leaves the ledger complete (a duplicate
+                // include, an include cycle, a glob matching nothing) is
+                // reported but neither stops the session plugins nor blocks a
+                // query.
                 let (mut errors, mut notices) = (Vec::new(), Vec::new());
                 for (e, blocks) in fl.errors.into_iter().zip(fl.error_blocks_queries) {
                     if blocks {
@@ -2098,8 +2101,8 @@ impl SessionState {
             query_str,
             Some(&self.created_tables),
         );
-        // The non-blocking load errors (a duplicate include) still reach the
-        // caller, ahead of the query's own, as `rledger query` prints them.
+        // The non-blocking load errors still reach the caller, ahead of the
+        // query's own.
         result.errors.splice(0..0, self.errors.iter().cloned());
         result
     }
@@ -4328,43 +4331,66 @@ mod query_file_sources_tests {
         }
     }
 
-    /// A file included twice is loaded once, so the ledger is complete: the
-    /// file queries answer and report the duplicate, as `rledger query` does
-    /// (`LoadError::leaves_ledger_complete`). They returned no rows. An error
+    /// A load error after which every file the include graph names was read
+    /// once leaves the ledger complete (`LoadError::leaves_ledger_complete`):
+    /// a file included twice, an include cycle (bean-query reports both as
+    /// `Duplicate filename parsed` and answers), and a glob matching nothing.
+    /// The file queries answer and report it. They returned no rows. An error
     /// that does leave it incomplete, an include outside the root, still
     /// refuses.
     #[test]
-    fn test_file_queries_answer_over_a_duplicate_include() {
-        let tree = Tree::new("duplicate");
-        std::fs::write(
-            tree.0.join("main.beancount"),
-            "2024-01-01 open Assets:Bank\n2024-01-01 open Equity:Opening\ninclude \"txn.beancount\"\ninclude \"txn.beancount\"\n",
-        )
-        .expect("write main");
-        let duplicate = |errors: &[wit::Error]| {
-            assert_eq!(errors.len(), 1, "{errors:?}");
-            assert!(
-                errors[0].message.contains("Duplicate filename parsed"),
-                "{errors:?}"
-            );
-        };
-        let answered = |result: &super::out::QueryResult| {
-            duplicate(&result.errors);
-            let got: Vec<Vec<String>> = result
-                .rows
-                .iter()
-                .map(|row| row.iter().map(cell).collect())
-                .collect();
-            assert_eq!(got, expected(&tree));
-        };
-        answered(&super::query_file(&tree.main(), Q));
-        let batch = super::batch_file(&tree.main(), &[Q.to_string()]);
-        duplicate(&batch.load.errors);
-        answered(&batch.queries[0]);
-        let session =
-            super::SessionState::from_file(&tree.main(), false, &["noduplicates".to_string()]);
-        answered(&session.query(Q));
+    fn test_file_queries_answer_over_a_complete_ledger_load_error() {
+        let opens = "2024-01-01 open Assets:Bank\n2024-01-01 open Equity:Opening\n";
+        let txn = "2024-01-02 *\n  Assets:Bank     10 USD\n  Equity:Opening\n";
+        let cases = [
+            (
+                "duplicate",
+                "include \"txn.beancount\"\ninclude \"txn.beancount\"\n",
+                String::new(),
+                "Duplicate filename parsed",
+            ),
+            (
+                "cycle",
+                "include \"txn.beancount\"\n",
+                "include \"main.beancount\"\n".to_string(),
+                "include cycle",
+            ),
+            (
+                "glob",
+                "include \"txn.beancount\"\ninclude \"missing/*.beancount\"\n",
+                String::new(),
+                "does not match any files",
+            ),
+        ];
+        for (tag, includes, txn_tail, message) in cases {
+            let tree = Tree::new(tag);
+            std::fs::write(tree.0.join("main.beancount"), format!("{opens}{includes}"))
+                .expect("write main");
+            std::fs::write(tree.0.join("txn.beancount"), format!("{txn}{txn_tail}"))
+                .expect("write txn");
+            let reported = |errors: &[wit::Error]| {
+                assert_eq!(errors.len(), 1, "{tag}: {errors:?}");
+                assert!(errors[0].message.contains(message), "{tag}: {errors:?}");
+            };
+            let answered = |result: &super::out::QueryResult| {
+                reported(&result.errors);
+                let got: Vec<Vec<String>> = result
+                    .rows
+                    .iter()
+                    .map(|row| row.iter().map(cell).collect())
+                    .collect();
+                assert_eq!(got, expected(&tree), "{tag}");
+            };
+            answered(&super::query_file(&tree.main(), Q));
+            let batch = super::batch_file(&tree.main(), &[Q.to_string()]);
+            reported(&batch.load.errors);
+            answered(&batch.queries[0]);
+            let session =
+                super::SessionState::from_file(&tree.main(), false, &["noduplicates".to_string()]);
+            answered(&session.query(Q));
+        }
 
+        let tree = Tree::new("outside");
         std::fs::write(
             tree.0.join("main.beancount"),
             "include \"txn.beancount\"\ninclude \"../outside.beancount\"\n",

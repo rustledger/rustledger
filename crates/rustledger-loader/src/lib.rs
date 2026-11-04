@@ -248,15 +248,25 @@ pub enum LoadError {
 }
 
 impl LoadError {
-    /// Whether the ledger the load produced is still complete despite this
-    /// error, so a figure derived from it is right: true only for a duplicate
-    /// include, whose file the loader loaded exactly once. It is still
-    /// reported (beancount says `Duplicate filename parsed`), but a query or
-    /// report answers, as `rledger query` does. Every other load error leaves
-    /// files unread.
+    /// Whether the ledger the load produced is still every file the include
+    /// graph names, read once, despite this error, so a figure derived from it
+    /// is right. True for a duplicate include and an include cycle (the file
+    /// included again is one the loader already read; beancount says
+    /// `Duplicate filename parsed` for both), and for an include glob that
+    /// matches nothing (there is nothing to read). The error is still
+    /// reported, but the FFI file queries and WASM `queryMultiFile` answer, as
+    /// `bean-query` does. The other load errors leave a named file unread
+    /// (I/O, decryption, a confined path, a bad glob, too many files) or
+    /// unparsed.
+    ///
+    /// `rledger query` has its own, looser rule: it refuses only on a parse or
+    /// booking error, so it also answers over a missing include.
     #[must_use]
     pub const fn leaves_ledger_complete(&self) -> bool {
-        matches!(self, Self::DuplicateInclude { .. })
+        matches!(
+            self,
+            Self::DuplicateInclude { .. } | Self::IncludeCycle { .. } | Self::GlobNoMatch { .. }
+        )
     }
 
     /// Attach the `include` site that caused this failure.

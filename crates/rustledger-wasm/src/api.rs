@@ -38,8 +38,10 @@ use crate::utils::LineLookup;
 /// where the CLI returns them. The same shape as a warning being treated as an
 /// error, one layer down.
 ///
-/// The rule is the loader's [`LoadError::leaves_ledger_complete`], which the
-/// FFI's file queries share.
+/// An include cycle (the file included again was already read) and an include
+/// glob matching nothing (nothing to read) leave it complete too. The rule is
+/// the loader's [`LoadError::leaves_ledger_complete`], which the FFI's file
+/// queries share; `rledger query` refuses only on parse or booking errors.
 fn load_error_is_fatal(error: &LoadError) -> bool {
     !error.leaves_ledger_complete()
 }
@@ -1042,8 +1044,11 @@ mod load_error_tests {
         assert!(!load_error_is_fatal(&LoadError::DuplicateInclude {
             path: "shared.beancount".to_string(),
         }));
-        assert!(load_error_is_fatal(&LoadError::IncludeCycle {
+        assert!(!load_error_is_fatal(&LoadError::IncludeCycle {
             cycle: vec!["a".to_string(), "a".to_string()],
+        }));
+        assert!(!load_error_is_fatal(&LoadError::GlobNoMatch {
+            pattern: "*.bean".to_string(),
         }));
         assert!(load_error_is_fatal(&LoadError::PathTraversal {
             include_path: "../../etc/passwd".to_string(),

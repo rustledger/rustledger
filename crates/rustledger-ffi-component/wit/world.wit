@@ -564,10 +564,12 @@ interface ledger {
   /// its includes unread). Includes are confined to the entry file's
   /// directory tree, as `load-file` confines them by default, with no
   /// opt-out here (use `session.from-file` for one): an include outside it
-  /// is a load error. Any load error but a duplicate include (a file the
-  /// loader read once, so the ledger is complete) makes the result empty,
-  /// carrying the errors; a duplicate include is reported in `errors` beside
-  /// the rows, as `rledger query` reports it. A file that cannot be read
+  /// is a load error. A load error after which every file was still read
+  /// once (a duplicate include, an include cycle, an include glob matching
+  /// nothing) is reported in `errors` beside the rows, as `bean-query`
+  /// answers; any other load error, and any booking or plugin error, makes
+  /// the result empty, carrying the errors. (`rledger query` refuses only on
+  /// a parse or booking error.) A file that cannot be read
   /// reports `Failed to load file: ...` (was `Failed to read file ...`).
   query-file: func(path: string, query: string) -> query-result;
 
@@ -578,8 +580,7 @@ interface ledger {
   /// `load` has the `load-file` shape: entries carry their real files and
   /// lines (a directive a plugin created, `<unknown>` and 0), and `includes`
   /// lists the loaded files. Each query's `errors` repeats the load errors
-  /// (all of them when they make it refuse, a duplicate include beside its
-  /// rows), so every result stands alone.
+  /// (all of them when they make it refuse, else beside its rows), so every result stands alone.
   batch-file: func(path: string, queries: list<string>) -> batch-result;
 
   /// A loaded, booked ledger held inside the component (#1421).
@@ -650,8 +651,9 @@ interface ledger {
     /// Run a BQL query against the held ledger.
     ///
     /// It refuses, with no rows and the held errors, when the load left an
-    /// error, except a duplicate include (the ledger is complete, the file
-    /// read once), which is reported in `errors` beside the rows (3.16.0).
+    /// error, except one after which every file was still read once (a
+    /// duplicate include, an include cycle, an include glob matching
+    /// nothing), which is reported in `errors` beside the rows (3.16.0).
     ///
     /// A table a `CREATE TABLE` makes stays for this session's later
     /// queries, and `INSERT INTO` adds to it (3.15.0, #2579); before, each

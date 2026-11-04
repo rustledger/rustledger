@@ -160,3 +160,44 @@ fn parsed_ledger_names_the_plugin_that_created_a_directive_after_the_cache() {
     let restored = rustledger_wasm::ParsedLedger::from_cache(&bytes, source).expect("from cache");
     assert_eq!(rows(&restored), want, "restored");
 }
+
+/// `queryMultiFile` answers over an include cycle and over an include glob
+/// matching nothing, as bean-query does: every file was read once, so the
+/// ledger is complete (`LoadError::leaves_ledger_complete`). It returned no
+/// rows.
+#[wasm_bindgen_test]
+fn query_multi_file_answers_over_a_cycle_and_an_empty_glob() {
+    let cases = [
+        (
+            "include \"txn.beancount\"\n",
+            "include \"main.beancount\"\n",
+        ),
+        (
+            "include \"txn.beancount\"\ninclude \"missing/*.beancount\"\n",
+            "",
+        ),
+    ];
+    for (includes, txn_tail) in cases {
+        let files = js_sys::Object::new();
+        let set = |name: &str, text: String| {
+            js_sys::Reflect::set(&files, &JsValue::from_str(name), &JsValue::from_str(&text))
+                .expect("set");
+        };
+        set(
+            "main.beancount",
+            format!("2024-01-01 open Assets:Bank\n2024-01-01 open Equity:Opening\n{includes}"),
+        );
+        set(
+            "txn.beancount",
+            format!("2024-01-02 *\n  Assets:Bank     10 USD\n  Equity:Opening\n{txn_tail}"),
+        );
+        let q = "SELECT filename, lineno FROM postings LIMIT 1";
+        let result =
+            rustledger_wasm::query_multi_file(files.into(), "main.beancount", q).expect("query");
+        let row = first_row(&result, includes);
+        assert_eq!(string_cell(&row, 0), "txn.beancount", "{includes}");
+        assert_eq!(number_cell(&row, 1), 2.0, "{includes}");
+        let errors = js_sys::Array::from(&get_field(&result, "errors"));
+        assert_eq!(errors.length(), 1, "{includes}: {errors:?}");
+    }
+}

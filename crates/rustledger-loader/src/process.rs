@@ -449,7 +449,8 @@ impl LedgerError {
     }
 
     /// Whether this is a load error after which the ledger is still complete
-    /// (a duplicate include), so a query over it may answer. See
+    /// (a duplicate include, an include cycle, a glob matching nothing), so a
+    /// query over it may answer. See
     /// [`LoadError::leaves_ledger_complete`].
     #[must_use]
     pub const fn leaves_ledger_complete(&self) -> bool {

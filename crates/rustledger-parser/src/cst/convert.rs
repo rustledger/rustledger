@@ -203,10 +203,11 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     );
     let warnings = Vec::new();
 
-    // pushtag/poptag/pushmeta/popmeta state. The legacy parser
-    // maintains a stack across directives; each Transaction
-    // inherits the active pushed-tag set, and EVERY directive
-    // inherits the active pushed-meta set. We pair each entry
+    // pushtag/poptag/pushmeta/popmeta state, a stack across directives:
+    // transactions, notes and documents inherit the active pushed-tag set
+    // (#2544), and only transactions inherit the pushed-meta set, under
+    // their own keys (#2812), as in beancount. See `apply_inherited_state`.
+    // We pair each entry
     // with the originating directive's span so unclosed-at-EOF
     // diagnostics can point at the offending push.
     let mut tag_stack: Vec<(Tag, Span)> = Vec::new();
@@ -1444,7 +1445,16 @@ fn collect_postings_with_comments(
     bom_offset: u32,
     errors: &mut Vec<crate::ParseError>,
 ) -> (Vec<Spanned<Posting>>, Vec<String>) {
-    let mut out = Vec::new();
+    // Sized to the POSTING children up front, as the green fast path does
+    // (`green.rs`, `posting_count`): growing by push left a 2-posting
+    // transaction at capacity 4, 256 unused bytes held for the life of the
+    // ledger on every transaction that takes this path (#2834).
+    let posting_count = node
+        .syntax()
+        .children()
+        .filter(|n| n.kind() == crate::SyntaxKind::POSTING)
+        .count();
+    let mut out = Vec::with_capacity(posting_count);
     let mut pending: Vec<String> = Vec::new();
     // Leading trivia (blank lines, comment lines) sits inside the node before
     // the header; only the NEWLINE after the header content ends it (#2628).
@@ -3022,15 +3032,21 @@ pub(super) fn meta_value_from_tokens(tokens: impl Iterator<Item = impl TokenView
 /// `Document` and `Note`, as beancount 3 does (its grammar unions the tag
 /// stack into each of those three). They used to apply to transactions only
 /// (#2544). The tags are a [`TagSet`], so a pushed tag the line already
-/// wrote is not added twice (#2545). Meta applies to every directive's
-/// `meta` field.
+/// wrote is not added twice (#2545).
+///
+/// Pushed metadata applies to transactions only, as in beancount 3, whose
+/// grammar reads its meta stack in `transaction()` and nowhere else; an
+/// `open`, `balance`, `note` or any other directive gets none (#2812). A key
+/// the transaction writes itself wins over a pushed one, as beancount
+/// applies the pushed values first and its explicit metadata on top (#2812;
+/// rledger used to let the push override it). Postings get no pushed
+/// metadata in either.
 ///
 /// The meta stack is a `Vec` (not a map) to preserve shadow/pop
 /// semantics - `pushmeta x: 1; pushmeta x: 2; popmeta x` should
 /// leave `x = 1` active, which a map-replacing-on-insert can't
-/// express. Iterating in push order and inserting into the
-/// directive's meta means later entries naturally win, matching
-/// "topmost-shadow wins" behavior.
+/// express. Iterating in push order means the latest push of a key
+/// wins over earlier ones, as beancount's `value_list[-1]`.
 fn apply_inherited_state(
     value: &mut Directive,
     tag_stack: &[(Tag, Span)],
@@ -3056,22 +3072,17 @@ fn apply_inherited_state(
     if meta_stack.is_empty() {
         return;
     }
-    let meta = match value {
-        Directive::Transaction(d) => &mut d.meta,
-        Directive::Balance(d) => &mut d.meta,
-        Directive::Open(d) => &mut d.meta,
-        Directive::Close(d) => &mut d.meta,
-        Directive::Commodity(d) => &mut d.meta,
-        Directive::Pad(d) => &mut d.meta,
-        Directive::Event(d) => &mut d.meta,
-        Directive::Query(d) => &mut d.meta,
-        Directive::Note(d) => &mut d.meta,
-        Directive::Document(d) => &mut d.meta,
-        Directive::Price(d) => &mut d.meta,
-        Directive::Custom(d) => &mut d.meta,
+    let Directive::Transaction(txn) = value else {
+        return;
     };
-    for (k, v, _) in meta_stack {
-        meta.insert(k.clone(), v.clone());
+    let explicit = txn.meta.as_map();
+    let pushed: Vec<(String, MetaValue)> = meta_stack
+        .iter()
+        .filter(|(k, _, _)| !explicit.contains_key(k))
+        .map(|(k, v, _)| (k.clone(), v.clone()))
+        .collect();
+    for (k, v) in pushed {
+        txn.meta.insert(k, v);
     }
 }
 
@@ -3130,9 +3141,16 @@ fn pushmeta_value(node: &crate::SyntaxNode) -> Option<MetaValue> {
     // adding a second error at `popmeta`. Anything else on the line, or a run
     // past the date (`2024-02-002.`, `2024-002-02,000`), is a syntax error in
     // beancount too, so it pushes nothing.
-    if super::directive_header::first_header_defect(node.kind(), &header, end, &text).is_some()
-        && !is_only_a_split_date(&header, &text)
+    let split_date = is_only_a_split_date(&header, &text);
+    if !split_date
+        && super::directive_header::first_header_defect(node.kind(), &header, end, &text).is_some()
     {
+        return None;
+    }
+    // A date that is not a real calendar date (`pushmeta kk: 2024-02-30`) is
+    // a lexer error in beancount, which pushes nothing (#2811). A split date
+    // lexes as such a date plus a number (`2024-02-00` `2`), and is pushed.
+    if !split_date && invalid_value_date(&header, &text, false).is_some() {
         return None;
     }
     Some(meta_value_from_tokens(tokens.into_iter()))
@@ -3811,6 +3829,12 @@ fn directive_header_check(
     let Some(defect) =
         super::directive_header::first_header_defect(node.kind(), tokens, end, stripped)
     else {
+        // A grammatical value can still be a date that is not a real calendar
+        // date (`custom "x" 2024-02-30`, `pushmeta kk: 2024-13-01`): reported
+        // as the directive's own date would be (#2811).
+        if let Some((range, message)) = invalid_value_date(tokens, stripped, true) {
+            return Some(invalid_value_date_error(range, message, off));
+        }
         // A grammatical `pushmeta` value can still be an expression with no
         // value (`pushmeta kk: 1/0`): the same check, and the same error, as a
         // metadata line (#2812).
@@ -3952,6 +3976,14 @@ impl MetaCheck<'_> {
         let Some(defect) =
             super::directive_header::first_meta_defect(self.tokens, end, self.stripped)
         else {
+            // Grammatical, but a date that is not a real calendar date
+            // (`kk: 2024-02-30`) is an error, as the directive's own date
+            // would be (#2811).
+            if let Some((range, message)) = invalid_value_date(self.tokens, self.stripped, false) {
+                self.errors
+                    .push(invalid_value_date_error(range, message, off));
+                return;
+            }
             // Grammatical, but an expression with no value (`kk: 1/0`) is
             // still an error, from the check `pushmeta` uses too.
             if let Some(range) = unevaluable_meta_value(self.tokens, self.stripped) {
@@ -4059,6 +4091,13 @@ fn posting_line_check(
         }
         let Some(defect) = super::directive_header::first_posting_defect(tokens, end, stripped)
         else {
+            // Grammatical, but a cost date that is not a real calendar date
+            // (`{1 USD, 2024-02-30}`) is an error, as the directive's own date
+            // would be: it used to leave the lot undated, with no error (#2811).
+            if let Some((range, message)) = invalid_value_date(tokens, stripped, false) {
+                errors.push(invalid_value_date_error(range, message, off));
+                continue;
+            }
             // Grammatical; beancount's builder still rejects some postings.
             if let Some((range, message)) = posting_builder_error(tokens, stripped) {
                 errors.push(crate::ParseError::new(
@@ -4919,7 +4958,11 @@ fn section_marker_check(
 /// parser: canonical `YYYY-MM-DD`, slash-separated `YYYY/M/D`,
 /// and single-digit month/day. Returns `None` when the token
 /// can't be turned into a real calendar date (invalid month,
-/// invalid day for the given month, etc.).
+/// invalid day for the given month, year 0, etc.).
+///
+/// Year 0 is refused as beancount refuses it (`year 0 is out of range`):
+/// Python's `datetime.date` starts at year 1, while `jiff` would accept
+/// it (#2811).
 pub(super) fn parse_date_token(text: &str) -> Option<NaiveDate> {
     // Fast path: canonical "YYYY-MM-DD".
     if text.len() == 10
@@ -4931,7 +4974,7 @@ pub(super) fn parse_date_token(text: &str) -> Option<NaiveDate> {
             text[8..10].parse::<u32>(),
         )
     {
-        return naive_date(y, m, d);
+        return naive_date(y, m, d).filter(|date| date.year() >= 1);
     }
     // Slow path: share legacy's normalizer so single-digit
     // month/day (`2024-1-15`, `2024-01-5`) and slash separators
@@ -4939,6 +4982,56 @@ pub(super) fn parse_date_token(text: &str) -> Option<NaiveDate> {
     crate::diagnostics::normalize_date_str(text)
         .parse::<NaiveDate>()
         .ok()
+        .filter(|date| date.year() >= 1)
+}
+
+/// The first date in a value position on one line that is not a real
+/// calendar date (`kk: 2024-02-30`, `custom "x" 2024-13-01`), with the
+/// message the directive's own date gets (`InvalidDateValue`, from
+/// [`crate::diagnostics::describe_invalid_date`]), or `None`.
+///
+/// `tokens` are the line's `(kind, range)` pairs over `src`, from its first
+/// content token. `skip_leading_date` skips the first token when it is the
+/// directive's own `DATE`, which [`parse_directive_date`] already reports.
+///
+/// One check for metadata lines, `custom` and `pushmeta` values: those dates
+/// used to load as no value at all, with no error (#2811). beancount reports
+/// each (`day is out of range for month`).
+pub(super) fn invalid_value_date(
+    tokens: &[(crate::SyntaxKind, std::ops::Range<usize>)],
+    src: &str,
+    skip_leading_date: bool,
+) -> Option<(std::ops::Range<usize>, String)> {
+    let skip = usize::from(
+        skip_leading_date
+            && tokens
+                .first()
+                .is_some_and(|(k, _)| *k == crate::SyntaxKind::DATE),
+    );
+    tokens[skip..].iter().find_map(|(kind, range)| {
+        if *kind != crate::SyntaxKind::DATE {
+            return None;
+        }
+        let text = src.get(range.clone())?;
+        parse_date_token(text).is_none().then(|| {
+            (
+                range.clone(),
+                crate::diagnostics::describe_invalid_date(text),
+            )
+        })
+    })
+}
+
+/// The error for [`invalid_value_date`]'s finding, in the BOM frame.
+const fn invalid_value_date_error(
+    range: std::ops::Range<usize>,
+    message: String,
+    off: usize,
+) -> crate::ParseError {
+    crate::ParseError::new(
+        crate::ParseErrorKind::InvalidDateValue(message),
+        Span::new(range.start + off, range.end + off),
+    )
 }
 
 /// Parse a directive's `DATE` token. On success returns the
@@ -5947,17 +6040,17 @@ mod tests {
         let src = "pushmeta loc: \"NYC\"\n\
                    pushmeta loc: \"LDN\"\n\
                    popmeta loc:\n\
-                   2024-01-01 open Assets:Bank USD\n\
+                   2024-01-01 * \"t\"\n  Assets:A  1 USD\n  Assets:B\n\
                    popmeta loc:\n";
         let result = parse_via_cst(src);
-        let Directive::Open(open) = &result.directives[0].value else {
-            panic!("expected Open");
+        let Directive::Transaction(txn) = &result.directives[0].value else {
+            panic!("expected Transaction");
         };
         assert_eq!(
-            open.meta.get("loc"),
+            txn.meta.get("loc"),
             Some(&MetaValue::String("NYC".to_string())),
             "shadow pop should restore NYC, got {:?}",
-            open.meta.get("loc"),
+            txn.meta.get("loc"),
         );
     }
 
@@ -7617,10 +7710,13 @@ mod tests {
         }
     }
 
-    /// The value `pushmeta key: <value>` pushes onto the directive after it,
-    /// from the green-wired parse, after checking both trees agree.
+    /// The value `pushmeta key: <value>` pushes onto the transaction after
+    /// it (pushed metadata reaches transactions only, #2812), from the
+    /// green-wired parse, after checking both trees agree.
     fn pushed_value(value: &str) -> (Vec<String>, Option<MetaValue>) {
-        let src = format!("pushmeta kk: {value}\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n");
+        let src = format!(
+            "pushmeta kk: {value}\n2024-01-01 * \"t\"\n  Assets:A  1 USD\n  Assets:B\npopmeta kk:\n"
+        );
         let green = parse_via_cst(&src);
         let red = parse_red_only(&src);
         assert_eq!(
@@ -7633,15 +7729,15 @@ mod tests {
             format!("{:?}", red.directives),
             "trees disagree on directives for {src:?}"
         );
-        let Directive::Open(open) = &green.directives[0].value else {
-            panic!("expected Open from {src:?}");
+        let Directive::Transaction(txn) = &green.directives[0].value else {
+            panic!("expected Transaction from {src:?}");
         };
         let errors = green
             .errors
             .iter()
             .map(crate::ParseError::message)
             .collect();
-        (errors, open.meta.get("kk").cloned())
+        (errors, txn.meta.get("kk").cloned())
     }
 
     /// The value a metadata line `kk: <value>` gives, from the green-wired
@@ -7982,7 +8078,7 @@ mod tests {
     #[test]
     fn test_pushmeta_value_reports_an_unevaluable_expression() {
         let src = "pushmeta kk: 1/0\n\
-                   2024-01-01 open Assets:Bank USD\n\
+                   2024-01-01 * \"t\"\n  Assets:A  1 USD\n  Assets:B\n\
                    popmeta kk:\n";
         let green = parse_via_cst(src);
         let red = parse_red_only(src);
@@ -8001,10 +8097,10 @@ mod tests {
                 "1/0"
             )]
         );
-        let Directive::Open(open) = &green.directives[0].value else {
-            panic!("expected Open");
+        let Directive::Transaction(txn) = &green.directives[0].value else {
+            panic!("expected Transaction");
         };
-        assert_eq!(open.meta.get("kk"), Some(&MetaValue::None));
+        assert_eq!(txn.meta.get("kk"), Some(&MetaValue::None));
     }
 }
 

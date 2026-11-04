@@ -688,20 +688,23 @@ fn test_pushmeta_value_with_currency_is_amount() {
     use rust_decimal_macros::dec;
     use rustledger_core::{Amount, Currency, MetaValue};
 
-    let source = r"
+    let source = r#"
 pushmeta budget: 5 USD
-2024-01-01 open Assets:Cash USD
+2024-01-01 * "t"
+  Assets:Cash  1 USD
+  Assets:Other
 popmeta budget:
-";
+"#;
     let result = parse_ok(source);
+    // Pushed metadata reaches transactions only, as in beancount (#2812).
     let open = result
         .directives
         .iter()
         .find_map(|d| match &d.value {
-            Directive::Open(o) => Some(o),
+            Directive::Transaction(t) => Some(t),
             _ => None,
         })
-        .expect("expected an open directive");
+        .expect("expected a transaction");
     assert_eq!(
         open.meta.get("budget"),
         Some(&MetaValue::Amount(Amount::new(

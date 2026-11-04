@@ -348,14 +348,19 @@ use crate::types::{Error, LedgerOptions};
 /// v69: loader v54, PARSER OUTPUT changed. A posting whose cost and price
 /// currencies are both written and differ is a parse error, a purchase too; a
 /// v68 blob would keep serving such a purchase without the error.
-/// v70: the `ParsedLedger` payload gained `directive_spans`, so a restored
-/// ledger's queries resolve the `filename` / `lineno` / `location` columns
-/// (#2825). Loader output is unchanged; a v69 blob has no spans and would
-/// not deserialize as this layout.
-/// v71: the `ParsedLedger` payload gained `placeholders`, the source map's
-/// placeholder locations, so a restored ledger still names the plugin that
-/// created a directive (`<auto_accounts>`, 0) where v70 read NULL (#2825).
-pub const CACHE_VERSION: u32 = 71;
+/// v70: loader v55, PARSER OUTPUT changed (#2811). A value date that is not a
+/// real calendar date, and a year-0 date, are parse errors; a v69 blob would
+/// keep serving such a file without the error.
+/// v71: loader v56, PARSER OUTPUT changed (#2812). Pushed metadata reaches
+/// transactions only, and a transaction's own key wins over a pushed one; a v70
+/// blob would keep serving the old attachment.
+/// v72: the `ParsedLedger` payload gained `directive_spans` and `placeholders`
+/// (the source map's placeholder locations), so a restored ledger's queries
+/// resolve the `filename` / `lineno` / `location` columns and still name the
+/// plugin that created a directive (`<auto_accounts>`, 0) (#2825). Loader
+/// output is unchanged; a v71 blob has neither and would not deserialize as
+/// this layout.
+pub const CACHE_VERSION: u32 = 72;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -387,7 +392,7 @@ pub const CACHE_VERSION: u32 = 71;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 54;
+const LOADER_CACHE_VERSION_PIN: u32 = 56;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

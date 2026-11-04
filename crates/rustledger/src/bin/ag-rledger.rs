@@ -8,9 +8,10 @@
 //!
 //! The command surface and wiring are adapted from the contributor's
 //! `agledger` binary (matthiasdebernardini/agledger, #1291), which targeted
-//! `agcli 0.10.2`. This branch targets `agcli 0.13.0`: the `CommandRequest` /
-//! `CommandOutput` / `CommandError` / `ExitCode` shapes are the same, but each
-//! command opts out of the 0.13 unknown-flag / extra-positional rejection
+//! `agcli 0.10.2`. It now targets `agcli 0.19`: handlers are async closures over
+//! an owned `CommandRequest`, error codes are `ErrorCode`s and exit codes
+//! `ExitCode`s, and each command opts out of the unknown-flag /
+//! extra-positional rejection
 //! (`allow_unknown_flags` / `allow_extra_args`) because these handlers forward
 //! arbitrary flags through to the rustledger `cmd::*` argument structs rather
 //! than re-declaring every flag in the usage string. A flag the handler does
@@ -18,9 +19,7 @@
 //! so nothing is silently ignored. The naming is `ag-rledger` (mirroring
 //! `rledger`), not `agledger`.
 
-use agcli::{
-    ActionParam, AgentCli, Command, CommandError, CommandOutput, ExecutionContext, NextAction,
-};
+use agcli::{ActionParam, AgentCli, Command, CommandError, CommandOutput, NextAction};
 use rustledger::cmd::report_cmd::{CollectedDiagnostics, Diagnostic};
 use rustledger::cmd::restructure::{self, Check, Outcome, Step, merge, split};
 use rustledger::config::Config;
@@ -36,10 +35,20 @@ const SCHEMA_VERSION: &str = "ag-rledger.v1";
 
 #[tokio::main]
 async fn main() {
-    let args = expand_config_aliases(std::env::args().collect());
+    let args = std::env::args().collect();
+    let args = merge_repeated_value_flags(
+        expand_config_aliases(attach_global_values(args, is_config_alias)),
+        is_config_alias,
+    );
     let cli = build_cli();
-    let mut ctx = ExecutionContext::default();
-    let run = cli.run_argv_with_context(args, &mut ctx).await;
+    // `run`, not `run_env`: the argv is rewritten first (config aliases).
+    // `run` installs no panic hook, so a handler panic is caught here, as a
+    // task panic, and still answered with one envelope.
+    let run_args = args.clone();
+    let run = match tokio::spawn(async move { cli.run(run_args).await }).await {
+        Ok(run) => run,
+        Err(error) => handler_panic(args, error).await,
+    };
     // The envelope's records carry ledger strings: DEL, C1, bidi controls
     // and line separators are written as `\uXXXX`, the same JSON value, so
     // whoever reads the envelope raw is not acted on (#2714).
@@ -47,7 +56,45 @@ async fn main() {
         "{}",
         rustledger::cmd::escape_display_unsafe_in_json(&run.to_json())
     );
-    std::process::exit(run.exit_code());
+    std::process::exit(i32::from(run.exit_code().get()));
+}
+
+/// The `fix` of a `HANDLER_PANIC` envelope, as agcli 0.17 wrote it.
+const HANDLER_PANIC_FIX: &str = "This is a bug in the command handler, not the invocation. \
+                                 Inspect the root command tree and report the panic.";
+
+/// The `HANDLER_PANIC` envelope for a run whose handler panicked, exit code
+/// [`agcli::ExitCode::ERROR`], as agcli 0.17's `run_argv_with_context` gave.
+///
+/// agcli 0.18 dropped `catch_unwind`, and its panic hook only guards
+/// `run_env`. The envelope is still agcli's own: the same argv is answered by
+/// the same command tree with every handler returning the error, so the
+/// command is resolved, its flags redacted and its next actions chosen as in
+/// the run that panicked, whatever precedes the command word.
+async fn handler_panic(args: Vec<String>, error: tokio::task::JoinError) -> agcli::Execution {
+    let detail = match error.try_into_panic() {
+        Ok(payload) => payload
+            .downcast_ref::<&str>()
+            .map(|s| (*s).to_string())
+            .or_else(|| payload.downcast_ref::<String>().cloned())
+            .unwrap_or_else(|| "unknown panic".to_string()),
+        Err(_) => "the handler task was cancelled".to_string(),
+    };
+    let message = format!("handler panicked: {detail}");
+    let fallback = build_cli_with(&|command| {
+        let message = message.clone();
+        command.handler(move |_req| {
+            let message = message.clone();
+            async move {
+                Err(CommandError::new(
+                    agcli::ErrorCode::HANDLER_PANIC,
+                    message,
+                    HANDLER_PANIC_FIX,
+                ))
+            }
+        })
+    });
+    fallback.run(args).await
 }
 
 /// The `rledger` commands `ag-rledger` deliberately does not offer, each
@@ -63,6 +110,15 @@ const UNSUPPORTED_COMMANDS: &[(&str, &str)] = &[(
 )];
 
 fn build_cli() -> AgentCli {
+    build_cli_with(&|command| command)
+}
+
+/// The command tree, with every command passed through `wrap` before it is
+/// registered. [`build_cli`] registers them as they are; [`handler_panic`]
+/// swaps every handler for one that answers `HANDLER_PANIC`, so the fallback
+/// resolves the command, its flags, redaction and next actions exactly as the
+/// run that panicked did.
+fn build_cli_with(wrap: &dyn Fn(Command) -> Command) -> AgentCli {
     let mut cli = AgentCli::new("ag-rledger", "Agent-native plain-text accounting CLI")
         .version(env!("CARGO_PKG_VERSION"))
         .schema_version(SCHEMA_VERSION)
@@ -75,35 +131,41 @@ fn build_cli() -> AgentCli {
                 "attribution": "command surface adapted from matthiasdebernardini/agledger (#1291)"
             }),
         )
-        .command(check_command("check", "Validate beancount files"))
-        .command(check_command("c", "Alias for check"))
-        .command(query_command("query", "Query beancount files with BQL"))
-        .command(query_command("q", "Alias for query"))
-        .command(format_command("format", "Format beancount files"))
-        .command(format_command("fmt", "Alias for format"))
-        .command(report_command("report", "Generate financial reports"))
-        .command(report_command("r", "Alias for report"))
-        .command(doctor_command(
+        .command(wrap(check_command("check", "Validate beancount files")))
+        .command(wrap(check_command("c", "Alias for check")))
+        .command(wrap(query_command(
+            "query",
+            "Query beancount files with BQL",
+        )))
+        .command(wrap(query_command("q", "Alias for query")))
+        .command(wrap(format_command("format", "Format beancount files")))
+        .command(wrap(format_command("fmt", "Alias for format")))
+        .command(wrap(report_command("report", "Generate financial reports")))
+        .command(wrap(report_command("r", "Alias for report")))
+        .command(wrap(doctor_command(
             "doctor",
             "Debug and inspect beancount files",
-        ))
-        .command(doctor_command("d", "Alias for doctor"))
-        .command(extract_command(
+        )))
+        .command(wrap(doctor_command("d", "Alias for doctor")))
+        .command(wrap(extract_command(
             "extract",
             "Extract transactions from bank files",
-        ))
-        .command(extract_command("x", "Alias for extract"))
-        .command(price_command("price", "Fetch commodity prices"))
-        .command(price_command("p", "Alias for price"))
-        .command(config_command("config", "Manage rledger configuration"))
-        .command(config_command("cfg", "Alias for config"))
-        .command(add_command("add", "Add a transaction in quick mode"))
-        .command(add_command("a", "Alias for add"))
-        .command(compat_command())
-        .command(explain_command())
-        .command(lint_command())
-        .command(split_command())
-        .command(merge_command())
+        )))
+        .command(wrap(extract_command("x", "Alias for extract")))
+        .command(wrap(price_command("price", "Fetch commodity prices")))
+        .command(wrap(price_command("p", "Alias for price")))
+        .command(wrap(config_command(
+            "config",
+            "Manage rledger configuration",
+        )))
+        .command(wrap(config_command("cfg", "Alias for config")))
+        .command(wrap(add_command("add", "Add a transaction in quick mode")))
+        .command(wrap(add_command("a", "Alias for add")))
+        .command(wrap(compat_command()))
+        .command(wrap(explain_command()))
+        .command(wrap(lint_command()))
+        .command(wrap(split_command()))
+        .command(wrap(merge_command()))
         .root_field(
             "unsupported_commands",
             json!(
@@ -114,7 +176,7 @@ fn build_cli() -> AgentCli {
             ),
         );
     for (name, why) in UNSUPPORTED_COMMANDS {
-        cli = cli.command(unsupported_command(name, why));
+        cli = cli.command(wrap(unsupported_command(name, why)));
     }
 
     debug_assert!(
@@ -132,30 +194,31 @@ fn unsupported_command(name: &'static str, why: &'static str) -> Command {
         name,
         "Not offered by ag-rledger (see `unsupported_commands`)",
     )
-    .usage("ag-rledger <command> (not offered; use rledger)")
+    .usage(format!("ag-rledger {name} [args...]"))
     .allow_unknown_flags()
     .allow_extra_args()
     .default_next_action(NextAction::new(
         "ag-rledger",
         "List the commands ag-rledger offers",
     ))
-    .handler(move |_req, _ctx| {
-        Box::pin(async move {
-            Err(CommandError::new(
-                format!("`{name}` is not offered by ag-rledger: {why}"),
-                "UNSUPPORTED",
-                format!("Run `rledger {name}` instead."),
-            )
-            .exit_code(agcli::ExitCode::USAGE))
-        })
+    .handler(move |_req| async move {
+        Err(command_error(
+            format!("`{name}` is not offered by ag-rledger: {why}"),
+            "UNSUPPORTED",
+            format!("Run `rledger {name}` instead."),
+        )
+        .exit_code(agcli::ExitCode::USAGE))
     })
 }
 
 fn check_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
-        .usage(with_globals(
-            "ag-rledger check [<file>] [--format <format>] [--json] [--verbose] [-v] [--quiet] \
-             [-q] [--no-cache] [-C] [--auto] [-a] [--native-plugin <name>] [--lint <name>]",
+        .usage(usage_for(
+            name,
+            "ag-rledger check [<file>] [--format <format>] [-f <format>] [--json] [--verbose] [-v] [--quiet] \
+             [-q] [--no-cache] [-C] [--auto] [-a] [--native-plugin <name>] [--lint <name>] [--plugin <path>] [--include-rules <rules>] \
+             [--exclude-rules <rules>] [--cache-filename <file>] [--lint-min-confidence <n>] \
+             [--file <file>] [--show-summary]",
         ))
         .allow_unknown_flags()
         .allow_extra_args()
@@ -163,9 +226,9 @@ fn check_command(name: &'static str, description: &'static str) -> Command {
             "ag-rledger check <file> --format=json",
             "Validate a ledger and return diagnostics as JSON",
         ))
-        .handler(|req, _ctx| {
-            let parsed = parse_request("check", req, build_check_args);
-            Box::pin(async move {
+        .handler(|req| {
+            let parsed = parse_request("check", &req, build_check_args);
+            async move {
                 let (mut args, globals) = parsed?;
                 let config = load_config(&globals.budget)?;
                 if args.file.is_none() {
@@ -174,15 +237,15 @@ fn check_command(name: &'static str, description: &'static str) -> Command {
                 run_buffered_with_stderr("check", |out, err| {
                     rustledger::cmd::check::run_with_writer(&args, out, err).map(exit_code_to_i32)
                 })
-            })
+            }
         })
 }
 
 fn query_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
-        .usage(with_globals(
-            "ag-rledger query [<file>] <query...> [--file <file>] [--query-file <file>] \
-             [--output <file>] [--format <format>] [--numberify] [-m] [--no-errors] [-q] \
+        .usage(usage_for(name,
+            "ag-rledger query [<file>] <query...> [--file <file>] [--query-file <file>] [-F <file>] \
+             [--output <file>] [-o <file>] [--format <format>] [-f <format>] [--numberify] [-m] [--no-errors] [-q] \
              [--verbose] [-v]",
         ))
         .allow_unknown_flags()
@@ -195,9 +258,9 @@ fn query_command(name: &'static str, description: &'static str) -> Command {
             .with_param("file", ActionParam::new().required(true))
             .with_param("query", ActionParam::new().required(true)),
         )
-        .handler(|req, _ctx| {
-            let parsed = parse_request("query", req, build_query_args);
-            Box::pin(async move {
+        .handler(|req| {
+            let parsed = parse_request("query", &req, build_query_args);
+            async move {
                 let (mut args, globals) = parsed?;
                 let config = load_config(&globals.budget)?;
                 if args.file.is_none() {
@@ -209,7 +272,7 @@ fn query_command(name: &'static str, description: &'static str) -> Command {
                     args.format = rustledger::cmd::query::OutputFormat::from_str_config(fmt);
                 }
                 if args.query.is_empty() && args.query_file.is_none() {
-                    return Err(CommandError::new(
+                    return Err(command_error(
                         "query text is required for ag-rledger query",
                         "MISSING_QUERY",
                         "Pass a BQL query as positional text or use --query-file. Use rledger query for the interactive REPL.",
@@ -220,14 +283,15 @@ fn query_command(name: &'static str, description: &'static str) -> Command {
                     rustledger::cmd::query::run_with_writer(&args, out, Some(warnings), err)
                         .map(|()| 0)
                 })
-            })
+            }
         })
 }
 
 fn format_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
-        .usage(with_globals(
-            "ag-rledger format [<file>...] [--output <file>] [--in-place] [-i] [--check] [--diff] \
+        .usage(usage_for(
+            name,
+            "ag-rledger format [<file>...] [--output <file>] [-o <file>] [--in-place] [-i] [--check] [--diff] \
              [--ledger <root>] [--no-ledger] [--verbose] [-v]",
         ))
         .allow_unknown_flags()
@@ -236,9 +300,9 @@ fn format_command(name: &'static str, description: &'static str) -> Command {
             "ag-rledger format <file> --check",
             "Check whether a ledger is in canonical format",
         ))
-        .handler(|req, _ctx| {
-            let parsed = parse_request("format", req, build_format_args);
-            Box::pin(async move {
+        .handler(|req| {
+            let parsed = parse_request("format", &req, build_format_args);
+            async move {
                 let (mut args, globals) = parsed?;
                 let config = load_config(&globals.budget)?;
                 if args.files.is_empty()
@@ -249,7 +313,7 @@ fn format_command(name: &'static str, description: &'static str) -> Command {
                 run_buffered_with_stderr("format", |out, err| {
                     rustledger::cmd::format::run_with_writer(&args, out, err).map(exit_code_to_i32)
                 })
-            })
+            }
         })
 }
 
@@ -336,14 +400,19 @@ fn report_flag_usage() -> String {
             let rendered: Vec<String> = flags
                 .iter()
                 .map(|f| {
-                    let mut spelled = format!("--{}", f.long);
-                    if let Some(short) = f.short {
-                        spelled.push_str(&format!("/-{short}"));
-                    }
-                    match &f.value {
+                    // The short form is its own token: agcli reads
+                    // `--account/-a <ACCOUNT>` as declaring `--account` only, and
+                    // masks the value of an undeclared flag in `command`.
+                    let one = |spelled: String| match &f.value {
                         Some(value) => format!("[{spelled} <{value}>]"),
                         None => format!("[{spelled}]"),
+                    };
+                    let mut tokens = one(format!("--{}", f.long));
+                    if let Some(short) = f.short {
+                        tokens.push(' ');
+                        tokens.push_str(&one(format!("-{short}")));
                     }
+                    tokens
                 })
                 .collect();
             format!("{report}: {}", rendered.join(" "))
@@ -417,7 +486,7 @@ fn reject_inapplicable_flags(report_name: &str, req: &Req<'_>) -> Result<(), Com
     // A distinct code, not a generic usage error: an agent that asked for a
     // date window needs to tell "the window was refused" apart from "the file
     // was wrong", and act on it.
-    Err(CommandError::new(
+    Err(command_error(
         format!(
             "report `{canonical}` does not accept {}",
             supplied.join(", ")
@@ -466,12 +535,27 @@ fn report_usage() -> &'static str {
     USAGE
         .get_or_init(|| {
             format!(
-                "ag-rledger report [<file>] <report> [--file <file>] [--format <format>] \
+                "ag-rledger report [<file>] <report> [--file <file>] [--format <format>] [-f <format>] \
              [--verbose] [-v] [--no-cache]  |  report-specific flags \u{2014} {}",
                 report_flag_usage()
             )
         })
         .as_str()
+}
+
+/// [`with_globals`] for the command `name`: the template's command word is
+/// `name`, so an alias (`c`, `q`, `fmt`) advertises itself rather than the
+/// command it stands for. agcli 0.19's audit refuses a usage that names
+/// another command (`USAGE_PATH_MISMATCH`), since an agent copying the
+/// template would run that command, not this one.
+fn usage_for(name: &str, base: &str) -> String {
+    let rest = base
+        .strip_prefix("ag-rledger ")
+        .and_then(|tail| tail.split_once(' ').map(|(_, rest)| rest));
+    match rest {
+        Some(rest) => with_globals(&format!("ag-rledger {name} {rest}")),
+        None => with_globals(&format!("ag-rledger {name}")),
+    }
 }
 
 /// A command's usage string, with the flags `rledger` takes on every
@@ -487,16 +571,16 @@ fn with_globals(base: &str) -> String {
 
 fn report_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
-        .usage(with_globals(report_usage()))
+        .usage(usage_for(name, report_usage()))
         .allow_unknown_flags()
         .allow_extra_args()
         .default_next_action(NextAction::new(
             "ag-rledger report <file> balances --format=json",
             "Get balances as JSON",
         ))
-        .handler(|req, _ctx| {
-            let parsed = parse_request("report", req, build_report_args);
-            Box::pin(async move {
+        .handler(|req| {
+            let parsed = parse_request("report", &req, build_report_args);
+            async move {
                 let (args, globals) = parsed?;
                 let config = load_config(&globals.budget)?;
                 let file = args
@@ -528,15 +612,16 @@ fn report_command(name: &'static str, description: &'static str) -> Command {
                     )
                     .map(|()| 0)
                 })
-            })
+            }
         })
 }
 
 fn doctor_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
-        .usage(with_globals(
+        .usage(usage_for(
+            name,
             "ag-rledger doctor <subcommand> [args...] [--verbose] [-v] [--conversion <value>] \
-             [--output <dir>] [--count <n>] [--seed <n>] [--skip-validation] [--manifest] \
+             [--output <dir>] [-o <dir>] [--count <n>] [-c <n>] [--seed <n>] [-s <n>] [--skip-validation] [--manifest] \
              [--edge-cases-only]",
         ))
         .allow_unknown_flags()
@@ -545,9 +630,9 @@ fn doctor_command(name: &'static str, description: &'static str) -> Command {
             "ag-rledger doctor <subcommand> [args...]",
             "Run a doctor subcommand",
         ))
-        .handler(|req, _ctx| {
-            let parsed = parse_request("doctor", req, build_doctor_command);
-            Box::pin(async move {
+        .handler(|req| {
+            let parsed = parse_request("doctor", &req, build_doctor_command);
+            async move {
                 let (command, globals) = parsed?;
                 // Read for its errors and the plugin budget, as `rledger`
                 // does for every command but `config`.
@@ -555,17 +640,24 @@ fn doctor_command(name: &'static str, description: &'static str) -> Command {
                 run_buffered("doctor", |out| {
                     rustledger::cmd::doctor::run_with_writer(command, out).map(|()| 0)
                 })
-            })
+            }
         })
 }
 
 fn extract_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
-        .usage(with_globals(
-            "ag-rledger extract [<file>] [--file <file>] [--list-importers] [--importer <name>] \
-             [--config <file>] [--account <account>] [--currency <currency>] [--auto] \
+        .usage(usage_for(
+            name,
+            "ag-rledger extract [<file>] [--file <file>] [--list-importers] [--importer <name>] [-i <name>] \
+             [--config <file>] [--account <account>] [-a <account>] [--currency <currency>] [-c <currency>] [--auto] \
              [--invert-sign] [--include-zero-amounts] [--no-header] \
-             [--output <file>] [--existing <file>] [--suggest-categories] [--balance <amount>]",
+             [--output <file>] [-o <file>] [--existing <file>] [--suggest-categories] [--balance <amount>] \
+             [--wasm-importer <path>] [--wasm-importer-dir <dir>] [--delimiter <char>] \
+             [--importers-config <file>] [--date-column <col>] [--date-format <fmt>] \
+             [--narration-column <col>] [--payee-column <col>] [--amount-column <col>] \
+             [--currency-column <col>] [--amount-locale <locale>] [--amount-format <fmt>] \
+             [--debit-column <col>] [--credit-column <col>] [--skip-rows <n>] \
+             [--balance-date <date>] [--use-merchant-dict] [--force] [--ledger <root>]",
         ))
         .allow_unknown_flags()
         .allow_extra_args()
@@ -573,9 +665,9 @@ fn extract_command(name: &'static str, description: &'static str) -> Command {
             "ag-rledger extract <file> --account=<account>",
             "Convert a bank file to beancount directives",
         ))
-        .handler(|req, _ctx| {
-            let parsed = parse_request("extract", req, build_extract_args);
-            Box::pin(async move {
+        .handler(|req| {
+            let parsed = parse_request("extract", &req, build_extract_args);
+            async move {
                 let (args, globals) = parsed?;
                 // A WASM importer runs under the plugin budget.
                 load_config(&globals.budget)?;
@@ -611,15 +703,15 @@ fn extract_command(name: &'static str, description: &'static str) -> Command {
                     )
                     .map(|()| 0)
                 })
-            })
+            }
         })
 }
 
 fn price_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
-        .usage(with_globals(
-            "ag-rledger price [<symbol>...] [--file <file>] [--currency <currency>] [--date <date>] \
-             [--beancount] [-b] [--verbose] [-v] [--mapping <from:to>] [--source <source>] \
+        .usage(usage_for(name,
+            "ag-rledger price [<symbol>...] [--file <file>] [-f <file>] [--currency <currency>] [-c <currency>] [--date <date>] [-d <date>] \
+             [--beancount] [-b] [--verbose] [-v] [--mapping <from:to>] [-m <from:to>] [--source <source>] [-s <source>] [--source-meta] \
              [--source-cmd <cmd>] [--list-sources] [--clear-cache] [--inactive] \
              [--undeclared] [--all-commodities] [-n] [--clobber] [-C]",
         ))
@@ -630,9 +722,9 @@ fn price_command(name: &'static str, description: &'static str) -> Command {
             "ag-rledger price --file <file> --dry-run",
             "Preview price fetches without network calls",
         ))
-        .handler(|req, _ctx| {
-            let parsed = parse_request("price", req, build_price_args);
-            Box::pin(async move {
+        .handler(|req| {
+            let parsed = parse_request("price", &req, build_price_args);
+            async move {
                 let (args, globals) = parsed?;
                 let config = load_config(&globals.budget)?;
                 run_buffered_with_warnings("price", |out, warnings, err| {
@@ -645,13 +737,14 @@ fn price_command(name: &'static str, description: &'static str) -> Command {
                     )
                     .map(|()| 0)
                 })
-            })
+            }
         })
 }
 
 fn config_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
-        .usage(with_globals(
+        .usage(usage_for(
+            name,
             "ag-rledger config <show|path|edit|init|aliases> [--raw] [--format <format>] \
              [--project] [--system] [--force] [-f]",
         ))
@@ -661,9 +754,9 @@ fn config_command(name: &'static str, description: &'static str) -> Command {
             "ag-rledger config <subcommand> [--format=<format>]",
             "Run a configuration subcommand",
         ))
-        .handler(|req, _ctx| {
-            let parsed = parse_request("config", req, build_config_args);
-            Box::pin(async move {
+        .handler(|req| {
+            let parsed = parse_request("config", &req, build_config_args);
+            async move {
                 // No `load_config` here: `config` is how a broken file is
                 // shown and fixed, so it must run when the file does not
                 // load (as in `rledger`, #1306).
@@ -671,15 +764,15 @@ fn config_command(name: &'static str, description: &'static str) -> Command {
                 run_buffered("config", |out| {
                     rustledger::cmd::config_cmd::run_with_writer(&args, out).map(|()| 0)
                 })
-            })
+            }
         })
 }
 
 fn add_command(name: &'static str, description: &'static str) -> Command {
     Command::new(name, description)
-        .usage(with_globals(
+        .usage(usage_for(name,
             "ag-rledger add [<file>] --quick <payee> <narration> <account> <amount> <account> \
-             [--file <file>] [--date <date>] [--no-completion] [-n] [-y]",
+             [--file <file>] [--date <date>] [-d <date>] [-q <payee>] [--no-completion] [-n] [-y]",
         ))
         .allow_unknown_flags()
         .allow_extra_args()
@@ -688,16 +781,16 @@ fn add_command(name: &'static str, description: &'static str) -> Command {
             "ag-rledger add <file> --quick <payee> <narration> <account> <amount> <account> --dry-run",
             "Preview a transaction without editing the ledger",
         ))
-        .handler(|req, _ctx| {
-            let parsed = parse_request("add", req, build_add_args);
-            Box::pin(async move {
+        .handler(|req| {
+            let parsed = parse_request("add", &req, build_add_args);
+            async move {
                 let (args, globals) = parsed?;
                 // The agent path never prompts on stdin. Mutating the ledger
                 // without an explicit confirmation (and silently defaulting to
                 // "yes" on EOF) is unsafe, so require `--yes`/`--dry-run`
                 // up front and return a clean USAGE error otherwise (M3).
                 if !args.yes && !args.dry_run {
-                    return Err(CommandError::new(
+                    return Err(command_error(
                         "ag-rledger add needs explicit confirmation",
                         "CONFIRMATION_REQUIRED",
                         "Pass --yes to append the transaction, or --dry-run to preview it without modifying the ledger.",
@@ -713,7 +806,7 @@ fn add_command(name: &'static str, description: &'static str) -> Command {
                 run_buffered("add", |out| {
                     rustledger::cmd::add_cmd::run_quick_with_writer(&args, &file, out).map(|()| 0)
                 })
-            })
+            }
         })
 }
 
@@ -731,18 +824,18 @@ fn compat_command() -> Command {
         "ag-rledger compat <action> [--prefix=<dir>]",
         "Install or uninstall bean-* wrappers",
     ))
-    .handler(|req, _ctx| {
-        let parsed = parse_request("compat", req, |req| {
+    .handler(|req| {
+        let parsed = parse_request("compat", &req, |req| {
             Ok((
                 req.arg(0).map(str::to_string),
                 path_flag(req, "prefix", None),
             ))
         });
-        Box::pin(async move {
+        async move {
             let ((action, prefix), globals) = parsed?;
             load_config(&globals.budget)?;
             let action = action.ok_or_else(|| {
-                CommandError::new(
+                command_error(
                     "compat action is required",
                     "MISSING_ACTION",
                     "Use `install` or `uninstall`.",
@@ -758,14 +851,14 @@ fn compat_command() -> Command {
                     rustledger::cmd::compat::uninstall_with_writer(prefix.as_deref(), out, err)
                         .map(|()| 0)
                 }),
-                _ => Err(CommandError::new(
+                _ => Err(command_error(
                     format!("unknown compat action: {action}"),
                     "UNKNOWN_ACTION",
                     "Use `install` or `uninstall`.",
                 )
                 .exit_code(agcli::ExitCode::USAGE)),
             }
-        })
+        }
     })
 }
 
@@ -781,9 +874,9 @@ fn explain_command() -> Command {
         "ag-rledger explain <code>",
         "Explain what a validation error code means and how to fix it",
     ))
-    .handler(|req, _ctx| {
-        let parsed = parse_request("explain", req, build_explain_args);
-        Box::pin(async move {
+    .handler(|req| {
+        let parsed = parse_request("explain", &req, build_explain_args);
+        async move {
             let (args, globals) = parsed?;
             // Read for its errors, as `rledger` does for every command but
             // `config`.
@@ -793,13 +886,13 @@ fn explain_command() -> Command {
                 // `rledger`; the text saying so is in `result.stdout`.
                 rustledger::cmd::explain::run_with_writer(&args, out).map(i32::from)
             })
-        })
+        }
     })
 }
 
 fn build_explain_args(req: &Req<'_>) -> Result<rustledger::cmd::explain::Args, CommandError> {
     if req.positionals().len() > 1 {
-        return Err(CommandError::new(
+        return Err(command_error(
             "explain takes at most one error code",
             "INVALID_ARGS",
             "Pass one code (e.g. E2001), or none to list them all.",
@@ -814,7 +907,7 @@ fn build_explain_args(req: &Req<'_>) -> Result<rustledger::cmd::explain::Args, C
 fn lint_command() -> Command {
     Command::new("lint", "Run non-fatal advisory passes")
         .usage(with_globals(
-            "ag-rledger lint <transfers|closed-nonempty|control-chars> <file>... [--format <format>]  |  \
+            "ag-rledger lint <transfers|closed-nonempty|control-chars> <file>... [--format <format>] [-f <format>]  |  \
              transfers: [--min-confidence <n>] [--date-window <days>] \
              [--amount-tolerance <amount>] [--apply]",
         ))
@@ -824,15 +917,15 @@ fn lint_command() -> Command {
             "ag-rledger lint <lint> <file> [--format=<format>]",
             "Run an advisory lint",
         ))
-        .handler(|req, _ctx| {
-            let parsed = parse_request("lint", req, build_lint_args);
-            Box::pin(async move {
+        .handler(|req| {
+            let parsed = parse_request("lint", &req, build_lint_args);
+            async move {
                 let (args, globals) = parsed?;
                 load_config(&globals.budget)?;
                 run_buffered("lint", |out| {
                     rustledger::cmd::lint::run_with_writer(&args, out).map(exit_code_to_i32)
                 })
-            })
+            }
         })
 }
 
@@ -946,7 +1039,7 @@ fn path_value(
             || (*arg == spelling && raw.get(i + 1).is_some_and(|next| next == "true"))
     });
     if value.is_empty() || (value == "true" && !typed) {
-        return Err(CommandError::new(
+        return Err(command_error(
             format!("--{long} needs a value"),
             "MISSING_VALUE",
             format!("Pass a path after --{long}."),
@@ -976,7 +1069,7 @@ fn reject_conflicts(
             // argument that declares it (`--output`), not on both.
             if supplied(other) {
                 let name = |a: &clap::Arg| format!("--{}", a.get_long().unwrap_or_default());
-                return Err(CommandError::new(
+                return Err(command_error(
                     format!(
                         "`{command}` does not take {} together with {}",
                         name(arg),
@@ -1008,7 +1101,7 @@ fn confirmation(req: &Req<'_>) -> (bool, bool) {
 /// The one FILE positional `split` and `merge` take, if any.
 fn restructure_file(command: &str, req: &Req<'_>) -> Result<Option<PathBuf>, CommandError> {
     if req.positionals().len() > 1 {
-        return Err(CommandError::new(
+        return Err(command_error(
             format!("{command} takes at most one file"),
             "INVALID_ARGS",
             format!("Pass the one file to {command}, or none to use default.file from the config."),
@@ -1035,7 +1128,7 @@ fn build_split_args(req: &Req<'_>) -> Result<(split::Args, bool), CommandError> 
             invalid_enum("by", raw, &allowed)
         })?,
         None => {
-            return Err(CommandError::new(
+            return Err(command_error(
                 "split requires --by",
                 "MISSING_FLAG",
                 format!(
@@ -1086,7 +1179,7 @@ fn require_confirmation(command: &str, yes: bool, dry_run: bool) -> Result<(), C
     if yes || dry_run {
         return Ok(());
     }
-    Err(CommandError::new(
+    Err(command_error(
         format!(
             "ag-rledger {command} needs explicit confirmation: it {}",
             if command == "merge" {
@@ -1117,9 +1210,9 @@ fn split_command() -> Command {
         "ag-rledger split <file> --by year --dry-run",
         "Preview the split and its equivalence check without writing",
     ))
-    .handler(|req, _ctx| {
-        let parsed = parse_request("split", req, build_split_args);
-        Box::pin(async move {
+    .handler(|req| {
+        let parsed = parse_request("split", &req, build_split_args);
+        async move {
             let ((mut args, yes), globals) = parsed?;
             require_confirmation("split", yes, args.dry_run)?;
             let config = load_config(&globals.budget)?;
@@ -1129,7 +1222,7 @@ fn split_command() -> Command {
             run_restructure("split", |out, err, outcome| {
                 split::run_with_outcome(&args, out, err, outcome)
             })
-        })
+        }
     })
 }
 
@@ -1147,9 +1240,9 @@ fn merge_command() -> Command {
         "ag-rledger merge <file> --dry-run",
         "Preview the merge and its equivalence check without writing",
     ))
-    .handler(|req, _ctx| {
-        let parsed = parse_request("merge", req, build_merge_args);
-        Box::pin(async move {
+    .handler(|req| {
+        let parsed = parse_request("merge", &req, build_merge_args);
+        async move {
             let ((mut args, yes), globals) = parsed?;
             require_confirmation("merge", yes, args.dry_run)?;
             let config = load_config(&globals.budget)?;
@@ -1159,7 +1252,7 @@ fn merge_command() -> Command {
             run_restructure("merge", |out, err, outcome| {
                 merge::run_with_outcome(&args, out, err, outcome)
             })
-        })
+        }
     })
 }
 
@@ -1196,7 +1289,7 @@ where
                 let message =
                     rustledger_plugin::escape_untrusted_text(&format!("{e:#}")).into_owned();
                 let (exit, fix) = refusal_fix(code);
-                CommandError::new(message, code, fix).exit_code(exit)
+                command_error(message, code, fix).exit_code(exit)
             }
             None => command_failed(e),
         }),
@@ -1212,7 +1305,7 @@ where
                 };
                 let (exit, fix) = refusal_fix(code);
                 Some(
-                    CommandError::new(
+                    command_error(
                         rustledger_plugin::escape_untrusted_text(&format!(
                             "refusing to {command}: {why}: {reason}"
                         ))
@@ -1244,13 +1337,13 @@ where
         )
     };
     Ok(CommandOutput::new(Value::Object(body))
-        .exit_code(0)
+        .exit_code(agcli::ExitCode::SUCCESS)
         .next_action(next))
 }
 
 /// The exit code and the advice for a refusal code (see
 /// [`restructure::code`]).
-fn refusal_fix(code: &str) -> (i32, &'static str) {
+fn refusal_fix(code: &str) -> (agcli::ExitCode, &'static str) {
     use restructure::code as c;
     let usage = agcli::ExitCode::USAGE;
     let error = agcli::ExitCode::ERROR;
@@ -1557,7 +1650,7 @@ fn build_report_args(req: &Req<'_>) -> Result<ReportArgs, CommandError> {
     });
 
     let report_name = positionals.first().ok_or_else(|| {
-        CommandError::new(
+        command_error(
             "report subcommand is required",
             "MISSING_REPORT",
             format!("Use one of: {}.", report_names().join(", ")),
@@ -1633,7 +1726,7 @@ fn build_report(
             // Required by `rledger` too: the investment accounts ARE the
             // portfolio, and there is no default that would mean anything.
             if investments.is_empty() {
-                return Err(CommandError::new(
+                return Err(command_error(
                     "report returns requires --investments",
                     "MISSING_FLAG",
                     "Name the investment account prefix(es): --investments Assets:Investments \
@@ -1660,7 +1753,7 @@ fn build_report(
         // never ignored. The drift guard
         // (`ag_rledger_reads_every_rledger_flag_or_refuses_it`) fails until
         // it is wired here.
-        Some(other) => Err(CommandError::new(
+        Some(other) => Err(command_error(
             format!("report `{other}` is not offered by ag-rledger"),
             "UNSUPPORTED",
             "Run it with `rledger report`.",
@@ -1719,7 +1812,7 @@ fn parse_report_name(name: &str) -> Option<String> {
 fn build_doctor_command(req: &Req<'_>) -> Result<rustledger::cmd::doctor::Command, CommandError> {
     use rustledger::cmd::doctor::{Command as Doctor, Conversion};
     let sub = req.arg(0).ok_or_else(|| {
-        CommandError::new(
+        command_error(
             "doctor subcommand is required",
             "MISSING_SUBCOMMAND",
             "Use lex, parse, context, linked, missing-open, list-options, print-options, stats, display-context, roundtrip, directories, region, or generate-synthetic.",
@@ -1940,7 +2033,7 @@ fn build_add_args(req: &Req<'_>) -> Result<rustledger::cmd::add_cmd::Args, Comma
     // panics on agent-controlled input; return a clean USAGE error instead.
     match quick.as_ref().map(Vec::len) {
         None => {
-            return Err(CommandError::new(
+            return Err(command_error(
                 "add requires --quick (agent mode has no interactive prompt)",
                 "MISSING_QUICK_ARGS",
                 "Use: ag-rledger add <file> --quick <payee> <narration> <account> <amount> <account>",
@@ -1948,7 +2041,7 @@ fn build_add_args(req: &Req<'_>) -> Result<rustledger::cmd::add_cmd::Args, Comma
             .exit_code(agcli::ExitCode::USAGE));
         }
         Some(len) if len < 4 => {
-            return Err(CommandError::new(
+            return Err(command_error(
                 "quick mode requires at least payee, narration, account, amount",
                 "INVALID_QUICK_ARGS",
                 "Use: ag-rledger add <file> --quick <payee> <narration> <account> <amount> <account>",
@@ -1973,7 +2066,7 @@ const LINTS: &[&str] = &["transfers", "closed-nonempty", "control-chars"];
 fn build_lint_args(req: &Req<'_>) -> Result<rustledger::cmd::lint::Args, CommandError> {
     use rustledger::cmd::lint::{Args, LintKind, closed_nonempty, control_chars, transfers};
     let subcommand = req.arg(0).ok_or_else(|| {
-        CommandError::new(
+        command_error(
             "lint name is required",
             "MISSING_LINT",
             format!("Use one of: {}.", LINTS.join(", ")),
@@ -2106,7 +2199,8 @@ where
         }
     }
     Ok(CommandOutput::new(result)
-        .exit_code(exit_code)
+        // A command status is 0 or 1; anything outside a byte is a failure.
+        .exit_code(agcli::ExitCode::try_from(exit_code).unwrap_or(agcli::ExitCode::ERROR))
         .next_action(NextAction::new(
             format!("ag-rledger {command} --help"),
             "Inspect command usage",
@@ -2209,11 +2303,11 @@ fn command_failed(error: &anyhow::Error) -> CommandError {
             "Inspect the message, adjust the invocation, and retry.",
         )
     };
-    CommandError::new(message, code, fix).exit_code(exit_code)
+    command_error(message, code, fix).exit_code(exit_code)
 }
 
 fn missing_file_error(command: &str) -> CommandError {
-    CommandError::new(
+    command_error(
         format!("{command} requires a ledger file"),
         "MISSING_FILE",
         "Pass a file path or set default.file in rledger config.",
@@ -2222,7 +2316,7 @@ fn missing_file_error(command: &str) -> CommandError {
 }
 
 fn invalid_enum(name: &str, value: &str, allowed: &[&str]) -> CommandError {
-    CommandError::new(
+    command_error(
         format!("invalid {name}: {value}"),
         "INVALID_VALUE",
         format!("Use one of: {}.", allowed.join(", ")),
@@ -2328,7 +2422,7 @@ impl<'a> Req<'a> {
     /// Positional `index`, or agcli's `MISSING_ARG` error naming it.
     fn require_arg(&self, index: usize, name: &str) -> Result<&'a str, CommandError> {
         self.arg(index).ok_or_else(|| {
-            CommandError::new(
+            command_error(
                 format!("missing argument <{name}>"),
                 "MISSING_ARG",
                 format!("Provide <{name}> as positional argument {index}."),
@@ -2360,7 +2454,7 @@ impl<'a> Req<'a> {
         }
         // agcli's own code for the same refusal, so an agent handles both
         // the same way.
-        Err(CommandError::new(
+        Err(command_error(
             format!("unknown flag(s) for `{command}`: {}", unread.join(", ")),
             "UNKNOWN_FLAG",
             format!(
@@ -2411,7 +2505,7 @@ struct Globals {
 /// Every handler goes through this, so none can skip the unread-flag check.
 fn parse_request<T>(
     command: &str,
-    req: &agcli::CommandRequest<'_>,
+    req: &agcli::CommandRequest,
     build: impl FnOnce(&Req<'_>) -> Result<T, CommandError>,
 ) -> Result<(T, Globals), CommandError> {
     let req = Req::new(req.invocation(), req.positionals());
@@ -2438,7 +2532,7 @@ fn plugin_budget_flags(req: &Req<'_>) -> Result<PluginBudgetArgs, CommandError> 
         let rendered = e.to_string();
         let first = rendered.lines().next().unwrap_or_default();
         let message = first.strip_prefix("error: ").unwrap_or(first).to_string();
-        CommandError::new(
+        command_error(
             message,
             "INVALID_FLAG",
             "--plugin-max-time-secs takes a whole number of seconds, at least 1; \
@@ -2496,7 +2590,7 @@ fn load_config(budget: &PluginBudgetArgs) -> Result<Config, CommandError> {
     let config = config_result()
         .as_ref()
         .map_err(|message| {
-            let error = CommandError::new(
+            let error = command_error(
                 message.clone(),
                 "CONFIG_ERROR",
                 "Fix the config file named in the message and retry. `ag-rledger config path` \
@@ -2575,7 +2669,7 @@ where
 {
     match flag(req, long, short) {
         Some(raw) => raw.parse::<T>().map(Some).map_err(|_| {
-            CommandError::new(
+            command_error(
                 format!("flag --{long} is not valid: {raw:?}"),
                 "INVALID_FLAG",
                 format!("Pass a valid value for --{long}."),
@@ -2592,7 +2686,7 @@ where
 {
     let raw = req.require_arg(index, name)?;
     raw.parse::<T>().map_err(|_| {
-        CommandError::new(
+        command_error(
             format!("argument <{name}> is not valid: {raw:?}"),
             "INVALID_ARG",
             format!("Pass a valid value for <{name}>."),
@@ -2658,12 +2752,150 @@ fn exit_code_to_i32(code: ProcessExitCode) -> i32 {
     i32::from(code != ProcessExitCode::SUCCESS)
 }
 
+/// The flags `rledger` takes more than once (clap `Vec`s), which
+/// [`flag_values`] collects: long forms, for every command.
+const MULTI_VALUE_FLAGS: &[&str] = &[
+    "plugin",
+    "native-plugin",
+    "include-rules",
+    "exclude-rules",
+    "investments",
+    "income",
+    "wasm-importer",
+    "wasm-importer-dir",
+    "mapping",
+];
+
+/// The short forms of [`MULTI_VALUE_FLAGS`], by the commands that own them:
+/// elsewhere the same letter is another flag (`format -i` is `--in-place`).
+const MULTI_VALUE_SHORTS: &[(&[&str], char, &str)] = &[
+    (&["report", "r"], 'i', "investments"),
+    (&["report", "r"], 'n', "income"),
+    (&["price", "p"], 'm', "mapping"),
+];
+
+/// Merge every repeated [`MULTI_VALUE_FLAGS`] flag into one comma-joined
+/// `--flag=a,b` at its first occurrence.
+///
+/// agcli 0.18 refuses a flag given twice (`PARSE_ERROR`), with no opt-out,
+/// but these flags are lists in `rledger` (`--investments A --investments B`)
+/// and were accepted by `ag-rledger` before. [`flag_values`] already splits
+/// each value on commas, so the merged flag reads exactly as the repeats did
+/// (a value containing a comma was split there before too). A flag given
+/// once is left as written, so `command` echoes it unchanged, and a repeated
+/// boolean (`--json --json`) is left for agcli to refuse. Stops at `--`.
+fn merge_repeated_value_flags(args: Vec<String>, is_alias: impl Fn(&str) -> bool) -> Vec<String> {
+    let command = first_command_index(&args, is_alias).map(|idx| args[idx].clone());
+    let long_of = |arg: &str| -> Option<(&'static str, Option<String>)> {
+        if let Some(rest) = arg.strip_prefix("--") {
+            let (name, value) = match rest.split_once('=') {
+                Some((name, value)) => (name, Some(value.to_string())),
+                None => (rest, None),
+            };
+            return MULTI_VALUE_FLAGS
+                .iter()
+                .find(|long| **long == name)
+                .map(|long| (*long, value));
+        }
+        let rest = arg.strip_prefix('-')?;
+        let mut chars = rest.chars();
+        let letter = chars.next()?;
+        let value = match chars.as_str() {
+            "" => None,
+            tail => Some(tail.strip_prefix('=')?.to_string()),
+        };
+        MULTI_VALUE_SHORTS
+            .iter()
+            .find(|(commands, short, _)| {
+                *short == letter
+                    && command
+                        .as_deref()
+                        .is_some_and(|command| commands.contains(&command))
+            })
+            .map(|(_, _, long)| (*long, value))
+    };
+
+    // (position, flag, value) of each occurrence that has a value.
+    let mut found: Vec<(usize, usize, &'static str, String)> = Vec::new();
+    let mut i = 1;
+    while i < args.len() {
+        if args[i] == "--" {
+            break;
+        }
+        if let Some((long, inline)) = long_of(&args[i]) {
+            match inline {
+                Some(value) => found.push((i, 1, long, value)),
+                None => {
+                    if let Some(value) = args.get(i + 1)
+                        && !value.starts_with('-')
+                    {
+                        found.push((i, 2, long, value.clone()));
+                        i += 2;
+                        continue;
+                    }
+                }
+            }
+        }
+        i += 1;
+    }
+
+    let repeated: BTreeSet<&str> = found
+        .iter()
+        .filter(|(_, _, long, _)| {
+            found
+                .iter()
+                .filter(|(_, _, other, _)| other == long)
+                .count()
+                > 1
+        })
+        .map(|(_, _, long, _)| *long)
+        .collect();
+    if repeated.is_empty() {
+        return args;
+    }
+    let mut drop = vec![false; args.len()];
+    let mut replace: Vec<(usize, String)> = Vec::new();
+    for long in &repeated {
+        let mut occurrences = found.iter().filter(|(_, _, other, _)| other == long);
+        let Some((first, _, _, _)) = occurrences.clone().next() else {
+            continue;
+        };
+        let joined: Vec<&str> = occurrences
+            .clone()
+            .map(|(_, _, _, value)| value.as_str())
+            .collect();
+        replace.push((*first, format!("--{long}={}", joined.join(","))));
+        for (pos, width, _, _) in occurrences.by_ref() {
+            for slot in drop.iter_mut().skip(*pos).take(*width) {
+                *slot = true;
+            }
+        }
+    }
+    let mut merged = Vec::with_capacity(args.len());
+    for (pos, arg) in args.into_iter().enumerate() {
+        if let Some((_, flag)) = replace.iter().find(|(at, _)| *at == pos) {
+            merged.push(flag.clone());
+        } else if !drop[pos] {
+            merged.push(arg);
+        }
+    }
+    merged
+}
+
+/// Whether `name` is an alias in the rledger config (none if it failed to
+/// load; the command that runs reports that).
+fn is_config_alias(name: &str) -> bool {
+    config_result()
+        .as_ref()
+        .is_ok_and(|config| config.resolve_alias(name).is_some())
+}
+
 fn expand_config_aliases(args: Vec<String>) -> Vec<String> {
     // A config that failed to load yields no aliases here; the command that
     // runs reports the error (`load_config`), as `rledger` does.
     let default = Config::default();
     let config = config_result().as_ref().unwrap_or(&default);
-    let Some(idx) = first_command_index(&args) else {
+    let Some(idx) = first_command_index(&args, |name| config.resolve_alias(name).is_some()) else {
         return args;
     };
     let Some(expansion) = config.resolve_alias(&args[idx]) else {
@@ -2676,31 +2908,100 @@ fn expand_config_aliases(args: Vec<String>) -> Vec<String> {
     expanded
 }
 
-fn first_command_index(args: &[String]) -> Option<usize> {
-    // Global flags whose value can follow as its own argument. Their value
-    // is not the command: `--plugin-max-time-secs 5 bal` must expand `bal`.
-    let mut value_flags = vec!["-P".to_string(), "--profile".to_string()];
-    value_flags.extend(
+/// Every command and alias [`build_cli`] registers. agcli has no way to list
+/// them, so `every_registered_command_is_in_command_names` compares this with
+/// the root command tree.
+const COMMAND_NAMES: &[&str] = &[
+    "check",
+    "c",
+    "query",
+    "q",
+    "format",
+    "fmt",
+    "report",
+    "r",
+    "doctor",
+    "d",
+    "extract",
+    "x",
+    "price",
+    "p",
+    "config",
+    "cfg",
+    "add",
+    "a",
+    "compat",
+    "explain",
+    "lint",
+    "split",
+    "merge",
+    "completions",
+];
+
+/// The global flags whose value can follow as its own argument: `-P`,
+/// `--profile` and the plugin budget.
+fn global_value_flags() -> Vec<String> {
+    let mut flags = vec!["-P".to_string(), "--profile".to_string()];
+    flags.extend(
         PluginBudgetArgs::flags()
             .into_iter()
             .map(|(long, _)| format!("--{long}")),
     );
+    flags
+}
+
+/// The index of the command word: the first argument that names a
+/// registered command or a config alias (`is_alias`), as agcli itself finds
+/// it, so a value flag before it (`--format json report`, `-f json price`)
+/// is not taken for the command. The value of a global value flag is never
+/// the command (`--plugin-max-time-secs 5 bal` expands `bal`, `-P x check`
+/// runs `check`), and nothing after `--` is.
+fn first_command_index(args: &[String], is_alias: impl Fn(&str) -> bool) -> Option<usize> {
+    let value_flags = global_value_flags();
     let mut skip_next = false;
     for (idx, arg) in args.iter().enumerate().skip(1) {
         if skip_next {
             skip_next = false;
             continue;
         }
+        if arg == "--" {
+            return None;
+        }
         if value_flags.iter().any(|f| f == arg) {
             skip_next = true;
             continue;
         }
-        if arg.starts_with('-') {
-            continue;
+        if COMMAND_NAMES.contains(&arg.as_str()) || is_alias(arg) {
+            return Some(idx);
         }
-        return Some(idx);
     }
     None
+}
+
+/// Write each global value flag before the command word with its value
+/// attached (`-P x` becomes `-P=x`).
+///
+/// agcli 0.19 never takes a command's name as a bare flag's value, so with
+/// `-P x check l.beancount` it ran the `x` alias (`extract`) on the file
+/// `check`, where `rledger` (and agcli 0.17) took `x` as the profile.
+/// Declaring `-P` does not change that rule; the attached value does.
+fn attach_global_values(args: Vec<String>, is_alias: impl Fn(&str) -> bool) -> Vec<String> {
+    let end = first_command_index(&args, is_alias).unwrap_or(args.len());
+    let value_flags = global_value_flags();
+    let mut out = Vec::with_capacity(args.len());
+    let mut iter = args.into_iter().enumerate().peekable();
+    while let Some((idx, arg)) = iter.next() {
+        if idx > 0
+            && idx < end
+            && value_flags.contains(&arg)
+            && let Some((_, value)) = iter.next_if(|(next, _)| *next < end)
+        {
+            out.push(format!("{arg}={value}"));
+            continue;
+        }
+        out.push(arg);
+    }
+    out
 }
 
 fn parse_alias_expansion(expansion: &str) -> Vec<String> {
@@ -2725,6 +3026,24 @@ fn parse_alias_expansion(expansion: &str) -> Vec<String> {
         parts.push(current);
     }
     parts
+}
+
+/// A [`CommandError`] from its message, code and fix, in that order.
+///
+/// agcli 0.18 moved the code first and made it an [`agcli::ErrorCode`]; the
+/// codes here are `&'static str` constants and a few built at run time
+/// (`restructure::refusal_code`), so every one goes through
+/// [`agcli::ErrorCode::owned`]. None is empty, which `owned` would refuse.
+fn command_error(
+    message: impl Into<String>,
+    code: impl AsRef<str>,
+    fix: impl Into<String>,
+) -> CommandError {
+    CommandError::new(
+        agcli::ErrorCode::owned(code.as_ref().to_string()),
+        message,
+        fix,
+    )
 }
 
 #[cfg(test)]
@@ -2787,7 +3106,14 @@ mod tests {
                 .map(|f| f.trim_matches(['[', ']']))
                 .map(|f| f.split([' ', '/']).next().unwrap_or_default())
                 .collect();
-            let expected: Vec<String> = flags.iter().map(|f| format!("--{}", f.long)).collect();
+            // Each flag's long form, then its short form as its own token.
+            let expected: Vec<String> = flags
+                .iter()
+                .flat_map(|f| {
+                    std::iter::once(format!("--{}", f.long))
+                        .chain(f.short.map(|short| format!("-{short}")))
+                })
+                .collect();
             assert_eq!(listed, expected, "`{report}`'s usage segment disagrees");
         }
     }
@@ -2801,7 +3127,11 @@ mod tests {
         for switch in ["[--irr]", "[--by-group]", "[--no-zero]", "[--children]"] {
             assert!(usage.contains(switch), "{switch} missing from {usage}");
         }
-        assert!(usage.contains("[--account/-a <ACCOUNT>]"), "{usage}");
+        // The short form is its own token, so agcli declares it with its value.
+        assert!(
+            usage.contains("[--account <ACCOUNT>] [-a <ACCOUNT>]"),
+            "{usage}"
+        );
         assert!(
             usage.contains("[--long-term-days <LONG_TERM_DAYS>]"),
             "{usage}"
@@ -2851,7 +3181,7 @@ mod tests {
     fn report_refusal(args: &[&str]) -> Option<String> {
         let mut argv = vec!["ag-rledger", "report", "f.beancount"];
         argv.extend_from_slice(args);
-        let invocation = agcli::parse_invocation(argv).expect("argv parses");
+        let invocation = agcli::Invocation::parse(argv, |_| false).expect("argv parses");
         let req = Req::new(&invocation, &invocation.positionals()[1..]);
         build_report_args(&req).err().map(|e| format!("{e:?}"))
     }
@@ -2897,7 +3227,7 @@ mod tests {
         let build = |args: &[&str]| {
             let mut argv = vec!["ag-rledger", "report", "f.beancount"];
             argv.extend_from_slice(args);
-            let invocation = agcli::parse_invocation(argv).expect("argv parses");
+            let invocation = agcli::Invocation::parse(argv, |_| false).expect("argv parses");
             let req = Req::new(&invocation, &invocation.positionals()[1..]);
             let built = build_report_args(&req).map(|a| a.report);
             assert!(req.unread_flags().is_empty(), "{:?}", req.unread_flags());
@@ -2969,15 +3299,18 @@ mod tests {
     #[test]
     fn closed_nonempty_and_explain_build() {
         use rustledger::cmd::lint::{LintKind, closed_nonempty::OutputFormat};
-        let invocation = agcli::parse_invocation([
-            "ag-rledger",
-            "lint",
-            "closed-nonempty",
-            "a.beancount",
-            "b.beancount",
-            "--format",
-            "json",
-        ])
+        let invocation = agcli::Invocation::parse(
+            [
+                "ag-rledger",
+                "lint",
+                "closed-nonempty",
+                "a.beancount",
+                "b.beancount",
+                "--format",
+                "json",
+            ],
+            |_| false,
+        )
         .unwrap();
         let req = Req::new(&invocation, &invocation.positionals()[1..]);
         let LintKind::ClosedNonempty(args) = build_lint_args(&req).unwrap().lint else {
@@ -2986,13 +3319,14 @@ mod tests {
         assert_eq!(args.files.len(), 2);
         assert!(matches!(args.format, OutputFormat::Json));
 
-        let invocation = agcli::parse_invocation(["ag-rledger", "explain", "E2001"]).unwrap();
+        let invocation =
+            agcli::Invocation::parse(["ag-rledger", "explain", "E2001"], |_| false).unwrap();
         let req = Req::new(&invocation, &invocation.positionals()[1..]);
         assert_eq!(
             build_explain_args(&req).unwrap().code.as_deref(),
             Some("E2001")
         );
-        let invocation = agcli::parse_invocation(["ag-rledger", "explain"]).unwrap();
+        let invocation = agcli::Invocation::parse(["ag-rledger", "explain"], |_| false).unwrap();
         let req = Req::new(&invocation, &invocation.positionals()[1..]);
         assert_eq!(build_explain_args(&req).unwrap().code, None);
     }
@@ -3004,7 +3338,7 @@ mod tests {
     ) -> BTreeSet<String> {
         let mut argv = vec!["ag-rledger"];
         argv.extend_from_slice(args);
-        let invocation = agcli::parse_invocation(argv).expect("argv parses");
+        let invocation = agcli::Invocation::parse(argv, |_| false).expect("argv parses");
         // positionals()[0] is the command; the handler sees the rest.
         let positionals = &invocation.positionals()[1..];
         let req = Req::new(&invocation, positionals);
@@ -3016,7 +3350,7 @@ mod tests {
     fn builds<T>(args: &[&str], build: impl FnOnce(&Req<'_>) -> Result<T, CommandError>) -> bool {
         let mut argv = vec!["ag-rledger"];
         argv.extend_from_slice(args);
-        let invocation = agcli::parse_invocation(argv).expect("argv parses");
+        let invocation = agcli::Invocation::parse(argv, |_| false).expect("argv parses");
         let req = Req::new(&invocation, &invocation.positionals()[1..]);
         build(&req).is_ok()
     }
@@ -3220,7 +3554,7 @@ mod tests {
             "--compact",
             "--json",
         ];
-        let invocation = agcli::parse_invocation(argv).unwrap();
+        let invocation = agcli::Invocation::parse(argv, |_| false).unwrap();
         let req = Req::new(&invocation, &invocation.positionals()[1..]);
         build_format_args(&req).unwrap();
         assert_eq!(
@@ -3237,19 +3571,25 @@ mod tests {
     /// it must refuse it, unlike `--select`. `report` reads it now.
     #[test]
     fn no_cache_must_be_read() {
-        let invocation =
-            agcli::parse_invocation(["ag-rledger", "format", "f.beancount", "--no-cache"]).unwrap();
+        let invocation = agcli::Invocation::parse(
+            ["ag-rledger", "format", "f.beancount", "--no-cache"],
+            |_| false,
+        )
+        .unwrap();
         let req = Req::new(&invocation, &invocation.positionals()[1..]);
         build_format_args(&req).unwrap();
         assert_eq!(req.unread_flags(), vec!["--no-cache"]);
 
-        let invocation = agcli::parse_invocation([
-            "ag-rledger",
-            "report",
-            "f.beancount",
-            "balances",
-            "--no-cache",
-        ])
+        let invocation = agcli::Invocation::parse(
+            [
+                "ag-rledger",
+                "report",
+                "f.beancount",
+                "balances",
+                "--no-cache",
+            ],
+            |_| false,
+        )
         .unwrap();
         let req = Req::new(&invocation, &invocation.positionals()[1..]);
         let args = build_report_args(&req).unwrap();
@@ -3264,7 +3604,7 @@ mod tests {
         let parse = |args: &[&str]| {
             let mut argv = vec!["ag-rledger", "check", "f.beancount"];
             argv.extend_from_slice(args);
-            let invocation = agcli::parse_invocation(argv).unwrap();
+            let invocation = agcli::Invocation::parse(argv, |_| false).unwrap();
             let req = Req::new(&invocation, &invocation.positionals()[1..]);
             plugin_budget_flags(&req)
         };
@@ -3321,6 +3661,404 @@ mod tests {
         .iter()
         .map(ToString::to_string)
         .collect();
-        assert_eq!(first_command_index(&args), Some(7));
+        assert_eq!(first_command_index(&args, |name| name == "bal"), Some(7));
+    }
+
+    /// A panicking handler is answered with agcli's own `HANDLER_PANIC`
+    /// envelope, exit code 1, for the command the argv names: also with a
+    /// framework boolean before the command word, and with no arguments.
+    #[tokio::test]
+    async fn test_handler_panic_answers_for_the_command_that_panicked() {
+        for argv in [
+            vec!["ag-rledger", "check", "f.beancount"],
+            vec!["ag-rledger", "--json", "check", "f.beancount"],
+            vec!["ag-rledger", "check"],
+            vec!["ag-rledger", "r", "f.beancount", "balances", "-a", "Assets"],
+        ] {
+            let error = tokio::spawn(async { std::panic::panic_any("boom") })
+                .await
+                .expect_err("the task panics");
+            let args: Vec<String> = argv.iter().map(ToString::to_string).collect();
+            let run = handler_panic(args, error).await;
+            let envelope: Value = serde_json::from_str(&run.to_json()).expect("envelope is JSON");
+            assert_eq!(
+                envelope["error"]["code"], "HANDLER_PANIC",
+                "{argv:?}: {envelope}"
+            );
+            assert_eq!(
+                envelope["error"]["message"], "handler panicked: boom",
+                "{argv:?}"
+            );
+            assert_eq!(envelope["fix"], HANDLER_PANIC_FIX, "{argv:?}");
+            assert_eq!(run.exit_code(), agcli::ExitCode::ERROR, "{argv:?}");
+            let command = envelope["command"].as_str().expect("command");
+            assert!(
+                command.ends_with(&argv[1..].join(" ")),
+                "{argv:?}: the command echoed as written: {command}"
+            );
+        }
+    }
+
+    fn strings(argv: &[&str]) -> Vec<String> {
+        argv.iter().map(ToString::to_string).collect()
+    }
+
+    /// What `flag_values` reads for `long` (and `short`) after the merge, and
+    /// that the merged argv parses (agcli refuses a repeated flag).
+    fn merged_values(argv: &[&str], long: &str, short: Option<&str>) -> Vec<String> {
+        let merged = merge_repeated_value_flags(strings(argv), |_| false);
+        let invocation = agcli::Invocation::parse(merged.clone(), |_| false)
+            .unwrap_or_else(|e| panic!("{merged:?} does not parse: {e:?}"));
+        let req = Req::new(&invocation, &invocation.positionals()[1..]);
+        flag_values(&req, long, short)
+    }
+
+    /// Each multi-value flag given twice reaches the handler as both values,
+    /// in order, in every spelling.
+    #[test]
+    fn test_merge_repeated_value_flags_keeps_every_value() {
+        for long in MULTI_VALUE_FLAGS {
+            for argv in [
+                vec![
+                    "ag-rledger",
+                    "check",
+                    "f.beancount",
+                    &format!("--{long}"),
+                    "A",
+                    &format!("--{long}"),
+                    "B",
+                ],
+                vec![
+                    "ag-rledger",
+                    "check",
+                    "f.beancount",
+                    &format!("--{long}=A"),
+                    &format!("--{long}=B"),
+                ],
+                vec![
+                    "ag-rledger",
+                    "check",
+                    "f.beancount",
+                    &format!("--{long}"),
+                    "A",
+                    &format!("--{long}=B"),
+                ],
+            ] {
+                assert_eq!(merged_values(&argv, long, None), vec!["A", "B"], "{argv:?}");
+            }
+        }
+    }
+
+    /// The short forms merge for the command that owns them, and only there.
+    #[test]
+    fn test_merge_repeated_value_flags_merges_short_forms_for_their_command() {
+        for (argv, long, short, expected) in [
+            (
+                vec!["ag-rledger", "report", "f", "returns", "-i", "A", "-i", "B"],
+                "investments",
+                "i",
+                vec!["A", "B"],
+            ),
+            (
+                vec![
+                    "ag-rledger",
+                    "r",
+                    "f",
+                    "returns",
+                    "--investments",
+                    "A",
+                    "-i=B",
+                ],
+                "investments",
+                "i",
+                vec!["A", "B"],
+            ),
+            (
+                vec![
+                    "ag-rledger",
+                    "report",
+                    "f",
+                    "returns",
+                    "-n",
+                    "A",
+                    "--income",
+                    "B",
+                ],
+                "income",
+                "n",
+                vec!["A", "B"],
+            ),
+            (
+                vec!["ag-rledger", "price", "-m", "A:B", "-m", "C:D", "--dry-run"],
+                "mapping",
+                "m",
+                vec!["A:B", "C:D"],
+            ),
+            (
+                vec!["ag-rledger", "p", "--mapping", "A:B", "-m", "C:D"],
+                "mapping",
+                "m",
+                vec!["A:B", "C:D"],
+            ),
+        ] {
+            assert_eq!(
+                merged_values(&argv, long, Some(short)),
+                expected,
+                "{argv:?}"
+            );
+        }
+        // `format -i` is `--in-place`: a boolean, not merged, left for agcli.
+        let argv = strings(&["ag-rledger", "format", "f", "-i", "-i"]);
+        assert_eq!(merge_repeated_value_flags(argv.clone(), |_| false), argv);
+    }
+
+    /// A flag given once, a repeated boolean, and anything after `--` are
+    /// left exactly as written.
+    #[test]
+    fn test_merge_repeated_value_flags_leaves_other_argv_alone() {
+        for argv in [
+            vec![
+                "ag-rledger",
+                "check",
+                "f",
+                "--native-plugin",
+                "auto_accounts",
+            ],
+            vec!["ag-rledger", "check", "f", "--json", "--json"],
+            vec![
+                "ag-rledger",
+                "check",
+                "f",
+                "--",
+                "--plugin",
+                "a",
+                "--plugin",
+                "b",
+            ],
+            vec!["ag-rledger", "query", "f", "-m", "-m"],
+        ] {
+            let argv = strings(&argv);
+            assert_eq!(merge_repeated_value_flags(argv.clone(), |_| false), argv);
+        }
+    }
+
+    /// The root command tree agcli prints: each command's name and usage.
+    async fn registered_usages() -> std::collections::BTreeMap<String, String> {
+        let run = build_cli().run(["ag-rledger"]).await;
+        let root: Value = serde_json::from_str(&run.to_json()).expect("root is JSON");
+        root["result"]["commands"]
+            .as_array()
+            .expect("result.commands")
+            .iter()
+            .map(|c| {
+                (
+                    c["name"].as_str().expect("name").to_string(),
+                    c["usage"].as_str().expect("usage").to_string(),
+                )
+            })
+            .collect()
+    }
+
+    /// `COMMAND_NAMES`, which finds the command word, lists exactly the
+    /// commands `build_cli` registers.
+    #[tokio::test]
+    async fn every_registered_command_is_in_command_names() {
+        let registered: BTreeSet<String> = registered_usages().await.into_keys().collect();
+        let listed: BTreeSet<String> = COMMAND_NAMES.iter().map(ToString::to_string).collect();
+        assert_eq!(registered, listed);
+    }
+
+    /// Every flag a handler reads, long or short, is declared in its
+    /// command's usage, so agcli echoes its value in `command` rather than
+    /// masking it as an undeclared flag's. agcli's reserved flags are its own.
+    #[tokio::test]
+    async fn usage_declares_every_flag_the_handler_reads() {
+        use clap::Args as _;
+        use rustledger::cmd;
+        let usages = registered_usages().await;
+        let reserved: BTreeSet<&str> = agcli::reserved_flag_names().iter().copied().collect();
+        let command = |name: &'static str| clap::Command::new(name);
+        let mut reads: Vec<(&str, BTreeSet<String>)> = vec![
+            (
+                "check",
+                flags_read(&["check", "f.beancount"], build_check_args),
+            ),
+            (
+                "query",
+                flags_read(&["query", "f.beancount", "SELECT 1"], build_query_args),
+            ),
+            (
+                "format",
+                flags_read(&["format", "f.beancount"], build_format_args),
+            ),
+            (
+                "extract",
+                flags_read(&["extract", "bank.csv"], build_extract_args),
+            ),
+            ("price", flags_read(&["price"], build_price_args)),
+            (
+                "add",
+                flags_read(
+                    &[
+                        "add",
+                        "f.beancount",
+                        "--quick",
+                        "p",
+                        "n",
+                        "Assets:A",
+                        "1 USD",
+                    ],
+                    build_add_args,
+                ),
+            ),
+            (
+                "explain",
+                flags_read(&["explain", "E2001"], build_explain_args),
+            ),
+            (
+                "split",
+                flags_read(&["split", "f.beancount", "--by", "year"], build_split_args),
+            ),
+            (
+                "merge",
+                flags_read(&["merge", "f.beancount"], build_merge_args),
+            ),
+        ];
+        for sub in cmd::report_cmd::Args::augment_args(command("report")).get_subcommands() {
+            let mut argv = vec!["report", "f.beancount", sub.get_name()];
+            if sub.get_name() == "returns" {
+                argv.extend(["--investments", "Assets"]);
+            }
+            reads.push(("report", flags_read(&argv, build_report_args)));
+        }
+        for sub in cmd::doctor::Args::augment_args(command("doctor")).get_subcommands() {
+            let argv = ["doctor", sub.get_name(), "f.beancount", "1", "2"];
+            reads.push(("doctor", flags_read(&argv, build_doctor_command)));
+        }
+        for sub in cmd::config_cmd::Args::augment_args(command("config")).get_subcommands() {
+            reads.push((
+                "config",
+                flags_read(&["config", sub.get_name()], build_config_args),
+            ));
+        }
+        for lint in LINTS {
+            reads.push((
+                "lint",
+                flags_read(&["lint", lint, "f.beancount"], build_lint_args),
+            ));
+        }
+        let mut gaps = Vec::new();
+        for (name, read) in reads {
+            let usage = &usages[name];
+            let declared: BTreeSet<&str> = usage
+                .split(|c: char| c.is_whitespace() || "[]|;".contains(c))
+                .filter(|token| token.starts_with('-'))
+                .collect();
+            let missing: Vec<String> = read
+                .iter()
+                .filter(|key| !reserved.contains(key.as_str()))
+                .map(|key| {
+                    if key.len() == 1 {
+                        format!("-{key}")
+                    } else {
+                        format!("--{key}")
+                    }
+                })
+                .filter(|flag| !declared.contains(flag.as_str()))
+                .collect();
+            if !missing.is_empty() {
+                gaps.push(format!("`{name}` reads {missing:?}"));
+            }
+        }
+        gaps.sort();
+        gaps.dedup();
+        assert!(
+            gaps.is_empty(),
+            "usage does not declare flags the handler reads:\n{}",
+            gaps.join("\n")
+        );
+    }
+
+    /// A value flag before the command word does not hide the command, so
+    /// its short list flags still merge.
+    #[test]
+    fn test_merge_repeated_value_flags_after_a_value_flag_before_the_command() {
+        assert_eq!(
+            merged_values(
+                &[
+                    "ag-rledger",
+                    "--format",
+                    "json",
+                    "report",
+                    "l",
+                    "returns",
+                    "-i",
+                    "A",
+                    "-i",
+                    "B"
+                ],
+                "investments",
+                Some("i"),
+            ),
+            vec!["A", "B"]
+        );
+        assert_eq!(
+            merged_values(
+                &[
+                    "ag-rledger",
+                    "-f",
+                    "json",
+                    "price",
+                    "-m",
+                    "A:B",
+                    "-m",
+                    "C:D",
+                    "--list-sources"
+                ],
+                "mapping",
+                Some("m"),
+            ),
+            vec!["A:B", "C:D"]
+        );
+    }
+
+    /// A global value flag before the command word gets its value attached,
+    /// so agcli does not take a value that names a command (`-P x`: `x` is the
+    /// `extract` alias) for the command. After the command word, nothing is
+    /// rewritten.
+    #[test]
+    fn test_attach_global_values_before_the_command_word() {
+        for (argv, want) in [
+            (
+                vec!["ag-rledger", "-P", "x", "check", "l"],
+                vec!["ag-rledger", "-P=x", "check", "l"],
+            ),
+            (
+                vec!["ag-rledger", "--profile", "check", "check", "l"],
+                vec!["ag-rledger", "--profile=check", "check", "l"],
+            ),
+            (
+                vec!["ag-rledger", "--plugin-max-time-secs", "5", "bal"],
+                vec!["ag-rledger", "--plugin-max-time-secs=5", "bal"],
+            ),
+            (
+                vec!["ag-rledger", "check", "l", "-P", "x"],
+                vec!["ag-rledger", "check", "l", "-P", "x"],
+            ),
+            (
+                vec!["ag-rledger", "-P=x", "check"],
+                vec!["ag-rledger", "-P=x", "check"],
+            ),
+        ] {
+            assert_eq!(
+                attach_global_values(strings(&argv), |name| name == "bal"),
+                strings(&want),
+                "{argv:?}"
+            );
+        }
+        // The rewritten argv names `check` as agcli resolves it.
+        let argv =
+            attach_global_values(strings(&["ag-rledger", "-P", "x", "check", "l"]), |_| false);
+        assert_eq!(first_command_index(&argv, |_| false), Some(2));
     }
 }

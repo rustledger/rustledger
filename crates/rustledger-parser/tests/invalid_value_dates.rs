@@ -445,34 +445,127 @@ fn test_parse_does_not_name_a_date_inside_an_invalid_token() {
 /// (bean-check 3.2.3: `syntax error, unexpected CURRENCY` / `unexpected
 /// NUMBER, expecting STRING`, then `day is out of range for month`). Errors at
 /// or after the date are still dropped.
+///
+/// Each row is checked after the directives directly, after a blank line and
+/// after a comment line: a dropped directive's error span takes in the lines
+/// before it, which once kept an error the date had caused. An indented line
+/// after a blank or comment line is no directive's continuation, so beancount
+/// fails at the indent (`unexpected INDENT`) and reports that too. Every
+/// count is bean-check 3.2.3's on the same input.
 #[test]
 fn test_parse_keeps_a_grammar_error_before_an_invalid_date() {
-    for (label, body, errors) in [
-        ("balance", "2024-01-02 balance Assets:A USD 2024-02-30\n", 2),
-        ("note", "2024-01-02 note Assets:A 5 2024-02-30\n", 2),
-        ("open", "2024-01-02 open 2024-02-30\n", 1),
-        ("price", "2024-01-02 price 2024-02-30\n", 1),
-        ("custom", "2024-01-02 custom \"x\" 2024-02-30 (\n", 1),
+    const TXN: &str = "2024-01-02 * \"t\"\n  Assets:A  1 USD\n  Assets:B\n";
+    // (label, in a transaction body, line, errors directly after, errors
+    // after a blank or comment line)
+    for (label, in_body, line, direct, after_gap) in [
+        (
+            "balance currency",
+            false,
+            "2024-01-02 balance Assets:A USD 2024-02-30",
+            2,
+            2,
+        ),
+        (
+            "note number",
+            false,
+            "2024-01-02 note Assets:A 5 2024-02-30",
+            2,
+            2,
+        ),
+        ("open", false, "2024-01-02 open 2024-02-30", 1, 1),
+        ("price", false, "2024-01-02 price 2024-02-30", 1, 1),
+        (
+            "custom paren",
+            false,
+            "2024-01-02 custom \"x\" 2024-02-30 (",
+            1,
+            1,
+        ),
+        ("close", false, "2024-01-02 close 2024-02-30", 1, 1),
+        ("commodity", false, "2024-01-02 commodity 2024-02-30", 1, 1),
+        (
+            "pad source",
+            false,
+            "2024-01-02 pad Assets:A 2024-02-30",
+            1,
+            1,
+        ),
+        (
+            "pad target",
+            false,
+            "2024-01-02 pad 2024-02-30 Assets:A",
+            1,
+            1,
+        ),
+        (
+            "balance amount",
+            false,
+            "2024-01-02 balance Assets:A 2024-02-30",
+            1,
+            1,
+        ),
+        (
+            "document",
+            false,
+            "2024-01-02 document Assets:A 2024-02-30",
+            1,
+            1,
+        ),
+        ("query", false, "2024-01-02 query \"q\" 2024-02-30", 1, 1),
+        ("event", false, "2024-01-02 event \"e\" 2024-02-30", 1, 1),
+        (
+            "note string",
+            false,
+            "2024-01-02 note Assets:A 2024-02-30",
+            1,
+            1,
+        ),
+        (
+            "orphan posting",
+            false,
+            "  Assets:A 5 USD USD 2024-02-30",
+            2,
+            2,
+        ),
+        ("orphan string", false, "  \"x\" 2024-02-30", 2, 2),
+        ("orphan date first", false, "  2024-02-30 5", 1, 2),
+        ("orphan metadata", false, "  kk: 2024-02-30", 1, 2),
+        ("body number", true, "  5 2024-02-30", 2, 2),
+        ("body string", true, "  \"x\" 2024-02-30", 2, 2),
+        (
+            "body posting",
+            true,
+            "  Assets:B 5 USD USD 2024-02-30",
+            2,
+            2,
+        ),
+        (
+            "body posting date",
+            true,
+            "  Assets:B 5 USD 2024-02-30",
+            1,
+            1,
+        ),
     ] {
-        let result = parse(&format!("{OPENS}{body}"));
-        assert_eq!(result.errors.len(), errors, "{label}: {:?}", result.errors);
-        let dates: Vec<_> = result
-            .errors
-            .iter()
-            .filter(|e| matches!(e.kind, ParseErrorKind::InvalidDateValue(_)))
-            .collect();
-        assert_eq!(dates.len(), 1, "{label}: {:?}", result.errors);
-        if errors == 2 {
-            let other = result
+        for (gap, errors) in [("", direct), ("\n", after_gap), ("; c\n", after_gap)] {
+            // In a body the gap goes before the transaction: a blank line
+            // inside one would end it.
+            let txn = if in_body { TXN } else { "" };
+            let src = format!("{OPENS}{gap}{txn}{line}\n");
+            let result = parse(&src);
+            let label = format!("{label} after {gap:?}");
+            assert_eq!(result.errors.len(), errors, "{label}: {:?}", result.errors);
+            let dates = result
                 .errors
                 .iter()
-                .find(|e| !matches!(e.kind, ParseErrorKind::InvalidDateValue(_)))
-                .expect("a grammar error");
-            assert!(
-                other.span.start < dates[0].span.start,
-                "{label}: the grammar error is before the date: {:?}",
-                result.errors
-            );
+                .filter(|e| matches!(e.kind, ParseErrorKind::InvalidDateValue(_)))
+                .count();
+            assert_eq!(dates, 1, "{label}: {:?}", result.errors);
         }
     }
+    // The indent rule holds at the top of the file too.
+    assert_eq!(parse("  2024-02-30 5\n").errors.len(), 2);
+    // An indented comment continues the directive above; it is no gap.
+    let src = "2024-01-01 open Assets:A\n  ; c\n  2024-02-30 5\n";
+    assert_eq!(parse(src).errors.len(), 1, "{:?}", parse(src).errors);
 }

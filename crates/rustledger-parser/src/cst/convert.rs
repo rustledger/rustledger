@@ -224,9 +224,12 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     let mut prior_error_starts: Vec<usize> = errors.iter().map(|e| e.span.start).collect();
     prior_error_starts.sort_unstable();
     let mut header_tokens = Vec::new();
-    // `(error start, grammar failure point)` for each directive the converter
-    // dropped with a whole-node error, in order, BOM frame.
-    let mut grammar_failures: Vec<(usize, usize)> = Vec::new();
+    // `(error start, header start, grammar failure point)` for each directive
+    // the converter dropped with a whole-node error, in order, BOM frame. The
+    // node's span takes in leading blank and comment lines, so the header
+    // start is what places the error on its line; the failure point is
+    // `usize::MAX` when the header grammar finds no defect.
+    let mut grammar_failures: Vec<(usize, usize, usize)> = Vec::new();
 
     for directive in source_file.directives() {
         // Helper to push a successfully-converted directive
@@ -419,15 +422,19 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
             // date after that point does not swallow this error
             // (`report_invalid_dates`).
             if super::directive_header::directive_keyword(cst_node.kind()).is_some() {
+                let off = bom_offset as usize;
                 let end = header_line_tokens(&cst_node, &mut header_tokens);
-                if let Some(defect) = super::directive_header::first_header_defect(
+                let header_start = header_tokens
+                    .first()
+                    .map_or(span.start, |(_, r)| r.start + off);
+                let failed_at = super::directive_header::first_header_defect(
                     cst_node.kind(),
                     &header_tokens,
                     end,
                     stripped,
-                ) {
-                    grammar_failures.push((span.start, defect.range.start + bom_offset as usize));
-                }
+                )
+                .map_or(usize::MAX, |defect| defect.range.start + off);
+                grammar_failures.push((span.start, header_start, failed_at));
             }
             errors.push(crate::ParseError::new(
                 crate::ParseErrorKind::SyntaxError("unexpected input".to_string()),
@@ -5023,11 +5030,11 @@ pub(super) fn invalid_value_date(
 /// it is read, so this pass, run once over the whole tree after every other
 /// check, applies that rule in one place: each invalid date not already
 /// reported at its position (a directive's own date, by
-/// `parse_directive_date`) gets `InvalidDateValue`, and a parse error on that
-/// line that reaches its first bad date (starts at or after it, or spans it,
-/// as the whole-directive error of a dropped directive does, unless the header
-/// grammar fails before the date) is dropped unless it covers an `ERROR_TOKEN` (the lexer's own error: a
-/// character no token takes, a mid-file BOM). A directive with a bad date of
+/// `parse_directive_date`) gets `InvalidDateValue`, and a parse error is
+/// dropped when the parser failed at or after its line's first bad date
+/// (`reaches_a_bad_date` says where it failed), unless it covers an
+/// `ERROR_TOKEN` (the lexer's own error: a character no token takes, a
+/// mid-file BOM). A directive with a bad date of
 /// its own is still dropped, as in beancount, but the bad dates under it are
 /// now reported too. A date inside one of beancount's invalid tokens (an
 /// invalid character takes the rest of its run of non-blank characters) is
@@ -5042,7 +5049,7 @@ fn report_invalid_dates(
     root: &crate::SyntaxNode,
     stripped: &str,
     bom_offset: u32,
-    grammar_failures: &[(usize, usize)],
+    grammar_failures: &[(usize, usize, usize)],
     errors: &mut Vec<crate::ParseError>,
 ) {
     use crate::SyntaxKind as K;
@@ -5149,25 +5156,53 @@ fn report_invalid_dates(
             ));
         }
     }
-    // Whether a grammar error is the date's doing: it starts on a bad-date
-    // line and reaches that line's first bad date (at it, after it, or a
-    // whole-line error spanning it). One that ends before the date is the
-    // parser failing at an earlier token, which beancount reports too
-    // (`balance Assets:A USD 2024-02-30`: `unexpected CURRENCY`, then the date).
+    // Whether a grammar error is the date's doing: the parser failed at or
+    // after the first bad date on its line, which it reaches. An error from
+    // an earlier failure is reported by beancount too (`balance Assets:A USD
+    // 2024-02-30`: `unexpected CURRENCY`, then the date).
+    //
+    // Where the parser failed: for a dropped directive's whole-node error,
+    // what the header grammar says (`grammar_failures`), placed on the line by
+    // the header's start, since the node's span takes in leading blank and
+    // comment lines. For any other error, its first non-blank character: a
+    // precise error starts at its token, and a whole-line recovery error (an
+    // orphan indented line, a transaction-body line no posting takes) fails at
+    // the line's first token in beancount (`  "x" 2024-02-30`: `unexpected
+    // STRING`, then the date; `  2024-02-30 5`: the date alone).
     let reaches_a_bad_date = |span: &Span| {
-        let i = lines.partition_point(|(_, stretch)| stretch.end <= span.start);
+        let j = grammar_failures.partition_point(|&(start, _, _)| start < span.start);
+        let (anchor, failed_at) = match grammar_failures.get(j) {
+            Some(&(start, header_start, failed_at)) if start == span.start => {
+                (header_start, failed_at)
+            }
+            _ => {
+                let from = span.start.saturating_sub(off).min(stripped.len());
+                let is_blank = |b: &u8| matches!(b, b' ' | b'\t');
+                let ahead = stripped[from..].bytes().take_while(is_blank).count();
+                let behind = stripped[..from].bytes().rev().take_while(is_blank).count();
+                let line_begin = from - behind;
+                // An indented line after a blank or comment line (or at the
+                // top of the file) is no directive's continuation, so
+                // beancount fails at the indent itself (`unexpected INDENT`),
+                // before any date on it.
+                let after_a_gap = ahead + behind > 0
+                    && (line_begin == 0 || stripped.as_bytes()[line_begin - 1] == b'\n')
+                    && previous_line_is_a_gap(stripped, line_begin);
+                let failed_at = if after_a_gap {
+                    line_begin + off
+                } else {
+                    span.start + ahead
+                };
+                (span.start, failed_at)
+            }
+        };
+        let i = lines.partition_point(|(_, stretch)| stretch.end <= anchor);
         let Some((line_start, stretch)) = lines.get(i) else {
             return false;
         };
-        if *line_start > span.start || stretch.start >= span.end.max(span.start + 1) {
-            return false;
-        }
-        // A whole-directive error (the converter dropped the directive) says
-        // nothing of where the parser failed; the header grammar does.
-        let j = grammar_failures.partition_point(|&(start, _)| start < span.start);
-        !grammar_failures
-            .get(j)
-            .is_some_and(|&(start, failed_at)| start == span.start && failed_at < stretch.start)
+        *line_start <= anchor
+            && stretch.start < span.end.max(span.start + 1)
+            && failed_at >= stretch.start
     };
     let covers_a_lexer_error = |span: &Span| {
         let end = span.end.max(span.start + 1);
@@ -5179,6 +5214,17 @@ fn report_invalid_dates(
             || !reaches_a_bad_date(&e.span)
             || covers_a_lexer_error(&e.span)
     });
+}
+
+/// Whether the line before the one starting at `line_start` is blank, a
+/// comment at column 0 (an indented one continues the directive above), or
+/// missing. Steps over that one line only.
+fn previous_line_is_a_gap(src: &str, line_start: usize) -> bool {
+    let Some(before) = src[..line_start].strip_suffix('\n') else {
+        return true;
+    };
+    let previous = before.rfind('\n').map_or(before, |i| &before[i + 1..]);
+    previous.starts_with(';') || previous.trim_start_matches([' ', '\t', '\r']).is_empty()
 }
 
 /// Counters the linear-cost tests read (test builds only).

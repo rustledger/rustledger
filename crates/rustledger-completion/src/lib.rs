@@ -16,12 +16,12 @@
 //! 2. **Candidate generation** — the `*_candidates` functions produce
 //!    neutral [`CompletionCandidate`] lists for each context.
 
-/// Standard Beancount account types: core's list, re-exported so editor
+/// Standard Beancount account types: core's list, as a slice, so editor
 /// surfaces read the one canonical copy.
 ///
 /// Only the DEFAULT roots. Classification of a real account belongs to
 /// `rustledger_core::AccountTypes`, which honors the `name_*` renames.
-pub use rustledger_core::ACCOUNT_TYPES;
+pub const ACCOUNT_TYPES: &[&str] = &rustledger_core::ACCOUNT_TYPES;
 
 /// Standard Beancount directives.
 pub const DIRECTIVES: &[&str] = &[

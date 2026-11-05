@@ -9,6 +9,7 @@ use crate::ast::FunctionCall;
 use crate::error::QueryError;
 
 use super::super::Executor;
+use super::super::summarize::{python_inventory_str, python_position_str};
 use super::super::types::{PostingContext, SourceLocation, Value};
 
 impl Executor<'_> {
@@ -27,6 +28,8 @@ impl Executor<'_> {
 
         let key = match self.evaluate_expr(&func.args[0], ctx)? {
             Value::String(s) => s,
+            // A NULL key reads nothing, as bean-query answers NULL (#2820).
+            Value::Null => return Ok(Value::Null),
             _ => {
                 return Err(QueryError::Type(format!(
                     "{name}: argument must be a string key"
@@ -182,10 +185,23 @@ impl Executor<'_> {
             Value::Boolean(b) => Ok(Value::String(if *b { "TRUE" } else { "FALSE" }.to_string())),
             Value::Date(d) => Ok(Value::String(d.to_string())),
             Value::Amount(a) => Ok(Value::String(format!("{} {}", a.number, a.currency))),
+            // Python's `str()` of a position or inventory, as bean-query
+            // gives: `10 USD`, `(10 USD)`, `()` for an empty one (#2822).
+            Value::Position(p) => Ok(Value::String(python_position_str(p))),
+            Value::Inventory(inv) => Ok(Value::String(python_inventory_str(Self::held_positions(
+                inv,
+            )))),
+            // Deliberately NOT Python's repr for the rest: bean-query writes
+            // `frozenset({'t1'})`, a metadata `dict` or a `Transaction(...)`
+            // dump, which name Python types rather than ledger values. They
+            // render as their cells do here, `t1, t2` and `{key: value}`
+            // (#2822).
+            Value::StringSet(_)
+            | Value::Set(_)
+            | Value::Metadata(_)
+            | Value::Object(_)
+            | Value::Interval(_) => Ok(Value::String(Self::value_to_string(val))),
             Value::Null => Ok(Value::Null),
-            _ => Err(QueryError::Type(
-                "STR expects a string, integer, number, boolean, date, or amount".to_string(),
-            )),
         }
     }
 

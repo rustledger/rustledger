@@ -388,12 +388,9 @@ fn test_where_refuses_an_aggregate_inside_between_or_a_set() {
 /// inventory is refused before any row is read, as bean-query's compiler
 /// refuses `number(position)` (`no function matches`). `AT number` summed
 /// bare numbers across currencies; `AT currency` failed only on a row.
-/// `JOURNAL ... AT str` is stricter than bean-query, which prints the
-/// position as text: rledger's `str()` does not take a position yet (#2822),
-/// so it is refused rather than failing on the first row.
 #[test]
 fn test_at_refuses_a_function_that_does_not_give_an_amount() {
-    for f in ["number", "currency", "str"] {
+    for f in ["number", "currency"] {
         for query in [
             format!("BALANCES AT {f}"),
             format!("BALANCES AT {f} WHERE account ~ 'XYZ'"),
@@ -408,6 +405,54 @@ fn test_at_refuses_a_function_that_does_not_give_an_amount() {
             }
         }
     }
+}
+
+/// `BALANCES AT str` is refused before any row is read, with bean-query's
+/// reason: `str(position)` is text, and text cannot be summed (`no function
+/// matches "sum(str)"`). This named `str(position)`, which takes a position
+/// since #2822.
+#[test]
+fn test_balances_at_str_refuses_summing_text() {
+    for query in ["BALANCES AT str", "BALANCES AT str WHERE account ~ 'XYZ'"] {
+        match run(MOVEMENTS, query) {
+            Err(QueryError::UnknownFunction(sig)) => assert_eq!(sig, "sum(str)", "{query}"),
+            other => panic!("{query}: expected a refusal, got {other:?}"),
+        }
+    }
+}
+
+/// `JOURNAL ... AT str` shows `str(position)` and `str(balance)` as text,
+/// as bean-query prints them:
+///
+/// ```text
+/// 2024-01-02  *  buy   Assets:Stock  4 VHT {100 USD, 2024-01-02}   (4 VHT {100 USD, 2024-01-02})
+/// 2024-01-05  *  sell  Assets:Stock  -1 VHT {100 USD, 2024-01-02}  (3 VHT {100 USD, 2024-01-02})
+/// ```
+///
+/// It was refused with `no function matches "str(position)"`.
+#[test]
+fn test_journal_at_str_shows_the_position_and_balance_as_text() {
+    let result = run(MOVEMENTS, "JOURNAL 'Assets:Stock' AT str").expect("runs");
+    let cells: Vec<_> = result
+        .rows
+        .iter()
+        .map(|r| (r[5].clone(), r[6].clone()))
+        .collect();
+    assert_eq!(
+        cells,
+        vec![
+            (
+                Value::String("4 VHT {100 USD, 2024-01-02}".into()),
+                Value::String("(4 VHT {100 USD, 2024-01-02})".into()),
+            ),
+            (
+                Value::String("-1 VHT {100 USD, 2024-01-02}".into()),
+                Value::String("(3 VHT {100 USD, 2024-01-02})".into()),
+            ),
+        ]
+    );
+    let empty = run(MOVEMENTS, "JOURNAL 'Nothing:Matches' AT str").expect("runs");
+    assert!(empty.rows.is_empty());
 }
 
 /// The functions that do map a position to an amount, position or inventory

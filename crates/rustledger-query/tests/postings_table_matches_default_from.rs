@@ -130,45 +130,33 @@ fn cost_of_sum_of_position_agrees_across_from_clauses() {
     }
 }
 
-/// `SELECT *`'s columns are exactly the table's visible ones.
+/// `SELECT *`'s columns are bean-query's postings wildcard, the same as the
+/// default FROM's (#2829), with every other column still there by name.
 #[test]
 fn select_star_does_not_show_the_hidden_columns() {
     let directives = booked();
-    let (columns, _) = query(&directives, "SELECT * FROM #postings LIMIT 1");
+    let five = ["date", "flag", "payee", "narration", "position"];
+    let (columns, star) = query(
+        &directives,
+        "SELECT * FROM #postings ORDER BY date, account",
+    );
+    assert_eq!(columns, five);
+    let (default_columns, default_star) = query(&directives, "SELECT * ORDER BY date, account");
+    assert_eq!(default_columns, five);
+    assert_eq!(star, default_star);
+    let (columns, _) = query(
+        &directives,
+        "SELECT type, account, balance, account_balance, meta, accounts FROM #postings LIMIT 1",
+    );
     assert_eq!(
         columns,
         [
             "type",
-            "id",
-            "date",
-            "year",
-            "month",
-            "day",
-            "filename",
-            "lineno",
-            "location",
-            "flag",
-            "payee",
-            "narration",
-            "description",
-            "tags",
-            "links",
-            "posting_flag",
             "account",
-            "other_accounts",
-            "number",
-            "currency",
-            "cost_number",
-            "cost_currency",
-            "cost_date",
-            "cost_label",
-            "position",
-            "price",
-            "weight",
             "balance",
             "account_balance",
             "meta",
-            "accounts",
+            "accounts"
         ]
     );
 }

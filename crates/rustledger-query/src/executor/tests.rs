@@ -590,14 +590,15 @@ fn test_wildcard_select() {
     let query = parse("SELECT *").unwrap();
     let result = executor.execute(&query).unwrap();
 
-    // Wildcard expands to default column names (fixes issue #577)
+    // Wildcard expands to default column names (fixes issue #577), bean-query's
+    // postings wildcard (#2829)
     assert_eq!(
         result.columns,
-        vec!["date", "flag", "payee", "narration", "account", "position"]
+        vec!["date", "flag", "payee", "narration", "position"]
     );
     // Each row has expanded values matching the column names
     assert_eq!(result.len(), 4);
-    assert_eq!(result.rows[0].len(), 6);
+    assert_eq!(result.rows[0].len(), 5);
 }
 
 #[test]
@@ -1724,11 +1725,13 @@ fn test_postings_balance_excludes_filtered_commodities() {
     assert_eq!(result.rows[1][1], Value::Null);
     assert_eq!(result.rows[2][1], Value::Null);
 
-    // `SELECT *` expands to the `balance` column too — it must be recomputed
-    // the same way (wildcard doesn't name `balance` explicitly).
+    // The bare `balance` column must be recomputed the same way.
     let result = executor
         .execute(
-            &parse("SELECT * FROM #postings WHERE account = 'Assets:Bank' ORDER BY date").unwrap(),
+            &parse(
+                "SELECT date, balance FROM #postings WHERE account = 'Assets:Bank' ORDER BY date",
+            )
+            .unwrap(),
         )
         .unwrap();
     let bal_col = result
@@ -1740,7 +1743,7 @@ fn test_postings_balance_excludes_filtered_commodities() {
         if let Value::Inventory(inv) = &row[bal_col] {
             assert!(
                 inv.units("AAPL").is_zero(),
-                "SELECT * balance must not leak the filtered AAPL leg"
+                "the balance column must not leak the filtered AAPL leg"
             );
         } else {
             panic!("expected an Inventory in the balance column");
@@ -3445,7 +3448,13 @@ fn from_filter_column_lists_match_the_executor() {
         .columns
         .into_iter()
         .collect();
-    let postings_schema = run("SELECT * FROM #postings").expect("#postings").columns;
+    // The table's whole schema: `SELECT *` gives only its five wildcard
+    // columns (#2829).
+    let postings_schema: Vec<String> = super::system_table_columns("#postings")
+        .expect("#postings")
+        .iter()
+        .map(|c| c.name.to_string())
+        .collect();
     assert!(
         postings_schema.len() > 20,
         "the schema came back: {postings_schema:?}"

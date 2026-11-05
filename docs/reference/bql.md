@@ -38,7 +38,7 @@ A comment may span lines and end the query without a newline after it. It does n
 /* Basic columns */
 SELECT account, date, narration, payee, position
 
-/* All columns */
+/* The postings wildcard: date, flag, payee, narration, position, as in bean-query */
 SELECT *
 
 /* Expressions */

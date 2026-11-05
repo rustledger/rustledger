@@ -437,10 +437,15 @@ mod window;
 /// hundreds of lots 2.35x smaller. 4 is the most conservative of them.
 const DETACH_ACCOUNT_BALANCE_AT: usize = 4;
 
-/// Default column names for `SELECT *` wildcard expansion.
+/// The columns `SELECT *` expands to over the postings.
+///
+/// They are bean-query's `PostingsTable.wildcard_columns`, for the default
+/// FROM and `FROM #postings` alike (#2829). rledger's default list also had `account`, and `#postings`
+/// gave every visible column, so a positional consumer of `SELECT *` saw a
+/// different shape. Every other column is still selectable by name.
+///
 /// This must match the order of values pushed in `evaluate_row()`.
-pub const WILDCARD_COLUMNS: &[&str] =
-    &["date", "flag", "payee", "narration", "account", "position"];
+pub const WILDCARD_COLUMNS: &[&str] = &["date", "flag", "payee", "narration", "position"];
 
 /// One column of a table: its name, its value type, and a one-line description.
 ///

@@ -982,29 +982,50 @@ fn expr<'a>() -> Boxed<'a, 'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
         // Unary signs as beanquery's grammar has them (#2830): `-` stacks
         // (`---6` is -6, `-- 6` is 6) and may be followed by a `+`, but a `+`
         // (`uplus: '+' atom`) takes a bare atom only, so `-+6` is -6 while
-        // `++6`, `+-6`, `+(1)`, `+x.y` and `+*` are syntax errors there and here.
+        // `++6`, `+-6`, `+(1)` and `+x.y` are syntax errors there and here,
+        // as is any sign before `*` (see the check below).
         // A run of `-` is bounded by the nesting limit, and
         // `nesting_exceeds_limit` counts it toward the same depth as the
         // brackets around it, so signs and brackets cannot multiply into a
         // stack overflow.
         let plus_atom = just('+')
             .ignore_then(ws())
-            // Not a bracket, not a sign and not the `*` wildcard: `-6` reads
-            // as a literal here, but bean-query's atom has no sign, so `+-6`
-            // is refused there, and `*` is no atom of bean-query's, so
-            // `SELECT +*`, `count(+*)` and `WHERE +*` are refused as they are
-            // there (`WHERE +*` gave no rows). bean-query's atom does include
-            // a list constant, so it takes `+(1, 2)` and `'a' IN +('a', 'b')`;
-            // rledger has no list constant outside `IN` (`SELECT (1, 2)` is
-            // refused too), so every `+(` is refused here, a known gap.
-            .ignore_then(atom.and_is(one_of("(-+*").not()));
+            // Not a bracket and not a sign: `-6` reads as a literal here, but
+            // bean-query's atom has no sign, so `+-6` is refused there.
+            // bean-query's atom does include a list constant, so it takes
+            // `+(1, 2)` and `'a' IN +('a', 'b')`; rledger has no list
+            // constant outside `IN` (`SELECT (1, 2)` is refused too), so every
+            // `+(` is refused here, a known gap. The `*` wildcard parses here
+            // so that the check below can name it.
+            .ignore_then(
+                atom.clone()
+                    .and_is(one_of("(-+").not())
+                    .map_with(|e, x| (true, e, x.span())),
+            );
+        let operand = choice((
+            plus_atom,
+            primary.clone().map_with(|e, x| (false, e, x.span())),
+        ));
         let unary = just('-')
             .then_ignore(ws())
             .repeated()
             .at_most(MAX_NESTING_DEPTH)
             .count()
-            .then(choice((plus_atom, primary)))
-            .map(|(negations, e)| {
+            .then(operand)
+            // `*` is no atom of bean-query's, so no sign takes it: `SELECT
+            // +*`, `-*`, `--*`, `count(--*)` and `WHERE --*` are syntax
+            // errors there, and here. `WHERE --*` parsed and gave no rows,
+            // and `SELECT --*` failed only on a row ("negation requires
+            // numeric value"). Reported at the `*` by `validate`, which keeps
+            // the parse, so the error names the `*` rather than suggesting,
+            // at the sign, that a `*` was what the target list expected.
+            .validate(|(negations, (plus, e, span)), _, emitter| {
+                if (plus || negations > 0) && matches!(e, Expr::Wildcard) {
+                    emitter.emit(Rich::custom(
+                        span,
+                        "'*' is not a value, so a sign cannot apply to it",
+                    ));
+                }
                 (0..negations).fold(e, |acc, _| Expr::unary(UnaryOperator::Neg, acc))
             })
             .boxed();

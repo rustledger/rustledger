@@ -113,22 +113,39 @@ fn test_parse_stacks_unary_signs() {
     }
 }
 
-/// `*` is no atom of bean-query's, so a `+` before it is a syntax error there
-/// in every position, and here. `WHERE +*` parsed and gave no rows; the
-/// others parsed too. `count(*)` and `SELECT *` are unaffected.
+/// `*` is no atom of bean-query's, so no sign takes it: a `+` or a run of `-`
+/// before it is a syntax error there in every position, and here. On this
+/// branch before the fix `WHERE +*` parsed and gave no rows, and `SELECT --*`
+/// parsed and failed on a row; main accepted `-*`. The error is at the `*`,
+/// naming it, not at the sign as an expected token. `count(*)` and
+/// `SELECT *` are unaffected.
 #[test]
-fn test_parse_refuses_unary_plus_before_the_wildcard() {
-    for query in [
-        "SELECT +*",
-        "SELECT + *",
-        "SELECT count(+*)",
-        "SELECT date WHERE +*",
-        "SELECT -+*",
+fn test_parse_refuses_a_sign_before_the_wildcard() {
+    for (query, position) in [
+        ("SELECT +*", 8),
+        ("SELECT + *", 9),
+        ("SELECT count(+*)", 14),
+        ("SELECT date WHERE +*", 19),
+        ("SELECT -+*", 9),
+        ("SELECT -*", 8),
+        ("SELECT --*", 9),
+        ("SELECT -- *", 10),
+        ("SELECT - -*", 10),
+        ("SELECT count(--*)", 15),
+        ("SELECT date WHERE --*", 20),
+        ("SELECT date FROM year = 1999 WHERE --*", 37),
     ] {
-        assert!(parse(query).is_err(), "{query}");
+        let err = parse(query).expect_err(query);
+        assert_eq!(err.position, position, "{query}: {err}");
+        assert!(
+            err.to_string().contains("a sign cannot apply to it"),
+            "{query}: {err}"
+        );
     }
     let (_, rows) = run("SELECT count(*)");
     assert_eq!(rows[0][0], Value::Integer(4));
+    let (columns, _) = run("SELECT * LIMIT 1");
+    assert_eq!(columns.len(), 5);
 }
 
 /// Known gap: bean-query's atom includes a list constant, so it takes
@@ -151,8 +168,9 @@ fn test_parse_refuses_unary_plus_before_a_list() {
 
 /// The nesting scan cannot tell a binary `-` from a unary one, so a bracket
 /// right after a binary minus costs two levels: `a - (b - (...` reaches the
-/// bound at half the brackets `a + (b + (...` does. This pins that cost, as
-/// `nesting_exceeds_limit` documents it.
+/// bound at half the brackets `a + (b + (...` does. This pins that cost
+/// exactly, as `nesting_exceeds_limit` documents it: 128 `+ (` parse and 129
+/// do not, 64 `- (` parse and 65 do not.
 #[test]
 fn test_parse_counts_a_bracket_after_a_binary_minus_twice() {
     let chain = |op: &str, n: usize| {
@@ -162,9 +180,10 @@ fn test_parse_counts_a_bracket_after_a_binary_minus_twice() {
             ")".repeat(n)
         )
     };
-    assert!(parse(&chain("+", 100)).is_ok());
-    assert!(parse(&chain("-", 60)).is_ok());
-    assert!(parse(&chain("-", 70)).is_err());
+    assert!(parse(&chain("+", 128)).is_ok());
+    assert!(parse(&chain("+", 129)).is_err());
+    assert!(parse(&chain("-", 64)).is_ok());
+    assert!(parse(&chain("-", 65)).is_err());
 }
 
 /// A run of signs counts toward the same nesting bound as the brackets around

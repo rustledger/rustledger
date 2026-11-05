@@ -1444,13 +1444,7 @@ fn format_node_range_with_style(
         let (kind, child_range) = (el.kind(), el.text_range());
         let is_formattable = match &el {
             rowan::NodeOrToken::Node(n) => ast::Directive::cast(n.clone()).is_some(),
-            rowan::NodeOrToken::Token(_) => matches!(
-                kind,
-                crate::SyntaxKind::COMMENT
-                    | crate::SyntaxKind::PERCENT_COMMENT
-                    | crate::SyntaxKind::SHEBANG
-                    | crate::SyntaxKind::EMACS_DIRECTIVE
-            ),
+            rowan::NodeOrToken::Token(_) => super::convert::is_comment_kind(kind),
         };
         if !is_formattable {
             continue;
@@ -1460,7 +1454,20 @@ fn format_node_range_with_style(
         }
         any_included = true;
         snap_start = Some(snap_start.map_or(child_range.start(), |s| s.min(child_range.start())));
-        snap_end = Some(snap_end.map_or(child_range.end(), |e| e.max(child_range.end())));
+        // A directive owns the NEWLINE that ends it; a top-level comment
+        // token does not, but its emitted line ends with one. Take the
+        // comment's own NEWLINE into the snap, so the replacement covers
+        // the line it writes instead of adding a blank line on every run
+        // (#2838).
+        let end = if let rowan::NodeOrToken::Token(t) = &el
+            && let Some(next) = t.next_sibling_or_token()
+            && next.kind() == crate::SyntaxKind::NEWLINE
+        {
+            next.text_range().end()
+        } else {
+            child_range.end()
+        };
+        snap_end = Some(snap_end.map_or(end, |e| e.max(end)));
     }
     if !any_included {
         return None;

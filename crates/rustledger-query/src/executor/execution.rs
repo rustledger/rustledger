@@ -724,10 +724,17 @@ impl Executor<'_> {
         // `query_references_column` doesn't see through the wildcard — so treat a
         // wildcard target as referencing `balance`, else `SELECT * FROM #postings
         // WHERE ...` would still emit the pre-WHERE snapshot.
+        // Only where the wildcard shows `balance`: `#postings`' wildcard is
+        // bean-query's five columns (#2829), so `SELECT * FROM #postings`
+        // must not pay for a running inventory it never prints (#1080).
         let selects_all = query
             .targets
             .iter()
-            .any(|t| matches!(t.expr, Expr::Wildcard));
+            .any(|t| matches!(t.expr, Expr::Wildcard))
+            && !table
+                .hidden
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case("balance"));
         let track_balance = balance_idx.is_some()
             && position_idx.is_some()
             && (selects_all || super::query_references_column(query, "balance"));

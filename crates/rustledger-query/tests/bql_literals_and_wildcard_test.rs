@@ -87,7 +87,8 @@ fn test_parse_reads_a_decimal_with_a_leading_or_trailing_dot() {
     assert!(parse("SELECT . LIMIT 1").is_err());
 }
 
-/// Unary signs stack, as in beanquery: `---6` is -6, `-+6` is -6, `-- 6` is 6.
+/// Unary minus stacks, as in beanquery: `---6` is -6, `-+6` is -6, `-- 6` is 6.
+/// A `+` takes a bare atom only (`uplus: '+' atom`), as there.
 #[test]
 fn test_parse_stacks_unary_signs() {
     for (expr, value) in [
@@ -96,7 +97,8 @@ fn test_parse_stacks_unary_signs() {
         ("---6", "-6"),
         ("-+6", "-6"),
         ("+6", "6"),
-        ("+-+6", "-6"),
+        ("+ 6", "6"),
+        ("+abs(-2)", "2"),
         ("3--2", "5"),
         ("3 - -2", "5"),
         ("3+-2", "1"),
@@ -104,16 +106,33 @@ fn test_parse_stacks_unary_signs() {
     ] {
         assert_eq!(scalar(expr), value, "{expr}");
     }
+    // bean-query refuses each of these with a syntax error.
+    for expr in ["++6", "+-6", "+-+6", "+(1)", "-+(1)", "+date.year"] {
+        let query = format!("SELECT {expr} LIMIT 1");
+        assert!(parse(&query).is_err(), "{query}");
+    }
 }
 
-/// A run of signs is bounded like parenthesis nesting, so it cannot nest an
-/// expression deep enough to threaten the stack: past the bound it is a parse
-/// error, not a crash.
+/// A run of signs counts toward the same nesting bound as the brackets around
+/// it, so neither alone nor together can they nest an expression deep enough
+/// to threaten the stack: past the bound it is a parse error, not a crash.
 #[test]
 fn test_parse_refuses_a_run_of_signs_past_the_nesting_bound() {
     let long = format!("SELECT {}6 LIMIT 1", "-".repeat(10_000));
     assert!(parse(&long).is_err());
     assert_eq!(scalar(&format!("{}6", "-".repeat(64))), "6");
+    // Signs and brackets multiply: 20 brackets each behind 128 signs.
+    let mixed = format!(
+        "SELECT {}1{} LIMIT 1",
+        format!("{}(", "-".repeat(128)).repeat(20),
+        ")".repeat(20)
+    );
+    assert!(parse(&mixed).is_err());
+    // Within the bound together, they still parse.
+    assert_eq!(
+        scalar(&format!("{}1{}", "-(".repeat(60), ")".repeat(60))),
+        "1"
+    );
 }
 
 /// A trailing `; text` stays an error, deliberately (#2403): beanquery's
@@ -166,4 +185,22 @@ fn test_select_star_is_the_postings_wildcard_in_every_form() {
         .execute(&parse("SELECT * FROM t").unwrap())
         .unwrap();
     assert_eq!(result.columns, five);
+}
+
+/// A bracket or quote left open is named at the end, where its closer is
+/// missing, rather than as the offending character at its opener.
+#[test]
+fn test_parse_names_an_unclosed_bracket_or_quote_at_the_end() {
+    for (query, message) in [
+        ("SELECT (1", "expected ')' to close the '(' at position 7"),
+        ("SELECT 'abc", "expected ''' to close the ''' at position 7"),
+        (
+            "SELECT \"abc",
+            "expected '\"' to close the '\"' at position 7",
+        ),
+    ] {
+        let err = parse(query).expect_err(query);
+        assert_eq!(err.position, query.len(), "{query:?}: {err}");
+        assert!(err.to_string().contains(message), "{query:?}: {err}");
+    }
 }

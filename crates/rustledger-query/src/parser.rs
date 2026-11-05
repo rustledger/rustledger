@@ -67,13 +67,40 @@ const PARSE_STACK_SIZE: usize = 16 * 1024 * 1024;
 /// string scanner exists: `completions::tokenize_bql`, a heuristic
 /// completion-context tokenizer that only understands double quotes —
 /// see its doc comment for the divergence rationale.)
+///
+/// A run of unary `-` counts toward the same depth, as each sign nests the
+/// expression after it one level: the grammar caps a run on its own, but
+/// 128 signs before each of 20 brackets would nest 2,580 levels and overflow
+/// the parse thread's stack (#2830 review). A binary `-` before a unary one
+/// counts too, which costs a legitimate query one level at most.
 fn nesting_exceeds_limit(source: &str) -> Option<usize> {
+    scan_delimiters(source).too_deep
+}
+
+/// What [`scan_delimiters`] finds: where nesting first passes the limit, and
+/// the brackets and quotes still open at the end, by offset.
+struct DelimiterScan {
+    too_deep: Option<usize>,
+    unclosed: Vec<(usize, char)>,
+}
+
+/// One pass over `source`'s brackets, quotes and sign runs; see
+/// [`nesting_exceeds_limit`] for the lexing rules it shares with the grammar.
+fn scan_delimiters(source: &str) -> DelimiterScan {
+    // Each open bracket's offset and the depth it added: itself plus the
+    // signs pending before it.
+    let mut open: Vec<(usize, usize)> = Vec::new();
     let mut depth: usize = 0;
+    let mut signs: usize = 0;
+    let mut too_deep = None;
+    let mut unclosed_quote = None;
     let mut chars = source.char_indices().peekable();
     while let Some((i, c)) = chars.next() {
         match c {
             '"' | '\'' => {
+                signs = 0;
                 // Consume the string body so its parens don't count.
+                let mut closed = false;
                 while let Some((_, sc)) = chars.next() {
                     if sc == c {
                         // `''` continues a single-quoted string.
@@ -81,21 +108,42 @@ fn nesting_exceeds_limit(source: &str) -> Option<usize> {
                             chars.next();
                             continue;
                         }
+                        closed = true;
                         break;
                     }
                 }
-            }
-            '(' => {
-                depth += 1;
-                if depth > MAX_NESTING_DEPTH {
-                    return Some(i);
+                if !closed {
+                    unclosed_quote = Some((i, c));
                 }
             }
-            ')' => depth = depth.saturating_sub(1),
-            _ => {}
+            '(' => {
+                let added = 1 + signs;
+                signs = 0;
+                depth += added;
+                open.push((i, added));
+                if depth > MAX_NESTING_DEPTH {
+                    too_deep.get_or_insert(i);
+                }
+            }
+            ')' => {
+                signs = 0;
+                if let Some((_, added)) = open.pop() {
+                    depth -= added;
+                }
+            }
+            '-' => {
+                signs += 1;
+                if depth + signs > MAX_NESTING_DEPTH {
+                    too_deep.get_or_insert(i);
+                }
+            }
+            c if c.is_whitespace() => {}
+            _ => signs = 0,
         }
     }
-    None
+    let mut unclosed: Vec<(usize, char)> = open.into_iter().map(|(i, _)| (i, '(')).collect();
+    unclosed.extend(unclosed_quote);
+    DelimiterScan { too_deep, unclosed }
 }
 
 /// `source` with every `/* ... */` comment outside a string literal replaced
@@ -254,6 +302,24 @@ fn parse_on_current_stack(source: &str) -> Result<Query, ParseError> {
         } else {
             errs
         };
+        // A bracket or quote never closed is what the parser trips over at
+        // its opener (`SELECT (1` read as "found '('"), so name the missing
+        // closer at the end, where it belongs.
+        if !parsed
+            && let Some(first) = errs.first()
+            && let Some(&(opened, opener)) = scan_delimiters(source)
+                .unclosed
+                .iter()
+                .find(|(at, _)| *at == first.span().start)
+        {
+            let closer = if opener == '(' { ')' } else { opener };
+            return Err(ParseError::new(
+                ParseErrorKind::SyntaxError(format!(
+                    "expected '{closer}' to close the '{opener}' at position {opened}"
+                )),
+                source.len(),
+            ));
+        }
         let err = errs.first().map(|e| {
             let start = e.span().start;
             let kind = if parsed {
@@ -893,7 +959,9 @@ fn expr<'a>() -> Boxed<'a, 'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
                 .then_ignore(just(']'))
                 .map(Postfix::Sub),
         ));
-        let primary = primary_expr(expr.clone())
+        let atom = primary_expr(expr.clone()).boxed();
+        let primary = atom
+            .clone()
             .foldl(postfix.repeated(), |operand, p| match p {
                 Postfix::Attr(name) => Expr::Attribute {
                     operand: Box::new(operand),
@@ -906,22 +974,27 @@ fn expr<'a>() -> Boxed<'a, 'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
             })
             .boxed();
 
-        // Unary signs, stacked as beanquery stacks them (#2830): `---6` is
-        // -6, `-+6` is -6, `-- 6` is 6. A `+` is the identity. Bounded by
-        // the nesting limit, so a long run of signs cannot nest deep enough
-        // to threaten the stack; the run past it is a parse error at that
-        // sign.
-        let unary = choice((just('-').to(Some(UnaryOperator::Neg)), just('+').to(None)))
+        // Unary signs as beanquery's grammar has them (#2830): `-` stacks
+        // (`---6` is -6, `-- 6` is 6) and may be followed by a `+`, but a `+`
+        // (`uplus: '+' atom`) takes a bare atom only, so `-+6` is -6 while
+        // `++6`, `+-6`, `+(1)` and `+x.y` are syntax errors there and here.
+        // A run of `-` is bounded by the nesting limit, and
+        // `nesting_exceeds_limit` counts it toward the same depth as the
+        // brackets around it, so signs and brackets cannot multiply into a
+        // stack overflow.
+        let plus_atom = just('+')
+            .ignore_then(ws())
+            // Not a bracket, and not a sign: `-6` reads as a literal here,
+            // but bean-query's atom has no sign, so `+-6` is refused there.
+            .ignore_then(atom.and_is(one_of("(-+").not()));
+        let unary = just('-')
             .then_ignore(ws())
             .repeated()
             .at_most(MAX_NESTING_DEPTH)
-            .collect::<Vec<_>>()
-            .then(primary)
-            .map(|(signs, e)| {
-                signs.into_iter().rev().fold(e, |acc, sign| match sign {
-                    Some(op) => Expr::unary(op, acc),
-                    None => acc,
-                })
+            .count()
+            .then(choice((plus_atom, primary)))
+            .map(|(negations, e)| {
+                (0..negations).fold(e, |acc, _| Expr::unary(UnaryOperator::Neg, acc))
             })
             .boxed();
 

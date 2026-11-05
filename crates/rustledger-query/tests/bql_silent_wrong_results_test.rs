@@ -389,8 +389,8 @@ fn test_where_refuses_an_aggregate_inside_between_or_a_set() {
 /// refuses `number(position)` (`no function matches`). `AT number` summed
 /// bare numbers across currencies; `AT currency` failed only on a row.
 /// `JOURNAL ... AT str` is stricter than bean-query, which prints the
-/// position as text: rledger's `str()` does not take a position yet (#2822),
-/// so it is refused rather than failing on the first row.
+/// position as text: `str(position)` answers since #2822, but with text, which
+/// the AT check does not take as an amount, so it is still refused up front.
 #[test]
 fn test_at_refuses_a_function_that_does_not_give_an_amount() {
     for f in ["number", "currency", "str"] {

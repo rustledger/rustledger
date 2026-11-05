@@ -929,27 +929,25 @@ impl Executor<'_> {
                 // about the same directive (#2154). A column-presence census
                 // cannot see this: `tags` IS registered on `#entries`, it was
                 // just wrong for every directive except transactions.
+                // A directive kind that has no tags or links (`open`, `balance`,
+                // `price`, ...) has them NULL, as bean-query reads them with
+                // `getattr(entry, 'tags', None)`: an empty set made `tags IS
+                // NULL`, `length(tags)` and `str(tags)` answer differently (#2822).
                 let (tags, links, accounts) = match directive {
-                    Directive::Open(open) => {
-                        (Vec::new(), Vec::new(), vec![open.account.to_string()])
-                    }
-                    Directive::Close(close) => {
-                        (Vec::new(), Vec::new(), vec![close.account.to_string()])
-                    }
-                    Directive::Balance(bal) => {
-                        (Vec::new(), Vec::new(), vec![bal.account.to_string()])
-                    }
+                    Directive::Open(open) => (None, None, vec![open.account.to_string()]),
+                    Directive::Close(close) => (None, None, vec![close.account.to_string()]),
+                    Directive::Balance(bal) => (None, None, vec![bal.account.to_string()]),
                     Directive::Document(doc) => (
-                        doc.tags.iter().map(ToString::to_string).collect(),
-                        doc.links.iter().map(ToString::to_string).collect(),
+                        Some(doc.tags.iter().map(ToString::to_string).collect()),
+                        Some(doc.links.iter().map(ToString::to_string).collect()),
                         vec![doc.account.to_string()],
                     ),
                     // `note` carries them too, since #2160 gave `Note` the
                     // fields. This arm was Document-only because a note's
                     // tags did not survive parsing; the comment above said so.
                     Directive::Note(note) => (
-                        note.tags.iter().map(ToString::to_string).collect(),
-                        note.links.iter().map(ToString::to_string).collect(),
+                        Some(note.tags.iter().map(ToString::to_string).collect()),
+                        Some(note.links.iter().map(ToString::to_string).collect()),
                         vec![note.account.to_string()],
                     ),
                     // A set, as beancount's `get_entry_accounts` returns: sorted
@@ -960,17 +958,17 @@ impl Executor<'_> {
                             vec![pad.account.to_string(), pad.source_account.to_string()];
                         accounts.sort();
                         accounts.dedup();
-                        (Vec::new(), Vec::new(), accounts)
+                        (None, None, accounts)
                     }
-                    _ => (Vec::new(), Vec::new(), Vec::new()),
+                    _ => (None, None, Vec::new()),
                 };
                 (
                     Value::Null,
                     Value::Null,
                     Value::Null,
                     Value::Null,
-                    Value::StringSet(tags),
-                    Value::StringSet(links),
+                    tags.map_or(Value::Null, Value::StringSet),
+                    links.map_or(Value::Null, Value::StringSet),
                     Value::StringSet(accounts),
                 )
             };

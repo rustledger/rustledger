@@ -1,3 +1,5 @@
+| `number(amount)` | Extract number from amount; of an inventory, the total when it holds one currency, `NULL` when it holds several or nothing |
+| `currency(position)` | Get currency; of an inventory, its first held position's, `NULL` when it holds nothing |
 ______________________________________________________________________
 
 ## title: BQL Reference description: Beancount Query Language syntax reference
@@ -395,6 +397,19 @@ NULL, and amounts, positions and inventories compare in `ORDER BY`'s order
 
 ## Scalar Functions
 
+A function given a `NULL` argument returns `NULL`, as in bean-query, so one
+row with no payee reads as a blank rather than failing the query:
+`substr(payee, 0, 2)` is `NULL` where `payee` is. The exceptions are the
+functions that exist to look at `NULL` (`coalesce`, `empty`) and the target of
+`convert` and `value`: a `NULL` currency or date there is an error, since it
+usually means an aggregate found no rows.
+
+`str(x)` renders any value as text. A position or inventory reads as Python
+prints it, as in bean-query: `10 USD`, `2 HOOL {100 USD, 2024-01-05}`,
+`(10 USD, 3 EUR)`, and `()` for an empty one. A set, metadata or an `entry`
+reads as its cell does (`t1, t2`, `{key: value}`), where bean-query prints the
+Python repr (`frozenset({'t1'})`).
+
 ### Date Functions
 
 | Function | Description | Example |
@@ -661,7 +676,8 @@ directives still active at the date, the last price of each currency pair,
 the opening-balance summaries, and every entry from the date on. `CLOSE ON`
 cuts off at the date, and `CLOSE` and `CLEAR` add their conversion and
 transfer entries. The filter reads each entry, whatever its type, the way the
-`#entries` table does: `narration` is NULL on an `open`, and
+`#entries` table does: `narration` is NULL on an `open`, as are `tags` and
+`links` on any entry but a transaction, note or document, and
 `has_account(regex)` matches the accounts the entry names.
 
 ## Subqueries

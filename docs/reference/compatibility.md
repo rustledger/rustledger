@@ -567,14 +567,14 @@ lines the amounts up:
   `[\p{Lu}][\p{L}\p{Nd}\-]*(?::[\p{Lu}\p{Nd}][\p{L}\p{Nd}\-]*)+` followed by
   whitespace, needs each component after the root to start with an uppercase
   letter or a digit, and every character to be a letter, a digit or a hyphen.
-  So a posting to `Expenses:생활` or `Expenses:食품` (a component starting with
+  So a posting to `Expenses:생활` or `Expenses:食品` (a component starting with
   a letter that has no case) does not match, and neither does an account with
   an emoji (`Assets:CORP✨`) or a combining mark anywhere in it (`Expenses:Cafe`
   followed by U+0301 COMBINING ACUTE ACCENT, a decomposed `é`). bean-format
-  keeps whatever spacing such a line has, while still realigning the
-  transaction's other, matching postings among themselves. (A precomposed
-  `Expenses:Café`, with U+00E9, matches; `é` takes one cell, so both tools
-  align it the same way.)
+  keeps whatever spacing such a line has, while still aligning every
+  matching line, in that transaction and elsewhere in the file, to its one
+  file-wide column. (A precomposed `Expenses:Café`, with U+00E9, matches;
+  `é` takes one cell, so both tools align it the same way.)
 - **It pads by code points.** When the account does match but contains a
   wide character (`Expenses:X생활`, fullwidth `Expenses:Ｆｏｏｄ`), the line is
   padded with Python's `len()`, so the wide character puts the amount further

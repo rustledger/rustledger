@@ -8,9 +8,9 @@
 //! emoji or a combining mark in the account, as written (its alignment regex
 //! needs each component after the root to start with an uppercase letter or a
 //! digit, and every character to be a letter, a digit or a hyphen) and pads a
-//! line that does match (`Expenses:X생활`) by code points. A deliberate difference, documented in
-//! `docs/reference/compatibility.md` ("Amount Alignment With Wide
-//! Characters"). ASCII-only alignment is unchanged.
+//! line that does match (`Expenses:X생활`) by code points. A deliberate
+//! difference, documented in `docs/reference/compatibility.md` ("Amount
+//! Alignment With Wide Characters"). ASCII-only alignment is unchanged.
 
 use rustledger_parser::format::{display_width, try_format_source};
 

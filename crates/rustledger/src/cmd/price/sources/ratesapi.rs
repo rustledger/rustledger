@@ -1,6 +1,8 @@
 //! Rates API price source.
 //!
-//! Fetches currency exchange rates from exchangerate.host or similar free APIs.
+//! Fetches currency exchange rates from Frankfurter
+//! (<https://api.frankfurter.dev>), the open-source keyless API serving the
+//! ECB reference rates, as beanprice's `ratesapi` source does.
 
 use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, user_agent};
 use crate::cmd::price::PriceResponse;
@@ -9,10 +11,14 @@ use rust_decimal::Decimal;
 use rustledger_core::NaiveDate;
 use std::time::Duration;
 
+/// Frankfurter's API root.
+const FRANKFURTER: &str = "https://api.frankfurter.dev/v1";
+
 /// Rates API price source.
 ///
-/// Uses a free exchange rate API to fetch currency conversion rates.
-/// No API key required.
+/// Fetches ECB reference rates from Frankfurter, as beanprice's `ratesapi`
+/// does. No API key required. It used exchangerate.host, which now refuses
+/// every request without a key.
 ///
 /// # Supported Currencies
 ///
@@ -31,8 +37,8 @@ impl RatesApiSource {
     /// EU-reference rate for that day (#1802).
     fn build_url(&self, base: &str, target: &str, date: Option<NaiveDate>) -> String {
         match date {
-            Some(d) => format!("https://api.exchangerate.host/{d}?base={base}&symbols={target}"),
-            None => format!("https://api.exchangerate.host/latest?base={base}&symbols={target}"),
+            Some(d) => format!("{FRANKFURTER}/{d}?base={base}&symbols={target}"),
+            None => format!("{FRANKFURTER}/latest?base={base}&symbols={target}"),
         }
     }
 
@@ -48,28 +54,51 @@ impl RatesApiSource {
         pair: &PricePair,
         date_fallback: NaiveDate,
     ) -> Result<(Decimal, NaiveDate)> {
-        let mut response = ureq::get(url)
-            .header("User-Agent", user_agent())
-            .call()
-            .with_context(|| format!("Failed to fetch rate for {}", pair.ticker))?;
+        let mut response = match ureq::get(url).header("User-Agent", user_agent()).call() {
+            Ok(response) => response,
+            // Frankfurter answers an unknown currency with 404 `not found`.
+            Err(ureq::Error::StatusCode(code)) => anyhow::bail!(
+                "Rates API (Frankfurter) returned HTTP {code} for {}-{}; \
+                 the currency pair may be unsupported (it serves the ECB reference currencies)",
+                pair.ticker.to_uppercase(),
+                pair.currency.to_uppercase()
+            ),
+            Err(e) => {
+                return Err(e).with_context(|| format!("Failed to fetch rate for {}", pair.ticker));
+            }
+        };
 
-        let json: serde_json::Value = response
+        let body = response
             .body_mut()
-            .read_json()
+            .read_to_string()
+            .with_context(|| format!("Failed to read response for {}", pair.ticker))?;
+        Self::parse_response(&body, pair, date_fallback)
+    }
+
+    /// Parse a Frankfurter response (`{"amount","base","date","rates"}`) into
+    /// `(price, feed_date)`. Split from [`Self::fetch_rate`] so it is tested
+    /// without the network.
+    fn parse_response(
+        body: &str,
+        pair: &PricePair,
+        date_fallback: NaiveDate,
+    ) -> Result<(Decimal, NaiveDate)> {
+        let json: serde_json::Value = serde_json::from_str(body)
             .with_context(|| format!("Failed to parse response for {}", pair.ticker))?;
 
-        // Check for success
-        let success = json
-            .get("success")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(true);
-        if !success {
+        // An error body: Frankfurter's `{"message": ...}`, or the
+        // `{"success": false, "error": {...}}` shape keyed services use.
+        if json.get("rates").is_none() {
             let error = json
-                .get("error")
-                .and_then(|e| e.get("info"))
+                .get("message")
                 .and_then(serde_json::Value::as_str)
-                .unwrap_or("Unknown error");
-            anyhow::bail!("Rates API error: {error}");
+                .or_else(|| {
+                    json.get("error")
+                        .and_then(|e| e.get("info").or_else(|| e.get("type")))
+                        .and_then(serde_json::Value::as_str)
+                })
+                .unwrap_or("no rates in the response");
+            anyhow::bail!("Rates API error for {}: {error}", pair.ticker);
         }
 
         let rates = json
@@ -85,7 +114,7 @@ impl RatesApiSource {
         let price = crate::cmd::price::price_decimal_from_json(rate_value)
             .with_context(|| format!("Invalid rate format: {rate_value}"))?;
 
-        // The feed's OWN quote date when present (exchangerate.host
+        // The feed's OWN quote date when present (Frankfurter
         // returns a "date" field) — on weekends the latest rate belongs
         // to Friday and must say so (deep review, same rule as ECB).
         let date = super::feed_date_or(
@@ -130,7 +159,7 @@ impl PriceSource for RatesApiSource {
     }
 
     fn description(&self) -> &'static str {
-        "Exchange Rate API - currency conversion rates"
+        "Frankfurter - ECB reference exchange rates"
     }
 
     fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
@@ -155,7 +184,7 @@ impl PriceSource for RatesApiSource {
     }
 
     fn historical_coverage(&self) -> HistoricalCoverage {
-        // exchangerate.host serves the EU reference series, which
+        // Frankfurter serves the EU reference series, which
         // begins 1999-01-04 (the euro's first trading day).
         HistoricalCoverage::Since(
             rustledger_core::naive_date(1999, 1, 4).expect("static date is valid"),
@@ -228,6 +257,89 @@ mod tests {
         assert_eq!(RatesApiSource::eu_reference_label(sun), fri);
         assert_eq!(RatesApiSource::eu_reference_label(fri), fri);
         assert_eq!(RatesApiSource::eu_reference_label(mon), mon);
+    }
+
+    fn usd_eur() -> PricePair {
+        PricePair {
+            ticker: "USD".to_string(),
+            currency: "EUR".to_string(),
+        }
+    }
+
+    fn day(y: i32, m: u32, d: u32) -> NaiveDate {
+        rustledger_core::naive_date(y, m, d).unwrap()
+    }
+
+    #[test]
+    fn test_build_url_uses_frankfurter() {
+        let source = RatesApiSource::new(Duration::from_secs(30));
+        assert_eq!(
+            source.build_url("USD", "EUR", None),
+            "https://api.frankfurter.dev/v1/latest?base=USD&symbols=EUR"
+        );
+        assert_eq!(
+            source.build_url("USD", "EUR", Some(day(2026, 10, 30))),
+            "https://api.frankfurter.dev/v1/2026-10-30?base=USD&symbols=EUR"
+        );
+    }
+
+    /// Canned Frankfurter bodies, as `curl` returned them.
+    #[test]
+    fn test_parse_response_latest_and_historical() {
+        let latest = r#"{"amount":1.0,"base":"USD","date":"2026-11-04","rates":{"EUR":0.88755}}"#;
+        let (price, date) =
+            RatesApiSource::parse_response(latest, &usd_eur(), day(2026, 11, 5)).unwrap();
+        assert_eq!(price.to_string(), "0.88755");
+        assert_eq!(date, day(2026, 11, 4));
+
+        let historical =
+            r#"{"amount":1.0,"base":"USD","date":"2026-10-30","rates":{"EUR":0.89509}}"#;
+        let (price, date) =
+            RatesApiSource::parse_response(historical, &usd_eur(), day(2026, 10, 30)).unwrap();
+        assert_eq!(price.to_string(), "0.89509");
+        assert_eq!(date, day(2026, 10, 30));
+    }
+
+    /// A weekend request (2026-11-01, a Sunday) answers with the previous
+    /// business day's rate and date; the label keeps the feed's date.
+    #[test]
+    fn test_parse_response_weekend_request_keeps_the_business_day() {
+        let body = r#"{"amount":1.0,"base":"USD","date":"2026-10-30","rates":{"EUR":0.89509}}"#;
+        let (_, date) = RatesApiSource::parse_response(body, &usd_eur(), day(2026, 11, 1)).unwrap();
+        assert_eq!(RatesApiSource::eu_reference_label(date), day(2026, 10, 30));
+    }
+
+    #[test]
+    fn test_parse_response_reports_error_bodies() {
+        let pair = usd_eur();
+        let today = day(2026, 11, 4);
+        // Frankfurter, unknown currency.
+        let err = RatesApiSource::parse_response(r#"{"message":"not found"}"#, &pair, today)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("not found"), "{err}");
+        // A keyed service refusing a keyless request.
+        let keyed = r#"{"success":false,"error":{"code":101,"type":"missing_access_key","info":"You have not supplied an API Access Key."}}"#;
+        let err = RatesApiSource::parse_response(keyed, &pair, today)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("API Access Key"), "{err}");
+        // Not JSON at all.
+        let err = format!(
+            "{:#}",
+            RatesApiSource::parse_response("<html>502 Bad Gateway</html>", &pair, today)
+                .unwrap_err()
+        );
+        assert!(err.contains("Failed to parse response"), "{err}");
+        // The pair is missing from the rates.
+        let err = RatesApiSource::parse_response(
+            r#"{"amount":1.0,"base":"USD","date":"2026-11-04","rates":{"GBP":0.7}}"#,
+            &pair,
+            today,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("EUR"), "{err}");
     }
 
     #[test]

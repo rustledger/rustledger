@@ -593,6 +593,36 @@ fn test_parse_keeps_a_grammar_error_before_an_invalid_date() {
         ("* Heading\n  2024-02-30 5\n", vec![2, 2]),
         ("%note\n  2024-02-30 5\n", vec![2, 2]),
         ("# note\n  2024-02-30 5\n", vec![2, 2]),
+        // A column-0 `*`, `%` or `#` with more on the line is a comment, but
+        // not `#` starting a tag, which is a token like any other.
+        (
+            "2024-01-01 open Assets:A\n*\tx\n  2024-02-30 5\n",
+            vec![3, 3],
+        ),
+        ("2024-01-01 open Assets:A\n%x\n  2024-02-30 5\n", vec![3, 3]),
+        ("2024-01-01 open Assets:A\n;\n  2024-02-30 5\n", vec![3, 3]),
+        (
+            "2024-01-01 open Assets:A\n#note\n  2024-02-30 5\n",
+            vec![2, 3],
+        ),
+        (
+            "2024-01-01 open Assets:A\n#a.b\n  2024-02-30 5\n",
+            vec![2, 3],
+        ),
+        // A multi-line string belongs to the line it starts on: after one in a
+        // directive that takes no metadata, the indented line is no
+        // continuation.
+        ("option \"title\" \"a\nb\"\n  2024-02-30 5\n", vec![3, 3]),
+        ("plugin \"a\nb\"\n  2024-02-30 5\n", vec![3, 3]),
+        ("include \"a\nb\"\n  2024-02-30 5\n", vec![3, 3]),
+        (
+            "pushmeta kk: \"a\nb\"\n  2024-02-30 5\npopmeta kk:\n",
+            vec![3, 3],
+        ),
+        (
+            "2024-01-01 open Assets:A\n2024-01-02 * \"a\nb\"\n  2024-02-30 5\n",
+            vec![4],
+        ),
         ("pushtag #t\n  2024-02-30 5\npoptag #t\n", vec![2, 2]),
         ("pushtag #t\npoptag #t\n  2024-02-30 5\n", vec![3, 3]),
         (
@@ -630,6 +660,20 @@ fn test_parse_keeps_a_grammar_error_before_an_invalid_date() {
             error_lines(src, &result.errors),
             lines,
             "{src:?}: {:?}",
+            result.errors
+        );
+    }
+    // A bare `#`, `%` or `*` line is a token to beancount, not a comment, so
+    // it is no gap: no `unexpected INDENT` on the indented line after it,
+    // only the date. (bean-check also reports the bare marker on its own
+    // line; rledger, before this change as after, does not.)
+    for marker in ["#", "%", "*", "#\r", "%\r"] {
+        let src = format!("2024-01-01 open Assets:A\n{marker}\n  2024-02-30 5\n");
+        let result = parse(&src);
+        assert_eq!(
+            error_lines(&src, &result.errors),
+            vec![3],
+            "{marker:?}: {:?}",
             result.errors
         );
     }

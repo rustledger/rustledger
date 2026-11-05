@@ -5228,14 +5228,24 @@ fn report_invalid_dates(
 }
 
 /// Whether the line before the one starting at `line_start` leaves an indented
-/// line nothing to continue: it is blank, a comment or an org-mode heading at
-/// column 0 (an indented comment continues the directive above), one of the
-/// undated directives that take no metadata (`option`, `include`, `plugin`,
-/// `pushtag`, `poptag`, `pushmeta`, `popmeta`), or missing. bean-check 3.2.3
-/// reports `unexpected INDENT` after each. `%` and `# ` lines are comments
-/// there too. A previous line that starts inside a multi-line string
-/// (`multiline_strings`, sorted) is the string's text, never a gap, whatever it
-/// starts with. Steps over that one line only.
+/// line nothing to continue, so beancount reports `unexpected INDENT` there
+/// (bean-check 3.2.3): it is blank, missing, a comment at column 0, or one of
+/// the undated directives that take no metadata (`option`, `include`,
+/// `plugin`, `pushtag`, `poptag`, `pushmeta`, `popmeta`). An indented comment
+/// continues the directive above.
+///
+/// A column-0 comment is `;` and anything, or `*`, `%` or `#` followed by at
+/// least one more character on the line, except `#` starting a tag (`#a1`,
+/// `#a b`). A bare marker is a token, not a comment, and beancount reports it
+/// on its own line. `!`, `&` and `:` lines are comments to beancount too, but
+/// rledger already reports an error on such a line, so they are not taken as
+/// gaps here.
+///
+/// A previous line that starts inside a multi-line string (`multiline_strings`,
+/// sorted) is the string's text. Its directive is the one on the line where
+/// the string starts, so step back to that line (again, while it too starts
+/// inside a string) and apply only the no-metadata check there. Each step
+/// goes back over one string, so the walk is bounded by the lines above.
 fn previous_line_is_a_gap(
     src: &str,
     line_start: usize,
@@ -5244,28 +5254,42 @@ fn previous_line_is_a_gap(
     const NO_METADATA: [&str; 7] = [
         "option", "include", "plugin", "pushtag", "poptag", "pushmeta", "popmeta",
     ];
+    let takes_no_metadata = |line: &str| {
+        NO_METADATA.iter().any(|keyword| {
+            line.strip_prefix(keyword)
+                .is_some_and(|rest| rest.starts_with([' ', '\t']))
+        })
+    };
+    // The string a line starting at `at` starts inside, if any.
+    let string_around = |at: usize| {
+        let i = multiline_strings.partition_point(|s| s.end <= at);
+        multiline_strings.get(i).filter(|s| s.start < at)
+    };
+    let line_start_of = |at: usize| src[..at].rfind('\n').map_or(0, |i| i + 1);
     let Some(before) = src[..line_start].strip_suffix('\n') else {
         return true;
     };
-    let previous_start = before.rfind('\n').map_or(0, |i| i + 1);
-    let i = multiline_strings.partition_point(|s| s.end <= previous_start);
-    if multiline_strings
-        .get(i)
-        .is_some_and(|s| s.start < previous_start)
-    {
-        return false;
+    let previous_start = line_start_of(before.len());
+    if let Some(mut string) = string_around(previous_start) {
+        let mut start = line_start_of(string.start);
+        while let Some(outer) = string_around(start) {
+            string = outer;
+            start = line_start_of(string.start);
+        }
+        let end = src[start..].find('\n').map_or(src.len(), |i| start + i);
+        return takes_no_metadata(&src[start..end]);
     }
-    let previous = &before[previous_start..];
-    previous.starts_with([';', '*', '%'])
-        || previous
-            .strip_prefix('#')
-            .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t', '\r']))
-        || previous.trim_start_matches([' ', '\t', '\r']).is_empty()
-        || NO_METADATA.iter().any(|keyword| {
-            previous
-                .strip_prefix(keyword)
-                .is_some_and(|rest| rest.starts_with([' ', '\t']))
-        })
+    let previous = before[previous_start..].trim_end_matches('\r');
+    let mut chars = previous.chars();
+    let comment = match (chars.next(), chars.next()) {
+        (Some(';'), _) => true,
+        (Some('*' | '%'), Some(_)) => true,
+        (Some('#'), Some(next)) => {
+            !(next.is_ascii_alphanumeric() || matches!(next, '-' | '_' | '/' | '.'))
+        }
+        _ => false,
+    };
+    comment || previous.trim_start_matches([' ', '\t']).is_empty() || takes_no_metadata(previous)
 }
 
 /// Counters the linear-cost tests read (test builds only).

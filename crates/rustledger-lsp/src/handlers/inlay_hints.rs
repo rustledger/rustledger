@@ -167,8 +167,9 @@ pub fn handle_inlay_hints(
 
             // The hint anchors at the end of the account text. We need
             // that column in TWO unit systems and must NOT mix them:
-            //   * char columns (`end_col_chars`) to match the
-            //     formatter's char-based `number_col`/`number_width`
+            //   * display columns (`end_col_cells`, measured with the
+            //     formatter's own `display_width`, #2852) to match its
+            //     `number_col`/`number_width`
             //     when computing the visual gap, and
             //   * a source byte offset (`end_col_bytes`) to convert into
             //     an encoding-correct `Position` via `LineIndex` (LSP
@@ -186,8 +187,12 @@ pub fn handle_inlay_hints(
             let trimmed = content.trim();
             let indent_bytes = line.len() - line.trim_start().len();
             let end_col_bytes = indent_bytes + trimmed.len();
+            // The indent is whitespace only; count it per character as before.
+            // (`display_width` would agree here: unicode-width gives a tab one
+            // cell, but a terminal renders it wider, so neither is the visual
+            // column; keeping the char count keeps this unchanged.)
             let indent_chars = line[..indent_bytes].chars().count();
-            let end_col_chars = indent_chars + trimmed.chars().count();
+            let end_col_cells = indent_chars + rustledger_parser::format::display_width(trimmed);
 
             // Align the greyed-out amount with the column `rledger
             // format` uses for explicit amounts (issue #1346), instead
@@ -203,7 +208,7 @@ pub fn handle_inlay_hints(
             //
             // Caveat: `number_col`/`number_width` are the *canonical*
             // formatter columns (2-space indent, single inner spaces),
-            // while `end_col_chars` is measured from the raw source line.
+            // while `end_col_cells` is measured from the raw source line.
             // So the hint aligns perfectly with explicit amounts only
             // when the file is already formatted (the steady state). On
             // a non-canonically-indented or unformatted line the hint
@@ -211,8 +216,10 @@ pub fn handle_inlay_hints(
             // may differ from where the current explicit amount renders.
             let num_text = amount.number.to_string();
             let align = parse_result.alignment();
-            let field_pad = align.number_col.saturating_sub(end_col_chars).max(2);
-            let justify_pad = align.number_width.saturating_sub(num_text.chars().count());
+            let field_pad = align.number_col.saturating_sub(end_col_cells).max(2);
+            let justify_pad = align
+                .number_width
+                .saturating_sub(rustledger_parser::format::display_width(&num_text));
             let gap = field_pad + justify_pad;
             let label = format!("{}{} {}", " ".repeat(gap), num_text, amount.currency);
 
@@ -957,11 +964,45 @@ mod tests {
         );
     }
 
+    /// A wide character in the elided account (`생활`, two characters, four
+    /// cells) is measured in display cells against the formatter's column, so
+    /// the hint's amount ends where `rledger format` puts the explicit one
+    /// (#2852); the anchor stays a UTF-16 column.
+    #[test]
+    fn test_inlay_hint_wide_account_pads_by_display_width_2852() {
+        let source = "2024-01-15 * \"Test\"\n  Expenses:Restaurants  -50.00 USD\n  Assets:생활\n";
+        let result = parse(source);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let params = InlayHintParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            range: lsp_types::Range {
+                start: Position::new(0, 0),
+                end: Position::new(10, 0),
+            },
+            work_done_progress_params: Default::default(),
+        };
+        let hints = handle_inlay_hints(&params, source, &result, PositionEncoding::Utf16)
+            .unwrap_or_default();
+        assert_eq!(hints.len(), 1);
+        let h = &hints[0];
+        // `  Assets:생활` is 11 UTF-16 units (each Hangul syllable is one).
+        assert_eq!(h.position.character, 11);
+        // The number column is 2 + 20 + 2 = 24 cells and the number field 6
+        // wide; the account ends at cell 13 (2 + 7 + 4), so the gap is
+        // 11 + 1 = 12 spaces. Counting characters (11) gave 14.
+        let InlayHintLabel::String(label) = &h.label else {
+            panic!("string label");
+        };
+        assert_eq!(label, &format!("{}50.00 USD", " ".repeat(12)));
+    }
+
     /// #1346 regression for the byte-vs-encoding bugs the deep review
     /// surfaced: with a multi-byte account name, (a) `position.character`
     /// must be the UTF-16 column, not the byte length, and (b) the
-    /// visual gap must be computed in char columns so the currency still
-    /// lines up with the explicit amount above.
+    /// visual gap must be computed in display cells (#2852) so the currency
+    /// still lines up with the explicit amount above.
     #[test]
     fn test_inlay_hint_nonascii_account_position_and_alignment_1346() {
         // `é` is one char / one UTF-16 unit but two UTF-8 bytes.

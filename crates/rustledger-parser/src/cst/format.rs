@@ -94,8 +94,8 @@ use crate::cst::ast::{self, AstNode, AstToken, MetaEntry, SourceFile};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PostingAlignment {
-    /// 0-indexed column at which the right-justified number field
-    /// starts.
+    /// 0-indexed column, in display cells ([`display_width`]), at which the
+    /// right-justified number field starts.
     pub number_col: usize,
     /// Width of the number field; shorter numbers are left-padded
     /// with spaces so the currency column stays uniform.
@@ -152,6 +152,36 @@ impl<'a> GroupingStyle<'a> {
 
 /// Two-space indent for directive bodies (postings, metadata).
 const INDENT: &str = "  ";
+
+/// The number of terminal cells `s` occupies in a monospaced editor.
+///
+/// East Asian Wide and Fullwidth characters take 2, combining marks and other
+/// zero-width characters 0, and ambiguous-width characters 1 (as most
+/// terminals render them). Emoji take what `unicode-width` gives them (2 for
+/// emoji-presentation characters).
+///
+/// Deliberately different from bean-format 3.2.3, which never lines such
+/// amounts up (#2852): its alignment regex needs each account component after
+/// the root to start with an uppercase letter or a digit, and every character
+/// to be a letter, a digit or a hyphen. So a line like
+/// `Expenses:생활  12345 KRW`, or one with an emoji or a combining mark in the
+/// account, is left as written, and a line that does match (`Expenses:X생활`,
+/// fullwidth `Ｆｏｏｄ`) is padded by code points (Python's `len()`), which
+/// puts a wide character's amount further right on screen.
+/// So files with wide or combining characters in an account name format
+/// differently from bean-format; ASCII-only alignment is unchanged by this.
+/// See `docs/reference/compatibility.md`, "Amount Alignment With Wide
+/// Characters".
+///
+/// Every alignment computation goes through this function, so the width
+/// pre-pass (`compute_alignment`) and the emitter (`emit_posting`) cannot
+/// disagree; [`PostingAlignment`]'s columns are in these cells. Callers
+/// outside the formatter that place text against those columns (the LSP's
+/// inferred-amount inlay hint) must measure with it too.
+#[must_use]
+pub fn display_width(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
 
 /// Format a Beancount source file in opinionated canonical form.
 ///
@@ -1635,10 +1665,10 @@ pub fn compute_alignment(sf: &SourceFile, style: GroupingStyle<'_>) -> PostingAl
             };
             let mut lhs = 0usize;
             if let Some(flag) = p.flag() {
-                lhs += flag.text().chars().count() + 1; // `! ` etc.
+                lhs += display_width(flag.text()) + 1; // `! ` etc.
             }
             if let Some(account) = p.account() {
-                lhs += account.text().chars().count();
+                lhs += display_width(account.text());
             }
 
             // Only postings that render a number drive the alignment
@@ -1658,7 +1688,7 @@ pub fn compute_alignment(sf: &SourceFile, style: GroupingStyle<'_>) -> PostingAl
             {
                 any_aligned_posting = true;
                 max_lhs = max_lhs.max(lhs);
-                max_num = max_num.max(text.chars().count());
+                max_num = max_num.max(display_width(&text));
             }
         }
     }
@@ -2500,14 +2530,14 @@ fn emit_posting(
     if let Some(flag) = p.flag() {
         out.push_str(flag.text());
         out.push(' ');
-        col += flag.text().chars().count() + 1;
+        col += display_width(flag.text()) + 1;
     }
     let account_text = p
         .account()
         .map(|a| a.text().to_string())
         .unwrap_or_default();
     out.push_str(&account_text);
-    col += account_text.chars().count();
+    col += display_width(&account_text);
 
     if let Some(amt) = p.amount() {
         // `amount_number_text` is the shared "does this render a number?"
@@ -2523,7 +2553,7 @@ fn emit_posting(
             //      lands at a single uniform position file-wide even
             //      when numbers have different widths or signs.
             let field_pad = align.number_col.saturating_sub(col).max(2);
-            let justify_pad = align.number_width.saturating_sub(value.chars().count());
+            let justify_pad = align.number_width.saturating_sub(display_width(&value));
             for _ in 0..(field_pad + justify_pad) {
                 out.push(' ');
             }

@@ -8,9 +8,8 @@
 
 use lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Position};
 use rustledger_booking::interpolate;
-use rustledger_core::{Decimal, Directive, IncompleteAmount, SYNTHESIZED_FILE_ID, Transaction};
+use rustledger_core::{Directive, IncompleteAmount, SYNTHESIZED_FILE_ID, Transaction};
 use rustledger_parser::ParseResult;
-use std::collections::HashMap;
 
 use super::utils::{LineIndex, PositionEncoding};
 
@@ -319,9 +318,6 @@ fn build_account_tooltip(
     parse_result: &ParseResult,
     ledger: Option<&rustledger_loader::Ledger>,
 ) -> String {
-    let mut balances: HashMap<String, Decimal> = HashMap::new();
-    let mut transaction_count = 0;
-
     let balance_view; // keeps the whole-ledger view alive for the loop below
     let (transactions, balance_label): (Box<dyn Iterator<Item = &Transaction>>, &str) =
         if let Some(ledger) = ledger {
@@ -348,25 +344,19 @@ fn build_account_tooltip(
             )
         };
 
-    for txn in transactions {
-        for posting in &txn.postings {
-            if posting.account.as_ref() == account {
-                transaction_count += 1;
-                if let Some(units) = &posting.units
-                    && let Some(number) = units.number()
-                {
-                    let curr = units.currency().unwrap_or("???").to_string();
-                    *balances.entry(curr).or_default() += number;
-                }
-            }
-        }
-    }
+    // The shared count-and-balance rule (#2850), the same one completion
+    // resolve uses.
+    let activity = super::utils::account_activity(account, transactions);
+    let (transaction_count, balances) = (activity.transactions, activity.balances);
 
     let mut tooltip = format!("**Inferred:** {} {}\n\n", inferred_amount, currency);
     tooltip.push_str(&format!("**Account:** `{}`\n\n", account));
 
     if transaction_count > 0 {
-        tooltip.push_str(&format!("📊 {} transactions\n\n", transaction_count));
+        tooltip.push_str(&format!(
+            "📊 {}\n\n",
+            super::utils::count_noun(transaction_count, "transaction")
+        ));
 
         if !balances.is_empty() {
             tooltip.push_str(balance_label);
@@ -456,6 +446,45 @@ mod tests {
         };
         assert!(content.value.contains("Expenses:Food"));
         assert!(content.value.contains("2 transactions"));
+    }
+
+    /// Two postings to the account in one transaction are one transaction in
+    /// the tooltip (#2850).
+    #[test]
+    fn test_inlay_hint_resolve_counts_each_transaction_once() {
+        let source = r#"2021-01-02 * "Split invoice"
+  Expenses:Supplies  10000 KRW
+  Expenses:Supplies  20000 KRW
+  Assets:Bank
+"#;
+        let result = parse(source);
+        let hint = InlayHint {
+            position: Position::new(3, 13),
+            label: InlayHintLabel::String("  -30000 KRW".to_string()),
+            kind: Some(InlayHintKind::TYPE),
+            text_edits: None,
+            tooltip: None,
+            padding_left: Some(true),
+            padding_right: None,
+            data: Some(serde_json::json!({
+                "kind": "inferred_amount",
+                "account": "Expenses:Supplies",
+                "amount": "30000",
+                "currency": "KRW",
+            })),
+        };
+        let resolved = handle_inlay_hint_resolve(hint, &result, None);
+        let content = match resolved.tooltip {
+            Some(lsp_types::InlayHintTooltip::MarkupContent(c)) => c,
+            other => panic!("expected MarkupContent tooltip; got {other:?}"),
+        };
+        // The whole count line, so `1 transactions` or `11 transactions`
+        // cannot pass.
+        assert!(
+            content.value.contains("📊 1 transaction\n"),
+            "{}",
+            content.value
+        );
     }
 
     #[test]

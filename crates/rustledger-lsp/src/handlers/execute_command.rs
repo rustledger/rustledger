@@ -381,20 +381,17 @@ fn handle_show_account_balance(
         );
     };
 
-    let mut balances: HashMap<String, rustledger_core::Decimal> = HashMap::new();
-    for spanned in &parse_result.directives {
-        if let Directive::Transaction(txn) = &spanned.value {
-            for posting in &txn.postings {
-                if posting.account.as_ref() == account
-                    && let Some(units) = &posting.units
-                    && let Some(number) = units.number()
-                {
-                    let currency = units.currency().unwrap_or("???").to_string();
-                    *balances.entry(currency).or_default() += number;
-                }
-            }
-        }
-    }
+    let balances = super::utils::account_activity(
+        account,
+        parse_result
+            .directives
+            .iter()
+            .filter_map(|spanned| match &spanned.value {
+                Directive::Transaction(txn) => Some(txn),
+                _ => None,
+            }),
+    )
+    .balances;
 
     if balances.is_empty() {
         return ExecuteCommandResponse::warn(format!(

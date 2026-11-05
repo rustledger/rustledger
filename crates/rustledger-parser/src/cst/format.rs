@@ -161,11 +161,13 @@ const INDENT: &str = "  ";
 /// emoji-presentation characters).
 ///
 /// Deliberately different from bean-format 3.2.3, which never lines such
-/// amounts up (#2852): its alignment regex needs each account component to
-/// start with an uppercase letter or a digit, so a line like
-/// `Expenses:생활  12345 KRW` is left as written, and a line that does match
-/// (`Expenses:X생활`, fullwidth `Ｆｏｏｄ`) is padded by code points (Python's
-/// `len()`), which puts a wide character's amount further right on screen.
+/// amounts up (#2852): its alignment regex needs each account component after
+/// the root to start with an uppercase letter or a digit, and every character
+/// to be a letter, a digit or a hyphen. So a line like
+/// `Expenses:생활  12345 KRW`, or one with an emoji or a combining mark in the
+/// account, is left as written, and a line that does match (`Expenses:X생활`,
+/// fullwidth `Ｆｏｏｄ`) is padded by code points (Python's `len()`), which
+/// puts a wide character's amount further right on screen.
 /// So files with wide or combining characters in an account name format
 /// differently from bean-format; ASCII-only alignment is unchanged by this.
 /// See `docs/reference/compatibility.md`, "Amount Alignment With Wide

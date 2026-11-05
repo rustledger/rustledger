@@ -4,10 +4,11 @@
 //! two cells and a combining mark none, so padding by code points puts the
 //! amounts of an account with such characters in a different visible
 //! column. rledger pads by display width. bean-format 3.2.3 never lines
-//! these up: it leaves a line like `Expenses:생활  12345 KRW` as written (its
-//! alignment regex needs each account component to start with an uppercase
-//! letter or a digit) and pads a line that does match (`Expenses:X생활`) by
-//! code points. A deliberate difference, documented in
+//! these up: it leaves a line like `Expenses:생활  12345 KRW`, or one with an
+//! emoji or a combining mark in the account, as written (its alignment regex
+//! needs each component after the root to start with an uppercase letter or a
+//! digit, and every character to be a letter, a digit or a hyphen) and pads a
+//! line that does match (`Expenses:X생활`) by code points. A deliberate difference, documented in
 //! `docs/reference/compatibility.md` ("Amount Alignment With Wide
 //! Characters"). ASCII-only alignment is unchanged.
 

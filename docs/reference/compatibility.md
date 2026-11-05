@@ -563,14 +563,23 @@ characters one (as most terminals render them). Emoji take the width
 bean-format 3.2.3 handles such accounts in one of two ways, neither of which
 lines the amounts up:
 
-- **It leaves the line as written.** Its alignment regex needs every account
-  component to start with an uppercase letter or a digit, so a posting to
-  `Expenses:생활`, `Expenses:食品`, `Expenses:Café` or `Assets:CORP✨` does not
-  match, and bean-format keeps whatever spacing the line has.
-- **It pads by code points.** When a component does start with an uppercase
-  letter or digit (`Expenses:X생활`, fullwidth `Expenses:Ｆｏｏｄ`), the line
-  matches and is padded with Python's `len()`, so a wide character puts the
-  amount further right on screen:
+- **It leaves the line as written.** Its alignment regex,
+  `[\p{Lu}][\p{L}\p{Nd}\-]*(?::[\p{Lu}\p{Nd}][\p{L}\p{Nd}\-]*)+` followed by
+  whitespace, needs each component after the root to start with an uppercase
+  letter or a digit, and every character to be a letter, a digit or a hyphen.
+  So a posting to `Expenses:생활` or `Expenses:食품` (a component starting with
+  a letter that has no case) does not match, and neither does an account with
+  an emoji (`Assets:CORP✨`) or a combining mark anywhere in it (`Expenses:Cafe`
+  followed by U+0301 COMBINING ACUTE ACCENT, a decomposed `é`). bean-format
+  keeps whatever spacing such a line has, while still realigning the
+  transaction's other, matching postings among themselves. (A precomposed
+  `Expenses:Café`, with U+00E9, matches; `é` takes one cell, so both tools
+  align it the same way.)
+- **It pads by code points.** When the account does match but contains a
+  wide character (`Expenses:X생활`, fullwidth `Expenses:Ｆｏｏｄ`), the line is
+  padded with Python's `len()`, so the wide character puts the amount further
+  right on screen. Emoji and combining marks never reach this case; they
+  always leave the line as written:
 
 ```beancount
 2021-01-02 * "x"

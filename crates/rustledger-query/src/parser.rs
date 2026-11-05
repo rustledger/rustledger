@@ -237,6 +237,23 @@ fn parse_on_current_stack(source: &str) -> Result<Query, ParseError> {
     {
         Ok(query)
     } else {
+        // When every statement fails, the error reported is the last
+        // alternative's `kw` refusal at the statement keyword (`expected
+        // keyword 'PRINT'` over `SELECT`), not the one the named statement
+        // failed with further in, so ``SELECT `payee` `` read as an error in
+        // `SELECT` at position 0 (#2830). Ask the statement the keyword names
+        // for its own error instead.
+        let narrowed;
+        let errs = if !parsed
+            && errs
+                .first()
+                .is_some_and(|e| e.span().start == source.len() - source.trim_start().len())
+        {
+            narrowed = statement_errors(source);
+            if narrowed.is_empty() { errs } else { narrowed }
+        } else {
+            errs
+        };
         let err = errs.first().map(|e| {
             let start = e.span().start;
             let kind = if parsed {
@@ -266,6 +283,39 @@ fn parse_on_current_stack(source: &str) -> Result<Query, ParseError> {
             ParseError::new(kind, start)
         });
         Err(err.unwrap_or_else(|| ParseError::new(ParseErrorKind::UnexpectedEof, 0)))
+    }
+}
+
+/// The errors of the one statement parser `source`'s first keyword names,
+/// run as [`query_parser`] runs it, or none when the first word names no
+/// statement. See the narrowing in [`parse_on_current_stack`].
+fn statement_errors(source: &str) -> Vec<Rich<'_, char>> {
+    fn run<'a, P>(statement: P, source: &'a str) -> Vec<Rich<'a, char>>
+    where
+        P: Parser<'a, ParserInput<'a>, (), ParserExtra<'a>>,
+    {
+        ws().ignore_then(statement)
+            .then_ignore(ws())
+            .then_ignore(just(';').or_not())
+            .then_ignore(ws())
+            .then_ignore(end())
+            .parse(source)
+            .into_errors()
+    }
+    let keyword = source
+        .trim_start()
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    match keyword.as_str() {
+        "SELECT" => run(select_query().ignored(), source),
+        "CREATE" => run(create_table_stmt().ignored(), source),
+        "INSERT" => run(insert_stmt().ignored(), source),
+        "JOURNAL" => run(journal_query().ignored(), source),
+        "BALANCES" => run(balances_query().ignored(), source),
+        "PRINT" => run(print_query().ignored(), source),
+        _ => Vec::new(),
     }
 }
 
@@ -856,17 +906,22 @@ fn expr<'a>() -> Boxed<'a, 'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
             })
             .boxed();
 
-        // Unary minus
-        let unary = just('-')
+        // Unary signs, stacked as beanquery stacks them (#2830): `---6` is
+        // -6, `-+6` is -6, `-- 6` is 6. A `+` is the identity. Bounded by
+        // the nesting limit, so a long run of signs cannot nest deep enough
+        // to threaten the stack; the run past it is a parse error at that
+        // sign.
+        let unary = choice((just('-').to(Some(UnaryOperator::Neg)), just('+').to(None)))
             .then_ignore(ws())
-            .or_not()
+            .repeated()
+            .at_most(MAX_NESTING_DEPTH)
+            .collect::<Vec<_>>()
             .then(primary)
-            .map(|(neg, e)| {
-                if neg.is_some() {
-                    Expr::unary(UnaryOperator::Neg, e)
-                } else {
-                    e
-                }
+            .map(|(signs, e)| {
+                signs.into_iter().rev().fold(e, |acc, sign| match sign {
+                    Some(op) => Expr::unary(op, acc),
+                    None => acc,
+                })
             })
             .boxed();
 
@@ -1377,18 +1432,29 @@ fn date_literal<'a>() -> impl Parser<'a, ParserInput<'a>, NaiveDate, ParserExtra
 /// semantics and lets functions that strictly require integer arguments
 /// (e.g. `ROOT(account, n)`, `SUBSTR(s, start, len)`) work with literal
 /// arguments. See issue #938.
+///
+/// A dot may start or end a decimal, as in beanquery (#2830): `.5` is 0.5 and
+/// `5.` is the decimal 5. A lone `.` is not a number.
 fn number_literal<'a>() -> impl Parser<'a, ParserInput<'a>, Literal, ParserExtra<'a>> + Clone {
+    // `5`, `5.5` or `5.` (the digits after the dot may be absent) ...
+    let int_first = digits()
+        .then(just('.').ignore_then(digits().or_not()).or_not())
+        .map(|(int_part, frac): (&str, Option<Option<&str>>)| (Some(int_part), frac));
+    // ... or `.5` (no digits before the dot, at least one after).
+    let dot_first = just('.')
+        .ignore_then(digits())
+        .map(|frac: &str| (None, Some(Some(frac))));
     just('-')
         .or_not()
-        .then(digits())
-        .then(just('.').then(digits()).or_not())
+        .then(choice((int_first, dot_first)))
         .try_map(
-            |((neg, int_part), frac_part): ((Option<char>, &str), Option<(char, &str)>), span| {
+            |(neg, (int_part, frac_part)): (Option<char>, (Option<&str>, Option<Option<&str>>)),
+             span| {
                 let mut s = String::new();
                 if neg.is_some() {
                     s.push('-');
                 }
-                s.push_str(int_part);
+                s.push_str(int_part.unwrap_or("0"));
                 match frac_part {
                     None => match s.parse::<i64>() {
                         Ok(i) => Ok(Literal::Integer(i)),
@@ -1397,9 +1463,12 @@ fn number_literal<'a>() -> impl Parser<'a, ParserInput<'a>, Literal, ParserExtra
                             .map(Literal::Number)
                             .map_err(|_| Rich::custom(span, "invalid number")),
                     },
-                    Some((_, frac)) => {
-                        s.push('.');
-                        s.push_str(frac);
+                    Some(frac) => {
+                        // `5.` is the decimal 5, as `Decimal('5.')` is.
+                        if let Some(frac) = frac {
+                            s.push('.');
+                            s.push_str(frac);
+                        }
                         Decimal::from_str(&s)
                             .map(Literal::Number)
                             .map_err(|_| Rich::custom(span, "invalid number"))

@@ -658,7 +658,7 @@ impl Executor<'_> {
             if matches!(target.expr, Expr::Wildcard) {
                 // Expand wildcard to default columns.
                 // Order must match WILDCARD_COLUMNS constant in mod.rs:
-                // [date, flag, payee, narration, account, position]
+                // [date, flag, payee, narration, position]
                 row.push(Value::Date(ctx.transaction.date));
                 row.push(Value::String(ctx.transaction.flag.to_string()));
                 row.push(
@@ -668,7 +668,6 @@ impl Executor<'_> {
                         .map_or(Value::Null, |p| Value::String(p.to_string())),
                 );
                 row.push(Value::String(ctx.transaction.narration.to_string()));
-                row.push(self.evaluate_column("account", ctx)?);
                 // The `position` column itself, cost included, as bean-query's
                 // `SELECT *` gives it. This pushed the units alone, so a held
                 // lot lost its cost, and a table or subquery built from

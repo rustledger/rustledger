@@ -71,8 +71,13 @@ const PARSE_STACK_SIZE: usize = 16 * 1024 * 1024;
 /// A run of unary `-` counts toward the same depth, as each sign nests the
 /// expression after it one level: the grammar caps a run on its own, but
 /// 128 signs before each of 20 brackets would nest 2,580 levels and overflow
-/// the parse thread's stack (#2830 review). A binary `-` before a unary one
-/// counts too, which costs a legitimate query one level at most.
+/// the parse thread's stack (#2830 review). The scan cannot tell a binary
+/// `-` from a unary one, so every `-` counts: a bracket written right after
+/// a `-` costs two levels, its own and the sign's. A chain that nests a
+/// bracket after each binary minus, `a - (b - (c - (...)))`, therefore
+/// reaches the limit at half the brackets an unsigned one would
+/// (`a + (b + (...`). A run of signs followed by anything but a bracket
+/// stops counting at that token, so `a - b` and `-x` cost no lasting level.
 fn nesting_exceeds_limit(source: &str) -> Option<usize> {
     scan_delimiters(source).too_deep
 }
@@ -977,16 +982,22 @@ fn expr<'a>() -> Boxed<'a, 'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
         // Unary signs as beanquery's grammar has them (#2830): `-` stacks
         // (`---6` is -6, `-- 6` is 6) and may be followed by a `+`, but a `+`
         // (`uplus: '+' atom`) takes a bare atom only, so `-+6` is -6 while
-        // `++6`, `+-6`, `+(1)` and `+x.y` are syntax errors there and here.
+        // `++6`, `+-6`, `+(1)`, `+x.y` and `+*` are syntax errors there and here.
         // A run of `-` is bounded by the nesting limit, and
         // `nesting_exceeds_limit` counts it toward the same depth as the
         // brackets around it, so signs and brackets cannot multiply into a
         // stack overflow.
         let plus_atom = just('+')
             .ignore_then(ws())
-            // Not a bracket, and not a sign: `-6` reads as a literal here,
-            // but bean-query's atom has no sign, so `+-6` is refused there.
-            .ignore_then(atom.and_is(one_of("(-+").not()));
+            // Not a bracket, not a sign and not the `*` wildcard: `-6` reads
+            // as a literal here, but bean-query's atom has no sign, so `+-6`
+            // is refused there, and `*` is no atom of bean-query's, so
+            // `SELECT +*`, `count(+*)` and `WHERE +*` are refused as they are
+            // there (`WHERE +*` gave no rows). bean-query's atom does include
+            // a list constant, so it takes `+(1, 2)` and `'a' IN +('a', 'b')`;
+            // rledger has no list constant outside `IN` (`SELECT (1, 2)` is
+            // refused too), so every `+(` is refused here, a known gap.
+            .ignore_then(atom.and_is(one_of("(-+*").not()));
         let unary = just('-')
             .then_ignore(ws())
             .repeated()

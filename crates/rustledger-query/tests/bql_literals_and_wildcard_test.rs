@@ -113,6 +113,60 @@ fn test_parse_stacks_unary_signs() {
     }
 }
 
+/// `*` is no atom of bean-query's, so a `+` before it is a syntax error there
+/// in every position, and here. `WHERE +*` parsed and gave no rows; the
+/// others parsed too. `count(*)` and `SELECT *` are unaffected.
+#[test]
+fn test_parse_refuses_unary_plus_before_the_wildcard() {
+    for query in [
+        "SELECT +*",
+        "SELECT + *",
+        "SELECT count(+*)",
+        "SELECT date WHERE +*",
+        "SELECT -+*",
+    ] {
+        assert!(parse(query).is_err(), "{query}");
+    }
+    let (_, rows) = run("SELECT count(*)");
+    assert_eq!(rows[0][0], Value::Integer(4));
+}
+
+/// Known gap: bean-query's atom includes a list constant, so it takes
+/// `+(1, 2)` (`[1, 2]`) and `'a' IN +('a', 'b')` (TRUE). rledger has no list
+/// constant outside `IN`, and `SELECT (1, 2)` is refused as well, so every
+/// `+(` is refused. This pins the gap so that closing it is a deliberate
+/// change; the unsigned `IN` list still works.
+#[test]
+fn test_parse_refuses_unary_plus_before_a_list() {
+    for query in [
+        "SELECT +(1, 2) LIMIT 1",
+        "SELECT 'a' IN +('a', 'b') LIMIT 1",
+        "SELECT (1, 2) LIMIT 1",
+    ] {
+        assert!(parse(query).is_err(), "{query}");
+    }
+    let (_, rows) = run("SELECT 'a' IN ('a', 'b') LIMIT 1");
+    assert_eq!(rows[0][0], Value::Boolean(true));
+}
+
+/// The nesting scan cannot tell a binary `-` from a unary one, so a bracket
+/// right after a binary minus costs two levels: `a - (b - (...` reaches the
+/// bound at half the brackets `a + (b + (...` does. This pins that cost, as
+/// `nesting_exceeds_limit` documents it.
+#[test]
+fn test_parse_counts_a_bracket_after_a_binary_minus_twice() {
+    let chain = |op: &str, n: usize| {
+        format!(
+            "SELECT 1{}1{} LIMIT 1",
+            format!(" {op} (1").repeat(n),
+            ")".repeat(n)
+        )
+    };
+    assert!(parse(&chain("+", 100)).is_ok());
+    assert!(parse(&chain("-", 60)).is_ok());
+    assert!(parse(&chain("-", 70)).is_err());
+}
+
 /// A run of signs counts toward the same nesting bound as the brackets around
 /// it, so neither alone nor together can they nest an expression deep enough
 /// to threaten the stack: past the bound it is a parse error, not a crash.

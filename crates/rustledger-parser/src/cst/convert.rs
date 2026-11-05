@@ -5179,6 +5179,12 @@ fn report_invalid_dates(
     // orphan indented line, a transaction-body line no posting takes) fails at
     // the line's first token in beancount (`  "x" 2024-02-30`: `unexpected
     // STRING`, then the date; `  2024-02-30 5`: the date alone).
+    // Where every error starts, sorted, stripped frame.
+    let mut error_starts: Vec<usize> = errors
+        .iter()
+        .map(|e| e.span.start.saturating_sub(off))
+        .collect();
+    error_starts.sort_unstable();
     let reaches_a_bad_date = |span: &Span| {
         let j = grammar_failures.partition_point(|&(start, _, _)| start < span.start);
         let (anchor, failed_at) = match grammar_failures.get(j) {
@@ -5198,7 +5204,12 @@ fn report_invalid_dates(
                 // before any date on it.
                 let after_a_gap = ahead + behind > 0
                     && (line_begin == 0 || stripped.as_bytes()[line_begin - 1] == b'\n')
-                    && previous_line_is_a_gap(stripped, line_begin, &multiline_strings);
+                    && previous_line_is_a_gap(
+                        stripped,
+                        line_begin,
+                        &multiline_strings,
+                        &error_starts,
+                    );
                 let failed_at = if after_a_gap {
                     line_begin + off
                 } else {
@@ -5231,8 +5242,10 @@ fn report_invalid_dates(
 /// line nothing to continue, so beancount reports `unexpected INDENT` there
 /// (bean-check 3.2.3): it is blank, missing, a comment at column 0, or one of
 /// the undated directives that take no metadata (`option`, `include`,
-/// `plugin`, `pushtag`, `poptag`, `pushmeta`, `popmeta`). An indented comment
-/// continues the directive above.
+/// `plugin`, `pushtag`, `poptag`, `pushmeta`, `popmeta`) with no error of its
+/// own (`error_starts`, sorted): beancount's recovery from a broken one
+/// swallows the indented line. An indented comment continues the directive
+/// above.
 ///
 /// A column-0 comment is `;` and anything, or `*`, `%` or `#` followed by at
 /// least one more character on the line, except `#` starting a tag (`#a1`,
@@ -5250,6 +5263,7 @@ fn previous_line_is_a_gap(
     src: &str,
     line_start: usize,
     multiline_strings: &[std::ops::Range<usize>],
+    error_starts: &[usize],
 ) -> bool {
     const NO_METADATA: [&str; 7] = [
         "option", "include", "plugin", "pushtag", "poptag", "pushmeta", "popmeta",
@@ -5266,6 +5280,13 @@ fn previous_line_is_a_gap(
         multiline_strings.get(i).filter(|s| s.start < at)
     };
     let line_start_of = |at: usize| src[..at].rfind('\n').map_or(0, |i| i + 1);
+    // Whether an error starts in `from..to`: a directive that is already a
+    // syntax error is no gap, because beancount's recovery from it swallows
+    // the indented line after it (`option "a" "b" "c"`).
+    let has_an_error = |from: usize, to: usize| {
+        let i = error_starts.partition_point(|&s| s < from);
+        error_starts.get(i).is_some_and(|&s| s < to)
+    };
     let Some(before) = src[..line_start].strip_suffix('\n') else {
         return true;
     };
@@ -5277,9 +5298,11 @@ fn previous_line_is_a_gap(
             start = line_start_of(string.start);
         }
         let end = src[start..].find('\n').map_or(src.len(), |i| start + i);
-        return takes_no_metadata(&src[start..end]);
+        return takes_no_metadata(&src[start..end]) && !has_an_error(start, line_start);
     }
-    let previous = before[previous_start..].trim_end_matches('\r');
+    // Not trimmed of `\r`: a `#\r` line is a comment, as flex's `.` takes the
+    // `\r` (bean-check 3.2.3).
+    let previous = &before[previous_start..];
     let mut chars = previous.chars();
     let comment = match (chars.next(), chars.next()) {
         (Some(';'), _) => true,
@@ -5289,7 +5312,9 @@ fn previous_line_is_a_gap(
         }
         _ => false,
     };
-    comment || previous.trim_start_matches([' ', '\t']).is_empty() || takes_no_metadata(previous)
+    comment
+        || previous.trim_start_matches([' ', '\t', '\r']).is_empty()
+        || takes_no_metadata(previous) && !has_an_error(previous_start, line_start)
 }
 
 /// Counters the linear-cost tests read (test builds only).

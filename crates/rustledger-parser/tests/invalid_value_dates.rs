@@ -609,6 +609,34 @@ fn test_parse_keeps_a_grammar_error_before_an_invalid_date() {
             "2024-01-01 open Assets:A\n#a.b\n  2024-02-30 5\n",
             vec![2, 3],
         ),
+        // flex's `.` takes a `\r`, so `#\r` is a marker and one more
+        // character: a comment.
+        (
+            "2024-01-01 open Assets:A\n#\r\n  2024-02-30 5\n",
+            vec![3, 3],
+        ),
+        (
+            "2024-01-01 open Assets:A\n%\r\n  2024-02-30 5\n",
+            vec![3, 3],
+        ),
+        (
+            "2024-01-01 open Assets:A\n*\r\n  2024-02-30 5\n",
+            vec![3, 3],
+        ),
+        // A directive that takes no metadata but is already a syntax error is
+        // no gap: beancount's recovery swallows the indented line.
+        ("option \"a\" \"b\" \"c\"\n  2024-02-30 5\n", vec![1, 2]),
+        ("plugin \"a\" \"b\" \"c\"\n  2024-02-30 5\n", vec![1, 2]),
+        ("include \"a\" \"b\"\n  2024-02-30 5\n", vec![1, 2]),
+        ("option \"title\" \"a\nb\" x\n  2024-02-30 5\n", vec![2, 3]),
+        (
+            "option \"title\" \"a\nb\" \"c\"\n  2024-02-30 5\n",
+            vec![2, 3],
+        ),
+        ("include \"a\nb\" \"c\"\n  2024-02-30 5\n", vec![2, 3]),
+        ("pushmeta kk: \"a\nb\" \"c\"\n  2024-02-30 5\n", vec![2, 3]),
+        // A valid one still is.
+        ("plugin \"a\nb\" \"c\"\n  2024-02-30 5\n", vec![3, 3]),
         // A multi-line string belongs to the line it starts on: after one in a
         // directive that takes no metadata, the indented line is no
         // continuation.
@@ -667,7 +695,7 @@ fn test_parse_keeps_a_grammar_error_before_an_invalid_date() {
     // it is no gap: no `unexpected INDENT` on the indented line after it,
     // only the date. (bean-check also reports the bare marker on its own
     // line; rledger, before this change as after, does not.)
-    for marker in ["#", "%", "*", "#\r", "%\r"] {
+    for marker in ["#", "%", "*"] {
         let src = format!("2024-01-01 open Assets:A\n{marker}\n  2024-02-30 5\n");
         let result = parse(&src);
         assert_eq!(

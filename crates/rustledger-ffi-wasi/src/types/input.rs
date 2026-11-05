@@ -964,6 +964,9 @@ mod tests {
         let err = open("0000-01-01").expect_err("year 0 is refused");
         assert!(err.contains("year 0 out of range"), "{err}");
         assert!(open("2024-02-30").is_err());
+        // A two-digit year is no date to the parser; it must not load as 24 AD.
+        assert!(open("24-01-15").is_err());
+        assert!(open("1-1-1").is_err());
         match open("02024-001-015").expect("one date, as beancount reads it") {
             Directive::Open(o) => {
                 assert_eq!(o.date, rustledger_core::naive_date(2024, 1, 15).unwrap());

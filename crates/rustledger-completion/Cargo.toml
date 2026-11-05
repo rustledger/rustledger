@@ -16,6 +16,7 @@ readme = "README.md"
 bench = false
 
 [dependencies]
+rustledger-parser.workspace = true
 
 [lints]
 workspace = true

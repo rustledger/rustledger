@@ -3240,6 +3240,9 @@ dependencies = [
 [[package]]
 name = "rustledger-completion"
 version = "0.24.0"
+dependencies = [
+ "rustledger-parser",
+]
 
 [[package]]
 name = "rustledger-core"

@@ -15,47 +15,48 @@ pub const BOM_REMOVAL_HINT: &str = concat!(
     "strip BOMs from the inner files before concatenating",
 );
 
-/// The three fields of a date token, as the integers beancount reads them:
-/// leading zeros carry no meaning (`02024-001-01` is 2024, 1, 1), and a field
-/// too long for a `u64` saturates, so it is out of range rather than unreadable.
-/// `None` unless `s` is exactly three runs of digits joined by `-` or `/`, the
-/// shape the lexer's `Date` token guarantees (#2808).
+/// The three fields of a date token, as beancount reads them, each as its
+/// digits with the leading zeros removed (`02024-001-01` is `2024`, `1`, `1`;
+/// `0000` is `0`). Text rather than integers, so a field too long for any
+/// integer type is still echoed as written in a diagnostic.
+/// `None` unless `s` is exactly three runs of ASCII digits joined by `-` or
+/// `/`, the shape the lexer's `Date` token guarantees (#2808).
 #[must_use]
-pub fn date_fields(s: &str) -> Option<(u64, u64, u64)> {
-    let field = |f: &str| -> Option<u64> {
+pub fn date_fields(s: &str) -> Option<[&str; 3]> {
+    fn field(f: &str) -> Option<&str> {
         if f.is_empty() || !f.bytes().all(|b| b.is_ascii_digit()) {
             return None;
         }
         let digits = f.trim_start_matches('0');
         Some(if digits.is_empty() {
-            0
+            &f[f.len() - 1..]
         } else {
-            digits.parse::<u64>().unwrap_or(u64::MAX)
+            digits
         })
-    };
+    }
     let mut parts = s.split(['-', '/']);
     let (year, month, day) = (parts.next()?, parts.next()?, parts.next()?);
     if parts.next().is_some() {
         return None;
     }
-    Some((field(year)?, field(month)?, field(day)?))
+    Some([field(year)?, field(month)?, field(day)?])
 }
 
 /// Build a human-readable reason why a date string is invalid.
 #[must_use]
 pub fn describe_invalid_date(s: &str) -> String {
-    if let Some((year, month, day)) = date_fields(s) {
+    if let Some([year, month, day]) = date_fields(s) {
         // Years 1 to 9999, as beancount (Python's `datetime.date`) allows:
         // year 0 (#2811) and a year past 9999 (`20024-01-01`, #2808) are
         // refused, as beancount refuses them (`year 0 is out of range`).
-        if !(1..=9999).contains(&year) {
+        // A field is echoed as written, however long (#2868 review).
+        if !year.parse::<u16>().is_ok_and(|y| (1..=9999).contains(&y)) {
             return format!("year {year} out of range");
         }
-        if !(1..=12).contains(&month) {
+        if !month.parse::<u8>().is_ok_and(|m| (1..=12).contains(&m)) {
             return format!("month {month} out of range");
         }
-        let year_month = format!("{year}-{month:02}");
-        return format!("day {day} out of range for {year_month}");
+        return format!("day {day} out of range for {year}-{month:0>2}");
     }
     format!("invalid date '{s}'")
 }

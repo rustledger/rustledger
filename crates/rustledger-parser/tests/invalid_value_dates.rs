@@ -304,3 +304,138 @@ fn test_parse_does_not_report_valid_cost_dates() {
         assert!(result.errors.is_empty(), "{date}: {:?}", result.errors);
     }
 }
+
+/// A bad date stands for its line's GRAMMAR errors, not its lexer errors:
+/// beancount's lexer goes on past the date, so a character no token takes, or
+/// a mid-file BOM, on the same line is reported too. Each count is bean-check
+/// 3.2.3's (the date, then `Invalid token`).
+#[test]
+fn test_parse_keeps_lexer_errors_on_a_line_with_an_invalid_date() {
+    for (label, body) in [
+        ("custom", "2024-01-02 custom \"x\" 2024-02-30 `\n"),
+        (
+            "cost",
+            "2024-01-02 * \"x\"\n  Assets:A  1 HOOL {10 USD, 2024-02-30} `\n  Assets:B\n",
+        ),
+        (
+            "mid-file BOM",
+            "2024-01-02 custom \"x\" 2024-02-30 \u{feff}\n",
+        ),
+    ] {
+        let result = parse(&format!("{OPENS}{body}"));
+        assert_eq!(result.errors.len(), 2, "{label}: {:?}", result.errors);
+        assert!(
+            matches!(result.errors[0].kind, ParseErrorKind::InvalidDateValue(_)),
+            "{label}: {:?}",
+            result.errors
+        );
+        assert!(
+            !matches!(result.errors[1].kind, ParseErrorKind::InvalidDateValue(_)),
+            "{label}: {:?}",
+            result.errors
+        );
+    }
+}
+
+/// A field too long for any integer is named as written, not as a saturated
+/// `u64` (`year 18446744073709551615 out of range`).
+#[test]
+fn test_parse_names_an_overlong_date_field_as_written() {
+    let long = "99999999999999999999999";
+    for (date, message) in [
+        (format!("{long}-1-1"), format!("year {long} out of range")),
+        (
+            format!("2024-{long}-1"),
+            format!("month {long} out of range"),
+        ),
+        (
+            format!("2024-1-{long}"),
+            format!("day {long} out of range for 2024-01"),
+        ),
+    ] {
+        let src = format!("{OPENS}2024-01-02 custom \"x\" {date}\n");
+        let directives = OPENS.lines().count() + 1;
+        assert_invalid_date(&date, &src, &date, &message, directives);
+    }
+}
+
+/// A date's digits are ASCII, as in beancount's `[0-9]`: a Unicode digit
+/// (`𑄶`, `١`) ends the date, so no token here is a date, and bean-check 3.2.3
+/// reports `Invalid token` rather than a bad date.
+#[test]
+fn test_parse_does_not_read_unicode_digits_as_a_date() {
+    for value in ["6665/2\u{11136}3130-7", "2024-0\u{661}-01"] {
+        let result = parse(&format!("{OPENS}2024-01-02 custom \"x\" {value}\n"));
+        assert!(!result.errors.is_empty(), "{value}");
+        assert!(
+            !result
+                .errors
+                .iter()
+                .any(|e| matches!(e.kind, ParseErrorKind::InvalidDateValue(_))),
+            "{value}: {:?}",
+            result.errors
+        );
+        assert_eq!(rustledger_parser::leading_date_len(value), None, "{value}");
+    }
+}
+
+/// `parse_date` takes a date only if the parser would: one `DATE` token, so a
+/// year of four or more ASCII digits. `24-01-15` and `1-1-1` are refused, as
+/// in a header, where they would otherwise read as years 24 and 1.
+#[test]
+fn test_parse_date_takes_only_what_the_parser_reads_as_a_date() {
+    let ymd = |y, m, d| rustledger_core::naive_date(y, m, d).unwrap();
+    for (text, date) in [
+        ("2024-01-15", ymd(2024, 1, 15)),
+        ("2024/1/5", ymd(2024, 1, 5)),
+        ("02024-001-015", ymd(2024, 1, 15)),
+        ("0001-01-01", ymd(1, 1, 1)),
+    ] {
+        assert_eq!(rustledger_parser::parse_date(text), Ok(date), "{text}");
+    }
+    for text in [
+        "24-01-15",
+        "1-1-1",
+        "2024-01-15 ",
+        " 2024-01-15",
+        "2024-01-15x",
+        "2024-0\u{661}-01",
+        "",
+    ] {
+        assert!(rustledger_parser::parse_date(text).is_err(), "{text:?}");
+    }
+    assert_eq!(
+        rustledger_parser::parse_date("0000-01-01"),
+        Err("year 0 out of range".to_string())
+    );
+    for header in ["24-01-15 open Assets:C\n", "1-1-1 open Assets:C\n"] {
+        assert!(!parse(header).errors.is_empty(), "{header:?}");
+    }
+}
+
+/// beancount's lexer takes an invalid character and the rest of its run of
+/// non-blank characters as one invalid token, so a date inside that run is
+/// never read and never named; after a blank it is. Counts are bean-check
+/// 3.2.3's.
+#[test]
+fn test_parse_does_not_name_a_date_inside_an_invalid_token() {
+    // `errors` is bean-check's count where rledger matches it; on `` `x2024-02-30 ``
+    // rledger reports the `` ` `` and the rest of the run as two errors, as for
+    // any such run, so only the date is pinned there.
+    for (label, value, errors, dates) in [
+        ("glued to the invalid character", "`2024-02-30", Some(1), 0),
+        ("after more of the run", "`x2024-02-30", None, 0),
+        ("after a blank", "` 2024-02-30", Some(2), 1),
+    ] {
+        let result = parse(&format!("{OPENS}2024-01-02 custom \"x\" {value}\n"));
+        if let Some(errors) = errors {
+            assert_eq!(result.errors.len(), errors, "{label}: {:?}", result.errors);
+        }
+        let named = result
+            .errors
+            .iter()
+            .filter(|e| matches!(e.kind, ParseErrorKind::InvalidDateValue(_)))
+            .count();
+        assert_eq!(named, dates, "{label}: {:?}", result.errors);
+    }
+}

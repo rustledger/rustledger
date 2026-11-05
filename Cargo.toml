@@ -75,6 +75,8 @@ anyhow = "1"
 regex = "1"
 # NFC folding for import dedup text comparison (#2507).
 unicode-normalization = "0.1"
+# Display width of account names for the formatter's amount alignment (#2852).
+unicode-width = "0.2"
 
 # Parsing
 format_num_pattern = { version = "0.9.5", features = ["rust_decimal"] }

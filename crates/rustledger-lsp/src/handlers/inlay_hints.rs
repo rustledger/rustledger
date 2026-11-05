@@ -168,8 +168,9 @@ pub fn handle_inlay_hints(
 
             // The hint anchors at the end of the account text. We need
             // that column in TWO unit systems and must NOT mix them:
-            //   * char columns (`end_col_chars`) to match the
-            //     formatter's char-based `number_col`/`number_width`
+            //   * display columns (`end_col_chars`, measured with the
+            //     formatter's own `display_width`, #2852) to match its
+            //     `number_col`/`number_width`
             //     when computing the visual gap, and
             //   * a source byte offset (`end_col_bytes`) to convert into
             //     an encoding-correct `Position` via `LineIndex` (LSP
@@ -187,8 +188,10 @@ pub fn handle_inlay_hints(
             let trimmed = content.trim();
             let indent_bytes = line.len() - line.trim_start().len();
             let end_col_bytes = indent_bytes + trimmed.len();
+            // The indent is whitespace only; count it per character as before,
+            // since `display_width` gives a tab 0 cells.
             let indent_chars = line[..indent_bytes].chars().count();
-            let end_col_chars = indent_chars + trimmed.chars().count();
+            let end_col_chars = indent_chars + rustledger_parser::format::display_width(trimmed);
 
             // Align the greyed-out amount with the column `rledger
             // format` uses for explicit amounts (issue #1346), instead
@@ -213,7 +216,9 @@ pub fn handle_inlay_hints(
             let num_text = amount.number.to_string();
             let align = parse_result.alignment();
             let field_pad = align.number_col.saturating_sub(end_col_chars).max(2);
-            let justify_pad = align.number_width.saturating_sub(num_text.chars().count());
+            let justify_pad = align
+                .number_width
+                .saturating_sub(rustledger_parser::format::display_width(&num_text));
             let gap = field_pad + justify_pad;
             let label = format!("{}{} {}", " ".repeat(gap), num_text, amount.currency);
 

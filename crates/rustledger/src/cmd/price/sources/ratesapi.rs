@@ -18,8 +18,9 @@ const FRANKFURTER: &str = "https://api.frankfurter.dev/v1";
 ///
 /// Fetches ECB reference rates from Frankfurter, the provider beanprice's
 /// `ratesapi` uses. The ticker is the base currency (`EUR`, quoted in the
-/// request's currency), not beanprice's `BASE-SYMBOL` form. No API key required. It used exchangerate.host, which now refuses
-/// every request without a key.
+/// request's currency), not beanprice's `BASE-SYMBOL` form. No API key
+/// required. It used exchangerate.host, which now refuses every request
+/// without a key.
 ///
 /// # Supported Currencies
 ///
@@ -80,7 +81,7 @@ impl RatesApiSource {
     /// Turn an HTTP status and body into `(price, feed_date)`, the step after
     /// the request on every fetch. A non-2xx status is an error naming the
     /// pair and the provider's message (Frankfurter answers 404 `not found`
-    /// for an unknown currency and 422 for a malformed pair). Split from
+    /// for an unknown currency, an out-of-range date or a malformed code). Split from
     /// [`Self::fetch_rate`] so it is tested without the network.
     fn handle_response(
         status: u16,
@@ -105,9 +106,13 @@ impl RatesApiSource {
                 Some(message) => anyhow::bail!(
                     "Rates API (Frankfurter) returned HTTP {status} for {pair_name}: {message}"
                 ),
-                None => anyhow::bail!(
+                None if (400..500).contains(&status) => anyhow::bail!(
                     "Rates API (Frankfurter) returned HTTP {status} for {pair_name}; \
                      the currency pair may be unsupported (it serves the ECB reference currencies)"
+                ),
+                None => anyhow::bail!(
+                    "Rates API (Frankfurter) returned HTTP {status} for {pair_name}; \
+                     the service may be unavailable, try again later"
                 ),
             }
         }
@@ -415,12 +420,17 @@ mod tests {
                 .to_string();
             assert!(err.contains(want), "{err}");
         }
-        // No JSON message: the generic hint.
+        // No JSON message: a 5xx says the service may be down, a 4xx that the
+        // pair may be unsupported.
         let err =
             RatesApiSource::handle_response(502, "<html>Bad Gateway</html>", &usd_eur(), today)
                 .unwrap_err()
                 .to_string();
         assert!(err.contains("HTTP 502 for USD-EUR"), "{err}");
+        assert!(err.contains("may be unavailable"), "{err}");
+        let err = RatesApiSource::handle_response(404, "<html>Not Found</html>", &usd_eur(), today)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("may be unsupported"), "{err}");
         // A 2xx body is parsed as a rate.
         let ok = r#"{"amount":1.0,"base":"USD","date":"2026-11-04","rates":{"EUR":0.88755}}"#;

@@ -8,7 +8,6 @@ use lsp_types::{CompletionItem, Documentation, MarkupContent, MarkupKind};
 use rustledger_core::Decimal;
 use rustledger_core::Directive;
 use rustledger_parser::Spanned;
-use std::collections::HashMap;
 
 use super::utils::{is_account_like, is_currency_like_simple};
 
@@ -70,40 +69,20 @@ fn resolve_account_documentation(
     account: &str,
     directives: &[Spanned<Directive>],
 ) -> (Documentation, Option<String>) {
-    let mut balances: HashMap<String, Decimal> = HashMap::new();
-    let mut transaction_count = 0;
-    let mut first_date: Option<rustledger_core::NaiveDate> = None;
-    let mut last_date: Option<rustledger_core::NaiveDate> = None;
-
-    for spanned in directives {
-        if let Directive::Transaction(txn) = &spanned.value {
-            // A transaction counts once however many of its postings touch
-            // the account (#2850): two postings to it in one transaction are
-            // still one transaction.
-            if txn.postings.iter().any(|p| p.account.as_ref() == account) {
-                transaction_count += 1;
-            }
-            for posting in &txn.postings {
-                if posting.account.as_ref() == account {
-                    // Track dates
-                    if first_date.is_none() || Some(txn.date) < first_date {
-                        first_date = Some(txn.date);
-                    }
-                    if last_date.is_none() || Some(txn.date) > last_date {
-                        last_date = Some(txn.date);
-                    }
-
-                    // Track balance
-                    if let Some(units) = &posting.units
-                        && let Some(number) = units.number()
-                    {
-                        let currency = units.currency().unwrap_or("???").to_string();
-                        *balances.entry(currency).or_default() += number;
-                    }
-                }
-            }
-        }
-    }
+    // The shared count-and-balance rule (#2850), the same one the inlay
+    // tooltip uses.
+    let super::utils::AccountActivity {
+        transactions: transaction_count,
+        balances,
+        first_date,
+        last_date,
+    } = super::utils::account_activity(
+        account,
+        directives.iter().filter_map(|s| match &s.value {
+            Directive::Transaction(txn) => Some(txn),
+            _ => None,
+        }),
+    );
 
     let mut doc = format!("**{}**\n\n", account);
 

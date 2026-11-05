@@ -8,9 +8,8 @@
 
 use lsp_types::{InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Position};
 use rustledger_booking::interpolate;
-use rustledger_core::{Decimal, Directive, IncompleteAmount, SYNTHESIZED_FILE_ID, Transaction};
+use rustledger_core::{Directive, IncompleteAmount, SYNTHESIZED_FILE_ID, Transaction};
 use rustledger_parser::ParseResult;
-use std::collections::HashMap;
 
 use super::utils::{LineIndex, PositionEncoding};
 
@@ -312,9 +311,6 @@ fn build_account_tooltip(
     parse_result: &ParseResult,
     ledger: Option<&rustledger_loader::Ledger>,
 ) -> String {
-    let mut balances: HashMap<String, Decimal> = HashMap::new();
-    let mut transaction_count = 0;
-
     let balance_view; // keeps the whole-ledger view alive for the loop below
     let (transactions, balance_label): (Box<dyn Iterator<Item = &Transaction>>, &str) =
         if let Some(ledger) = ledger {
@@ -341,22 +337,10 @@ fn build_account_tooltip(
             )
         };
 
-    for txn in transactions {
-        // Each transaction counts once however many of its postings touch
-        // the account (#2850).
-        if txn.postings.iter().any(|p| p.account.as_ref() == account) {
-            transaction_count += 1;
-        }
-        for posting in &txn.postings {
-            if posting.account.as_ref() == account
-                && let Some(units) = &posting.units
-                && let Some(number) = units.number()
-            {
-                let curr = units.currency().unwrap_or("???").to_string();
-                *balances.entry(curr).or_default() += number;
-            }
-        }
-    }
+    // The shared count-and-balance rule (#2850), the same one completion
+    // resolve uses.
+    let activity = super::utils::account_activity(account, transactions);
+    let (transaction_count, balances) = (activity.transactions, activity.balances);
 
     let mut tooltip = format!("**Inferred:** {} {}\n\n", inferred_amount, currency);
     tooltip.push_str(&format!("**Account:** `{}`\n\n", account));
@@ -487,9 +471,10 @@ mod tests {
             Some(lsp_types::InlayHintTooltip::MarkupContent(c)) => c,
             other => panic!("expected MarkupContent tooltip; got {other:?}"),
         };
-        assert!(content.value.contains("1 transaction"), "{}", content.value);
+        // The whole count line, so `1 transactions` or `11 transactions`
+        // cannot pass.
         assert!(
-            !content.value.contains("2 transactions"),
+            content.value.contains("📊 1 transaction\n"),
             "{}",
             content.value
         );

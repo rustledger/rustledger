@@ -4,7 +4,68 @@
 //! including position conversion, word extraction, and type checking.
 
 use lsp_types::{Position, Range};
+use rust_decimal::Decimal;
+use rustledger_core::{NaiveDate, Transaction};
 use rustledger_parser::ParseResult;
+use std::collections::{HashMap, HashSet};
+
+/// What the LSP's account summaries (completion resolve, the inferred-amount
+/// inlay tooltip) report for one account over a set of transactions.
+#[derive(Debug, Default)]
+pub(crate) struct AccountActivity {
+    /// Transactions with at least one posting to the account, each counted
+    /// once however many of its postings touch it (#2850).
+    pub(crate) transactions: usize,
+    /// The account's units summed per currency, as written (unbooked).
+    pub(crate) balances: HashMap<String, Decimal>,
+    /// The earliest and latest dates of those transactions.
+    pub(crate) first_date: Option<NaiveDate>,
+    pub(crate) last_date: Option<NaiveDate>,
+}
+
+/// The one rule for an account's transaction count and units balance, shared
+/// by every LSP surface that reports them so they cannot disagree on the
+/// unit (#2850). The `open` code lens counts every account in one pass with
+/// [`transaction_accounts`], which applies the same rule.
+pub(crate) fn account_activity<'a>(
+    account: &str,
+    transactions: impl IntoIterator<Item = &'a Transaction>,
+) -> AccountActivity {
+    let mut activity = AccountActivity::default();
+    for txn in transactions {
+        let mut touched = false;
+        for posting in txn
+            .postings
+            .iter()
+            .filter(|p| p.account.as_ref() == account)
+        {
+            touched = true;
+            if let Some(units) = &posting.units
+                && let Some(number) = units.number()
+            {
+                let currency = units.currency().unwrap_or("???").to_string();
+                *activity.balances.entry(currency).or_default() += number;
+            }
+        }
+        if touched {
+            activity.transactions += 1;
+            activity.first_date = Some(activity.first_date.map_or(txn.date, |d| d.min(txn.date)));
+            activity.last_date = Some(activity.last_date.map_or(txn.date, |d| d.max(txn.date)));
+        }
+    }
+    activity
+}
+
+/// Each account a transaction posts to, once, in posting order: the
+/// per-transaction step of [`account_activity`]'s count, for callers that
+/// tally every account in one pass.
+pub(crate) fn transaction_accounts(txn: &Transaction) -> impl Iterator<Item = &str> {
+    let mut seen = HashSet::new();
+    txn.postings
+        .iter()
+        .map(|p| p.account.as_ref())
+        .filter(move |a| seen.insert(*a))
+}
 
 /// Trim a directive span's end offset back over trailing whitespace.
 ///

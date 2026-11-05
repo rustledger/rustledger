@@ -38,7 +38,7 @@ A comment may span lines and end the query without a newline after it. It does n
 /* Basic columns */
 SELECT account, date, narration, payee, position
 
-/* All columns */
+/* The postings wildcard: date, flag, payee, narration, position, as in bean-query */
 SELECT *
 
 /* Expressions */
@@ -395,6 +395,23 @@ NULL, and amounts, positions and inventories compare in `ORDER BY`'s order
 
 ## Scalar Functions
 
+A function given a `NULL` argument returns `NULL`, as in bean-query, so one
+row with no payee reads as a blank rather than failing the query:
+`substr(payee, 0, 2)` and `meta(payee)` are `NULL` where `payee` is, and
+`getitem(x, NULL, default)` is the default for a non-`NULL` `x` (a `NULL` `x`
+gives `NULL`). The exceptions: `coalesce` and `empty` exist to look at `NULL`;
+`joinstr` of several values skips the `NULL` ones; and, deliberately unlike
+bean-query, `convert` refuses a `NULL` target currency and `value` any `NULL`
+second argument, a currency or a date (it usually means an aggregate found no
+rows), `convert(NULL, 'USD')` is `0 USD` as an empty balance is, and a `NULL`
+date in `convert` or `getprice` means the latest price.
+
+`str(x)` renders any value as text. A position or inventory reads as Python
+prints it, as in bean-query: `10 USD`, `2 HOOL {100 USD, 2024-01-05}`,
+`(10 USD, 3 EUR)`, and `()` for an empty one. A set, metadata or an `entry`
+reads as its cell does (`t1, t2`, `{key: value}`), where bean-query prints the
+Python repr (`frozenset({'t1'})`).
+
 ### Date Functions
 
 | Function | Description | Example |
@@ -413,9 +430,9 @@ NULL, and amounts, positions and inventories compare in `ORDER BY`'s order
 |----------|-------------|
 | `cost(position)` | Convert to cost basis |
 | `units(position)` | Get units (number + currency) |
-| `currency(position)` | Get currency |
+| `currency(position)` | Get currency; of an inventory, its first held position's, `NULL` when it holds nothing |
 | `commodity(amount)` | Get the currency of an **amount** |
-| `number(amount)` | Extract number from amount |
+| `number(amount)` | Extract number from amount; of an inventory, the total when it holds one currency, `NULL` when it holds several or nothing |
 | `neg(x)` | Negate a number, amount, position or inventory; a position keeps its cost |
 | `abs(x)` | Absolute value of a number, position or inventory; a position keeps its cost |
 | `possign(x, account)` | Flip the sign for a credit-normal account (Income, Liabilities, Equity, including `name_*` renames), unchanged otherwise; takes a number, amount, position or inventory |
@@ -661,7 +678,8 @@ directives still active at the date, the last price of each currency pair,
 the opening-balance summaries, and every entry from the date on. `CLOSE ON`
 cuts off at the date, and `CLOSE` and `CLEAR` add their conversion and
 transfer entries. The filter reads each entry, whatever its type, the way the
-`#entries` table does: `narration` is NULL on an `open`, and
+`#entries` table does: `narration` is NULL on an `open`, as are `tags` and
+`links` on any entry but a transaction, note or document, and
 `has_account(regex)` matches the accounts the entry names.
 
 ## Subqueries

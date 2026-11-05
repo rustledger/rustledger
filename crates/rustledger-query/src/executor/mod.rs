@@ -437,10 +437,15 @@ mod window;
 /// hundreds of lots 2.35x smaller. 4 is the most conservative of them.
 const DETACH_ACCOUNT_BALANCE_AT: usize = 4;
 
-/// Default column names for `SELECT *` wildcard expansion.
+/// The columns `SELECT *` expands to over the postings.
+///
+/// They are bean-query's `PostingsTable.wildcard_columns`, for the default
+/// FROM and `FROM #postings` alike (#2829). rledger's default list also had `account`, and `#postings`
+/// gave every visible column, so a positional consumer of `SELECT *` saw a
+/// different shape. Every other column is still selectable by name.
+///
 /// This must match the order of values pushed in `evaluate_row()`.
-pub const WILDCARD_COLUMNS: &[&str] =
-    &["date", "flag", "payee", "narration", "account", "position"];
+pub const WILDCARD_COLUMNS: &[&str] = &["date", "flag", "payee", "narration", "position"];
 
 /// One column of a table: its name, its value type, and a one-line description.
 ///
@@ -2068,6 +2073,11 @@ impl<'a> Executor<'a> {
     /// Evaluate a function with pre-evaluated arguments (for subquery context).
     fn evaluate_function_on_values(&self, name: &str, args: &[Value]) -> Result<Value, QueryError> {
         let name_upper = name.to_uppercase();
+        if Self::is_null_in_null_out(&name_upper, args.len())
+            && args.iter().any(|a| matches!(a, Value::Null))
+        {
+            return Ok(Value::Null);
+        }
         match name_upper.as_str() {
             // Date functions
             "TODAY" => {
@@ -2176,9 +2186,14 @@ impl<'a> Executor<'a> {
                         // currency. Summing across different currencies is not meaningful.
                         // Single pass: track the first currency and running total, bail out
                         // to Null on any currency mismatch.
-                        let mut iter = inv.positions();
+                        //
+                        // An inventory that holds nothing (no positions, or only
+                        // zero ones, as a balance back at zero keeps) is NULL, as
+                        // `get` and `only` read it: a `0` could not be told from a
+                        // real zero holding (#2821).
+                        let mut iter = Self::held_positions(inv);
                         let Some(first) = iter.next() else {
-                            return Ok(Value::Number(Decimal::ZERO));
+                            return Ok(Value::Null);
                         };
                         let first_currency = &first.units.currency;
                         let mut total = first.units.number;
@@ -2221,8 +2236,10 @@ impl<'a> Executor<'a> {
                     Value::Amount(a) => Ok(Value::String(a.currency.to_string())),
                     Value::Position(p) => Ok(Value::String(p.units.currency.to_string())),
                     Value::Inventory(inv) => {
-                        // Return the currency of the first position, or Null if empty
-                        if let Some(pos) = inv.positions().next() {
+                        // The currency of the first position held, or NULL when it
+                        // holds nothing: a zero position left by a balance back at
+                        // zero names no currency (#2821), as for `NUMBER`.
+                        if let Some(pos) = Self::held_positions(inv).next() {
                             Ok(Value::String(pos.units.currency.to_string()))
                         } else {
                             Ok(Value::Null)
@@ -2682,7 +2699,9 @@ impl<'a> Executor<'a> {
                 let date: Option<rustledger_core::NaiveDate> = if args.len() == 3 {
                     match &args[2] {
                         Value::Date(d) => Some(*d),
-                        Value::Null => None, // NULL date uses latest price
+                        // NULL date uses latest price. Deliberately not
+                        // bean-query's NULL; see `is_null_in_null_out`.
+                        Value::Null => None,
                         _ => {
                             return Err(QueryError::Type(
                                 "CONVERT: third argument must be a date".to_string(),
@@ -2915,13 +2934,20 @@ impl<'a> Executor<'a> {
                     ));
                 }
                 match (&args[0], &args[1]) {
+                    // A NULL container is NULL whatever the key and default,
+                    // as bean-query's `GetItem3` returns None before it
+                    // reads the key (#2820 review). First, so the NULL-key
+                    // arm below cannot hand back the default for it.
+                    (Value::Null, _) => Ok(Value::Null),
                     // Container lookups delegate to the CANONICAL
                     // `getitem_entry`, shared with `[...]` subscript
                     // expressions so the two spellings cannot drift
                     // (#1800 review).
                     (container, Value::String(key)) => Ok(Self::getitem_entry(container, key)?
                         .unwrap_or_else(|| args.get(2).cloned().unwrap_or(Value::Null))),
-                    (Value::Null, _) => Ok(Value::Null),
+                    // A NULL key finds nothing, so the default stands in, as in
+                    // bean-query; with no default it is NULL (#2820).
+                    (_, Value::Null) if args.len() == 3 => Ok(args[2].clone()),
                     _ => Err(QueryError::Type(
                         "GETITEM expects (inventory, string), (metadata, string), or (object, string)"
                             .to_string(),
@@ -3378,6 +3404,41 @@ impl<'a> Executor<'a> {
             .map(|(k, v)| (k.clone(), Self::meta_value_to_value(Some(v))))
             .collect();
         Value::Object(Box::new(map))
+    }
+
+    /// Whether `name` called with `arity` arguments gives NULL when any
+    /// argument is NULL, before its own type checks run.
+    ///
+    /// bean-query's `@function` wrapper returns `None` as soon as any argument
+    /// is `None`, so one NULL row (a missing payee, an open account's close
+    /// date) reads as a blank instead of failing the whole query. These are
+    /// the functions that raised a type error on NULL instead (#2820); the
+    /// rest already pass NULL through in their own arms. Only valid arities
+    /// are listed, so a wrong argument count is still reported as one.
+    /// Deliberately kept, where bean-query gives NULL: `CONVERT` and `VALUE`
+    /// refuse a NULL target currency (#902); `convert(NULL, 'USD')` is
+    /// `0 USD`, as an empty balance converts to zero (#586); and a NULL date
+    /// in `convert` or `getprice` means the latest price.
+    fn is_null_in_null_out(name: &str, arity: usize) -> bool {
+        match name {
+            "WEEKDAY" | "YMONTH" | "ACCOUNT_DEPTH" => arity == 1,
+            "MAXWIDTH" | "STARTSWITH" | "ENDSWITH" | "DATE_ADD" | "DATE_DIFF" | "DATE_PART"
+            | "DATE_TRUNC" | "ROOT" | "POSSIGN" | "GETITEM" | "GET" => arity == 2,
+            "SPLITCOMP" | "GREPN" | "DATE_BIN" => arity == 3,
+            // bean-query's `joinstr` takes one set; rledger's also joins several
+            // values, skipping NULLs among them.
+            "JOINSTR" => arity == 1,
+            "SUBSTR" | "SUBSTRING" => arity == 2 || arity == 3,
+            "DATE" => arity == 1 || arity == 3,
+            "ROUND" | "INTERVAL" | "PARSE_DATE" => arity == 1 || arity == 2,
+            _ => false,
+        }
+    }
+
+    /// The positions an inventory actually holds: its non-empty ones, as
+    /// [`Inventory::is_empty`] counts them.
+    pub(super) fn held_positions(inv: &Inventory) -> impl Iterator<Item = &Position> + '_ {
+        inv.positions().filter(|p| !p.is_empty())
     }
 
     /// Helper to require a specific number of arguments (for pre-evaluated args).

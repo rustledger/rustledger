@@ -119,7 +119,9 @@ fn a_created_table_passes_the_posting_through() {
     let read_p = "SELECT date, account, weight(p), cost(p) FROM t ORDER BY date, account";
     for statements in [
         &["CREATE TABLE t AS SELECT date, account, position", read][..],
-        &["CREATE TABLE t AS SELECT *", read],
+        // The wildcard's `position`, with `account` added: the postings
+        // wildcard is bean-query's five columns, without it (#2829).
+        &["CREATE TABLE t AS SELECT *, account", read],
         &[
             "CREATE TABLE t AS SELECT date, account, position AS p",
             read_p,
@@ -128,7 +130,7 @@ fn a_created_table_passes_the_posting_through() {
             "CREATE TABLE t AS SELECT date, account, position FROM #postings",
             read,
         ],
-        &["CREATE TABLE t AS SELECT * FROM #postings", read],
+        &["CREATE TABLE t AS SELECT *, account FROM #postings", read],
         &[
             "CREATE TABLE t AS SELECT date, account, position FROM (SELECT date, account, position)",
             read,
@@ -367,7 +369,7 @@ fn select_star_position_is_the_position_column() {
     let directives = booked(LEDGER);
     let star: Vec<Value> = rows(&directives, &["SELECT * ORDER BY date, account"])
         .into_iter()
-        .map(|r| r[5].clone())
+        .map(|r| r[4].clone())
         .collect();
     let position: Vec<Value> = rows(&directives, &["SELECT position ORDER BY date, account"])
         .into_iter()
@@ -384,11 +386,11 @@ fn select_star_position_is_the_position_column() {
     );
     for statements in [
         &[
-            "CREATE TABLE t AS SELECT *",
+            "CREATE TABLE t AS SELECT *, account",
             &format!("SELECT account, sum(position), cost(sum(position)) FROM t {tail}"),
         ][..],
         &[&format!(
-            "SELECT account, sum(position), cost(sum(position)) FROM (SELECT *) {tail}"
+            "SELECT account, sum(position), cost(sum(position)) FROM (SELECT *, account) {tail}"
         )],
     ] {
         assert_eq!(rows(&directives, statements), direct, "{statements:?}");

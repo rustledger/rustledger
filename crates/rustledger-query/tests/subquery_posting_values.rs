@@ -66,7 +66,8 @@ fn rows(directives: &[Directive], bql: &str) -> Vec<Vec<Value>> {
 }
 
 /// Every way a subquery can hand the posting column through: named, from
-/// `SELECT *`, renamed, nested, and over `#postings`.
+/// `SELECT *` (with `account` added: the postings wildcard is bean-query's
+/// five columns, #2829), renamed, nested, and over `#postings`.
 #[test]
 fn a_subquery_passes_the_posting_through() {
     let directives = booked(LEDGER);
@@ -79,7 +80,7 @@ fn a_subquery_passes_the_posting_through() {
         "SELECT date, account, weight(position), cost(position) \
          FROM (SELECT date, account, position) ORDER BY date, account",
         "SELECT date, account, weight(position), cost(position) \
-         FROM (SELECT *) ORDER BY date, account",
+         FROM (SELECT *, account) ORDER BY date, account",
         "SELECT date, account, weight(p), cost(p) \
          FROM (SELECT date, account, position AS p) ORDER BY date, account",
         "SELECT date, account, weight(position), cost(position) \
@@ -92,7 +93,7 @@ fn a_subquery_passes_the_posting_through() {
          FROM (SELECT date, account, position FROM #postings) \
          ORDER BY date, account",
         "SELECT date, account, weight(position), cost(position) \
-         FROM (SELECT * FROM #postings) ORDER BY date, account",
+         FROM (SELECT *, account FROM #postings) ORDER BY date, account",
         "SELECT date, account, weight(position), cost(position) \
          FROM (SELECT * FROM (SELECT date, account, position)) ORDER BY date, account",
     ] {

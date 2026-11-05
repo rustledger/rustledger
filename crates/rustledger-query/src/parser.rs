@@ -67,13 +67,45 @@ const PARSE_STACK_SIZE: usize = 16 * 1024 * 1024;
 /// string scanner exists: `completions::tokenize_bql`, a heuristic
 /// completion-context tokenizer that only understands double quotes —
 /// see its doc comment for the divergence rationale.)
+///
+/// A run of unary `-` counts toward the same depth, as each sign nests the
+/// expression after it one level: the grammar caps a run on its own, but
+/// 128 signs before each of 20 brackets would nest 2,580 levels and overflow
+/// the parse thread's stack (#2830 review). The scan cannot tell a binary
+/// `-` from a unary one, so every `-` counts: a bracket written right after
+/// a `-` costs two levels, its own and the sign's. A chain that nests a
+/// bracket after each binary minus, `a - (b - (c - (...)))`, therefore
+/// reaches the limit at half the brackets an unsigned one would
+/// (`a + (b + (...`). A run of signs followed by anything but a bracket
+/// stops counting at that token, so `a - b` and `-x` cost no lasting level.
 fn nesting_exceeds_limit(source: &str) -> Option<usize> {
+    scan_delimiters(source).too_deep
+}
+
+/// What [`scan_delimiters`] finds: where nesting first passes the limit, and
+/// the brackets and quotes still open at the end, by offset.
+struct DelimiterScan {
+    too_deep: Option<usize>,
+    unclosed: Vec<(usize, char)>,
+}
+
+/// One pass over `source`'s brackets, quotes and sign runs; see
+/// [`nesting_exceeds_limit`] for the lexing rules it shares with the grammar.
+fn scan_delimiters(source: &str) -> DelimiterScan {
+    // Each open bracket's offset and the depth it added: itself plus the
+    // signs pending before it.
+    let mut open: Vec<(usize, usize)> = Vec::new();
     let mut depth: usize = 0;
+    let mut signs: usize = 0;
+    let mut too_deep = None;
+    let mut unclosed_quote = None;
     let mut chars = source.char_indices().peekable();
     while let Some((i, c)) = chars.next() {
         match c {
             '"' | '\'' => {
+                signs = 0;
                 // Consume the string body so its parens don't count.
+                let mut closed = false;
                 while let Some((_, sc)) = chars.next() {
                     if sc == c {
                         // `''` continues a single-quoted string.
@@ -81,21 +113,42 @@ fn nesting_exceeds_limit(source: &str) -> Option<usize> {
                             chars.next();
                             continue;
                         }
+                        closed = true;
                         break;
                     }
                 }
-            }
-            '(' => {
-                depth += 1;
-                if depth > MAX_NESTING_DEPTH {
-                    return Some(i);
+                if !closed {
+                    unclosed_quote = Some((i, c));
                 }
             }
-            ')' => depth = depth.saturating_sub(1),
-            _ => {}
+            '(' => {
+                let added = 1 + signs;
+                signs = 0;
+                depth += added;
+                open.push((i, added));
+                if depth > MAX_NESTING_DEPTH {
+                    too_deep.get_or_insert(i);
+                }
+            }
+            ')' => {
+                signs = 0;
+                if let Some((_, added)) = open.pop() {
+                    depth -= added;
+                }
+            }
+            '-' => {
+                signs += 1;
+                if depth + signs > MAX_NESTING_DEPTH {
+                    too_deep.get_or_insert(i);
+                }
+            }
+            c if c.is_whitespace() => {}
+            _ => signs = 0,
         }
     }
-    None
+    let mut unclosed: Vec<(usize, char)> = open.into_iter().map(|(i, _)| (i, '(')).collect();
+    unclosed.extend(unclosed_quote);
+    DelimiterScan { too_deep, unclosed }
 }
 
 /// `source` with every `/* ... */` comment outside a string literal replaced
@@ -237,6 +290,41 @@ fn parse_on_current_stack(source: &str) -> Result<Query, ParseError> {
     {
         Ok(query)
     } else {
+        // When every statement fails, the error reported is the last
+        // alternative's `kw` refusal at the statement keyword (`expected
+        // keyword 'PRINT'` over `SELECT`), not the one the named statement
+        // failed with further in, so ``SELECT `payee` `` read as an error in
+        // `SELECT` at position 0 (#2830). Ask the statement the keyword names
+        // for its own error instead.
+        let narrowed;
+        let errs = if !parsed
+            && errs
+                .first()
+                .is_some_and(|e| e.span().start == source.len() - source.trim_start().len())
+        {
+            narrowed = statement_errors(source);
+            if narrowed.is_empty() { errs } else { narrowed }
+        } else {
+            errs
+        };
+        // A bracket or quote never closed is what the parser trips over at
+        // its opener (`SELECT (1` read as "found '('"), so name the missing
+        // closer at the end, where it belongs.
+        if !parsed
+            && let Some(first) = errs.first()
+            && let Some(&(opened, opener)) = scan_delimiters(source)
+                .unclosed
+                .iter()
+                .find(|(at, _)| *at == first.span().start)
+        {
+            let closer = if opener == '(' { ')' } else { opener };
+            return Err(ParseError::new(
+                ParseErrorKind::SyntaxError(format!(
+                    "expected '{closer}' to close the '{opener}' at position {opened}"
+                )),
+                source.len(),
+            ));
+        }
         let err = errs.first().map(|e| {
             let start = e.span().start;
             let kind = if parsed {
@@ -266,6 +354,39 @@ fn parse_on_current_stack(source: &str) -> Result<Query, ParseError> {
             ParseError::new(kind, start)
         });
         Err(err.unwrap_or_else(|| ParseError::new(ParseErrorKind::UnexpectedEof, 0)))
+    }
+}
+
+/// The errors of the one statement parser `source`'s first keyword names,
+/// run as [`query_parser`] runs it, or none when the first word names no
+/// statement. See the narrowing in [`parse_on_current_stack`].
+fn statement_errors(source: &str) -> Vec<Rich<'_, char>> {
+    fn run<'a, P>(statement: P, source: &'a str) -> Vec<Rich<'a, char>>
+    where
+        P: Parser<'a, ParserInput<'a>, (), ParserExtra<'a>>,
+    {
+        ws().ignore_then(statement)
+            .then_ignore(ws())
+            .then_ignore(just(';').or_not())
+            .then_ignore(ws())
+            .then_ignore(end())
+            .parse(source)
+            .into_errors()
+    }
+    let keyword = source
+        .trim_start()
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .next()
+        .unwrap_or("")
+        .to_ascii_uppercase();
+    match keyword.as_str() {
+        "SELECT" => run(select_query().ignored(), source),
+        "CREATE" => run(create_table_stmt().ignored(), source),
+        "INSERT" => run(insert_stmt().ignored(), source),
+        "JOURNAL" => run(journal_query().ignored(), source),
+        "BALANCES" => run(balances_query().ignored(), source),
+        "PRINT" => run(print_query().ignored(), source),
+        _ => Vec::new(),
     }
 }
 
@@ -843,7 +964,9 @@ fn expr<'a>() -> Boxed<'a, 'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
                 .then_ignore(just(']'))
                 .map(Postfix::Sub),
         ));
-        let primary = primary_expr(expr.clone())
+        let atom = primary_expr(expr.clone()).boxed();
+        let primary = atom
+            .clone()
             .foldl(postfix.repeated(), |operand, p| match p {
                 Postfix::Attr(name) => Expr::Attribute {
                     operand: Box::new(operand),
@@ -856,17 +979,54 @@ fn expr<'a>() -> Boxed<'a, 'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
             })
             .boxed();
 
-        // Unary minus
+        // Unary signs as beanquery's grammar has them (#2830): `-` stacks
+        // (`---6` is -6, `-- 6` is 6) and may be followed by a `+`, but a `+`
+        // (`uplus: '+' atom`) takes a bare atom only, so `-+6` is -6 while
+        // `++6`, `+-6`, `+(1)` and `+x.y` are syntax errors there and here,
+        // as is any sign before `*` (see the check below).
+        // A run of `-` is bounded by the nesting limit, and
+        // `nesting_exceeds_limit` counts it toward the same depth as the
+        // brackets around it, so signs and brackets cannot multiply into a
+        // stack overflow.
+        let plus_atom = just('+')
+            .ignore_then(ws())
+            // Not a bracket and not a sign: `-6` reads as a literal here, but
+            // bean-query's atom has no sign, so `+-6` is refused there.
+            // bean-query's atom does include a list constant, so it takes
+            // `+(1, 2)` and `'a' IN +('a', 'b')`; rledger has no list
+            // constant outside `IN` (`SELECT (1, 2)` is refused too), so every
+            // `+(` is refused here, a known gap. The `*` wildcard parses here
+            // so that the check below can name it.
+            .ignore_then(
+                atom.clone()
+                    .and_is(one_of("(-+").not())
+                    .map_with(|e, x| (true, e, x.span())),
+            );
+        let operand = choice((
+            plus_atom,
+            primary.clone().map_with(|e, x| (false, e, x.span())),
+        ));
         let unary = just('-')
             .then_ignore(ws())
-            .or_not()
-            .then(primary)
-            .map(|(neg, e)| {
-                if neg.is_some() {
-                    Expr::unary(UnaryOperator::Neg, e)
-                } else {
-                    e
+            .repeated()
+            .at_most(MAX_NESTING_DEPTH)
+            .count()
+            .then(operand)
+            // `*` is no atom of bean-query's, so no sign takes it: `SELECT
+            // +*`, `-*`, `--*`, `count(--*)` and `WHERE --*` are syntax
+            // errors there, and here. `WHERE --*` parsed and gave no rows,
+            // and `SELECT --*` failed only on a row ("negation requires
+            // numeric value"). Reported at the `*` by `validate`, which keeps
+            // the parse, so the error names the `*` rather than suggesting,
+            // at the sign, that a `*` was what the target list expected.
+            .validate(|(negations, (plus, e, span)), _, emitter| {
+                if (plus || negations > 0) && matches!(e, Expr::Wildcard) {
+                    emitter.emit(Rich::custom(
+                        span,
+                        "'*' is not a value, so a sign cannot apply to it",
+                    ));
                 }
+                (0..negations).fold(e, |acc, _| Expr::unary(UnaryOperator::Neg, acc))
             })
             .boxed();
 
@@ -1377,18 +1537,29 @@ fn date_literal<'a>() -> impl Parser<'a, ParserInput<'a>, NaiveDate, ParserExtra
 /// semantics and lets functions that strictly require integer arguments
 /// (e.g. `ROOT(account, n)`, `SUBSTR(s, start, len)`) work with literal
 /// arguments. See issue #938.
+///
+/// A dot may start or end a decimal, as in beanquery (#2830): `.5` is 0.5 and
+/// `5.` is the decimal 5. A lone `.` is not a number.
 fn number_literal<'a>() -> impl Parser<'a, ParserInput<'a>, Literal, ParserExtra<'a>> + Clone {
+    // `5`, `5.5` or `5.` (the digits after the dot may be absent) ...
+    let int_first = digits()
+        .then(just('.').ignore_then(digits().or_not()).or_not())
+        .map(|(int_part, frac): (&str, Option<Option<&str>>)| (Some(int_part), frac));
+    // ... or `.5` (no digits before the dot, at least one after).
+    let dot_first = just('.')
+        .ignore_then(digits())
+        .map(|frac: &str| (None, Some(Some(frac))));
     just('-')
         .or_not()
-        .then(digits())
-        .then(just('.').then(digits()).or_not())
+        .then(choice((int_first, dot_first)))
         .try_map(
-            |((neg, int_part), frac_part): ((Option<char>, &str), Option<(char, &str)>), span| {
+            |(neg, (int_part, frac_part)): (Option<char>, (Option<&str>, Option<Option<&str>>)),
+             span| {
                 let mut s = String::new();
                 if neg.is_some() {
                     s.push('-');
                 }
-                s.push_str(int_part);
+                s.push_str(int_part.unwrap_or("0"));
                 match frac_part {
                     None => match s.parse::<i64>() {
                         Ok(i) => Ok(Literal::Integer(i)),
@@ -1397,9 +1568,12 @@ fn number_literal<'a>() -> impl Parser<'a, ParserInput<'a>, Literal, ParserExtra
                             .map(Literal::Number)
                             .map_err(|_| Rich::custom(span, "invalid number")),
                     },
-                    Some((_, frac)) => {
-                        s.push('.');
-                        s.push_str(frac);
+                    Some(frac) => {
+                        // `5.` is the decimal 5, as `Decimal('5.')` is.
+                        if let Some(frac) = frac {
+                            s.push('.');
+                            s.push_str(frac);
+                        }
                         Decimal::from_str(&s)
                             .map(Literal::Number)
                             .map_err(|_| Rich::custom(span, "invalid number"))

@@ -724,10 +724,17 @@ impl Executor<'_> {
         // `query_references_column` doesn't see through the wildcard — so treat a
         // wildcard target as referencing `balance`, else `SELECT * FROM #postings
         // WHERE ...` would still emit the pre-WHERE snapshot.
+        // Only where the wildcard shows `balance`: `#postings`' wildcard is
+        // bean-query's five columns (#2829), so `SELECT * FROM #postings`
+        // must not pay for a running inventory it never prints (#1080).
         let selects_all = query
             .targets
             .iter()
-            .any(|t| matches!(t.expr, Expr::Wildcard));
+            .any(|t| matches!(t.expr, Expr::Wildcard))
+            && !table
+                .hidden
+                .iter()
+                .any(|h| h.eq_ignore_ascii_case("balance"));
         let track_balance = balance_idx.is_some()
             && position_idx.is_some()
             && (selects_all || super::query_references_column(query, "balance"));
@@ -1357,7 +1364,7 @@ impl Executor<'_> {
         // (`transform_journal`), checked before any row is read (#2826).
         let at_other = match (at_mode, query.at_function.as_deref()) {
             (AtMode::Other, Some(name)) => {
-                self.check_at_function(name)?;
+                self.check_at_function(name, true)?;
                 Some(name)
             }
             _ => None,
@@ -1578,15 +1585,20 @@ impl Executor<'_> {
     /// `f(position)` (#2826): an unknown function, one that does not take a
     /// single argument, or one that does not map a position to an amount,
     /// position or inventory is an error before any row is read, and an
-    /// aggregate is refused as `sum(sum(position))` is.
+    /// aggregate is refused as `sum(sum(position))` is. For `JOURNAL`
+    /// (`journal`), which shows each cell without summing it, a function
+    /// that renders a position as text (`str`) is taken too, as bean-query
+    /// takes it; `BALANCES` refuses it as bean-query refuses `sum(str)`.
+    /// Only `str` is taken so: bean-query has no `currency(position)`.
     ///
     /// # Errors
     ///
     /// [`QueryError::Aggregation`] for an aggregate; the function lookup's
     /// own error for an unknown name or a wrong argument count; and
     /// [`QueryError::UnknownFunction`] naming `f(position)` for a function
-    /// that does not take or give a position, as bean-query words it.
-    fn check_at_function(&self, name: &str) -> Result<(), QueryError> {
+    /// that does not take or give a position, as bean-query words it, or
+    /// `sum(str)` for a text-valued one under `BALANCES`.
+    fn check_at_function(&self, name: &str, journal: bool) -> Result<(), QueryError> {
         if Self::is_aggregate_function(name) {
             return Err(QueryError::Aggregation(
                 "aggregates of aggregates are not allowed".to_string(),
@@ -1613,6 +1625,19 @@ impl Executor<'_> {
         )));
         match self.evaluate_function_on_values(name, &[sample]) {
             Ok(Value::Amount(_) | Value::Position(_) | Value::Inventory(_)) => Ok(()),
+            // `str` is the one text-valued function bean-query types on a
+            // position (`currency(position)` and the like it refuses, so a
+            // text result alone does not qualify). JOURNAL shows `f(position)`
+            // and `f(balance)` as cells and never sums them, so bean-query
+            // runs `JOURNAL ... AT str`; BALANCES sums them, and bean-query
+            // refuses `sum(str)` there.
+            Ok(Value::String(_)) if name.eq_ignore_ascii_case("STR") => {
+                if journal {
+                    Ok(())
+                } else {
+                    Err(QueryError::UnknownFunction("sum(str)".to_string()))
+                }
+            }
             _ => Err(QueryError::UnknownFunction(format!("{name}(position)"))),
         }
     }
@@ -1675,7 +1700,7 @@ impl Executor<'_> {
             .as_deref()
             .filter(|f| !f.eq_ignore_ascii_case("COST") && !f.eq_ignore_ascii_case("UNITS"));
         if let Some(at_func) = at_other {
-            self.check_at_function(at_func)?;
+            self.check_at_function(at_func, false)?;
         }
         // A double-quoted string naming a posting column, in the FROM filter
         // or the WHERE, is that column, as in bean-query, whose BALANCES is a

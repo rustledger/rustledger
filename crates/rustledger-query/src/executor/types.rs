@@ -823,6 +823,37 @@ impl Table {
         self
     }
 
+    /// Make `SELECT *` expand to exactly `wildcard`, hiding every other
+    /// column (still selectable by name). For a table whose bean-query
+    /// wildcard is a short explicit list rather than "everything but a few":
+    /// `#postings`, whose wildcard is `PostingsTable.wildcard_columns`.
+    ///
+    /// # Panics
+    ///
+    /// In debug builds, if `wildcard` names a column this table does not
+    /// have, or lists them in another order than the table's: the expansion
+    /// keeps table order, so a list out of order would silently show its
+    /// columns in a different order than written.
+    #[must_use]
+    pub fn with_wildcard(self, wildcard: &[&str]) -> Self {
+        let positions: Vec<Option<usize>> = wildcard
+            .iter()
+            .map(|w| self.columns.iter().position(|c| c.eq_ignore_ascii_case(w)))
+            .collect();
+        debug_assert!(
+            positions.iter().all(Option::is_some) && positions.windows(2).all(|p| p[0] < p[1]),
+            "with_wildcard: {wildcard:?} must be columns of {:?}, in table order",
+            self.columns
+        );
+        let hidden = self
+            .columns
+            .iter()
+            .filter(|c| !wildcard.iter().any(|w| w.eq_ignore_ascii_case(c)))
+            .cloned()
+            .collect();
+        Self { hidden, ..self }
+    }
+
     /// Add a row to the table.
     pub fn add_row(&mut self, row: Vec<Value>) {
         self.add_row_with_origin(row, None);

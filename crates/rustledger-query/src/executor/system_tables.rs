@@ -929,27 +929,25 @@ impl Executor<'_> {
                 // about the same directive (#2154). A column-presence census
                 // cannot see this: `tags` IS registered on `#entries`, it was
                 // just wrong for every directive except transactions.
+                // A directive kind that has no tags or links (`open`, `balance`,
+                // `price`, ...) has them NULL, as bean-query reads them with
+                // `getattr(entry, 'tags', None)`: an empty set made `tags IS
+                // NULL`, `length(tags)` and `str(tags)` answer differently (#2822).
                 let (tags, links, accounts) = match directive {
-                    Directive::Open(open) => {
-                        (Vec::new(), Vec::new(), vec![open.account.to_string()])
-                    }
-                    Directive::Close(close) => {
-                        (Vec::new(), Vec::new(), vec![close.account.to_string()])
-                    }
-                    Directive::Balance(bal) => {
-                        (Vec::new(), Vec::new(), vec![bal.account.to_string()])
-                    }
+                    Directive::Open(open) => (None, None, vec![open.account.to_string()]),
+                    Directive::Close(close) => (None, None, vec![close.account.to_string()]),
+                    Directive::Balance(bal) => (None, None, vec![bal.account.to_string()]),
                     Directive::Document(doc) => (
-                        doc.tags.iter().map(ToString::to_string).collect(),
-                        doc.links.iter().map(ToString::to_string).collect(),
+                        Some(doc.tags.iter().map(ToString::to_string).collect()),
+                        Some(doc.links.iter().map(ToString::to_string).collect()),
                         vec![doc.account.to_string()],
                     ),
                     // `note` carries them too, since #2160 gave `Note` the
                     // fields. This arm was Document-only because a note's
                     // tags did not survive parsing; the comment above said so.
                     Directive::Note(note) => (
-                        note.tags.iter().map(ToString::to_string).collect(),
-                        note.links.iter().map(ToString::to_string).collect(),
+                        Some(note.tags.iter().map(ToString::to_string).collect()),
+                        Some(note.links.iter().map(ToString::to_string).collect()),
                         vec![note.account.to_string()],
                     ),
                     // A set, as beancount's `get_entry_accounts` returns: sorted
@@ -960,17 +958,17 @@ impl Executor<'_> {
                             vec![pad.account.to_string(), pad.source_account.to_string()];
                         accounts.sort();
                         accounts.dedup();
-                        (Vec::new(), Vec::new(), accounts)
+                        (None, None, accounts)
                     }
-                    _ => (Vec::new(), Vec::new(), Vec::new()),
+                    _ => (None, None, Vec::new()),
                 };
                 (
                     Value::Null,
                     Value::Null,
                     Value::Null,
                     Value::Null,
-                    Value::StringSet(tags),
-                    Value::StringSet(links),
+                    tags.map_or(Value::Null, Value::StringSet),
+                    links.map_or(Value::Null, Value::StringSet),
                     Value::StringSet(accounts),
                 )
             };
@@ -1040,7 +1038,9 @@ impl Executor<'_> {
                 .position(|c| c == "position")
                 .expect("#postings has a position column"),
         ]);
-        let mut table = Table::new(columns);
+        // `SELECT *` here gives bean-query's postings wildcard, the same five
+        // columns as the default FROM (#2829).
+        let mut table = Table::new(columns).with_wildcard(super::WILDCARD_COLUMNS);
 
         // Single posting-source scan, shared with the default `SELECT` path
         // ([`Self::collect_postings`]): every posting in directive order, with no
@@ -1079,19 +1079,13 @@ impl Executor<'_> {
                 //     the snapshot before the row was built, and
                 //     `WHERE account_balance != 0` then matched nothing.
                 //
-                // A wildcard reads every column, and unlike the default
-                // source -- whose `WILDCARD_COLUMNS` excludes both -- this
-                // table's `SELECT *` includes `balance` and
-                // `account_balance`, so it must force both on.
+                // A wildcard reads neither: this table's `SELECT *` is the
+                // default source's `WILDCARD_COLUMNS` (#2829), which excludes
+                // both.
                 {
-                    let wildcard = query
-                        .targets
-                        .iter()
-                        .any(|t| matches!(t.expr, crate::ast::Expr::Wildcard));
-                    let account_balance =
-                        wildcard || super::query_references_column(query, "account_balance");
+                    let account_balance = super::query_references_column(query, "account_balance");
                     super::ScanNeeds {
-                        balance: wildcard || super::query_references_column(query, "balance"),
+                        balance: super::query_references_column(query, "balance"),
                         account_balance,
                         where_reads_balance: false,
                         where_reads_account_balance: false,
@@ -1117,23 +1111,17 @@ impl Executor<'_> {
         // #2173 effect at 457.4M -> 244.2M instructions, which does not move
         // with machine load the way the wall clock does.
         //
-        // A wildcard forces on only what it can actually SHOW. This table's
-        // `SELECT *` emits `meta` but omits `entry` and the two `_`-prefixed
-        // metadata helpers -- `Executor::wildcard_hidden` drops the structured
-        // entry column to match beanquery, and underscore columns with it. So
-        // a bare `SELECT *` never observes those three, and forcing them on
-        // would be pure waste. Reaching them from a wildcard query still
-        // works, because `ORDER BY entry.narration` or `meta('k')` names or
-        // calls its way in and is picked up below.
-        let wildcard = query
-            .targets
-            .iter()
-            .any(|t| matches!(t.expr, crate::ast::Expr::Wildcard));
+        // A wildcard forces nothing on: this table's `SELECT *` is the five
+        // `WILDCARD_COLUMNS` (#2829), none of them `entry`, `meta` or a
+        // metadata helper. Reaching them from a wildcard query still works,
+        // because `ORDER BY entry.narration` or `meta('k')` names or calls its
+        // way in and is picked up below.
+        //
         // `entry` is reachable as a bare column and as `entry.narration`;
         // `expr_references_column` recurses into `Attribute`/`Subscript`
         // operands, so the bare name covers both.
         let needs_entry = super::query_references_column(query, "entry");
-        let needs_meta = wildcard || super::query_references_column(query, "meta");
+        let needs_meta = super::query_references_column(query, "meta");
         // The hidden metadata columns are read by FUNCTION, not by name:
         // `eval_meta_on_table_row` is dispatched for exactly these four, and
         // reads `_posting_meta` / `_entry_meta` off the row. A query calling

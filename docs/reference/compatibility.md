@@ -552,6 +552,55 @@ really off (`-999.99 USD` here) is still refused. The BQL `weight` column
 uses the same written total (#2031). Pinned by
 `crates/rustledger-loader/tests/total_price_face_value_test.rs` (issue #2831).
 
+### 19. Amount Alignment With Wide Characters
+
+`rledger format` aligns amounts by display width: the number of cells an
+account name takes in a monospaced editor. East Asian Wide and Fullwidth
+characters take two cells, combining marks none, and ambiguous-width
+characters one (as most terminals render them). Emoji take the width
+`unicode-width` gives them (two cells for emoji-presentation characters).
+
+bean-format 3.2.3 handles such accounts in one of two ways, neither of which
+lines the amounts up:
+
+- **It leaves the line as written.** Its alignment regex,
+  `[\p{Lu}][\p{L}\p{Nd}\-]*(?::[\p{Lu}\p{Nd}][\p{L}\p{Nd}\-]*)+` followed by
+  whitespace, needs each component after the root to start with an uppercase
+  letter or a digit, and every character to be a letter, a digit or a hyphen.
+  So a posting to `Expenses:생활` or `Expenses:食品` (a component starting with
+  a letter that has no case) does not match, and neither does an account with
+  an emoji (`Assets:CORP✨`) or a combining mark anywhere in it (`Expenses:Cafe`
+  followed by U+0301 COMBINING ACUTE ACCENT, a decomposed `é`). bean-format
+  keeps whatever spacing such a line has, while still aligning every
+  matching line, in that transaction and elsewhere in the file, to its one
+  file-wide column. (A precomposed `Expenses:Café`, with U+00E9, matches;
+  `é` takes one cell, so both tools align it the same way.)
+- **It pads by code points.** When the account does match but contains a
+  wide character (`Expenses:X생활`, fullwidth `Expenses:Ｆｏｏｄ`), the line is
+  padded with Python's `len()`, so the wide character puts the amount further
+  right on screen. Emoji and combining marks never reach this case; they
+  always leave the line as written:
+
+```beancount
+2021-01-02 * "x"
+  Expenses:X생활   12345 KRW
+  Assets:Bank   -12345 KRW
+```
+
+That is bean-format's output: `Expenses:X생활` and `Assets:Bank` get the
+same padding, so the Korean amount starts two cells to the right. rustledger
+writes both kinds of line with the amounts ending in the same column on
+screen.
+
+This is deliberate: lining amounts up on screen is what alignment is for.
+Only files with wide or combining characters in an account name or posting
+flag are affected; for ASCII-only text, rledger's amount alignment is
+unchanged by this. (It still differs from bean-format's in other ways:
+bean-format also aligns dated `balance` and `price` lines, which widen the
+posting column, and leaves other spacing as written, such as the gaps inside
+`2021-01-01   open  Assets:Bank   USD`.) Pinned by
+`crates/rustledger-parser/tests/format_display_width.rs` (issue #2852).
+
 ## BQL Query Compatibility
 
 BQL (Beancount Query Language) compatibility was tested with 11 standard queries on 50 files:

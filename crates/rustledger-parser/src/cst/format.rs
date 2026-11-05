@@ -94,8 +94,8 @@ use crate::cst::ast::{self, AstNode, AstToken, MetaEntry, SourceFile};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PostingAlignment {
-    /// 0-indexed column at which the right-justified number field
-    /// starts.
+    /// 0-indexed column, in display cells ([`display_width`]), at which the
+    /// right-justified number field starts.
     pub number_col: usize,
     /// Width of the number field; shorter numbers are left-padded
     /// with spaces so the currency column stays uniform.
@@ -152,6 +152,36 @@ impl<'a> GroupingStyle<'a> {
 
 /// Two-space indent for directive bodies (postings, metadata).
 const INDENT: &str = "  ";
+
+/// The number of terminal cells `s` occupies in a monospaced editor.
+///
+/// East Asian Wide and Fullwidth characters take 2, combining marks and other
+/// zero-width characters 0, and ambiguous-width characters 1 (as most
+/// terminals render them). Emoji take what `unicode-width` gives them (2 for
+/// emoji-presentation characters).
+///
+/// Deliberately different from bean-format 3.2.3, which never lines such
+/// amounts up (#2852): its alignment regex needs each account component after
+/// the root to start with an uppercase letter or a digit, and every character
+/// to be a letter, a digit or a hyphen. So a line like
+/// `Expenses:생활  12345 KRW`, or one with an emoji or a combining mark in the
+/// account, is left as written, and a line that does match (`Expenses:X생활`,
+/// fullwidth `Ｆｏｏｄ`) is padded by code points (Python's `len()`), which
+/// puts a wide character's amount further right on screen.
+/// So files with wide or combining characters in an account name format
+/// differently from bean-format; ASCII-only alignment is unchanged by this.
+/// See `docs/reference/compatibility.md`, "Amount Alignment With Wide
+/// Characters".
+///
+/// Every alignment computation goes through this function, so the width
+/// pre-pass (`compute_alignment`) and the emitter (`emit_posting`) cannot
+/// disagree; [`PostingAlignment`]'s columns are in these cells. Callers
+/// outside the formatter that place text against those columns (the LSP's
+/// inferred-amount inlay hint) must measure with it too.
+#[must_use]
+pub fn display_width(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
 
 /// Format a Beancount source file in opinionated canonical form.
 ///
@@ -1444,13 +1474,7 @@ fn format_node_range_with_style(
         let (kind, child_range) = (el.kind(), el.text_range());
         let is_formattable = match &el {
             rowan::NodeOrToken::Node(n) => ast::Directive::cast(n.clone()).is_some(),
-            rowan::NodeOrToken::Token(_) => matches!(
-                kind,
-                crate::SyntaxKind::COMMENT
-                    | crate::SyntaxKind::PERCENT_COMMENT
-                    | crate::SyntaxKind::SHEBANG
-                    | crate::SyntaxKind::EMACS_DIRECTIVE
-            ),
+            rowan::NodeOrToken::Token(_) => super::convert::is_comment_kind(kind),
         };
         if !is_formattable {
             continue;
@@ -1460,7 +1484,20 @@ fn format_node_range_with_style(
         }
         any_included = true;
         snap_start = Some(snap_start.map_or(child_range.start(), |s| s.min(child_range.start())));
-        snap_end = Some(snap_end.map_or(child_range.end(), |e| e.max(child_range.end())));
+        // A directive owns the NEWLINE that ends it; a top-level comment
+        // token does not, but its emitted line ends with one. Take the
+        // comment's own NEWLINE into the snap, so the replacement covers
+        // the line it writes instead of adding a blank line on every run
+        // (#2838).
+        let end = if let rowan::NodeOrToken::Token(t) = &el
+            && let Some(next) = t.next_sibling_or_token()
+            && next.kind() == crate::SyntaxKind::NEWLINE
+        {
+            next.text_range().end()
+        } else {
+            child_range.end()
+        };
+        snap_end = Some(snap_end.map_or(end, |e| e.max(end)));
     }
     if !any_included {
         return None;
@@ -1628,10 +1665,10 @@ pub fn compute_alignment(sf: &SourceFile, style: GroupingStyle<'_>) -> PostingAl
             };
             let mut lhs = 0usize;
             if let Some(flag) = p.flag() {
-                lhs += flag.text().chars().count() + 1; // `! ` etc.
+                lhs += display_width(flag.text()) + 1; // `! ` etc.
             }
             if let Some(account) = p.account() {
-                lhs += account.text().chars().count();
+                lhs += display_width(account.text());
             }
 
             // Only postings that render a number drive the alignment
@@ -1651,7 +1688,7 @@ pub fn compute_alignment(sf: &SourceFile, style: GroupingStyle<'_>) -> PostingAl
             {
                 any_aligned_posting = true;
                 max_lhs = max_lhs.max(lhs);
-                max_num = max_num.max(text.chars().count());
+                max_num = max_num.max(display_width(&text));
             }
         }
     }
@@ -2493,14 +2530,14 @@ fn emit_posting(
     if let Some(flag) = p.flag() {
         out.push_str(flag.text());
         out.push(' ');
-        col += flag.text().chars().count() + 1;
+        col += display_width(flag.text()) + 1;
     }
     let account_text = p
         .account()
         .map(|a| a.text().to_string())
         .unwrap_or_default();
     out.push_str(&account_text);
-    col += account_text.chars().count();
+    col += display_width(&account_text);
 
     if let Some(amt) = p.amount() {
         // `amount_number_text` is the shared "does this render a number?"
@@ -2516,7 +2553,7 @@ fn emit_posting(
             //      lands at a single uniform position file-wide even
             //      when numbers have different widths or signs.
             let field_pad = align.number_col.saturating_sub(col).max(2);
-            let justify_pad = align.number_width.saturating_sub(value.chars().count());
+            let justify_pad = align.number_width.saturating_sub(display_width(&value));
             for _ in 0..(field_pad + justify_pad) {
                 out.push(' ');
             }
@@ -5593,6 +5630,24 @@ mod tests {
             "snap range should be the whole file's textual span"
         );
         assert_eq!(formatted, format_node(&node));
+    }
+
+    /// The whole-file range matches `format_node` with top-level comments
+    /// too: a trailing comment, consecutive comments, and a comment-only file
+    /// gained a blank line on the range path before #2838.
+    #[test]
+    fn format_node_range_full_range_matches_format_node_with_comments() {
+        for source in [
+            "2024-01-01 open Assets:A\n; c\n",
+            "; c\n; d\n",
+            "; c\n",
+            "; c\n2024-01-01 open Assets:A\n; d\n",
+        ] {
+            let (node, src) = parse_for_range(source);
+            let full = rowan::TextRange::new(ts(0), ts(src.len()));
+            let (_, formatted) = format_node_range(&node, full).expect("a range over the file");
+            assert_eq!(formatted, format_node(&node), "{source:?}");
+        }
     }
 
     /// A selection that hits only inter-directive whitespace

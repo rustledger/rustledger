@@ -3436,6 +3436,7 @@ dependencies = [
  "rustledger-core",
  "serde",
  "serde_json",
+ "unicode-width 0.2.2",
 ]
 
 [[package]]

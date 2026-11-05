@@ -417,7 +417,9 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
             // top-level error-recovery path which emits a
             // `SyntaxError("unexpected input")` for the failed
             // span so downstream tooling sees the same shape.
-            let span = node_span(&cst_node, bom_offset);
+            // The node's span takes in the blank and comment lines before it;
+            // the error starts at the header, where beancount reports it.
+            let mut span = node_span(&cst_node, bom_offset);
             // Where beancount's grammar fails on the header line, so a bad
             // date after that point does not swallow this error
             // (`report_invalid_dates`).
@@ -434,6 +436,7 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
                     stripped,
                 )
                 .map_or(usize::MAX, |defect| defect.range.start + off);
+                span = Span::new(header_start.min(span.end), span.end);
                 grammar_failures.push((span.start, header_start, failed_at));
             }
             errors.push(crate::ParseError::new(
@@ -5181,8 +5184,9 @@ fn report_invalid_dates(
                 let ahead = stripped[from..].bytes().take_while(is_blank).count();
                 let behind = stripped[..from].bytes().rev().take_while(is_blank).count();
                 let line_begin = from - behind;
-                // An indented line after a blank or comment line (or at the
-                // top of the file) is no directive's continuation, so
+                // An indented line after a blank line, a comment, a directive
+                // that takes no metadata or the top of the file
+                // (`previous_line_is_a_gap`) is no directive's continuation, so
                 // beancount fails at the indent itself (`unexpected INDENT`),
                 // before any date on it.
                 let after_a_gap = ahead + behind > 0
@@ -5216,15 +5220,27 @@ fn report_invalid_dates(
     });
 }
 
-/// Whether the line before the one starting at `line_start` is blank, a
-/// comment at column 0 (an indented one continues the directive above), or
-/// missing. Steps over that one line only.
+/// Whether the line before the one starting at `line_start` leaves an indented
+/// line nothing to continue: it is blank, a comment or an org-mode heading at
+/// column 0 (an indented comment continues the directive above), one of the
+/// undated directives that take no metadata (`option`, `include`, `plugin`,
+/// `pushtag`, `poptag`, `pushmeta`, `popmeta`), or missing. bean-check 3.2.3
+/// reports `unexpected INDENT` after each. Steps over that one line only.
 fn previous_line_is_a_gap(src: &str, line_start: usize) -> bool {
+    const NO_METADATA: [&str; 7] = [
+        "option", "include", "plugin", "pushtag", "poptag", "pushmeta", "popmeta",
+    ];
     let Some(before) = src[..line_start].strip_suffix('\n') else {
         return true;
     };
     let previous = before.rfind('\n').map_or(before, |i| &before[i + 1..]);
-    previous.starts_with(';') || previous.trim_start_matches([' ', '\t', '\r']).is_empty()
+    previous.starts_with([';', '*'])
+        || previous.trim_start_matches([' ', '\t', '\r']).is_empty()
+        || NO_METADATA.iter().any(|keyword| {
+            previous
+                .strip_prefix(keyword)
+                .is_some_and(|rest| rest.starts_with([' ', '\t']))
+        })
 }
 
 /// Counters the linear-cost tests read (test builds only).

@@ -451,7 +451,7 @@ fn test_parse_does_not_name_a_date_inside_an_invalid_token() {
 /// before it, which once kept an error the date had caused. An indented line
 /// after a blank or comment line is no directive's continuation, so beancount
 /// fails at the indent (`unexpected INDENT`) and reports that too. Every
-/// count is bean-check 3.2.3's on the same input.
+/// count, and every error's line, is bean-check 3.2.3's on the same input.
 #[test]
 fn test_parse_keeps_a_grammar_error_before_an_invalid_date() {
     const TXN: &str = "2024-01-02 * \"t\"\n  Assets:A  1 USD\n  Assets:B\n";
@@ -561,11 +561,55 @@ fn test_parse_keeps_a_grammar_error_before_an_invalid_date() {
                 .filter(|e| matches!(e.kind, ParseErrorKind::InvalidDateValue(_)))
                 .count();
             assert_eq!(dates, 1, "{label}: {:?}", result.errors);
+            // Every error is on the row's own line, as in bean-check: an
+            // error placed on the blank or comment line before it is wrong
+            // even when the count is right.
+            let row = src.lines().count();
+            assert_eq!(
+                error_lines(&src, &result.errors),
+                vec![row; errors],
+                "{label}: {:?}",
+                result.errors
+            );
         }
     }
-    // The indent rule holds at the top of the file too.
-    assert_eq!(parse("  2024-02-30 5\n").errors.len(), 2);
-    // An indented comment continues the directive above; it is no gap.
-    let src = "2024-01-01 open Assets:A\n  ; c\n  2024-02-30 5\n";
-    assert_eq!(parse(src).errors.len(), 1, "{:?}", parse(src).errors);
+    // bean-check 3.2.3's error lines for a dropped directive after a comment
+    // line, two after one blank line, and an indented line after each
+    // directive that takes no metadata or an org-mode heading.
+    for (src, lines) in [
+        (
+            "2024-01-01 open Assets:A\n; c\n2024-01-02 balance Assets:A USD 2024-02-30\n",
+            vec![3, 3],
+        ),
+        (
+            "2024-01-01 open Assets:A\n\n2024-01-02 balance Assets:A USD 2024-02-30\n\
+             2024-01-02 balance Assets:A USD 2024-02-30\n",
+            vec![3, 3, 4, 4],
+        ),
+        ("option \"title\" \"x\"\n  2024-02-30 5\n", vec![2, 2]),
+        ("include \"none.beancount\"\n  2024-02-30 5\n", vec![2, 2]),
+        ("plugin \"x\"\n  2024-02-30 5\n", vec![2, 2]),
+        ("* Heading\n  2024-02-30 5\n", vec![2, 2]),
+        ("  2024-02-30 5\n", vec![1, 1]),
+        // An indented comment continues the directive above; it is no gap.
+        ("2024-01-01 open Assets:A\n  ; c\n  2024-02-30 5\n", vec![3]),
+    ] {
+        let result = parse(src);
+        assert_eq!(
+            error_lines(src, &result.errors),
+            lines,
+            "{src:?}: {:?}",
+            result.errors
+        );
+    }
+}
+
+/// The 1-based line each error starts on, in order.
+fn error_lines(src: &str, errors: &[rustledger_parser::ParseError]) -> Vec<usize> {
+    let mut lines: Vec<usize> = errors
+        .iter()
+        .map(|e| src[..e.span.start].matches('\n').count() + 1)
+        .collect();
+    lines.sort_unstable();
+    lines
 }

@@ -574,10 +574,12 @@ Korean amount two cells to the right.
 
 This is deliberate: lining amounts up on screen is what alignment is for.
 The difference only affects files with wide or combining characters in an
-account name or posting flag; ASCII-only files format exactly as
-bean-format formats them. A file reformatted by one tool and then the other
-moves only those lines. Emoji take the width `unicode-width` gives them
-(two cells for emoji-presentation characters). Pinned by
+account name or posting flag: for ASCII-only text, amount alignment is
+unchanged and matches bean-format's. (rledger normalizes other spacing
+that bean-format leaves as written, such as the gaps inside
+`2021-01-01   open  Assets:Bank   USD`; that is unrelated to this.) Emoji
+take the width `unicode-width` gives them (two cells for emoji-presentation
+characters). Pinned by
 `crates/rustledger-parser/tests/format_display_width.rs` (issue #2852).
 
 ## BQL Query Compatibility

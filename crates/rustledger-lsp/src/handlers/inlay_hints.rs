@@ -188,8 +188,10 @@ pub fn handle_inlay_hints(
             let trimmed = content.trim();
             let indent_bytes = line.len() - line.trim_start().len();
             let end_col_bytes = indent_bytes + trimmed.len();
-            // The indent is whitespace only; count it per character as before,
-            // since `display_width` gives a tab 0 cells.
+            // The indent is whitespace only; count it per character as before.
+            // (`display_width` would agree here: unicode-width gives a tab one
+            // cell, but a terminal renders it wider, so neither is the visual
+            // column; keeping the char count keeps this unchanged.)
             let indent_chars = line[..indent_bytes].chars().count();
             let end_col_chars = indent_chars + rustledger_parser::format::display_width(trimmed);
 
@@ -938,6 +940,40 @@ mod tests {
     /// must be the UTF-16 column, not the byte length, and (b) the
     /// visual gap must be computed in char columns so the currency still
     /// lines up with the explicit amount above.
+    /// A wide character in the elided account (`생활`, two characters, four
+    /// cells) is measured in display cells against the formatter's column, so
+    /// the hint's amount ends where `rledger format` puts the explicit one
+    /// (#2852); the anchor stays a UTF-16 column.
+    #[test]
+    fn test_inlay_hint_wide_account_pads_by_display_width_2852() {
+        let source = "2024-01-15 * \"Test\"\n  Expenses:Restaurants  -50.00 USD\n  Assets:생활\n";
+        let result = parse(source);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let params = InlayHintParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            range: lsp_types::Range {
+                start: Position::new(0, 0),
+                end: Position::new(10, 0),
+            },
+            work_done_progress_params: Default::default(),
+        };
+        let hints = handle_inlay_hints(&params, source, &result, PositionEncoding::Utf16)
+            .unwrap_or_default();
+        assert_eq!(hints.len(), 1);
+        let h = &hints[0];
+        // `  Assets:생활` is 11 UTF-16 units (each Hangul syllable is one).
+        assert_eq!(h.position.character, 11);
+        // The number column is 2 + 20 + 2 = 24 cells and the number field 6
+        // wide; the account ends at cell 13 (2 + 7 + 4), so the gap is
+        // 11 + 1 = 12 spaces. Counting characters (11) gave 14.
+        let InlayHintLabel::String(label) = &h.label else {
+            panic!("string label");
+        };
+        assert_eq!(label, &format!("{}50.00 USD", " ".repeat(12)));
+    }
+
     #[test]
     fn test_inlay_hint_nonascii_account_position_and_alignment_1346() {
         // `é` is one char / one UTF-16 unit but two UTF-8 bytes.

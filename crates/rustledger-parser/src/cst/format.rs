@@ -1444,13 +1444,7 @@ fn format_node_range_with_style(
         let (kind, child_range) = (el.kind(), el.text_range());
         let is_formattable = match &el {
             rowan::NodeOrToken::Node(n) => ast::Directive::cast(n.clone()).is_some(),
-            rowan::NodeOrToken::Token(_) => matches!(
-                kind,
-                crate::SyntaxKind::COMMENT
-                    | crate::SyntaxKind::PERCENT_COMMENT
-                    | crate::SyntaxKind::SHEBANG
-                    | crate::SyntaxKind::EMACS_DIRECTIVE
-            ),
+            rowan::NodeOrToken::Token(_) => super::convert::is_comment_kind(kind),
         };
         if !is_formattable {
             continue;
@@ -1460,7 +1454,20 @@ fn format_node_range_with_style(
         }
         any_included = true;
         snap_start = Some(snap_start.map_or(child_range.start(), |s| s.min(child_range.start())));
-        snap_end = Some(snap_end.map_or(child_range.end(), |e| e.max(child_range.end())));
+        // A directive owns the NEWLINE that ends it; a top-level comment
+        // token does not, but its emitted line ends with one. Take the
+        // comment's own NEWLINE into the snap, so the replacement covers
+        // the line it writes instead of adding a blank line on every run
+        // (#2838).
+        let end = if let rowan::NodeOrToken::Token(t) = &el
+            && let Some(next) = t.next_sibling_or_token()
+            && next.kind() == crate::SyntaxKind::NEWLINE
+        {
+            next.text_range().end()
+        } else {
+            child_range.end()
+        };
+        snap_end = Some(snap_end.map_or(end, |e| e.max(end)));
     }
     if !any_included {
         return None;
@@ -5593,6 +5600,24 @@ mod tests {
             "snap range should be the whole file's textual span"
         );
         assert_eq!(formatted, format_node(&node));
+    }
+
+    /// The whole-file range matches `format_node` with top-level comments
+    /// too: a trailing comment, consecutive comments, and a comment-only file
+    /// gained a blank line on the range path before #2838.
+    #[test]
+    fn format_node_range_full_range_matches_format_node_with_comments() {
+        for source in [
+            "2024-01-01 open Assets:A\n; c\n",
+            "; c\n; d\n",
+            "; c\n",
+            "; c\n2024-01-01 open Assets:A\n; d\n",
+        ] {
+            let (node, src) = parse_for_range(source);
+            let full = rowan::TextRange::new(ts(0), ts(src.len()));
+            let (_, formatted) = format_node_range(&node, full).expect("a range over the file");
+            assert_eq!(formatted, format_node(&node), "{source:?}");
+        }
     }
 
     /// A selection that hits only inter-directive whitespace

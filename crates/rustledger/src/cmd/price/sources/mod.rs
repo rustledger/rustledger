@@ -232,9 +232,9 @@ fn reject_url_metacharacters(kind: &str, value: &str) -> Result<()> {
 ///
 /// # Implementation Notes
 ///
-/// Source implementations store a `timeout` field for future use. Currently,
-/// ureq 3.x doesn't support timeout on individual requests (only on the Agent).
-/// A future enhancement could use `ureq::Agent` with timeout configuration.
+/// Sources receive a `timeout`. ureq 3 sets one per request with
+/// `RequestBuilder::config().timeout_global(..)`; `ratesapi` applies it, and
+/// the other sources do not yet use theirs.
 pub trait PriceSource: Send + Sync {
     /// Returns the unique name of this source.
     fn name(&self) -> &'static str;
@@ -1022,7 +1022,7 @@ mod capability_wiring_tests {
             coverage("coinbase"),
             HistoricalCoverage::Since(rustledger_core::naive_date(2015, 1, 1).unwrap())
         );
-        // exchangerate.host serves EU-reference history from 1999-01-04.
+        // Frankfurter serves EU-reference history from 1999-01-04.
         assert_eq!(
             coverage("ratesapi"),
             HistoricalCoverage::Since(rustledger_core::naive_date(1999, 1, 4).unwrap())

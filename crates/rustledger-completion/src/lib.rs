@@ -16,20 +16,12 @@
 //! 2. **Candidate generation** — the `*_candidates` functions produce
 //!    neutral [`CompletionCandidate`] lists for each context.
 
-/// Standard Beancount account types.
-///
-/// A DELIBERATE copy of `rustledger_core::ACCOUNT_TYPES`, which names this one
-/// in return. This crate has no dependencies at all — that is what lets both
-/// the LSP and the WASM editor take it — so it cannot read core's.
-///
-/// Kept honest by `account_types_match_core` in `rustledger-lsp`, which is a
-/// crate that can see both. Without that guard the copy is the #1964 shape:
-/// two lists that agree until one of them does not, with each side's tests
-/// passing throughout.
+/// Standard Beancount account types: core's list, re-exported so editor
+/// surfaces read the one canonical copy.
 ///
 /// Only the DEFAULT roots. Classification of a real account belongs to
 /// `rustledger_core::AccountTypes`, which honors the `name_*` renames.
-pub const ACCOUNT_TYPES: &[&str] = &["Assets", "Liabilities", "Equity", "Income", "Expenses"];
+pub use rustledger_core::ACCOUNT_TYPES;
 
 /// Standard Beancount directives.
 pub const DIRECTIVES: &[&str] = &[

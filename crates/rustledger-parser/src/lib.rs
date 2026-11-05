@@ -463,7 +463,7 @@ pub fn parse(source: &str) -> ParseResult {
 /// `year 0 out of range`), as the parser's `InvalidDateValue` error states it.
 pub fn parse_date(text: &str) -> Result<rustledger_core::NaiveDate, String> {
     if leading_date_len(text) != Some(text.len()) {
-        return Err(format!("invalid date '{text}'"));
+        return Err("not a date (a year of four or more digits, a month and a day)".to_string());
     }
     cst::parse_date_token(text).ok_or_else(|| diagnostics::describe_invalid_date(text))
 }

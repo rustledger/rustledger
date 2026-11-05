@@ -439,3 +439,40 @@ fn test_parse_does_not_name_a_date_inside_an_invalid_token() {
         assert_eq!(named, dates, "{label}: {:?}", result.errors);
     }
 }
+
+/// A grammar error BEFORE the bad date still stands: beancount's parser fails
+/// at that earlier token before its lexer reaches the date, so it reports both
+/// (bean-check 3.2.3: `syntax error, unexpected CURRENCY` / `unexpected
+/// NUMBER, expecting STRING`, then `day is out of range for month`). Errors at
+/// or after the date are still dropped.
+#[test]
+fn test_parse_keeps_a_grammar_error_before_an_invalid_date() {
+    for (label, body, errors) in [
+        ("balance", "2024-01-02 balance Assets:A USD 2024-02-30\n", 2),
+        ("note", "2024-01-02 note Assets:A 5 2024-02-30\n", 2),
+        ("open", "2024-01-02 open 2024-02-30\n", 1),
+        ("price", "2024-01-02 price 2024-02-30\n", 1),
+        ("custom", "2024-01-02 custom \"x\" 2024-02-30 (\n", 1),
+    ] {
+        let result = parse(&format!("{OPENS}{body}"));
+        assert_eq!(result.errors.len(), errors, "{label}: {:?}", result.errors);
+        let dates: Vec<_> = result
+            .errors
+            .iter()
+            .filter(|e| matches!(e.kind, ParseErrorKind::InvalidDateValue(_)))
+            .collect();
+        assert_eq!(dates.len(), 1, "{label}: {:?}", result.errors);
+        if errors == 2 {
+            let other = result
+                .errors
+                .iter()
+                .find(|e| !matches!(e.kind, ParseErrorKind::InvalidDateValue(_)))
+                .expect("a grammar error");
+            assert!(
+                other.span.start < dates[0].span.start,
+                "{label}: the grammar error is before the date: {:?}",
+                result.errors
+            );
+        }
+    }
+}

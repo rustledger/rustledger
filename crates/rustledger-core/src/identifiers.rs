@@ -323,10 +323,9 @@ pub fn is_subaccount_or_equal(child: &str, parent: &str) -> bool {
 /// The five Beancount root account types, in declaration order.
 ///
 /// The canonical root-type list for core consumers: the FFI surfaces
-/// (`util.types`, `util.getAccountType`), the query account-type sort order, and
-/// the LSP account-type check all reference this so they cannot drift.
-/// (`rustledger-completion` keeps its own copy — it is a minimal crate that does
-/// not depend on `rustledger-core`.)
+/// (`util.types`, `util.getAccountType`), the query account-type sort order,
+/// the LSP account-type check and `rustledger-completion` all reference this so
+/// they cannot drift.
 ///
 /// These are the default English roots; the `name_*` loader options can rename
 /// them per-ledger, which this constant does not model — do not use it to

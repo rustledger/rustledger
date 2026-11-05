@@ -224,6 +224,9 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     let mut prior_error_starts: Vec<usize> = errors.iter().map(|e| e.span.start).collect();
     prior_error_starts.sort_unstable();
     let mut header_tokens = Vec::new();
+    // `(error start, grammar failure point)` for each directive the converter
+    // dropped with a whole-node error, in order, BOM frame.
+    let mut grammar_failures: Vec<(usize, usize)> = Vec::new();
 
     for directive in source_file.directives() {
         // Helper to push a successfully-converted directive
@@ -411,9 +414,24 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
             // top-level error-recovery path which emits a
             // `SyntaxError("unexpected input")` for the failed
             // span so downstream tooling sees the same shape.
+            let span = node_span(&cst_node, bom_offset);
+            // Where beancount's grammar fails on the header line, so a bad
+            // date after that point does not swallow this error
+            // (`report_invalid_dates`).
+            if super::directive_header::directive_keyword(cst_node.kind()).is_some() {
+                let end = header_line_tokens(&cst_node, &mut header_tokens);
+                if let Some(defect) = super::directive_header::first_header_defect(
+                    cst_node.kind(),
+                    &header_tokens,
+                    end,
+                    stripped,
+                ) {
+                    grammar_failures.push((span.start, defect.range.start + bom_offset as usize));
+                }
+            }
             errors.push(crate::ParseError::new(
                 crate::ParseErrorKind::SyntaxError("unexpected input".to_string()),
-                node_span(&cst_node, bom_offset),
+                span,
             ));
         }
     }
@@ -433,7 +451,13 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
             *span,
         ));
     }
-    report_invalid_dates(source_file.syntax(), stripped, bom_offset, &mut errors);
+    report_invalid_dates(
+        source_file.syntax(),
+        stripped,
+        bom_offset,
+        &grammar_failures,
+        &mut errors,
+    );
     errors.sort_by_key(|e| e.span.start);
 
     // Post-pass: align directive spans with the legacy parser's
@@ -3735,6 +3759,36 @@ fn transaction_header_check(
     }
 }
 
+/// A directive's header-line tokens into `tokens` (cleared first): its direct
+/// tokens from the first content token (past leading trivia) up to the
+/// `NEWLINE` that ends the line. Returns where the line's content ends.
+/// Walks GREEN children only.
+fn header_line_tokens(
+    node: &crate::SyntaxNode,
+    tokens: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
+) -> usize {
+    tokens.clear();
+    let mut at = usize::from(node.text_range().start());
+    let mut end = usize::from(node.text_range().end());
+    for child in node.green().children() {
+        let rowan::NodeOrToken::Token(t) = child else {
+            break;
+        };
+        let kind = <crate::BeancountLanguage as rowan::Language>::kind_from_raw(t.kind());
+        let range = at..at + t.text().len();
+        at = range.end;
+        if tokens.is_empty() && (is_trivia_kind(kind) || kind == crate::SyntaxKind::BOM) {
+            continue;
+        }
+        if kind == crate::SyntaxKind::NEWLINE {
+            end = range.start;
+            break;
+        }
+        tokens.push((kind, range));
+    }
+    end
+}
+
 /// Reject a non-transaction directive header line that beancount's grammar
 /// refuses (#2802). The rule lives in [`super::directive_header`]; here we only
 /// enumerate the header tokens: the node's direct tokens from its first
@@ -3759,25 +3813,7 @@ fn directive_header_check(
     tokens: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
 ) -> Option<crate::ParseError> {
     let keyword = super::directive_header::directive_keyword(node.kind())?;
-    tokens.clear();
-    let mut at = usize::from(node.text_range().start());
-    let mut end = usize::from(node.text_range().end());
-    for child in node.green().children() {
-        let rowan::NodeOrToken::Token(t) = child else {
-            break;
-        };
-        let kind = <crate::BeancountLanguage as rowan::Language>::kind_from_raw(t.kind());
-        let range = at..at + t.text().len();
-        at = range.end;
-        if tokens.is_empty() && (is_trivia_kind(kind) || kind == crate::SyntaxKind::BOM) {
-            continue;
-        }
-        if kind == crate::SyntaxKind::NEWLINE {
-            end = range.start;
-            break;
-        }
-        tokens.push((kind, range));
-    }
+    let end = header_line_tokens(node, tokens);
     let off = bom_offset as usize;
     let from = usize::from(node.text_range().start()) + off;
     let first_after = prior_error_starts.partition_point(|&s| s < from);
@@ -4977,18 +5013,23 @@ pub(super) fn invalid_value_date(
 /// is named (`day is out of range for month`) in every position, a header, a
 /// metadata or `custom` value, an `event` or `option` argument, a price, a
 /// transaction header, an orphan indented line; two bad dates on one line are
-/// two errors; and the line gets no grammar error on top, because the parser
-/// never sees a date token there. Its OTHER lexer errors still stand: the
+/// two errors; and the rest of the line gets no grammar error on top, because
+/// the parser never sees a date token there. A grammar error BEFORE the date
+/// still stands: the parser fails at that earlier token before the lexer
+/// reaches the date (`balance Assets:A USD 2024-02-30` is `unexpected
+/// CURRENCY` and the date). Its OTHER lexer errors still stand: the
 /// lexer goes on past the date, so a stray `` ` `` or a mid-file BOM on the
 /// same line is reported too. Here the date is one token like any other until
 /// it is read, so this pass, run once over the whole tree after every other
 /// check, applies that rule in one place: each invalid date not already
 /// reported at its position (a directive's own date, by
-/// `parse_directive_date`) gets `InvalidDateValue`, and a parse error starting
-/// on that line is dropped unless it covers an `ERROR_TOKEN` (the lexer's own
-/// error: a character no token takes, a mid-file BOM). A directive with a bad
-/// date of its own is still dropped, as in beancount, but the bad dates under
-/// it are now reported too. A date inside one of beancount's invalid tokens (an
+/// `parse_directive_date`) gets `InvalidDateValue`, and a parse error on that
+/// line that reaches its first bad date (starts at or after it, or spans it,
+/// as the whole-directive error of a dropped directive does, unless the header
+/// grammar fails before the date) is dropped unless it covers an `ERROR_TOKEN` (the lexer's own error: a
+/// character no token takes, a mid-file BOM). A directive with a bad date of
+/// its own is still dropped, as in beancount, but the bad dates under it are
+/// now reported too. A date inside one of beancount's invalid tokens (an
 /// invalid character takes the rest of its run of non-blank characters) is
 /// never read there, so it is not named here either.
 ///
@@ -5001,6 +5042,7 @@ fn report_invalid_dates(
     root: &crate::SyntaxNode,
     stripped: &str,
     bom_offset: u32,
+    grammar_failures: &[(usize, usize)],
     errors: &mut Vec<crate::ParseError>,
 ) {
     use crate::SyntaxKind as K;
@@ -5049,12 +5091,13 @@ fn report_invalid_dates(
         let i = lexer_errors.partition_point(|t| t.start < from);
         lexer_errors.get(i).is_some_and(|t| t.start < to)
     };
-    // The lines holding a reported bad date, in order and each once, in the
-    // BOM frame. `line` is the current date's line in the stripped frame, and
-    // `scanned` is where it ended (its `\n`), so every byte is stepped over at
-    // most once looking back for a line start and once looking ahead for a
-    // line end.
-    let mut lines: Vec<std::ops::Range<usize>> = Vec::new();
+    // For each line holding a reported bad date, in order and once, its start
+    // and the stretch from its first such date to its end, in the BOM frame.
+    // `line` is the current date's line in the stripped frame, and `scanned`
+    // is where it ended (its `\n`), so every byte is stepped over at most
+    // once looking back for a line start and once looking ahead for a line
+    // end.
+    let mut lines: Vec<(usize, std::ops::Range<usize>)> = Vec::new();
     let mut line = 0..0;
     let mut scanned = 0;
     // Where the last date on this line ended, and whether it stood inside an
@@ -5091,9 +5134,11 @@ fn report_invalid_dates(
         if in_invalid {
             continue;
         }
-        let in_frame = line.start + off..line.end + off;
-        if lines.last() != Some(&in_frame) {
-            lines.push(in_frame);
+        if lines
+            .last()
+            .is_none_or(|(_, stretch)| stretch.end != line.end + off)
+        {
+            lines.push((line.start + off, range.start + off..line.end + off));
         }
         if !reported.contains(&(range.start + off)) {
             let text = &stripped[range.clone()];
@@ -5104,9 +5149,25 @@ fn report_invalid_dates(
             ));
         }
     }
-    let on_a_bad_line = |at: usize| {
-        let i = lines.partition_point(|line| line.start <= at);
-        i > 0 && lines[i - 1].contains(&at)
+    // Whether a grammar error is the date's doing: it starts on a bad-date
+    // line and reaches that line's first bad date (at it, after it, or a
+    // whole-line error spanning it). One that ends before the date is the
+    // parser failing at an earlier token, which beancount reports too
+    // (`balance Assets:A USD 2024-02-30`: `unexpected CURRENCY`, then the date).
+    let reaches_a_bad_date = |span: &Span| {
+        let i = lines.partition_point(|(_, stretch)| stretch.end <= span.start);
+        let Some((line_start, stretch)) = lines.get(i) else {
+            return false;
+        };
+        if *line_start > span.start || stretch.start >= span.end.max(span.start + 1) {
+            return false;
+        }
+        // A whole-directive error (the converter dropped the directive) says
+        // nothing of where the parser failed; the header grammar does.
+        let j = grammar_failures.partition_point(|&(start, _)| start < span.start);
+        !grammar_failures
+            .get(j)
+            .is_some_and(|&(start, failed_at)| start == span.start && failed_at < stretch.start)
     };
     let covers_a_lexer_error = |span: &Span| {
         let end = span.end.max(span.start + 1);
@@ -5115,7 +5176,7 @@ fn report_invalid_dates(
     };
     errors.retain(|e| {
         matches!(e.kind, crate::ParseErrorKind::InvalidDateValue(_))
-            || !on_a_bad_line(e.span.start)
+            || !reaches_a_bad_date(&e.span)
             || covers_a_lexer_error(&e.span)
     });
 }

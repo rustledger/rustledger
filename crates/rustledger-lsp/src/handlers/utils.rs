@@ -960,34 +960,10 @@ mod tests {
         assert!(!is_account_like("Random:Thing"));
     }
 
-    /// The two account-root lists must not drift apart.
+    /// `is_default_account_root` must answer for exactly `ACCOUNT_TYPES`.
     ///
-    /// `rustledger-completion` keeps its own copy because it has no
-    /// dependencies at all — that is what lets both the LSP and the WASM editor
-    /// take it. A deliberate copy is only allowed here if something asserts the
-    /// agreement (AGENTS.md's canonical-function rule), and nothing did: each
-    /// crate tested its own list against its own expectations, so a change to
-    /// one would have left both suites green while the two surfaces disagreed
-    /// about what an account root is.
-    ///
-    /// This lives in the LSP because it is a crate that can see BOTH, which
-    /// neither of the two owners can.
-    #[test]
-    fn account_types_match_core() {
-        assert_eq!(
-            rustledger_completion::ACCOUNT_TYPES,
-            rustledger_core::ACCOUNT_TYPES,
-            "rustledger-completion's ACCOUNT_TYPES has drifted from \
-             rustledger-core's; they are a deliberate copy of one another and \
-             every editor surface assumes they agree"
-        );
-    }
-
-    /// And the predicate must answer for exactly that list.
-    ///
-    /// Guards the direction the equality above cannot: a future
-    /// `is_default_account_root` that hardcoded its own words would still pass a test
-    /// comparing two constants. This asks the function about every root, and
+    /// A future `is_default_account_root` that hardcoded its own words could
+    /// drift from the list. This asks the function about every root, and
     /// about a word that is not one.
     #[test]
     fn is_default_account_root_answers_for_every_root() {

@@ -965,7 +965,8 @@ mod tests {
         assert!(err.contains("year 0 out of range"), "{err}");
         assert!(open("2024-02-30").is_err());
         // A two-digit year is no date to the parser; it must not load as 24 AD.
-        assert!(open("24-01-15").is_err());
+        let err = open("24-01-15").expect_err("a two-digit year is refused");
+        assert_eq!(err.matches("24-01-15").count(), 1, "named once: {err}");
         assert!(open("1-1-1").is_err());
         match open("02024-001-015").expect("one date, as beancount reads it") {
             Directive::Open(o) => {

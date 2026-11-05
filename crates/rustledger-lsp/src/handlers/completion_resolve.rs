@@ -168,7 +168,10 @@ fn resolve_currency_documentation(
 
     let mut doc = format!("**{}**\n\n", currency);
 
-    doc.push_str(&format!("📊 Used in **{} postings**\n\n", usage_count));
+    doc.push_str(&format!(
+        "📊 Used in **{}**\n\n",
+        super::utils::count_noun(usage_count, "posting")
+    ));
 
     if !prices.is_empty() {
         // Sort by date descending

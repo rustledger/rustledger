@@ -10,7 +10,8 @@ use rustledger_parser::ParseResult;
 use std::collections::{HashMap, HashSet};
 
 /// What the LSP's account summaries (completion resolve, the inferred-amount
-/// inlay tooltip) report for one account over a set of transactions.
+/// inlay tooltip, `rledger.showAccountBalance`) report for one account over a
+/// set of transactions.
 #[derive(Debug, Default)]
 pub(crate) struct AccountActivity {
     /// Transactions with at least one posting to the account, each counted

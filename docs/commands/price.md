@@ -220,7 +220,7 @@ Rustledger supports 11 built-in price sources and external commands.
 | `coinbase` | Coinbase — cryptocurrency spot prices |
 | `coincap` | CoinCap — cryptocurrency market data |
 | `ecb` | European Central Bank — EUR exchange rates |
-| `ratesapi` | Forex rates: ECB reference rates from Frankfurter (keyless), as beanprice's `ratesapi` does |
+| `ratesapi` | Forex rates: ECB reference rates from Frankfurter (keyless), the provider bean-price's `ratesapi` uses. The ticker is the base currency (`EUR` with `-c USD`), not bean-price's `ratesapi/EUR-USD` form, and `^` inversion is not supported |
 | `tsp` | US Thrift Savings Plan fund prices |
 | `eastmoneyfund` | East Money Fund — Chinese fund prices |
 
@@ -342,7 +342,8 @@ source = ["yahoo", "alphavantage"]
 
 # Fallback chain with per-source tickers (issue #963).
 # Use this when sources expect different ticker shapes for the same
-# underlying instrument — e.g. ratesapi-style `GBP-EUR` vs ecb-style `GBP`.
+# underlying instrument, e.g. a `GBP-EUR` pair ticker vs ecb-style `GBP`
+# (rledger's own `ratesapi` takes the base currency, `GBP`, like `ecb`).
 [price.mapping.GBP]
 source = [
   { source = "ecbrates", ticker = "GBP-EUR" },

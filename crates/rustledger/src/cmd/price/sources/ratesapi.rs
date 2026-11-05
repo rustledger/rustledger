@@ -2,7 +2,7 @@
 //!
 //! Fetches currency exchange rates from Frankfurter
 //! (<https://api.frankfurter.dev>), the open-source keyless API serving the
-//! ECB reference rates, as beanprice's `ratesapi` source does.
+//! ECB reference rates, the provider beanprice's `ratesapi` source uses.
 
 use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, user_agent};
 use crate::cmd::price::PriceResponse;
@@ -16,8 +16,9 @@ const FRANKFURTER: &str = "https://api.frankfurter.dev/v1";
 
 /// Rates API price source.
 ///
-/// Fetches ECB reference rates from Frankfurter, as beanprice's `ratesapi`
-/// does. No API key required. It used exchangerate.host, which now refuses
+/// Fetches ECB reference rates from Frankfurter, the provider beanprice's
+/// `ratesapi` uses. The ticker is the base currency (`EUR`, quoted in the
+/// request's currency), not beanprice's `BASE-SYMBOL` form. No API key required. It used exchangerate.host, which now refuses
 /// every request without a key.
 ///
 /// # Supported Currencies
@@ -25,12 +26,15 @@ const FRANKFURTER: &str = "https://api.frankfurter.dev/v1";
 /// All major world currencies:
 /// - USD, EUR, GBP, JPY, CHF, CAD, AUD, CNY, INR, etc.
 #[derive(Debug)]
-pub struct RatesApiSource {}
+pub struct RatesApiSource {
+    /// Whole-request timeout, applied to each request.
+    timeout: Duration,
+}
 
 impl RatesApiSource {
     /// Create a new Rates API source.
-    pub const fn new(_timeout: Duration) -> Self {
-        Self {}
+    pub const fn new(timeout: Duration) -> Self {
+        Self { timeout }
     }
 
     /// Build the API URL. The date-path form serves the historical
@@ -54,25 +58,60 @@ impl RatesApiSource {
         pair: &PricePair,
         date_fallback: NaiveDate,
     ) -> Result<(Decimal, NaiveDate)> {
-        let mut response = match ureq::get(url).header("User-Agent", user_agent()).call() {
-            Ok(response) => response,
-            // Frankfurter answers an unknown currency with 404 `not found`.
-            Err(ureq::Error::StatusCode(code)) => anyhow::bail!(
-                "Rates API (Frankfurter) returned HTTP {code} for {}-{}; \
-                 the currency pair may be unsupported (it serves the ECB reference currencies)",
-                pair.ticker.to_uppercase(),
-                pair.currency.to_uppercase()
-            ),
-            Err(e) => {
-                return Err(e).with_context(|| format!("Failed to fetch rate for {}", pair.ticker));
-            }
-        };
-
+        // A 4xx/5xx is read as a response, not turned into a bare
+        // `StatusCode` error, so Frankfurter's `{"message": ...}` reaches
+        // the user.
+        let mut response = ureq::get(url)
+            .config()
+            .timeout_global(Some(self.timeout))
+            .http_status_as_error(false)
+            .build()
+            .header("User-Agent", user_agent())
+            .call()
+            .with_context(|| format!("Failed to fetch rate for {}", pair.ticker))?;
+        let status = response.status().as_u16();
         let body = response
             .body_mut()
             .read_to_string()
             .with_context(|| format!("Failed to read response for {}", pair.ticker))?;
-        Self::parse_response(&body, pair, date_fallback)
+        Self::handle_response(status, &body, pair, date_fallback)
+    }
+
+    /// Turn an HTTP status and body into `(price, feed_date)`, the step after
+    /// the request on every fetch. A non-2xx status is an error naming the
+    /// pair and the provider's message (Frankfurter answers 404 `not found`
+    /// for an unknown currency and 422 for a malformed pair). Split from
+    /// [`Self::fetch_rate`] so it is tested without the network.
+    fn handle_response(
+        status: u16,
+        body: &str,
+        pair: &PricePair,
+        date_fallback: NaiveDate,
+    ) -> Result<(Decimal, NaiveDate)> {
+        if !(200..300).contains(&status) {
+            let message = serde_json::from_str::<serde_json::Value>(body)
+                .ok()
+                .and_then(|json| {
+                    json.get("message")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                });
+            let pair_name = format!(
+                "{}-{}",
+                pair.ticker.to_uppercase(),
+                pair.currency.to_uppercase()
+            );
+            match message {
+                Some(message) => anyhow::bail!(
+                    "Rates API (Frankfurter) returned HTTP {status} for {pair_name}: {message}"
+                ),
+                None => anyhow::bail!(
+                    "Rates API (Frankfurter) returned HTTP {status} for {pair_name}; \
+                     the currency pair may be unsupported (it serves the ECB reference currencies)"
+                ),
+            }
+        }
+        Self::parse_response(body, pair, date_fallback)
     }
 
     /// Parse a Frankfurter response (`{"amount","base","date","rates"}`) into
@@ -340,6 +379,59 @@ mod tests {
         .unwrap_err()
         .to_string();
         assert!(err.contains("EUR"), "{err}");
+    }
+
+    /// HTTP errors go through the same step as a live response: the status
+    /// and body, as Frankfurter sent them (`curl`), reach the user.
+    #[test]
+    fn test_handle_response_reports_frankfurter_http_errors() {
+        let today = day(2026, 11, 4);
+        for (status, body, pair, want) in [
+            (
+                404,
+                r#"{"message":"not found"}"#,
+                ("USD", "XXX"),
+                "HTTP 404 for USD-XXX: not found",
+            ),
+            (
+                422,
+                r#"{"message":"bad currency pair"}"#,
+                ("EUR", "EUR"),
+                "HTTP 422 for EUR-EUR: bad currency pair",
+            ),
+            (
+                422,
+                r#"{"message":"invalid date"}"#,
+                ("USD", "EUR"),
+                "HTTP 422 for USD-EUR: invalid date",
+            ),
+        ] {
+            let pair = PricePair {
+                ticker: pair.0.to_string(),
+                currency: pair.1.to_string(),
+            };
+            let err = RatesApiSource::handle_response(status, body, &pair, today)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains(want), "{err}");
+        }
+        // No JSON message: the generic hint.
+        let err =
+            RatesApiSource::handle_response(502, "<html>Bad Gateway</html>", &usd_eur(), today)
+                .unwrap_err()
+                .to_string();
+        assert!(err.contains("HTTP 502 for USD-EUR"), "{err}");
+        assert!(err.contains("may be unsupported"), "{err}");
+        // A 2xx body is parsed as a rate.
+        let ok = r#"{"amount":1.0,"base":"USD","date":"2026-11-04","rates":{"EUR":0.88755}}"#;
+        let (price, _) = RatesApiSource::handle_response(200, ok, &usd_eur(), today).unwrap();
+        assert_eq!(price.to_string(), "0.88755");
+    }
+
+    #[test]
+    fn test_new_keeps_the_timeout() {
+        let source = RatesApiSource::new(Duration::from_secs(7));
+        assert_eq!(source.timeout, Duration::from_secs(7));
     }
 
     #[test]

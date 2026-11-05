@@ -27,6 +27,8 @@ rust_decimal.workspace = true
 serde.workspace = true
 # CST migration (#1262).
 rowan.workspace = true
+# Display width (terminal cells) of account names for amount alignment (#2852).
+unicode-width.workspace = true
 num_enum.workspace = true
 # Used by the doc-hidden `__baseline_canonical_payload` helper that
 # the corpus baseline test consumes. The helper canonicalizes

@@ -8,7 +8,6 @@ use lsp_types::{CompletionItem, Documentation, MarkupContent, MarkupKind};
 use rustledger_core::Decimal;
 use rustledger_core::Directive;
 use rustledger_parser::Spanned;
-use std::collections::HashMap;
 
 use super::utils::{is_account_like, is_currency_like_simple};
 
@@ -70,41 +69,28 @@ fn resolve_account_documentation(
     account: &str,
     directives: &[Spanned<Directive>],
 ) -> (Documentation, Option<String>) {
-    let mut balances: HashMap<String, Decimal> = HashMap::new();
-    let mut transaction_count = 0;
-    let mut first_date: Option<rustledger_core::NaiveDate> = None;
-    let mut last_date: Option<rustledger_core::NaiveDate> = None;
-
-    for spanned in directives {
-        if let Directive::Transaction(txn) = &spanned.value {
-            for posting in &txn.postings {
-                if posting.account.as_ref() == account {
-                    transaction_count += 1;
-
-                    // Track dates
-                    if first_date.is_none() || Some(txn.date) < first_date {
-                        first_date = Some(txn.date);
-                    }
-                    if last_date.is_none() || Some(txn.date) > last_date {
-                        last_date = Some(txn.date);
-                    }
-
-                    // Track balance
-                    if let Some(units) = &posting.units
-                        && let Some(number) = units.number()
-                    {
-                        let currency = units.currency().unwrap_or("???").to_string();
-                        *balances.entry(currency).or_default() += number;
-                    }
-                }
-            }
-        }
-    }
+    // The shared count-and-balance rule (#2850), the same one the inlay
+    // tooltip uses.
+    let super::utils::AccountActivity {
+        transactions: transaction_count,
+        balances,
+        first_date,
+        last_date,
+    } = super::utils::account_activity(
+        account,
+        directives.iter().filter_map(|s| match &s.value {
+            Directive::Transaction(txn) => Some(txn),
+            _ => None,
+        }),
+    );
 
     let mut doc = format!("**{}**\n\n", account);
 
     if transaction_count > 0 {
-        doc.push_str(&format!("📊 **{} transactions**\n\n", transaction_count));
+        doc.push_str(&format!(
+            "📊 **{}**\n\n",
+            super::utils::count_noun(transaction_count, "transaction")
+        ));
 
         if let (Some(first), Some(last)) = (first_date, last_date) {
             doc.push_str(&format!("📅 {} → {}\n\n", first, last));
@@ -130,9 +116,12 @@ fn resolve_account_documentation(
         parts.sort();
         let balance_str = parts.join(", ");
         Some(if balance_str.is_empty() {
-            format!("{transaction_count} txns")
+            super::utils::count_noun(transaction_count, "txn")
         } else {
-            format!("{balance_str} · {transaction_count} txns")
+            format!(
+                "{balance_str} · {}",
+                super::utils::count_noun(transaction_count, "txn")
+            )
         })
     } else {
         None
@@ -179,7 +168,10 @@ fn resolve_currency_documentation(
 
     let mut doc = format!("**{}**\n\n", currency);
 
-    doc.push_str(&format!("📊 Used in **{} postings**\n\n", usage_count));
+    doc.push_str(&format!(
+        "📊 Used in **{}**\n\n",
+        super::utils::count_noun(usage_count, "posting")
+    ));
 
     if !prices.is_empty() {
         // Sort by date descending
@@ -249,6 +241,35 @@ mod tests {
             assert!(content.value.contains("2 transactions"));
             assert!(content.value.contains("95")); // 100 - 5
         }
+    }
+
+    /// Two postings to the account in one transaction are one transaction,
+    /// in both the popup and the `detail` (#2850).
+    #[test]
+    fn test_resolve_account_completion_counts_each_transaction_once() {
+        let source = r#"2000-01-01 open Expenses:Supplies KRW
+2000-01-01 open Assets:Bank KRW
+2021-01-02 * "Split invoice"
+  Expenses:Supplies  10000 KRW
+  Expenses:Supplies  20000 KRW
+  Assets:Bank       -30000 KRW
+"#;
+        let result = parse(source);
+        let item = CompletionItem {
+            label: "Expenses:Supplies".to_string(),
+            ..Default::default()
+        };
+        let resolved = handle_completion_resolve(item, &result.directives);
+        let detail = resolved.detail.clone().expect("detail summary set");
+        assert_eq!(detail, "30000 KRW · 1 txn");
+        let Some(Documentation::MarkupContent(content)) = resolved.documentation else {
+            panic!("markdown documentation");
+        };
+        assert!(
+            content.value.contains("**1 transaction**"),
+            "{}",
+            content.value
+        );
     }
 
     /// Regression for #1297: the resolve detail must aggregate over

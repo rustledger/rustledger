@@ -160,13 +160,16 @@ const INDENT: &str = "  ";
 /// terminals render them). Emoji take what `unicode-width` gives them (2 for
 /// emoji-presentation characters).
 ///
-/// Deliberately different from bean-format, which pads by code points
-/// (Python's `len()`): with a wide character in an account name (`생활`),
-/// bean-format's amounts land in different visible columns, which is what
-/// alignment exists to prevent (#2852). So files with wide or combining
-/// characters format differently from bean-format 3.2.3; ASCII-only files
-/// are unaffected. See `docs/reference/compatibility.md`, "Amount Alignment
-/// With Wide Characters".
+/// Deliberately different from bean-format 3.2.3, which never lines such
+/// amounts up (#2852): its alignment regex needs each account component to
+/// start with an uppercase letter or a digit, so a line like
+/// `Expenses:생활  12345 KRW` is left as written, and a line that does match
+/// (`Expenses:X생활`, fullwidth `Ｆｏｏｄ`) is padded by code points (Python's
+/// `len()`), which puts a wide character's amount further right on screen.
+/// So files with wide or combining characters in an account name format
+/// differently from bean-format; ASCII-only alignment is unchanged by this.
+/// See `docs/reference/compatibility.md`, "Amount Alignment With Wide
+/// Characters".
 ///
 /// Every alignment computation goes through this function, so the width
 /// pre-pass (`compute_alignment`) and the emitter (`emit_posting`) cannot

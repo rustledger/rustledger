@@ -557,29 +557,39 @@ uses the same written total (#2031). Pinned by
 `rledger format` aligns amounts by display width: the number of cells an
 account name takes in a monospaced editor. East Asian Wide and Fullwidth
 characters take two cells, combining marks none, and ambiguous-width
-characters one (as most terminals render them). bean-format pads by code
-points (Python's `len()`), so an account with such characters gets its
-amounts in a different visible column:
+characters one (as most terminals render them). Emoji take the width
+`unicode-width` gives them (two cells for emoji-presentation characters).
+
+bean-format 3.2.3 handles such accounts in one of two ways, neither of which
+lines the amounts up:
+
+- **It leaves the line as written.** Its alignment regex needs every account
+  component to start with an uppercase letter or a digit, so a posting to
+  `Expenses:생활`, `Expenses:食品`, `Expenses:Café` or `Assets:CORP✨` does not
+  match, and bean-format keeps whatever spacing the line has.
+- **It pads by code points.** When a component does start with an uppercase
+  letter or digit (`Expenses:X생활`, fullwidth `Expenses:Ｆｏｏｄ`), the line
+  matches and is padded with Python's `len()`, so a wide character puts the
+  amount further right on screen:
 
 ```beancount
 2021-01-02 * "x"
-  Expenses:생활   12345 KRW
-  Assets:Bank    -12345 KRW
+  Expenses:X생활   12345 KRW
+  Assets:Bank   -12345 KRW
 ```
 
-rustledger writes the above, with both amounts ending in the same column on
-screen. bean-format 3.2.3 gives the two accounts the same padding because
-`Expenses:생활` and `Assets:Bank` are both 11 code points, which starts the
-Korean amount two cells to the right.
+That is bean-format's output: `Expenses:X생활` and `Assets:Bank` get the
+same padding, so the Korean amount starts two cells to the right. rustledger
+writes both kinds of line with the amounts ending in the same column on
+screen.
 
 This is deliberate: lining amounts up on screen is what alignment is for.
-The difference only affects files with wide or combining characters in an
-account name or posting flag: for ASCII-only text, amount alignment is
-unchanged and matches bean-format's. (rledger normalizes other spacing
-that bean-format leaves as written, such as the gaps inside
-`2021-01-01   open  Assets:Bank   USD`; that is unrelated to this.) Emoji
-take the width `unicode-width` gives them (two cells for emoji-presentation
-characters). Pinned by
+Only files with wide or combining characters in an account name or posting
+flag are affected; for ASCII-only text, rledger's amount alignment is
+unchanged by this. (It still differs from bean-format's in other ways:
+bean-format also aligns dated `balance` and `price` lines, which widen the
+posting column, and leaves other spacing as written, such as the gaps inside
+`2021-01-01   open  Assets:Bank   USD`.) Pinned by
 `crates/rustledger-parser/tests/format_display_width.rs` (issue #2852).
 
 ## BQL Query Compatibility

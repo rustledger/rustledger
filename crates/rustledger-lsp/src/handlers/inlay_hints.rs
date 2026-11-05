@@ -168,7 +168,7 @@ pub fn handle_inlay_hints(
 
             // The hint anchors at the end of the account text. We need
             // that column in TWO unit systems and must NOT mix them:
-            //   * display columns (`end_col_chars`, measured with the
+            //   * display columns (`end_col_cells`, measured with the
             //     formatter's own `display_width`, #2852) to match its
             //     `number_col`/`number_width`
             //     when computing the visual gap, and
@@ -193,7 +193,7 @@ pub fn handle_inlay_hints(
             // cell, but a terminal renders it wider, so neither is the visual
             // column; keeping the char count keeps this unchanged.)
             let indent_chars = line[..indent_bytes].chars().count();
-            let end_col_chars = indent_chars + rustledger_parser::format::display_width(trimmed);
+            let end_col_cells = indent_chars + rustledger_parser::format::display_width(trimmed);
 
             // Align the greyed-out amount with the column `rledger
             // format` uses for explicit amounts (issue #1346), instead
@@ -209,7 +209,7 @@ pub fn handle_inlay_hints(
             //
             // Caveat: `number_col`/`number_width` are the *canonical*
             // formatter columns (2-space indent, single inner spaces),
-            // while `end_col_chars` is measured from the raw source line.
+            // while `end_col_cells` is measured from the raw source line.
             // So the hint aligns perfectly with explicit amounts only
             // when the file is already formatted (the steady state). On
             // a non-canonically-indented or unformatted line the hint
@@ -217,7 +217,7 @@ pub fn handle_inlay_hints(
             // may differ from where the current explicit amount renders.
             let num_text = amount.number.to_string();
             let align = parse_result.alignment();
-            let field_pad = align.number_col.saturating_sub(end_col_chars).max(2);
+            let field_pad = align.number_col.saturating_sub(end_col_cells).max(2);
             let justify_pad = align
                 .number_width
                 .saturating_sub(rustledger_parser::format::display_width(&num_text));
@@ -935,11 +935,6 @@ mod tests {
         );
     }
 
-    /// #1346 regression for the byte-vs-encoding bugs the deep review
-    /// surfaced: with a multi-byte account name, (a) `position.character`
-    /// must be the UTF-16 column, not the byte length, and (b) the
-    /// visual gap must be computed in char columns so the currency still
-    /// lines up with the explicit amount above.
     /// A wide character in the elided account (`생활`, two characters, four
     /// cells) is measured in display cells against the formatter's column, so
     /// the hint's amount ends where `rledger format` puts the explicit one
@@ -974,6 +969,11 @@ mod tests {
         assert_eq!(label, &format!("{}50.00 USD", " ".repeat(12)));
     }
 
+    /// #1346 regression for the byte-vs-encoding bugs the deep review
+    /// surfaced: with a multi-byte account name, (a) `position.character`
+    /// must be the UTF-16 column, not the byte length, and (b) the
+    /// visual gap must be computed in display cells (#2852) so the currency
+    /// still lines up with the explicit amount above.
     #[test]
     fn test_inlay_hint_nonascii_account_position_and_alignment_1346() {
         // `é` is one char / one UTF-16 unit but two UTF-8 bytes.

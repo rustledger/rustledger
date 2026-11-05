@@ -1,12 +1,15 @@
 //! The formatter aligns amounts by display width, not code points (#2852).
 //!
 //! In a monospaced editor an East Asian Wide or Fullwidth character takes
-//! two cells and a combining mark none, so padding by code points (as
-//! bean-format 3.2.3 does, with Python's `len()`) puts the amounts of an
-//! account with such characters in a different visible column. rledger pads
-//! by display width instead: a deliberate difference from bean-format,
-//! documented in `docs/reference/compatibility.md` ("Amount Alignment With
-//! Wide Characters"). ASCII-only files format exactly as before.
+//! two cells and a combining mark none, so padding by code points puts the
+//! amounts of an account with such characters in a different visible
+//! column. rledger pads by display width. bean-format 3.2.3 never lines
+//! these up: it leaves a line like `Expenses:생활  12345 KRW` as written (its
+//! alignment regex needs each account component to start with an uppercase
+//! letter or a digit) and pads a line that does match (`Expenses:X생활`) by
+//! code points. A deliberate difference, documented in
+//! `docs/reference/compatibility.md` ("Amount Alignment With Wide
+//! Characters"). ASCII-only alignment is unchanged.
 
 use rustledger_parser::format::{display_width, try_format_source};
 

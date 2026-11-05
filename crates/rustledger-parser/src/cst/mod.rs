@@ -60,6 +60,7 @@ mod syntax_kind;
 mod trivia;
 mod txn_header;
 
+pub(crate) use convert::parse_date_token;
 pub use convert::{parse_red_only, parse_via_cst, parse_via_cst_opts};
 // Formatter exports do NOT re-export through `cst` — the sole
 // import path for the formatter is `rustledger_parser::format`

@@ -104,6 +104,9 @@ pub struct SourceFile {
     /// per line: 3.9% of a warm `check` and 320 KB on a 40,000-line ledger,
     /// for a table nothing read.
     line_starts: std::sync::OnceLock<Vec<usize>>,
+    /// Character marks ([`char_marks_of`]), built on the first column
+    /// lookup, for the same reason as [`Self::line_starts`].
+    char_marks: std::sync::OnceLock<Vec<usize>>,
     /// Whether [`Self::source`] still holds the file's text. False after
     /// [`SourceMap::drop_text`]; line numbers still answer from the kept
     /// offsets table, but no text is handable and columns are 0.
@@ -149,9 +152,51 @@ fn line_starts_of(source: &str) -> Vec<usize> {
         .collect()
 }
 
-/// [`line_col_in`]'s answer, found through a line-start table: the line by
-/// `partition_point`, then only that one line is walked.
-fn line_col_indexed(source: &str, starts: &[usize], offset: usize) -> (usize, usize) {
+/// Bytes between two entries of a character-mark table ([`char_marks_of`]).
+const CHAR_MARK_STRIDE: usize = 256;
+
+/// Whether `b` starts a character (is not a UTF-8 continuation byte).
+const fn starts_a_char(b: u8) -> bool {
+    b & 0xC0 != 0x80
+}
+
+/// A character-mark table for `source`: entry `k` is the number of characters
+/// that start before byte `k * CHAR_MARK_STRIDE`. With it, the characters
+/// before any offset are counted by walking fewer than `CHAR_MARK_STRIDE`
+/// bytes ([`chars_before`]).
+fn char_marks_of(source: &str) -> Vec<usize> {
+    let mut marks = Vec::with_capacity(source.len() / CHAR_MARK_STRIDE + 1);
+    let mut chars = 0;
+    marks.push(0);
+    for chunk in source.as_bytes().chunks(CHAR_MARK_STRIDE) {
+        chars += chunk.iter().filter(|&&b| starts_a_char(b)).count();
+        marks.push(chars);
+    }
+    marks
+}
+
+/// The number of characters of `source` that start before `offset` (any
+/// byte offset, inside a character or past the end).
+fn chars_before(source: &str, marks: &[usize], offset: usize) -> usize {
+    let offset = offset.min(source.len());
+    let k = offset / CHAR_MARK_STRIDE;
+    let from = k * CHAR_MARK_STRIDE;
+    marks[k]
+        + source.as_bytes()[from..offset]
+            .iter()
+            .filter(|&&b| starts_a_char(b))
+            .count()
+}
+
+/// [`line_col_in`]'s answer, found through a line-start table and a
+/// character-mark table: the line by `partition_point`, the column as the
+/// characters before the offset less those before the line start.
+fn line_col_indexed(
+    source: &str,
+    starts: &[usize],
+    marks: &[usize],
+    offset: usize,
+) -> (usize, usize) {
     // `partition_point`, not `rposition`: the table is sorted ascending,
     // so a linear scan would be O(lines) per lookup — fine for one
     // diagnostic, quadratic for a file that reports thousands. The
@@ -161,23 +206,23 @@ fn line_col_indexed(source: &str, starts: &[usize], offset: usize) -> (usize, us
     let line = starts.partition_point(|&start| start <= offset) - 1;
 
     // Characters on this line that START before the offset -- the same
-    // rule `line_col_in` applies, and the reason this counts rather than
-    // slices. Slicing needs `offset` to be a character boundary, and an
-    // offset landing INSIDE a multi-byte character made `get` return
-    // `None`: the drift guard caught that answering column 1, which would
-    // have put a caret at the start of the line. Counting also handles an
-    // offset past the end without a panic.
+    // rule `line_col_in` applies. Counted, not sliced: an offset can land
+    // INSIDE a multi-byte character (slicing there made `get` return `None`,
+    // which the drift guard caught answering column 1) or past the end.
+    //
+    // Through the mark table, not by walking the line: a walk per lookup made
+    // a file with thousands of errors on one long line quadratic (#2868
+    // review: 40,000 bad dates on one 440 KB line took a minute, two walks
+    // of up to 440 KB per diagnostic).
     let line_start = starts[line];
-    let col = source[line_start..]
-        .char_indices()
-        .take_while(|(i, _)| line_start + i < offset)
-        .count();
+    let col = chars_before(source, marks, offset) - chars_before(source, marks, line_start);
 
     (line + 1, col + 1)
 }
 
-/// [`line_col_in`] for many lookups in one `&str`: the line-start table is
-/// built once, so each lookup walks one line instead of the file.
+/// [`line_col_in`] for many lookups in one `&str`: the line-start and
+/// character-mark tables are built once, so a lookup walks fewer than
+/// `CHAR_MARK_STRIDE` bytes instead of the file or the line.
 ///
 /// For callers that have the text but no [`SourceFile`] — parse errors are
 /// reported before a [`SourceMap`] exists. Rescanning from byte 0 per lookup
@@ -186,6 +231,7 @@ fn line_col_indexed(source: &str, starts: &[usize], offset: usize) -> (usize, us
 pub struct LineIndex<'a> {
     source: &'a str,
     starts: Vec<usize>,
+    marks: Vec<usize>,
 }
 
 impl<'a> LineIndex<'a> {
@@ -195,6 +241,7 @@ impl<'a> LineIndex<'a> {
         Self {
             source,
             starts: line_starts_of(source),
+            marks: char_marks_of(source),
         }
     }
 
@@ -202,7 +249,7 @@ impl<'a> LineIndex<'a> {
     /// exactly as [`line_col_in`] answers it.
     #[must_use]
     pub fn line_col(&self, offset: usize) -> (usize, usize) {
-        line_col_indexed(self.source, &self.starts, offset)
+        line_col_indexed(self.source, &self.starts, &self.marks, offset)
     }
 }
 
@@ -227,6 +274,7 @@ impl SourceFile {
             opened_path,
             source,
             line_starts: std::sync::OnceLock::new(),
+            char_marks: std::sync::OnceLock::new(),
             text_retained: true,
         }
     }
@@ -259,10 +307,12 @@ impl SourceFile {
     /// on a line holding `Assets:Café` the two disagreed by one column per
     /// extra byte and an editor placed the caret in the wrong place.
     ///
-    /// Counting characters costs a walk of the line, not of the file: the line
-    /// is still found with the cached line-start table and `partition_point`,
-    /// and only the remainder of that one line is scanned. The helper this
-    /// replaced rescanned from byte 0 on every call.
+    /// Counting characters costs a short walk, not one of the file or the
+    /// line: the line is found with the cached line-start table and
+    /// `partition_point`, and the characters before an offset with the cached
+    /// character-mark table. The helper this replaced rescanned from byte 0
+    /// on every call, and a later one walked the line, which was quadratic on
+    /// one long line with thousands of errors.
     ///
     /// The line survives [`SourceMap::drop_text`] (it comes from the
     /// offsets table, which the drop keeps), but the column does not:
@@ -280,7 +330,8 @@ impl SourceFile {
             let line = starts.partition_point(|&start| start <= offset) - 1;
             return (line + 1, 0);
         }
-        line_col_indexed(&self.source, self.line_starts(), offset)
+        let marks = self.char_marks.get_or_init(|| char_marks_of(&self.source));
+        line_col_indexed(&self.source, self.line_starts(), marks, offset)
     }
 
     /// Get the source text for a span.
@@ -591,6 +642,10 @@ mod tests {
     /// and past the end.
     #[test]
     fn char_columns_agree_between_surfaces() {
+        // Lines longer than `CHAR_MARK_STRIDE`, with multi-byte characters
+        // straddling the mark boundaries, so the mark table is exercised.
+        let long_mixed = "Ab\u{e9} \u{1f600} x".repeat(60) + "\n" + &"\u{e9}".repeat(300);
+        let long_ascii = "a".repeat(700) + "\nb";
         for source in [
             "2026-01-01 open Assets:Café\n  Assets:Café  -1 ABC\n",
             "a\r\nb\r\n",
@@ -598,6 +653,8 @@ mod tests {
             "\u{1f600} emoji first\nthen ascii\n",
             "no trailing newline",
             "",
+            long_mixed.as_str(),
+            long_ascii.as_str(),
         ] {
             let file = SourceFile::new(0, std::path::PathBuf::from("t.beancount"), source.into());
             let index = LineIndex::new(source);

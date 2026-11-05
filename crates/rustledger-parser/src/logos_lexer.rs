@@ -3,17 +3,6 @@
 //! This module provides a fast tokenizer for Beancount syntax using the Logos crate,
 //! which generates a DFA-based lexer with SIMD optimizations where available.
 
-// The `Logos` derive on `Token` generates one large lexer function: the
-// workspace builds logos with `state_machine_codegen`, which trades that
-// frame for no per-character recursion on long tokens (#2789). The lint
-// fires on the generated `impl`, which an attribute on the enum does not
-// reach. `expect` rather than `allow`: if the feature is dropped, the
-// expectation goes unfulfilled and clippy points back here.
-#![expect(
-    clippy::large_stack_frames,
-    reason = "state_machine_codegen trades one large lexer frame for no per-character recursion (#2789)"
-)]
-
 use logos::Logos;
 use std::fmt;
 use std::ops::Range;
@@ -83,9 +72,13 @@ pub enum Token<'src> {
     #[regex(r"[ \t]+")]
     Whitespace(&'src str),
     // ===== Literals =====
-    /// A date in YYYY-MM-DD, YYYY-M-D, YYYY/MM/DD, or YYYY/M/D format.
-    /// Single-digit month and day are accepted (e.g., 2024-1-5).
-    #[regex(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}")]
+    /// A date: beancount's `DATE` rule, `[0-9]{4,}[-/][0-9]+[-/][0-9]+`, so
+    /// single-digit fields (`2024-1-5`), `/` separators and extra leading zeros
+    /// (`02024-01-01`, `2024-001-01`) all lex as one date, as in beancount
+    /// (#2808). Whether the fields form a real date is decided when the token is
+    /// read, by `parse_date_token`, as beancount decides it when its lexer
+    /// builds the date.
+    #[regex(r"[0-9]{4,}[-/][0-9]+[-/][0-9]+")]
     Date(&'src str),
 
     /// A number with optional thousands separators and decimals.
@@ -624,6 +617,23 @@ pub fn is_valid_account_name(name: &str) -> bool {
         return false;
     };
     lexer.span() == (0..name.len()) && lexer.next().is_none()
+}
+
+/// The byte length of the date `text` starts with, or `None` if it does not
+/// start with one.
+///
+/// Implemented by running the lexer, as [`is_valid_account_name`] is, so it is
+/// the parser's own rule (beancount's `DATE`, `[0-9]{4,}[-/][0-9]+[-/][0-9]+`):
+/// `2024-1-5`, `2024/01/05` and `02024-01-01` are dates, `24-01-15` is not.
+/// Says nothing about whether the fields form a real calendar date; see
+/// [`crate::parse_date`] for that.
+#[must_use]
+pub fn leading_date_len(text: &str) -> Option<usize> {
+    let mut lexer = Token::lexer(text);
+    let Some(Ok(Token::Date(date))) = lexer.next() else {
+        return None;
+    };
+    Some(date.len())
 }
 
 /// Whether `name` is a valid commodity (currency) name.

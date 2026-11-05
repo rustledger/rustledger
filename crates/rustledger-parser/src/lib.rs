@@ -96,7 +96,7 @@ pub use cst::{
 // changes any of these will require a coordinated bump of this
 // crate so the re-export contract holds at THIS crate's semver.
 pub use error::{COST_PRICE_CURRENCY_MISMATCH, ParseError, ParseErrorKind};
-pub use logos_lexer::{is_valid_account_name, is_valid_currency};
+pub use logos_lexer::{is_valid_account_name, is_valid_currency, leading_date_len};
 pub use rowan::{Direction, NodeOrToken, TextRange, TextSize, TokenAtOffset, WalkEvent};
 pub use rustledger_core::{
     FIRST_PLACEHOLDER_FILE_ID, InternedStr, SYNTHESIZED_FILE_ID, Span, Spanned, is_source_file_id,
@@ -443,6 +443,29 @@ impl ParseWarning {
 #[must_use]
 pub fn parse(source: &str) -> ParseResult {
     parse_via_cst(source)
+}
+
+/// Parse a date as the parser reads a `DATE` token.
+///
+/// The rule is beancount's: `text` must lex as one `DATE` token (a year of
+/// four or more ASCII digits, then a month and a day, joined by `-` or `/`;
+/// see [`leading_date_len`]), whose fields are read as integers (`2024-01-15`,
+/// `2024/1/15` and `02024-001-015` are all 2024-01-15), with a year from 1 to
+/// 9999 and a real month and day. `24-01-15` is refused, as the parser
+/// refuses it.
+///
+/// For callers that build directives from text outside the parser (embedder
+/// input), so a date they accept is one the parser accepts (#2856).
+///
+/// # Errors
+///
+/// Returns why `text` is not such a date (`day 30 out of range for 2024-02`,
+/// `year 0 out of range`), as the parser's `InvalidDateValue` error states it.
+pub fn parse_date(text: &str) -> Result<rustledger_core::NaiveDate, String> {
+    if leading_date_len(text) != Some(text.len()) {
+        return Err("not a date (a year of four or more digits, a month and a day)".to_string());
+    }
+    cst::parse_date_token(text).ok_or_else(|| diagnostics::describe_invalid_date(text))
 }
 
 /// Parse beancount source for the processing pipeline, **without** collecting

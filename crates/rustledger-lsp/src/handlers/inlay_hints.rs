@@ -342,15 +342,18 @@ fn build_account_tooltip(
         };
 
     for txn in transactions {
+        // Each transaction counts once however many of its postings touch
+        // the account (#2850).
+        if txn.postings.iter().any(|p| p.account.as_ref() == account) {
+            transaction_count += 1;
+        }
         for posting in &txn.postings {
-            if posting.account.as_ref() == account {
-                transaction_count += 1;
-                if let Some(units) = &posting.units
-                    && let Some(number) = units.number()
-                {
-                    let curr = units.currency().unwrap_or("???").to_string();
-                    *balances.entry(curr).or_default() += number;
-                }
+            if posting.account.as_ref() == account
+                && let Some(units) = &posting.units
+                && let Some(number) = units.number()
+            {
+                let curr = units.currency().unwrap_or("???").to_string();
+                *balances.entry(curr).or_default() += number;
             }
         }
     }
@@ -359,7 +362,10 @@ fn build_account_tooltip(
     tooltip.push_str(&format!("**Account:** `{}`\n\n", account));
 
     if transaction_count > 0 {
-        tooltip.push_str(&format!("📊 {} transactions\n\n", transaction_count));
+        tooltip.push_str(&format!(
+            "📊 {}\n\n",
+            super::utils::count_noun(transaction_count, "transaction")
+        ));
 
         if !balances.is_empty() {
             tooltip.push_str(balance_label);
@@ -449,6 +455,44 @@ mod tests {
         };
         assert!(content.value.contains("Expenses:Food"));
         assert!(content.value.contains("2 transactions"));
+    }
+
+    /// Two postings to the account in one transaction are one transaction in
+    /// the tooltip (#2850).
+    #[test]
+    fn test_inlay_hint_resolve_counts_each_transaction_once() {
+        let source = r#"2021-01-02 * "Split invoice"
+  Expenses:Supplies  10000 KRW
+  Expenses:Supplies  20000 KRW
+  Assets:Bank
+"#;
+        let result = parse(source);
+        let hint = InlayHint {
+            position: Position::new(3, 13),
+            label: InlayHintLabel::String("  -30000 KRW".to_string()),
+            kind: Some(InlayHintKind::TYPE),
+            text_edits: None,
+            tooltip: None,
+            padding_left: Some(true),
+            padding_right: None,
+            data: Some(serde_json::json!({
+                "kind": "inferred_amount",
+                "account": "Expenses:Supplies",
+                "amount": "30000",
+                "currency": "KRW",
+            })),
+        };
+        let resolved = handle_inlay_hint_resolve(hint, &result, None);
+        let content = match resolved.tooltip {
+            Some(lsp_types::InlayHintTooltip::MarkupContent(c)) => c,
+            other => panic!("expected MarkupContent tooltip; got {other:?}"),
+        };
+        assert!(content.value.contains("1 transaction"), "{}", content.value);
+        assert!(
+            !content.value.contains("2 transactions"),
+            "{}",
+            content.value
+        );
     }
 
     #[test]

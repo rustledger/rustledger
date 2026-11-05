@@ -77,10 +77,14 @@ fn resolve_account_documentation(
 
     for spanned in directives {
         if let Directive::Transaction(txn) = &spanned.value {
+            // A transaction counts once however many of its postings touch
+            // the account (#2850): two postings to it in one transaction are
+            // still one transaction.
+            if txn.postings.iter().any(|p| p.account.as_ref() == account) {
+                transaction_count += 1;
+            }
             for posting in &txn.postings {
                 if posting.account.as_ref() == account {
-                    transaction_count += 1;
-
                     // Track dates
                     if first_date.is_none() || Some(txn.date) < first_date {
                         first_date = Some(txn.date);
@@ -104,7 +108,10 @@ fn resolve_account_documentation(
     let mut doc = format!("**{}**\n\n", account);
 
     if transaction_count > 0 {
-        doc.push_str(&format!("📊 **{} transactions**\n\n", transaction_count));
+        doc.push_str(&format!(
+            "📊 **{}**\n\n",
+            super::utils::count_noun(transaction_count, "transaction")
+        ));
 
         if let (Some(first), Some(last)) = (first_date, last_date) {
             doc.push_str(&format!("📅 {} → {}\n\n", first, last));
@@ -130,9 +137,12 @@ fn resolve_account_documentation(
         parts.sort();
         let balance_str = parts.join(", ");
         Some(if balance_str.is_empty() {
-            format!("{transaction_count} txns")
+            super::utils::count_noun(transaction_count, "txn")
         } else {
-            format!("{balance_str} · {transaction_count} txns")
+            format!(
+                "{balance_str} · {}",
+                super::utils::count_noun(transaction_count, "txn")
+            )
         })
     } else {
         None
@@ -249,6 +259,35 @@ mod tests {
             assert!(content.value.contains("2 transactions"));
             assert!(content.value.contains("95")); // 100 - 5
         }
+    }
+
+    /// Two postings to the account in one transaction are one transaction,
+    /// in both the popup and the `detail` (#2850).
+    #[test]
+    fn test_resolve_account_completion_counts_each_transaction_once() {
+        let source = r#"2000-01-01 open Expenses:Supplies KRW
+2000-01-01 open Assets:Bank KRW
+2021-01-02 * "Split invoice"
+  Expenses:Supplies  10000 KRW
+  Expenses:Supplies  20000 KRW
+  Assets:Bank       -30000 KRW
+"#;
+        let result = parse(source);
+        let item = CompletionItem {
+            label: "Expenses:Supplies".to_string(),
+            ..Default::default()
+        };
+        let resolved = handle_completion_resolve(item, &result.directives);
+        let detail = resolved.detail.clone().expect("detail summary set");
+        assert_eq!(detail, "30000 KRW · 1 txn");
+        let Some(Documentation::MarkupContent(content)) = resolved.documentation else {
+            panic!("markdown documentation");
+        };
+        assert!(
+            content.value.contains("**1 transaction**"),
+            "{}",
+            content.value
+        );
     }
 
     /// Regression for #1297: the resolve detail must aggregate over

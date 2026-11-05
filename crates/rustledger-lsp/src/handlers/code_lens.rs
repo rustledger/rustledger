@@ -423,9 +423,16 @@ fn collect_account_stats(parse_result: &ParseResult) -> HashMap<String, AccountS
 
     for spanned in &parse_result.directives {
         if let Directive::Transaction(txn) = &spanned.value {
+            // Each transaction counts once per account, however many of its
+            // postings touch it (#2850).
+            let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::new();
             for posting in &txn.postings {
-                let account = posting.account.to_string();
-                stats.entry(account).or_default().transaction_count += 1;
+                if seen.insert(posting.account.as_ref()) {
+                    stats
+                        .entry(posting.account.to_string())
+                        .or_default()
+                        .transaction_count += 1;
+                }
             }
         }
     }
@@ -521,6 +528,30 @@ mod tests {
                 .title
                 .contains("2 transactions")
         );
+    }
+
+    /// Two postings to the account in one transaction are one transaction on
+    /// the `open` lens (#2850).
+    #[test]
+    fn test_code_lens_counts_each_transaction_once() {
+        let source = r#"2000-01-01 open Expenses:Supplies KRW
+2021-01-02 * "Split invoice"
+  Expenses:Supplies  10000 KRW
+  Expenses:Supplies  20000 KRW
+  Assets:Bank       -30000 KRW
+"#;
+        let result = parse(source);
+        let lenses = handle_code_lens(
+            &code_lens_params(),
+            source,
+            &result,
+            Some(&[]),
+            PositionEncoding::Utf16,
+        )
+        .expect("lenses emitted");
+        let title = &lenses[0].command.as_ref().expect("command").title;
+        assert!(title.contains("1 transaction"), "{title}");
+        assert!(!title.contains("2 transactions"), "{title}");
     }
 
     /// Cold-start case: no diagnostics have been computed yet for this

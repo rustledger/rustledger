@@ -28,6 +28,8 @@ impl Executor<'_> {
 
         let key = match self.evaluate_expr(&func.args[0], ctx)? {
             Value::String(s) => s,
+            // A NULL key reads nothing, as bean-query answers NULL (#2820).
+            Value::Null => return Ok(Value::Null),
             _ => {
                 return Err(QueryError::Type(format!(
                     "{name}: argument must be a string key"

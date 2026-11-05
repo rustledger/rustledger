@@ -1,5 +1,3 @@
-| `number(amount)` | Extract number from amount; of an inventory, the total when it holds one currency, `NULL` when it holds several or nothing |
-| `currency(position)` | Get currency; of an inventory, its first held position's, `NULL` when it holds nothing |
 ______________________________________________________________________
 
 ## title: BQL Reference description: Beancount Query Language syntax reference
@@ -399,10 +397,13 @@ NULL, and amounts, positions and inventories compare in `ORDER BY`'s order
 
 A function given a `NULL` argument returns `NULL`, as in bean-query, so one
 row with no payee reads as a blank rather than failing the query:
-`substr(payee, 0, 2)` is `NULL` where `payee` is. The exceptions are the
-functions that exist to look at `NULL` (`coalesce`, `empty`) and the target of
-`convert` and `value`: a `NULL` currency or date there is an error, since it
-usually means an aggregate found no rows.
+`substr(payee, 0, 2)` and `meta(payee)` are `NULL` where `payee` is, and
+`getitem(x, NULL, default)` is the default. The exceptions: `coalesce` and
+`empty` exist to look at `NULL`; `joinstr` of several values skips the `NULL`
+ones; and, deliberately unlike bean-query, `convert` and `value` refuse a
+`NULL` target currency (it usually means an aggregate found no rows),
+`convert(NULL, 'USD')` is `0 USD` as an empty balance is, and a `NULL` date in
+`convert` or `getprice` means the latest price.
 
 `str(x)` renders any value as text. A position or inventory reads as Python
 prints it, as in bean-query: `10 USD`, `2 HOOL {100 USD, 2024-01-05}`,
@@ -428,9 +429,9 @@ Python repr (`frozenset({'t1'})`).
 |----------|-------------|
 | `cost(position)` | Convert to cost basis |
 | `units(position)` | Get units (number + currency) |
-| `currency(position)` | Get currency |
+| `currency(position)` | Get currency; of an inventory, its first held position's, `NULL` when it holds nothing |
 | `commodity(amount)` | Get the currency of an **amount** |
-| `number(amount)` | Extract number from amount |
+| `number(amount)` | Extract number from amount; of an inventory, the total when it holds one currency, `NULL` when it holds several or nothing |
 | `neg(x)` | Negate a number, amount, position or inventory; a position keeps its cost |
 | `abs(x)` | Absolute value of a number, position or inventory; a position keeps its cost |
 | `possign(x, account)` | Flip the sign for a credit-normal account (Income, Liabilities, Equity, including `name_*` renames), unchanged otherwise; takes a number, amount, position or inventory |

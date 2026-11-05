@@ -23,6 +23,7 @@ const LEDGER: &str = r#"
   Equity:Opening   15 USD
 2024-01-05 * "Broker" "lot"
   Assets:Stock    2 HOOL {100 USD, 2024-01-05, "lot"}
+    note: "first lot"
   Equity:Opening -200 USD
 2024-01-06 balance Assets:Bank 0 USD
 "#;
@@ -188,4 +189,32 @@ fn test_str_renders_positions_and_inventories_as_bean_query() {
         &column("SELECT str(meta) LIMIT 1")[0],
         Value::String(_)
     ));
+}
+
+/// The other NULL readers bean-query answers NULL (or the default) for:
+/// `meta` and its kin on a NULL key, `joinstr` of a NULL set, and a
+/// three-argument `getitem` whose key is NULL.
+#[test]
+fn test_meta_joinstr_and_getitem_on_null() {
+    let rows = run("SELECT meta(payee), entry_meta(payee), any_meta(payee), \
+         getitem(meta, payee, 'd') WHERE date = 2024-01-02");
+    assert_eq!(rows[0], [Value::Null, Value::Null, Value::Null, s("d")]);
+    let rows = run("SELECT type, joinstr(tags) FROM #entries");
+    assert_eq!(rows[0], [s("open"), Value::Null]);
+}
+
+/// `str()` of metadata or an entry is the cell's own text, deliberately not
+/// bean-query's Python repr (`{'note': 'first lot', ...}`,
+/// `Transaction(meta=..., ...)`).
+#[test]
+fn test_str_of_meta_and_entry_is_the_cell_text() {
+    let rows = run("SELECT str(meta), str(entry) WHERE account = 'Assets:Stock'");
+    assert_eq!(rows[0][0], s("{note: first lot}"));
+    assert_eq!(
+        rows[0][1],
+        s(
+            "{accounts: Assets:Stock, Equity:Opening, date: 2024-01-05, flag: *, links: , \
+             meta: {}, narration: lot, payee: Broker, tags: }"
+        )
+    );
 }

@@ -218,3 +218,20 @@ fn test_str_of_meta_and_entry_is_the_cell_text() {
         )
     );
 }
+
+/// A NULL container gives NULL even with a NULL key and a default:
+/// bean-query's `GetItem3` returns None for a None container before it reads
+/// the key, and prints a blank for `getitem(currency_meta(payee), payee, 'd')`
+/// on a row with no payee. The NULL-key arm answered the default for it.
+/// bean-query refuses the literal `getitem(NULL, NULL, 'd')` at compile time
+/// (`getitem(nonetype, nonetype, str)`); here it is NULL, as main gave it.
+#[test]
+fn test_getitem_null_container_wins_over_the_default() {
+    let rows = run("SELECT getitem(currency_meta(payee), payee, 'd') WHERE date = 2024-01-02");
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|r| r[0] == Value::Null), "{rows:?}");
+    assert_eq!(
+        column("SELECT getitem(NULL, NULL, 'd') LIMIT 1"),
+        [Value::Null]
+    );
+}

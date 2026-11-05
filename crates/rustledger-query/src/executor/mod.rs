@@ -2929,6 +2929,11 @@ impl<'a> Executor<'a> {
                     ));
                 }
                 match (&args[0], &args[1]) {
+                    // A NULL container is NULL whatever the key and default,
+                    // as bean-query's `GetItem3` returns None before it
+                    // reads the key (#2820 review). First, so the NULL-key
+                    // arm below cannot hand back the default for it.
+                    (Value::Null, _) => Ok(Value::Null),
                     // Container lookups delegate to the CANONICAL
                     // `getitem_entry`, shared with `[...]` subscript
                     // expressions so the two spellings cannot drift
@@ -2938,7 +2943,6 @@ impl<'a> Executor<'a> {
                     // A NULL key finds nothing, so the default stands in, as in
                     // bean-query; with no default it is NULL (#2820).
                     (_, Value::Null) if args.len() == 3 => Ok(args[2].clone()),
-                    (Value::Null, _) => Ok(Value::Null),
                     _ => Err(QueryError::Type(
                         "GETITEM expects (inventory, string), (metadata, string), or (object, string)"
                             .to_string(),

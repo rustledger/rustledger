@@ -398,12 +398,13 @@ NULL, and amounts, positions and inventories compare in `ORDER BY`'s order
 A function given a `NULL` argument returns `NULL`, as in bean-query, so one
 row with no payee reads as a blank rather than failing the query:
 `substr(payee, 0, 2)` and `meta(payee)` are `NULL` where `payee` is, and
-`getitem(x, NULL, default)` is the default. The exceptions: `coalesce` and
-`empty` exist to look at `NULL`; `joinstr` of several values skips the `NULL`
-ones; and, deliberately unlike bean-query, `convert` and `value` refuse a
-`NULL` target currency (it usually means an aggregate found no rows),
-`convert(NULL, 'USD')` is `0 USD` as an empty balance is, and a `NULL` date in
-`convert` or `getprice` means the latest price.
+`getitem(x, NULL, default)` is the default for a non-`NULL` `x` (a `NULL` `x`
+gives `NULL`). The exceptions: `coalesce` and `empty` exist to look at `NULL`;
+`joinstr` of several values skips the `NULL` ones; and, deliberately unlike
+bean-query, `convert` refuses a `NULL` target currency and `value` any `NULL`
+second argument, a currency or a date (it usually means an aggregate found no
+rows), `convert(NULL, 'USD')` is `0 USD` as an empty balance is, and a `NULL`
+date in `convert` or `getprice` means the latest price.
 
 `str(x)` renders any value as text. A position or inventory reads as Python
 prints it, as in bean-query: `10 USD`, `2 HOOL {100 USD, 2024-01-05}`,

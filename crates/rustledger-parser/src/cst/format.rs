@@ -5602,6 +5602,24 @@ mod tests {
         assert_eq!(formatted, format_node(&node));
     }
 
+    /// The whole-file range matches `format_node` with top-level comments
+    /// too: a trailing comment, consecutive comments, and a comment-only file
+    /// gained a blank line on the range path before #2838.
+    #[test]
+    fn format_node_range_full_range_matches_format_node_with_comments() {
+        for source in [
+            "2024-01-01 open Assets:A\n; c\n",
+            "; c\n; d\n",
+            "; c\n",
+            "; c\n2024-01-01 open Assets:A\n; d\n",
+        ] {
+            let (node, src) = parse_for_range(source);
+            let full = rowan::TextRange::new(ts(0), ts(src.len()));
+            let (_, formatted) = format_node_range(&node, full).expect("a range over the file");
+            assert_eq!(formatted, format_node(&node), "{source:?}");
+        }
+    }
+
     /// A selection that hits only inter-directive whitespace
     /// (no directive intersected, no top-level comment
     /// intersected) returns `None` — the caller surfaces this

@@ -161,24 +161,106 @@ fn test_parse_reports_a_year_zero_header_date() {
     );
 }
 
-/// A date beancount reads whole and our lexer splits (`2024-02-002`, #2808)
-/// lexes as an invalid `2024-02-00` plus `2`: it keeps its one split-date
-/// error, and is not reported a second time as an invalid date.
+/// A date with extra digits is one date, as beancount reads its `DATE` token
+/// (`[0-9]{4,}[-/][0-9]+[-/][0-9]+`, the fields read as integers): `2024-02-002`
+/// is 2024-02-02, a value with no error, where our lexer used to split it
+/// (#2808).
 #[test]
-fn test_parse_reports_a_split_date_once() {
-    for src in [
-        "2024-01-02 open Assets:C\n  kk: 2024-02-002\n",
-        "2024-01-02 custom \"x\" 2024-02-002\n",
-        "pushmeta kk: 2024-02-002\npopmeta kk:\n",
+fn test_parse_reads_a_long_form_value_date_as_beancount_does() {
+    let want = rustledger_core::naive_date(2024, 2, 2).expect("a date");
+    for value in ["2024-02-002", "2024-002-02", "02024-02-02", "2024/002/002"] {
+        let src = format!("2024-01-02 open Assets:C\n  kk: {value}\n");
+        let result = parse(&src);
+        assert!(result.errors.is_empty(), "{src:?}: {:?}", result.errors);
+        let Directive::Open(open) = &result.directives[0].value else {
+            panic!("{src:?}: an open");
+        };
+        assert_eq!(
+            open.meta.as_map().get("kk"),
+            Some(&MetaValue::Date(want)),
+            "{src:?}"
+        );
+        let src = format!("2024-01-02 custom \"x\" {value}\n");
+        let result = parse(&src);
+        assert!(result.errors.is_empty(), "{src:?}: {:?}", result.errors);
+        let Directive::Custom(custom) = &result.directives[0].value else {
+            panic!("{src:?}: a custom");
+        };
+        assert_eq!(custom.values, vec![MetaValue::Date(want)], "{src:?}");
+        let src = format!("pushmeta kk: {value}\npopmeta kk:\n");
+        assert!(parse(&src).errors.is_empty(), "{src:?}");
+    }
+    // Past 9999 the year is out of range, in beancount and here.
+    let result = parse("2024-01-02 open Assets:C\n  kk: 20024-02-02\n");
+    assert_eq!(result.errors.len(), 1, "{:?}", result.errors);
+    assert!(
+        result.errors[0]
+            .to_string()
+            .contains("year 20024 out of range"),
+        "{}",
+        result.errors[0]
+    );
+}
+
+/// beancount names a bad date wherever it stands, since it builds the date
+/// while lexing, and that error stands for the line (#2856): no grammar error
+/// on top, two bad dates on one line are two errors, and the bad dates under a
+/// directive with a bad date of its own are reported too. Every count below is
+/// bean-check 3.2.3's on the same input.
+#[test]
+fn test_parse_names_an_invalid_date_in_every_position_as_beancount_does() {
+    for (label, body, errors) in [
+        ("event value", "2024-01-02 event \"e\" 2024-02-30\n", 1),
+        ("price amount", "2024-01-02 price HOOL 2024-02-30\n", 1),
+        (
+            "@ price",
+            "2024-01-02 *\n  Assets:A  1 HOOL @ 2024-02-30\n  Assets:B\n",
+            1,
+        ),
+        (
+            "transaction header",
+            "2024-01-02 * \"x\" 2024-02-30\n  Assets:A  1 USD\n  Assets:B\n",
+            1,
+        ),
+        ("option", "option \"title\" 2024-02-30\n", 1),
+        ("plugin", "plugin \"x\" 2024-02-30\n", 1),
+        ("orphan metadata line", "  kk: 2024-02-30\n", 1),
+        (
+            "bad header date over a bad value date",
+            "2024-02-30 open Assets:C\n  kk: 2024-02-31\n",
+            2,
+        ),
+        (
+            "bad header date and value date",
+            "2024-02-30 custom \"x\" 2024-02-31\n",
+            2,
+        ),
+        (
+            "two bad dates in one custom",
+            "2024-01-02 custom \"x\" 2024-02-30 2024-13-01\n",
+            2,
+        ),
     ] {
-        let result = parse(src);
-        assert_eq!(result.errors.len(), 1, "{src:?}: {:?}", result.errors);
+        let src = format!("{OPENS}{body}");
+        let result = parse(&src);
+        assert_eq!(result.errors.len(), errors, "{label}: {:?}", result.errors);
         assert!(
-            !matches!(result.errors[0].kind, ParseErrorKind::InvalidDateValue(_)),
-            "{src:?}: {:?}",
+            result
+                .errors
+                .iter()
+                .all(|e| matches!(e.kind, ParseErrorKind::InvalidDateValue(_))),
+            "{label}: only date errors, {:?}",
             result.errors
         );
     }
+    // A valid date where the grammar wants none is still a syntax error.
+    let result = parse(&format!("{OPENS}2024-01-02 event \"e\" 2024-02-02\n"));
+    assert_eq!(result.errors.len(), 1, "{:?}", result.errors);
+    assert!(
+        !matches!(result.errors[0].kind, ParseErrorKind::InvalidDateValue(_)),
+        "{:?}",
+        result.errors
+    );
 }
 
 /// Valid dates stay values, including a leap day and the slash form.
@@ -210,24 +292,15 @@ fn test_parse_reports_an_invalid_cost_date() {
     );
 }
 
-/// A valid cost date, and a split cost date, are not reported as invalid
-/// calendar dates.
+/// A valid cost date is not reported as an invalid calendar date.
 #[test]
-fn test_parse_does_not_report_valid_or_split_cost_dates_as_invalid() {
-    let ok = format!(
-        "{OPENS}2024-01-02 * \"x\"\n  Assets:A  1 HOOL {{1 USD, 2024-02-29}}\n  Assets:B\n"
-    );
-    assert!(parse(&ok).errors.is_empty(), "{:?}", parse(&ok).errors);
-    let split = format!(
-        "{OPENS}2024-01-02 * \"x\"\n  Assets:A  1 HOOL {{1 USD, 2024-02-002}}\n  Assets:B\n"
-    );
-    let result = parse(&split);
-    assert!(
-        !result
-            .errors
-            .iter()
-            .any(|e| matches!(e.kind, ParseErrorKind::InvalidDateValue(_))),
-        "{:?}",
-        result.errors
-    );
+fn test_parse_does_not_report_valid_cost_dates() {
+    // Including one with extra digits, one date as in beancount (#2808).
+    for date in ["2024-02-29", "2024-02-002"] {
+        let src = format!(
+            "{OPENS}2024-01-02 * \"x\"\n  Assets:A  1 HOOL {{1 USD, {date}}}\n  Assets:B\n"
+        );
+        let result = parse(&src);
+        assert!(result.errors.is_empty(), "{date}: {:?}", result.errors);
+    }
 }

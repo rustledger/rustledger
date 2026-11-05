@@ -367,12 +367,7 @@ pub(super) fn first_header_defect(
     }
     c.bump();
     let grammar = directive_body(directive, &mut c).err();
-    // On a tie the split date wins: it says why the token is unexpected.
-    earliest([
-        split_beancount_date(tokens, src),
-        grammar,
-        glued_one_letter_currency(tokens, src),
-    ])
+    earliest([grammar, glued_one_letter_currency(tokens, src)])
 }
 
 /// The defect that starts first on the line; on a tie, the first listed.
@@ -410,82 +405,6 @@ fn glued_one_letter_currency(tokens: &[(K, Range<usize>)], src: &str) -> Option<
     })
 }
 
-/// Text that beancount lexes as ONE date and our lexer splits (#2808).
-///
-/// beancount's `DATE` is `[0-9]{4,}[-/][0-9]+[-/][0-9]+`; ours is
-/// `\d{4}[-/]\d{1,2}[-/]\d{1,2}`. Where they differ, our tokens are glued
-/// together with no whitespace between them, in one of two shapes:
-///
-/// - a `DATE` with a `NUMBER` right after it, when the last field has more
-///   than two digits: `2024-02-002`, `2024/02/002`, `2024-2-002` and
-///   `2024-02-0002` lex as `DATE 2024-02-00` (or `2024-2-00`) then a number;
-/// - `NUMBER`, `-` or `/`, `NUMBER`, `-` or `/`, `NUMBER`, the first two plain
-///   digits and the first at least four of them, when the year has more than
-///   four digits or the month more than two: `02024-02-02`, `20024-02-02` and
-///   `2024-002-02` lex as the number expression `2024 - 002 - 02`.
-///
-/// The last number may run on past the digits (`2024-002-02.5`,
-/// `2024-002-02,000`, `2024-02-002.`): beancount's `DATE` takes the leading
-/// digits and then reports what follows, and read our way the run is
-/// arithmetic again (2019.5, 22). The first two must be plain digits, since
-/// `2024.5-02-02` and `2024-0.5-02` are arithmetic in beancount too.
-///
-/// Read our way, either shape loads as a wrong value with no error where a
-/// value may be a number (a metadata value, a `custom` value, a `pushmeta`
-/// value, an amount): `kk: 2024-002-02` was the integer 2020, `kk: 2024-02-002`
-/// the integer 2, `custom "x" 2024-02-002` just the number 2 (the invalid
-/// date `2024-02-00` is dropped, #2811). beancount reads a date (or rejects
-/// an invalid one, `20024-02-02`), so the text is reported. That is stricter
-/// than beancount where its date is valid, and deliberately so: the
-/// alternative is a silently wrong value. The fix that matches beancount is
-/// in the lexer (#2808).
-pub(super) fn split_beancount_date(
-    tokens: &[(K, Range<usize>)],
-    src: &str,
-) -> Option<HeaderDefect> {
-    let digits = |r: &Range<usize>| {
-        src.get(r.clone())
-            .is_some_and(|t| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))
-    };
-    let glued = |pair: &[(K, Range<usize>)]| pair[0].1.end == pair[1].1.start;
-    let defect = |from: usize, to: usize| HeaderDefect {
-        range: from..to,
-        expected: "YYYY-MM-DD if this is a date: beancount reads it as one \
-                   date, which rledger does not support yet (#2808)",
-        found: Some(K::NUMBER),
-    };
-    for (i, (kind, range)) in tokens.iter().enumerate() {
-        match kind {
-            K::DATE => {
-                if let Some(next) = tokens.get(i + 1)
-                    && next.0 == K::NUMBER
-                    && glued(&tokens[i..i + 2])
-                {
-                    return Some(defect(range.start, next.1.end));
-                }
-            }
-            K::NUMBER => {
-                let Some(run) = tokens.get(i..i + 5) else {
-                    continue;
-                };
-                let shape = run[0].1.len() >= 4
-                    && matches!(run[1].0, K::MINUS | K::SLASH)
-                    && run[2].0 == K::NUMBER
-                    && matches!(run[3].0, K::MINUS | K::SLASH)
-                    && run[4].0 == K::NUMBER
-                    && run.windows(2).all(glued)
-                    && digits(&run[0].1)
-                    && digits(&run[2].1);
-                if shape {
-                    return Some(defect(range.start, run[4].1.end));
-                }
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
 /// The first defect in a metadata line (`key: value` under a directive, a
 /// transaction or a posting; stage 2 of #2802), if any. beancount's rule is
 /// `key_value_line : INDENT key_value eol` with `key_value : KEY COLON
@@ -495,21 +414,15 @@ pub(super) fn split_beancount_date(
 /// `NEWLINE`; `end` is where it ends; `src` is the text the ranges index.
 /// Ranges are echoed back in the caller's frame.
 ///
-/// Stricter than beancount in two places, deliberately, both because our
-/// lexer splits a token beancount reads whole and the pieces used to load as
-/// a wrong value with no error:
-///
-/// - a date beancount's `DATE` takes and ours does not
-///   ([`split_beancount_date`]): `kk: 2024-02-002` loaded as the integer 2,
-///   `kk: 2024-002-02` as 2020. Fixed properly in the lexer by #2808.
-/// - a number with doubled thousands separators: beancount's `NUMBER` is
+/// Stricter than beancount in one place, deliberately, because our lexer
+/// splits a token beancount reads whole and the pieces used to load as a wrong
+/// value with no error: a number with doubled thousands separators: beancount's `NUMBER` is
 ///   `[0-9][0-9,]+[0-9]`, so `kk: 1,,000` is 1000 there, and ours lexes `1`,
 ///   `,`, `,`, `000`, which loaded as the integer 1. The stray comma is
 ///   reported here by the grammar; a posting amount (`1,,000 USD`) and a
 ///   header amount (`balance Assets:A 1,,000 USD`) already reported it.
 ///
-/// Pinned by `test_parse_reports_a_split_beancount_date_instead_of_misreading_it`
-/// and `test_parse_reports_doubled_thousands_separators_instead_of_misreading_them`.
+/// Pinned by `test_parse_reports_doubled_thousands_separators_instead_of_misreading_them`.
 pub(super) fn first_meta_defect(
     tokens: &[(K, Range<usize>)],
     end: usize,
@@ -528,12 +441,7 @@ pub(super) fn first_meta_defect(
         .and_then(|()| key_value_value(&mut c))
         .and_then(|()| c.finish())
         .err();
-    // On a tie the split date wins: it says why the token is unexpected.
-    earliest([
-        split_beancount_date(tokens, src),
-        grammar,
-        glued_one_letter_currency(tokens, src),
-    ])
+    earliest([grammar, glued_one_letter_currency(tokens, src)])
 }
 
 /// `maybe_number maybe_currency`: what may stand for the units of a posting,
@@ -636,10 +544,6 @@ fn cost_spec<I: Iterator<Item = (K, Range<usize>)>>(c: &mut Cursor<I>) -> Step {
 /// converter also asks it whether a spec's number may be trusted; the two
 /// agree on everything that rule reports, which the stray-character matrix
 /// pins, and a posting it already reported is not checked again here.
-///
-/// Like [`first_meta_defect`], stricter than beancount on a date our lexer
-/// splits ([`split_beancount_date`], #2808): `Assets:A  2024-002-02 USD`
-/// loaded as 2020 USD.
 pub(super) fn first_posting_defect(
     tokens: &[(K, Range<usize>)],
     end: usize,
@@ -672,7 +576,6 @@ pub(super) fn first_posting_defect(
     })()
     .err();
     earliest([
-        split_beancount_date(tokens, src),
         grammar,
         glued_one_letter_currency(tokens, src),
         tag_after_brace_hash(tokens, src),

@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 
-use rustledger_core::{Directive, MetaValue, Metadata, NaiveDate};
+use rustledger_core::{Directive, MetaValue, Metadata};
 use serde::Deserialize;
 
 /// Parse an `InputAmount` to a host `Amount`, propagating decimal parse
@@ -287,8 +287,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
             postings,
             meta,
         } => {
-            let date = date
-                .parse::<NaiveDate>()
+            let date = rustledger_parser::parse_date(date)
                 .map_err(|e| format!("Invalid date '{date}': {e}"))?;
 
             let flag = match flag.as_str() {
@@ -371,7 +370,14 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
                             Ok::<_, String>(rustledger_core::CostSpec {
                                 number,
                                 currency: c.currency.clone().map(Into::into),
-                                date: c.date.as_ref().and_then(|d| d.parse::<NaiveDate>().ok()),
+                                date: c
+                                    .date
+                                    .as_deref()
+                                    .map(|d| {
+                                        rustledger_parser::parse_date(d)
+                                            .map_err(|e| format!("Invalid cost date '{d}': {e}"))
+                                    })
+                                    .transpose()?,
                                 label: c.label.clone(),
                                 merge: c.merge,
                             })
@@ -418,8 +424,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
             booking,
             meta,
         } => {
-            let date = date
-                .parse::<NaiveDate>()
+            let date = rustledger_parser::parse_date(date)
                 .map_err(|e| format!("Invalid date '{date}': {e}"))?;
             Ok(Directive::Open(rustledger_core::Open {
                 date,
@@ -434,8 +439,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
             account,
             meta,
         } => {
-            let date = date
-                .parse::<NaiveDate>()
+            let date = rustledger_parser::parse_date(date)
                 .map_err(|e| format!("Invalid date '{date}': {e}"))?;
             Ok(Directive::Close(rustledger_core::Close {
                 date,
@@ -449,8 +453,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
             amount,
             meta,
         } => {
-            let date = date
-                .parse::<NaiveDate>()
+            let date = rustledger_parser::parse_date(date)
                 .map_err(|e| format!("Invalid date '{date}': {e}"))?;
             Ok(Directive::Balance(rustledger_core::Balance {
                 date,
@@ -466,8 +469,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
             source_account,
             meta,
         } => {
-            let date = date
-                .parse::<NaiveDate>()
+            let date = rustledger_parser::parse_date(date)
                 .map_err(|e| format!("Invalid date '{date}': {e}"))?;
             Ok(Directive::Pad(rustledger_core::Pad {
                 date,
@@ -481,8 +483,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
             currency,
             meta,
         } => {
-            let date = date
-                .parse::<NaiveDate>()
+            let date = rustledger_parser::parse_date(date)
                 .map_err(|e| format!("Invalid date '{date}': {e}"))?;
             Ok(Directive::Commodity(rustledger_core::Commodity {
                 date,
@@ -496,8 +497,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
             amount,
             meta,
         } => {
-            let date = date
-                .parse::<NaiveDate>()
+            let date = rustledger_parser::parse_date(date)
                 .map_err(|e| format!("Invalid date '{date}': {e}"))?;
             Ok(Directive::Price(rustledger_core::Price {
                 date,
@@ -512,8 +512,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
             value,
             meta,
         } => {
-            let date = date
-                .parse::<NaiveDate>()
+            let date = rustledger_parser::parse_date(date)
                 .map_err(|e| format!("Invalid date '{date}': {e}"))?;
             Ok(Directive::Event(rustledger_core::Event {
                 date,
@@ -530,8 +529,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
             links,
             meta,
         } => {
-            let date = date
-                .parse::<NaiveDate>()
+            let date = rustledger_parser::parse_date(date)
                 .map_err(|e| format!("Invalid date '{date}': {e}"))?;
             Ok(Directive::Note(rustledger_core::Note {
                 date,
@@ -551,8 +549,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
             links,
             meta,
         } => {
-            let date = date
-                .parse::<NaiveDate>()
+            let date = rustledger_parser::parse_date(date)
                 .map_err(|e| format!("Invalid date '{date}': {e}"))?;
             Ok(Directive::Document(rustledger_core::Document {
                 date,
@@ -569,8 +566,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
             query_string,
             meta,
         } => {
-            let date = date
-                .parse::<NaiveDate>()
+            let date = rustledger_parser::parse_date(date)
                 .map_err(|e| format!("Invalid date '{date}': {e}"))?;
             Ok(Directive::Query(rustledger_core::Query {
                 date,
@@ -585,8 +581,7 @@ pub fn input_entry_to_directive(entry: &InputEntry) -> Result<Directive, String>
             values,
             meta,
         } => {
-            let date = date
-                .parse::<NaiveDate>()
+            let date = rustledger_parser::parse_date(date)
                 .map_err(|e| format!("Invalid date '{date}': {e}"))?;
             Ok(Directive::Custom(rustledger_core::Custom {
                 date,
@@ -951,5 +946,54 @@ mod tests {
             Directive::Open(o) => assert_eq!(o.account.as_str(), "資産:現金"),
             other => panic!("expected Open, got {other:?}"),
         }
+    }
+
+    /// A date from embedder input follows the parser's date rule
+    /// (`rustledger_parser::parse_date`, #2856): year 0 is refused, as the
+    /// parser and beancount refuse it, and a date beancount writes with extra
+    /// digits reads as that date.
+    #[test]
+    fn test_input_entry_to_directive_reads_dates_as_the_parser_does() {
+        let open = |date: &str| {
+            let entry: InputEntry = serde_json::from_value(serde_json::json!({
+                "type": "open", "date": date, "account": "Assets:Cash"
+            }))
+            .expect("an open entry");
+            input_entry_to_directive(&entry)
+        };
+        let err = open("0000-01-01").expect_err("year 0 is refused");
+        assert!(err.contains("year 0 out of range"), "{err}");
+        assert!(open("2024-02-30").is_err());
+        match open("02024-001-015").expect("one date, as beancount reads it") {
+            Directive::Open(o) => {
+                assert_eq!(o.date, rustledger_core::naive_date(2024, 1, 15).unwrap());
+            }
+            other => panic!("expected Open, got {other:?}"),
+        }
+    }
+
+    /// An invalid cost date is an error, where it used to leave the lot
+    /// undated with no error.
+    #[test]
+    fn test_input_entry_to_directive_refuses_an_invalid_cost_date() {
+        let entry: InputEntry = serde_json::from_value(serde_json::json!({
+            "type": "transaction",
+            "date": "2024-01-02",
+            "postings": [
+                {
+                    "account": "Assets:Stock",
+                    "units": {"number": "1", "currency": "HOOL"},
+                    "cost": {
+                        "number": {"kind": "per_unit", "value": "10"},
+                        "currency": "USD",
+                        "date": "2024-02-30"
+                    }
+                },
+                {"account": "Assets:Cash"}
+            ]
+        }))
+        .expect("a transaction entry");
+        let err = input_entry_to_directive(&entry).expect_err("invalid cost date");
+        assert!(err.contains("Invalid cost date '2024-02-30'"), "{err}");
     }
 }

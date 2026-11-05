@@ -83,9 +83,13 @@ pub enum Token<'src> {
     #[regex(r"[ \t]+")]
     Whitespace(&'src str),
     // ===== Literals =====
-    /// A date in YYYY-MM-DD, YYYY-M-D, YYYY/MM/DD, or YYYY/M/D format.
-    /// Single-digit month and day are accepted (e.g., 2024-1-5).
-    #[regex(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}")]
+    /// A date: beancount's `DATE` rule, `[0-9]{4,}[-/][0-9]+[-/][0-9]+`, so
+    /// single-digit fields (`2024-1-5`), `/` separators and extra leading zeros
+    /// (`02024-01-01`, `2024-001-01`) all lex as one date, as in beancount
+    /// (#2808). Whether the fields form a real date is decided when the token is
+    /// read, by `parse_date_token`, as beancount decides it when its lexer
+    /// builds the date.
+    #[regex(r"\d{4,}[-/]\d+[-/]\d+")]
     Date(&'src str),
 
     /// A number with optional thousands separators and decimals.

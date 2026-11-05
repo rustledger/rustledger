@@ -28,7 +28,6 @@ const DATA: &str = include_str!("data/stray_char_matrix.tsv");
 
 /// Rows pinned as known differences, by count: see the `known_*` functions.
 const KNOWN_COLUMN_0: usize = 192;
-const KNOWN_DATES: [usize; 3] = [259, 6, 175];
 
 /// One generated input.
 struct Case {
@@ -143,26 +142,6 @@ fn known_column_0_divergence(row: &Row, case: &Case) -> bool {
     "!?&".contains(case.ch) && (case.offset == 0 || row.base.as_bytes()[case.offset - 1] == b'\n')
 }
 
-/// A digit inserted into a date: beancount's `DATE` is
-/// `[0-9]{4,}[-/][0-9]+[-/][0-9]+`, so `02024-01-01` and `2024-001-01` are
-/// dates there, and our lexer rejects them; `20024-02-02` lexes as a date
-/// there and then fails as one, where ours reads the number expression
-/// `20024 - 02 - 02`. A date-lexing difference, not a stray token: #2808.
-/// Pinned by count below until it is fixed.
-fn known_date_digit_divergence(row: &Row, case: &Case) -> bool {
-    let b = row.base.as_bytes();
-    let is_date_at = |s: usize| {
-        b.get(s..s + 10).is_some_and(|w| {
-            w.iter().enumerate().all(|(i, c)| match i {
-                4 | 7 => *c == b'-',
-                _ => c.is_ascii_digit(),
-            })
-        }) && (s == 0 || !b[s - 1].is_ascii_digit())
-    };
-    case.ch.is_ascii_digit()
-        && (0..b.len()).any(|s| is_date_at(s) && (s..=s + 10).contains(&case.offset))
-}
-
 /// A character inserted right after a `\r` that the line goes on past: a
 /// mid-line `\r`, which we report and beancount accepts. A deliberate
 /// deviation (#2804): the formatter turns a bare `\r` into a line break, so
@@ -192,7 +171,6 @@ fn known_cost_merge(case: &Case) -> bool {
 fn test_parse_reports_a_stray_character_exactly_when_beancount_does() {
     let mut checked = [0usize; 3];
     let mut known = 0usize;
-    let mut known_dates = [0usize; 3];
     let mut known_cr = 0usize;
     let mut known_merge = 0usize;
     let mut wrong = Vec::new();
@@ -207,10 +185,6 @@ fn test_parse_reports_a_stray_character_exactly_when_beancount_does() {
             let disagree = we_reject != beancount_rejects;
             if known_column_0_divergence(&row, case) && we_reject && !beancount_rejects {
                 known += 1;
-                continue;
-            }
-            if known_date_digit_divergence(&row, case) && disagree {
-                known_dates[stage] += 1;
                 continue;
             }
             if known_mid_line_cr(&row, case) && we_reject && !beancount_rejects {
@@ -251,10 +225,6 @@ fn test_parse_reports_a_stray_character_exactly_when_beancount_does() {
         checked[1]
     );
     assert_eq!(known, KNOWN_COLUMN_0, "the #2779 rows changed");
-    assert_eq!(
-        known_dates, KNOWN_DATES,
-        "the date-digit (#2808) rows changed"
-    );
     assert!(
         checked[2] > 20_000,
         "only {} transaction and posting cases checked",
@@ -391,19 +361,29 @@ fn test_try_format_source_keeps_a_leading_comma_in_a_currency_list() {
 fn normalize_txn_flag(s: &str) -> String {
     s.split_inclusive('\n')
         .map(|line| {
+            // A leading date in beancount's `DATE` shape,
+            // `[0-9]{4,}[-/][0-9]+[-/][0-9]+` (#2808), then ` txn`.
             let bytes = line.as_bytes();
-            let dated = bytes.len() >= 14
-                && bytes[..10].iter().enumerate().all(|(i, b)| match i {
-                    4 | 7 => *b == b'-',
-                    _ => b.is_ascii_digit(),
-                });
-            if dated
-                && line[10..].starts_with(" txn")
-                && matches!(bytes.get(14), Some(b' ' | b'\n' | b'\r') | None)
-            {
-                format!("{} *{}", &line[..10], &line[14..])
-            } else {
-                line.to_string()
+            let run = |from: usize| {
+                bytes[from..]
+                    .iter()
+                    .take_while(|b| b.is_ascii_digit())
+                    .count()
+            };
+            let year = run(0);
+            let date_len = (year >= 4 && matches!(bytes.get(year), Some(b'-' | b'/')))
+                .then(|| year + 1 + run(year + 1))
+                .filter(|&at| at > year + 1 && matches!(bytes.get(at), Some(b'-' | b'/')))
+                .map(|at| at + 1 + run(at + 1))
+                .filter(|&end| bytes.get(end - 1).is_some_and(u8::is_ascii_digit));
+            match date_len {
+                Some(n)
+                    if line[n..].starts_with(" txn")
+                        && matches!(bytes.get(n + 4), Some(b' ' | b'\n' | b'\r') | None) =>
+                {
+                    format!("{} *{}", &line[..n], &line[n + 4..])
+                }
+                _ => line.to_string(),
             }
         })
         .collect()
@@ -874,104 +854,80 @@ fn test_parse_accepts_every_metadata_value_type() {
     }
 }
 
-/// Text beancount's `DATE` (`[0-9]{4,}[-/][0-9]+[-/][0-9]+`) reads as one date
-/// and our lexer splits (#2808). Read our way, each loaded as a wrong value
-/// with no error: `kk: 2024-002-02` as the integer 2020 (`2024 - 002 - 02`),
-/// `kk: 2024-02-002` as the integer 2 (`DATE 2024-02-00`, then `2`),
-/// `custom "x" 2024-02-002` as just the number 2 (the invalid date is
-/// dropped, #2811), `balance ... 2024-002-02 USD` as 2020 USD,
-/// `kk: 2024-002-02.5` as 2019.5 (beancount takes the date's digits and
-/// then rejects the `.5`). It is now reported: stricter than beancount where its
-/// date is valid (`2024-002-02` is 2024-02-02 there), on purpose, since the
-/// alternative is a wrong value. Matching beancount is the lexer fix in
-/// #2808; the matrix rows are pinned in `KNOWN_DATES` until then.
+/// A date with extra digits is one token, as beancount's `DATE`
+/// (`[0-9]{4,}[-/][0-9]+[-/][0-9]+`) is (#2808): a value date reads as that
+/// date (`2024-002-02` is 2024-02-02), a year past 9999 is an invalid date,
+/// and a date where the grammar wants a number (`balance ... 2024-002-02
+/// USD`) is the syntax error it is in beancount. What runs on past the date
+/// (`2024-002-02.5`, `2024-02-002,000`) is reported as beancount reports it.
+/// Our lexer used to split these into a number expression, which loaded as a
+/// wrong value with no error (`kk: 2024-002-02` was 2020), so they were
+/// reported until this fix. Every expectation below is bean-check 3.2.3's on
+/// the same input: the lines it reports, and whether a date is one of them.
 #[test]
-fn test_parse_reports_a_split_beancount_date_instead_of_misreading_it() {
-    for value in [
-        // A glued `DATE` and `NUMBER`: the last field has more than two digits.
-        "2024-02-002",
-        "2024-02-020",
-        "2024/02/002",
-        "2024-2-002",
-        "2024-02-0002",
-        // A glued number run: the year or the month is too long for our DATE.
-        "2024-002-02",
-        "02024-02-02",
-        "2024/002/02",
-        // Invalid dates in beancount (it reports them), wrong numbers here.
-        "20024-02-02",
-        "99999-01-01",
-        // The last number runs on past the digits: beancount takes the date
-        // and rejects the rest; read our way it was arithmetic again.
-        "2024-002-02.5",
-        "2024-002-02,000",
-        "2024-02-002.5",
-        "2024-02-002.",
-        "2024-02-002,000",
+fn test_parse_reads_a_long_form_date_in_every_position_as_beancount_does() {
+    // (value, which templates beancount reports, whether it names the date)
+    for (value, values_clean, amounts_error, date_error) in [
+        ("2024-002-02", true, true, false),
+        ("02024-02-02", true, true, false),
+        ("2024-02-002", true, true, false),
+        ("2024/002/02", true, true, false),
+        ("20024-02-02", false, true, true),
+        ("99999-01-01", false, true, true),
+        ("2024-002-02.5", false, true, false),
+        ("2024-02-002.", false, true, false),
     ] {
-        // `pushmeta` and `popmeta` produce no directive.
-        for (src, kept) in [
-            (format!("2024-01-01 open Assets:A\n  kk: {value}\n"), 1),
-            (format!("2024-01-01 custom \"x\" {value}\n"), 1),
-            (format!("pushmeta kk: {value}\npopmeta kk:\n"), 0),
-            (format!("2024-01-01 balance Assets:A {value} USD\n"), 1),
-            (format!("2024-01-01 price HOOL {value} USD\n"), 1),
+        for (src, is_value) in [
+            (format!("2024-01-01 open Assets:A\n  kk: {value}\n"), true),
+            (format!("2024-01-01 custom \"x\" {value}\n"), true),
+            (format!("2024-01-01 balance Assets:A {value} USD\n"), false),
+            (format!("2024-01-01 price HOOL {value} USD\n"), false),
+            (
+                format!("2024-01-01 *\n  Assets:A  {value} USD\n  Assets:B\n"),
+                false,
+            ),
+            (
+                format!("2024-01-01 *\n  Assets:A  1 HOOL @ {value} USD\n  Assets:B\n"),
+                false,
+            ),
         ] {
             let result = parse(&src);
-            // A value that runs on past the date (`2024-002-02.5`) is a syntax
-            // error in beancount too, so its `pushmeta` pushes nothing and the
-            // `popmeta` reports the absent key, as beancount does; a value that
-            // is exactly one date is pushed, as beancount pushes it.
-            let runs_on = value.contains(['.', ',']);
-            let expected = if src.starts_with("pushmeta") && runs_on {
-                2
+            let want_error = if is_value {
+                !values_clean
             } else {
-                1
+                amounts_error
             };
             assert_eq!(
-                result.errors.len(),
-                expected,
+                !result.errors.is_empty(),
+                want_error,
                 "{src:?}: {:?}",
                 result.errors
             );
-            if expected == 2 {
-                assert!(
+            if want_error {
+                let lines: std::collections::HashSet<usize> = result
+                    .errors
+                    .iter()
+                    .map(|e| src[..e.span.start].matches('\n').count())
+                    .collect();
+                assert_eq!(lines.len(), 1, "{src:?}: one line, {:?}", result.errors);
+                let named = result.errors.iter().any(|e| {
                     matches!(
-                        result.errors[1].kind,
-                        rustledger_parser::ParseErrorKind::InvalidPopmeta(ref key) if key == "kk"
-                    ),
-                    "{src:?}: {:?}",
-                    result.errors
-                );
+                        e.kind,
+                        rustledger_parser::ParseErrorKind::InvalidDateValue(_)
+                    )
+                });
+                assert_eq!(named, date_error, "{src:?}: {:?}", result.errors);
             }
-            let err = &result.errors[0];
-            assert_eq!(
-                &src[err.span.start..err.span.end],
-                value,
-                "{src:?}: {err:?}"
-            );
-            assert!(
-                err.message().contains("#2808"),
-                "{src:?}: {}",
-                err.message()
-            );
-            assert_eq!(
-                result.directives.len(),
-                kept,
-                "{src:?}: the directive is kept"
-            );
         }
     }
-    // Not a split date: a spaced expression, a thousands separator, a short
-    // first number, and a real date are all still read as before, and so is
-    // a decimal in the first two numbers (`2024.5-02-02`, `2024-0.5-02`),
-    // which is arithmetic in beancount too.
+    // Arithmetic stays arithmetic where beancount's `DATE` does not match: a
+    // spaced expression, a thousands separator, a short first number, one
+    // separator, and a decimal in the first two numbers.
     for value in [
         "2024 - 002 - 02",
         "1,234-02-02",
         "202-002-02",
-        "2024-02-02",
-        "10000",
+        "10000-5",
         "2024.5-02-02",
         "2024-0.5-02",
     ] {
@@ -1268,24 +1224,6 @@ fn test_parse_evaluates_stacked_signs_in_a_posting_amount() {
         // `rledger format` keeps the expression, so the value round-trips.
         let out = try_format_source(&src).expect("formats");
         assert_eq!(non_whitespace(&out), non_whitespace(&src), "{src:?}");
-    }
-}
-
-/// A date our lexer splits (#2808) in a posting, cost or price amount loaded
-/// as a wrong number (`2024-002-02 USD` as 2020 USD); it is reported, as in
-/// metadata and header amounts.
-#[test]
-fn test_parse_reports_a_split_beancount_date_in_a_posting() {
-    for (posting, message) in [
-        ("Assets:A  2024-002-02 USD", "#2808"),
-        ("Assets:A  1 HOOL {2024-002-02 USD}", "#2808"),
-        ("Assets:A  1 HOOL @ 2024-002-02 USD", "#2808"),
-        // A DATE then a number in a cost is junk after a complete component,
-        // which the cost-spec shape rule reports first.
-        ("Assets:A  1 HOOL {2024-02-002 USD}", "already complete"),
-    ] {
-        let src = format!("2024-01-01 *\n  {posting}\n  Assets:B\n");
-        assert_reported_once(posting, &src, message);
     }
 }
 

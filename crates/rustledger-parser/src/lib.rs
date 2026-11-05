@@ -445,6 +445,26 @@ pub fn parse(source: &str) -> ParseResult {
     parse_via_cst(source)
 }
 
+/// Parse a date as the parser reads a `DATE` token.
+///
+/// The rule is beancount's: three runs of digits joined by `-` or `/`, read
+/// as integers (`2024-01-15`, `2024/1/5` and `02024-001-015` are all
+/// 2024-01-15), with a year from 1 to 9999 and a real month and day.
+///
+/// For callers that build directives from text outside the parser (embedder
+/// input), so a date they accept is one the parser accepts (#2856).
+///
+/// # Errors
+///
+/// Returns why `text` is not such a date (`day 30 out of range for 2024-02`,
+/// `year 0 out of range`), as the parser's `InvalidDateValue` error states it.
+pub fn parse_date(text: &str) -> Result<rustledger_core::NaiveDate, String> {
+    if diagnostics::date_fields(text).is_none() {
+        return Err(format!("invalid date '{text}'"));
+    }
+    cst::parse_date_token(text).ok_or_else(|| diagnostics::describe_invalid_date(text))
+}
+
 /// Parse beancount source for the processing pipeline, **without** collecting
 /// the `currency_occurrences` / `account_occurrences` indices.
 ///

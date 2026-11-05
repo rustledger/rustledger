@@ -433,6 +433,7 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
             *span,
         ));
     }
+    report_invalid_dates(source_file.syntax(), stripped, bom_offset, &mut errors);
     errors.sort_by_key(|e| e.span.start);
 
     // Post-pass: align directive spans with the legacy parser's
@@ -3135,55 +3136,15 @@ fn pushmeta_value(node: &crate::SyntaxNode) -> Option<MetaValue> {
         }
         header.push((t.kind(), range));
     }
-    // Except a value that is exactly one split date (`pushmeta kk:
-    // 2024-02-002`): beancount reads it as one valid date and pushes it, and
-    // rledger reports it only until #2808, so it still pushes here rather than
-    // adding a second error at `popmeta`. Anything else on the line, or a run
-    // past the date (`2024-02-002.`, `2024-002-02,000`), is a syntax error in
-    // beancount too, so it pushes nothing.
-    let split_date = is_only_a_split_date(&header, &text);
-    if !split_date
-        && super::directive_header::first_header_defect(node.kind(), &header, end, &text).is_some()
-    {
+    if super::directive_header::first_header_defect(node.kind(), &header, end, &text).is_some() {
         return None;
     }
     // A date that is not a real calendar date (`pushmeta kk: 2024-02-30`) is
-    // a lexer error in beancount, which pushes nothing (#2811). A split date
-    // lexes as such a date plus a number (`2024-02-00` `2`), and is pushed.
-    if !split_date && invalid_value_date(&header, &text, false).is_some() {
+    // a lexer error in beancount, which pushes nothing (#2811).
+    if invalid_value_date(&header, &text, false).is_some() {
         return None;
     }
     Some(meta_value_from_tokens(tokens.into_iter()))
-}
-
-/// Whether the `pushmeta` value (everything after its `META_KEY`) is exactly
-/// one date in beancount's `DATE` shape, `[0-9]{4,}[-/][0-9]+[-/][0-9]+`, that
-/// rledger's lexer splits (#2808).
-fn is_only_a_split_date(
-    header: &[(crate::SyntaxKind, std::ops::Range<usize>)],
-    text: &str,
-) -> bool {
-    let Some(split) = super::directive_header::split_beancount_date(header, text) else {
-        return false;
-    };
-    let mut value = header
-        .iter()
-        .skip_while(|(k, _)| *k != crate::SyntaxKind::META_KEY)
-        .skip(1)
-        .filter(|(k, _)| !is_trivia_kind(*k));
-    let (Some((_, first)), last) = (value.next(), value.last()) else {
-        return false;
-    };
-    let value_end = last.map_or(first.end, |(_, r)| r.end);
-    if split.range.start != first.start || split.range.end != value_end {
-        return false;
-    }
-    let Some(date) = text.get(split.range) else {
-        return false;
-    };
-    let fields: Vec<&str> = date.split(['-', '/']).collect();
-    matches!(fields.as_slice(), [y, m, d]
-        if y.len() >= 4 && [y, m, d].iter().all(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit())))
 }
 
 // ---- ParseResult.comments --------------------------------------
@@ -3829,12 +3790,8 @@ fn directive_header_check(
     let Some(defect) =
         super::directive_header::first_header_defect(node.kind(), tokens, end, stripped)
     else {
-        // A grammatical value can still be a date that is not a real calendar
-        // date (`custom "x" 2024-02-30`, `pushmeta kk: 2024-13-01`): reported
-        // as the directive's own date would be (#2811).
-        if let Some((range, message)) = invalid_value_date(tokens, stripped, true) {
-            return Some(invalid_value_date_error(range, message, off));
-        }
+        // A value date that is not a real calendar date (`custom "x"
+        // 2024-02-30`) is reported by `report_invalid_dates`, for every line.
         // A grammatical `pushmeta` value can still be an expression with no
         // value (`pushmeta kk: 1/0`): the same check, and the same error, as a
         // metadata line (#2812).
@@ -3976,14 +3933,8 @@ impl MetaCheck<'_> {
         let Some(defect) =
             super::directive_header::first_meta_defect(self.tokens, end, self.stripped)
         else {
-            // Grammatical, but a date that is not a real calendar date
-            // (`kk: 2024-02-30`) is an error, as the directive's own date
-            // would be (#2811).
-            if let Some((range, message)) = invalid_value_date(self.tokens, self.stripped, false) {
-                self.errors
-                    .push(invalid_value_date_error(range, message, off));
-                return;
-            }
+            // A date that is not a real calendar date (`kk: 2024-02-30`) is
+            // reported by `report_invalid_dates`, for every line.
             // Grammatical, but an expression with no value (`kk: 1/0`) is
             // still an error, from the check `pushmeta` uses too.
             if let Some(range) = unevaluable_meta_value(self.tokens, self.stripped) {
@@ -4091,13 +4042,8 @@ fn posting_line_check(
         }
         let Some(defect) = super::directive_header::first_posting_defect(tokens, end, stripped)
         else {
-            // Grammatical, but a cost date that is not a real calendar date
-            // (`{1 USD, 2024-02-30}`) is an error, as the directive's own date
-            // would be: it used to leave the lot undated, with no error (#2811).
-            if let Some((range, message)) = invalid_value_date(tokens, stripped, false) {
-                errors.push(invalid_value_date_error(range, message, off));
-                continue;
-            }
+            // A cost date that is not a real calendar date (`{1 USD,
+            // 2024-02-30}`) is reported by `report_invalid_dates`.
             // Grammatical; beancount's builder still rejects some postings.
             if let Some((range, message)) = posting_builder_error(tokens, stripped) {
                 errors.push(crate::ParseError::new(
@@ -4954,16 +4900,17 @@ fn section_marker_check(
 
 // ---- Token parsing helpers -------------------------------------
 
-/// Parse a date token, accepting the same shapes as the legacy
-/// parser: canonical `YYYY-MM-DD`, slash-separated `YYYY/M/D`,
-/// and single-digit month/day. Returns `None` when the token
-/// can't be turned into a real calendar date (invalid month,
-/// invalid day for the given month, year 0, etc.).
+/// Parse a date token the way beancount builds a date from its `DATE` token:
+/// the three fields are integers ([`crate::diagnostics::date_fields`]), so
+/// single-digit fields, `/` separators and extra leading zeros all read
+/// (`02024-001-01` is 2024-01-01, #2808). Returns `None` when they do not form
+/// a real calendar date (a month or day out of range, Feb 29 in a common year,
+/// a year outside 1 to 9999).
 ///
 /// Year 0 is refused as beancount refuses it (`year 0 is out of range`):
 /// Python's `datetime.date` starts at year 1, while `jiff` would accept
 /// it (#2811).
-pub(super) fn parse_date_token(text: &str) -> Option<NaiveDate> {
+pub fn parse_date_token(text: &str) -> Option<NaiveDate> {
     // Fast path: canonical "YYYY-MM-DD".
     if text.len() == 10
         && text.as_bytes()[4] == b'-'
@@ -4976,13 +4923,16 @@ pub(super) fn parse_date_token(text: &str) -> Option<NaiveDate> {
     {
         return naive_date(y, m, d).filter(|date| date.year() >= 1);
     }
-    // Slow path: share legacy's normalizer so single-digit
-    // month/day (`2024-1-15`, `2024-01-5`) and slash separators
-    // are accepted everywhere the legacy parser accepts them.
-    crate::diagnostics::normalize_date_str(text)
-        .parse::<NaiveDate>()
-        .ok()
-        .filter(|date| date.year() >= 1)
+    // Slow path: any other shape the lexer accepts.
+    let (year, month, day) = crate::diagnostics::date_fields(text)?;
+    if !(1..=9999).contains(&year) {
+        return None;
+    }
+    naive_date(
+        i32::try_from(year).ok()?,
+        u32::try_from(month).ok()?,
+        u32::try_from(day).ok()?,
+    )
 }
 
 /// The first date in a value position on one line that is not a real
@@ -5020,6 +4970,88 @@ pub(super) fn invalid_value_date(
             )
         })
     })
+}
+
+/// Report every `DATE` token that is not a real calendar date, wherever it
+/// stands, and let that error stand for its whole line, as beancount does
+/// (#2856).
+///
+/// beancount builds the date while lexing, so a bad date is a lexer error: it
+/// is named (`day is out of range for month`) in every position, a header, a
+/// metadata or `custom` value, an `event` or `option` argument, a price, a
+/// transaction header, an orphan indented line; two bad dates on one line are
+/// two errors; and the line gets no grammar error on top. Here the date is one
+/// token like any other until it is read, so this pass, run once over the
+/// whole tree after every other check, applies that rule in one place: each
+/// invalid date not already reported at its position (a directive's own date,
+/// by `parse_directive_date`) gets `InvalidDateValue`, and any other parse
+/// error starting on that line is dropped. A directive with a bad date of its
+/// own is still dropped, as in beancount, but the bad dates under it are now
+/// reported too.
+///
+/// Walks GREEN tokens (kind and length, no red-node allocation).
+fn report_invalid_dates(
+    root: &crate::SyntaxNode,
+    stripped: &str,
+    bom_offset: u32,
+    errors: &mut Vec<crate::ParseError>,
+) {
+    let off = bom_offset as usize;
+    let mut bad: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut stack = vec![(
+        root.green().to_owned(),
+        usize::from(root.text_range().start()),
+    )];
+    while let Some((node, start)) = stack.pop() {
+        let mut at = start;
+        for child in node.children() {
+            match child {
+                rowan::NodeOrToken::Node(n) => {
+                    let len = usize::from(n.text_len());
+                    stack.push((n.to_owned(), at));
+                    at += len;
+                }
+                rowan::NodeOrToken::Token(t) => {
+                    let len = t.text().len();
+                    if <crate::BeancountLanguage as rowan::Language>::kind_from_raw(t.kind())
+                        == crate::SyntaxKind::DATE
+                        && parse_date_token(t.text()).is_none()
+                    {
+                        bad.push(at..at + len);
+                    }
+                    at += len;
+                }
+            }
+        }
+    }
+    if bad.is_empty() {
+        return;
+    }
+    let reported: std::collections::HashSet<usize> = errors
+        .iter()
+        .filter(|e| matches!(e.kind, crate::ParseErrorKind::InvalidDateValue(_)))
+        .map(|e| e.span.start)
+        .collect();
+    let mut lines: Vec<std::ops::Range<usize>> = Vec::with_capacity(bad.len());
+    for range in bad {
+        let line_start = stripped[..range.start].rfind('\n').map_or(0, |i| i + 1);
+        let line_end = stripped[range.end..]
+            .find('\n')
+            .map_or(stripped.len(), |i| range.end + i);
+        lines.push(line_start + off..line_end + off);
+        if !reported.contains(&(range.start + off)) {
+            let text = &stripped[range.clone()];
+            errors.push(invalid_value_date_error(
+                range,
+                crate::diagnostics::describe_invalid_date(text),
+                off,
+            ));
+        }
+    }
+    errors.retain(|e| {
+        matches!(e.kind, crate::ParseErrorKind::InvalidDateValue(_))
+            || !lines.iter().any(|line| line.contains(&e.span.start))
+    });
 }
 
 /// The error for [`invalid_value_date`]'s finding, in the BOM frame.

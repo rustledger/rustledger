@@ -5059,6 +5059,9 @@ fn report_invalid_dates(
     let off = bom_offset as usize;
     let mut bad: Vec<std::ops::Range<usize>> = Vec::new();
     let mut lexer_errors: Vec<std::ops::Range<usize>> = Vec::new();
+    // `STRING` tokens that run over a line end (stripped frame), so a line
+    // that starts inside one is not taken for a gap line.
+    let mut multiline_strings: Vec<std::ops::Range<usize>> = Vec::new();
     let mut stack = vec![(
         root.green().to_owned(),
         usize::from(root.text_range().start()),
@@ -5079,6 +5082,9 @@ fn report_invalid_dates(
                             bad.push(at..at + len);
                         }
                         K::ERROR_TOKEN => lexer_errors.push(at + off..at + len + off),
+                        K::STRING if t.text().contains('\n') => {
+                            multiline_strings.push(at..at + len);
+                        }
                         _ => {}
                     }
                     at += len;
@@ -5091,6 +5097,7 @@ fn report_invalid_dates(
     }
     bad.sort_unstable_by_key(|r| r.start);
     lexer_errors.sort_unstable_by_key(|r| r.start);
+    multiline_strings.sort_unstable_by_key(|r| r.start);
     let reported: std::collections::HashSet<usize> = errors
         .iter()
         .filter(|e| matches!(e.kind, crate::ParseErrorKind::InvalidDateValue(_)))
@@ -5191,7 +5198,7 @@ fn report_invalid_dates(
                 // before any date on it.
                 let after_a_gap = ahead + behind > 0
                     && (line_begin == 0 || stripped.as_bytes()[line_begin - 1] == b'\n')
-                    && previous_line_is_a_gap(stripped, line_begin);
+                    && previous_line_is_a_gap(stripped, line_begin, &multiline_strings);
                 let failed_at = if after_a_gap {
                     line_begin + off
                 } else {
@@ -5225,16 +5232,34 @@ fn report_invalid_dates(
 /// column 0 (an indented comment continues the directive above), one of the
 /// undated directives that take no metadata (`option`, `include`, `plugin`,
 /// `pushtag`, `poptag`, `pushmeta`, `popmeta`), or missing. bean-check 3.2.3
-/// reports `unexpected INDENT` after each. Steps over that one line only.
-fn previous_line_is_a_gap(src: &str, line_start: usize) -> bool {
+/// reports `unexpected INDENT` after each. `%` and `# ` lines are comments
+/// there too. A previous line that starts inside a multi-line string
+/// (`multiline_strings`, sorted) is the string's text, never a gap, whatever it
+/// starts with. Steps over that one line only.
+fn previous_line_is_a_gap(
+    src: &str,
+    line_start: usize,
+    multiline_strings: &[std::ops::Range<usize>],
+) -> bool {
     const NO_METADATA: [&str; 7] = [
         "option", "include", "plugin", "pushtag", "poptag", "pushmeta", "popmeta",
     ];
     let Some(before) = src[..line_start].strip_suffix('\n') else {
         return true;
     };
-    let previous = before.rfind('\n').map_or(before, |i| &before[i + 1..]);
-    previous.starts_with([';', '*'])
+    let previous_start = before.rfind('\n').map_or(0, |i| i + 1);
+    let i = multiline_strings.partition_point(|s| s.end <= previous_start);
+    if multiline_strings
+        .get(i)
+        .is_some_and(|s| s.start < previous_start)
+    {
+        return false;
+    }
+    let previous = &before[previous_start..];
+    previous.starts_with([';', '*', '%'])
+        || previous
+            .strip_prefix('#')
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with([' ', '\t', '\r']))
         || previous.trim_start_matches([' ', '\t', '\r']).is_empty()
         || NO_METADATA.iter().any(|keyword| {
             previous

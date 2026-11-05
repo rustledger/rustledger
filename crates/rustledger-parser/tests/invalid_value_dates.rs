@@ -575,7 +575,8 @@ fn test_parse_keeps_a_grammar_error_before_an_invalid_date() {
     }
     // bean-check 3.2.3's error lines for a dropped directive after a comment
     // line, two after one blank line, and an indented line after each
-    // directive that takes no metadata or an org-mode heading.
+    // directive that takes no metadata, `%` or `# ` comment or org-mode
+    // heading, and none after a line inside a multi-line string.
     for (src, lines) in [
         (
             "2024-01-01 open Assets:A\n; c\n2024-01-02 balance Assets:A USD 2024-02-30\n",
@@ -590,6 +591,36 @@ fn test_parse_keeps_a_grammar_error_before_an_invalid_date() {
         ("include \"none.beancount\"\n  2024-02-30 5\n", vec![2, 2]),
         ("plugin \"x\"\n  2024-02-30 5\n", vec![2, 2]),
         ("* Heading\n  2024-02-30 5\n", vec![2, 2]),
+        ("%note\n  2024-02-30 5\n", vec![2, 2]),
+        ("# note\n  2024-02-30 5\n", vec![2, 2]),
+        ("pushtag #t\n  2024-02-30 5\npoptag #t\n", vec![2, 2]),
+        ("pushtag #t\npoptag #t\n  2024-02-30 5\n", vec![3, 3]),
+        (
+            "pushmeta kk: \"v\"\n  2024-02-30 5\npopmeta kk:\n",
+            vec![2, 2],
+        ),
+        (
+            "pushmeta kk: \"v\"\npopmeta kk:\n  2024-02-30 5\n",
+            vec![3, 3],
+        ),
+        // A line that starts inside a multi-line string is the string's text,
+        // not a gap, whatever it starts with.
+        (
+            "2024-01-01 open Assets:A\n2024-01-02 * \"multi\n* line\"\n  2024-02-30 5\n",
+            vec![4],
+        ),
+        (
+            "2024-01-01 open Assets:A\n2024-01-02 * \"multi\n; x\"\n  2024-02-30 5\n",
+            vec![4],
+        ),
+        (
+            "2024-01-01 open Assets:A\n2024-01-02 * \"multi\noption x\"\n  2024-02-30 5\n",
+            vec![4],
+        ),
+        (
+            "2024-01-01 open Assets:A\n2024-01-02 custom \"a\" \"multi\npushtag y\"\n  2024-02-30 5\n",
+            vec![4],
+        ),
         ("  2024-02-30 5\n", vec![1, 1]),
         // An indented comment continues the directive above; it is no gap.
         ("2024-01-01 open Assets:A\n  ; c\n  2024-02-30 5\n", vec![3]),

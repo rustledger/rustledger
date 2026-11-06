@@ -540,7 +540,8 @@ fn body_excerpt(body: &str) -> String {
 /// GET `url` with the shared [`user_agent`] plus `headers`, the whole
 /// request (connecting, sending, and reading the body) limited to
 /// `timeout`. A zero `timeout` means no limit, as `[price] timeout = 0`
-/// configures (the same convention as `cache_ttl = 0`).
+/// configures (the same convention as `cache_ttl = 0`), and so does one past
+/// [`MAX_REQUEST_TIMEOUT`].
 ///
 /// Every price source makes its requests through this function, so none
 /// can block `rledger price` past its timeout (#2870). A 4xx/5xx status is
@@ -557,10 +558,9 @@ pub(crate) fn http_get(
     timeout: Duration,
     headers: &[(&str, &str)],
 ) -> Result<HttpReply> {
-    let limit = (!timeout.is_zero()).then_some(timeout);
     let mut request = ureq::get(url)
         .config()
-        .timeout_global(limit)
+        .timeout_global(request_limit(timeout))
         .http_status_as_error(false)
         .build()
         .header("User-Agent", user_agent());
@@ -576,13 +576,28 @@ pub(crate) fn http_get(
     Ok(HttpReply { status, body })
 }
 
-/// A ureq error as an `anyhow` error; a timeout names the limit and the
-/// setting that configures it, so a stalled provider reads as one.
+/// The longest timeout [`http_get`] applies: 100 years. ureq adds the
+/// timeout to an `Instant`, which panics on overflow, and a timeout of
+/// `[price] timeout = 9223372036854775807` (the largest TOML integer)
+/// overflows it.
+const MAX_REQUEST_TIMEOUT: Duration = Duration::from_hours(100 * 365 * 24);
+
+/// The limit ureq is given for `timeout`: none for zero (`[price] timeout
+/// = 0`) or for anything past [`MAX_REQUEST_TIMEOUT`], which no request
+/// could reach anyway.
+fn request_limit(timeout: Duration) -> Option<Duration> {
+    (!timeout.is_zero() && timeout <= MAX_REQUEST_TIMEOUT).then_some(timeout)
+}
+
+/// A ureq error as an `anyhow` error. A timeout is reported as one
+/// message naming the limit and the setting that configures it, so a
+/// stalled provider reads as a timeout (ureq's own `timeout: global`
+/// would only repeat it).
 fn request_error(error: ureq::Error, timeout: Duration) -> anyhow::Error {
     if matches!(error, ureq::Error::Timeout(_)) {
-        let message =
-            format!("no complete response within the {timeout:?} timeout (set by [price] timeout)");
-        return anyhow::Error::new(error).context(message);
+        return anyhow::anyhow!(
+            "no complete response within the {timeout:?} timeout (set by [price] timeout)"
+        );
     }
     anyhow::Error::new(error)
 }
@@ -625,7 +640,7 @@ pub(crate) fn http_get_json(
 
 #[cfg(test)]
 mod http_tests {
-    use super::{HttpReply, body_excerpt, http_get};
+    use super::{HttpReply, MAX_REQUEST_TIMEOUT, body_excerpt, http_get, request_limit};
     use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc;
@@ -641,9 +656,13 @@ mod http_tests {
             // The receiver is gone only if the test already failed.
             let _ = sender.send(result);
         });
-        receiver
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the request was still waiting after 10s")
+        match receiver.recv_timeout(Duration::from_secs(10)) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("the request was still waiting after 10s")
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => panic!("http_get panicked"),
+        }
     }
 
     /// A server that takes the connection and never answers must not
@@ -659,7 +678,7 @@ mod http_tests {
         let err = http_get_within_10s(url, Duration::from_millis(200))
             .expect_err("a server that never answers must time out");
         assert_eq!(
-            err.to_string(),
+            format!("{err:#}"),
             "no complete response within the 200ms timeout (set by [price] timeout)"
         );
         drop(listener);
@@ -670,6 +689,47 @@ mod http_tests {
     /// would fail every request at once.
     #[test]
     fn test_http_get_zero_timeout_means_no_limit() {
+        assert_eq!(request_limit(Duration::ZERO), None);
+        let (url, server) = serve_ok_after_100ms();
+        let reply = http_get_within_10s(url, Duration::ZERO)
+            .expect("a zero timeout must not fail the request");
+        assert_eq!((reply.status, reply.body.as_str()), (200, "ok"));
+        server.join().expect("the server thread");
+    }
+
+    /// A timeout too large to add to an `Instant` (the largest TOML
+    /// integer is `i64::MAX` seconds) means no limit: given to ureq as-is
+    /// it panics with "overflow when adding duration to instant".
+    #[test]
+    fn test_http_get_huge_timeout_means_no_limit() {
+        for secs in [
+            i64::MAX.unsigned_abs(),
+            u64::MAX,
+            MAX_REQUEST_TIMEOUT.as_secs() + 1,
+        ] {
+            assert_eq!(request_limit(Duration::from_secs(secs)), None, "{secs}s");
+        }
+        assert_eq!(
+            request_limit(MAX_REQUEST_TIMEOUT),
+            Some(MAX_REQUEST_TIMEOUT)
+        );
+        // The cap itself is applied, and a timeout past it is not, so
+        // neither overflows inside ureq.
+        for timeout in [
+            MAX_REQUEST_TIMEOUT,
+            Duration::from_secs(i64::MAX.unsigned_abs()),
+        ] {
+            let (url, server) = serve_ok_after_100ms();
+            let reply = http_get_within_10s(url, timeout)
+                .unwrap_or_else(|e| panic!("a {timeout:?} timeout failed the request: {e:#}"));
+            assert_eq!((reply.status, reply.body.as_str()), (200, "ok"));
+            server.join().expect("the server thread");
+        }
+    }
+
+    /// A local server that reads one request and answers `200 ok` after
+    /// 100ms, so a zero limit applied as-is fails. Returns its URL.
+    fn serve_ok_after_100ms() -> (String, thread::JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local listener");
         let url = format!("http://{}/", listener.local_addr().expect("local addr"));
         let server = thread::spawn(move || {
@@ -681,16 +741,12 @@ mod http_tests {
                 assert!(read > 0, "the client closed before sending its request");
                 request.extend_from_slice(&chunk[..read]);
             }
-            // Answer after a pause, so a zero limit applied as-is fails.
             thread::sleep(Duration::from_millis(100));
             stream
                 .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
                 .expect("write the response");
         });
-        let reply = http_get_within_10s(url, Duration::ZERO)
-            .expect("a zero timeout must not fail the request");
-        assert_eq!((reply.status, reply.body.as_str()), (200, "ok"));
-        server.join().expect("the server thread");
+        (url, server)
     }
 
     /// No source calls ureq directly: every request goes through

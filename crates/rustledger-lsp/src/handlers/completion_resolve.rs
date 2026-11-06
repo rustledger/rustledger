@@ -9,7 +9,7 @@ use rustledger_core::Decimal;
 use rustledger_core::Directive;
 use rustledger_parser::Spanned;
 
-use super::utils::{is_account_like, is_currency_like_simple};
+use super::utils::is_account_like;
 
 /// Handle a completion item resolve request.
 /// This adds detailed documentation to completion items.
@@ -50,7 +50,7 @@ pub fn handle_completion_resolve(
             if let Some(detail) = detail {
                 resolved.detail = Some(detail);
             }
-        } else if is_currency_like_simple(label) {
+        } else if rustledger_parser::is_valid_currency(label) {
             let (doc, detail) = resolve_currency_documentation(label, directives);
             resolved.documentation = Some(doc);
             if let Some(detail) = detail {
@@ -207,7 +207,7 @@ fn resolve_currency_documentation(
 
 #[cfg(test)]
 mod tests {
-    use super::super::utils::{is_account_like, is_currency_like_simple};
+    use super::super::utils::is_account_like;
     use super::*;
     use rustledger_parser::parse;
 
@@ -374,12 +374,16 @@ mod tests {
         assert!(!is_account_like("hello"));
     }
 
+    /// A label is documented as a currency by the parser's own rule (#2807),
+    /// so `/6J` is one and `USD_` is not.
     #[test]
     fn test_is_currency_like() {
-        assert!(is_currency_like_simple("USD"));
-        assert!(is_currency_like_simple("AAPL"));
-        assert!(is_currency_like_simple("BTC"));
-        assert!(!is_currency_like_simple("Assets:Bank"));
-        assert!(!is_currency_like_simple("hello world"));
+        use rustledger_parser::is_valid_currency;
+        assert!(is_valid_currency("USD"));
+        assert!(is_valid_currency("AAPL"));
+        assert!(is_valid_currency("/6J"));
+        assert!(!is_valid_currency("USD_"));
+        assert!(!is_valid_currency("Assets:Bank"));
+        assert!(!is_valid_currency("hello world"));
     }
 }

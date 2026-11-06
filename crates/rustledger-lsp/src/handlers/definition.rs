@@ -10,7 +10,7 @@ use rustledger_parser::ParseResult;
 
 use crate::ledger_state::LedgerState;
 
-use super::utils::{LineIndex, PositionEncoding, get_word_at_source_position, is_currency_like};
+use super::utils::{LineIndex, PositionEncoding, get_symbol_at_position, is_currency_like};
 
 /// Handle a go-to-definition request.
 pub fn handle_goto_definition(
@@ -23,16 +23,16 @@ pub fn handle_goto_definition(
 ) -> Option<GotoDefinitionResponse> {
     let position = params.text_document_position_params.position;
 
-    // Get the word at the cursor position
-    let word = get_word_at_source_position(source, position, encoding)?;
+    // Get the symbol at the cursor position (the currency token when the
+    // cursor is on one, so `/6J` is not cut at its `/`).
+    // Build the line index once and share it with the symbol lookup and
+    // both definition lookups. Each `byte_offset_to_position` call is O(n)
+    // (linear scan from byte 0); `LineIndex::offset_to_position` is
+    // O(log lines) after a one-shot O(n) build.
+    let line_index = LineIndex::new(source, encoding);
+    let (word, _, _) = get_symbol_at_position(&line_index, parse_result, position)?;
 
     tracing::debug!("Go-to-definition for word: {:?}", word);
-
-    // Build the line index once and share across both lookups.
-    // Each `byte_offset_to_position` call is O(n) (linear scan from
-    // byte 0); `LineIndex::offset_to_position` is O(log lines)
-    // after a one-shot O(n) build.
-    let line_index = LineIndex::new(source, encoding);
 
     let is_account = word.contains(':') || rustledger_core::is_default_account_root(&word);
 
@@ -54,7 +54,7 @@ pub fn handle_goto_definition(
     }
 
     // Check if it's a currency. Use the AST-validating
-    // `is_currency_like` (not `_simple`) so words that look like
+    // `is_currency_like` (not a format check alone) so words that look like
     // currencies but don't actually appear as `Currency` tokens
     // anywhere in the document short-circuit here instead of falling
     // through to `find_currency_definition` and then returning None.
@@ -239,9 +239,8 @@ mod tests {
         assert_eq!(loc.range.end, Position::new(0, 24));
     }
 
-    /// `is_currency_like_simple` accepts anything matching
-    /// `[A-Z0-9]{2,5}` — so `USDX` would pass the format check
-    /// even if no commodity for it exists. The function must
+    /// A format check alone passes `USDX` even if no commodity
+    /// for it exists. The function must
     /// return None when the currency isn't declared, not panic or
     /// return a bogus location.
     #[test]
@@ -289,5 +288,46 @@ mod tests {
         // Line 1 (1-based) clamps to 0, not underflow.
         let first = cross_file_location(&crate::test_abs("a.beancount"), 1).unwrap();
         assert_eq!(first.range.start, Position::new(0, 0));
+    }
+
+    /// Go-to-definition on a one-letter flag goes nowhere; on the currency
+    /// `T` it reaches the `commodity T` declaration.
+    #[test]
+    fn test_definition_skips_one_letter_flags() {
+        let source = "2024-01-01 commodity T\n\
+                      2024-01-16 T \"Transfer\"\n  \
+                      P Assets:Cash  1 T\n  \
+                      Assets:Bank\n\
+                      2024-01-17 P \"Pending\"\n  \
+                      Assets:Cash  1 T\n  \
+                      Assets:Bank\n";
+        let result = parse(source);
+        let uri: Uri = "file:///test.beancount".parse().unwrap();
+        let at = |line, character| {
+            let params = GotoDefinitionParams {
+                text_document_position_params: lsp_types::TextDocumentPositionParams {
+                    text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                    position: Position::new(line, character),
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            };
+            handle_goto_definition(
+                &params,
+                source,
+                &result,
+                None,
+                &uri,
+                PositionEncoding::Utf16,
+            )
+        };
+        assert_eq!(at(1, 11), None, "header flag T");
+        let Some(GotoDefinitionResponse::Scalar(location)) = at(2, 19) else {
+            panic!("the currency T has a definition");
+        };
+        assert_eq!(
+            location.range,
+            Range::new(Position::new(0, 21), Position::new(0, 22))
+        );
     }
 }

@@ -6,7 +6,7 @@ use rustledger_parser::ParseResult;
 use crate::types::EditorHoverInfo;
 
 use super::helpers::{
-    count_account_usages, count_currency_usages, get_word_at_position, is_currency_like,
+    count_account_usages, count_currency_usages, get_symbol_at_position, is_currency_like,
 };
 use super::line_index::EditorCache;
 
@@ -29,7 +29,7 @@ pub fn get_hover_info(
     character: u32,
     parse_result: &ParseResult,
 ) -> Option<EditorHoverInfo> {
-    let word = get_word_at_position(source, line, character)?;
+    let word = get_symbol_at_position(source, line, character, parse_result)?;
 
     // Check if it's an account name
     if (word.contains(':') || rustledger_core::is_default_account_root(&word))
@@ -256,4 +256,101 @@ mod tests {
             );
         }
     }
+
+    /// A one-letter flag hovers as nothing, whether or not a currency of
+    /// that name exists.
+    #[test]
+    fn test_get_hover_info_skips_one_letter_flags() {
+        let source = "2024-01-01 commodity T\n\
+                      2024-01-16 T \"Transfer\"\n  \
+                      P Assets:X  1 T\n  \
+                      Assets:Y\n\
+                      2024-01-17 P \"Pending\"\n  \
+                      Assets:X  1 T\n  \
+                      Assets:Y\n";
+        let result = parse(source);
+        assert!(get_hover_info(source, 1, 11, &result).is_none(), "T flag");
+        assert!(
+            get_hover_info(source, 2, 2, &result).is_none(),
+            "P posting flag"
+        );
+        assert!(get_hover_info(source, 4, 11, &result).is_none(), "P flag");
+        let hover = get_hover_info(source, 2, 16, &result).expect("the currency T hovers");
+        assert!(hover.contents.contains('T'), "{}", hover.contents);
+    }
+
+    /// Every directive keyword hovers as it did before one-letter flags
+    /// were skipped, `txn` included (it is a flag, but not a one-letter
+    /// currency-token one); `*` and `!` are not words and hover as nothing,
+    /// as before.
+    #[test]
+    fn test_get_hover_info_keywords_unchanged_by_flag_skip() {
+        let source = KEYWORD_LEDGER;
+        let result = parse(source);
+        let at = |line: u32, character: u32| {
+            get_hover_info(source, line, character, &result).map(|h| h.contents)
+        };
+        let keywords = [
+            "option",
+            "plugin",
+            "include",
+            "open",
+            "commodity",
+            "balance",
+            "pad",
+            "event",
+            "note",
+            "document",
+            "query",
+            "custom",
+            "price",
+            "txn",
+            "close",
+        ];
+        for keyword in keywords {
+            let (line, text) = source
+                .lines()
+                .enumerate()
+                .find(|(_, l)| l.split_whitespace().any(|w| w == keyword))
+                .unwrap();
+            let col = text.find(keyword).unwrap() as u32;
+            let expected = get_directive_hover_info(keyword);
+            assert!(expected.is_some(), "{keyword}");
+            for c in [col, col + 1, col + keyword.len() as u32] {
+                assert_eq!(at(line as u32, c), expected, "{keyword} at {line}:{c}");
+            }
+        }
+        // The review's case: characters 12 and 13 of the `txn` header.
+        assert!(at(13, 12).unwrap().contains("Transaction"));
+        assert!(at(13, 13).unwrap().contains("Transaction"));
+        // `*` and `!`, as header and posting flags.
+        for (line, c) in [(16, 11), (17, 2), (18, 2), (19, 11)] {
+            assert_eq!(at(line, c), None, "{line}:{c}");
+        }
+    }
+
+    const KEYWORD_LEDGER: &str = r#"option "title" "x"
+plugin "beancount.plugins.auto_accounts"
+include "other.beancount"
+2024-01-01 open Assets:A USD
+2024-01-01 commodity USD
+2024-01-02 balance Assets:A 0 USD
+2024-01-02 pad Assets:A Equity:E
+2024-01-02 event "location" "x"
+2024-01-02 note Assets:A "x"
+2024-01-02 document Assets:A "/x.pdf"
+2024-01-02 query "q" "SELECT 1"
+2024-01-02 custom "budget" "x"
+2024-01-02 price USD 1 EUR
+2024-01-03 txn "Broker" "Buy"
+  Assets:A 1 USD
+  Equity:E
+2024-01-04 * "x"
+  ! Assets:A 1 USD
+  * Equity:E
+2024-01-05 ! "x"
+  Assets:A 1 USD
+  Equity:E
+2024-12-31 close Assets:A
+"#;
 }

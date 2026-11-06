@@ -5,7 +5,7 @@ use rustledger_parser::ParseResult;
 
 use crate::types::EditorLocation;
 
-use super::helpers::{get_word_at_position, is_currency_like};
+use super::helpers::{get_symbol_at_position, is_currency_like};
 use super::line_index::{EditorCache, LineIndex};
 
 /// Get the definition location for the symbol at the given position (using cached data).
@@ -16,7 +16,7 @@ pub fn get_definition_cached(
     parse_result: &ParseResult,
     cache: &EditorCache,
 ) -> Option<EditorLocation> {
-    let word = get_word_at_position(source, line, character)?;
+    let word = get_symbol_at_position(source, line, character, parse_result)?;
 
     // Check if it's an account name
     if (word.contains(':') || rustledger_core::is_default_account_root(&word))
@@ -104,5 +104,29 @@ mod tests {
         assert!(location.is_some());
         let loc = location.unwrap();
         assert_eq!(loc.line, 0); // Open directive is on line 0
+    }
+
+    /// Go-to-definition on a `/` currency (#2807), cursor on its `/`.
+    #[test]
+    fn test_get_definition_slash_currency() {
+        let source = "2024-01-01 commodity /6J\n\
+                      2024-01-01 open Assets:Futures /6J\n";
+        let result = parse(source);
+        let loc = get_definition(source, 1, 31, &result).expect("definition found");
+        assert_eq!((loc.line, loc.character), (0, 0));
+    }
+
+    /// Go-to-definition on a one-letter flag goes nowhere, even when a
+    /// currency of that name is declared.
+    #[test]
+    fn test_get_definition_skips_one_letter_flags() {
+        let source = "2024-01-01 commodity T\n\
+                      2024-01-16 T \"Transfer\"\n  \
+                      Assets:X  1 T\n  \
+                      Assets:Y\n";
+        let result = parse(source);
+        assert!(get_definition(source, 1, 11, &result).is_none());
+        let loc = get_definition(source, 2, 14, &result).expect("the currency T");
+        assert_eq!(loc.line, 0);
     }
 }

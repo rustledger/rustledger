@@ -306,7 +306,7 @@ impl std::str::FromStr for Amount {
     }
 }
 
-/// Beancount commodity validation, as used by [`Amount::from_str`].
+/// Beancount commodity validation, as used by `Amount::from_str`.
 ///
 /// DELIBERATE COPY of the canonical lexer-backed rule,
 /// `rustledger_parser::is_valid_currency`, which runs the parser's own

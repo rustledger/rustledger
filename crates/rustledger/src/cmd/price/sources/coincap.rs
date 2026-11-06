@@ -19,7 +19,7 @@ use std::time::Duration;
 /// - Cryptocurrencies by ID: `bitcoin`, `ethereum`, `solana`
 /// - Upper-case symbols (`BTC`, `SHIB`): common ones from a built-in table,
 ///   others looked up in `CoinCap`'s asset list, as beanprice's `coincap`
-///   does
+///   looks up every upper-case symbol
 #[derive(Debug)]
 pub struct CoinCapSource {
     /// Whole-request timeout, applied to each request.
@@ -71,21 +71,36 @@ impl CoinCapSource {
         }
     }
 
-    /// The asset ID for `symbol` in a `CoinCap` asset list (`/assets`),
-    /// which is ordered by market cap: the first asset with that symbol,
-    /// as beanprice's `coincap` picks it (#2866).
+    /// The asset ID for `symbol` in a `CoinCap` asset list, which is
+    /// ordered by market cap: the first asset with that symbol (#2866).
+    /// beanprice's `coincap` takes the first match the same way, but scans
+    /// the unfiltered `/assets/` list, its first page of 100; rledger asks
+    /// `/assets?search=SYMBOL`, which also finds a coin ranked below 100.
+    ///
+    /// The ID goes into a URL path, so one the provider returns is used
+    /// only when it has the shape of a `CoinCap` ID: lower-case letters,
+    /// digits and `-`.
     fn id_from_asset_list(json: &serde_json::Value, symbol: &str) -> Option<String> {
-        json.get("data")?
+        let id = json
+            .get("data")?
             .as_array()?
             .iter()
             .find(|asset| asset.get("symbol").and_then(serde_json::Value::as_str) == Some(symbol))?
             .get("id")?
-            .as_str()
-            .map(str::to_string)
+            .as_str()?;
+        let valid = !id.is_empty()
+            && id
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+        valid.then(|| id.to_string())
     }
 
     /// The asset ID for `ticker`, searching the asset list when the table
     /// does not have it (see [`Self::ticker_to_id`]).
+    ///
+    /// # Errors
+    ///
+    /// The lookup failing, or no asset with a valid ID having the symbol.
     fn resolve_id(&self, ticker: &str) -> Result<String> {
         if let Some(id) = Self::ticker_to_id(ticker) {
             return Ok(id);
@@ -197,6 +212,16 @@ mod tests {
             Some("shiba-inu")
         );
         assert_eq!(CoinCapSource::id_from_asset_list(&json, "DOGE"), None);
+        // A provider-returned ID goes into the URL path: one that is not
+        // the shape of a CoinCap ID is not used.
+        for id in ["../../admin", "a?b=c", "Bitcoin", ""] {
+            let json = serde_json::json!({"data": [{"id": id, "symbol": "BAD"}]});
+            assert_eq!(
+                CoinCapSource::id_from_asset_list(&json, "BAD"),
+                None,
+                "{id:?}"
+            );
+        }
         assert_eq!(
             CoinCapSource::id_from_asset_list(&serde_json::json!({}), "SHIB"),
             None

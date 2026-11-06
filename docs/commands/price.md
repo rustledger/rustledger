@@ -84,7 +84,14 @@ The first source in the chain is tried first; subsequent ones act as fallbacks. 
 
 A `price:` value written for bean-price works as it is. bean-price's grammar is `<quote-currency>:<source>/[^]<ticker>`, with sources chained by `,` and quote currencies separated by spaces or `;`. rledger also reads its own form, which repeats the currency on each entry (`USD:yahoo/AAPL,USD:google/AAPL`).
 
-A leading `^` on the ticker inverts the quote on any source, as in bean-price. `price: "EUR:ratesapi/^EUR-GBP"` on `GBP` fetches the EUR-GBP rate (GBP per EUR) and writes its inverse, the GBP price in EUR. The inverse is rounded as bean-price rounds it, to 28 significant digits. Below 0.1, `rust_decimal`'s 28 decimal places keep a digit or two fewer.
+In `price:` metadata, a leading `^` on the ticker inverts the quote on any source, as in bean-price. `price: "EUR:ratesapi/^EUR-GBP"` on `GBP` fetches the EUR-GBP rate (GBP per EUR) and writes its inverse, the GBP price in EUR.
+
+- **Scope.** The `^` inverts only in `price:` metadata, the one place bean-price's grammar applies. A `[price.mapping]` ticker, `--mapping SYMBOL:TICKER` and `--source` send the ticker exactly as written, so Yahoo index tickers such as `^GSPC`, `^DJI` and `^VIX` work there.
+- **Digits.** The inverse is computed exactly and rounded once, as bean-price's `ONE / price` is under Python's default decimal context. That means 28 significant digits, rounded half to even, and an exact quotient in its shortest form (`1 / 8` is `0.125`). Python writes `1E+2` for 100; rledger writes it out.
+  - `rust_decimal` holds at most 28 decimal places, so an inverse near 10^-k keeps k - 1 fewer significant digits. bean-price's `ecbrates` writes fewer still, about six, because it leaves Python's decimal precision set to its rate legs' after each fetch. rledger keeps 28 digits on every source.
+- **Refusals.** rledger refuses an inverse that would not be a price of the pair it is labeled with: the quote must be in the commodity and, for a ticker naming its pair, the pair must be based in the declared currency. For example, `GBP:ratesapi/^EUR-USD` on `CHF` is refused, where bean-price writes a USD-per-EUR inverse as a CHF price in GBP.
+  - A second `^` (`^^X`) is refused, as bean-price's grammar refuses it.
+  - A zero quote, or one whose inverse rounds to zero, fails that source and the chain moves on to the next one. bean-price stops with a division-by-zero error instead.
 
 Each source reads its ticker the way the matching beanprice module does. rledger's own ticker forms still work.
 

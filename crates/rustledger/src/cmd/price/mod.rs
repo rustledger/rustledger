@@ -231,12 +231,60 @@ impl PriceSourceRegistry {
     /// declaration (no CLI `--source`, no `[price.mapping.X]` in config,
     /// no `price:` metadata) and `[price] use_default_source = false`
     /// (the default). See issue #966.
+    ///
+    /// Every ticker is sent as it is written: a leading `^` is part of it
+    /// (Yahoo's `^GSPC`). For a mapping read from `price:` metadata, where
+    /// `^` is bean-price's inversion, use [`Self::fetch_price_for_spec`].
     pub fn fetch_price(
         &self,
         commodity: &str,
         currency: &str,
         date: Option<NaiveDate>,
         mapping: &HashMap<String, CommodityMapping>,
+    ) -> Result<PriceResponse> {
+        self.fetch_attempts(commodity, currency, date, mapping, TickerSyntax::Verbatim)
+    }
+
+    /// [`Self::fetch_price`] for a mapping read from a commodity's `price:`
+    /// metadata, bean-price's source-spec grammar
+    /// `CURRENCY:module/[^]TICKER` (#2866): a leading `^` asks for the
+    /// inverse of the source's quote. Config mappings, `--mapping` and
+    /// `--source` keep their tickers verbatim, as bean-price's grammar does
+    /// not apply to them (Yahoo index tickers such as `^GSPC` start with
+    /// `^`).
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::fetch_price`]. An inverted attempt also fails when the
+    /// ticker has a second `^`, when the quote is not a price of
+    /// `commodity` or (for a ticker naming its pair, `^EUR-GBP`) not of a
+    /// pair based in `currency`, and when the quote has no writable
+    /// inverse (zero, or an inverse too small for 28 decimal places).
+    pub fn fetch_price_for_spec(
+        &self,
+        commodity: &str,
+        currency: &str,
+        date: Option<NaiveDate>,
+        mapping: &HashMap<String, CommodityMapping>,
+    ) -> Result<PriceResponse> {
+        self.fetch_attempts(
+            commodity,
+            currency,
+            date,
+            mapping,
+            TickerSyntax::BeanPriceSpec,
+        )
+    }
+
+    /// The fallback chain behind [`Self::fetch_price`] and
+    /// [`Self::fetch_price_for_spec`].
+    fn fetch_attempts(
+        &self,
+        commodity: &str,
+        currency: &str,
+        date: Option<NaiveDate>,
+        mapping: &HashMap<String, CommodityMapping>,
+        syntax: TickerSyntax,
     ) -> Result<PriceResponse> {
         let attempts = self.resolve_mapping(commodity, mapping)?;
 
@@ -249,25 +297,20 @@ impl PriceSourceRegistry {
 
         for (source_name, ticker) in &attempts {
             if let Some(source) = self.get(source_name) {
-                // bean-price's `^TICKER` asks for the inverse of the
-                // source's rate, on every source (#2866).
-                let (ticker, inverted) = match ticker.strip_prefix('^') {
-                    Some(rest) => (rest, true),
-                    None => (ticker.as_str(), false),
-                };
-                let request = PriceRequest {
-                    ticker: ticker.to_string(),
-                    currency: currency.to_string(),
-                    date,
-                };
-
-                let result = source.fetch_price(&request).and_then(|response| {
-                    if inverted {
-                        invert_response(response, currency)
-                    } else {
-                        Ok(response)
+                let result = match syntax.inverted_ticker(ticker) {
+                    Ok(Some(rest)) => {
+                        Self::fetch_inverse(&*source, commodity, rest, currency, date)
                     }
-                });
+                    Ok(None) => source.fetch_price(&PriceRequest {
+                        ticker: ticker.clone(),
+                        currency: currency.to_string(),
+                        date,
+                    }),
+                    Err(e) => Err(e),
+                };
+                // A failed attempt, a zero quote among them, moves on to
+                // the next source in the chain. bean-price aborts the job
+                // with DivisionByZero instead.
                 match result {
                     Ok(response) => return Ok(response),
                     Err(e) => {
@@ -384,50 +427,200 @@ impl PriceSourceRegistry {
     }
 }
 
-/// The inverse of a fetched quote, for bean-price's `^TICKER` (#2866):
-/// `1 / price`, labeled with the requested quote currency, as bean-price
-/// labels it (`EUR:ratesapi/^EUR-GBP` fetches GBP per EUR and writes EUR
-/// per GBP).
+/// How [`PriceSourceRegistry`] reads a mapping's tickers.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum TickerSyntax {
+    /// As written: a config mapping, `--mapping` or `--source` ticker. A
+    /// leading `^` is part of the ticker (Yahoo's `^GSPC`).
+    Verbatim,
+    /// bean-price's source spec, from `price:` metadata (#2866): a leading
+    /// `^` asks for the inverse of the quote.
+    BeanPriceSpec,
+}
+
+impl TickerSyntax {
+    /// The ticker to fetch and invert, when `ticker` asks for an inverse.
+    ///
+    /// # Errors
+    ///
+    /// A spec ticker with nothing after its `^`, or a second `^`, which
+    /// bean-price's grammar (`/(\^?)([a-zA-Z0-9:=_\-\.\(\)]+)$`) rejects.
+    fn inverted_ticker(self, ticker: &str) -> Result<Option<&str>> {
+        if self == Self::Verbatim {
+            return Ok(None);
+        }
+        match ticker.strip_prefix('^') {
+            None => Ok(None),
+            Some(rest) if rest.is_empty() || rest.starts_with('^') => anyhow::bail!(
+                "invalid source ticker `{ticker}`: a bean-price spec inverts with one `^` \
+                 before the ticker"
+            ),
+            Some(rest) => Ok(Some(rest)),
+        }
+    }
+}
+
+impl PriceSourceRegistry {
+    /// Fetch `ticker` from `source` and invert it, for bean-price's
+    /// `^TICKER` (#2866): `EUR:ratesapi/^EUR-GBP` on GBP fetches the
+    /// EUR-GBP rate (GBP per EUR) and writes its inverse, the GBP price in
+    /// EUR, labeled `currency` as bean-price labels it.
+    ///
+    /// The inverse of a price of B in Q is a price of Q in B, so it is
+    /// written only when the quote is in `commodity` (Q) and, for a ticker
+    /// the source reads as a pair, the pair is based in `currency` (B).
+    /// Otherwise the label would claim a pair the number is not, a relabel
+    /// past the #2731 mismatch check that judges an uninverted quote.
+    /// Stricter than Python: bean-price writes any such inverse, labeled
+    /// the declared currency.
+    ///
+    /// # Errors
+    ///
+    /// The fetch failing, a quote that is not of `commodity` or not of a
+    /// pair based in `currency`, or a quote with no writable inverse (see
+    /// [`invert_price`]).
+    fn fetch_inverse(
+        source: &dyn PriceSource,
+        commodity: &str,
+        ticker: &str,
+        currency: &str,
+        date: Option<NaiveDate>,
+    ) -> Result<PriceResponse> {
+        let response = source.fetch_price(&PriceRequest {
+            ticker: ticker.to_string(),
+            currency: currency.to_string(),
+            date,
+        })?;
+        let quote = response.currency.as_str();
+        if !quote.eq_ignore_ascii_case(commodity) {
+            anyhow::bail!(
+                "`^{ticker}` inverts a price in {quote}, which is a price of {quote}, not of \
+                 {commodity}; refusing to write it as a {commodity} price"
+            );
+        }
+        // A ticker the source reads as its own pair (`EUR-GBP`, or
+        // alphavantage's `fx:EUR:GBP`, read as `EUR/GBP`) names the base.
+        let pair = source.bean_price_pair(sources::PricePair {
+            ticker: ticker.to_string(),
+            currency: currency.to_string(),
+        });
+        if pair.ticker != ticker || pair.currency != currency {
+            let base = pair.ticker.split('/').next().unwrap_or(&pair.ticker);
+            if !base.eq_ignore_ascii_case(currency) {
+                anyhow::bail!(
+                    "`^{ticker}` inverts a price of {base}, which is a price in {base}, not \
+                     in {currency}; refusing to write it as a {currency} price"
+                );
+            }
+        }
+        let price = invert_price(response.price).with_context(|| {
+            format!(
+                "cannot invert the {} price {} {} for `^{ticker}`",
+                response.source, response.price, response.currency
+            )
+        })?;
+        Ok(PriceResponse {
+            price,
+            currency: currency.to_uppercase(),
+            ..response
+        })
+    }
+}
+
+/// The significant digits [`invert_price`] keeps: Python's default decimal
+/// context, under which bean-price computes `ONE / price`.
+const INVERSE_DIGITS: i64 = 28;
+
+/// The most decimal places a `rust_decimal` value holds.
+const MAX_SCALE: i64 = 28;
+
+/// `1 / price` with bean-price's digits (#2866): `ONE / price` under
+/// Python's default decimal context. An exact quotient takes its shortest
+/// form (`1 / 8` is `0.125`), and any other is rounded once, half to even,
+/// to 28 significant digits (`1 / 4.538` is `0.2203613926840017628911414720`,
+/// trailing zero kept). The division is exact integer arithmetic, so that
+/// one rounding is the only one.
 ///
-/// The digits are bean-price's `ONE / price` under Python's default decimal
-/// context: an exact inverse in its shortest form (`1 / 8` is `0.125`), and
-/// any other rounded to 28 significant digits, half to even. One limit is
-/// `rust_decimal`'s: it holds at most 28 decimal places, so an inverse
-/// below 0.1 keeps fewer significant digits than Python's (`1 / 149.5` is
-/// `0.0066889632107023411371237458`, where Python carries two more), the
-/// "not fixable locally" precision case of AGENTS.md.
+/// One limit is `rust_decimal`'s: it holds at most 28 decimal places, so an
+/// inverse near 10^-k keeps k - 1 fewer significant digits than Python's,
+/// rounded once at the 28th decimal place (`1 / 149.5` is
+/// `0.0066889632107023411371237458`, where Python carries
+/// `0.006688963210702341137123745819`). This is the "not fixable locally"
+/// precision case of AGENTS.md.
+///
+/// bean-price's `ecbrates` writes fewer digits than 28: it sets the global
+/// decimal precision to its rate legs' (`getcontext().prec = max(5, ...)`)
+/// and leaves it set, so the `ONE / price` that follows is rounded to about
+/// six digits. Stricter than Python: that is a context leak in beanprice's
+/// `ecbrates.py`, not a precision anyone chose, so rledger keeps 28 digits
+/// for every source.
 ///
 /// # Errors
 ///
-/// A zero price, which has no inverse.
-fn invert_response(response: PriceResponse, currency: &str) -> Result<PriceResponse> {
-    let price = response.price;
-    let inverse = Decimal::ONE.checked_div(price).with_context(|| {
-        format!(
-            "cannot invert the {} price {} {} for `^`: it has no inverse",
-            response.source, response.price, response.currency
-        )
-    })?;
-    let significant_digits = inverse.mantissa().unsigned_abs().to_string().len();
-    let inverse = if significant_digits > 28 {
-        inverse
-            .round_sf_with_strategy(28, rust_decimal::RoundingStrategy::MidpointNearestEven)
-            .context("rounding the inverted price")?
-    } else {
-        inverse
+/// A zero price, which has no inverse, and an inverse that rounds to zero
+/// at 28 decimal places (a price above 2 * 10^28), which would be written
+/// as `0`.
+fn invert_price(price: Decimal) -> Result<Decimal> {
+    use bigdecimal::num_bigint::BigInt;
+
+    if price.is_zero() {
+        anyhow::bail!("a zero price has no inverse");
+    }
+    let zero = BigInt::from(0);
+    // price = coef / 10^exp10, so 1 / price = 10^exp10 / coef, and value =
+    // 10^(exp10 + shift) / coef is it scaled by 10^shift.
+    let coef = BigInt::from(price.mantissa().unsigned_abs());
+    let exp10 = i64::from(price.scale());
+    let pow10 = |n: i64| BigInt::from(10).pow(u32::try_from(n).expect("a small exponent"));
+    let digits = |n: &BigInt| i64::try_from(n.to_string().len()).expect("a short number");
+    let quotient = |shift: i64| {
+        let (num, den) = if exp10 + shift >= 0 {
+            (pow10(exp10 + shift), coef.clone())
+        } else {
+            (BigInt::from(1), &coef * pow10(-(exp10 + shift)))
+        };
+        (&num / &den, &num % &den, den)
     };
-    // Python gives an exact quotient its shortest form, and rounds only an
-    // inexact one, which keeps its trailing zeros.
-    let inverse = if inverse.checked_mul(price) == Some(Decimal::ONE) {
-        inverse.normalize()
+    // Pick shift so the integer part of value holds 28 digits, within the 28
+    // decimal places rust_decimal holds.
+    let mut shift = INVERSE_DIGITS + digits(&coef) - exp10;
+    while shift > MAX_SCALE || digits(&quotient(shift).0) > INVERSE_DIGITS {
+        shift -= 1;
+    }
+    let (mut value, rem, den) = quotient(shift);
+    // One rounding, half to even, on the exact remainder.
+    let exact = rem == zero;
+    let twice = &rem * 2;
+    if twice > den || (twice == den && &value % 2 != zero) {
+        value += 1;
+    }
+    if digits(&value) > INVERSE_DIGITS {
+        // Rounded up to 10^28: drop the zero it gained.
+        value /= 10;
+        shift -= 1;
+    }
+    if exact {
+        // Python's shortest form for an exact quotient: no trailing zeros.
+        while shift > 0 && &value % 10 == zero {
+            value /= 10;
+            shift -= 1;
+        }
+    }
+    if value == zero {
+        anyhow::bail!("its inverse is below the smallest writable price (28 decimal places)");
+    }
+    while shift < 0 {
+        value *= 10;
+        shift += 1;
+    }
+    let mantissa = i128::try_from(&value).context("the inverse is too large to write")?;
+    let mantissa = if price.is_sign_negative() {
+        -mantissa
     } else {
-        inverse
+        mantissa
     };
-    Ok(PriceResponse {
-        price: inverse,
-        currency: currency.to_uppercase(),
-        ..response
-    })
+    let scale = u32::try_from(shift).expect("a scale within 0..=28");
+    Decimal::try_from_i128_with_scale(mantissa, scale).context("the inverse is too large to write")
 }
 
 impl Default for PriceSourceRegistry {
@@ -793,11 +986,11 @@ mod tests {
     }
 
     /// `EUR:pairs/^EUR-GBP` for GBP fetches EUR in GBP and writes the
-    /// inverse, GBP in EUR, labeled EUR, to bean-price's 28 significant
-    /// digits: `ONE / Decimal("0.83467")` in bean-price 2.1.0 is
+    /// inverse, GBP in EUR, labeled EUR, with bean-price's digits:
+    /// `ONE / Decimal("0.83467")` in bean-price 2.1.0 is
     /// `1.198078282434974301220841770` (#2866).
     #[test]
-    fn test_fetch_price_inverts_a_caret_ticker() {
+    fn test_fetch_price_for_spec_inverts_a_caret_ticker() {
         let source = pair_source("0.83467");
         let (registry, mapping) = registry_with(
             vec![("pairs", source.clone())],
@@ -805,7 +998,7 @@ mod tests {
             &[("pairs", "^EUR-GBP")],
         );
         let response = registry
-            .fetch_price("GBP", "EUR", None, &mapping)
+            .fetch_price_for_spec("GBP", "EUR", None, &mapping)
             .expect("an inverted quote");
         assert_eq!(response.price.to_string(), "1.198078282434974301220841770");
         assert_eq!(response.currency, "EUR");
@@ -815,34 +1008,160 @@ mod tests {
         );
     }
 
-    /// The same 28-digit rounding as Python's for quotes above and below
-    /// one (values from bean-price 2.1.0's `ONE / D(x)`).
+    /// Outside `price:` metadata a `^` is part of the ticker, as on main:
+    /// Yahoo's index tickers (`^GSPC`) start with one. A config mapping
+    /// and `--mapping` reach the registry through `fetch_price`.
     #[test]
-    fn test_invert_response_matches_python_decimal() {
+    fn test_fetch_price_keeps_a_caret_ticker_verbatim() {
+        let source = pair_source("5000.12");
+        let (registry, mapping) = registry_with(
+            vec![("pairs", source.clone())],
+            "SPX",
+            &[("pairs", "^GSPC")],
+        );
+        let response = registry
+            .fetch_price("SPX", "USD", None, &mapping)
+            .expect("an uninverted quote");
+        assert_eq!(response.price.to_string(), "5000.12");
+        assert_eq!(
+            *source.asked.lock().expect("not poisoned"),
+            vec![("^GSPC".to_string(), "USD".to_string())]
+        );
+    }
+
+    /// The inverse of a price of B in Q is a price of Q in B: it is refused
+    /// when the quote is not in the commodity, or when the pair the ticker
+    /// names is not based in the declared currency. Without `^`, the #2731
+    /// label check refuses the same mismatches.
+    #[test]
+    fn test_fetch_price_for_spec_refuses_an_inverse_of_another_pair() {
+        // CHF with `GBP:pairs/^EUR-USD`: the quote is in USD, not CHF.
+        let (registry, mapping) = registry_with(
+            vec![("pairs", pair_source("1.08"))],
+            "CHF",
+            &[("pairs", "^EUR-USD")],
+        );
+        let err = registry
+            .fetch_price_for_spec("CHF", "GBP", None, &mapping)
+            .expect_err("a USD quote inverted is not a CHF price");
+        assert_eq!(
+            format!("{err:#}"),
+            "`^EUR-USD` inverts a price in USD, which is a price of USD, not of CHF; \
+             refusing to write it as a CHF price"
+        );
+
+        // GBP with `USD:pairs/^EUR-GBP`: the pair is based in EUR, not USD.
+        let (registry, mapping) = registry_with(
+            vec![("pairs", pair_source("0.83"))],
+            "GBP",
+            &[("pairs", "^EUR-GBP")],
+        );
+        let err = registry
+            .fetch_price_for_spec("GBP", "USD", None, &mapping)
+            .expect_err("an EUR-based pair inverted is not a USD price");
+        assert_eq!(
+            format!("{err:#}"),
+            "`^EUR-GBP` inverts a price of EUR, which is a price in EUR, not in USD; \
+             refusing to write it as a USD price"
+        );
+    }
+
+    /// bean-price's grammar takes one `^` before the ticker; `^^X` and a
+    /// bare `^` are refused, not sent upstream.
+    #[test]
+    fn test_fetch_price_for_spec_refuses_a_malformed_caret() {
+        for ticker in ["^^EUR-GBP", "^"] {
+            let source = pair_source("0.83");
+            let (registry, mapping) =
+                registry_with(vec![("pairs", source.clone())], "GBP", &[("pairs", ticker)]);
+            let err = registry
+                .fetch_price_for_spec("GBP", "EUR", None, &mapping)
+                .expect_err("a malformed `^`");
+            assert_eq!(
+                format!("{err:#}"),
+                format!(
+                    "invalid source ticker `{ticker}`: a bean-price spec inverts with one `^` \
+                     before the ticker"
+                )
+            );
+            assert!(source.asked.lock().expect("not poisoned").is_empty());
+        }
+    }
+
+    /// One half-even rounding to 28 significant digits, as Python's
+    /// `ONE / D(x)` (values from bean-price 2.1.0's beancount). The first
+    /// four were rounded twice before: `rust_decimal`'s division rounds to
+    /// about 29 digits on its own.
+    #[test]
+    fn test_invert_price_matches_python_decimal() {
         use std::str::FromStr;
         for (rate, inverse) in [
+            ("0.00000198", "505050.5050505050505050505051"),
+            ("0.006550", "152.6717557251908396946564885"),
+            ("0.051", "19.60784313725490196078431373"),
+            ("4.538", "0.2203613926840017628911414720"),
+            ("0.83467", "1.198078282434974301220841770"),
             ("1.0852", "0.9214891264283081459638776262"),
             ("3", "0.3333333333333333333333333333"),
+            ("-4", "-0.25"),
             // Exact quotients take their shortest form, as in Python.
             ("2", "0.5"),
             ("0.25", "4"),
             ("2.50", "0.4"),
             ("8", "0.125"),
             ("0.8", "1.25"),
-            // Below 0.1, rust_decimal's 28 decimal places hold two digits
-            // fewer than Python's 0.006688963210702341137123745819.
+            // Python's `1E+28` and `1E+2`, written out.
+            (
+                "0.0000000000000000000000000001",
+                "10000000000000000000000000000",
+            ),
+            ("0.01", "100"),
+            // Below 0.1, rust_decimal's 28 decimal places hold k - 1
+            // digits fewer near 10^-k: Python has
+            // 0.006688963210702341137123745819 and
+            // 1.262177448353618888658765705E-28.
             ("149.5", "0.0066889632107023411371237458"),
+            (
+                "7922816251426433759354395033",
+                "0.0000000000000000000000000001",
+            ),
         ] {
-            let response = PriceResponse {
-                price: Decimal::from_str(rate).expect("valid rate"),
-                currency: "USD".to_string(),
-                date: rustledger_core::naive_date(2024, 1, 15).expect("valid date"),
-                source: "pairs".to_string(),
-            };
-            let inverted = invert_response(response, "eur").expect("invertible");
-            assert_eq!(inverted.price.to_string(), inverse, "1 / {rate}");
-            assert_eq!(inverted.currency, "EUR");
+            let price = Decimal::from_str(rate).expect("valid rate");
+            let inverse_of = invert_price(price).expect("invertible");
+            assert_eq!(inverse_of.to_string(), inverse, "1 / {rate}");
         }
+    }
+
+    /// Stricter than Python: bean-price's `ecbrates` leaves the global
+    /// decimal precision at its legs' (`getcontext().prec = max(5, ...)`),
+    /// so its `ONE / price` writes `0.0890115` for `1 / 11.2345`. rledger
+    /// keeps the 28 digits of Python's default context, on `ecbrates` as on
+    /// every source.
+    #[test]
+    fn test_fetch_price_for_spec_ecbrates_inverse_keeps_28_digits() {
+        let source = pair_source("11.2345");
+        let (registry, mapping) = registry_with(
+            vec![("ecbrates", source)],
+            "SEK",
+            &[("ecbrates", "^EUR-SEK")],
+        );
+        let response = registry
+            .fetch_price_for_spec("SEK", "EUR", None, &mapping)
+            .expect("an inverted quote");
+        assert_eq!(response.price.to_string(), "0.0890115269927455605500912368");
+    }
+
+    /// No writable inverse: a zero price, and one so large its inverse
+    /// rounds to zero at 28 decimal places (it would be written `0`).
+    #[test]
+    fn test_invert_price_refuses_zero() {
+        let err = invert_price(Decimal::ZERO).expect_err("no inverse");
+        assert_eq!(err.to_string(), "a zero price has no inverse");
+        let err = invert_price(Decimal::MAX).expect_err("an inverse below 1e-28");
+        assert_eq!(
+            err.to_string(),
+            "its inverse is below the smallest writable price (28 decimal places)"
+        );
     }
 
     /// A ticker that names its pair is fetched as that pair, whatever the
@@ -856,7 +1175,7 @@ mod tests {
             &[("pairs", "USD-EUR")],
         );
         let response = registry
-            .fetch_price("USD", "EUR", None, &mapping)
+            .fetch_price_for_spec("USD", "EUR", None, &mapping)
             .expect("a quote");
         assert_eq!(response.price.to_string(), "0.88755");
         assert_eq!(response.currency, "EUR");
@@ -866,31 +1185,32 @@ mod tests {
         );
     }
 
-    /// A zero quote has no inverse: that attempt fails, and the chain
-    /// goes on to the next source.
+    /// A zero quote has no inverse: that attempt fails, and the chain goes
+    /// on to the next source, where bean-price aborts the job with
+    /// `DivisionByZero`.
     #[test]
-    fn test_fetch_price_zero_inverse_tries_the_next_source() {
-        let zero = pair_source("0");
-        let good = pair_source("2");
+    fn test_fetch_price_for_spec_zero_inverse_tries_the_next_source() {
         let (registry, mapping) = registry_with(
-            vec![("zero", zero), ("good", good)],
+            vec![("zero", pair_source("0")), ("good", pair_source("2"))],
             "GBP",
             &[("zero", "^EUR-GBP"), ("good", "^EUR-GBP")],
         );
         let response = registry
-            .fetch_price("GBP", "EUR", None, &mapping)
+            .fetch_price_for_spec("GBP", "EUR", None, &mapping)
             .expect("the second source answers");
         assert_eq!(response.price.to_string(), "0.5");
 
-        let zero = pair_source("0");
-        let (registry, mapping) =
-            registry_with(vec![("zero", zero)], "GBP", &[("zero", "^EUR-GBP")]);
+        let (registry, mapping) = registry_with(
+            vec![("zero", pair_source("0"))],
+            "GBP",
+            &[("zero", "^EUR-GBP")],
+        );
         let err = registry
-            .fetch_price("GBP", "EUR", None, &mapping)
+            .fetch_price_for_spec("GBP", "EUR", None, &mapping)
             .expect_err("a zero quote cannot be inverted");
         assert_eq!(
             format!("{err:#}"),
-            "cannot invert the pairs price 0 GBP for `^`: it has no inverse"
+            "cannot invert the pairs price 0 GBP for `^EUR-GBP`: a zero price has no inverse"
         );
     }
 

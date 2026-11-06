@@ -78,7 +78,15 @@ Shipped work, by area. Forward-looking plans live in [docs/roadmap/](docs/roadma
 ### Fixed
 
 - **`rledger price` reads bean-price's source specs: `^` inverts a quote on any source, and each source reads its ticker as the matching beanprice module does**: `price: "EUR:ratesapi/USD-EUR"` asked Frankfurter for `USD-EUR` in EUR and got HTTP 404, and `^EUR-GBP` was sent to the provider as it was written (#2866).
-  - A leading `^` now fetches the rest of the ticker and writes `1 / price`, labeled with the declared quote currency and rounded to bean-price's 28 significant digits.
+  - In `price:` metadata, a leading `^` now fetches the rest of the ticker and writes `1 / price`, labeled with the declared quote currency.
+    - The inverse is computed exactly and rounded once to 28 significant digits, half to even, as bean-price's `ONE / price` is.
+    - Below 0.1, `rust_decimal`'s 28 decimal places keep k - 1 fewer digits near 10^-k.
+    - A `[price.mapping]` ticker, `--mapping` and `--source` keep `^` as part of the ticker, so Yahoo's `^GSPC` still works.
+  - Stricter than Python, for inverses:
+    - rledger refuses an inverse that is not a price of the commodity in the declared currency, where bean-price relabels it.
+    - rledger refuses `^^X`.
+    - A zero quote, or an inverse that rounds to zero, moves on to the next source, where bean-price stops on a division by zero.
+    - bean-price's `ecbrates` writes an inverse to about six digits, because it leaves Python's decimal precision set to its rate legs'. rledger keeps 28.
   - These sources now read beanprice's ticker forms. rledger's own forms still work.
     - `ratesapi` and `ecb`: `BASE-SYMBOL`.
     - `coinmarketcap`: `SYMBOL-BASE`.

@@ -282,15 +282,21 @@ impl LoadError {
     /// that does not exist (bean-query: `File glob ... does not match any
     /// files`), an include cycle and a duplicate include (`Duplicate filename
     /// parsed`), and an include glob matching nothing. It refuses, as
-    /// bean-query does (an uncaught `OSError`, exit 1, no rows), when a file
-    /// that exists could not be read: a decryption failure (a locked
-    /// gpg-agent would otherwise make every balance silently zero) or an I/O
-    /// error other than not-found, such as an include naming a directory.
+    /// bean-query does (an uncaught `OSError`, exit 1, no rows), on a
+    /// decryption failure (a locked gpg-agent would otherwise make every
+    /// balance silently zero) and when an include names a directory or a file
+    /// without read permission.
     ///
-    /// Two deliberate differences. An include outside the ledger's directory,
-    /// when rledger confines includes (`path_security`), is reported and left
-    /// unread, and the query answers without it; bean-query does not confine,
-    /// so it reads the file. And bean-query answers over a parse error and a
+    /// Three deliberate differences. Every I/O error other than not-found
+    /// refuses, including one bean-query does not see: an include under a
+    /// directory without read or search permission (`locked/x.beancount`) is
+    /// "no such file" to bean-query's glob, so it answers without the file,
+    /// where rledger gets `PermissionDenied` and refuses, because the file may
+    /// well exist and answering would silently leave it out. An include
+    /// outside the ledger's directory, when rledger confines includes
+    /// (`path_security`), is reported and left unread, and the query answers
+    /// without it; bean-query does not confine, so it reads the file. And
+    /// bean-query answers over a parse error and a
     /// booking error, dropping the entry; there rledger refuses, because
     /// figures from a ledger that did not parse or book are plausible but
     /// wrong (see `bail_on_load_errors` and `bail_on_booking_errors` in the
@@ -300,6 +306,8 @@ impl LoadError {
         match self {
             Self::ParseErrors { errors, .. } => !errors.is_empty(),
             Self::Decryption { .. } => true,
+            // Stricter than bean-query for a file under an unreadable
+            // directory (it globs, sees nothing and answers): see above.
             Self::Io { error, .. } => error.kind() != std::io::ErrorKind::NotFound,
             _ => false,
         }

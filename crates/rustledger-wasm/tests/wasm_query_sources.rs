@@ -298,3 +298,39 @@ mod query_answer_rule {
         }
     }
 }
+
+/// `queryWithHost` treats a `readFile` that throws as a file the host could
+/// not read, which stops the query, as `rledger query` and bean-query refuse
+/// an include they cannot read; only a throw carrying `code: "ENOENT"` (or a
+/// `null` return) is a missing file, which the query answers over (#2861).
+/// A throw was always "not found", so the query answered without the file.
+#[wasm_bindgen_test]
+fn query_with_host_refuses_an_include_the_host_cannot_read() {
+    let run = |code: &str| {
+        let read_file = js_sys::Function::new_with_args(
+            "p",
+            &format!(
+                "if (p.endsWith('main.beancount')) {{ return 'include \"sub.beancount\"\\n\
+                 2024-01-01 open Assets:Cash\\n2024-01-01 open Income:Salary\\n\
+                 2024-01-02 * \"pay\"\\n  Assets:Cash  100 USD\\n  Income:Salary\\n'; }}\
+                 const e = new Error('cannot read ' + p); e.code = '{code}'; throw e;"
+            ),
+        );
+        let host = js_sys::Object::new();
+        js_sys::Reflect::set(&host, &JsValue::from_str("readFile"), &read_file).expect("set");
+        let q = "SELECT narration FROM postings WHERE account = 'Assets:Cash'";
+        rustledger_wasm::query_with_host(&host.into(), "main.beancount", q).expect("query")
+    };
+
+    let refused = run("EACCES");
+    assert_eq!(
+        js_sys::Array::from(&get_field(&refused, "rows")).length(),
+        0
+    );
+    let errors = js_sys::Array::from(&get_field(&refused, "errors"));
+    assert!(errors.length() > 0, "the unreadable include is reported");
+
+    let answered = run("ENOENT");
+    let row = first_row(&answered, "ENOENT");
+    assert_eq!(string_cell(&row, 0), "pay");
+}

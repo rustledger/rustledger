@@ -621,10 +621,11 @@ pub struct Ledger {
     summary_accounts: rustledger_query::executor::SummaryAccounts,
     /// Processing errors (load, booking, validation).
     errors: Vec<Error>,
-    /// Whether `errors` holds one that stops a query from answering (a parse
-    /// error or a booking failure: `LedgerError::blocks_queries`, #2861), or
-    /// the load or processing failed outright. Archived in the cache payload,
-    /// since the restored `errors` no longer carry the flag.
+    /// Whether `errors` holds one that stops a query from answering
+    /// (`LedgerError::blocks_queries`, #2861: a parse error, a file that
+    /// could not be read or decrypted, a booking failure), or the load or
+    /// processing failed outright. Archived in the cache payload, since the
+    /// restored `errors` no longer carry the flag.
     query_refused: bool,
     /// Editor cache for cross-file completions.
     editor_cache: editor::EditorCache,

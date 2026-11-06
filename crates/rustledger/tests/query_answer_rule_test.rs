@@ -51,7 +51,11 @@ fn test_query_answers_or_refuses_by_the_shared_rule() {
                 .collect();
             assert_eq!(got, rows, "{context}");
         } else {
-            assert!(!out.status.success(), "{context}");
+            // Exit 1 with the gate's own message: a panic (exit 101, as a
+            // debug assertion behind a no-op gate gives) is not a refusal,
+            // and a release build would answer there.
+            assert_eq!(out.status.code(), Some(1), "{context}");
+            assert!(stderr.contains("refusing"), "{context}");
             assert!(
                 stdout.trim().is_empty(),
                 "a refusal prints no rows: {context}"

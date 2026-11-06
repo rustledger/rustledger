@@ -46,7 +46,9 @@ struct HostCallbacks {
     /// free to write `{ readFile(p) { return this.cache.get(p); } }`, and
     /// calling that with a null receiver breaks it at runtime.
     receiver: JsValue,
-    /// `(path: string) => string | null` — contents, or null if unreadable.
+    /// `(path: string) => string | null`: contents, or null if the file does
+    /// not exist. A throw is a file that could not be read (an error with
+    /// `code: "ENOENT"` excepted, which is not-found too).
     read_file: js_sys::Function,
     /// `(pattern: string) => string[]` — optional; without it a glob include
     /// reports the same "does not match any files" the disk backend does.
@@ -160,8 +162,13 @@ impl FileSystem for HostFs {
                 .map(|host| (host.read_file.clone(), host.receiver.clone()))
         });
         let (f, receiver) = pair.ok_or_else(|| not_found(path, "no host filesystem installed"))?;
-        let value =
-            Self::call1(&f, &receiver, &display).map_err(|message| not_found(path, &message))?;
+        // A throwing `readFile` is a file the host could not read, NOT a missing
+        // one, unless what it threw says so (Node's `ENOENT`). Calling it
+        // missing let a query answer without the file (#2861), where
+        // `rledger query` and bean-query refuse an include they cannot read.
+        let value = f
+            .call1(&receiver, &JsValue::from_str(&display))
+            .map_err(|thrown| read_failure(path, &thrown))?;
         value
             .as_string()
             .map(SourceText::from)
@@ -272,6 +279,37 @@ fn textual_normalize(path: &str) -> PathBuf {
     })
 }
 
+/// The load error for a `readFile` that threw `thrown`: not-found when the
+/// host says so (an `ENOENT` `code`, as Node's `fs` sets it), else an I/O
+/// error, which stops a query (`LoadError::blocks_queries`, #2861).
+fn read_failure(path: &Path, thrown: &JsValue) -> LoadError {
+    let message = thrown
+        .as_string()
+        .or_else(|| {
+            js_sys::Reflect::get(thrown, &JsValue::from_str("message"))
+                .ok()
+                .and_then(|m| m.as_string())
+        })
+        .unwrap_or_else(|| "host callback threw".to_string());
+    let code = js_sys::Reflect::get(thrown, &JsValue::from_str("code"))
+        .ok()
+        .and_then(|c| c.as_string());
+    read_failure_from(path, code.as_deref(), &message)
+}
+
+/// [`read_failure`]'s decision, apart from the JS value so it is testable
+/// natively: `ENOENT` is not-found, anything else an I/O error.
+fn read_failure_from(path: &Path, code: Option<&str>, message: &str) -> LoadError {
+    if code == Some("ENOENT") {
+        return not_found(path, message);
+    }
+    LoadError::Io {
+        path: path.to_path_buf(),
+        error: std::io::Error::other(message.to_string()),
+        include_site: None,
+    }
+}
+
 fn not_found(path: &Path, message: &str) -> LoadError {
     LoadError::Io {
         path: path.to_path_buf(),
@@ -284,6 +322,21 @@ fn not_found(path: &Path, message: &str) -> LoadError {
 mod tests {
     use super::textual_normalize;
     use std::path::PathBuf;
+
+    /// A `readFile` that threw is a file the host could not read, which stops
+    /// a query, unless it threw `ENOENT`, a missing file a query answers over
+    /// (#2861). It was always not-found.
+    #[test]
+    fn test_read_failure_is_not_found_only_on_enoent() {
+        use std::path::Path;
+        let blocks = |code| {
+            super::read_failure_from(Path::new("x.beancount"), code, "boom").blocks_queries()
+        };
+        assert!(!blocks(Some("ENOENT")));
+        assert!(blocks(Some("EACCES")));
+        assert!(blocks(Some("EISDIR")));
+        assert!(blocks(None));
+    }
 
     #[test]
     fn the_fallback_collapses_paths_that_name_one_file() {

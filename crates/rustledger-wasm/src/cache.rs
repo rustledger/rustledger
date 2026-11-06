@@ -363,10 +363,10 @@ use crate::types::{Error, LedgerOptions};
 /// v73: loader v57, PARSER OUTPUT changed (#2808, #2856). A date with extra
 /// digits is one date, as in beancount, and every invalid date is reported; a
 /// v72 blob would keep serving such a file with its old errors.
-/// v74: the `Ledger` payload gained `query_refused`, whether a parse error or
-/// a booking failure stops its queries (#2861); the restored `errors` no
-/// longer carry that flag. Loader output is unchanged; a v73 blob has no such
-/// field and would not deserialize as this layout.
+/// v74: the `Ledger` payload gained `query_refused`, whether an error that
+/// blocks queries (`LedgerError::blocks_queries`) stops them (#2861); the
+/// restored `errors` no longer carry that flag. Loader output is unchanged; a
+/// v73 blob has no such field and would not deserialize as this layout.
 pub const CACHE_VERSION: u32 = 74;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
@@ -455,8 +455,9 @@ pub struct LedgerPayload {
     /// strings for the same reason as `account_type_names`.
     pub summary_account_names: Vec<String>,
     pub errors: Vec<Error>,
-    /// Whether a query over the ledger refuses: a parse error or a booking
-    /// failure (`LedgerError::blocks_queries`, #2861). Archived because
+    /// Whether a query over the ledger refuses (`LedgerError::blocks_queries`,
+    /// #2861: a parse error, a file that could not be read or decrypted, a
+    /// booking failure). Archived because
     /// `errors` lost the flag in conversion.
     pub query_refused: bool,
 }

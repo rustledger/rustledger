@@ -721,9 +721,12 @@ pub fn validate_multi_file(files: JsValue, entry_point: &str) -> Result<JsValue,
 ///
 /// `host` is an object with:
 ///
-/// - `readFile(path) => string | null` — required. `null` means "cannot read
-///   this", which the loader reports as a missing include against the file
-///   that asked for it.
+/// - `readFile(path) => string | null`: required. `null` means "no such
+///   file", which the loader reports as a missing include against the file
+///   that asked for it, and a query answers over. A throw means the file
+///   exists but could not be read (a directory, no permission), which stops a
+///   query, as it stops `rledger query` (#2861); a host that throws for a
+///   missing file instead marks it with `code: "ENOENT"`, as Node's `fs` does.
 /// - `glob(pattern) => string[]` — optional. Without it, a glob `include`
 ///   reports "does not match any files", as a backend without glob support
 ///   does.

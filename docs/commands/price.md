@@ -311,7 +311,7 @@ Configure sources, mappings, and fallback chains in config:
 ```toml
 [price]
 default_source = "yahoo"
-timeout = 30
+timeout = 30          # seconds per request; 0 = no limit
 cache_ttl = 1800
 
 # Issue #966: by default, fetching a commodity that has no

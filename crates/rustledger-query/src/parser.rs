@@ -2,6 +2,7 @@
 //!
 //! Uses chumsky for parser combinators.
 
+use chumsky::error::RichReason;
 use chumsky::prelude::*;
 use rust_decimal::Decimal;
 use std::str::FromStr;
@@ -334,6 +335,10 @@ fn parse_on_current_stack(source: &str) -> Result<Query, ParseError> {
                 // token-naming below is for parses that FAILED, whose custom
                 // errors are `kw`'s "expected keyword" and must not win.
                 ParseErrorKind::SyntaxError(e.to_string())
+            } else if is_operand_refusal(e) {
+                // Emitted by an operand that then parsed on, so it is no
+                // stray token either, though the query failed further in.
+                ParseErrorKind::SyntaxError(e.to_string())
             } else if e.found().is_some() {
                 // chumsky found a concrete unexpected token: keep its rich
                 // message ("expected keyword …", "invalid number", …).
@@ -566,8 +571,31 @@ fn targets<'a>() -> impl Parser<'a, ParserInput<'a>, Vec<Target>, ParserExtra<'a
 }
 
 /// Parse a single target.
+///
+/// A `*` target is bean-query's whole target list (`SELECT *`); rledger
+/// also takes it beside other targets (`SELECT *, account`), an extension.
+/// It is read here, before an expression, because `*` is no operand (see
+/// `primary_expr`): a `*` that an operator, a sign, `.` or `[` follows
+/// (`* * 2`, `*.x`) is not a target but a `*` used as a value, and falls
+/// through to `expr` to be refused there by name (#2871).
 fn target<'a>() -> impl Parser<'a, ParserInput<'a>, Target, ParserExtra<'a>> + Clone {
-    expr()
+    let operator_follows = choice((
+        ws().then(one_of(".[*/%+-=<>!~")).ignored(),
+        ws1()
+            .then(choice((
+                kw("AND"),
+                kw("OR"),
+                kw("IN"),
+                kw("IS"),
+                kw("NOT"),
+                kw("BETWEEN"),
+            )))
+            .ignored(),
+    ));
+    let wildcard = just('*')
+        .to(Expr::Wildcard)
+        .then_ignore(operator_follows.not());
+    choice((wildcard, expr()))
         .then(
             ws1()
                 .ignore_then(kw("AS"))
@@ -983,7 +1011,8 @@ fn expr<'a>() -> Boxed<'a, 'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
         // (`---6` is -6, `-- 6` is 6) and may be followed by a `+`, but a `+`
         // (`uplus: '+' atom`) takes a bare atom only, so `-+6` is -6 while
         // `++6`, `+-6`, `+(1)` and `+x.y` are syntax errors there and here,
-        // as is any sign before `*` (see the check below).
+        // as is any sign before `*` (the `*` atom in `primary_expr` refuses
+        // it).
         // A run of `-` is bounded by the nesting limit, and
         // `nesting_exceeds_limit` counts it toward the same depth as the
         // brackets around it, so signs and brackets cannot multiply into a
@@ -995,37 +1024,38 @@ fn expr<'a>() -> Boxed<'a, 'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
             // bean-query's atom does include a list constant, so it takes
             // `+(1, 2)` and `'a' IN +('a', 'b')`; rledger has no list
             // constant outside `IN` (`SELECT (1, 2)` is refused too), so every
-            // `+(` is refused here, a known gap. The `*` wildcard parses here
-            // so that the check below can name it.
-            .ignore_then(
-                atom.clone()
-                    .and_is(one_of("(-+").not())
-                    .map_with(|e, x| (true, e, x.span())),
-            );
-        let operand = choice((
-            plus_atom,
-            primary.clone().map_with(|e, x| (false, e, x.span())),
-        ));
+            // `+(` is refused here, a known gap.
+            //
+            // The check comes first, not as `atom.and_is(..)`: `and_is`
+            // rewinds past the atom, and with it the error the `*` atom
+            // emits, so `SELECT +*` parsed.
+            .ignore_then(choice((
+                one_of("(-+").not().ignore_then(atom.clone()),
+                // A sign after the `+` (`++6`, `+-6`, `+-*`) is refused at
+                // that sign by name, and the signs and operand after it are
+                // read on so that the refusal is the error kept. Read as a
+                // run, not by recursion, so it adds no nesting.
+                one_of("-+")
+                    .then(ws())
+                    .repeated()
+                    .at_least(1)
+                    .at_most(MAX_NESTING_DEPTH)
+                    .validate(|(), e, emitter| {
+                        emitter.emit(Rich::custom(
+                            e.span(),
+                            SIGN_AFTER_PLUS,
+                        ));
+                    })
+                    .ignore_then(primary.clone()),
+            )));
+        let operand = choice((plus_atom, primary.clone()));
         let unary = just('-')
             .then_ignore(ws())
             .repeated()
             .at_most(MAX_NESTING_DEPTH)
             .count()
             .then(operand)
-            // `*` is no atom of bean-query's, so no sign takes it: `SELECT
-            // +*`, `-*`, `--*`, `count(--*)` and `WHERE --*` are syntax
-            // errors there, and here. `WHERE --*` parsed and gave no rows,
-            // and `SELECT --*` failed only on a row ("negation requires
-            // numeric value"). Reported at the `*` by `validate`, which keeps
-            // the parse, so the error names the `*` rather than suggesting,
-            // at the sign, that a `*` was what the target list expected.
-            .validate(|(negations, (plus, e, span)), _, emitter| {
-                if (plus || negations > 0) && matches!(e, Expr::Wildcard) {
-                    emitter.emit(Rich::custom(
-                        span,
-                        "'*' is not a value, so a sign cannot apply to it",
-                    ));
-                }
+            .map(|(negations, e)| {
                 (0..negations).fold(e, |acc, _| Expr::unary(UnaryOperator::Neg, acc))
             })
             .boxed();
@@ -1253,9 +1283,35 @@ fn primary_expr<'a>(
         // Function call or column reference (must come before wildcard check)
         // Pass expr to allow nested function calls like units(sum(position))
         function_call_or_column(expr),
-        // Wildcard (fallback if nothing else matched)
-        just('*').to(Expr::Wildcard),
+        // `*` is no operand: bean-query 0.2.0's grammar takes it only as the
+        // whole target list and as a call's only argument (`count(*)`), and
+        // refuses `1 + *`, `(*)`, `*.x` and `-*` as syntax errors (#2871).
+        // `WHERE 1 + *` used to parse and give no rows, with no error. The
+        // places that take a `*` read it before reaching an expression
+        // (`target`, `function_args`); one that gets here is parsed only so
+        // that the error, kept by `validate`, names it.
+        just('*').validate(|_, e, emitter| {
+            emitter.emit(Rich::custom(e.span(), STAR_IS_NOT_A_VALUE));
+            Expr::Wildcard
+        }),
     ))
+}
+
+/// The error for a `*` where an operand belongs (#2871).
+const STAR_IS_NOT_A_VALUE: &str = "'*' is not a value: it stands only for the whole target list, or alone in a call such as count(*)";
+
+/// The error for a sign after a unary `+` (`++6`, `+-*`).
+const SIGN_AFTER_PLUS: &str = "a '+' sign takes a bare value, not another sign after it";
+
+/// Whether `error` is one an operand emits to refuse what it parsed
+/// ([`STAR_IS_NOT_A_VALUE`], [`SIGN_AFTER_PLUS`]). Such an error names what
+/// is wrong where it is, so it is reported as written even when a later
+/// part of the query also fails to parse (``SELECT -*, `x` ``).
+fn is_operand_refusal(error: &Rich<'_, char>) -> bool {
+    matches!(
+        error.reason(),
+        RichReason::Custom(message) if message == STAR_IS_NOT_A_VALUE || message == SIGN_AFTER_PLUS
+    )
 }
 
 /// Parse function call, window function, or column reference.
@@ -1361,9 +1417,18 @@ fn window_order_spec<'a>() -> impl Parser<'a, ParserInput<'a>, OrderSpec, Parser
 fn function_args<'a>(
     expr: impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> + Clone + 'a,
 ) -> impl Parser<'a, ParserInput<'a>, Vec<Expr>, ParserExtra<'a>> + Clone {
-    // Allow empty args or comma-separated full expressions
+    // A `*` alone (`count(*)`), as bean-query's grammar has it
+    // (`function: fname '(' asterisk ')'`); any other `*` is an operand and
+    // refused by `primary_expr` (`count(1 + *)`, `count(*, 1)`, #2871).
+    let wildcard = just('*')
+        .then_ignore(ws().then(just(')')).rewind())
+        .to(vec![Expr::Wildcard]);
+    // Otherwise empty args or comma-separated full expressions
     // This enables nested function calls like units(sum(position))
-    expr.separated_by(ws().then(just(',')).then(ws())).collect()
+    choice((
+        wildcard,
+        expr.separated_by(ws().then(just(',')).then(ws())).collect(),
+    ))
 }
 
 /// Parse a simple function argument (column, wildcard, or literal).

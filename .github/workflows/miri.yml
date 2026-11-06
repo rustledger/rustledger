@@ -109,11 +109,17 @@ jobs:
       # future test file silently never runs under Miri — the failure mode this
       # job spent eight weeks demonstrating.
       #
-      # Coverage cost is small. Neither crate has a `proptest!` in `src/`, so
-      # the unit tests — where the transitive `unsafe` actually lives (imbl,
-      # smallvec, rust_decimal) — all still run. Both categories keep full
-      # strength in the normal test suite, and TLA+ conformance is owned by
-      # tla.yml regardless.
+      # Coverage cost is small. The unit tests in `src/`, where the transitive
+      # `unsafe` actually lives (imbl, smallvec, rust_decimal, regex), all
+      # still run. Both categories keep full strength in the normal test
+      # suite, and TLA+ conformance is owned by tla.yml regardless.
+      #
+      # A slow unit test is shrunk under `cfg(miri)` in the test itself rather
+      # than skipped here, since a lib target cannot be skipped piecemeal: the
+      # `proptest!` in core's `sorted_set` runs 8 cases under Miri, and core's
+      # table-driven `py_regex` tests check every fifth row (`rows()`). Only
+      # tests that walk every code point and touch no unsafe code carry
+      # `#[cfg_attr(miri, ignore = "...")]`.
       - name: Run Miri on ${{ matrix.crate }}
         run: |
           set -euo pipefail

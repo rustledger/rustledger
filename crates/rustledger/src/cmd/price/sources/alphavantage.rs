@@ -2,7 +2,7 @@
 //!
 //! Fetches stock, forex, and crypto prices from Alpha Vantage.
 
-use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, user_agent};
+use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, http_get_json};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
@@ -26,12 +26,15 @@ use std::time::Duration;
 /// - Forex: Use `from_currency/to_currency` format (e.g., `EUR/USD`)
 /// - Crypto: Use `CRYPTO:symbol` format (e.g., `CRYPTO:BTC`)
 #[derive(Debug)]
-pub struct AlphaVantageSource {}
+pub struct AlphaVantageSource {
+    /// Whole-request timeout, applied to each request.
+    timeout: Duration,
+}
 
 impl AlphaVantageSource {
     /// Create a new Alpha Vantage source.
-    pub const fn new(_timeout: Duration) -> Self {
-        Self {}
+    pub const fn new(timeout: Duration) -> Self {
+        Self { timeout }
     }
 
     /// Get the API key from environment.
@@ -145,15 +148,13 @@ impl AlphaVantageSource {
     fn fetch_stock(&self, symbol: &str, currency: &str, api_key: &str) -> Result<PriceResponse> {
         let url = self.build_stock_url(symbol, api_key);
 
-        let mut response = ureq::get(&url)
-            .header("User-Agent", user_agent())
-            .call()
-            .with_context(|| format!("Failed to fetch quote for {symbol}"))?;
-
-        let json: serde_json::Value = response
-            .body_mut()
-            .read_json()
-            .with_context(|| "Failed to parse Alpha Vantage response")?;
+        let json = http_get_json(
+            &url,
+            self.timeout,
+            &[],
+            &[api_key],
+            &format!("Failed to fetch quote for {symbol}"),
+        )?;
 
         // Check for API errors
         if let Some(note) = json.get("Note") {
@@ -195,28 +196,32 @@ impl AlphaVantageSource {
 
     fn fetch_forex(&self, from: &str, to: &str, api_key: &str) -> Result<PriceResponse> {
         let url = self.build_forex_url(from, to, api_key);
-        self.fetch_exchange_rate(&url, from, to)
+        self.fetch_exchange_rate(&url, from, to, api_key)
     }
 
     fn fetch_crypto(&self, symbol: &str, market: &str, api_key: &str) -> Result<PriceResponse> {
         let url = self.build_crypto_url(symbol, market, api_key);
-        self.fetch_exchange_rate(&url, symbol, market)
+        self.fetch_exchange_rate(&url, symbol, market, api_key)
     }
 
     /// Shared `CURRENCY_EXCHANGE_RATE` fetch — forex and crypto hit the
     /// same endpoint and parse the same response shape (round-2 deep
     /// review: the two copies had drifted, keeping the local-clock date
     /// label in both while the stock path was fixed).
-    fn fetch_exchange_rate(&self, url: &str, from: &str, to: &str) -> Result<PriceResponse> {
-        let mut response = ureq::get(url)
-            .header("User-Agent", user_agent())
-            .call()
-            .with_context(|| format!("Failed to fetch rate for {from}/{to}"))?;
-
-        let json: serde_json::Value = response
-            .body_mut()
-            .read_json()
-            .with_context(|| "Failed to parse Alpha Vantage response")?;
+    fn fetch_exchange_rate(
+        &self,
+        url: &str,
+        from: &str,
+        to: &str,
+        api_key: &str,
+    ) -> Result<PriceResponse> {
+        let json = http_get_json(
+            url,
+            self.timeout,
+            &[],
+            &[api_key],
+            &format!("Failed to fetch rate for {from}/{to}"),
+        )?;
 
         let rate_data = json
             .get("Realtime Currency Exchange Rate")
@@ -296,15 +301,13 @@ impl PriceSource for AlphaVantageSource {
         let api_key = Self::get_api_key()?;
         let url = Self::build_daily_url(&pair.ticker, &api_key, window);
 
-        let mut response = ureq::get(&url)
-            .header("User-Agent", user_agent())
-            .call()
-            .with_context(|| format!("Failed to fetch daily series for {}", pair.ticker))?;
-
-        let json: serde_json::Value = response
-            .body_mut()
-            .read_json()
-            .with_context(|| "Failed to parse Alpha Vantage response")?;
+        let json = http_get_json(
+            &url,
+            self.timeout,
+            &[],
+            &[&api_key],
+            &format!("Failed to fetch daily series for {}", pair.ticker),
+        )?;
 
         let points = Self::parse_daily_series(&json)?;
         // Drop the still-open US session's bar: TIME_SERIES_DAILY dates

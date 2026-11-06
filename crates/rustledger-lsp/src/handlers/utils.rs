@@ -503,21 +503,46 @@ pub fn get_word_at_position(
     Some((word, encoded_col_at_char(start), encoded_col_at_char(end)))
 }
 
-/// Get the word at a position in a source document, interpreting
-/// `position.character` in the negotiated encoding.
+/// The symbol under the cursor, with its start and end columns in the
+/// index's negotiated encoding (the same contract as
+/// [`get_word_at_position`]).
 ///
-/// Convenience wrapper that extracts the addressed line and delegates
-/// to [`get_word_at_position`]. Returns only the word text (not its
-/// columns) since most callers (hover, goto-definition) don't need
-/// the column values.
-pub fn get_word_at_source_position(
-    source: &str,
+/// When the lexer read a currency token at the cursor, that token is the
+/// symbol (via [`ParseResult::currency_at`]): the word-character scan of
+/// [`get_word_at_position`] splits `/6J` at the `/` and `BRK.B` at the
+/// `.`, so rename, references and linked editing could not reach those
+/// currencies (#2807). Otherwise this is [`get_word_at_position`] on the
+/// addressed line, except that a one-letter transaction or posting flag is
+/// no symbol: a flag such as `T` is not the currency `T`, and
+/// reading it as one let references, highlight, rename, linked editing,
+/// hover and definition on a currency `T` reach every `T` flag. Other
+/// flags, `txn` among them, are still words, so keyword hover works.
+///
+/// Takes the handler's [`LineIndex`] so a request builds one index, not
+/// two.
+pub fn get_symbol_at_position(
+    index: &LineIndex<'_>,
+    parse_result: &ParseResult,
     position: Position,
-    encoding: PositionEncoding,
-) -> Option<String> {
-    let line = source.lines().nth(position.line as usize)?;
-    let (word, _, _) = get_word_at_position(line, position.character as usize, encoding)?;
-    Some(word)
+) -> Option<(String, usize, usize)> {
+    if let Some(offset) = index.position_to_offset(position.line, position.character)
+        && let Some(occ) = parse_result.currency_at(offset)
+    {
+        let (start_line, start_col) = index.offset_to_position(occ.span.start);
+        let (end_line, end_col) = index.offset_to_position(occ.span.end);
+        if start_line == position.line && end_line == position.line {
+            return Some((occ.value.to_string(), start_col as usize, end_col as usize));
+        }
+    }
+    let line = index.line_text(position.line)?;
+    let (word, start, end) =
+        get_word_at_position(line, position.character as usize, index.encoding())?;
+    let start_col = u32::try_from(start).ok()?;
+    let word_start = index.position_to_offset(position.line, start_col)?;
+    if parse_result.is_currency_flag_at(word_start) {
+        return None;
+    }
+    Some((word, start, end))
 }
 
 /// Check if a character is part of a word (for Beancount identifiers).
@@ -533,16 +558,6 @@ pub fn is_account_like(s: &str) -> bool {
         && rustledger_core::ACCOUNT_TYPES
             .iter()
             .any(|t| s.starts_with(t))
-}
-
-/// Check if a string looks like a currency (simple format check).
-///
-/// Currencies are typically 2-5 uppercase letters/digits (e.g., USD, EUR, BTC).
-pub fn is_currency_like_simple(s: &str) -> bool {
-    s.len() >= 2
-        && s.len() <= 5
-        && s.chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
 }
 
 /// Spans of the actual *declared* currency token in each
@@ -669,7 +684,9 @@ pub fn account_declaration_spans(
 
 /// Check if a string looks like a currency, validating against known currencies.
 ///
-/// Validates the format (uppercase-and-digits, 2-24 chars) and then
+/// Validates the format with the lexer-backed canonical
+/// [`rustledger_parser::is_valid_currency`] (so `/6J` and `BRK.B` pass
+/// and `USD_` does not, exactly as the parser decides; #2807) and then
 /// confirms the string actually appears as a parsed `Currency` token
 /// in the document by looking it up in `parse_result.currency_occurrences`.
 ///
@@ -689,7 +706,7 @@ pub fn account_declaration_spans(
 /// Consulting the parser's index makes the check exact by
 /// construction and shrinks the function from ~50 lines to ~5.
 pub fn is_currency_like(s: &str, parse_result: &ParseResult) -> bool {
-    if !s.chars().all(|c| c.is_uppercase() || c.is_numeric()) || s.len() < 2 || s.len() > 24 {
+    if !rustledger_parser::is_valid_currency(s) {
         return false;
     }
     parse_result
@@ -979,16 +996,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_is_currency_like_simple() {
-        assert!(is_currency_like_simple("USD"));
-        assert!(is_currency_like_simple("EUR"));
-        assert!(is_currency_like_simple("BTC"));
-        assert!(!is_currency_like_simple("usd"));
-        assert!(!is_currency_like_simple("U"));
-        assert!(!is_currency_like_simple("TOOLONGCURRENCY"));
-    }
-
     /// `is_currency_like` validates format AND confirms the string
     /// actually appears as a parsed `Currency` token in the
     /// document. This test pins both behaviors.
@@ -1009,15 +1016,28 @@ mod tests {
   Assets:Bank  -5.00 USD
   Expenses:Food  5.00 USD
 2024-01-20 price GBP  1.27 USD
+2024-01-21 price /6J  0.0067 USD
+2024-01-22 price /ESM24  5000 USD
 "#;
         let parse_result = parse(source);
 
-        // Format check: must be uppercase/digits, length 2-24.
+        // Format check: the lexer's own rule (`is_valid_currency`).
         assert!(
             !is_currency_like("usd", &parse_result),
             "lowercase rejected"
         );
-        assert!(!is_currency_like("U", &parse_result), "too short rejected");
+        assert!(
+            !is_currency_like("USD_", &parse_result),
+            "trailing `_` rejected"
+        );
+        assert!(
+            !is_currency_like("U", &parse_result),
+            "absent single-letter currency rejected"
+        );
+
+        // `/` currencies are currencies (#2807).
+        assert!(is_currency_like("/6J", &parse_result));
+        assert!(is_currency_like("/ESM24", &parse_result));
 
         // Format-valid but not present in document.
         assert!(
@@ -1032,6 +1052,54 @@ mod tests {
         // latent gap of the previous manual AST walk if it had
         // missed Price). `currency_occurrences` is exhaustive.
         assert!(is_currency_like("GBP", &parse_result));
+    }
+
+    /// The symbol at the cursor is the lexer's currency token when there is
+    /// one, so `/6J` and `BRK.B` are not split at `/` or `.` (#2807), and
+    /// the word scan otherwise.
+    #[test]
+    fn test_get_symbol_at_position_currency_token() {
+        use rustledger_parser::parse;
+
+        let source = "2024-01-01 open Assets:Futures /6J,BRK.B\n";
+        let parse_result = parse(source);
+        let index = LineIndex::new(source, PositionEncoding::Utf16);
+        let at =
+            |character| get_symbol_at_position(&index, &parse_result, Position::new(0, character));
+        // On the `/`, inside, and at the end of `/6J`.
+        for col in [31, 32, 34] {
+            assert_eq!(at(col), Some(("/6J".to_string(), 31, 34)), "col {col}");
+        }
+        assert_eq!(at(37), Some(("BRK.B".to_string(), 35, 40)));
+        // Not a currency token: falls back to the word scan.
+        assert_eq!(at(20), Some(("Assets:Futures".to_string(), 16, 30)));
+    }
+
+    /// A one-letter flag lexes as a currency token but is no symbol, even
+    /// when a currency of the same name exists; the currency itself still is.
+    #[test]
+    fn test_get_symbol_at_position_skips_one_letter_flags() {
+        use rustledger_parser::parse;
+
+        let source = "2024-01-01 commodity T\n2024-01-16 T \"Transfer\"\n  P Assets:Cash 1 T\n  Assets:Bank\n";
+        let parse_result = parse(source);
+        for encoding in [PositionEncoding::Utf16, PositionEncoding::Utf8] {
+            let index = LineIndex::new(source, encoding);
+            let at = |line, character| {
+                get_symbol_at_position(&index, &parse_result, Position::new(line, character))
+            };
+            // Before, on and after the header flag `T`.
+            for col in [11, 12] {
+                assert_eq!(at(1, col), None, "header flag col {col}");
+            }
+            // The posting flag `P`.
+            for col in [2, 3] {
+                assert_eq!(at(2, col), None, "posting flag col {col}");
+            }
+            assert_eq!(at(2, 18), Some(("T".to_string(), 18, 19)), "currency use");
+            assert_eq!(at(0, 21), Some(("T".to_string(), 21, 22)), "declaration");
+            assert_eq!(at(2, 6), Some(("Assets:Cash".to_string(), 4, 15)));
+        }
     }
 
     #[test]

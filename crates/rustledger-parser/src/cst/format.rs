@@ -655,10 +655,14 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
     let mut run_end = 0;
     let mut run_is_stray = false;
     let mut unclosed_until = 0;
-    // Where the current output line starts, kept as a running index so the
-    // lone-marker check below costs O(1) per `\r` (an `rfind` over `out`
-    // made a long line of stray `\r`s quadratic).
-    let mut out_line_start = bom.len();
+    // Where the current output line starts, found by `out_line_start` from
+    // where its last scan stopped, so the lone-marker check below steps over
+    // each output byte once in all (an `rfind` over `out` for every `\r` made
+    // a long line of stray `\r`s quadratic).
+    let mut line = OutLine {
+        start: bom.len(),
+        scanned: bom.len(),
+    };
     while let Some((i, ch)) = chars.next() {
         let peek = chars.peek().map(|&(_, c)| c);
         // A CRLF pair outside a string is consumed whole here, so the
@@ -669,12 +673,11 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
         // bare-marker error. Outside a string, every branch below drops or
         // folds the `\r`, so a space stands in for it (#2779).
         if ch == '\r' && state != SourceState::InString {
-            let line = &out[out_line_start..];
-            if is_lone_marker(line.strip_prefix('\u{FEFF}').unwrap_or(line)) {
+            let text = &out[line.start_in(&out)..];
+            if is_lone_marker(text.strip_prefix('\u{FEFF}').unwrap_or(text)) {
                 out.push(' ');
             }
         }
-        let out_before = out.len();
         match state {
             SourceState::InString => out.push(ch),
             _ => {
@@ -708,15 +711,32 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
             &mut unclosed_until,
         );
         at_line_start = ate_lf || next_at_line_start(ch, at_line_start);
-        // At most one char was pushed this step (or a `\n` folded from a
-        // CRLF), so this scan is O(1) per input char.
-        #[cfg(test)]
-        CR_FOLD_LINE_SCAN_BYTES.with(|c| c.set(c.get() + (out.len() - out_before)));
-        if let Some(p) = out[out_before..].rfind('\n') {
-            out_line_start = out_before + p + 1;
-        }
     }
     std::borrow::Cow::Owned(out)
+}
+
+/// Where the last line of a growing output string starts, for
+/// [`crlf_to_lf_outside_strings`]'s lone-marker check (#2779).
+struct OutLine {
+    start: usize,
+    /// How far `out` has been scanned for line breaks.
+    scanned: usize,
+}
+
+impl OutLine {
+    /// The start of `out`'s last line. Scans only what was pushed since the
+    /// last call, so all calls together step over each byte once. Counted in
+    /// tests (`crlf_to_lf_lone_marker_check_is_linear`).
+    fn start_in(&mut self, out: &str) -> usize {
+        let new = &out[self.scanned..];
+        #[cfg(test)]
+        CR_FOLD_LINE_SCAN_BYTES.with(|c| c.set(c.get() + new.len()));
+        if let Some(p) = new.rfind('\n') {
+            self.start = self.scanned + p + 1;
+        }
+        self.scanned = out.len();
+        self.start
+    }
 }
 
 /// The `[ \t\r]` run that starts at the bare `\r` at `body[at]`: where it
@@ -5483,9 +5503,11 @@ mod tests {
     }
 
     /// The lone-marker check in `crlf_to_lf_outside_strings` (#2779) finds
-    /// the current output line's start from a running index, so a long line
-    /// of `\r`s is folded in linear time: it scanned back over the whole
-    /// output for every `\r` (1.8 s on this input in a release build).
+    /// the current output line's start with `OutLine`, which scans each
+    /// output byte once, so a long line of `\r`s is folded in linear time. It
+    /// scanned back over the whole output for every `\r` (1.8 s on this input
+    /// in a release build); with that `rfind` restored, this counts
+    /// 25,600,320,000 bytes on the first input and fails.
     #[test]
     fn crlf_to_lf_lone_marker_check_is_linear() {
         const N: usize = 160_000;

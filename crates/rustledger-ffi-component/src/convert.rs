@@ -1757,10 +1757,13 @@ pub struct SessionState {
     lines: Vec<u32>,
     files: Vec<String>,
     errors: Vec<wit::Error>,
-    /// Whether a query refuses: the load reported a parse error or a booking
-    /// failure ([`rustledger_loader::LedgerError::blocks_queries`], the rule
-    /// every query surface shares, #2861), or the load failed outright. Every
-    /// other error, a missing include among them, is reported beside the rows.
+    /// Whether a query refuses: the load reported an error that blocks
+    /// queries (a parse error, a file that could not be read or decrypted, a
+    /// booking failure: [`rustledger_loader::LedgerError::blocks_queries`],
+    /// the rule the file-based query surfaces share, #2861), or the load
+    /// failed outright. Every other error, an include of a missing file among
+    /// them, is reported beside the rows. A session from source text sets it
+    /// by its own, older rule: any load error.
     query_blocked: bool,
     options: wit::LedgerOptions,
     plugins: Vec<ffi::Plugin>,
@@ -1943,11 +1946,12 @@ impl SessionState {
         let path_security = !allow_unrestricted_includes;
         match ffi::helpers::load_file(std::path::Path::new(path), path_security) {
             Ok(fl) => {
-                // The one rule for whether a query answers (#2861,
-                // `LedgerError::blocks_queries`): only a parse error or a
-                // booking failure stops it. Every other error (a missing
-                // include, an include cycle, a plugin's) is reported beside
-                // the rows and does not stop the session plugins either.
+                // The file-based query rule (#2861,
+                // `LedgerError::blocks_queries`): only a parse error, a file
+                // that could not be read or decrypted, or a booking failure
+                // stops it. Every other error (an include of a missing file,
+                // an include cycle, a plugin's) is reported beside the rows
+                // and does not stop the session plugins either.
                 let (mut errors, mut notices) = (Vec::new(), Vec::new());
                 for (e, blocks) in fl.errors.into_iter().zip(fl.error_blocks_queries) {
                     if blocks {
@@ -4335,12 +4339,13 @@ mod query_file_sources_tests {
         }
     }
 
-    /// A load error other than a parse error does not stop the file queries
-    /// (`LoadError::blocks_queries`, #2861): a file included twice, an
-    /// include cycle (bean-query reports both as `Duplicate filename parsed`
-    /// and answers), and a glob matching nothing are reported beside the
-    /// rows. So is an include outside the root, which refused before 3.17.0
-    /// (bean-query answers over it too).
+    /// A load error that leaves no existing file unread or unparsed does not
+    /// stop the file queries (`LoadError::blocks_queries`, #2861): a file
+    /// included twice, an include cycle (bean-query reports both as
+    /// `Duplicate filename parsed` and answers), and a glob matching nothing
+    /// are reported beside the rows. So is an include outside the root,
+    /// which refused before 3.17.0: it is left unread and the query answers
+    /// without it (bean-query does not confine, and reads it).
     #[test]
     fn test_file_queries_answer_over_a_complete_ledger_load_error() {
         let opens = "2024-01-01 open Assets:Bank\n2024-01-01 open Equity:Opening\n";
@@ -4434,58 +4439,93 @@ mod query_file_sources_tests {
     }
 }
 
-/// The FFI side of the drift guard for the one rule for whether a query
+/// The FFI side of the drift guard for the rule for whether a file-based query
 /// answers despite load errors (#2861). The same ledgers the loader, CLI and
-/// WASM tests run must answer or refuse here as they say.
+/// WASM tests run must give exactly the same rows here, or refuse, reporting
+/// the same load error.
 #[cfg(test)]
 mod query_answer_rule {
     include!("../../rustledger-loader/tests/query_answer_rule/cases.rs");
 
-    /// Write `case`'s files under a directory of their own; return the entry.
-    fn write_case(case: &QueryRuleCase) -> std::path::PathBuf {
-        let slug: String = case
-            .name
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        let dir = std::env::temp_dir().join(format!(
-            "rl-query-answer-rule-{slug}-{}",
-            std::process::id()
-        ));
-        if dir.exists() {
-            std::fs::remove_dir_all(&dir).expect("clear the directory");
-        }
+    use super::wit;
+
+    /// Write `case`'s files under a fresh directory; return it with the entry.
+    fn write_case(case: &QueryRuleCase) -> (tempfile::TempDir, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
         for (path, text) in case.files {
-            let path = dir.join(path);
+            let path = dir.path().join(path);
             std::fs::create_dir_all(path.parent().expect("parent")).expect("mkdir");
             std::fs::write(&path, text).expect("write");
         }
-        dir.join(case.entry)
+        let entry = dir
+            .path()
+            .join(case.entry)
+            .to_str()
+            .expect("utf-8 path")
+            .to_string();
+        (dir, entry)
+    }
+
+    fn text(value: &wit::QueryValue) -> String {
+        match value {
+            wit::QueryValue::Text(s) => s.clone(),
+            other => panic!("expected a narration, got {other:?}"),
+        }
+    }
+
+    /// `result` is exactly `case`'s answer: its rows, or a refusal, with its
+    /// load error among the reported errors.
+    fn check(case: &QueryRuleCase, surface: &str, result: &super::out::QueryResult) {
+        let context = format!("{} via {surface}: {result:?}", case.name);
+        let got: Vec<String> = result
+            .rows
+            .iter()
+            .map(|row| {
+                assert_eq!(row.len(), 1, "{context}");
+                text(&row[0])
+            })
+            .collect();
+        match case.rows {
+            Some(rows) => assert_eq!(got, rows, "{context}"),
+            None => {
+                assert!(got.is_empty(), "{context}");
+                assert!(!result.errors.is_empty(), "{context}");
+            }
+        }
+        if let Some(error) = case.error {
+            assert!(
+                result.errors.iter().any(|e| e.message.contains(error)),
+                "`{error}` not reported: {context}"
+            );
+        }
     }
 
     #[test]
     fn test_file_queries_answer_or_refuse_by_the_shared_rule() {
         for case in QUERY_RULE_CASES {
-            let entry = write_case(case);
-            let entry = entry.to_str().expect("utf-8 path");
-            let check = |surface: &str, result: &super::out::QueryResult| {
-                assert_eq!(
-                    !result.rows.is_empty(),
-                    case.answers,
-                    "{} via {surface}: {result:?}",
-                    case.name
-                );
-                if !case.answers {
-                    assert!(!result.errors.is_empty(), "{} via {surface}", case.name);
-                }
-            };
-            check("query-file", &super::query_file(entry, QUERY_RULE_QUERY));
-            let batch = super::batch_file(entry, &[QUERY_RULE_QUERY.to_string()]);
-            check("batch-file", &batch.queries[0]);
-            for unrestricted in [false, true] {
-                let session = super::SessionState::from_file(entry, unrestricted, &[]);
+            let (_dir, entry) = write_case(case);
+            // `query-file`, `batch-file` and a session without
+            // `allow-unrestricted-includes` confine includes to the tree.
+            if case.confinement != Confinement::UnconfinedOnly {
                 check(
-                    &format!("session.from-file (unrestricted: {unrestricted})"),
+                    case,
+                    "query-file",
+                    &super::query_file(&entry, QUERY_RULE_QUERY),
+                );
+                let batch = super::batch_file(&entry, &[QUERY_RULE_QUERY.to_string()]);
+                check(case, "batch-file", &batch.queries[0]);
+                let session = super::SessionState::from_file(&entry, false, &[]);
+                check(
+                    case,
+                    "session.from-file (confined)",
+                    &session.query(QUERY_RULE_QUERY),
+                );
+            }
+            if case.confinement != Confinement::ConfinedOnly {
+                let session = super::SessionState::from_file(&entry, true, &[]);
+                check(
+                    case,
+                    "session.from-file (unrestricted)",
                     &session.query(QUERY_RULE_QUERY),
                 );
             }

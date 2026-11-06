@@ -1,13 +1,12 @@
-//! `rledger query` answers despite load errors exactly when every other query
-//! surface does (#2861).
+//! `rledger query` answers despite load errors exactly when the other
+//! file-based query surfaces do (#2861).
 //!
-//! The drift guard for the CLI side of the one rule
+//! The drift guard for the CLI side of the rule
 //! (`LoadError::blocks_queries`, `LedgerError::blocks_queries`): the same
 //! ledgers the loader, WASM and FFI tests run (`query_answer_rule/cases.rs` in
-//! `rustledger-loader`) must answer or refuse here as they do there. A missing
-//! include, an include cycle, a duplicate include, an empty glob and an
-//! include outside the ledger's directory answer, with the load error on
-//! stderr, as bean-query answers; a parse or booking error refuses.
+//! `rustledger-loader`) must give exactly the same rows here, or refuse, with
+//! the same load error on stderr. The CLI does not confine includes, so it
+//! runs the cases for an unconfined surface.
 
 mod common;
 
@@ -19,6 +18,9 @@ use std::process::Command;
 fn test_query_answers_or_refuses_by_the_shared_rule() {
     let bin = require_rledger!();
     for case in QUERY_RULE_CASES {
+        if case.confinement == Confinement::ConfinedOnly {
+            continue;
+        }
         let dir = tempfile::tempdir().expect("tempdir");
         for (path, text) in case.files {
             let path = dir.path().join(path);
@@ -26,32 +28,37 @@ fn test_query_answers_or_refuses_by_the_shared_rule() {
             std::fs::write(&path, text).expect("write");
         }
         let out = Command::new(&bin)
-            .arg("query")
-            .arg("--no-cache")
+            .args(["query", "--no-cache", "-f", "json"])
             .arg(dir.path().join(case.entry))
             .arg(QUERY_RULE_QUERY)
             .output()
             .expect("run rledger query");
         let stdout = String::from_utf8_lossy(&out.stdout);
-        let answered = out.status.success() && stdout.contains("pay");
-        assert_eq!(
-            answered,
-            case.answers,
-            "{}: status {:?}\nstdout:\n{stdout}\nstderr:\n{}",
-            case.name,
-            out.status,
-            String::from_utf8_lossy(&out.stderr)
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        let context = format!(
+            "{}: status {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+            case.name, out.status
         );
-        // An answer over a load error still reports it. (The CLI does not
-        // confine includes, so the out-of-root include is read and is no
-        // error here.)
-        if case.answers && !matches!(case.name, "clean" | "include outside the root") {
-            let stderr = String::from_utf8_lossy(&out.stderr);
+        if let Some(rows) = case.rows {
+            assert!(out.status.success(), "{context}");
+            let value: serde_json::Value =
+                serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("{e}: {context}"));
+            let got: Vec<&str> = value["rows"]
+                .as_array()
+                .unwrap_or_else(|| panic!("no rows array: {context}"))
+                .iter()
+                .map(|row| row[0].as_str().unwrap_or_else(|| panic!("{context}")))
+                .collect();
+            assert_eq!(got, rows, "{context}");
+        } else {
+            assert!(!out.status.success(), "{context}");
             assert!(
-                stderr.contains("LOAD"),
-                "{}: the load error must be reported: {stderr}",
-                case.name
+                stdout.trim().is_empty(),
+                "a refusal prints no rows: {context}"
             );
+        }
+        if let Some(error) = case.error {
+            assert!(stderr.contains(error), "`{error}` not reported: {context}");
         }
     }
 }

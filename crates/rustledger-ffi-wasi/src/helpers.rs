@@ -302,7 +302,8 @@ pub struct FileLoad {
     pub directive_placeholders: Vec<Option<(String, u32)>>,
     pub errors: Vec<Error>,
     /// Parallel to `errors`: whether the error stops a query over the ledger
-    /// from answering, a parse error or a booking failure
+    /// from answering: a parse error, a file that could not be read or
+    /// decrypted, or a booking failure
     /// ([`rustledger_loader::LedgerError::blocks_queries`], #2861).
     pub error_blocks_queries: Vec<bool>,
     pub options: LedgerOptions,

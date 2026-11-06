@@ -35,7 +35,8 @@ use crate::utils::LineLookup;
 /// it complete too: the loader's [`LoadError::leaves_ledger_complete`].
 ///
 /// This is validation's rule, not the query rule: whether a query answers is
-/// [`LoadError::blocks_queries`] (#2861), which every query surface shares.
+/// [`LoadError::blocks_queries`] (#2861), which the file-based query
+/// surfaces share.
 fn load_error_is_fatal(error: &LoadError) -> bool {
     !error.leaves_ledger_complete()
 }
@@ -802,11 +803,12 @@ fn query_with_filesystem(
         }
     };
 
-    // Report every load error, but refuse only on a parse error: the one rule
-    // every query surface shares (`LoadError::blocks_queries`, #2861). A
-    // missing include, an include cycle, a duplicate include or an empty glob
-    // is reported beside the rows, as `bean-query` and `rledger query`
-    // report it.
+    // Report every load error, but refuse on one that blocks queries (a
+    // parse error; the in-memory filesystem cannot fail a read or a
+    // decryption otherwise): the rule the file-based query surfaces share
+    // (`LoadError::blocks_queries`, #2861). An include of a missing file, an
+    // include cycle, a duplicate include or an empty glob is reported beside
+    // the rows, as `bean-query` and `rledger query` report it.
     let load_errors = load_errors_to_errors(&load_result);
     if load_result.errors.iter().any(LoadError::blocks_queries) {
         let result = QueryResult {
@@ -918,9 +920,10 @@ fn query_with_filesystem(
 ///
 /// Similar to `query`, but accepts multiple files with include resolution.
 ///
-/// Answers unless parsing or booking failed, reporting every load error
-/// (a missing include, an include cycle, ...) beside the rows: the rule
-/// every query surface shares (`LoadError::blocks_queries`, #2861).
+/// Answers unless a file failed to parse or a transaction failed to book,
+/// reporting every load error (an include of a missing file, an include
+/// cycle, ...) beside the rows: the rule the file-based query surfaces share
+/// (`LoadError::blocks_queries`, #2861).
 ///
 /// Note: Glob patterns in `include` directives are not supported in multi-file mode
 /// since there is no real filesystem to enumerate. Use explicit file paths instead.

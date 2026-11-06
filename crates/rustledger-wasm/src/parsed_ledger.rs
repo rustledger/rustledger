@@ -716,9 +716,9 @@ impl Ledger {
                     .into_iter()
                     .map(|s| (s.value, (s.span, s.file_id)))
                     .unzip();
-                // The one rule for whether a query answers (#2861): not over
-                // a parse error or a booking failure; every other error is
-                // reported beside the rows.
+                // The file-based query rule (#2861): not over a parse error,
+                // a file that could not be read or decrypted, or a booking
+                // failure; every other error is reported beside the rows.
                 let query_refused = ledger
                     .errors
                     .iter()
@@ -805,10 +805,12 @@ impl Ledger {
     /// (#2579).
     #[wasm_bindgen]
     pub fn query(&self, query_str: &str) -> Result<JsValue, JsError> {
-        // Answers unless parsing or booking failed, reporting every other
-        // error (a missing include, a failed assertion, ...) through
-        // `getErrors`, as `rledger query` and `queryMultiFile` do (#2861).
-        // It answered over a parse or booking failure.
+        // Refuses when a file failed to parse or a transaction failed to
+        // book (`LedgerError::blocks_queries`), and answers otherwise,
+        // reporting every other error (an include of a missing file, a failed
+        // assertion, ...) through `getErrors`, as `rledger query` and
+        // `queryMultiFile` do (#2861). It answered over a parse or booking
+        // failure.
         if self.query_refused {
             return to_js(&QueryResult {
                 columns: Vec::new(),

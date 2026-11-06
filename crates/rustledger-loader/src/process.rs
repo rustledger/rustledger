@@ -365,9 +365,9 @@ pub struct LedgerError {
     /// that transaction out of the booked stream. See
     /// [`Self::is_booking_failure`].
     booking_failure: bool,
-    /// Whether this is a load error that stops a query from answering (a
-    /// parse error). See [`Self::blocks_queries`].
-    parse_failure: bool,
+    /// Whether this is a load error that stops a query from answering
+    /// ([`LoadError::blocks_queries`]). See [`Self::blocks_queries`].
+    blocking_load: bool,
 }
 
 /// Error severity level.
@@ -406,7 +406,7 @@ impl LedgerError {
             phase: "validate".to_string(),
             hint: None,
             booking_failure: false,
-            parse_failure: false,
+            blocking_load: false,
         }
     }
 
@@ -422,7 +422,7 @@ impl LedgerError {
             phase: "validate".to_string(),
             hint: None,
             booking_failure: false,
-            parse_failure: false,
+            blocking_load: false,
         }
     }
 
@@ -449,17 +449,19 @@ impl LedgerError {
     }
 
     /// Whether this error stops a query over the ledger from answering: a
-    /// parse error ([`LoadError::blocks_queries`]) or a booking failure
-    /// ([`Self::is_booking_failure`]). Every other error, including every
-    /// other load error (a missing include, an include cycle, ...), a
-    /// validation error and a plugin error, is reported beside the rows.
+    /// load error that blocks ([`LoadError::blocks_queries`]: a parse error,
+    /// a decryption failure, an I/O error other than not-found) or a booking
+    /// failure ([`Self::is_booking_failure`]). Every other error, including
+    /// the other load errors (an include of a missing file, an include cycle,
+    /// ...), a validation error and a plugin error, is reported beside the
+    /// rows.
     ///
-    /// The one rule for every query surface (#2861); see
-    /// [`LoadError::blocks_queries`] for the rule and why it deviates from
-    /// `bean-query` on parse and booking errors.
+    /// The rule for every file-based query surface (#2861); see
+    /// [`LoadError::blocks_queries`] for the rule and where it differs from
+    /// `bean-query`.
     #[must_use]
     pub const fn blocks_queries(&self) -> bool {
-        self.parse_failure || self.booking_failure
+        self.blocking_load || self.booking_failure
     }
 
     /// Set the processing phase for this error.
@@ -501,7 +503,7 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // (the phase transitions and validator setup below borrow it).
     for load_err in &raw.errors {
         let mut err = LedgerError::error("LOAD", load_err.to_string()).with_phase("parse");
-        err.parse_failure = load_err.blocks_queries();
+        err.blocking_load = load_err.blocks_queries();
         if let Some(site) = load_err.include_site() {
             // Prefer the source map for line/col so byte spans stay authoritative.
             if let Some(file) = raw.source_map.get(site.file_id as usize) {
@@ -2037,7 +2039,7 @@ fn ledger_errors_extend(
             phase: phase.to_string(),
             hint: err.hint,
             booking_failure: false,
-            parse_failure: false,
+            blocking_load: false,
         });
     }
 }

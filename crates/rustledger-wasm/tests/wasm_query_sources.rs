@@ -201,14 +201,15 @@ fn query_multi_file_answers_over_a_cycle_and_an_empty_glob() {
     }
 }
 
-/// The WASM side of the drift guard for the one rule for whether a query
-/// answers despite load errors (#2861). `queryMultiFile` and
-/// `Ledger.fromFiles` answer or refuse on the same ledgers exactly as the
-/// loader, CLI and FFI tests say: a missing include, an include cycle, a
-/// duplicate include, an empty glob and an include outside the root answer,
-/// with the error reported; a parse or booking error refuses.
-/// `queryMultiFile` refused over a missing include, and `Ledger.query`
-/// answered over a parse or booking error.
+/// The WASM side of the drift guard for the rule for whether a file-based
+/// query answers despite load errors (#2861). `queryMultiFile` and
+/// `Ledger.fromFiles` give exactly the rows the loader, CLI and FFI tests
+/// expect on the same ledgers, or refuse, reporting the same load error.
+/// Neither confines includes (an in-memory filesystem has no tree to escape:
+/// `root/../other.beancount` is the key `other.beancount`, which is read), so
+/// they run the unconfined cases; the cases needing a real filesystem (a
+/// directory, a file to decrypt) are skipped. `queryMultiFile` refused over a
+/// missing include, and `Ledger.query` answered over a parse or booking error.
 mod query_answer_rule {
     include!("../../rustledger-loader/tests/query_answer_rule/cases.rs");
 
@@ -225,27 +226,58 @@ mod query_answer_rule {
         files.into()
     }
 
-    fn check(case: &QueryRuleCase, surface: &str, result: &JsValue) {
-        let rows = js_sys::Array::from(&get_field(result, "rows"));
-        let errors = js_sys::Array::from(&get_field(result, "errors"));
-        assert_eq!(
-            rows.length() > 0,
-            case.answers,
-            "{} via {surface}: {errors:?}",
+    /// `result` is exactly `case`'s answer: its rows, or a refusal, with its
+    /// load error among `errors` (the result's own, or a `Ledger`'s
+    /// `getErrors`, where a query that answers reports the load's errors).
+    fn check(case: &QueryRuleCase, surface: &str, result: &JsValue, errors: &JsValue) {
+        let rows: Vec<String> = js_sys::Array::from(&get_field(result, "rows"))
+            .iter()
+            .map(|row| {
+                let row = js_sys::Array::from(&row);
+                assert_eq!(row.length(), 1, "{} via {surface}", case.name);
+                row.get(0)
+                    .as_string()
+                    .unwrap_or_else(|| panic!("{} via {surface}: not text", case.name))
+            })
+            .collect();
+        let errors: Vec<String> = js_sys::Array::from(errors)
+            .iter()
+            .map(|e| get_field(&e, "message").as_string().unwrap_or_default())
+            .collect();
+        let context = format!(
+            "{} via {surface}: rows {rows:?}, errors {errors:?}",
             case.name
         );
-        if !case.answers {
-            assert!(errors.length() > 0, "{} via {surface}", case.name);
+        match case.rows {
+            Some(want) => assert_eq!(rows, want, "{context}"),
+            None => {
+                assert!(rows.is_empty(), "{context}");
+                assert!(!errors.is_empty(), "{context}");
+            }
+        }
+        if let Some(error) = case.error {
+            assert!(
+                errors.iter().any(|m| m.contains(error)),
+                "`{error}` not reported: {context}"
+            );
         }
     }
 
     #[wasm_bindgen_test]
     fn query_surfaces_answer_or_refuse_by_the_shared_rule() {
         for case in QUERY_RULE_CASES {
+            if case.disk_only || case.confinement == Confinement::ConfinedOnly {
+                continue;
+            }
             let result =
                 rustledger_wasm::query_multi_file(files(case), case.entry, QUERY_RULE_QUERY)
                     .expect("queryMultiFile");
-            check(case, "queryMultiFile", &result);
+            check(
+                case,
+                "queryMultiFile",
+                &result,
+                &get_field(&result, "errors"),
+            );
 
             let ledger =
                 rustledger_wasm::Ledger::from_files(files(case), case.entry).expect("fromFiles");
@@ -253,6 +285,7 @@ mod query_answer_rule {
                 case,
                 "Ledger.query",
                 &ledger.query(QUERY_RULE_QUERY).expect("query"),
+                &ledger.get_errors().expect("getErrors"),
             );
             let restored = rustledger_wasm::Ledger::from_cache(&ledger.serialize().expect("ser"))
                 .expect("fromCache");
@@ -260,6 +293,7 @@ mod query_answer_rule {
                 case,
                 "Ledger.query from cache",
                 &restored.query(QUERY_RULE_QUERY).expect("query"),
+                &restored.get_errors().expect("getErrors"),
             );
         }
     }

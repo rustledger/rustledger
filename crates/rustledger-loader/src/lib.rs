@@ -270,24 +270,39 @@ impl LoadError {
 
     /// Whether this load error stops a query from answering (#2861).
     ///
-    /// The single rule every query surface applies (the `rledger query`
+    /// The rule every file-based query surface applies (the `rledger query`
     /// CLI, WASM `queryMultiFile` and `Ledger.fromFiles`, FFI `query-file`,
     /// `batch-file` and `session.from-file`), through this predicate and
-    /// [`LedgerError::blocks_queries`]: **a query answers unless parsing or
-    /// booking failed, and reports every load error beside its rows.**
+    /// [`LedgerError::blocks_queries`]: **a query refuses if a file failed to
+    /// parse, a named file exists but could not be read (or decrypted), or a
+    /// transaction failed to book; otherwise it answers and reports every load
+    /// error beside its rows.**
     ///
-    /// Of the load errors, only a parse error blocks. `bean-query` 0.2.0
-    /// answers over every load error: a missing include, an include cycle, a
-    /// duplicate include, an include glob matching nothing and an include
-    /// outside the ledger's directory are reported and the rest of the ledger
-    /// is queried, and so do we. It also answers over a parse error and a
-    /// booking error, dropping the entry; there we deliberately deviate and
-    /// refuse, because figures from a ledger that did not parse or book are
-    /// plausible but wrong (see `bail_on_parse_errors` and
-    /// `bail_on_booking_errors` in the `rustledger` crate, #1908, #1987).
+    /// Matching `bean-query` 0.2.0, a query answers over an include of a file
+    /// that does not exist (bean-query: `File glob ... does not match any
+    /// files`), an include cycle and a duplicate include (`Duplicate filename
+    /// parsed`), and an include glob matching nothing. It refuses, as
+    /// bean-query does (an uncaught `OSError`, exit 1, no rows), when a file
+    /// that exists could not be read: a decryption failure (a locked
+    /// gpg-agent would otherwise make every balance silently zero) or an I/O
+    /// error other than not-found, such as an include naming a directory.
+    ///
+    /// Two deliberate differences. An include outside the ledger's directory,
+    /// when rledger confines includes (`path_security`), is reported and left
+    /// unread, and the query answers without it; bean-query does not confine,
+    /// so it reads the file. And bean-query answers over a parse error and a
+    /// booking error, dropping the entry; there rledger refuses, because
+    /// figures from a ledger that did not parse or book are plausible but
+    /// wrong (see `bail_on_load_errors` and `bail_on_booking_errors` in the
+    /// `rustledger` crate, #1908, #1987).
     #[must_use]
-    pub const fn blocks_queries(&self) -> bool {
-        matches!(self, Self::ParseErrors { errors, .. } if !errors.is_empty())
+    pub fn blocks_queries(&self) -> bool {
+        match self {
+            Self::ParseErrors { errors, .. } => !errors.is_empty(),
+            Self::Decryption { .. } => true,
+            Self::Io { error, .. } => error.kind() != std::io::ErrorKind::NotFound,
+            _ => false,
+        }
     }
 
     /// Attach the `include` site that caused this failure.

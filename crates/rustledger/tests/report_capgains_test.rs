@@ -541,7 +541,7 @@ fn negative_long_term_days_is_rejected() {
 /// fabricating a row was right; exiting 0 was not. A header-only capital-gains
 /// CSV is indistinguishable from "you had no disposals this year", so the
 /// failure mode was a confident, complete-looking answer over a ledger that
-/// did not book — the exact hazard `bail_on_parse_errors` already exists to
+/// did not book: the exact hazard `bail_on_load_errors` already exists to
 /// prevent one phase earlier.
 ///
 /// Changed by #1987, where the same unbooked directives made `report balances`

@@ -46,8 +46,9 @@ use exports::rustledger::ledger::ledger::{
 use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 
 /// The Component-Model api-version this build implements. 3.17: `query-file`,
-/// `batch-file` and a session from a file answer unless parsing or booking
-/// failed, the one rule every query surface shares (#2861); 3.16: every
+/// `batch-file` and a session from a file refuse only when a file failed to
+/// parse or to be read or decrypted, or a transaction failed to book, the
+/// rule the file-based query surfaces share (#2861); 3.16: every
 /// query (`query`, `batch`, the file variants, `session.query`) resolves the
 /// `filename` / `lineno` / `location` columns and `#balances.discrepancy`
 /// as `rledger query` does, and `query-file` / `batch-file` load the file

@@ -46,5 +46,9 @@ rustledger-ffi-wasi.workspace = true
 # inside a component and stays a host-side concern.
 rustledger-importer = { workspace = true, features = ["toml-config"] }
 
+[dev-dependencies]
+# Fresh, self-removing directories for the query-answer drift guard (#2861).
+tempfile.workspace = true
+
 [lints]
 workspace = true

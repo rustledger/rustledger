@@ -193,6 +193,15 @@ fn clean_line(line: &str) -> String {
     // `chars().next_back()` loop was O(n²) on long whitespace runs.
     let trimmed_len = out.trim_end_matches([' ', '\t']).len();
     out.truncate(trimmed_len);
+    // A lone column-0 marker with whitespace after it (`# `, `*\t`) is a
+    // line beancount ignores, and the lone marker left by the trim is a
+    // bare-marker error there. Keep one space so the line stays ignored
+    // (#2779).
+    if rustledger_parser::logos_lexer::beancount_ignores_line(body)
+        && !rustledger_parser::logos_lexer::beancount_ignores_line(&out)
+    {
+        out.push(' ');
+    }
     if cr {
         out.push('\r');
     }
@@ -418,6 +427,43 @@ mod tests {
         assert_well_formed(&edits);
         let after = apply(source, &edits);
         assert_eq!(after, "2024-01-01 open Assets:Bank USD\n");
+    }
+
+    /// Surface cleanup (the parse-error fallback) keeps a line beancount
+    /// ignores ignored: a lone column-0 marker with whitespace after it
+    /// keeps one space, since a bare marker is an error (#2779). A bare
+    /// marker that already was an error is left alone.
+    #[test]
+    fn surface_cleanup_keeps_whitespace_marker_lines_ignored() {
+        for marker in ['#', '!', '&', '?', ':', '%', '*'] {
+            for ws in [" ", "\t", "  \t"] {
+                for eol in ["\n", "\r\n"] {
+                    let source = format!(
+                        "2024-01-01 open Assets:A{eol}{marker}{ws}{eol}\
+                         2024-01-02 open Assets:B{eol}@@@ junk{eol}"
+                    );
+                    let result = parse(&source);
+                    let before = result.errors.len();
+                    assert_eq!(before, 1, "{source:?}: {:?}", result.errors);
+                    let edits = handle_formatting(
+                        &params(),
+                        &source,
+                        &result,
+                        PositionEncoding::Utf16,
+                        GroupingStyle::default(),
+                    );
+                    let after = edits.map_or_else(|| source.clone(), |e| apply(&source, &e));
+                    assert!(
+                        after.contains(&format!("\n{marker} {eol}")),
+                        "{source:?} became {after:?}"
+                    );
+                    assert_eq!(parse(&after).errors.len(), before, "{after:?}");
+                }
+            }
+            let source = format!("2024-01-01 open Assets:A\n{marker}\n@@@ junk\n");
+            assert_eq!(clean_line(&marker.to_string()), marker.to_string());
+            assert_eq!(parse(&source).errors.len(), 2, "{source:?}");
+        }
     }
 
     #[test]

@@ -936,9 +936,10 @@ impl<'src> Iterator for TokenIter<'src> {
                     // past the line ending and swallowed the directives
                     // after it, with no error (#2775). The lexer resumes
                     // exactly at `line_end`, so the next call emits the
-                    // `Newline` (or ends the stream) normally. `line_end`
-                    // sits on a `\r`, a `\n` or the end of the source, so
-                    // it is always a char boundary in range.
+                    // `Newline` (or the stray-`\r` trivia before it, or ends
+                    // the stream) normally. `line_end` sits on a `\r`, a
+                    // `\n` or the end of the source, so it is always a char
+                    // boundary in range.
                     self.lexer.bump(line_end - span.end);
                     self.at_line_start = false;
                     return Some((
@@ -1076,10 +1077,12 @@ impl<'src> Iterator for TokenIter<'src> {
     }
 }
 
-/// Whether beancount ignores the whole line whose text from column 0 on is
-/// `line` (the rest of the source from there will do): a `;` comment, or a
-/// `#`, `*`, `:` or flag character (`[!&#?%]`) with at least one more byte
-/// on its line, except a `#` that starts a tag (#2779).
+/// Whether beancount ignores the whole line starting at column 0 with `line`.
+///
+/// `line` is the line's text from column 0 on (the rest of the source from
+/// there will do). Ignored are a `;` comment, and a `#`, `*`, `:` or flag
+/// character (`[!&#?%]`) with at least one more byte on its line, except a
+/// `#` that starts a tag (#2779).
 ///
 /// Beancount's rules are `^[\*\:\#]/.` and `^{FLAGS}/.`, and flex's `.` is
 /// any byte but `\n`: a bare marker, with its line ending or the end of the
@@ -1089,7 +1092,9 @@ impl<'src> Iterator for TokenIter<'src> {
 /// a `TAG`, as beancount's longer tag match wins. The one rule for the
 /// lexer's column-0 `#`, `!`, `&`, `?`, `:` and `%` arms in `TokenIter` and
 /// for `convert`'s `previous_line_is_a_gap` and `is_section_marker` (the
-/// `*` heading), and of the formatter's `emit_error_node`.
+/// `*` heading), of the formatter's `emit_error_node`, and of the LSP's
+/// parse-error surface cleanup (`clean_line` in `rustledger-lsp`), which is
+/// why it is public.
 ///
 /// One deliberate mirror: `format::advance_source_state`, the formatter's
 /// char-at-a-time line-ending state machine, cannot call this (it is a
@@ -1099,7 +1104,8 @@ impl<'src> Iterator for TokenIter<'src> {
 /// line ending right after it). Agreement on the lines that matter is pinned
 /// by `source_state_classification_agrees_with_lexer`; revisit if the state
 /// machine ever needs the bare-marker distinction.
-pub(crate) fn beancount_ignores_line(line: &str) -> bool {
+#[must_use]
+pub fn beancount_ignores_line(line: &str) -> bool {
     match line.as_bytes() {
         [b';', ..] => true,
         [b'#', next, ..] => {
@@ -1121,20 +1127,28 @@ fn line_chunk_end(source: &str, from: usize) -> usize {
 
 /// Where a whole-line token that starts before `from` ends: before the
 /// `Newline` token that follows it, or at the end of the source, and before
-/// any run of `\r` bytes right in front of either.
+/// the stray-`\r` run (a `[ \t\r]` run from a `\r` on) right in front of
+/// either.
 ///
 /// `Newline` is `\r?\n`, so on a CRLF line it starts at the `\r`; ending at
 /// the `\n` would hand that byte to both tokens and break the lossless
-/// round-trip (#2769). Further `\r` bytes before it (`\r\r\n`), and a
-/// trailing `\r` at the end of the source, are left out too: they lex as the
-/// `Whitespace` trivia that follows the line (#2774), as after any other
-/// token. A `\r` with more of the line after it stays in the line. The
-/// result sits on a `\r`, a `\n` or the end of the source, so it is always a
-/// char boundary. Shared by the column-0 `#` comment and `*` heading arms of
-/// `TokenIter`, and by its cut of an unterminated string.
+/// round-trip (#2769). A run of spaces, tabs and `\r`s from a `\r` on before
+/// it (`\r\r\n`, `\r \r\n`), or before the end of the source, is left out
+/// too: it lexes as the `Whitespace` trivia that follows the line (#2774),
+/// as after any other token, and `format::crlf_to_lf_outside_strings` drops
+/// it, so the formatter reads the line the same with or without that fold
+/// (#2779). Spaces and tabs before the run's first `\r` stay in the line,
+/// and so does a `\r` with more of the line after it. The result sits on a
+/// `\r`, a `\n` or the end of the source, so it is always a char boundary.
+/// Shared by the column-0 `#` comment and `*` heading arms of `TokenIter`,
+/// and by its cut of an unterminated string.
 fn line_end_before_newline(source: &str, from: usize) -> usize {
     let nl = source[from..].find('\n').map_or(source.len(), |i| from + i);
-    from + source[from..nl].trim_end_matches('\r').len()
+    let line = &source[from..nl];
+    let run_start = line.trim_end_matches([' ', '\t', '\r']).len();
+    from + line[run_start..]
+        .find('\r')
+        .map_or(line.len(), |i| run_start + i)
 }
 
 fn tokenize_inner(source: &str, keep_whitespace: bool) -> Vec<(Token<'_>, Span)> {

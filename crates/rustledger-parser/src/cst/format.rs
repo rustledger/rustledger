@@ -620,6 +620,8 @@ impl std::error::Error for CanonicalizeError {}
 /// followed by a `\r` (`#\r\n`, `*\r\n`) gets a space after the marker. Such
 /// a line is ignored by beancount, and the lone marker left by dropping the
 /// `\r` would be an error there (#2779).
+/// Stricter than bean-format: it reads the file in Python's text mode, which
+/// folds `#\r\n` to `#\n`, a line bean-check then rejects.
 ///
 /// Cheap fast path: if the input contains no `\r`, returns the
 /// source slice borrowed (no allocation). Used by
@@ -653,6 +655,10 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
     let mut run_end = 0;
     let mut run_is_stray = false;
     let mut unclosed_until = 0;
+    // Where the current output line starts, kept as a running index so the
+    // lone-marker check below costs O(1) per `\r` (an `rfind` over `out`
+    // made a long line of stray `\r`s quadratic).
+    let mut out_line_start = bom.len();
     while let Some((i, ch)) = chars.next() {
         let peek = chars.peek().map(|&(_, c)| c);
         // A CRLF pair outside a string is consumed whole here, so the
@@ -662,14 +668,13 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
         // ignores (flex's `.` takes the `\r`); without the `\r` it is a
         // bare-marker error. Outside a string, every branch below drops or
         // folds the `\r`, so a space stands in for it (#2779).
-        if ch == '\r'
-            && state != SourceState::InString
-            && is_lone_marker(
-                out[out.rfind('\n').map_or(0, |p| p + 1)..].trim_start_matches('\u{FEFF}'),
-            )
-        {
-            out.push(' ');
+        if ch == '\r' && state != SourceState::InString {
+            let line = &out[out_line_start..];
+            if is_lone_marker(line.strip_prefix('\u{FEFF}').unwrap_or(line)) {
+                out.push(' ');
+            }
         }
+        let out_before = out.len();
         match state {
             SourceState::InString => out.push(ch),
             _ => {
@@ -703,6 +708,13 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
             &mut unclosed_until,
         );
         at_line_start = ate_lf || next_at_line_start(ch, at_line_start);
+        // At most one char was pushed this step (or a `\n` folded from a
+        // CRLF), so this scan is O(1) per input char.
+        #[cfg(test)]
+        CR_FOLD_LINE_SCAN_BYTES.with(|c| c.set(c.get() + (out.len() - out_before)));
+        if let Some(p) = out[out_before..].rfind('\n') {
+            out_line_start = out_before + p + 1;
+        }
     }
     std::borrow::Cow::Owned(out)
 }
@@ -930,6 +942,9 @@ thread_local! {
     /// Bytes `lexer_source_state` has scanned looking for a closing quote,
     /// for the linear-cost test.
     static QUOTE_SCAN_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Bytes `crlf_to_lf_outside_strings` has stepped over tracking where
+    /// its current output line starts, for the linear-cost test (#2779).
+    static CR_FOLD_LINE_SCAN_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// A character the lexer's `Tag` regex (`#[a-zA-Z0-9-_/.]+`) accepts
@@ -5467,6 +5482,33 @@ mod tests {
         assert_eq!(crlf, src.replace('\n', "\r\n"));
     }
 
+    /// The lone-marker check in `crlf_to_lf_outside_strings` (#2779) finds
+    /// the current output line's start from a running index, so a long line
+    /// of `\r`s is folded in linear time: it scanned back over the whole
+    /// output for every `\r` (1.8 s on this input in a release build).
+    #[test]
+    fn crlf_to_lf_lone_marker_check_is_linear() {
+        const N: usize = 160_000;
+        for src in [
+            format!("; {}{}\n", "a".repeat(N), "\r".repeat(N)),
+            format!("#\r{}\n", "\r".repeat(N)),
+        ] {
+            CR_FOLD_LINE_SCAN_BYTES.with(|c| c.set(0));
+            let folded = crlf_to_lf_outside_strings(&src);
+            let scanned = CR_FOLD_LINE_SCAN_BYTES.with(std::cell::Cell::get);
+            assert!(
+                scanned <= 2 * src.len(),
+                "line-start tracking stepped over {scanned} bytes of a {}-byte input",
+                src.len()
+            );
+            assert!(!folded.contains('\r'));
+        }
+        assert_eq!(
+            crlf_to_lf_outside_strings(&format!("#\r{}\n", "\r".repeat(N))),
+            "# \n"
+        );
+    }
+
     /// `cr_outside_strings_present` reads quotes as the line-ending helpers
     /// do: a stray quote ends at its own line, so the `\r` after it is
     /// outside a string, as `crlf_to_lf_outside_strings` folds it (#2803).
@@ -5531,6 +5573,10 @@ mod tests {
                 "%\r\n",
                 "*\r\n",
                 "#\r\r\n",
+                "#\r \r\n",
+                "# c\r \r\n",
+                "#\t\r\n",
+                "* c\r \r\n",
                 "*\r \r\n",
                 "\r\r\n",
                 "  \r\r\n",
@@ -5546,6 +5592,8 @@ mod tests {
                 "2024-01-01 open Assets:A\r\n\r",
                 "2024-01-01 open Assets:A\r\n#\r",
                 "2024-01-01 open Assets:A\r\n*\r",
+                "2024-01-01 open Assets:A\r\n#\r ",
+                "2024-01-01 open Assets:A\r\n# c\r \r",
                 "\r",
             ]
             .map(String::from),

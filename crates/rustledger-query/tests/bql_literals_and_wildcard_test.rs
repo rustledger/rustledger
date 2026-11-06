@@ -117,8 +117,8 @@ fn test_parse_stacks_unary_signs() {
 /// before it is a syntax error there in every position, and here. On this
 /// branch before the fix `WHERE +*` parsed and gave no rows, and `SELECT --*`
 /// parsed and failed on a row; main accepted `-*`. The error is at the `*`,
-/// naming it, not at the sign as an expected token. `count(*)` and
-/// `SELECT *` are unaffected.
+/// naming it (as any `*` used as a value is, #2871), not at the sign as an
+/// expected token. `count(*)` and `SELECT *` are unaffected.
 #[test]
 fn test_parse_refuses_a_sign_before_the_wildcard() {
     for (query, position) in [
@@ -138,7 +138,7 @@ fn test_parse_refuses_a_sign_before_the_wildcard() {
         let err = parse(query).expect_err(query);
         assert_eq!(err.position, position, "{query}: {err}");
         assert!(
-            err.to_string().contains("a sign cannot apply to it"),
+            err.to_string().contains(STAR_IS_NOT_A_VALUE),
             "{query}: {err}"
         );
     }
@@ -146,6 +146,111 @@ fn test_parse_refuses_a_sign_before_the_wildcard() {
     assert_eq!(rows[0][0], Value::Integer(4));
     let (columns, _) = run("SELECT * LIMIT 1");
     assert_eq!(columns.len(), 5);
+}
+
+/// The start of the error a `*` used as a value gives.
+const STAR_IS_NOT_A_VALUE: &str = "'*' is not a value";
+
+/// `*` is no operand in bean-query 0.2.0's grammar: it is the whole target
+/// list (`SELECT *`) or a call's only argument (`count(*)`), and every other
+/// `*` is a syntax error there (each row checked against it). rledger read
+/// `*` as an ordinary operand, so `SELECT 1 + *` gave blank rows,
+/// `count(1 + *)` gave 0 and `WHERE 1 + *` gave no rows and no error
+/// (#2871). The error is at the `*`, naming it.
+#[test]
+fn test_parse_refuses_the_wildcard_as_an_operand() {
+    for (query, position) in [
+        ("SELECT 1 + *", 11),
+        ("SELECT 2 * *", 11),
+        ("SELECT * * 2", 7),
+        ("SELECT * + 1 FROM year = 2024", 7),
+        ("SELECT count(1 + *)", 17),
+        ("SELECT count(*, 1)", 13),
+        ("SELECT date WHERE 1 + *", 22),
+        ("SELECT date WHERE * > 1", 18),
+        ("SELECT date FROM year = 2024 WHERE 1 + *", 39),
+        ("SELECT date GROUP BY *", 21),
+        ("SELECT date ORDER BY *", 21),
+        ("SELECT (*)", 8),
+        ("SELECT *.x", 7),
+        ("SELECT * . x", 7),
+        ("SELECT *['k']", 7),
+        ("SELECT -(*)", 9),
+        ("SELECT -*.x", 8),
+        // Another error after the refused `*` does not displace it with
+        // "unexpected token '*'" (#2865 review).
+        ("SELECT -*, `x`", 8),
+        ("SELECT -* FROM", 8),
+        ("SELECT 1 + *, `x`", 11),
+    ] {
+        let err = parse(query).expect_err(query);
+        assert_eq!(err.position, position, "{query}: {err}");
+        assert!(
+            err.to_string().contains(STAR_IS_NOT_A_VALUE),
+            "{query}: {err}"
+        );
+    }
+}
+
+/// Every `*` bean-query takes still parses and runs: the target list, a
+/// call's only argument (any function's, as its grammar has it; the call is
+/// then checked like any other), and rledger's `*` beside other targets.
+/// A `*` operator next to them is untouched.
+#[test]
+fn test_parse_keeps_the_wildcard_where_bean_query_takes_it() {
+    for query in [
+        "SELECT *",
+        "SELECT * FROM year = 2024",
+        "SELECT * WHERE account ~ 'Bank'",
+        "SELECT * ORDER BY date",
+        "SELECT * FROM (SELECT * )",
+        "SELECT *, account",
+        "SELECT account, *",
+        "SELECT account,*,date",
+        "SELECT count(*)",
+        "SELECT count( * )",
+        "SELECT sum(*)",
+        "SELECT account, count(*) GROUP BY account",
+        "SELECT account GROUP BY account HAVING count(*) > 1",
+        "SELECT -1 * 2",
+        "SELECT 2*3",
+        "SELECT 2 * -3",
+    ] {
+        assert!(parse(query).is_ok(), "{query}: {:?}", parse(query).err());
+    }
+    let (columns, rows) = run("SELECT *, account LIMIT 1");
+    assert_eq!(columns.len(), 6);
+    assert_eq!(rows[0][5], Value::String("Assets:Bank".to_string()));
+    let (_, rows) = run("SELECT count( * )");
+    assert_eq!(rows[0][0], Value::Integer(4));
+    assert_eq!(scalar("-1 * 2"), "-2");
+    assert_eq!(scalar("2*3"), "6");
+}
+
+/// A `+` takes a bare value (bean-query's `uplus: '+' atom`), so a sign
+/// after it is a syntax error there; here the error is at that sign and
+/// says so, rather than "found '+' expected identifier, or '*'" (#2865
+/// review).
+#[test]
+fn test_parse_names_a_sign_after_unary_plus() {
+    for (query, position) in [
+        ("SELECT ++6", 8),
+        ("SELECT +-6", 8),
+        ("SELECT +-+6", 8),
+        ("SELECT + -6", 9),
+        ("SELECT ++*", 8),
+        ("SELECT +-*", 8),
+        ("SELECT -+-6", 9),
+        ("SELECT date WHERE ++1 = 1", 19),
+    ] {
+        let err = parse(query).expect_err(query);
+        assert_eq!(err.position, position, "{query}: {err}");
+        assert!(
+            err.to_string()
+                .contains("a '+' sign takes a bare value, not another sign after it"),
+            "{query}: {err}"
+        );
+    }
 }
 
 /// Known gap: bean-query's atom includes a list constant, so it takes

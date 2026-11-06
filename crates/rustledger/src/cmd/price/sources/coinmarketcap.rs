@@ -2,7 +2,7 @@
 //!
 //! Fetches cryptocurrency prices from `CoinMarketCap`.
 
-use super::{PricePair, PriceSource, user_agent};
+use super::{PricePair, PriceSource, http_get_json};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use std::env;
@@ -23,12 +23,15 @@ use std::time::Duration;
 /// All cryptocurrencies listed on `CoinMarketCap`:
 /// - `BTC`, `ETH`, `SOL`, `DOGE`, etc.
 #[derive(Debug)]
-pub struct CoinMarketCapSource {}
+pub struct CoinMarketCapSource {
+    /// Whole-request timeout, applied to each request.
+    timeout: Duration,
+}
 
 impl CoinMarketCapSource {
     /// Create a new `CoinMarketCap` source.
-    pub const fn new(_timeout: Duration) -> Self {
-        Self {}
+    pub const fn new(timeout: Duration) -> Self {
+        Self { timeout }
     }
 
     /// Get the API key from environment.
@@ -74,17 +77,15 @@ impl PriceSource for CoinMarketCapSource {
         let api_key = Self::get_api_key()?;
         let url = self.build_url(&pair.ticker, &pair.currency);
 
-        let mut response = ureq::get(&url)
-            .header("User-Agent", user_agent())
-            .header("X-CMC_PRO_API_KEY", &api_key)
-            .header("Accept", "application/json")
-            .call()
-            .with_context(|| format!("Failed to fetch price for {}", pair.ticker))?;
-
-        let json: serde_json::Value = response
-            .body_mut()
-            .read_json()
-            .with_context(|| "Failed to parse CoinMarketCap response")?;
+        let json = http_get_json(
+            &url,
+            self.timeout,
+            &[
+                ("X-CMC_PRO_API_KEY", &api_key),
+                ("Accept", "application/json"),
+            ],
+            &format!("Failed to fetch price for {}", pair.ticker),
+        )?;
 
         // Check for API errors
         let status = json

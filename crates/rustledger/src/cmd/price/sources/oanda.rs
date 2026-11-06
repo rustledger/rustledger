@@ -2,7 +2,7 @@
 //!
 //! Fetches forex rates from OANDA's API.
 
-use super::{PricePair, PriceSource, user_agent};
+use super::{PricePair, PriceSource, http_get_json};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
@@ -25,15 +25,15 @@ use std::time::Duration;
 /// All major and minor forex pairs:
 /// - `EUR_USD`, `GBP_USD`, `USD_JPY`, etc.
 #[derive(Debug)]
-pub struct OandaSource {}
+pub struct OandaSource {
+    /// Whole-request timeout, applied to each request.
+    timeout: Duration,
+}
 
 impl OandaSource {
     /// Create a new OANDA source.
-    ///
-    /// The timeout parameter is accepted for API consistency but not
-    /// currently applied to HTTP requests.
-    pub const fn new(_timeout: Duration) -> Self {
-        Self {}
+    pub const fn new(timeout: Duration) -> Self {
+        Self { timeout }
     }
 
     /// Get the API key from environment.
@@ -106,17 +106,15 @@ impl PriceSource for OandaSource {
         let instrument = Self::format_instrument(&pair.ticker, &pair.currency);
         let url = self.build_url(&instrument);
 
-        let mut response = ureq::get(&url)
-            .header("User-Agent", user_agent())
-            .header("Authorization", &format!("Bearer {api_key}"))
-            .header("Accept-Datetime-Format", "RFC3339")
-            .call()
-            .with_context(|| format!("Failed to fetch rate for {instrument}"))?;
-
-        let json: serde_json::Value = response
-            .body_mut()
-            .read_json()
-            .with_context(|| "Failed to parse OANDA response")?;
+        let json = http_get_json(
+            &url,
+            self.timeout,
+            &[
+                ("Authorization", &format!("Bearer {api_key}")),
+                ("Accept-Datetime-Format", "RFC3339"),
+            ],
+            &format!("Failed to fetch rate for {instrument}"),
+        )?;
 
         // Check for errors
         if let Some(error_message) = json.get("errorMessage") {

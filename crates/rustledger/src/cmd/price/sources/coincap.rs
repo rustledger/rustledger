@@ -2,7 +2,7 @@
 //!
 //! Fetches cryptocurrency prices from `CoinCap`.
 
-use super::{PricePair, PriceSource, user_agent};
+use super::{PricePair, PriceSource, http_get_json};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
@@ -19,12 +19,15 @@ use std::time::Duration;
 /// - Cryptocurrencies by ID: `bitcoin`, `ethereum`, `solana`
 /// - Also supports uppercase symbols which are converted to lowercase IDs
 #[derive(Debug)]
-pub struct CoinCapSource {}
+pub struct CoinCapSource {
+    /// Whole-request timeout, applied to each request.
+    timeout: Duration,
+}
 
 impl CoinCapSource {
     /// Create a new `CoinCap` source.
-    pub const fn new(_timeout: Duration) -> Self {
-        Self {}
+    pub const fn new(timeout: Duration) -> Self {
+        Self { timeout }
     }
 
     /// Convert ticker to `CoinCap` asset ID.
@@ -81,15 +84,12 @@ impl PriceSource for CoinCapSource {
         let date = jiff::Zoned::now().date();
         let url = self.build_url(&pair.ticker);
 
-        let mut response = ureq::get(&url)
-            .header("User-Agent", user_agent())
-            .call()
-            .with_context(|| format!("Failed to fetch price for {}", pair.ticker))?;
-
-        let json: serde_json::Value = response
-            .body_mut()
-            .read_json()
-            .with_context(|| format!("Failed to parse response for {}", pair.ticker))?;
+        let json = http_get_json(
+            &url,
+            self.timeout,
+            &[],
+            &format!("Failed to fetch price for {}", pair.ticker),
+        )?;
 
         // Check for errors
         if let Some(error) = json.get("error") {

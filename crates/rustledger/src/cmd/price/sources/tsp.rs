@@ -2,7 +2,7 @@
 //!
 //! Fetches TSP fund share prices from the TSP.gov website.
 
-use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, user_agent};
+use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, http_get_json};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use std::time::Duration;
@@ -21,15 +21,15 @@ use std::time::Duration;
 /// - `SFUND` - S Fund (Small Cap Stock Index)
 /// - `IFUND` - I Fund (International Stock Index)
 #[derive(Debug)]
-pub struct TspSource {}
+pub struct TspSource {
+    /// Whole-request timeout, applied to each request.
+    timeout: Duration,
+}
 
 impl TspSource {
     /// Create a new TSP source.
-    ///
-    /// The timeout parameter is accepted for API consistency but not
-    /// currently applied to HTTP requests.
-    pub const fn new(_timeout: Duration) -> Self {
-        Self {}
+    pub const fn new(timeout: Duration) -> Self {
+        Self { timeout }
     }
 
     /// Normalize TSP fund name.
@@ -67,15 +67,7 @@ impl TspSource {
     fn fetch_history(&self) -> Result<Vec<serde_json::Value>> {
         let url = self.build_url();
 
-        let mut response = ureq::get(&url)
-            .header("User-Agent", user_agent())
-            .call()
-            .with_context(|| "Failed to fetch TSP prices")?;
-
-        let json: serde_json::Value = response
-            .body_mut()
-            .read_json()
-            .with_context(|| "Failed to parse TSP response")?;
+        let json = http_get_json(&url, self.timeout, &[], "Failed to fetch TSP prices")?;
 
         // The TSP API returns an array of daily prices
         match json {

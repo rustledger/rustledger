@@ -31,6 +31,7 @@ use super::{PriceRequest, PriceResponse};
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use rustledger_core::NaiveDate;
+use std::time::Duration;
 
 /// A `(ticker, quote-currency)` pair — the date-free fetch target.
 ///
@@ -232,9 +233,8 @@ fn reject_url_metacharacters(kind: &str, value: &str) -> Result<()> {
 ///
 /// # Implementation Notes
 ///
-/// Sources receive a `timeout`. ureq 3 sets one per request with
-/// `RequestBuilder::config().timeout_global(..)`; `ratesapi` applies it, and
-/// the other sources do not yet use theirs.
+/// Sources receive a `timeout` and make every request through
+/// `http_get`, which applies it to the whole request.
 pub trait PriceSource: Send + Sync {
     /// Returns the unique name of this source.
     fn name(&self) -> &'static str;
@@ -471,6 +471,225 @@ pub trait PriceSource: Send + Sync {
 /// Helper function to build a User-Agent header for HTTP requests.
 pub(crate) const fn user_agent() -> &'static str {
     "Mozilla/5.0 (compatible; rustledger/1.0; +https://github.com/rustledger/rustledger)"
+}
+
+/// The status and body of an HTTP response, read by [`http_get`].
+#[derive(Debug)]
+pub(crate) struct HttpReply {
+    /// HTTP status code.
+    pub(crate) status: u16,
+    /// Response body, read whole (ureq's 10 MB limit applies).
+    pub(crate) body: String,
+}
+
+impl HttpReply {
+    /// The body of a 2xx response. Any other status is an error naming
+    /// `what` (the provider and the thing fetched), the status, and the
+    /// start of the body, so the provider's own message reaches the user.
+    pub(crate) fn into_success_body(self, what: &str) -> Result<String> {
+        if (200..300).contains(&self.status) {
+            return Ok(self.body);
+        }
+        let excerpt = body_excerpt(&self.body);
+        if excerpt.is_empty() {
+            anyhow::bail!("{what}: HTTP {}", self.status);
+        }
+        anyhow::bail!("{what}: HTTP {}: {excerpt}", self.status)
+    }
+
+    /// The JSON body of a 2xx response; see [`Self::into_success_body`].
+    pub(crate) fn into_success_json(self, what: &str) -> Result<serde_json::Value> {
+        let body = self.into_success_body(what)?;
+        serde_json::from_str(&body).with_context(|| format!("{what}: invalid JSON response"))
+    }
+}
+
+/// The longest error-body excerpt [`HttpReply::into_success_body`] quotes.
+const MAX_ERROR_EXCERPT_CHARS: usize = 300;
+
+/// The start of an error body on one line: whitespace runs collapsed,
+/// cut at [`MAX_ERROR_EXCERPT_CHARS`] characters.
+fn body_excerpt(body: &str) -> String {
+    let line = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    match line.char_indices().nth(MAX_ERROR_EXCERPT_CHARS) {
+        Some((cut, _)) => format!("{}...", &line[..cut]),
+        None => line,
+    }
+}
+
+/// GET `url` with the shared [`user_agent`] plus `headers`, the whole
+/// request (connecting, sending, and reading the body) limited to
+/// `timeout`.
+///
+/// Every price source makes its requests through this function, so none
+/// can block `rledger price` past its timeout (#2870). A 4xx/5xx status is
+/// returned as a reply rather than an error, so the provider's error body
+/// can be read (#2864); [`HttpReply::into_success_body`] turns it into an
+/// error that quotes it.
+///
+/// # Errors
+///
+/// Fails if the request cannot be made or the body cannot be read,
+/// including when `timeout` elapses.
+pub(crate) fn http_get(
+    url: &str,
+    timeout: Duration,
+    headers: &[(&str, &str)],
+) -> Result<HttpReply> {
+    let mut request = ureq::get(url)
+        .config()
+        .timeout_global(Some(timeout))
+        .http_status_as_error(false)
+        .build()
+        .header("User-Agent", user_agent());
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let mut response = request.call()?;
+    let status = response.status().as_u16();
+    let body = response.body_mut().read_to_string()?;
+    Ok(HttpReply { status, body })
+}
+
+/// [`http_get`] a 2xx body as text. `what` names the fetch in every error:
+/// a failed request, or a non-2xx status quoting the provider's body.
+///
+/// # Errors
+///
+/// As [`http_get`], plus any non-2xx status.
+pub(crate) fn http_get_text(
+    url: &str,
+    timeout: Duration,
+    headers: &[(&str, &str)],
+    what: &str,
+) -> Result<String> {
+    http_get(url, timeout, headers)
+        .with_context(|| what.to_string())?
+        .into_success_body(what)
+}
+
+/// [`http_get`] a 2xx body as JSON; see [`http_get_text`].
+///
+/// # Errors
+///
+/// As [`http_get_text`], plus a body that is not JSON.
+pub(crate) fn http_get_json(
+    url: &str,
+    timeout: Duration,
+    headers: &[(&str, &str)],
+    what: &str,
+) -> Result<serde_json::Value> {
+    http_get(url, timeout, headers)
+        .with_context(|| what.to_string())?
+        .into_success_json(what)
+}
+
+#[cfg(test)]
+mod http_tests {
+    use super::{HttpReply, body_excerpt, http_get};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    /// A server that takes the connection and never answers must not
+    /// hang the request: the timeout ends it (#2870).
+    #[test]
+    fn test_http_get_applies_the_timeout() {
+        // Bound but never accepted: the kernel completes the TCP
+        // handshake into the backlog, so the request connects and then
+        // waits for a response that never comes.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local listener");
+        let url = format!("http://{}/", listener.local_addr().expect("local addr"));
+        // On a thread, so a timeout that is not applied fails the test
+        // instead of hanging it.
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = http_get(&url, Duration::from_millis(200), &[]);
+            // The receiver is gone only if the test already failed.
+            let _ = sender.send(result);
+        });
+        let result = receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the 200ms timeout did not apply: the request was still waiting after 10s");
+        let err = result.expect_err("a server that never answers must time out");
+        assert!(
+            format!("{err:#}").contains("timeout"),
+            "expected a timeout error, got: {err:#}"
+        );
+        drop(listener);
+    }
+
+    /// No source calls ureq directly: every request goes through
+    /// `http_get`, so none can skip the timeout (#2870).
+    #[test]
+    fn test_http_get_is_the_only_request_path() {
+        let sources = [
+            ("alphavantage.rs", include_str!("alphavantage.rs")),
+            ("coinbase.rs", include_str!("coinbase.rs")),
+            ("coincap.rs", include_str!("coincap.rs")),
+            ("coinmarketcap.rs", include_str!("coinmarketcap.rs")),
+            ("eastmoneyfund.rs", include_str!("eastmoneyfund.rs")),
+            ("ecb.rs", include_str!("ecb.rs")),
+            ("oanda.rs", include_str!("oanda.rs")),
+            ("quandl.rs", include_str!("quandl.rs")),
+            ("ratesapi.rs", include_str!("ratesapi.rs")),
+            ("tsp.rs", include_str!("tsp.rs")),
+            ("yahoo.rs", include_str!("yahoo.rs")),
+        ];
+        for (file, text) in sources {
+            assert!(
+                !text.contains("ureq::"),
+                "{file} uses ureq directly; make the request with http_get"
+            );
+            assert!(
+                text.contains("http_get"),
+                "{file} makes no request through http_get"
+            );
+        }
+    }
+
+    #[test]
+    fn test_into_success_body_quotes_the_error_body() {
+        let reply = HttpReply {
+            status: 404,
+            body: "{\"errors\": [\n  {\"message\": \"Invalid currency\"}]}".to_string(),
+        };
+        let err = reply
+            .into_success_body("Coinbase price for XXX")
+            .expect_err("a 404 is an error");
+        assert_eq!(
+            err.to_string(),
+            "Coinbase price for XXX: HTTP 404: {\"errors\": [ {\"message\": \"Invalid currency\"}]}"
+        );
+    }
+
+    #[test]
+    fn test_into_success_body_empty_error_body() {
+        let reply = HttpReply {
+            status: 503,
+            body: " \n".to_string(),
+        };
+        let err = reply
+            .into_success_body("TSP prices")
+            .expect_err("a 503 is an error");
+        assert_eq!(err.to_string(), "TSP prices: HTTP 503");
+    }
+
+    #[test]
+    fn test_into_success_body_passes_a_2xx_body() {
+        let reply = HttpReply {
+            status: 200,
+            body: "ok".to_string(),
+        };
+        assert_eq!(reply.into_success_body("x").expect("2xx"), "ok");
+    }
+
+    #[test]
+    fn test_body_excerpt_truncates_long_bodies() {
+        let excerpt = body_excerpt(&"\u{e9}".repeat(400));
+        assert_eq!(excerpt, format!("{}...", "\u{e9}".repeat(300)));
+    }
 }
 
 #[cfg(test)]

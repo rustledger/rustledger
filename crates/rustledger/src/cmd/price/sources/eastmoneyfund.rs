@@ -2,7 +2,10 @@
 //!
 //! Fetches Chinese mutual fund prices from East Money (天天基金).
 
-use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, user_agent};
+use super::{
+    DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, http_get_json,
+    http_get_text,
+};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
@@ -22,12 +25,15 @@ use std::time::Duration;
 /// - `110011` - 易方达中小盘
 /// - etc.
 #[derive(Debug)]
-pub struct EastMoneyFundSource {}
+pub struct EastMoneyFundSource {
+    /// Whole-request timeout, applied to each request.
+    timeout: Duration,
+}
 
 impl EastMoneyFundSource {
     /// Create a new East Money Fund source.
-    pub const fn new(_timeout: Duration) -> Self {
-        Self {}
+    pub const fn new(timeout: Duration) -> Self {
+        Self { timeout }
     }
 
     /// Build the East Money API URL.
@@ -145,16 +151,12 @@ impl PriceSource for EastMoneyFundSource {
     fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
         let url = self.build_url(&pair.ticker);
 
-        let mut response = ureq::get(&url)
-            .header("User-Agent", user_agent())
-            .header("Referer", "https://fund.eastmoney.com/")
-            .call()
-            .with_context(|| format!("Failed to fetch fund {}", pair.ticker))?;
-
-        let body = response
-            .body_mut()
-            .read_to_string()
-            .with_context(|| "Failed to read response")?;
+        let body = http_get_text(
+            &url,
+            self.timeout,
+            &[("Referer", "https://fund.eastmoney.com/")],
+            &format!("Failed to fetch fund {}", pair.ticker),
+        )?;
 
         let json = self.parse_jsonp(&body)?;
 
@@ -210,16 +212,12 @@ impl PriceSource for EastMoneyFundSource {
         // The lsjz API rejects requests without an eastmoney Referer,
         // so send the fund-detail origin alongside the shared
         // User-Agent (#1802 source ports).
-        let mut response = ureq::get(&url)
-            .header("User-Agent", user_agent())
-            .header("Referer", "https://fundf10.eastmoney.com/")
-            .call()
-            .with_context(|| format!("Failed to fetch history for fund {}", pair.ticker))?;
-
-        let json: serde_json::Value = response
-            .body_mut()
-            .read_json()
-            .with_context(|| "Failed to parse East Money history response")?;
+        let json = http_get_json(
+            &url,
+            self.timeout,
+            &[("Referer", "https://fundf10.eastmoney.com/")],
+            &format!("Failed to fetch history for fund {}", pair.ticker),
+        )?;
 
         Self::parse_history(&json)
     }

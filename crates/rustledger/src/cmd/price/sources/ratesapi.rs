@@ -4,7 +4,7 @@
 //! (<https://api.frankfurter.dev>), the open-source keyless API serving the
 //! ECB reference rates, the provider beanprice's `ratesapi` source uses.
 
-use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, user_agent};
+use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, http_get};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
@@ -62,20 +62,9 @@ impl RatesApiSource {
         // A 4xx/5xx is read as a response, not turned into a bare
         // `StatusCode` error, so Frankfurter's `{"message": ...}` reaches
         // the user.
-        let mut response = ureq::get(url)
-            .config()
-            .timeout_global(Some(self.timeout))
-            .http_status_as_error(false)
-            .build()
-            .header("User-Agent", user_agent())
-            .call()
+        let reply = http_get(url, self.timeout, &[])
             .with_context(|| format!("Failed to fetch rate for {}", pair.ticker))?;
-        let status = response.status().as_u16();
-        let body = response
-            .body_mut()
-            .read_to_string()
-            .with_context(|| format!("Failed to read response for {}", pair.ticker))?;
-        Self::handle_response(status, &body, pair, date_fallback)
+        Self::handle_response(reply.status, &reply.body, pair, date_fallback)
     }
 
     /// Turn an HTTP status and body into `(price, feed_date)`, the step after

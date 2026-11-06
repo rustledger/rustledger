@@ -2,7 +2,7 @@
 //!
 //! Fetches currency exchange rates from the ECB.
 
-use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, user_agent};
+use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, http_get};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
@@ -25,15 +25,15 @@ use std::time::Duration;
 /// - Rates are against EUR (EUR is the base currency)
 /// - Weekend/holiday rates use the last available rate
 #[derive(Debug)]
-pub struct EcbSource {}
+pub struct EcbSource {
+    /// Whole-request timeout, applied to each request.
+    timeout: Duration,
+}
 
 impl EcbSource {
     /// Create a new ECB source.
-    ///
-    /// The timeout parameter is accepted for API consistency but not
-    /// currently applied to HTTP requests.
-    pub const fn new(_timeout: Duration) -> Self {
-        Self {}
+    pub const fn new(timeout: Duration) -> Self {
+        Self { timeout }
     }
 
     /// Build the ECB API URL for a currency's EUR-reference series:
@@ -65,27 +65,18 @@ impl EcbSource {
     ) -> Result<Vec<(NaiveDate, Decimal)>> {
         let url = self.build_url(&currency.to_uppercase(), window);
 
-        let mut response = match ureq::get(&url)
-            .header("User-Agent", user_agent())
-            .header("Accept", "application/json")
-            .call()
-        {
-            Ok(response) => response,
-            // The SDMX API answers an EMPTY selection with HTTP 404
-            // ("No results found") — that is the fetch_window
-            // contract's "no observations here" (a clean no-quote at
-            // the dispatch), not a transport failure (deep review of
-            // #1804: a frozen HRK window read as a network error).
-            Err(ureq::Error::StatusCode(404)) => return Ok(Vec::new()),
-            Err(e) => {
-                return Err(e).with_context(|| format!("Failed to fetch ECB rate for {currency}"));
-            }
-        };
-
-        let json: serde_json::Value = response
-            .body_mut()
-            .read_json()
-            .with_context(|| format!("Failed to parse ECB response for {currency}"))?;
+        let what = format!("Failed to fetch ECB rate for {currency}");
+        let reply = http_get(&url, self.timeout, &[("Accept", "application/json")])
+            .with_context(|| what.clone())?;
+        // The SDMX API answers an EMPTY selection with HTTP 404
+        // ("No results found"): that is the fetch_window contract's
+        // "no observations here" (a clean no-quote at the dispatch), not a
+        // transport failure (deep review of #1804: a frozen HRK window
+        // read as a network error).
+        if reply.status == 404 {
+            return Ok(Vec::new());
+        }
+        let json = reply.into_success_json(&what)?;
 
         Self::parse_series(&json, undated_fallback)
     }

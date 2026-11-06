@@ -2,7 +2,7 @@
 //!
 //! Fetches financial data from Quandl/Nasdaq Data Link.
 
-use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, user_agent};
+use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, http_get_json};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use std::env;
@@ -26,15 +26,15 @@ use std::time::Duration;
 /// - `FRED/GDP` - Federal Reserve Economic Data
 /// - `CHRIS/CME_CL1` - CME Crude Oil Futures
 #[derive(Debug)]
-pub struct QuandlSource {}
+pub struct QuandlSource {
+    /// Whole-request timeout, applied to each request.
+    timeout: Duration,
+}
 
 impl QuandlSource {
     /// Create a new Quandl source.
-    ///
-    /// The timeout parameter is accepted for API consistency but not
-    /// currently applied to HTTP requests.
-    pub const fn new(_timeout: Duration) -> Self {
-        Self {}
+    pub const fn new(timeout: Duration) -> Self {
+        Self { timeout }
     }
 
     /// Get the API key from environment.
@@ -78,18 +78,17 @@ impl QuandlSource {
     fn fetch_rows(
         &self,
         url: &str,
+        api_key: &str,
         pair: &PricePair,
         undated_fallback: Option<rustledger_core::NaiveDate>,
     ) -> Result<Vec<PricePoint>> {
-        let mut response = ureq::get(url)
-            .header("User-Agent", user_agent())
-            .call()
-            .with_context(|| format!("Failed to fetch data for {}", pair.ticker))?;
-
-        let json: serde_json::Value = response
-            .body_mut()
-            .read_json()
-            .with_context(|| "Failed to parse Quandl response")?;
+        let json = http_get_json(
+            url,
+            self.timeout,
+            &[],
+            &[api_key],
+            &format!("Failed to fetch data for {}", pair.ticker),
+        )?;
 
         // Check for errors
         if let Some(quandl_error) = json.get("quandl_error") {
@@ -201,7 +200,7 @@ impl PriceSource for QuandlSource {
         // The row's own date, never the requested one (#1794); the
         // greatest-date pick guards against a provider that ignores
         // limit=1 (providers do not guarantee sorted series).
-        let points = self.fetch_rows(&url, pair, Some(jiff::Zoned::now().date()))?;
+        let points = self.fetch_rows(&url, &api_key, pair, Some(jiff::Zoned::now().date()))?;
         let point = points.into_iter().max_by_key(|p| p.date).with_context(
             || "No usable rows in the Quandl response (empty dataset or unparsable prices)",
         )?;
@@ -229,7 +228,7 @@ impl PriceSource for QuandlSource {
         let (database, dataset) = Self::parse_dataset(&pair.ticker);
         let full_dataset = format!("{database}/{dataset}");
         let url = self.build_url(&full_dataset, &api_key, Some(window));
-        self.fetch_rows(&url, pair, None)
+        self.fetch_rows(&url, &api_key, pair, None)
     }
 }
 

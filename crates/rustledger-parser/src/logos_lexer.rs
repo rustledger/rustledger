@@ -641,6 +641,12 @@ pub fn leading_date_len(text: &str) -> Option<usize> {
 /// Implemented by running the lexer, so it is the same rule the parser
 /// applies: a configured currency the parser would reject is caught where it
 /// is configured rather than when the emitted ledger fails to re-parse.
+///
+/// This is the canonical currency-name check; route new callers here.
+/// The one surface that cannot is `rustledger-core`'s `Amount::from_str`
+/// (core is below the parser), which keeps a documented copy
+/// (`is_valid_commodity` in `rustledger-core/src/amount.rs`) pinned to
+/// this function by the `amount_from_str_currency_matches_lexer` test.
 #[must_use]
 pub fn is_valid_currency(name: &str) -> bool {
     let mut lexer = Token::lexer(name);
@@ -1848,6 +1854,72 @@ mod tests {
         }
         for bad in ["", "usd", "€", " USD", "USD ", "US D", "1USD"] {
             assert!(!ok(bad), "{bad:?}");
+        }
+    }
+
+    /// Drift guard for #2807: `rustledger-core`'s `Amount::from_str` cannot
+    /// call [`is_valid_currency`] (core is below the parser), so it carries a
+    /// documented copy of the rule (`is_valid_commodity` in
+    /// `rustledger-core/src/amount.rs`). This compares the two on every
+    /// string of up to five characters over an alphabet covering each
+    /// character class the rule distinguishes, plus the shapes that broke
+    /// and the keyword tokens that outrank a currency.
+    #[test]
+    fn amount_from_str_currency_matches_lexer() {
+        use rustledger_core::Amount;
+        use std::str::FromStr;
+
+        fn agree(s: &str) {
+            let core = Amount::from_str(&format!("1 {s}")).is_ok();
+            assert_eq!(
+                core,
+                is_valid_currency(s),
+                "Amount::from_str and is_valid_currency disagree on {s:?}"
+            );
+        }
+
+        const ALPHABET: [char; 10] = ['A', '0', '\'', '.', '_', '-', '/', 'a', ':', '\u{c9}'];
+        let mut frontier = vec![String::new()];
+        for _ in 0..5 {
+            let mut next = Vec::with_capacity(frontier.len() * ALPHABET.len());
+            for prefix in &frontier {
+                for c in ALPHABET {
+                    let mut s = prefix.clone();
+                    s.push(c);
+                    agree(&s);
+                    next.push(s);
+                }
+            }
+            frontier = next;
+        }
+
+        for s in [
+            "/6J",
+            "/ESM24",
+            "/LOX21_211204_P100.25",
+            "USD_",
+            "A",
+            "C_",
+            "HOOL'",
+            "USD-",
+            "BRK.B",
+            "/1.14",
+            "TRUE",
+            "FALSE",
+            "NULL",
+            "True",
+            "TRUEX",
+            "NULL1",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        ] {
+            agree(s);
+        }
+        // The named shapes, pinned on both sides (not just agreement).
+        for good in ["/6J", "/ESM24", "A"] {
+            assert!(is_valid_currency(good), "{good}");
+        }
+        for bad in ["USD_", "C_", "HOOL'", "USD-"] {
+            assert!(!is_valid_currency(bad), "{bad}");
         }
     }
 

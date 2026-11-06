@@ -10,7 +10,7 @@ use rustledger_parser::ParseResult;
 
 use crate::ledger_state::LedgerState;
 
-use super::utils::{LineIndex, PositionEncoding, get_word_at_source_position, is_currency_like};
+use super::utils::{LineIndex, PositionEncoding, get_symbol_at_position, is_currency_like};
 
 /// Handle a go-to-definition request.
 pub fn handle_goto_definition(
@@ -23,8 +23,9 @@ pub fn handle_goto_definition(
 ) -> Option<GotoDefinitionResponse> {
     let position = params.text_document_position_params.position;
 
-    // Get the word at the cursor position
-    let word = get_word_at_source_position(source, position, encoding)?;
+    // Get the symbol at the cursor position (the currency token when the
+    // cursor is on one, so `/6J` is not cut at its `/`).
+    let (word, _, _) = get_symbol_at_position(source, parse_result, position, encoding)?;
 
     tracing::debug!("Go-to-definition for word: {:?}", word);
 
@@ -54,7 +55,7 @@ pub fn handle_goto_definition(
     }
 
     // Check if it's a currency. Use the AST-validating
-    // `is_currency_like` (not `_simple`) so words that look like
+    // `is_currency_like` (not a format check alone) so words that look like
     // currencies but don't actually appear as `Currency` tokens
     // anywhere in the document short-circuit here instead of falling
     // through to `find_currency_definition` and then returning None.
@@ -239,9 +240,8 @@ mod tests {
         assert_eq!(loc.range.end, Position::new(0, 24));
     }
 
-    /// `is_currency_like_simple` accepts anything matching
-    /// `[A-Z0-9]{2,5}` — so `USDX` would pass the format check
-    /// even if no commodity for it exists. The function must
+    /// A format check alone passes `USDX` even if no commodity
+    /// for it exists. The function must
     /// return None when the currency isn't declared, not panic or
     /// return a bogus location.
     #[test]

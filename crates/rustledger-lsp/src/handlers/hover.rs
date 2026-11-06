@@ -12,8 +12,7 @@ use rustledger_parser::{ParseResult, Spanned};
 use crate::ledger_state::LedgerState;
 
 use super::utils::{
-    PositionEncoding, commodity_declaration_spans, count_noun, get_word_at_source_position,
-    is_currency_like_simple,
+    PositionEncoding, commodity_declaration_spans, count_noun, get_symbol_at_position,
 };
 
 /// Handle a hover request.
@@ -26,8 +25,9 @@ pub fn handle_hover(
 ) -> Option<Hover> {
     let position = params.text_document_position_params.position;
 
-    // Get the word at the cursor position
-    let word = get_word_at_source_position(source, position, encoding)?;
+    // Get the symbol at the cursor position (the currency token when the
+    // cursor is on one, so `/6J` is not cut at its `/`, #2807).
+    let (word, _, _) = get_symbol_at_position(source, parse_result, position, encoding)?;
 
     tracing::debug!("Hover for word: {:?}", word);
 
@@ -49,7 +49,7 @@ pub fn handle_hover(
     }
 
     // Check if it's a currency
-    if is_currency_like_simple(&word)
+    if rustledger_parser::is_valid_currency(&word)
         && let Some(info) = get_currency_info(&word, parse_result)
     {
         return Some(Hover {

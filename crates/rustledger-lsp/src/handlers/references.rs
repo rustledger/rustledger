@@ -7,7 +7,7 @@
 
 use super::utils::{
     LineIndex, PositionEncoding, account_declaration_spans, commodity_declaration_spans,
-    get_word_at_position, is_account_like, is_currency_like,
+    get_symbol_at_position, is_account_like, is_currency_like,
 };
 use lsp_types::{Location, Position, Range, ReferenceParams, Uri};
 use rustledger_core::Directive;
@@ -42,7 +42,7 @@ pub fn handle_references(
     let line = lines.get(line_idx)?;
 
     // Get the word at the cursor position
-    let (word, _, _) = get_word_at_position(line, position.character as usize, encoding)?;
+    let (word, _, _) = get_symbol_at_position(source, parse_result, position, encoding)?;
 
     // Classify the symbol kind from the cursor's file (account / currency /
     // payee), then collect that kind's occurrences across every ledger file.
@@ -633,6 +633,38 @@ mod tests {
         assert!(
             lines.contains(&2),
             "Assets:Bank posting on line 2 should appear in refs; got {lines:?}"
+        );
+    }
+
+    /// References on a `/` currency (#2807), with the cursor on its `/`.
+    #[test]
+    fn test_find_slash_currency_references() {
+        let source = "2024-01-01 open Assets:Futures /6J\n\
+                      2024-01-15 * \"Buy\"\n  \
+                      Assets:Futures  2 /6J {100 USD}\n  \
+                      Assets:Cash  -200 USD\n";
+        let result = parse(source);
+        let uri: Uri = "file:///test.beancount".parse().unwrap();
+        let params = ReferenceParams {
+            text_document_position: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                position: Position::new(0, 31),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+            context: lsp_types::ReferenceContext {
+                include_declaration: true,
+            },
+        };
+        let refs = handle_references(&params, source, &result, &[], &uri, PositionEncoding::Utf16)
+            .expect("references found");
+        let ranges: Vec<Range> = refs.iter().map(|r| r.range).collect();
+        assert_eq!(
+            ranges,
+            vec![
+                Range::new(Position::new(0, 31), Position::new(0, 34)),
+                Range::new(Position::new(2, 20), Position::new(2, 23)),
+            ]
         );
     }
 }

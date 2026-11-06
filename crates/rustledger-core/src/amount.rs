@@ -217,9 +217,11 @@ pub enum AmountParseErrorReason {
     /// The number token didn't parse as a [`Decimal`] (carries the
     /// offending token, not the full input).
     InvalidNumber(String),
-    /// The currency token isn't a valid beancount commodity (must be
-    /// uppercase ASCII letters, digits, `'`, `.`, `_`, `-`, starting
-    /// with an uppercase letter; max 24 chars).
+    /// The currency token isn't a valid beancount commodity, by the
+    /// parser's own `Currency` token rule (an uppercase ASCII letter,
+    /// or a `/` followed by text containing one, then uppercase
+    /// letters, digits, `'`, `.`, `_` or `-`, ending with a letter or
+    /// digit: `USD`, `BRK.B`, `/6J`; not `USD_` or `usd`).
     InvalidCurrency(String),
 }
 
@@ -239,7 +241,8 @@ impl fmt::Display for AmountParseError {
             AmountParseErrorReason::InvalidCurrency(tok) => write!(
                 f,
                 "invalid amount literal {:?}: {:?} isn't a valid commodity \
-                 (uppercase ASCII, may contain digits/'./_/-, max 24 chars)",
+                 (an uppercase ASCII letter or `/`, then uppercase letters, \
+                 digits, `'`, `.`, `_` or `-`, ending with a letter or digit)",
                 self.input, tok,
             ),
         }
@@ -303,27 +306,52 @@ impl std::str::FromStr for Amount {
     }
 }
 
-/// Beancount commodity validation: uppercase letter first, then
-/// uppercase letters, digits, `'`, `.`, `_`, or `-`. 1–24 chars.
+/// Beancount commodity validation, as used by [`Amount::from_str`].
 ///
-/// Matches the parser's commodity-token rule (see
-/// `rustledger-parser::lexer`). Kept inline here rather than reaching
-/// into the parser to avoid a `rustledger-core → rustledger-parser`
-/// dep cycle (parser already depends on core).
+/// DELIBERATE COPY of the canonical lexer-backed rule,
+/// `rustledger_parser::is_valid_currency`, which runs the parser's own
+/// `Currency` token regex. The canonical cannot be called from here:
+/// `rustledger-parser` depends on `rustledger-core`, so the reverse
+/// dependency would be a cycle. The regex this mirrors is
+///
+/// ```text
+/// /[A-Z0-9'._-]*[A-Z]([A-Z0-9'._-]*[A-Z0-9])?  |  [A-Z]([A-Z0-9'._-]*[A-Z0-9])?
+/// ```
+///
+/// minus the keyword tokens (`TRUE`, `FALSE`, `NULL`) that the lexer
+/// prefers over a currency of the same text. Agreement is pinned by the
+/// drift-guard test `amount_from_str_currency_matches_lexer` in
+/// `rustledger-parser/src/logos_lexer.rs`, which compares this function
+/// (through `Amount::from_str`) with `is_valid_currency` exhaustively
+/// over short strings; the canonical's doc comment points back here.
+/// Revisit (delete this copy and call the canonical) if `FromStr for
+/// Amount` ever moves out of `rustledger-core`.
 fn is_valid_commodity(s: &str) -> bool {
-    if s.is_empty() || s.len() > 24 {
-        return false;
+    const fn is_inner(b: u8) -> bool {
+        b.is_ascii_uppercase() || b.is_ascii_digit() || matches!(b, b'\'' | b'.' | b'_' | b'-')
     }
-    let mut chars = s.chars();
-    let Some(first) = chars.next() else {
-        return false;
+    const fn is_last(b: u8) -> bool {
+        b.is_ascii_uppercase() || b.is_ascii_digit()
+    }
+    let well_formed = match s.as_bytes() {
+        // `/` form: after the slash, currency characters only, at least
+        // one uppercase letter, ending with a letter or digit.
+        [b'/', rest @ ..] => {
+            rest.iter().copied().all(is_inner)
+                && rest.iter().any(u8::is_ascii_uppercase)
+                && rest.last().copied().is_some_and(is_last)
+        }
+        // Plain form: an uppercase letter, then (optionally) currency
+        // characters ending with a letter or digit.
+        [first, rest @ ..] => {
+            first.is_ascii_uppercase()
+                && rest.iter().copied().all(is_inner)
+                && rest.last().copied().is_none_or(is_last)
+        }
+        [] => false,
     };
-    if !first.is_ascii_uppercase() {
-        return false;
-    }
-    chars.all(|c| {
-        c.is_ascii_uppercase() || c.is_ascii_digit() || matches!(c, '\'' | '.' | '_' | '-')
-    })
+    // Keyword tokens the lexer prefers over a currency of the same text.
+    well_formed && !matches!(s, "TRUE" | "FALSE" | "NULL")
 }
 
 // Arithmetic operations on references
@@ -813,6 +841,38 @@ mod tests {
             err.reason,
             AmountParseErrorReason::InvalidCurrency(_)
         ));
+    }
+
+    /// The shapes that broke in #2807: `/` currencies were rejected and a
+    /// trailing `-` or `_` was accepted, both unlike the parser's lexer.
+    /// The exhaustive comparison with the lexer lives in
+    /// `rustledger-parser` (`amount_from_str_currency_matches_lexer`).
+    #[test]
+    fn test_amount_from_str_currency_matches_lexer_shapes() {
+        for good in [
+            "/6J",
+            "/ESM24",
+            "/LOX21_211204_P100.25",
+            "A",
+            "BRK.B",
+            "HOOL'S",
+        ] {
+            assert_eq!(
+                Amount::from_str(&format!("1 {good}")),
+                Ok(Amount::new(dec!(1), good)),
+                "{good} must be accepted"
+            );
+        }
+        for bad in [
+            "USD_", "C_", "USD-", "HOOL'", "/", "/1.14", "/6", "TRUE", "NULL",
+        ] {
+            let err = Amount::from_str(&format!("1 {bad}")).expect_err(bad);
+            assert!(
+                matches!(err.reason, AmountParseErrorReason::InvalidCurrency(_)),
+                "{bad}: {:?}",
+                err.reason
+            );
+        }
     }
 
     #[test]

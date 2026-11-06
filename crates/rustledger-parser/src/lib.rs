@@ -334,6 +334,20 @@ pub struct ParseResult {
 }
 
 impl ParseResult {
+    /// The currency token at byte `offset`, if the lexer read one there.
+    ///
+    /// A cursor sitting at either end of the token counts, as it does for
+    /// an editor's word-at-cursor. Editor surfaces (the LSP and the WASM
+    /// editor) use this instead of a word-character scan, which splits
+    /// `/6J` at the `/` and `BRK.B` at the `.`: the token span is the
+    /// lexer's own classification, so it cannot drift from the parser.
+    #[must_use]
+    pub fn currency_at(&self, offset: usize) -> Option<&Spanned<rustledger_core::Currency>> {
+        self.currency_occurrences
+            .iter()
+            .find(|occ| occ.span.start <= offset && offset <= occ.span.end)
+    }
+
     /// Cursor-API view of the lossless CST that produced this
     /// `ParseResult`. Equivalent to
     /// `SyntaxNode::new_root(self.syntax_root.clone())`.
@@ -990,5 +1004,34 @@ mod parse_result_alignment_cache {
   Expenses:Food
 ",
         );
+    }
+}
+
+#[cfg(test)]
+mod currency_at {
+    //! [`ParseResult::currency_at`] returns the lexer's currency token at a
+    //! byte offset, ends inclusive, so editor surfaces see `/6J` and
+    //! `BRK.B` whole (#2807).
+
+    use super::parse;
+
+    #[test]
+    fn test_currency_at_returns_whole_token() {
+        let source = "2024-01-01 open Assets:Futures /6J,BRK.B\n";
+        let result = parse(source);
+        let at = |offset| {
+            result
+                .currency_at(offset)
+                .map(|o| (o.value.to_string(), o.span.start, o.span.end))
+        };
+        for offset in [31, 32, 34] {
+            assert_eq!(
+                at(offset),
+                Some(("/6J".to_string(), 31, 34)),
+                "offset {offset}"
+            );
+        }
+        assert_eq!(at(37), Some(("BRK.B".to_string(), 35, 40)));
+        assert_eq!(at(20), None, "inside an account");
     }
 }

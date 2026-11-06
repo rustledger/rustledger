@@ -13,7 +13,7 @@ use rustledger_parser::ParseResult;
 
 use super::utils::{
     LineIndex, PositionEncoding, account_declaration_spans, commodity_declaration_spans,
-    get_word_at_position, is_account_like, is_currency_like,
+    get_symbol_at_position, is_account_like, is_currency_like,
 };
 
 /// Handle a document highlight request.
@@ -29,7 +29,7 @@ pub fn handle_document_highlight(
     let line = lines.get(line_idx)?;
 
     // Get the word at the cursor position
-    let (word, _, _) = get_word_at_position(line, position.character as usize, encoding)?;
+    let (word, _, _) = get_symbol_at_position(source, parse_result, position, encoding)?;
 
     let mut highlights = Vec::new();
     // Build the line index once and share it across collectors: each

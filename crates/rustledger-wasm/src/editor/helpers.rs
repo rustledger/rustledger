@@ -43,17 +43,49 @@ pub fn get_word_at_position(source: &str, line: u32, character: u32) -> Option<S
     Some(chars[start..end].iter().collect())
 }
 
+/// Get the symbol at a given position: the currency token there if the
+/// lexer read one (via [`ParseResult::currency_at`]), else the word from
+/// [`get_word_at_position`].
+///
+/// The word scan splits `/6J` at the `/` and `BRK.B` at the `.`, so hover,
+/// definitions and references could not reach those currencies (#2807).
+/// `character` is a character offset, as for [`get_word_at_position`].
+pub fn get_symbol_at_position(
+    source: &str,
+    line: u32,
+    character: u32,
+    parse_result: &ParseResult,
+) -> Option<String> {
+    let line_start: usize = source
+        .split_inclusive('\n')
+        .take(line as usize)
+        .map(str::len)
+        .sum();
+    let line_text = source.lines().nth(line as usize)?;
+    let in_line = match line_text.char_indices().nth(character as usize) {
+        Some((byte, _)) => Some(byte),
+        None => (line_text.chars().count() == character as usize).then_some(line_text.len()),
+    };
+    if let Some(in_line) = in_line
+        && let Some(occ) = parse_result.currency_at(line_start + in_line)
+    {
+        return Some(occ.value.to_string());
+    }
+    get_word_at_position(source, line, character)
+}
+
 /// Check if a character is part of a word (including account separators).
 pub fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == ':' || c == '_' || c == '-'
 }
 
-/// Check if a string looks like a currency (all uppercase, 2-5 chars).
+/// Check if a string is a valid currency name, by the parser's own rule.
+///
+/// Delegates to the lexer-backed canonical
+/// [`rustledger_parser::is_valid_currency`] (#2807), so `/6J`, `/ESM24` and
+/// `BRK.B` pass and `USD_` does not, exactly as the parser decides.
 pub fn is_currency_like(s: &str) -> bool {
-    s.len() >= 2
-        && s.len() <= 5
-        && s.chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    rustledger_parser::is_valid_currency(s)
 }
 
 /// Extract all account names from parse result.
@@ -228,9 +260,36 @@ mod tests {
         assert!(is_currency_like("EUR"));
         assert!(is_currency_like("BTC"));
         assert!(is_currency_like("AAPL"));
-        assert!(!is_currency_like("U")); // Too short
-        assert!(!is_currency_like("VERYLONGCURRENCY")); // Too long
         assert!(!is_currency_like("usd")); // Lowercase
+        // The parser's own rule (#2807): single letters and `/` currencies
+        // are currencies; a trailing `_` or `-` is not.
+        assert!(is_currency_like("T"));
+        assert!(is_currency_like("/6J"));
+        assert!(is_currency_like("/ESM24"));
+        assert!(is_currency_like("BRK.B"));
+        assert!(!is_currency_like("USD_"));
+        assert!(!is_currency_like("USD-"));
+    }
+
+    #[test]
+    fn test_get_symbol_at_position_currency_token() {
+        let source = "2024-01-01 open Assets:Futures /6J,BRK.B\n";
+        let result = parse(source);
+        for col in [31, 32, 34] {
+            assert_eq!(
+                get_symbol_at_position(source, 0, col, &result).as_deref(),
+                Some("/6J"),
+                "col {col}"
+            );
+        }
+        assert_eq!(
+            get_symbol_at_position(source, 0, 37, &result).as_deref(),
+            Some("BRK.B")
+        );
+        assert_eq!(
+            get_symbol_at_position(source, 0, 20, &result).as_deref(),
+            Some("Assets:Futures")
+        );
     }
 
     #[test]

@@ -44,7 +44,7 @@ use rustledger_parser::{ParseResult, parse};
 use std::collections::HashMap;
 
 use super::utils::{
-    LineIndex, PositionEncoding, get_word_at_position, is_account_like, is_currency_like,
+    LineIndex, PositionEncoding, get_symbol_at_position, is_account_like, is_currency_like,
 };
 
 /// Which kind of symbol is being renamed.
@@ -57,7 +57,7 @@ enum RenameKind {
 /// Handle a prepare rename request (check if rename is valid at position).
 ///
 /// `encoding` is required because the emitted `Range` carries columns
-/// in the negotiated wire encoding; `get_word_at_position` returns
+/// in the negotiated wire encoding; `get_symbol_at_position` returns
 /// columns in the same encoding as the input `col`, so threading
 /// `encoding` keeps the round-trip consistent.
 pub fn handle_prepare_rename(
@@ -67,14 +67,9 @@ pub fn handle_prepare_rename(
     encoding: PositionEncoding,
 ) -> Option<PrepareRenameResponse> {
     let position = params.position;
-    let line_idx = position.line as usize;
-
-    let lines: Vec<&str> = source.lines().collect();
-    let line = lines.get(line_idx)?;
-
-    // Get the word at the cursor position
+    // Get the symbol at the cursor position
     let (word, start_col, end_col) =
-        get_word_at_position(line, position.character as usize, encoding)?;
+        get_symbol_at_position(source, parse_result, position, encoding)?;
 
     // Check if it's a valid renameable symbol. Consult the
     // parser's token-occurrence indices first so Unicode-prefix
@@ -125,12 +120,8 @@ pub fn handle_rename(
     let new_name = &params.new_name;
     let uri = params.text_document_position.text_document.uri.clone();
 
-    let line_idx = position.line as usize;
-    let lines: Vec<&str> = source.lines().collect();
-    let line = lines.get(line_idx)?;
-
-    // Get the word at the cursor position
-    let (old_name, _, _) = get_word_at_position(line, position.character as usize, encoding)?;
+    // Get the symbol at the cursor position
+    let (old_name, _, _) = get_symbol_at_position(source, parse_result, position, encoding)?;
 
     // Determine the symbol kind ONCE from the current file's occurrence
     // indices (account vs currency), preserving the original precedence:
@@ -324,6 +315,7 @@ fn collect_currency_rename_edits(
 
 #[cfg(test)]
 mod tests {
+    use super::super::utils::get_word_at_position;
     use super::*;
     use rustledger_parser::parse;
 
@@ -511,5 +503,66 @@ mod tests {
         for e in edits {
             assert_eq!(e.new_text, "Assets:Checking");
         }
+    }
+
+    /// `/` currencies are renameable (#2807): the cursor on the `/` of
+    /// `/6J` selects the whole token, and every occurrence is renamed.
+    #[allow(clippy::mutable_key_type)] // `Uri` keys, as the LSP `WorkspaceEdit` API requires
+    #[test]
+    fn test_rename_slash_currency() {
+        let source = "2024-01-01 open Assets:Futures /6J\n\
+                      2024-01-15 * \"Buy\"\n  \
+                      Assets:Futures  2 /6J {100 USD}\n  \
+                      Assets:Cash  -200 USD\n";
+        let result = parse(source);
+        let uri: lsp_types::Uri = "file:///test.beancount".parse().unwrap();
+        let position = Position::new(0, 31); // on the `/` of `/6J`
+
+        let prepare = handle_prepare_rename(
+            &TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            },
+            source,
+            &result,
+            PositionEncoding::Utf16,
+        );
+        assert_eq!(
+            prepare,
+            Some(PrepareRenameResponse::Range(Range {
+                start: Position::new(0, 31),
+                end: Position::new(0, 34),
+            }))
+        );
+
+        let params = RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri },
+                position,
+            },
+            new_name: "/6E".to_string(),
+            work_done_progress_params: Default::default(),
+        };
+        let edit = handle_rename(&params, source, &result, &[], PositionEncoding::Utf16)
+            .expect("rename returns edit");
+        let changes = edit.changes.expect("edit has changes");
+        let edits = changes.values().next().expect("one file");
+        let ranges: Vec<_> = edits
+            .iter()
+            .map(|e| (e.range, e.new_text.as_str()))
+            .collect();
+        assert_eq!(
+            ranges,
+            vec![
+                (
+                    Range::new(Position::new(0, 31), Position::new(0, 34)),
+                    "/6E"
+                ),
+                (
+                    Range::new(Position::new(2, 20), Position::new(2, 23)),
+                    "/6E"
+                ),
+            ]
+        );
     }
 }

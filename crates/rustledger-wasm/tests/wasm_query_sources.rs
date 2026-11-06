@@ -299,21 +299,24 @@ mod query_answer_rule {
     }
 }
 
-/// `queryWithHost` treats a `readFile` that throws as a file the host could
-/// not read, which stops the query, as `rledger query` and bean-query refuse
-/// an include they cannot read; only a throw carrying `code: "ENOENT"` (or a
-/// `null` return) is a missing file, which the query answers over (#2861).
-/// A throw was always "not found", so the query answered without the file.
+/// `queryWithHost` treats a `readFile` that throws an error whose `code` is
+/// set and is not `ENOENT` as a file the host could not read, which stops the
+/// query, as `rledger query` and bean-query refuse an include they cannot read
+/// (#2861). Every such throw was "not found", so the query answered without
+/// the file. A throw with no `code`, an `ENOENT` one and a `null` return stay
+/// a missing file, which the query answers over: the contract these entry
+/// points shipped with (v0.22.0).
 #[wasm_bindgen_test]
 fn query_with_host_refuses_an_include_the_host_cannot_read() {
-    let run = |code: &str| {
+    // `missing` is the JS the host runs for any path but the entry file.
+    let run = |missing: &str| {
         let read_file = js_sys::Function::new_with_args(
             "p",
             &format!(
                 "if (p.endsWith('main.beancount')) {{ return 'include \"sub.beancount\"\\n\
                  2024-01-01 open Assets:Cash\\n2024-01-01 open Income:Salary\\n\
                  2024-01-02 * \"pay\"\\n  Assets:Cash  100 USD\\n  Income:Salary\\n'; }}\
-                 const e = new Error('cannot read ' + p); e.code = '{code}'; throw e;"
+                 {missing}"
             ),
         );
         let host = js_sys::Object::new();
@@ -322,15 +325,34 @@ fn query_with_host_refuses_an_include_the_host_cannot_read() {
         rustledger_wasm::query_with_host(&host.into(), "main.beancount", q).expect("query")
     };
 
-    let refused = run("EACCES");
-    assert_eq!(
-        js_sys::Array::from(&get_field(&refused, "rows")).length(),
-        0
-    );
-    let errors = js_sys::Array::from(&get_field(&refused, "errors"));
-    assert!(errors.length() > 0, "the unreadable include is reported");
+    for code in ["EACCES", "EISDIR"] {
+        let refused = run(&format!(
+            "const e = new Error('cannot read ' + p); e.code = '{code}'; throw e;"
+        ));
+        let rows = js_sys::Array::from(&get_field(&refused, "rows"));
+        assert_eq!(rows.length(), 0, "{code}");
+        let errors = js_sys::Array::from(&get_field(&refused, "errors"));
+        assert!(
+            errors.length() > 0,
+            "{code}: the unreadable include is reported"
+        );
+    }
 
-    let answered = run("ENOENT");
-    let row = first_row(&answered, "ENOENT");
-    assert_eq!(string_cell(&row, 0), "pay");
+    for (label, missing) in [
+        (
+            "ENOENT",
+            "const e = new Error('no such file ' + p); e.code = 'ENOENT'; throw e;",
+        ),
+        ("a throw without a code", "throw new Error('not found');"),
+        ("null", "return null;"),
+    ] {
+        let answered = run(missing);
+        let row = first_row(&answered, label);
+        assert_eq!(string_cell(&row, 0), "pay", "{label}");
+        let errors = js_sys::Array::from(&get_field(&answered, "errors"));
+        assert!(
+            errors.length() > 0,
+            "{label}: the missing include is reported"
+        );
+    }
 }

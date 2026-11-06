@@ -156,9 +156,9 @@ export function collectLedgerFiles(entryPath: string): {
       // Leaving it out would have the loader call it one, and a query would
       // answer without it, where `rledger query` and bean-query refuse
       // (#2861). Stop here instead, naming the file and the cause.
-      throw new Error(
-        `failed to read file ${abs}: ${error instanceof Error ? error.message : String(error)}`
-      );
+      // The code alone (`EISDIR`, `EACCES`): Node's message repeats the path.
+      const err = error as NodeJS.ErrnoException;
+      throw new Error(`failed to read file ${abs}: ${err.code ?? err.message ?? String(error)}`);
     }
     canonical.set(real, key(abs));
     files[key(abs)] = content;

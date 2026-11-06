@@ -47,8 +47,8 @@ struct HostCallbacks {
     /// calling that with a null receiver breaks it at runtime.
     receiver: JsValue,
     /// `(path: string) => string | null`: contents, or null if the file does
-    /// not exist. A throw is a file that could not be read (an error with
-    /// `code: "ENOENT"` excepted, which is not-found too).
+    /// not exist. A throw is not-found too, unless it carries a `code` other
+    /// than `ENOENT` (`EACCES`, `EISDIR`, ...): a file that could not be read.
     read_file: js_sys::Function,
     /// `(pattern: string) => string[]` — optional; without it a glob include
     /// reports the same "does not match any files" the disk backend does.
@@ -162,10 +162,12 @@ impl FileSystem for HostFs {
                 .map(|host| (host.read_file.clone(), host.receiver.clone()))
         });
         let (f, receiver) = pair.ok_or_else(|| not_found(path, "no host filesystem installed"))?;
-        // A throwing `readFile` is a file the host could not read, NOT a missing
-        // one, unless what it threw says so (Node's `ENOENT`). Calling it
-        // missing let a query answer without the file (#2861), where
-        // `rledger query` and bean-query refuse an include they cannot read.
+        // A throw carrying an error `code` other than `ENOENT` (Node's `fs`
+        // sets `EACCES`, `EISDIR`, ...) is a file the host could not read, NOT a
+        // missing one: calling it missing let a query answer without the file
+        // (#2861), where `rledger query` and bean-query refuse an include they
+        // cannot read. A throw without a `code` stays "not found", the contract
+        // these entry points shipped with (v0.22.0).
         let value = f
             .call1(&receiver, &JsValue::from_str(&display))
             .map_err(|thrown| read_failure(path, &thrown))?;
@@ -279,9 +281,10 @@ fn textual_normalize(path: &str) -> PathBuf {
     })
 }
 
-/// The load error for a `readFile` that threw `thrown`: not-found when the
-/// host says so (an `ENOENT` `code`, as Node's `fs` sets it), else an I/O
-/// error, which stops a query (`LoadError::blocks_queries`, #2861).
+/// The load error for a `readFile` that threw `thrown`: an I/O error, which
+/// stops a query (`LoadError::blocks_queries`, #2861), when it carries an
+/// error `code` other than `ENOENT` (as Node's `fs` sets one), else
+/// not-found, as every throw was before.
 fn read_failure(path: &Path, thrown: &JsValue) -> LoadError {
     let message = thrown
         .as_string()
@@ -298,9 +301,10 @@ fn read_failure(path: &Path, thrown: &JsValue) -> LoadError {
 }
 
 /// [`read_failure`]'s decision, apart from the JS value so it is testable
-/// natively: `ENOENT` is not-found, anything else an I/O error.
+/// natively: no `code`, or `ENOENT`, is not-found; any other code an I/O
+/// error.
 fn read_failure_from(path: &Path, code: Option<&str>, message: &str) -> LoadError {
-    if code == Some("ENOENT") {
+    if matches!(code, None | Some("ENOENT")) {
         return not_found(path, message);
     }
     LoadError::Io {
@@ -323,11 +327,12 @@ mod tests {
     use super::textual_normalize;
     use std::path::PathBuf;
 
-    /// A `readFile` that threw is a file the host could not read, which stops
-    /// a query, unless it threw `ENOENT`, a missing file a query answers over
-    /// (#2861). It was always not-found.
+    /// A `readFile` that threw an error `code` other than `ENOENT` is a file
+    /// the host could not read, which stops a query (#2861). With no `code`
+    /// it stays not-found, which a query answers over, as the shipped
+    /// contract promised; so does `ENOENT`.
     #[test]
-    fn test_read_failure_is_not_found_only_on_enoent() {
+    fn test_read_failure_blocks_only_on_a_code_other_than_enoent() {
         use std::path::Path;
         let blocks = |code| {
             super::read_failure_from(Path::new("x.beancount"), code, "boom").blocks_queries()
@@ -335,7 +340,7 @@ mod tests {
         assert!(!blocks(Some("ENOENT")));
         assert!(blocks(Some("EACCES")));
         assert!(blocks(Some("EISDIR")));
-        assert!(blocks(None));
+        assert!(!blocks(None));
     }
 
     #[test]

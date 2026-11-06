@@ -119,6 +119,25 @@ fn test_load_error_blocks_queries_by_variant() {
     );
 }
 
+/// Gives a directory its permissions back when dropped, panic or not, so the
+/// temporary directory can always be removed.
+#[cfg(unix)]
+struct Unlock<'a>(&'a std::path::Path);
+
+#[cfg(unix)]
+impl Drop for Unlock<'_> {
+    fn drop(&mut self) {
+        use std::os::unix::fs::PermissionsExt;
+        let restored = std::fs::set_permissions(self.0, std::fs::Permissions::from_mode(0o755));
+        // Report a failure, but not over a panic already unwinding.
+        if let Err(e) = restored
+            && !std::thread::panicking()
+        {
+            panic!("could not restore permissions on {}: {e}", self.0.display());
+        }
+    }
+}
+
 /// A deliberate deviation from bean-query: an include under a directory
 /// without read or search permission. bean-query resolves includes by glob,
 /// which sees nothing there, so it reports `does not match any files` and
@@ -144,10 +163,8 @@ fn test_blocks_queries_refuses_an_include_under_a_locked_directory() {
     )
     .expect("write");
     std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).expect("chmod");
-    let ledger = load(&entry, &LoadOptions::default());
-    // Restore before asserting, so the directory can be cleaned up.
-    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).expect("chmod");
-    let ledger = ledger.expect("load");
+    let _unlock = Unlock(&locked);
+    let ledger = load(&entry, &LoadOptions::default()).expect("load");
     let messages: Vec<&str> = ledger.errors.iter().map(|e| e.message.as_str()).collect();
     assert!(
         ledger.errors.iter().any(LedgerError::blocks_queries),

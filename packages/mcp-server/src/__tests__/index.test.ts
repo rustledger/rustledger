@@ -1076,7 +1076,7 @@ describe('collectLedgerFiles', () => {
       'isdir/main.beancount',
       'include "sub"\n2024-01-01 open Assets:Cash USD\n'
     );
-    expect(() => collectLedgerFiles(main)).toThrow(/failed to read file .*sub: EISDIR/);
+    expect(() => collectLedgerFiles(main)).toThrow(/failed to read file .*sub: EISDIR$/);
   });
 
   it('reports a file reached twice, once the wasm carries the loader fix', () => {

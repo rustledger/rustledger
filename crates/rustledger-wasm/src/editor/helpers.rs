@@ -44,8 +44,8 @@ fn word_char_range(line_text: &str, col: usize) -> Option<(usize, usize)> {
 
 /// Get the symbol at a given position: the currency token there if the
 /// lexer read one (via [`ParseResult::currency_at`]), else the word around
-/// the cursor, unless that word is a transaction or posting
-/// flag (via [`ParseResult::is_flag_at`]).
+/// the cursor, unless that word is a one-letter transaction or posting
+/// flag (via [`ParseResult::is_currency_flag_at`]).
 ///
 /// The word scan splits `/6J` at the `/` and `BRK.B` at the `.`, so hover,
 /// definitions and references could not reach those currencies (#2807). A
@@ -76,7 +76,7 @@ pub fn get_symbol_at_position(
         return Some(occ.value.to_string());
     }
     let (start, end) = word_char_range(line_text, character as usize)?;
-    if parse_result.is_flag_at(line_start + byte_of_char(start)) {
+    if parse_result.is_currency_flag_at(line_start + byte_of_char(start)) {
         return None;
     }
     Some(line_text.chars().skip(start).take(end - start).collect())

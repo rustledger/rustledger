@@ -207,12 +207,9 @@ fn find_currency_references(
 ) -> EditorReferencesResult {
     let mut references = Vec::new();
     let directives = &parse_result.directives;
+    let occurrences = &parse_result.currency_occurrences;
 
-    for occurrence in parse_result
-        .currency_occurrences
-        .iter()
-        .filter(|o| o.value == currency)
-    {
+    for occurrence in occurrences.iter().filter(|o| o.value == currency) {
         // The directive holding the token: directives are in source order,
         // so the last one starting at or before the token is the candidate.
         let holder = directives
@@ -222,20 +219,27 @@ fn find_currency_references(
             .filter(|d| occurrence.span.end <= d.span.end);
         // Whether the token is the first currency token of its directive:
         // the declared currency of a `commodity`, the priced one of a `price`.
-        let first_in_holder = holder.is_some_and(|d| {
-            parse_result
-                .currency_occurrences
-                .iter()
-                .find(|o| o.span.start >= d.span.start && o.span.end <= d.span.end)
+        // Occurrences are in source order, so the first one at or after the
+        // directive's start is found by binary search; only those two kinds
+        // ask, so the walk stays O(n log n) (a linear scan per match made it
+        // quadratic).
+        let first_in_holder = |d: &rustledger_parser::Spanned<Directive>| {
+            let i = occurrences.partition_point(|o| o.span.start < d.span.start);
+            occurrences
+                .get(i)
                 .is_some_and(|o| o.span == occurrence.span)
-        });
-        let (is_definition, context) = match holder.map(|d| &d.value) {
-            Some(Directive::Commodity(_)) => (first_in_holder, Some("commodity")),
-            Some(Directive::Open(_)) => (false, Some("open")),
-            Some(Directive::Balance(_)) => (false, Some("balance")),
-            Some(Directive::Price(_)) if first_in_holder => (false, Some("price")),
-            Some(Directive::Price(_)) => (false, Some("price amount")),
-            Some(Directive::Transaction(_)) => (false, Some("posting")),
+        };
+        // A token's context is its directive's kind. That includes currency
+        // values in a directive's metadata: a currency in a `commodity`'s
+        // metadata gets "commodity" (not a definition, since it is not the
+        // first token), and one in a `price`'s metadata gets "price amount".
+        let (is_definition, context) = match holder.map(|d| (d, &d.value)) {
+            Some((d, Directive::Commodity(_))) => (first_in_holder(d), Some("commodity")),
+            Some((d, Directive::Price(_))) if first_in_holder(d) => (false, Some("price")),
+            Some((_, Directive::Price(_))) => (false, Some("price amount")),
+            Some((_, Directive::Open(_))) => (false, Some("open")),
+            Some((_, Directive::Balance(_))) => (false, Some("balance")),
+            Some((_, Directive::Transaction(_))) => (false, Some("posting")),
             _ => (false, None),
         };
         let (start_line, start_character) = line_index.offset_to_position(occurrence.span.start);
@@ -425,6 +429,41 @@ mod tests {
                 (2, 23, Some("posting".to_string())),
                 (2, 33, Some("posting".to_string())),
             ]
+        );
+    }
+
+    /// The currency walk is not quadratic in the number of matches: each
+    /// match resolves its directive and its "first token" by binary search.
+    /// This ledger has 60k matches across `commodity`, `price` and `open`
+    /// directives, which all paid the old per-match linear scan. In a debug
+    /// test build the walk takes about 90 ms; with the old scan put back it
+    /// took about 13 s and tripped the bound. The bound is loose on purpose so
+    /// a slow machine does not trip it.
+    #[test]
+    fn test_get_references_currency_is_not_quadratic() {
+        use std::fmt::Write as _;
+        const N: usize = 20_000;
+        let mut source = String::from("2024-01-01 commodity USD\n");
+        for i in 0..N {
+            writeln!(source, "2024-01-01 open Assets:A{i} USD").unwrap();
+            writeln!(source, "2024-01-02 price USD 1 EUR").unwrap();
+            writeln!(source, "2024-01-03 commodity C{i}\n  quote: USD").unwrap();
+        }
+        let result = parse(&source);
+        assert!(result.errors.is_empty(), "{:?}", result.errors.first());
+        let cache = EditorCache::new(&source, &result);
+        let started = std::time::Instant::now();
+        let refs = get_references_cached(&source, 0, 21, &result, &cache).expect("references");
+        let elapsed = started.elapsed();
+        assert_eq!(refs.references.len(), 1 + 3 * N);
+        assert!(refs.references[0].is_definition);
+        assert_eq!(refs.references[2].context.as_deref(), Some("price"));
+        assert_eq!(refs.references[3].context.as_deref(), Some("commodity"));
+        assert!(!refs.references[3].is_definition, "a metadata currency");
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "currency references took {elapsed:?} for {} matches",
+            refs.references.len()
         );
     }
 }

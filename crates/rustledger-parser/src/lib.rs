@@ -354,19 +354,22 @@ impl ParseResult {
             .find(|occ| occ.span.start <= offset && offset <= occ.span.end)
     }
 
-    /// Whether a transaction or posting flag token starts at byte
-    /// `offset` (`*`, `!`, or a letter such as `T` in
-    /// `2024-01-16 T "Transfer"`).
+    /// Whether a one-letter flag that lexes as a currency token starts
+    /// at byte `offset` (the `T` in `2024-01-16 T "Transfer"`, a `P`
+    /// before a posting's account).
     ///
-    /// A one-letter flag lexes as a currency token but is not one, so
-    /// it is not in [`Self::currency_occurrences`] and
-    /// [`Self::currency_at`] does not return it. Editor surfaces that
-    /// fall back to a word scan use this to keep a flag from being
-    /// read as the currency of the same name. The flag is the one
-    /// `Transaction::flag` / `Posting::flag` read, so it cannot
-    /// disagree with the parsed directive.
+    /// Such a flag is not a currency, so it is not in
+    /// [`Self::currency_occurrences`] and [`Self::currency_at`] does
+    /// not return it. Editor surfaces that fall back to a word scan use
+    /// this to keep the flag from being read as the currency of the
+    /// same name. Every other flag (`*`, `!`, `#`, a `FLAG` letter such
+    /// as `?`, and the `txn` keyword) is false here: none of them can be
+    /// read as a currency, and `txn` must stay a word so its keyword
+    /// hover still works. The flag is the one `Transaction::flag` /
+    /// `Posting::flag` read, so it cannot disagree with the parsed
+    /// directive.
     #[must_use]
-    pub fn is_flag_at(&self, offset: usize) -> bool {
+    pub fn is_currency_flag_at(&self, offset: usize) -> bool {
         let bom_offset = if self.has_leading_bom { 3 } else { 0 };
         let Some(offset) = offset.checked_sub(bom_offset) else {
             return false;
@@ -379,8 +382,11 @@ impl ParseResult {
         if offset >= root.text_range().end() {
             return false;
         }
-        root.token_at_offset(offset)
-            .any(|t| t.text_range().start() == offset && crate::cst::is_flag_token(&t))
+        root.token_at_offset(offset).any(|t| {
+            t.kind() == SyntaxKind::CURRENCY
+                && t.text_range().start() == offset
+                && crate::cst::is_flag_token(&t)
+        })
     }
 
     /// Cursor-API view of the lossless CST that produced this
@@ -1106,7 +1112,7 @@ mod currency_at {
     }
 
     #[test]
-    fn test_is_flag_at_reads_header_and_posting_flags() {
+    fn test_is_currency_flag_at_reads_one_letter_flags_only() {
         for bom in ["", "\u{feff}"] {
             let source = format!(
                 "{bom}2024-01-01 commodity T\n2024-01-16 T \"Transfer\"\n  P Assets:Cash 1 T\n  Assets:Bank\n"
@@ -1115,12 +1121,34 @@ mod currency_at {
             let header_flag = source.find("16 T").unwrap() + 3;
             let posting_flag = source.find("P Assets").unwrap();
             let currency = source.find("1 T").unwrap() + 2;
-            assert!(result.is_flag_at(header_flag), "header flag, bom {bom:?}");
-            assert!(result.is_flag_at(posting_flag), "posting flag, bom {bom:?}");
-            assert!(!result.is_flag_at(currency), "currency, bom {bom:?}");
-            assert!(!result.is_flag_at(header_flag + 1), "after the flag");
-            assert!(!result.is_flag_at(source.len()), "end of source");
-            assert!(!result.is_flag_at(usize::MAX), "past the end");
+            assert!(
+                result.is_currency_flag_at(header_flag),
+                "header flag, bom {bom:?}"
+            );
+            assert!(
+                result.is_currency_flag_at(posting_flag),
+                "posting flag, bom {bom:?}"
+            );
+            assert!(
+                !result.is_currency_flag_at(currency),
+                "currency, bom {bom:?}"
+            );
+            assert!(
+                !result.is_currency_flag_at(header_flag + 1),
+                "after the flag"
+            );
+            assert!(!result.is_currency_flag_at(source.len()), "end of source");
+            assert!(!result.is_currency_flag_at(usize::MAX), "past the end");
+        }
+        // Other flags are not currency-shaped, and `txn` must stay a word for
+        // its keyword hover: none of them counts.
+        let source = "2024-01-03 txn \"Broker\" \"Buy\"\n  ! Assets:A 1 USD\n  * Assets:B\n\
+                      2024-01-04 * \"x\"\n  Assets:A 1 USD\n  Assets:B\n\
+                      2024-01-05 ! \"x\"\n  Assets:A 1 USD\n  Assets:B\n";
+        let result = parse(source);
+        for needle in ["txn", "! Assets", "* Assets", "* \"x\"", "! \"x\""] {
+            let offset = source.find(needle).unwrap();
+            assert!(!result.is_currency_flag_at(offset), "{needle:?}");
         }
     }
 }

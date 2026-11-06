@@ -512,10 +512,11 @@ pub fn get_word_at_position(
 /// [`get_word_at_position`] splits `/6J` at the `/` and `BRK.B` at the
 /// `.`, so rename, references and linked editing could not reach those
 /// currencies (#2807). Otherwise this is [`get_word_at_position`] on the
-/// addressed line, except that a transaction or posting flag is no
-/// symbol: a one-letter flag such as `T` is not the currency `T`, and
+/// addressed line, except that a one-letter transaction or posting flag is
+/// no symbol: a flag such as `T` is not the currency `T`, and
 /// reading it as one let references, highlight, rename, linked editing,
-/// hover and definition on a currency `T` reach every `T` flag.
+/// hover and definition on a currency `T` reach every `T` flag. Other
+/// flags, `txn` among them, are still words, so keyword hover works.
 ///
 /// Takes the handler's [`LineIndex`] so a request builds one index, not
 /// two.
@@ -538,7 +539,7 @@ pub fn get_symbol_at_position(
         get_word_at_position(line, position.character as usize, index.encoding())?;
     let start_col = u32::try_from(start).ok()?;
     let word_start = index.position_to_offset(position.line, start_col)?;
-    if parse_result.is_flag_at(word_start) {
+    if parse_result.is_currency_flag_at(word_start) {
         return None;
     }
     Some((word, start, end))

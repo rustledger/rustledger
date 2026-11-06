@@ -61,7 +61,7 @@ mod trivia;
 mod txn_header;
 
 /// Whether `token` is the flag of its transaction header or posting; see
-/// `convert::is_flag_token`. Re-exposed here for `ParseResult::is_flag_at`.
+/// `convert::is_flag_token`. Re-exposed here for `ParseResult::is_currency_flag_at`.
 pub(crate) fn is_flag_token(token: &crate::SyntaxToken) -> bool {
     convert::is_flag_token(token)
 }

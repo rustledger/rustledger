@@ -3212,6 +3212,12 @@ pub(super) const fn is_comment_kind(kind: crate::SyntaxKind) -> bool {
 /// before a directive. `offset` indexes `stripped`, the post-BOM-strip
 /// source, so a file's single leading BOM is already gone.
 ///
+/// A bare `*` line, with its line ending (or the end of the source) right
+/// after the `*`, is not a heading either: beancount's `^\*/.` needs one more
+/// character on the line (a `\r` counts), so it reports `unexpected ASTERISK`
+/// there, and the line is an ordinary error line here (#2779). That rule is
+/// [`crate::logos_lexer::beancount_ignores_line`], shared with the lexer.
+///
 /// The lexer has its own, deliberately broader, rule for the same line:
 /// `TokenIter`'s `Token::Star` arm in `logos_lexer.rs` (#2778) skips the
 /// rest of any line-start `*` line (BOMs included) without lexing it.
@@ -3222,6 +3228,9 @@ pub(super) const fn is_comment_kind(kind: crate::SyntaxKind) -> bool {
 pub(super) fn is_section_marker(kind: crate::SyntaxKind, stripped: &str, offset: usize) -> bool {
     kind == crate::SyntaxKind::STAR
         && (offset == 0 || stripped.as_bytes().get(offset - 1) == Some(&b'\n'))
+        && stripped
+            .get(offset..)
+            .is_some_and(crate::logos_lexer::beancount_ignores_line)
 }
 
 /// Output of the fused top-level pass [`walk_top_level_once`].
@@ -5247,12 +5256,12 @@ fn report_invalid_dates(
 /// swallows the indented line. An indented comment continues the directive
 /// above.
 ///
-/// A column-0 comment is `;` and anything, or `*`, `%` or `#` followed by at
-/// least one more character on the line, except `#` starting a tag (`#a1`,
-/// `#a b`). A bare marker is a token, not a comment, and beancount reports it
-/// on its own line. `!`, `&` and `:` lines are comments to beancount too, but
-/// rledger already reports an error on such a line, so they are not taken as
-/// gaps here.
+/// A column-0 comment is a line beancount ignores, per
+/// [`crate::logos_lexer::beancount_ignores_line`]: `;` and anything, or `*`,
+/// `:` or a flag character (`!`, `&`, `#`, `?`, `%`) followed by at least one
+/// more character on the line, except `#` starting a tag (`#a1`, `#a b`). A
+/// bare marker is a token, not a comment, and beancount reports it on its own
+/// line.
 ///
 /// A previous line that starts inside a multi-line string (`multiline_strings`,
 /// sorted) is the string's text. Its directive is the one on the line where
@@ -5303,16 +5312,7 @@ fn previous_line_is_a_gap(
     // Not trimmed of `\r`: a `#\r` line is a comment, as flex's `.` takes the
     // `\r` (bean-check 3.2.3).
     let previous = &before[previous_start..];
-    let mut chars = previous.chars();
-    let comment = match (chars.next(), chars.next()) {
-        (Some(';'), _) => true,
-        (Some('*' | '%'), Some(_)) => true,
-        (Some('#'), Some(next)) => {
-            !(next.is_ascii_alphanumeric() || matches!(next, '-' | '_' | '/' | '.'))
-        }
-        _ => false,
-    };
-    comment
+    crate::logos_lexer::beancount_ignores_line(previous)
         || previous.trim_start_matches([' ', '\t', '\r']).is_empty()
         || takes_no_metadata(previous) && !has_an_error(previous_start, line_start)
 }

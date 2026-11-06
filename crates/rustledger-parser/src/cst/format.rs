@@ -763,8 +763,8 @@ pub fn cr_outside_strings_present(src: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceState {
     /// In normal code. `"` opens a string; `;` / `%` / `#!` /
-    /// `#+`, a column-0 `#`, or a column-0 `*` (an org-mode heading)
-    /// opens a comment; everything else is just bytes.
+    /// `#+`, a column-0 `#`, `!`, `&`, `?` or `:`, or a column-0 `*`
+    /// (an org-mode heading) opens a comment; everything else is just bytes.
     Code,
     /// Inside `"…"`. Bytes pass through; an unescaped `"` exits.
     InString,
@@ -791,6 +791,11 @@ enum SourceState {
 /// an org-mode heading: the lexer's `Token::Star` arm emits the rest
 /// of the line as one token without lexing it, so a `"` there is
 /// heading text, and the line is treated as a comment here (#2778).
+/// A `!`, `&`, `?` or `:` at line start opens a comment too: beancount
+/// ignores such a line, and the lexer's column-0 comment arm in
+/// `TokenIter` makes it one comment token (#2779). A bare marker (its
+/// line ending right after it) is a token of its own there, but has
+/// nothing after it to misread, so it needs no case here.
 ///
 /// The column-0 `#` comment and the heading close on the first `\n`
 /// or `\r`, like the others. A run of stray `\r` bytes before the
@@ -831,10 +836,17 @@ const fn advance_source_state(
             // A `%` is a comment only at column 0; elsewhere the lexer reads a
             // flag, as beancount does (#2802).
             let is_percent_line_comment = ch == '%' && at_line_start;
+            // A column-0 `!`, `&`, `?` or `:` line is ignored, as in beancount
+            // (#2779).
+            let is_flag_line_comment = matches!(ch, '!' | '&' | '?' | ':') && at_line_start;
             if ch == '"' {
                 *prev_was_backslash = false;
                 SourceState::InString
-            } else if ch == ';' || is_percent_line_comment || is_hash_line_comment || is_org_heading
+            } else if ch == ';'
+                || is_percent_line_comment
+                || is_hash_line_comment
+                || is_org_heading
+                || is_flag_line_comment
             {
                 SourceState::InComment
             } else {
@@ -4438,6 +4450,13 @@ mod tests {
         (
             "org_heading_quote_then_string",
             "** Sub \"heading\n2024-01-15 note Assets:A \"x\"\n",
+        ),
+        // A column-0 `!`, `&`, `?` or `:` line is one comment token, so a
+        // `"` there is comment text (#2779), and the string on the later
+        // line is still read as one.
+        (
+            "flag_line_quote_then_string",
+            "! a \"q\n& b \"q\n? c \"q\n: d \"q\n2024-01-15 note Assets:A \"x\"\n",
         ),
         ("pushtag_directive", "pushtag #active\n"),
         ("poptag_directive", "poptag #active\n"),

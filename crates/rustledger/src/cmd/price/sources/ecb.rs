@@ -185,9 +185,16 @@ impl PriceSource for EcbSource {
         }
     }
 
-    /// `BASE-SYMBOL` names its pair, based in BASE (#2866).
+    /// The base of the pair the source fetches (#2866), read by the same
+    /// [`PriceSource::bean_price_pair`] the fetch uses: the pair ticker
+    /// (`EUR-GBP`) and a bare one quoted in the requested currency (`EUR`)
+    /// are both based in `EUR`.
     fn pair_base(&self, ticker: &str) -> Option<String> {
-        split_dash_pair(ticker).map(|(base, _)| base.to_string())
+        let pair = self.bean_price_pair(PricePair {
+            ticker: ticker.to_string(),
+            currency: String::new(),
+        });
+        Some(pair.ticker.to_uppercase())
     }
 
     fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
@@ -366,12 +373,9 @@ mod tests {
     #[test]
     fn test_pair_base() {
         let source = EcbSource::new(Duration::from_secs(30));
-        assert_eq!(
-            source.pair_base("GBP-EUR").as_deref(),
-            Some("GBP"),
-            "GBP-EUR"
-        );
-        assert_eq!(source.pair_base("GBP"), None, "GBP");
+        for (ticker, base) in [("GBP-EUR", Some("GBP")), ("GBP", Some("GBP"))] {
+            assert_eq!(source.pair_base(ticker).as_deref(), base, "{ticker}");
+        }
     }
 
     fn pair(ticker: &str, currency: &str) -> PricePair {

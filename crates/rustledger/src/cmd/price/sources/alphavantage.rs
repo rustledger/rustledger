@@ -35,6 +35,16 @@ pub struct AlphaVantageSource {
     timeout: Duration,
 }
 
+/// The endpoint a ticker is fetched from (see [`AlphaVantageSource::route`]).
+enum Route<'a> {
+    /// `CRYPTO:SYMBOL`.
+    Crypto(&'a str),
+    /// `FROM/TO`.
+    Forex(&'a str, &'a str),
+    /// A stock symbol.
+    Stock(&'a str),
+}
+
 impl AlphaVantageSource {
     /// Create a new Alpha Vantage source.
     pub const fn new(timeout: Duration) -> Self {
@@ -130,23 +140,32 @@ impl AlphaVantageSource {
 
     /// Determine the type of request and fetch accordingly.
     fn fetch_internal(&self, pair: &PricePair, api_key: &str) -> Result<PriceResponse> {
-        let ticker = &pair.ticker;
+        match Self::route(&pair.ticker) {
+            Route::Crypto(symbol) => self.fetch_crypto(symbol, &pair.currency, api_key),
+            Route::Forex(from, to) => self.fetch_forex(from, to, api_key),
+            Route::Stock(symbol) => self.fetch_stock(symbol, &pair.currency, api_key),
+        }
+    }
 
-        // Check for crypto prefix
+    /// Which endpoint a ticker is fetched from: `CRYPTO:BTC` (crypto),
+    /// `EUR/USD` (forex), or anything else (a stock).
+    fn route(ticker: &str) -> Route<'_> {
         if let Some(symbol) = ticker.strip_prefix("CRYPTO:") {
-            return self.fetch_crypto(symbol, &pair.currency, api_key);
+            return Route::Crypto(symbol);
         }
-
-        // Check for forex format (contains /)
-        if ticker.contains('/') {
-            let parts: Vec<&str> = ticker.split('/').collect();
-            if parts.len() == 2 {
-                return self.fetch_forex(parts[0], parts[1], api_key);
-            }
+        let parts: Vec<&str> = ticker.split('/').collect();
+        if let [from, to] = parts[..] {
+            return Route::Forex(from, to);
         }
+        Route::Stock(ticker)
+    }
 
-        // Default to stock
-        self.fetch_stock(ticker, &pair.currency, api_key)
+    /// The asset a ticker's quote is a price of, as [`Self::route`] reads
+    /// it: the crypto symbol, the forex base, or the stock.
+    fn request_base(ticker: &str) -> &str {
+        match Self::route(ticker) {
+            Route::Crypto(base) | Route::Forex(base, _) | Route::Stock(base) => base,
+        }
     }
 
     fn fetch_stock(&self, symbol: &str, currency: &str, api_key: &str) -> Result<PriceResponse> {
@@ -292,20 +311,16 @@ impl PriceSource for AlphaVantageSource {
         }
     }
 
-    /// The tickers that name both sides of their pair (#2866): beanprice's
-    /// `price:SYMBOL:BASE` and `fx:CCY:BASE`, based in SYMBOL and CCY, and
-    /// rledger's forex `CCY/BASE`, based in CCY.
+    /// The base of what the source fetches (#2866): the ticker read by the
+    /// same [`PriceSource::bean_price_pair`] and `request_base` the
+    /// fetch routes by. `fx:USD:CHF` and `USD/CHF` are based in `USD`,
+    /// `price:IBM:USD` and `IBM` in `IBM`, `CRYPTO:BTC` in `BTC`.
     fn pair_base(&self, ticker: &str) -> Option<String> {
         let pair = self.bean_price_pair(PricePair {
             ticker: ticker.to_string(),
             currency: String::new(),
         });
-        if !pair.currency.is_empty() {
-            // A beanprice form, read into `SYMBOL` or `CCY/BASE`.
-            return pair.ticker.split('/').next().map(str::to_string);
-        }
-        let (base, quote) = ticker.split_once('/')?;
-        (!base.is_empty() && !quote.is_empty()).then(|| base.to_string())
+        Some(Self::request_base(&pair.ticker).to_uppercase())
     }
 
     fn requires_api_key(&self) -> bool {
@@ -402,23 +417,15 @@ mod tests {
     #[test]
     fn test_pair_base() {
         let source = AlphaVantageSource::new(Duration::from_secs(30));
-        assert_eq!(
-            source.pair_base("price:IBM:USD").as_deref(),
-            Some("IBM"),
-            "price:IBM:USD"
-        );
-        assert_eq!(
-            source.pair_base("fx:USD:CHF").as_deref(),
-            Some("USD"),
-            "fx:USD:CHF"
-        );
-        assert_eq!(
-            source.pair_base("EUR/USD").as_deref(),
-            Some("EUR"),
-            "EUR/USD"
-        );
-        assert_eq!(source.pair_base("AAPL"), None, "AAPL");
-        assert_eq!(source.pair_base("CRYPTO:BTC"), None, "CRYPTO:BTC");
+        for (ticker, base) in [
+            ("price:IBM:USD", Some("IBM")),
+            ("fx:USD:CHF", Some("USD")),
+            ("EUR/USD", Some("EUR")),
+            ("AAPL", Some("AAPL")),
+            ("CRYPTO:BTC", Some("BTC")),
+        ] {
+            assert_eq!(source.pair_base(ticker).as_deref(), base, "{ticker}");
+        }
     }
 
     fn pair(ticker: &str, currency: &str) -> PricePair {

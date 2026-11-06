@@ -91,9 +91,15 @@ In `price:` metadata, a leading `^` on the ticker inverts the quote on any sourc
   - `rust_decimal` holds at most 28 decimal places, so an inverse near 10^-k keeps k - 1 fewer significant digits. bean-price's `ecbrates` writes fewer still, about six, because it leaves Python's decimal precision set to its rate legs' after each fetch. rledger keeps 28 digits on every source.
 - **Refusals.** The inverse of a price of B in Q is a price of Q in B, so rledger writes it only when both of these hold:
   - the currency of the quote the source returns is the commodity;
-  - when the ticker names both sides of its own pair, its base is the declared currency. These tickers name a pair: `ratesapi` and `ecb` `EUR-GBP`, `coinmarketcap` `BTC-CHF`, `coinbase` `BTC-USD`, `oanda` `EUR_CHF`, `yahoo` `EURCHF=X` and `BTC-USD`, and `alphavantage` `fx:EUR:CHF`, `price:IBM:USD` and `EUR/CHF`.
+  - the base of what the source fetches for the ticker is the declared currency. The source reads the base with the same code it builds the request with:
+    - `ratesapi`, `ecb` and `coinmarketcap`: `EUR-GBP`, or a bare `EUR` quoted in the requested currency, is based in `EUR`.
+    - `coinbase`: `BTC-USD` or `BTC` is based in `BTC`.
+    - `oanda`: `EUR_CHF`, a CFD such as `NAS100_USD`, or a bare `EUR` is based in the part before the last `_`.
+    - `alphavantage`: `fx:EUR:CHF` or `EUR/CHF` is based in `EUR`, `price:IBM:USD` or `IBM` in `IBM`, and `CRYPTO:BTC` in `BTC`.
+    - `yahoo`: `EURCHF=X` is based in `EUR`, `JPY=X` in `USD`, and a crypto `BTC-USD` in `BTC`, in any case. Other Yahoo tickers (`AAPL`, `BRK-B`) name no pair and are judged by the quote alone.
+    - `coincap`, `quandl`, `tsp`, `eastmoneyfund` and command sources: the ticker names no pair, so only the quote is checked.
 
-  So `EUR:oanda/^EUR_CHF` on `CHF` writes the CHF price in EUR, and `USD:oanda/^EUR_CHF` is refused, where bean-price writes the EUR-per-CHF inverse labeled USD. A refusal applies with or without `-b`, and its message names the `^` as bean-price's inversion.
+  So `EUR:oanda/^EUR_CHF` on `CHF` writes the CHF price in EUR, and `USD:oanda/^EUR_CHF` is refused, where bean-price writes the EUR-per-CHF inverse labeled USD. A refusal applies with or without `-b`. When an attempt was an inversion, a failed fetch ends with one note naming the `^` as bean-price's inversion.
   - A second `^` (`^^X`) is refused, as bean-price's grammar refuses it.
   - A zero quote, or a quote at or above 2 * 10^28 whose inverse rounds to zero, fails that source, and the chain moves on to the next one. bean-price stops with a division-by-zero error instead.
 - **Migrating index tickers.** A `price:` spec written for rledger before this change, such as `price: "USD:yahoo/^GSPC"`, used to send `^GSPC` to Yahoo. It now reads as bean-price does: the inverse of `GSPC`. Move such index tickers to `[price.mapping]` (`ticker = "^GSPC"`) or `--mapping SPX:^GSPC`, which keep the `^`.

@@ -71,10 +71,16 @@ impl PriceSource for CoinMarketCapSource {
         }
     }
 
-    /// `SYMBOL-BASE` names its pair, priced in BASE: the asset SYMBOL is
-    /// the side an inversion is a price in (#2866).
+    /// The base of the pair the source fetches (#2866), read by the same
+    /// [`PriceSource::bean_price_pair`] the fetch uses: the pair ticker
+    /// (`EUR-GBP`) and a bare one quoted in the requested currency (`EUR`)
+    /// are both based in `EUR`.
     fn pair_base(&self, ticker: &str) -> Option<String> {
-        split_dash_pair(ticker).map(|(base, _)| base.to_string())
+        let pair = self.bean_price_pair(PricePair {
+            ticker: ticker.to_string(),
+            currency: String::new(),
+        });
+        Some(pair.ticker.to_uppercase())
     }
 
     fn requires_api_key(&self) -> bool {
@@ -167,12 +173,9 @@ mod tests {
     #[test]
     fn test_pair_base() {
         let source = CoinMarketCapSource::new(Duration::from_secs(30));
-        assert_eq!(
-            source.pair_base("BTC-CHF").as_deref(),
-            Some("BTC"),
-            "BTC-CHF"
-        );
-        assert_eq!(source.pair_base("BTC"), None, "BTC");
+        for (ticker, base) in [("BTC-CHF", Some("BTC")), ("BTC", Some("BTC"))] {
+            assert_eq!(source.pair_base(ticker).as_deref(), base, "{ticker}");
+        }
     }
 
     fn pair(ticker: &str, currency: &str) -> PricePair {

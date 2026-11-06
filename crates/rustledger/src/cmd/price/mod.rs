@@ -294,9 +294,13 @@ impl PriceSourceRegistry {
         // (possibly transient) failure (round-2 deep review of #1801).
         let mut errors: Vec<(String, anyhow::Error)> = Vec::new();
         let mut unknown_sources = Vec::new();
+        // Whether an attempt read a `^` as bean-price's inversion: a failed
+        // fetch then says so, once (#2866).
+        let mut inverted_any = false;
 
         for (source_name, ticker) in &attempts {
             if let Some(source) = self.get(source_name) {
+                inverted_any |= syntax == TickerSyntax::BeanPriceSpec && ticker.starts_with('^');
                 let result = match syntax.inverted_ticker(ticker) {
                     Ok(Some(rest)) => {
                         Self::fetch_inverse(&*source, commodity, rest, currency, date)
@@ -360,6 +364,9 @@ impl PriceSourceRegistry {
             anyhow::anyhow!("No price source available for commodity {commodity}")
         };
 
+        if inverted_any {
+            return Err(anyhow::anyhow!("{err_msg:#} ({INVERSION_NOTE})"));
+        }
         Err(err_msg)
     }
 
@@ -427,6 +434,14 @@ impl PriceSourceRegistry {
     }
 }
 
+/// The note a failed fetch carries when an attempt read a `^` as
+/// bean-price's inversion (#2866): a `price:` spec written for rledger
+/// before #2866 (`USD:yahoo/^GSPC`) now means the inverse of `GSPC`.
+const INVERSION_NOTE: &str = "note: in a `price:` spec, a leading `^` is bean-price's \
+     inversion: the rest of the ticker is fetched and its inverse written; a ticker that \
+     itself starts with `^`, such as Yahoo's `^GSPC`, is kept literal in `[price.mapping]` \
+     or `--mapping SYMBOL:^TICKER`";
+
 /// How [`PriceSourceRegistry`] reads a mapping's tickers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TickerSyntax {
@@ -470,18 +485,18 @@ impl PriceSourceRegistry {
     /// only when both hold:
     ///
     /// - the currency of the quote the source returns (Q) is `commodity`;
-    /// - when the ticker names its own pair, so that the source reports a
-    ///   base for it ([`PriceSource::pair_base`]: `EUR-GBP`, `EUR_CHF`,
-    ///   `EURCHF=X`, `fx:EUR:CHF`), that base (B) is `currency`.
+    /// - when the source reports the base of what it fetches for the ticker
+    ///   ([`PriceSource::pair_base`], read by the same code the fetch uses:
+    ///   `EUR` for `EUR-GBP`, `EUR_CHF`, `EURCHF=X` or `fx:EUR:CHF`), that
+    ///   base (B) is `currency`.
     ///
     /// Otherwise the label would claim a pair the number is not, a relabel
     /// past the #2731 mismatch check that judges an uninverted quote. The
     /// refusal applies with or without `-b`. Stricter than Python:
     /// bean-price writes any such inverse, labeled the declared currency.
     ///
-    /// Every failure carries a note that the `^` was read as bean-price's
-    /// inversion, and how to keep a ticker that starts with `^` (Yahoo's
-    /// `^GSPC`) literal.
+    /// A failed fetch that tried an inversion carries [`INVERSION_NOTE`],
+    /// once, from [`Self::fetch_attempts`].
     ///
     /// # Errors
     ///
@@ -495,27 +510,11 @@ impl PriceSourceRegistry {
         currency: &str,
         date: Option<NaiveDate>,
     ) -> Result<PriceResponse> {
-        Self::fetch_inverse_unnoted(source, commodity, ticker, currency, date).map_err(|e| {
-            anyhow::anyhow!(
-                "{e:#}; note: in a `price:` spec, `^{ticker}` is bean-price's inversion (fetch \
-                 `{ticker}`, write its inverse); a ticker that itself starts with `^`, such as \
-                 Yahoo's `^GSPC`, is kept literal in `[price.mapping]` or `--mapping \
-                 SYMBOL:^TICKER`"
-            )
-        })
-    }
-
-    /// [`Self::fetch_inverse`] without its note.
-    fn fetch_inverse_unnoted(
-        source: &dyn PriceSource,
-        commodity: &str,
-        ticker: &str,
-        currency: &str,
-        date: Option<NaiveDate>,
-    ) -> Result<PriceResponse> {
         if let Some(base) = source.pair_base(ticker)
             && !base.eq_ignore_ascii_case(currency)
         {
+            let base = base.to_uppercase();
+            let currency = currency.to_uppercase();
             anyhow::bail!(
                 "`^{ticker}` inverts a price of {base}, which is a price in {base}, not \
                  in {currency}; refusing to write it as a {currency} price"
@@ -526,7 +525,7 @@ impl PriceSourceRegistry {
             currency: currency.to_string(),
             date,
         })?;
-        let quote = response.currency.as_str();
+        let quote = response.currency.to_uppercase();
         if !quote.eq_ignore_ascii_case(commodity) {
             anyhow::bail!(
                 "`^{ticker}` inverts a price in {quote}, which is a price of {quote}, not of \
@@ -1074,7 +1073,6 @@ mod tests {
             noted(
                 "`^EURUSD` inverts a price in GBP, which is a price of GBP, not of CHF; \
                  refusing to write it as a CHF price",
-                "EURUSD"
             )
         );
 
@@ -1092,7 +1090,6 @@ mod tests {
             noted(
                 "`^EUR-GBP` inverts a price of EUR, which is a price in EUR, not in USD; \
                  refusing to write it as a USD price",
-                "EUR-GBP"
             )
         );
     }
@@ -1110,10 +1107,10 @@ mod tests {
                 .expect_err("a malformed `^`");
             assert_eq!(
                 format!("{err:#}"),
-                format!(
+                noted(&format!(
                     "invalid source ticker `{ticker}`: a bean-price spec inverts with one `^` \
                      before the ticker"
-                )
+                ))
             );
             assert!(source.asked.lock().expect("not poisoned").is_empty());
         }
@@ -1243,7 +1240,6 @@ mod tests {
             format!("{err:#}"),
             noted(
                 "cannot invert the pairs price 0 GBP for `^EUR-GBP`: a zero price has no inverse",
-                "EUR-GBP"
             )
         );
     }
@@ -1259,13 +1255,8 @@ mod tests {
     }
 
     /// `message` with the note every failed `^` inversion carries.
-    fn noted(message: &str, ticker: &str) -> String {
-        format!(
-            "{message}; note: in a `price:` spec, `^{ticker}` is bean-price's inversion (fetch \
-             `{ticker}`, write its inverse); a ticker that itself starts with `^`, such as \
-             Yahoo's `^GSPC`, is kept literal in `[price.mapping]` or `--mapping \
-             SYMBOL:^TICKER`"
-        )
+    fn noted(message: &str) -> String {
+        format!("{message} ({INVERSION_NOTE})")
     }
 
     /// A source that reads its pair base as `reader` does (a real source,
@@ -1340,7 +1331,6 @@ mod tests {
             noted(
                 "`^EUR_CHF` inverts a price of EUR, which is a price in EUR, not in USD; \
                  refusing to write it as a USD price",
-                "EUR_CHF"
             )
         );
         // CHF with `EUR:oanda/^EUR_CHF`: the CHF price in EUR.
@@ -1359,7 +1349,6 @@ mod tests {
             noted(
                 "`^BTC-USD` inverts a price of BTC, which is a price in BTC, not in EUR; \
                  refusing to write it as a EUR price",
-                "BTC-USD"
             )
         );
         // USD with `BTC:coinbase/^BTC-USD`: the USD price in BTC.
@@ -1381,5 +1370,83 @@ mod tests {
         let response = spec_inverse(yahoo(), "^EURCHF=X", "CHF", "EUR", "0.8", "CHF")
             .expect("CHF per EUR inverted");
         assert_eq!(response.price.to_string(), "1.25");
+    }
+
+    /// Round 3 of #2883: oanda CFDs and Yahoo's `XXX=X` are pairs too, a
+    /// lower-case ticker is read as the source reads it, and alphavantage's
+    /// `price:IBM:USD` inverts only into IBM.
+    #[test]
+    fn test_fetch_price_for_spec_checks_cfd_usd_and_stock_bases() {
+        let timeout = std::time::Duration::from_secs(1);
+        let oanda = || -> Arc<dyn PriceSource> { Arc::new(sources::OandaSource::new(timeout)) };
+        let yahoo =
+            || -> Arc<dyn PriceSource> { Arc::new(sources::YahooFinanceSource::new(timeout)) };
+        let alphavantage =
+            || -> Arc<dyn PriceSource> { Arc::new(sources::AlphaVantageSource::new(timeout)) };
+
+        // USD with `EUR:oanda/^NAS100_USD`: an NAS100-based CFD, not EUR.
+        let err = spec_inverse(oanda(), "^NAS100_USD", "USD", "EUR", "18000", "USD")
+            .expect_err("NAS100 per USD is not an EUR price");
+        assert_eq!(
+            format!("{err:#}"),
+            noted(
+                "`^NAS100_USD` inverts a price of NAS100, which is a price in NAS100, not in \
+                 EUR; refusing to write it as a EUR price"
+            )
+        );
+
+        // JPY with `EUR:yahoo/^JPY=X`: Yahoo's `JPY=X` is USD-based. With
+        // `USD:yahoo/^JPY=X`, the JPY price in USD.
+        let err = spec_inverse(yahoo(), "^JPY=X", "JPY", "EUR", "150", "JPY")
+            .expect_err("USD per JPY is not an EUR price");
+        assert!(
+            format!("{err:#}").starts_with("`^JPY=X` inverts a price of USD"),
+            "{err:#}"
+        );
+        let response = spec_inverse(yahoo(), "^JPY=X", "JPY", "USD", "160", "JPY")
+            .expect("JPY per USD inverted");
+        assert_eq!(response.price.to_string(), "0.00625");
+
+        // A lower-case ticker is checked, and the base printed upper-case.
+        let err = spec_inverse(yahoo(), "^eurchf=x", "CHF", "usd", "0.94", "CHF")
+            .expect_err("EUR per CHF is not a USD price");
+        assert!(
+            format!("{err:#}").starts_with(
+                "`^eurchf=x` inverts a price of EUR, which is a price in EUR, not in USD"
+            ),
+            "{err:#}"
+        );
+
+        // USD with `price: "IBM:alphavantage/^price:IBM:USD"`: the USD price
+        // in IBM shares; with `EUR:`, refused.
+        let response = spec_inverse(alphavantage(), "^price:IBM:USD", "USD", "IBM", "250", "USD")
+            .expect("USD per IBM inverted");
+        assert_eq!(
+            (response.price.to_string(), response.currency),
+            ("0.004".to_string(), "IBM".to_string())
+        );
+        let err = spec_inverse(alphavantage(), "^price:IBM:USD", "USD", "EUR", "250", "USD")
+            .expect_err("IBM per USD is not an EUR price");
+        assert!(
+            format!("{err:#}").starts_with("`^price:IBM:USD` inverts a price of IBM"),
+            "{err:#}"
+        );
+    }
+
+    /// The inversion note is attached once per fetch, after the attempts,
+    /// with a separator of its own.
+    #[test]
+    fn test_fetch_price_for_spec_notes_inversion_once() {
+        let (registry, mapping) = registry_with(
+            vec![("a", pair_source("0")), ("b", pair_source("0"))],
+            "GBP",
+            &[("a", "^EUR-GBP"), ("b", "^EUR-GBP")],
+        );
+        let err = registry
+            .fetch_price_for_spec("GBP", "EUR", None, &mapping)
+            .expect_err("both quotes are zero");
+        let text = format!("{err:#}");
+        assert_eq!(text.matches(INVERSION_NOTE).count(), 1, "{text}");
+        assert!(text.ends_with(&format!(" ({INVERSION_NOTE})")), "{text}");
     }
 }

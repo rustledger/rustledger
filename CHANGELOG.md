@@ -83,9 +83,9 @@ Shipped work, by area. Forward-looking plans live in [docs/roadmap/](docs/roadma
     - Below 0.1, `rust_decimal`'s 28 decimal places keep k - 1 fewer digits near 10^-k.
     - A `[price.mapping]` ticker, `--mapping` and `--source` keep `^` as part of the ticker, so Yahoo's `^GSPC` still works.
     - `^^X` is refused, as bean-price's grammar refuses it.
-    - Migration: a `price:` spec such as `"USD:yahoo/^GSPC"`, which sent `^GSPC` to Yahoo before, now reads as bean-price reads it, the inverse of `GSPC`. Move index tickers to `[price.mapping]` (`ticker = "^GSPC"`) or `--mapping SPX:^GSPC`. A failed inversion's message says so.
+    - Migration: a `price:` spec such as `"USD:yahoo/^GSPC"`, which sent `^GSPC` to Yahoo before, now reads as bean-price reads it, the inverse of `GSPC`. Move index tickers to `[price.mapping]` (`ticker = "^GSPC"`) or `--mapping SPX:^GSPC`. A failed fetch that tried an inversion ends with a note saying so.
   - Stricter than Python, for inverses:
-    - rledger refuses an inverse that is not a price of the commodity in the declared currency, with or without `-b`, where bean-price relabels it. This covers every source whose ticker names its pair, including `oanda`'s `EUR_CHF`, `coinbase`'s `BTC-USD` and `yahoo`'s `EURCHF=X`.
+    - rledger refuses an inverse that is not a price of the commodity in the declared currency, with or without `-b`, where bean-price relabels it. Each source reads the base of a ticker with the same code it builds the request with (Yahoo, which sends the ticker as it is, by its own pair conventions), so this covers `oanda`'s `EUR_CHF` and CFDs (`NAS100_USD`), `coinbase`'s `BTC-USD`, and `yahoo`'s `EURCHF=X` and `JPY=X` (USD-based), as well as bare tickers quoted in the requested currency.
     - A zero quote, or an inverse that rounds to zero, moves on to the next source, where bean-price stops on a division by zero.
     - bean-price's `ecbrates` writes an inverse to about six digits, because it leaves Python's decimal precision set to its rate legs'. rledger keeps 28.
   - These sources now read beanprice's ticker forms. rledger's own forms still work.

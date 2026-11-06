@@ -106,6 +106,49 @@ fn check_missing_file_maps_to_not_found() {
     assert_eq!(env["error"]["code"], "FILE_NOT_FOUND");
 }
 
+/// An argument that is not UTF-8 is agcli's `PARSE_ERROR` envelope naming
+/// its position, exit code 2 (`USAGE`), not a panic in `std::env::args()`
+/// with exit code 101 and no envelope (#2860). The same in any position,
+/// including after flags the argv rewriting would otherwise look at.
+#[cfg(unix)]
+#[test]
+fn test_main_non_utf8_argument_is_a_parse_error_envelope() {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt;
+
+    let bad = || OsString::from_vec(b"\xff.beancount".to_vec());
+    for (args, index) in [
+        (vec![OsString::from("check"), bad()], 2),
+        (vec![bad()], 1),
+        (
+            vec![
+                OsString::from("check"),
+                OsString::from("--json"),
+                OsString::from("--plugin"),
+                bad(),
+            ],
+            4,
+        ),
+    ] {
+        let output = Command::new(ag_rledger())
+            .args(&args)
+            .output()
+            .expect("spawn ag-rledger");
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let env: Value = serde_json::from_str(stdout.trim())
+            .unwrap_or_else(|e| panic!("{args:?}: envelope is not JSON ({e}): {stdout}"));
+        assert_eq!(output.status.code(), Some(2), "{args:?}: {env}");
+        assert_eq!(env["ok"], Value::Bool(false), "{args:?}: {env}");
+        assert_eq!(env["exit_code"], 2, "{args:?}: {env}");
+        assert_eq!(env["error"]["code"], "PARSE_ERROR", "{args:?}: {env}");
+        assert_eq!(
+            env["error"]["message"],
+            format!("argument {index} is not valid UTF-8"),
+            "{args:?}: {env}"
+        );
+    }
+}
+
 #[test]
 fn query_returns_structured_json() {
     let tmp = tempfile::tempdir().unwrap();

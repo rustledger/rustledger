@@ -35,7 +35,17 @@ const SCHEMA_VERSION: &str = "ag-rledger.v1";
 
 #[tokio::main]
 async fn main() {
-    let args = std::env::args().collect();
+    // `std::env::args()` panics on an argument that is not UTF-8, before
+    // agcli has run and so with no envelope (#2860). agcli's own answer to
+    // one is `run_env`'s: it reads the same process argv, finds the argument
+    // that is not UTF-8, and returns a `PARSE_ERROR` envelope naming its
+    // position (exit code `USAGE`) without dispatching anything.
+    let Ok(args) = std::env::args_os()
+        .map(std::ffi::OsString::into_string)
+        .collect::<Result<Vec<String>, _>>()
+    else {
+        emit(&build_cli().run_env().await);
+    };
     let args = merge_repeated_value_flags(
         expand_config_aliases(attach_global_values(args, is_config_alias)),
         is_config_alias,
@@ -49,6 +59,11 @@ async fn main() {
         Ok(run) => run,
         Err(error) => handler_panic(args, error).await,
     };
+    emit(&run);
+}
+
+/// Print `run`'s envelope and exit with its exit code.
+fn emit(run: &agcli::Execution) -> ! {
     // The envelope's records carry ledger strings: DEL, C1, bidi controls
     // and line separators are written as `\uXXXX`, the same JSON value, so
     // whoever reads the envelope raw is not acted on (#2714).

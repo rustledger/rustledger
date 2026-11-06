@@ -301,9 +301,9 @@ pub struct FileLoad {
     /// flatten to `<unknown>`, 0. A query reports it, as the CLI does (#2825).
     pub directive_placeholders: Vec<Option<(String, u32)>>,
     pub errors: Vec<Error>,
-    /// Parallel to `errors`: whether the error leaves the ledger incomplete,
-    /// so a query over it must not answer. A duplicate include does not
-    /// ([`rustledger_loader::LoadError::leaves_ledger_complete`]).
+    /// Parallel to `errors`: whether the error stops a query over the ledger
+    /// from answering, a parse error or a booking failure
+    /// ([`rustledger_loader::LedgerError::blocks_queries`], #2861).
     pub error_blocks_queries: Vec<bool>,
     pub options: LedgerOptions,
     pub plugins: Vec<Plugin>,
@@ -426,7 +426,7 @@ pub fn load_file_with_fs(
     let error_blocks_queries: Vec<bool> = ledger
         .errors
         .iter()
-        .map(|e| !e.leaves_ledger_complete())
+        .map(rustledger_loader::LedgerError::blocks_queries)
         .collect();
     let options = build_ledger_options(&ledger.options, &ledger.display_context);
     let plugins: Vec<Plugin> = ledger

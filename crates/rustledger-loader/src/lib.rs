@@ -253,20 +253,41 @@ impl LoadError {
     /// is right. True for a duplicate include and an include cycle (the file
     /// included again is one the loader already read; beancount says
     /// `Duplicate filename parsed` for both), and for an include glob that
-    /// matches nothing (there is nothing to read). The error is still
-    /// reported, but the FFI file queries and WASM `queryMultiFile` answer, as
-    /// `bean-query` does. The other load errors leave a named file unread
-    /// (I/O, decryption, a confined path, a bad glob, too many files) or
-    /// unparsed.
+    /// matches nothing (there is nothing to read). The other load errors leave
+    /// a named file unread (I/O, decryption, a confined path, a bad glob, too
+    /// many files) or unparsed.
     ///
-    /// `rledger query` has its own, looser rule: it refuses only on a parse or
-    /// booking error, so it also answers over a missing include.
+    /// This is what `rledger doctor roundtrip` asks: it can only predict
+    /// `rledger format` on every file if it read every file. It is NOT the
+    /// rule for whether a query answers; that is [`Self::blocks_queries`].
     #[must_use]
     pub const fn leaves_ledger_complete(&self) -> bool {
         matches!(
             self,
             Self::DuplicateInclude { .. } | Self::IncludeCycle { .. } | Self::GlobNoMatch { .. }
         )
+    }
+
+    /// Whether this load error stops a query from answering (#2861).
+    ///
+    /// The single rule every query surface applies (the `rledger query`
+    /// CLI, WASM `queryMultiFile` and `Ledger.fromFiles`, FFI `query-file`,
+    /// `batch-file` and `session.from-file`), through this predicate and
+    /// [`LedgerError::blocks_queries`]: **a query answers unless parsing or
+    /// booking failed, and reports every load error beside its rows.**
+    ///
+    /// Of the load errors, only a parse error blocks. `bean-query` 0.2.0
+    /// answers over every load error: a missing include, an include cycle, a
+    /// duplicate include, an include glob matching nothing and an include
+    /// outside the ledger's directory are reported and the rest of the ledger
+    /// is queried, and so do we. It also answers over a parse error and a
+    /// booking error, dropping the entry; there we deliberately deviate and
+    /// refuse, because figures from a ledger that did not parse or book are
+    /// plausible but wrong (see `bail_on_parse_errors` and
+    /// `bail_on_booking_errors` in the `rustledger` crate, #1908, #1987).
+    #[must_use]
+    pub const fn blocks_queries(&self) -> bool {
+        matches!(self, Self::ParseErrors { errors, .. } if !errors.is_empty())
     }
 
     /// Attach the `include` site that caused this failure.

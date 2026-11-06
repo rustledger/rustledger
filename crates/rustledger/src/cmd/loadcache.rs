@@ -153,7 +153,17 @@ pub fn load_result_cached(
 /// opened, a failed balance assertion — leave the entry stream complete and
 /// the arithmetic sound, so those still report exactly as beancount does. That
 /// is the common messy-ledger case and breaking it would be a real
-/// compatibility loss for no safety gain.
+/// compatibility loss for no safety gain. Every other LOAD error (a missing
+/// include, an include cycle, a duplicate include, an empty glob, an include
+/// outside the ledger's directory) is reported and the query answers, as
+/// bean-query answers.
+///
+/// This and [`bail_on_booking_errors`] are the CLI's application of the one
+/// rule every query surface shares (#2861):
+/// [`rustledger_loader::LoadError::blocks_queries`] and
+/// [`rustledger_loader::LedgerError::blocks_queries`]. WASM and the FFI call
+/// the same predicates; the `query_answer_rule` drift-guard tests pin them
+/// together.
 ///
 /// Deliberately NOT registered under `KNOWN_RUST_DIVERGENCES`: the BQL compat
 /// suite's `load_valid_files` already requires `python_ok AND rust_ok`, so a
@@ -172,6 +182,7 @@ pub fn bail_on_parse_errors(raw: &rustledger_loader::LoadResult, file: &Path) ->
     let parse_failures: usize = raw
         .errors
         .iter()
+        .filter(|e| e.blocks_queries())
         .filter_map(|e| match e {
             rustledger_loader::LoadError::ParseErrors { errors, .. } => Some(errors.len()),
             _ => None,
@@ -218,11 +229,14 @@ pub fn bail_on_booking_errors(ledger: &rustledger_loader::Ledger, file: &Path) -
     // validation diagnostics, which do NOT leave the stream unbooked and must
     // not gate a report — `rledger check` is where those are read. Not by
     // code: a lot-matching failure carries its E4xxx code (#2631), which a
-    // validator can raise too.
+    // validator can raise too. The canonical query rule (#2861): its only
+    // blockers are parse and booking failures, and `bail_on_parse_errors`
+    // has already refused a ledger with a parse error, so what is left here
+    // is the booking failures.
     let failures: Vec<&str> = ledger
         .errors
         .iter()
-        .filter(|e| e.is_booking_failure())
+        .filter(|e| e.blocks_queries())
         .map(|e| e.message.as_str())
         .collect();
     if failures.is_empty() {

@@ -936,6 +936,7 @@ option "operating_currency" "EUR"
             booking_method: "STRICT".to_string(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
+            query_refused: false,
         };
 
         let bytes = cache::serialize_ledger(&payload).expect("serialize");

@@ -365,9 +365,9 @@ pub struct LedgerError {
     /// that transaction out of the booked stream. See
     /// [`Self::is_booking_failure`].
     booking_failure: bool,
-    /// Whether this is a load error that leaves the ledger complete. See
-    /// [`Self::leaves_ledger_complete`].
-    complete_load: bool,
+    /// Whether this is a load error that stops a query from answering (a
+    /// parse error). See [`Self::blocks_queries`].
+    parse_failure: bool,
 }
 
 /// Error severity level.
@@ -406,7 +406,7 @@ impl LedgerError {
             phase: "validate".to_string(),
             hint: None,
             booking_failure: false,
-            complete_load: false,
+            parse_failure: false,
         }
     }
 
@@ -422,7 +422,7 @@ impl LedgerError {
             phase: "validate".to_string(),
             hint: None,
             booking_failure: false,
-            complete_load: false,
+            parse_failure: false,
         }
     }
 
@@ -448,13 +448,18 @@ impl LedgerError {
         self.booking_failure
     }
 
-    /// Whether this is a load error after which the ledger is still complete
-    /// (a duplicate include, an include cycle, a glob matching nothing), so a
-    /// query over it may answer. See
-    /// [`LoadError::leaves_ledger_complete`].
+    /// Whether this error stops a query over the ledger from answering: a
+    /// parse error ([`LoadError::blocks_queries`]) or a booking failure
+    /// ([`Self::is_booking_failure`]). Every other error, including every
+    /// other load error (a missing include, an include cycle, ...), a
+    /// validation error and a plugin error, is reported beside the rows.
+    ///
+    /// The one rule for every query surface (#2861); see
+    /// [`LoadError::blocks_queries`] for the rule and why it deviates from
+    /// `bean-query` on parse and booking errors.
     #[must_use]
-    pub const fn leaves_ledger_complete(&self) -> bool {
-        self.complete_load
+    pub const fn blocks_queries(&self) -> bool {
+        self.parse_failure || self.booking_failure
     }
 
     /// Set the processing phase for this error.
@@ -496,7 +501,7 @@ pub fn process(raw: LoadResult, options: &LoadOptions) -> Result<Ledger, Process
     // (the phase transitions and validator setup below borrow it).
     for load_err in &raw.errors {
         let mut err = LedgerError::error("LOAD", load_err.to_string()).with_phase("parse");
-        err.complete_load = load_err.leaves_ledger_complete();
+        err.parse_failure = load_err.blocks_queries();
         if let Some(site) = load_err.include_site() {
             // Prefer the source map for line/col so byte spans stay authoritative.
             if let Some(file) = raw.source_map.get(site.file_id as usize) {
@@ -2032,7 +2037,7 @@ fn ledger_errors_extend(
             phase: phase.to_string(),
             hint: err.hint,
             booking_failure: false,
-            complete_load: false,
+            parse_failure: false,
         });
     }
 }

@@ -24,24 +24,18 @@ use crate::types::{
 use crate::types::{PluginInfo, PluginResult};
 use crate::utils::LineLookup;
 
-/// Whether a load error makes the directive stream unusable.
+/// Whether a load error stops `validateMultiFile` before it validates.
 ///
 /// Not every load error does. `DuplicateInclude` says a file was reached twice
-/// in the include graph — the loader still loaded it exactly once, so the
-/// ledger is complete and every figure derived from it is right. It has to be
-/// REPORTED (beancount says `Duplicate filename parsed` and `bean-check` exits
-/// 1, as does `rledger check`), but aborting on it throws away a correct
-/// answer: `rledger query` prints the notice and still returns the rows.
+/// in the include graph; the loader still loaded it exactly once, so the
+/// ledger is complete. It has to be REPORTED (beancount says `Duplicate
+/// filename parsed` and `bean-check` exits 1, as does `rledger check`), and
+/// validation still runs. An include cycle (the file included again was
+/// already read) and an include glob matching nothing (nothing to read) leave
+/// it complete too: the loader's [`LoadError::leaves_ledger_complete`].
 ///
-/// Treating every load error as fatal did exactly that — a query over a ledger
-/// with a shared prices file included from two journals returned NO rows,
-/// where the CLI returns them. The same shape as a warning being treated as an
-/// error, one layer down.
-///
-/// An include cycle (the file included again was already read) and an include
-/// glob matching nothing (nothing to read) leave it complete too. The rule is
-/// the loader's [`LoadError::leaves_ledger_complete`], which the FFI's file
-/// queries share; `rledger query` refuses only on parse or booking errors.
+/// This is validation's rule, not the query rule: whether a query answers is
+/// [`LoadError::blocks_queries`] (#2861), which every query surface shares.
 fn load_error_is_fatal(error: &LoadError) -> bool {
     !error.leaves_ledger_complete()
 }
@@ -808,11 +802,13 @@ fn query_with_filesystem(
         }
     };
 
-    // Report every load error, but abort only on one that makes the directive
-    // stream unusable. A duplicate include is not one: the ledger loaded
-    // correctly and `rledger query` returns its rows alongside the notice.
+    // Report every load error, but refuse only on a parse error: the one rule
+    // every query surface shares (`LoadError::blocks_queries`, #2861). A
+    // missing include, an include cycle, a duplicate include or an empty glob
+    // is reported beside the rows, as `bean-query` and `rledger query`
+    // report it.
     let load_errors = load_errors_to_errors(&load_result);
-    if load_result.errors.iter().any(load_error_is_fatal) {
+    if load_result.errors.iter().any(LoadError::blocks_queries) {
         let result = QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
@@ -844,10 +840,12 @@ fn query_with_filesystem(
         }
     };
 
+    // The other half of the same rule (`LedgerError::blocks_queries`): a
+    // booking failure leaves the directive stream unbooked.
     let booking_failed = ledger
         .errors
         .iter()
-        .any(rustledger_loader::LedgerError::is_booking_failure);
+        .any(rustledger_loader::LedgerError::blocks_queries);
     // Advisory-only codes (E1004, closing an account with a balance) are not
     // reported by `rledger query` either: the same canonical predicate.
     let errors: Vec<Error> = std::mem::take(&mut ledger.errors)
@@ -919,6 +917,10 @@ fn query_with_filesystem(
 /// Run a BQL query on multiple Beancount files.
 ///
 /// Similar to `query`, but accepts multiple files with include resolution.
+///
+/// Answers unless parsing or booking failed, reporting every load error
+/// (a missing include, an include cycle, ...) beside the rows: the rule
+/// every query surface shares (`LoadError::blocks_queries`, #2861).
 ///
 /// Note: Glob patterns in `include` directives are not supported in multi-file mode
 /// since there is no real filesystem to enumerate. Use explicit file paths instead.
@@ -1038,9 +1040,9 @@ mod load_error_tests {
 
     #[test]
     fn only_unusable_load_errors_are_fatal() {
-        // A duplicate include leaves a usable directive stream; a parse error
-        // does not. This predicate is what lets the query path answer over the
-        // first and refuse the second.
+        // A duplicate include leaves every file read; a confined path does
+        // not. This predicate is what lets validation run over the first and
+        // stop on the second. (Queries follow `LoadError::blocks_queries`.)
         assert!(!load_error_is_fatal(&LoadError::DuplicateInclude {
             path: "shared.beancount".to_string(),
         }));

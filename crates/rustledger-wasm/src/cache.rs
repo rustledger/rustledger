@@ -363,7 +363,11 @@ use crate::types::{Error, LedgerOptions};
 /// v73: loader v57, PARSER OUTPUT changed (#2808, #2856). A date with extra
 /// digits is one date, as in beancount, and every invalid date is reported; a
 /// v72 blob would keep serving such a file with its old errors.
-pub const CACHE_VERSION: u32 = 73;
+/// v74: the `Ledger` payload gained `query_refused`, whether a parse error or
+/// a booking failure stops its queries (#2861); the restored `errors` no
+/// longer carry that flag. Loader output is unchanged; a v73 blob has no such
+/// field and would not deserialize as this layout.
+pub const CACHE_VERSION: u32 = 74;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -451,6 +455,10 @@ pub struct LedgerPayload {
     /// strings for the same reason as `account_type_names`.
     pub summary_account_names: Vec<String>,
     pub errors: Vec<Error>,
+    /// Whether a query over the ledger refuses: a parse error or a booking
+    /// failure (`LedgerError::blocks_queries`, #2861). Archived because
+    /// `errors` lost the flag in conversion.
+    pub query_refused: bool,
 }
 
 // =============================================================================
@@ -801,6 +809,7 @@ mod tests {
                 "EUR".to_string(),
             ],
             errors: vec![Error::new("a warning")],
+            query_refused: true,
         };
         let bytes = serialize_ledger(&payload).expect("serialize");
         assert!(bytes.starts_with(MAGIC_LEDGER));
@@ -821,6 +830,10 @@ mod tests {
             ]
         );
         assert_eq!(restored.errors.len(), 1);
+        assert!(
+            restored.query_refused,
+            "the query gate survives the cache (#2861)"
+        );
     }
 
     #[test]
@@ -866,6 +879,7 @@ option "operating_currency" "USD"
             booking_method: "STRICT".to_string(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
+            query_refused: false,
         })
         .unwrap();
         bytes[0] = b'X';
@@ -890,6 +904,7 @@ option "operating_currency" "USD"
             booking_method: "STRICT".to_string(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
+            query_refused: false,
         })
         .unwrap();
         bytes[8..12].copy_from_slice(&99u32.to_le_bytes());
@@ -932,6 +947,7 @@ option "operating_currency" "USD"
             booking_method: "STRICT".to_string(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
+            query_refused: false,
         })
         .unwrap();
         assert!(

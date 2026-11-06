@@ -2,7 +2,9 @@
 //!
 //! Fetches currency exchange rates from the ECB.
 
-use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, http_get};
+use super::{
+    DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, http_get, split_dash_pair,
+};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
@@ -168,6 +170,19 @@ impl PriceSource for EcbSource {
 
     fn description(&self) -> &'static str {
         "European Central Bank - currency exchange rates"
+    }
+
+    /// beanprice's `ecbrates` ticker `BASE-SYMBOL` (`GBP-EUR`) is the
+    /// rate of BASE in SYMBOL (#2866); rledger's own form, the currency
+    /// alone (`GBP`, quoted in the requested currency), still works.
+    fn bean_price_pair(&self, pair: PricePair) -> PricePair {
+        match split_dash_pair(&pair.ticker) {
+            Some((ticker, currency)) => PricePair {
+                ticker: ticker.to_string(),
+                currency: currency.to_string(),
+            },
+            None => pair,
+        }
     }
 
     fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
@@ -340,6 +355,37 @@ impl PriceSource for EcbSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pair(ticker: &str, currency: &str) -> PricePair {
+        PricePair {
+            ticker: ticker.to_string(),
+            currency: currency.to_string(),
+        }
+    }
+
+    fn read(source: &dyn PriceSource, ticker: &str, currency: &str) -> (String, String) {
+        let pair = source.bean_price_pair(pair(ticker, currency));
+        (pair.ticker, pair.currency)
+    }
+
+    /// beanprice's `ecbrates` `BASE-SYMBOL` names the pair; rledger's
+    /// bare currency keeps the requested one (#2866).
+    #[test]
+    fn test_bean_price_pair() {
+        let source = EcbSource::new(Duration::from_secs(30));
+        assert_eq!(
+            read(&source, "GBP-EUR", "EUR"),
+            ("GBP".to_string(), "EUR".to_string())
+        );
+        assert_eq!(
+            read(&source, "EUR-SEK", "SEK"),
+            ("EUR".to_string(), "SEK".to_string())
+        );
+        assert_eq!(
+            read(&source, "GBP", "EUR"),
+            ("GBP".to_string(), "EUR".to_string())
+        );
+    }
 
     #[test]
     fn test_build_url() {

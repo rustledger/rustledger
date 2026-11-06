@@ -20,7 +20,8 @@ use std::time::Duration;
 ///
 /// # Supported Datasets
 ///
-/// Uses the format `DATABASE/DATASET` for tickers:
+/// Uses the format `DATABASE/DATASET` for tickers, or beanprice's
+/// `DATABASE:DATASET[:COLUMN]` (e.g. `WIKI:AAPL`, `WIKI:AAPL:Adj._Close`):
 /// - `WIKI/AAPL` - Wiki EOD Stock Prices
 /// - `LBMA/GOLD` - London Bullion Market Gold Price
 /// - `FRED/GDP` - Federal Reserve Economic Data
@@ -29,6 +30,46 @@ use std::time::Duration;
 pub struct QuandlSource {
     /// Whole-request timeout, applied to each request.
     timeout: Duration,
+}
+
+/// How a Quandl ticker picks the dataset column that holds the price.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum PriceColumn {
+    /// rledger's `DATABASE/DATASET` form: the first column whose name
+    /// contains `close`, `value`, `price` or `settle`.
+    Heuristic,
+    /// beanprice's `DATABASE:DATASET` form: `Adj. Close`, else `Close`,
+    /// as beanprice's `quandl` picks it.
+    BeanPriceDefault,
+    /// beanprice's `DATABASE:DATASET:COLUMN` form: the column named.
+    Named(String),
+}
+
+impl PriceColumn {
+    /// The index of the price column among `column_names`.
+    fn index(&self, column_names: &[serde_json::Value]) -> Result<usize> {
+        let position = |name: &str| column_names.iter().position(|c| c.as_str() == Some(name));
+        match self {
+            Self::Heuristic => column_names
+                .iter()
+                .position(|c| {
+                    c.as_str().is_some_and(|s| {
+                        let lower = s.to_lowercase();
+                        lower.contains("close")
+                            || lower.contains("value")
+                            || lower.contains("price")
+                            || lower.contains("settle")
+                    })
+                })
+                .with_context(|| "No price column found in dataset"),
+            Self::BeanPriceDefault => position("Adj. Close")
+                .or_else(|| position("Close"))
+                .with_context(|| "No 'Adj. Close' or 'Close' column in the dataset"),
+            Self::Named(name) => {
+                position(name).with_context(|| format!("No '{name}' column in the dataset"))
+            }
+        }
+    }
 }
 
 impl QuandlSource {
@@ -58,12 +99,41 @@ impl QuandlSource {
         }
     }
 
-    /// Parse the dataset identifier.
-    fn parse_dataset(ticker: &str) -> (&str, &str) {
+    /// Parse a ticker into the dataset and the way its price column is
+    /// picked.
+    ///
+    /// beanprice's form (#2866) is `DATABASE:DATASET[:COLUMN]`, matched
+    /// as beanprice's `quandl` matches it, `[A-Z0-9]+:[A-Z0-9]+(:[^:; ]+)?$`,
+    /// with `_` in COLUMN read as a space (`WIKI:AAPL:Adj._Close`).
+    /// rledger's own forms, `DATABASE/DATASET` and a bare `DATASET` (in
+    /// `WIKI`), still work.
+    fn parse_dataset(ticker: &str) -> (&str, &str, PriceColumn) {
+        let code = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+        };
+        let mut parts = ticker.splitn(3, ':');
+        if let (Some(database), Some(dataset)) = (parts.next(), parts.next())
+            && code(database)
+            && code(dataset)
+        {
+            match parts.next() {
+                None => return (database, dataset, PriceColumn::BeanPriceDefault),
+                Some(column) if !column.is_empty() && !column.contains([':', ';', ' ']) => {
+                    return (
+                        database,
+                        dataset,
+                        PriceColumn::Named(column.replace('_', " ")),
+                    );
+                }
+                Some(_) => {}
+            }
+        }
         if let Some(pos) = ticker.find('/') {
-            (&ticker[..pos], &ticker[pos + 1..])
+            (&ticker[..pos], &ticker[pos + 1..], PriceColumn::Heuristic)
         } else {
-            ("WIKI", ticker)
+            ("WIKI", ticker, PriceColumn::Heuristic)
         }
     }
 
@@ -80,6 +150,7 @@ impl QuandlSource {
         url: &str,
         api_key: &str,
         pair: &PricePair,
+        column: &PriceColumn,
         undated_fallback: Option<rustledger_core::NaiveDate>,
     ) -> Result<Vec<PricePoint>> {
         let json = http_get_json(
@@ -126,19 +197,7 @@ impl QuandlSource {
             })
             .unwrap_or(0);
 
-        // Find a price column (Close, Value, Price, etc.)
-        let price_idx = column_names
-            .iter()
-            .position(|c| {
-                c.as_str().is_some_and(|s| {
-                    let lower = s.to_lowercase();
-                    lower.contains("close")
-                        || lower.contains("value")
-                        || lower.contains("price")
-                        || lower.contains("settle")
-                })
-            })
-            .with_context(|| "No price column found in dataset")?;
+        let price_idx = column.index(column_names)?;
 
         let mut points = Vec::new();
         for row in rows {
@@ -193,14 +252,20 @@ impl PriceSource for QuandlSource {
 
     fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
         let api_key = Self::get_api_key()?;
-        let (database, dataset) = Self::parse_dataset(&pair.ticker);
+        let (database, dataset, column) = Self::parse_dataset(&pair.ticker);
         let full_dataset = format!("{database}/{dataset}");
         let url = self.build_url(&full_dataset, &api_key, None);
 
         // The row's own date, never the requested one (#1794); the
         // greatest-date pick guards against a provider that ignores
         // limit=1 (providers do not guarantee sorted series).
-        let points = self.fetch_rows(&url, &api_key, pair, Some(jiff::Zoned::now().date()))?;
+        let points = self.fetch_rows(
+            &url,
+            &api_key,
+            pair,
+            &column,
+            Some(jiff::Zoned::now().date()),
+        )?;
         let point = points.into_iter().max_by_key(|p| p.date).with_context(
             || "No usable rows in the Quandl response (empty dataset or unparsable prices)",
         )?;
@@ -225,10 +290,10 @@ impl PriceSource for QuandlSource {
         // start_date/end_date parameters (#1802 source ports); the
         // dispatch does on-or-before selection over the rows.
         let api_key = Self::get_api_key()?;
-        let (database, dataset) = Self::parse_dataset(&pair.ticker);
+        let (database, dataset, column) = Self::parse_dataset(&pair.ticker);
         let full_dataset = format!("{database}/{dataset}");
         let url = self.build_url(&full_dataset, &api_key, Some(window));
-        self.fetch_rows(&url, &api_key, pair, None)
+        self.fetch_rows(&url, &api_key, pair, &column, None)
     }
 }
 
@@ -238,9 +303,64 @@ mod tests {
 
     #[test]
     fn test_parse_dataset() {
-        assert_eq!(QuandlSource::parse_dataset("WIKI/AAPL"), ("WIKI", "AAPL"));
-        assert_eq!(QuandlSource::parse_dataset("LBMA/GOLD"), ("LBMA", "GOLD"));
-        assert_eq!(QuandlSource::parse_dataset("AAPL"), ("WIKI", "AAPL"));
+        use PriceColumn::{BeanPriceDefault, Heuristic, Named};
+        assert_eq!(
+            QuandlSource::parse_dataset("WIKI/AAPL"),
+            ("WIKI", "AAPL", Heuristic)
+        );
+        assert_eq!(
+            QuandlSource::parse_dataset("LBMA/GOLD"),
+            ("LBMA", "GOLD", Heuristic)
+        );
+        assert_eq!(
+            QuandlSource::parse_dataset("AAPL"),
+            ("WIKI", "AAPL", Heuristic)
+        );
+        // beanprice's form, with the cases of beanprice's own
+        // quandl_test.py `test_parse_ticker` (#2866).
+        assert_eq!(
+            QuandlSource::parse_dataset("WIKI:FB"),
+            ("WIKI", "FB", BeanPriceDefault)
+        );
+        assert_eq!(
+            QuandlSource::parse_dataset("LBMA:GOLD:USD_(PM)"),
+            ("LBMA", "GOLD", Named("USD (PM)".to_string()))
+        );
+        // Not beanprice's form: read as rledger's, as before.
+        assert_eq!(
+            QuandlSource::parse_dataset("LBMA:GOLD:col:umn"),
+            ("WIKI", "LBMA:GOLD:col:umn", Heuristic)
+        );
+        assert_eq!(
+            QuandlSource::parse_dataset("wiki:FB"),
+            ("WIKI", "wiki:FB", Heuristic)
+        );
+    }
+
+    /// The price column each ticker form picks (#2866): beanprice's form
+    /// takes `Adj. Close`, else `Close`, or the column it names; rledger's
+    /// takes the first close/value/price/settle column, as before.
+    #[test]
+    fn test_price_column_index() {
+        let wiki: Vec<serde_json::Value> = ["Date", "Open", "Close", "Volume", "Adj. Close"]
+            .into_iter()
+            .map(serde_json::Value::from)
+            .collect();
+        assert_eq!(PriceColumn::Heuristic.index(&wiki).unwrap(), 2);
+        assert_eq!(PriceColumn::BeanPriceDefault.index(&wiki).unwrap(), 4);
+        assert_eq!(
+            PriceColumn::Named("Open".to_string()).index(&wiki).unwrap(),
+            1
+        );
+        let no_adj: Vec<serde_json::Value> = ["Date", "Close"]
+            .into_iter()
+            .map(serde_json::Value::from)
+            .collect();
+        assert_eq!(PriceColumn::BeanPriceDefault.index(&no_adj).unwrap(), 1);
+        let err = PriceColumn::Named("USD (PM)".to_string())
+            .index(&no_adj)
+            .unwrap_err();
+        assert_eq!(err.to_string(), "No 'USD (PM)' column in the dataset");
     }
 
     #[test]

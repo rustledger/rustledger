@@ -2,7 +2,7 @@
 //!
 //! Fetches cryptocurrency prices from `CoinMarketCap`.
 
-use super::{PricePair, PriceSource, http_get_json};
+use super::{PricePair, PriceSource, http_get_json, split_dash_pair};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use std::env;
@@ -56,6 +56,19 @@ impl PriceSource for CoinMarketCapSource {
 
     fn description(&self) -> &'static str {
         "CoinMarketCap - cryptocurrency prices (requires API key)"
+    }
+
+    /// beanprice's `coinmarketcap` ticker `SYMBOL-BASE` (`BTC-CHF`) is
+    /// SYMBOL priced in BASE (#2866); rledger's own form, the symbol
+    /// alone (`BTC`, quoted in the requested currency), still works.
+    fn bean_price_pair(&self, pair: PricePair) -> PricePair {
+        match split_dash_pair(&pair.ticker) {
+            Some((ticker, currency)) => PricePair {
+                ticker: ticker.to_string(),
+                currency: currency.to_string(),
+            },
+            None => pair,
+        }
     }
 
     fn requires_api_key(&self) -> bool {
@@ -142,6 +155,33 @@ impl PriceSource for CoinMarketCapSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pair(ticker: &str, currency: &str) -> PricePair {
+        PricePair {
+            ticker: ticker.to_string(),
+            currency: currency.to_string(),
+        }
+    }
+
+    fn read(source: &dyn PriceSource, ticker: &str, currency: &str) -> (String, String) {
+        let pair = source.bean_price_pair(pair(ticker, currency));
+        (pair.ticker, pair.currency)
+    }
+
+    /// beanprice's `coinmarketcap` `SYMBOL-BASE` names the pair; rledger's
+    /// bare symbol keeps the requested currency (#2866).
+    #[test]
+    fn test_bean_price_pair() {
+        let source = CoinMarketCapSource::new(Duration::from_secs(30));
+        assert_eq!(
+            read(&source, "BTC-CHF", "USD"),
+            ("BTC".to_string(), "CHF".to_string())
+        );
+        assert_eq!(
+            read(&source, "BTC", "USD"),
+            ("BTC".to_string(), "USD".to_string())
+        );
+    }
 
     #[test]
     fn test_build_url() {

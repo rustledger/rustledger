@@ -80,6 +80,27 @@ Annotate a commodity with how to fetch its price. The format is `<quote-currency
 
 The first source in the chain is tried first; subsequent ones act as fallbacks. **Each spec carries its own ticker** — so `EUR:ecbrates/GBP-EUR,EUR:ecb/GBP` queries `ecbrates` with ticker `GBP-EUR` and, on failure, queries `ecb` with ticker `GBP`. (Issue #963: prior to this fix, all sources reused the first spec's ticker, which broke chains where sources expect different ticker shapes for the same underlying.)
 
+#### bean-price source specs
+
+A `price:` value written for bean-price works as it is. bean-price's grammar is `<quote-currency>:<source>/[^]<ticker>`, with sources chained by `,` and quote currencies separated by spaces or `;`. rledger also reads its own form, which repeats the currency on each entry (`USD:yahoo/AAPL,USD:google/AAPL`).
+
+A leading `^` on the ticker inverts the quote on any source, as in bean-price. `price: "EUR:ratesapi/^EUR-GBP"` on `GBP` fetches the EUR-GBP rate (GBP per EUR) and writes its inverse, the GBP price in EUR. The inverse is rounded as bean-price rounds it, to 28 significant digits. Below 0.1, `rust_decimal`'s 28 decimal places keep a digit or two fewer.
+
+Each source reads its ticker the way the matching beanprice module does. rledger's own ticker forms still work.
+
+| Source | bean-price ticker | rledger's own ticker |
+|--------|-------------------|----------------------|
+| `ratesapi` | `USD-EUR` (USD in EUR) | `USD`, quoted in the requested currency |
+| `ecb`, or `ecbrates` as bean-price names it | `GBP-EUR` | `GBP` |
+| `coinmarketcap` | `BTC-CHF` (BTC in CHF) | `BTC` |
+| `alphavantage` | `price:IBM:USD`, `fx:USD:CHF` | `IBM`, `USD/CHF`, `CRYPTO:BTC` |
+| `quandl` | `WIKI:AAPL` (`Adj. Close`, else `Close`), `LBMA:GOLD:USD_(PM)` (the named column, `_` read as a space) | `WIKI/AAPL` |
+| `coincap` | `BTC`, or an asset ID such as `bitcoin`. An upper-case symbol is looked up in CoinCap's asset list | the same |
+| `tsp` | `LInco`, `L2050`, `CFund` | `C`, `CFUND`, `LINCOME` |
+| `coinbase`, `oanda`, `yahoo`, `eastmoneyfund` | `BTC-USD`, `EUR_USD`, `AAPL`, `000001` | the same |
+
+A ticker that names its own quote currency is fetched in that currency. With `rledger price -b`, a quote whose currency differs from the declared one is refused rather than relabeled. bean-price writes `GBP:ratesapi/USD-EUR` as a GBP price; rledger names the mismatch instead.
+
 The quote currency in the metadata overrides the global `--currency` for that one symbol, so you can mix USD-quoted stocks and EUR-quoted bonds in the same run.
 
 `price: ""` (empty string, or whitespace-only) is an explicit **opt-out from `-f / --file` discovery**: the commodity is never picked up from the ledger, even with `--undeclared`. Useful for currency codes that happen to collide with stock tickers (e.g. `BAM`, `UKW`) — see issue #962.
@@ -219,8 +240,8 @@ Rustledger supports 11 built-in price sources and external commands.
 | `yahoo` (default) | Yahoo Finance — stocks, ETFs, crypto, forex |
 | `coinbase` | Coinbase — cryptocurrency spot prices |
 | `coincap` | CoinCap — cryptocurrency market data |
-| `ecb` | European Central Bank — EUR exchange rates |
-| `ratesapi` | Forex rates: ECB reference rates from Frankfurter (keyless), the provider bean-price's `ratesapi` uses. The ticker is the base currency (`EUR` with `-c USD`), not bean-price's `ratesapi/EUR-USD` form, and `^` inversion is not supported |
+| `ecb` | European Central Bank: EUR exchange rates (also registered as `ecbrates`, bean-price's name for it) |
+| `ratesapi` | Forex rates: ECB reference rates from Frankfurter (keyless), the provider bean-price's `ratesapi` uses. The ticker is bean-price's `EUR-USD`, or the base currency alone (`EUR` with `-c USD`) |
 | `tsp` | US Thrift Savings Plan fund prices |
 | `eastmoneyfund` | East Money Fund — Chinese fund prices |
 
@@ -343,7 +364,7 @@ source = ["yahoo", "alphavantage"]
 # Fallback chain with per-source tickers (issue #963).
 # Use this when sources expect different ticker shapes for the same
 # underlying instrument, e.g. a `GBP-EUR` pair ticker vs ecb-style `GBP`
-# (rledger's own `ratesapi` takes the base currency, `GBP`, like `ecb`).
+# (`ecb` and `ratesapi` read both forms; see "bean-price source specs").
 [price.mapping.GBP]
 source = [
   { source = "ecbrates", ticker = "GBP-EUR" },

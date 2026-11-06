@@ -211,6 +211,21 @@ fn reject_url_metacharacters(kind: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether `s` is a non-empty run of ASCII word characters, the `\w+` of
+/// the beanprice ticker patterns.
+pub(crate) fn is_word(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Split a bean-price `XXX-YYY` ticker into its two codes, as the
+/// beanprice modules that take one (`ratesapi`, `ecbrates`,
+/// `coinmarketcap`) match it: `^(\w+)-(\w+)$`, so exactly one `-` with a
+/// word on each side (#2866).
+pub(crate) fn split_dash_pair(ticker: &str) -> Option<(&str, &str)> {
+    let (first, second) = ticker.split_once('-')?;
+    (is_word(first) && is_word(second)).then_some((first, second))
+}
+
 /// Trait for price data sources.
 ///
 /// All price sources must implement this trait. The trait is object-safe
@@ -250,6 +265,21 @@ pub trait PriceSource: Send + Sync {
     /// Returns the environment variable name for the API key, if required.
     fn api_key_env_var(&self) -> Option<&'static str> {
         None
+    }
+
+    /// Read a ticker that names its own quote currency, the way the
+    /// matching beanprice module reads it (#2866): `ratesapi`'s
+    /// `BASE-SYMBOL` is the pair `(BASE, SYMBOL)`, whatever the requested
+    /// currency. A bean-price ticker fully names what is fetched, and the
+    /// requested currency only labels the result; reading it here, before
+    /// any routing, lets every source keep fetching a plain
+    /// `(ticker, currency)` pair.
+    ///
+    /// The default keeps the pair: the source's tickers name no currency,
+    /// or (`coinbase`'s `BTC-USD`, `oanda`'s `EUR_USD`) the source already
+    /// reads one itself.
+    fn bean_price_pair(&self, pair: PricePair) -> PricePair {
+        pair
     }
 
     /// Fetch the LATEST quote for a pair. Every provider has a latest
@@ -334,24 +364,27 @@ pub trait PriceSource: Send + Sync {
         reject_url_metacharacters("ticker", &request.ticker)?;
         reject_url_metacharacters("currency", &request.currency)?;
 
+        // A bean-price ticker that names its own quote currency is read
+        // into the pair first, so the identity check below sees the pair
+        // actually fetched (#2866).
+        let pair = self.bean_price_pair(PricePair {
+            ticker: request.ticker.clone(),
+            currency: request.currency.clone(),
+        });
+
         // 1. Identity: X priced in X is 1.0 on any past-or-today date,
         // source-independent (hoisted out of per-source branches by the
         // #1801 reviews; future labels refuse). The currency is
         // uppercased — beancount commodities are uppercase, and main's
         // ecb identity branch normalized (deep review of #1803).
-        if request.ticker.eq_ignore_ascii_case(&request.currency) {
+        if pair.ticker.eq_ignore_ascii_case(&pair.currency) {
             return Ok(PriceResponse {
                 price: Decimal::ONE,
-                currency: request.currency.to_uppercase(),
+                currency: pair.currency.to_uppercase(),
                 date: identity_label_date(self.name(), request)?,
                 source: self.name().to_string(),
             });
         }
-
-        let pair = PricePair {
-            ticker: request.ticker.clone(),
-            currency: request.currency.clone(),
-        };
 
         // 2. Undated → latest. The response currency is uppercased on
         // the way out, like every other arm: feeds return uppercase,

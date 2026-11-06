@@ -50,7 +50,8 @@ impl TspSource {
             "L2055" => Some("L 2055"),
             "L2060" => Some("L 2060"),
             "L2065" => Some("L 2065"),
-            "LINCOME" | "L INCOME" => Some("L Income"),
+            // beanprice's `tsp` names the L Income fund `LInco` (#2866).
+            "LINCOME" | "L INCOME" | "LINCO" => Some("L Income"),
             _ => None,
         }
     }
@@ -181,6 +182,14 @@ mod tests {
         assert_eq!(TspSource::normalize_fund("cfund"), Some("C Fund"));
         assert_eq!(TspSource::normalize_fund("L2030"), Some("L 2030"));
         assert_eq!(TspSource::normalize_fund("UNKNOWN"), None);
+        // Every fund name beanprice's `tsp` accepts (its `TSP_FUND_NAMES`)
+        // is one rledger reads too (#2866).
+        for fund in [
+            "LInco", "L2025", "L2030", "L2035", "L2040", "L2045", "L2050", "L2055", "L2060",
+            "L2065", "GFund", "FFund", "CFund", "SFund", "IFund",
+        ] {
+            assert!(TspSource::normalize_fund(fund).is_some(), "{fund}");
+        }
     }
 
     #[test]

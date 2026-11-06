@@ -4,7 +4,9 @@
 //! (<https://api.frankfurter.dev>), the open-source keyless API serving the
 //! ECB reference rates, the provider beanprice's `ratesapi` source uses.
 
-use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, http_get};
+use super::{
+    DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, http_get, split_dash_pair,
+};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
@@ -17,10 +19,10 @@ const FRANKFURTER: &str = "https://api.frankfurter.dev/v1";
 /// Rates API price source.
 ///
 /// Fetches ECB reference rates from Frankfurter, the provider beanprice's
-/// `ratesapi` uses. The ticker is the base currency (`EUR`, quoted in the
-/// request's currency), not beanprice's `BASE-SYMBOL` form. No API key
-/// required. It used exchangerate.host, which now refuses every request
-/// without a key.
+/// `ratesapi` uses. The ticker is beanprice's `BASE-SYMBOL` (`EUR-USD`, the
+/// rate of EUR in USD), or the base currency alone (`EUR`, quoted in the
+/// request's currency). No API key required. It used exchangerate.host,
+/// which now refuses every request without a key.
 ///
 /// # Supported Currencies
 ///
@@ -195,6 +197,19 @@ impl PriceSource for RatesApiSource {
         "Frankfurter - ECB reference exchange rates"
     }
 
+    /// beanprice's `ratesapi` ticker `BASE-SYMBOL` (`USD-EUR`) is the
+    /// rate of BASE in SYMBOL (#2866); rledger's own form, the base alone
+    /// (`USD`, quoted in the requested currency), still works.
+    fn bean_price_pair(&self, pair: PricePair) -> PricePair {
+        match split_dash_pair(&pair.ticker) {
+            Some((ticker, currency)) => PricePair {
+                ticker: ticker.to_string(),
+                currency: currency.to_string(),
+            },
+            None => pair,
+        }
+    }
+
     fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
         let url = self.build_url(
             &pair.ticker.to_uppercase(),
@@ -253,6 +268,46 @@ impl PriceSource for RatesApiSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pair(ticker: &str, currency: &str) -> PricePair {
+        PricePair {
+            ticker: ticker.to_string(),
+            currency: currency.to_string(),
+        }
+    }
+
+    fn read(source: &dyn PriceSource, ticker: &str, currency: &str) -> (String, String) {
+        let pair = source.bean_price_pair(pair(ticker, currency));
+        (pair.ticker, pair.currency)
+    }
+
+    /// beanprice's `ratesapi` `BASE-SYMBOL` names the pair; rledger's bare
+    /// base keeps the requested currency (#2866).
+    #[test]
+    fn test_bean_price_pair() {
+        let source = RatesApiSource::new(Duration::from_secs(30));
+        assert_eq!(
+            read(&source, "USD-EUR", "EUR"),
+            ("USD".to_string(), "EUR".to_string())
+        );
+        assert_eq!(
+            read(&source, "EUR-GBP", "EUR"),
+            ("EUR".to_string(), "GBP".to_string())
+        );
+        assert_eq!(
+            read(&source, "USD", "EUR"),
+            ("USD".to_string(), "EUR".to_string())
+        );
+        // Not beanprice's `^(\w+)-(\w+)$`: left as it is.
+        assert_eq!(
+            read(&source, "USD-EUR-X", "EUR"),
+            ("USD-EUR-X".to_string(), "EUR".to_string())
+        );
+        assert_eq!(
+            read(&source, "-EUR", "EUR"),
+            ("-EUR".to_string(), "EUR".to_string())
+        );
+    }
 
     #[test]
     fn test_build_url() {

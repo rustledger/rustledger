@@ -13,7 +13,7 @@ use rustledger_parser::ParseResult;
 
 use super::utils::{
     LineIndex, PositionEncoding, account_declaration_spans, commodity_declaration_spans,
-    get_word_at_position, is_account_like, is_currency_like,
+    get_symbol_at_position, is_account_like, is_currency_like,
 };
 
 /// Handle a document highlight request.
@@ -28,14 +28,15 @@ pub fn handle_document_highlight(
     let lines: Vec<&str> = source.lines().collect();
     let line = lines.get(line_idx)?;
 
+    // Build the line index once and share it with the symbol lookup and
+    // the collectors: each directive (and posting) used to trigger an O(n)
+    // byte→line scan, which scales quadratically on large files.
+    let line_index = LineIndex::new(source, encoding);
+
     // Get the word at the cursor position
-    let (word, _, _) = get_word_at_position(line, position.character as usize, encoding)?;
+    let (word, _, _) = get_symbol_at_position(&line_index, parse_result, position)?;
 
     let mut highlights = Vec::new();
-    // Build the line index once and share it across collectors: each
-    // directive (and posting) used to trigger an O(n) byte→line scan,
-    // which scales quadratically on large files.
-    let line_index = LineIndex::new(source, encoding);
 
     // Check if it's an account
     if is_account_like(&word) {
@@ -536,5 +537,43 @@ mod tests {
             ],
             "expected open=WRITE, posting=READ, close=WRITE; got {by_line:?}"
         );
+    }
+
+    /// Highlighting the currency `T` leaves the `T` flag alone, and the
+    /// flag itself highlights nothing.
+    #[test]
+    fn test_highlight_skips_one_letter_flags() {
+        let source = "2024-01-01 commodity T\n\
+                      2024-01-16 T \"Transfer\"\n  \
+                      P Assets:Cash  1 T\n  \
+                      Assets:Bank\n\
+                      2024-01-17 P \"Pending\"\n  \
+                      Assets:Cash  1 T\n  \
+                      Assets:Bank\n";
+        let result = parse(source);
+        let at = |line, character| {
+            let params = DocumentHighlightParams {
+                text_document_position_params: lsp_types::TextDocumentPositionParams {
+                    text_document: lsp_types::TextDocumentIdentifier {
+                        uri: "file:///test.beancount".parse().unwrap(),
+                    },
+                    position: Position::new(line, character),
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            };
+            handle_document_highlight(&params, source, &result, PositionEncoding::Utf16)
+                .map(|hs| hs.iter().map(|h| h.range).collect::<Vec<_>>())
+        };
+        assert_eq!(
+            at(2, 19),
+            Some(vec![
+                Range::new(Position::new(0, 21), Position::new(0, 22)),
+                Range::new(Position::new(2, 19), Position::new(2, 20)),
+                Range::new(Position::new(5, 17), Position::new(5, 18)),
+            ])
+        );
+        assert_eq!(at(1, 11), None, "header flag T");
+        assert_eq!(at(4, 11), None, "header flag P");
     }
 }

@@ -1089,7 +1089,16 @@ impl<'src> Iterator for TokenIter<'src> {
 /// a `TAG`, as beancount's longer tag match wins. The one rule for the
 /// lexer's column-0 `#`, `!`, `&`, `?`, `:` and `%` arms in `TokenIter` and
 /// for `convert`'s `previous_line_is_a_gap` and `is_section_marker` (the
-/// `*` heading).
+/// `*` heading), and of the formatter's `emit_error_node`.
+///
+/// One deliberate mirror: `format::advance_source_state`, the formatter's
+/// char-at-a-time line-ending state machine, cannot call this (it is a
+/// `const fn` over one char and a peek), so it opens a comment at any
+/// column-0 `!`, `&`, `?`, `:`, `%`, `*` or non-tag `#`. It may treat a bare
+/// marker as a comment, which is harmless there (the comment closes at the
+/// line ending right after it). Agreement on the lines that matter is pinned
+/// by `source_state_classification_agrees_with_lexer`; revisit if the state
+/// machine ever needs the bare-marker distinction.
 pub(crate) fn beancount_ignores_line(line: &str) -> bool {
     match line.as_bytes() {
         [b';', ..] => true,

@@ -616,6 +616,11 @@ impl std::error::Error for CanonicalizeError {}
 /// the user's data. Uses the shared `SourceState` state machine
 /// to track string / comment boundaries.
 ///
+/// One change besides the line endings: a line that is one column-0 marker
+/// followed by a `\r` (`#\r\n`, `*\r\n`) gets a space after the marker. Such
+/// a line is ignored by beancount, and the lone marker left by dropping the
+/// `\r` would be an error there (#2779).
+///
 /// Cheap fast path: if the input contains no `\r`, returns the
 /// source slice borrowed (no allocation). Used by
 /// [`format_source`] before parsing so the lexer never has to see
@@ -653,6 +658,18 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
         // A CRLF pair outside a string is consumed whole here, so the
         // `\n` never reaches `next_at_line_start`; it still ends the line.
         let mut ate_lf = false;
+        // A lone column-0 marker followed by a `\r` is a line beancount
+        // ignores (flex's `.` takes the `\r`); without the `\r` it is a
+        // bare-marker error. Outside a string, every branch below drops or
+        // folds the `\r`, so a space stands in for it (#2779).
+        if ch == '\r'
+            && state != SourceState::InString
+            && is_lone_marker(
+                out[out.rfind('\n').map_or(0, |p| p + 1)..].trim_start_matches('\u{FEFF}'),
+            )
+        {
+            out.push(' ');
+        }
         match state {
             SourceState::InString => out.push(ch),
             _ => {
@@ -837,7 +854,10 @@ const fn advance_source_state(
             // flag, as beancount does (#2802).
             let is_percent_line_comment = ch == '%' && at_line_start;
             // A column-0 `!`, `&`, `?` or `:` line is ignored, as in beancount
-            // (#2779).
+            // (#2779). A char-level mirror of
+            // `logos_lexer::beancount_ignores_line`, which documents why it
+            // is not called here; it also takes a bare marker as a comment,
+            // which is harmless (the comment closes right after it).
             let is_flag_line_comment = matches!(ch, '!' | '&' | '?' | ':') && at_line_start;
             if ch == '"' {
                 *prev_was_backslash = false;
@@ -1254,7 +1274,7 @@ impl TopLevelSpacing {
             | crate::SyntaxKind::SHEBANG
             | crate::SyntaxKind::EMACS_DIRECTIVE => {
                 self.flush(out);
-                out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                push_comment_text(out, t.text());
                 out.push('\n');
                 self.line_has_comment = true;
             }
@@ -1821,6 +1841,33 @@ fn emit_directive(
     }
 }
 
+/// Whether `line` is one column-0 marker, which beancount reads as a bare
+/// token (`unexpected FLAG`, `HASH`, `ASTERISK` or `COLON`). A line that
+/// beancount ignores only because of the whitespace or `\r` after its marker
+/// (`crate::logos_lexer::beancount_ignores_line` needs one more byte) becomes
+/// such a line once that is trimmed or folded away, so the formatter keeps a
+/// space there (#2779).
+const fn is_lone_marker(line: &str) -> bool {
+    matches!(
+        line.as_bytes(),
+        [b'#' | b'!' | b'&' | b'?' | b':' | b'%' | b'*']
+    )
+}
+
+/// Write a comment token's text, without its line ending. A comment that is
+/// one marker (`#\r\n`, `!\r\n`, `%\r\n`: the `\r` is trivia after the
+/// comment) keeps a space after it, so the formatted line is still one
+/// beancount ignores and not a bare-marker error (#2779). bean-format keeps
+/// such a line's trailing whitespace too; a `\r` cannot survive the LF
+/// output, so a space stands in for it.
+fn push_comment_text(out: &mut String, text: &str) {
+    let text = text.trim_end_matches(['\n', '\r']);
+    out.push_str(text);
+    if is_lone_marker(text) {
+        out.push(' ');
+    }
+}
+
 /// Emit an `ERROR_NODE`'s text verbatim, so `format` never deletes content it
 /// could not parse (#1335) — chiefly org-mode `*` section headers and the
 /// comments grouped with them. Only trailing whitespace per line is stripped
@@ -1838,10 +1885,19 @@ fn emit_error_node(node: &crate::SyntaxNode, out: &mut String) -> usize {
     // Trim a line's trailing whitespace, but not past the start of the line
     // (the newline ending the line before is not this line's, so a blank
     // line stays) nor past the end of the last string on it.
+    //
+    // An org-mode heading that is one `*` and whitespace (`* `, `*\t`,
+    // `*\r`) is ignored by beancount, but a lone `*` is an error there, so
+    // one space is kept after the `*` (#2779). A line that was a lone marker
+    // already stays one: it is an error either way.
     fn end_line(text: &mut String, string_end: usize) {
         let line_start = text.rfind('\n').map_or(0, |i| i + 1);
+        let ignored = crate::logos_lexer::beancount_ignores_line(&text[line_start..]);
         let keep = text.trim_end().len().max(line_start).max(string_end);
         text.truncate(keep);
+        if ignored && is_lone_marker(&text[line_start..]) {
+            text.push(' ');
+        }
     }
     let mut text = String::new();
     let mut string_end = 0;
@@ -1851,6 +1907,11 @@ fn emit_error_node(node: &crate::SyntaxNode, out: &mut String) -> usize {
     {
         match t.kind() {
             crate::SyntaxKind::NEWLINE if t.text().contains('\n') => {
+                // A CRLF's `\r` is part of the line for `end_line`'s
+                // ignored-line check (`*\r\n` is a heading), and trimmed.
+                if t.text().starts_with('\r') {
+                    text.push('\r');
+                }
                 end_line(&mut text, string_end);
                 text.push('\n');
             }
@@ -1926,7 +1987,7 @@ fn emit_leading_comments(node: &crate::SyntaxNode, out: &mut String) {
                     out.push('\n');
                 }
                 pending = 0;
-                out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                push_comment_text(out, t.text());
                 out.push('\n');
                 seen_comment = true;
                 line_has_comment = true;
@@ -2495,7 +2556,7 @@ fn emit_transaction(
                 match t.kind() {
                     k if super::convert::is_comment_kind(k) => {
                         out.push_str(INDENT);
-                        out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                        push_comment_text(out, t.text());
                         out.push('\n');
                     }
                     crate::SyntaxKind::TAG | crate::SyntaxKind::LINK => {
@@ -2670,7 +2731,7 @@ fn emit_posting(
                 }
                 if super::convert::is_comment_kind(t.kind()) {
                     out.push_str("    ");
-                    out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                    push_comment_text(out, t.text());
                     out.push('\n');
                 }
             }
@@ -3127,7 +3188,7 @@ fn emit_meta_entries_of(node: &crate::SyntaxNode, group: GroupingStyle<'_>, out:
                 }
                 if super::convert::is_comment_kind(t.kind()) {
                     out.push_str(INDENT);
-                    out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                    push_comment_text(out, t.text());
                     out.push('\n');
                 }
             }
@@ -5460,6 +5521,17 @@ mod tests {
                 "#! c\r\r\n",
                 "#+ c\r\r\n",
                 "* c\r\r\n",
+                // A lone marker before the `\r`: ignored with it, a bare-marker
+                // error without it, so the fold keeps a space (#2779).
+                "#\r\n",
+                "!\r\n",
+                "&\r\n",
+                "?\r\n",
+                ":\r\n",
+                "%\r\n",
+                "*\r\n",
+                "#\r\r\n",
+                "*\r \r\n",
                 "\r\r\n",
                 "  \r\r\n",
             ]
@@ -5472,6 +5544,8 @@ mod tests {
                 "2024-01-01 open Assets:A\r\r",
                 "2024-01-01 open Assets:A\r\n; c\r",
                 "2024-01-01 open Assets:A\r\n\r",
+                "2024-01-01 open Assets:A\r\n#\r",
+                "2024-01-01 open Assets:A\r\n*\r",
                 "\r",
             ]
             .map(String::from),

@@ -13,7 +13,9 @@
 
 use rustledger_core::Directive;
 use rustledger_parser::cst::parse_red_only;
-use rustledger_parser::format::{format_source, try_format_source};
+use rustledger_parser::format::{
+    GroupingStyle, format_parsed_range, format_source, try_format_source,
+};
 use rustledger_parser::{parse, parse_structured};
 
 /// The parsed opens, as `date account`, and the 1-based lines of the parse
@@ -151,5 +153,86 @@ fn test_format_keeps_column_0_flag_line() {
         let src = format!("! a \"q{eol}2024-01-02 note Assets:B \"x\"{eol}: b{eol}");
         let formatted = try_format_source(&src).expect("the file parses");
         assert_eq!(formatted, src.replace("\r\n", "\n"), "{src:?}");
+    }
+}
+
+/// A line that beancount ignores only because of the whitespace or `\r`
+/// after its marker must stay ignored through `format`: trimming it, or
+/// folding its `\r\n` to `\n`, leaves a lone marker, which is an error. The
+/// formatter keeps a space after the marker instead (#2779). Checked on every
+/// format entry point: `format_source` (which folds line endings first),
+/// `try_format_source` (the CLI's, which formats the parsed CRLF tree), a
+/// second pass, and range formatting over the whole file (the LSP's).
+#[test]
+fn test_format_keeps_whitespace_marker_lines_ignored() {
+    let mut lines: Vec<String> = ["#", "!", "&", "?", ":", "%", "*"]
+        .iter()
+        .flat_map(|m| [format!("{m}\r\n"), format!("{m} \n"), format!("{m}\t\n")])
+        .collect();
+    lines.extend(["#\r\r\n", "* \t\n", "*\r \r\n"].map(String::from));
+    let mut sources = Vec::new();
+    for line in &lines {
+        let eol = if line.ends_with("\r\n") { "\r\n" } else { "\n" };
+        sources.push(format!(
+            "2024-01-01 open Assets:A{eol}{line}2024-01-02 open Assets:B{eol}"
+        ));
+        // At the end of the file, with and without the final line ending.
+        sources.push(format!("2024-01-01 open Assets:A{eol}{line}"));
+        sources.push(format!(
+            "2024-01-01 open Assets:A{eol}{}",
+            line.trim_end_matches('\n')
+        ));
+    }
+    for src in &sources {
+        let (opens, errors) = summary(src);
+        assert!(errors.is_empty(), "{src:?}: {errors:?}");
+        let outputs = [
+            ("format_source", format_source(src)),
+            (
+                "try_format_source",
+                try_format_source(src).expect("the file parses"),
+            ),
+        ];
+        for (entry, formatted) in outputs {
+            assert_eq!(
+                summary(&formatted),
+                (opens.clone(), vec![]),
+                "{entry} of {src:?} gave {formatted:?}"
+            );
+            assert_eq!(
+                format_source(&formatted),
+                formatted,
+                "{entry} of {src:?} is not idempotent"
+            );
+        }
+        let parsed = parse(src);
+        let whole = rowan::TextRange::up_to(parsed.syntax_node().text_range().end());
+        // A `*` heading is an `ERROR_NODE`, which range formatting refuses
+        // to touch, so it cannot break it.
+        let Some((snapped, text)) = format_parsed_range(&parsed, whole, GroupingStyle::default())
+        else {
+            assert!(src.contains("\n*"), "{src:?}: range formatting refused");
+            continue;
+        };
+        let mut spliced = src.clone();
+        spliced.replace_range(
+            usize::from(snapped.start())..usize::from(snapped.end()),
+            &text,
+        );
+        assert_eq!(
+            summary(&spliced),
+            (opens.clone(), vec![]),
+            "range format of {src:?} gave {spliced:?}"
+        );
+    }
+}
+
+/// A lone marker that already was an error stays one: `format` does not
+/// make an invalid line valid.
+#[test]
+fn test_format_keeps_a_bare_marker_an_error() {
+    for marker in ['#', '!', '&', '?', ':', '%', '*'] {
+        let src = format!("2024-01-01 open Assets:A\n{marker}\n2024-01-02 open Assets:B\n");
+        assert_eq!(format_source(&src), src, "{src:?}");
     }
 }

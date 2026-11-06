@@ -69,7 +69,7 @@ pub fn handle_prepare_rename(
     let position = params.position;
     // Get the symbol at the cursor position
     let (word, start_col, end_col) =
-        get_symbol_at_position(source, parse_result, position, encoding)?;
+        get_symbol_at_position(&LineIndex::new(source, encoding), parse_result, position)?;
 
     // Check if it's a valid renameable symbol. Consult the
     // parser's token-occurrence indices first so Unicode-prefix
@@ -121,7 +121,8 @@ pub fn handle_rename(
     let uri = params.text_document_position.text_document.uri.clone();
 
     // Get the symbol at the cursor position
-    let (old_name, _, _) = get_symbol_at_position(source, parse_result, position, encoding)?;
+    let (old_name, _, _) =
+        get_symbol_at_position(&LineIndex::new(source, encoding), parse_result, position)?;
 
     // Determine the symbol kind ONCE from the current file's occurrence
     // indices (account vs currency), preserving the original precedence:
@@ -562,6 +563,60 @@ mod tests {
                     Range::new(Position::new(2, 20), Position::new(2, 23)),
                     "/6E"
                 ),
+            ]
+        );
+    }
+
+    /// Renaming the currency `T` leaves the `T` flag alone (it did not on
+    /// main), and the flag itself is not renameable.
+    #[allow(clippy::mutable_key_type)] // `Uri` keys, as the LSP `WorkspaceEdit` API requires
+    #[test]
+    fn test_rename_skips_one_letter_flags() {
+        let source = "2024-01-01 commodity T\n\
+                      2024-01-16 T \"Transfer\"\n  \
+                      P Assets:Cash  1 T\n  \
+                      Assets:Bank\n\
+                      2024-01-17 P \"Pending\"\n  \
+                      Assets:Cash  1 T\n  \
+                      Assets:Bank\n";
+        let result = parse(source);
+        let uri: lsp_types::Uri = "file:///test.beancount".parse().unwrap();
+        let prepare = |line, character| {
+            handle_prepare_rename(
+                &TextDocumentPositionParams {
+                    text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                    position: Position::new(line, character),
+                },
+                source,
+                &result,
+                PositionEncoding::Utf16,
+            )
+        };
+        assert_eq!(prepare(1, 11), None, "header flag T");
+        assert_eq!(prepare(2, 2), None, "posting flag P");
+
+        let rename_at = |line, character| {
+            let params = RenameParams {
+                text_document_position: TextDocumentPositionParams {
+                    text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                    position: Position::new(line, character),
+                },
+                new_name: "TT".to_string(),
+                work_done_progress_params: Default::default(),
+            };
+            handle_rename(&params, source, &result, &[], PositionEncoding::Utf16)
+        };
+        assert_eq!(rename_at(1, 11), None, "header flag T");
+        let edit = rename_at(0, 21).expect("rename returns edit");
+        let changes = edit.changes.expect("edit has changes");
+        let edits = changes.values().next().expect("one file");
+        let ranges: Vec<_> = edits.iter().map(|e| e.range).collect();
+        assert_eq!(
+            ranges,
+            vec![
+                Range::new(Position::new(0, 21), Position::new(0, 22)),
+                Range::new(Position::new(2, 19), Position::new(2, 20)),
+                Range::new(Position::new(5, 17), Position::new(5, 18)),
             ]
         );
     }

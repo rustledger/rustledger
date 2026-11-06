@@ -115,4 +115,18 @@ mod tests {
         let loc = get_definition(source, 1, 31, &result).expect("definition found");
         assert_eq!((loc.line, loc.character), (0, 0));
     }
+
+    /// Go-to-definition on a one-letter flag goes nowhere, even when a
+    /// currency of that name is declared.
+    #[test]
+    fn test_get_definition_skips_one_letter_flags() {
+        let source = "2024-01-01 commodity T\n\
+                      2024-01-16 T \"Transfer\"\n  \
+                      Assets:X  1 T\n  \
+                      Assets:Y\n";
+        let result = parse(source);
+        assert!(get_definition(source, 1, 11, &result).is_none());
+        let loc = get_definition(source, 2, 14, &result).expect("the currency T");
+        assert_eq!(loc.line, 0);
+    }
 }

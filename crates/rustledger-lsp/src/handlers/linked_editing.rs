@@ -19,13 +19,14 @@ pub fn handle_linked_editing_range(
     encoding: PositionEncoding,
 ) -> Option<LinkedEditingRanges> {
     let position = params.text_document_position_params.position;
+    // Build the line index once and share it with the symbol lookup and
+    // the collectors; otherwise each posting/directive lookup is an O(n)
+    // scan.
+    let line_index = LineIndex::new(source, encoding);
     // Get the symbol at the cursor position
-    let (word, _, _) = get_symbol_at_position(source, parse_result, position, encoding)?;
+    let (word, _, _) = get_symbol_at_position(&line_index, parse_result, position)?;
 
     let mut ranges = Vec::new();
-    // Build the line index once and share it across collectors —
-    // otherwise each posting/directive lookup is an O(n) scan.
-    let line_index = LineIndex::new(source, encoding);
 
     // Check if it's an account
     if is_account_like(&word) {
@@ -338,5 +339,43 @@ mod tests {
             ]
         );
         assert_eq!(ranges.word_pattern.as_deref(), Some(r"[A-Z/][A-Z0-9'._-]*"));
+    }
+
+    /// Linked editing on the currency `T` must not rewrite the `T` flag as
+    /// the user types, and the flag starts no linked edit.
+    #[test]
+    fn test_linked_editing_skips_one_letter_flags() {
+        let source = "2024-01-01 commodity T\n\
+                      2024-01-16 T \"Transfer\"\n  \
+                      P Assets:Cash  1 T\n  \
+                      Assets:Bank\n\
+                      2024-01-17 P \"Pending\"\n  \
+                      Assets:Cash  1 T\n  \
+                      Assets:Bank\n";
+        let result = parse(source);
+        let at = |line, character| {
+            let params = LinkedEditingRangeParams {
+                text_document_position_params: lsp_types::TextDocumentPositionParams {
+                    text_document: lsp_types::TextDocumentIdentifier {
+                        uri: "file:///test.beancount".parse().unwrap(),
+                    },
+                    position: Position::new(line, character),
+                },
+                work_done_progress_params: Default::default(),
+            };
+            handle_linked_editing_range(&params, source, &result, PositionEncoding::Utf16)
+                .map(|r| r.ranges)
+        };
+        assert_eq!(
+            at(0, 21),
+            Some(vec![
+                Range::new(Position::new(0, 21), Position::new(0, 22)),
+                Range::new(Position::new(2, 19), Position::new(2, 20)),
+                Range::new(Position::new(5, 17), Position::new(5, 18)),
+            ])
+        );
+        assert_eq!(at(1, 11), None, "header flag T");
+        assert_eq!(at(1, 12), None, "just after the header flag T");
+        assert_eq!(at(2, 2), None, "posting flag P");
     }
 }

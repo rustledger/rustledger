@@ -4738,6 +4738,31 @@ pub(super) struct DescendantsWalkResult {
     pub(super) custom_pushmeta_errors: Vec<crate::ParseError>,
 }
 
+/// Whether `token` is the flag of its transaction header or posting, as
+/// [`ast::Transaction::flag`] / [`ast::Posting::flag`] read it.
+///
+/// Used to keep a one-letter flag (`T`, `P`, ...), which lexes as `CURRENCY`,
+/// out of `currency_occurrences`. Asks the AST accessors themselves, so it
+/// cannot disagree with how the directive's flag is read. The green walker
+/// cannot build red nodes and mirrors this in `green::flag_child_index`; the
+/// `parse_green_eq_red_corpus` test and the `fuzz_green_eq_red` target pin the
+/// two to the same occurrences.
+pub(super) fn is_flag_token(token: &crate::SyntaxToken) -> bool {
+    let Some(parent) = token.parent() else {
+        return false;
+    };
+    let flag = match parent.kind() {
+        crate::SyntaxKind::TRANSACTION => ast::Transaction::cast(parent)
+            .and_then(|t| t.flag())
+            .map(|f| f.syntax().clone()),
+        crate::SyntaxKind::POSTING => ast::Posting::cast(parent)
+            .and_then(|p| p.flag())
+            .map(|f| f.syntax().clone()),
+        _ => None,
+    };
+    flag.as_ref() == Some(token)
+}
+
 /// Fused single-pass visitor over `source_file`'s descendants -
 /// replaces three separate walks (`extract_inline_token_errors`,
 /// `extract_top_level_comments`, `extract_currency_occurrences`)
@@ -4822,8 +4847,17 @@ fn walk_descendants_once(
             .any(|a| a.kind() == crate::SyntaxKind::ERROR_NODE);
 
         // CURRENCY occurrences: only outside ERROR_NODE, and only when the
-        // caller wants them (LSP path).
-        if collect_occurrences && kind == crate::SyntaxKind::CURRENCY && !in_error_node {
+        // caller wants them (LSP path). A one-letter flag (`T` in
+        // `2024-01-16 T "x"`, `P` before a posting's account) lexes as
+        // CURRENCY too, but it is a flag, not a currency, so it is left out:
+        // otherwise references, highlight, rename and linked editing on a
+        // currency `T` would also touch every `T` flag. The green walker
+        // mirrors this with `flag_child_index`.
+        if collect_occurrences
+            && kind == crate::SyntaxKind::CURRENCY
+            && !in_error_node
+            && !is_flag_token(&t)
+        {
             let range = t.text_range();
             let start: u32 = range.start().into();
             let end: u32 = range.end().into();

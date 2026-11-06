@@ -1862,8 +1862,9 @@ mod tests {
     /// documented copy of the rule (`is_valid_commodity` in
     /// `rustledger-core/src/amount.rs`). This compares the two on every
     /// string of up to five characters over an alphabet covering each
-    /// character class the rule distinguishes, plus the shapes that broke
-    /// and the keyword tokens that outrank a currency.
+    /// character class the rule distinguishes, plus the one-letter flag
+    /// letters, the shapes that broke and the keyword tokens that outrank a
+    /// currency.
     #[test]
     fn amount_from_str_currency_matches_lexer() {
         use rustledger_core::Amount;
@@ -1878,7 +1879,11 @@ mod tests {
             );
         }
 
-        const ALPHABET: [char; 10] = ['A', '0', '\'', '.', '_', '-', '/', 'a', ':', '\u{c9}'];
+        // `T` and `P` are flag letters (`[PSTCURM]`): a lexer change that let a
+        // flag token beat `Currency` for one letter would trip here.
+        const ALPHABET: [char; 12] = [
+            'A', 'T', 'P', '0', '\'', '.', '_', '-', '/', 'a', ':', '\u{c9}',
+        ];
         let mut frontier = vec![String::new()];
         for _ in 0..5 {
             let mut next = Vec::with_capacity(frontier.len() * ALPHABET.len());
@@ -1901,6 +1906,14 @@ mod tests {
             "A",
             "C_",
             "HOOL'",
+            "P",
+            "S",
+            "T",
+            "C",
+            "U",
+            "R",
+            "M",
+            "TT",
             "USD-",
             "BRK.B",
             "/1.14",

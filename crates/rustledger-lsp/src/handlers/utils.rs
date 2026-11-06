@@ -504,21 +504,26 @@ pub fn get_word_at_position(
 }
 
 /// The symbol under the cursor, with its start and end columns in the
-/// negotiated encoding (the same contract as [`get_word_at_position`]).
+/// index's negotiated encoding (the same contract as
+/// [`get_word_at_position`]).
 ///
 /// When the lexer read a currency token at the cursor, that token is the
 /// symbol (via [`ParseResult::currency_at`]): the word-character scan of
 /// [`get_word_at_position`] splits `/6J` at the `/` and `BRK.B` at the
 /// `.`, so rename, references and linked editing could not reach those
 /// currencies (#2807). Otherwise this is [`get_word_at_position`] on the
-/// addressed line.
+/// addressed line, except that a transaction or posting flag is no
+/// symbol: a one-letter flag such as `T` is not the currency `T`, and
+/// reading it as one let references, highlight, rename, linked editing,
+/// hover and definition on a currency `T` reach every `T` flag.
+///
+/// Takes the handler's [`LineIndex`] so a request builds one index, not
+/// two.
 pub fn get_symbol_at_position(
-    source: &str,
+    index: &LineIndex<'_>,
     parse_result: &ParseResult,
     position: Position,
-    encoding: PositionEncoding,
 ) -> Option<(String, usize, usize)> {
-    let index = LineIndex::new(source, encoding);
     if let Some(offset) = index.position_to_offset(position.line, position.character)
         && let Some(occ) = parse_result.currency_at(offset)
     {
@@ -529,7 +534,14 @@ pub fn get_symbol_at_position(
         }
     }
     let line = index.line_text(position.line)?;
-    get_word_at_position(line, position.character as usize, encoding)
+    let (word, start, end) =
+        get_word_at_position(line, position.character as usize, index.encoding())?;
+    let start_col = u32::try_from(start).ok()?;
+    let word_start = index.position_to_offset(position.line, start_col)?;
+    if parse_result.is_flag_at(word_start) {
+        return None;
+    }
+    Some((word, start, end))
 }
 
 /// Check if a character is part of a word (for Beancount identifiers).
@@ -1050,14 +1062,9 @@ mod tests {
 
         let source = "2024-01-01 open Assets:Futures /6J,BRK.B\n";
         let parse_result = parse(source);
-        let at = |character| {
-            get_symbol_at_position(
-                source,
-                &parse_result,
-                Position::new(0, character),
-                PositionEncoding::Utf16,
-            )
-        };
+        let index = LineIndex::new(source, PositionEncoding::Utf16);
+        let at =
+            |character| get_symbol_at_position(&index, &parse_result, Position::new(0, character));
         // On the `/`, inside, and at the end of `/6J`.
         for col in [31, 32, 34] {
             assert_eq!(at(col), Some(("/6J".to_string(), 31, 34)), "col {col}");
@@ -1065,6 +1072,33 @@ mod tests {
         assert_eq!(at(37), Some(("BRK.B".to_string(), 35, 40)));
         // Not a currency token: falls back to the word scan.
         assert_eq!(at(20), Some(("Assets:Futures".to_string(), 16, 30)));
+    }
+
+    /// A one-letter flag lexes as a currency token but is no symbol, even
+    /// when a currency of the same name exists; the currency itself still is.
+    #[test]
+    fn test_get_symbol_at_position_skips_one_letter_flags() {
+        use rustledger_parser::parse;
+
+        let source = "2024-01-01 commodity T\n2024-01-16 T \"Transfer\"\n  P Assets:Cash 1 T\n  Assets:Bank\n";
+        let parse_result = parse(source);
+        for encoding in [PositionEncoding::Utf16, PositionEncoding::Utf8] {
+            let index = LineIndex::new(source, encoding);
+            let at = |line, character| {
+                get_symbol_at_position(&index, &parse_result, Position::new(line, character))
+            };
+            // Before, on and after the header flag `T`.
+            for col in [11, 12] {
+                assert_eq!(at(1, col), None, "header flag col {col}");
+            }
+            // The posting flag `P`.
+            for col in [2, 3] {
+                assert_eq!(at(2, col), None, "posting flag col {col}");
+            }
+            assert_eq!(at(2, 18), Some(("T".to_string(), 18, 19)), "currency use");
+            assert_eq!(at(0, 21), Some(("T".to_string(), 21, 22)), "declaration");
+            assert_eq!(at(2, 6), Some(("Assets:Cash".to_string(), 4, 15)));
+        }
     }
 
     #[test]

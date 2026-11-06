@@ -12,7 +12,7 @@ use rustledger_parser::{ParseResult, Spanned};
 use crate::ledger_state::LedgerState;
 
 use super::utils::{
-    PositionEncoding, commodity_declaration_spans, count_noun, get_symbol_at_position,
+    LineIndex, PositionEncoding, commodity_declaration_spans, count_noun, get_symbol_at_position,
 };
 
 /// Handle a hover request.
@@ -27,7 +27,8 @@ pub fn handle_hover(
 
     // Get the symbol at the cursor position (the currency token when the
     // cursor is on one, so `/6J` is not cut at its `/`, #2807).
-    let (word, _, _) = get_symbol_at_position(source, parse_result, position, encoding)?;
+    let (word, _, _) =
+        get_symbol_at_position(&LineIndex::new(source, encoding), parse_result, position)?;
 
     tracing::debug!("Hover for word: {:?}", word);
 
@@ -537,5 +538,44 @@ mod tests {
             count, 4,
             "expected 4 USD usages (Open + CostSpec + Balance + Price.amount); got {count}"
         );
+    }
+
+    /// Hovering a one-letter flag shows nothing: not the currency `T` it
+    /// shares a name with, and not a made-up currency `P` that does not
+    /// exist. The currency `T` itself still hovers.
+    #[test]
+    fn test_hover_skips_one_letter_flags() {
+        let source = "2024-01-01 commodity T\n\
+                      2024-01-16 T \"Transfer\"\n  \
+                      P Assets:Cash  1 T\n  \
+                      Assets:Bank\n\
+                      2024-01-17 P \"Pending\"\n  \
+                      Assets:Cash  1 T\n  \
+                      Assets:Bank\n";
+        let result = parse(source);
+        let at = |line, character| {
+            let params = HoverParams {
+                text_document_position_params: lsp_types::TextDocumentPositionParams {
+                    text_document: lsp_types::TextDocumentIdentifier {
+                        uri: "file:///test.beancount".parse().unwrap(),
+                    },
+                    position: lsp_types::Position::new(line, character),
+                },
+                work_done_progress_params: Default::default(),
+            };
+            handle_hover(&params, source, &result, None, PositionEncoding::Utf16)
+        };
+        assert_eq!(at(1, 11), None, "header flag T");
+        assert_eq!(at(4, 11), None, "header flag P, no currency P");
+        assert_eq!(at(2, 2), None, "posting flag P, no currency P");
+        let Some(Hover {
+            contents: HoverContents::Markup(markup),
+            ..
+        }) = at(2, 19)
+        else {
+            panic!("the currency T hovers");
+        };
+        assert!(markup.value.contains("Currency: `T`"), "{}", markup.value);
+        assert!(markup.value.contains("2 amounts"), "{}", markup.value);
     }
 }

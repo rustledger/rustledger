@@ -256,4 +256,26 @@ mod tests {
             );
         }
     }
+
+    /// A one-letter flag hovers as nothing, whether or not a currency of
+    /// that name exists.
+    #[test]
+    fn test_get_hover_info_skips_one_letter_flags() {
+        let source = "2024-01-01 commodity T\n\
+                      2024-01-16 T \"Transfer\"\n  \
+                      P Assets:X  1 T\n  \
+                      Assets:Y\n\
+                      2024-01-17 P \"Pending\"\n  \
+                      Assets:X  1 T\n  \
+                      Assets:Y\n";
+        let result = parse(source);
+        assert!(get_hover_info(source, 1, 11, &result).is_none(), "T flag");
+        assert!(
+            get_hover_info(source, 2, 2, &result).is_none(),
+            "P posting flag"
+        );
+        assert!(get_hover_info(source, 4, 11, &result).is_none(), "P flag");
+        let hover = get_hover_info(source, 2, 16, &result).expect("the currency T hovers");
+        assert!(hover.contents.contains('T'), "{}", hover.contents);
+    }
 }

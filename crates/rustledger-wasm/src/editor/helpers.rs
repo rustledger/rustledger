@@ -10,13 +10,12 @@ pub fn get_line(source: &str, line_num: usize) -> &str {
     source.lines().nth(line_num).unwrap_or("")
 }
 
-/// Get the word at a given position in the source.
-pub fn get_word_at_position(source: &str, line: u32, character: u32) -> Option<String> {
-    let line_text = source.lines().nth(line as usize)?;
+/// The word around character offset `col` of `line_text`, as a half-open
+/// range of character indices; `None` when `col` touches no word character.
+fn word_char_range(line_text: &str, col: usize) -> Option<(usize, usize)> {
     let chars: Vec<char> = line_text.chars().collect();
-    let col = character as usize;
 
-    // `character` is a character offset and is used to index `chars`, so
+    // `col` is a character offset and is used to index `chars`, so
     // bound it by the character count, not the byte length (they differ
     // on multi-byte lines). Bounding by `line_text.len()` (bytes) would
     // accept an out-of-range char offset and then index incorrectly.
@@ -40,16 +39,19 @@ pub fn get_word_at_position(source: &str, line: u32, character: u32) -> Option<S
         return None;
     }
 
-    Some(chars[start..end].iter().collect())
+    Some((start, end))
 }
 
 /// Get the symbol at a given position: the currency token there if the
-/// lexer read one (via [`ParseResult::currency_at`]), else the word from
-/// [`get_word_at_position`].
+/// lexer read one (via [`ParseResult::currency_at`]), else the word around
+/// the cursor, unless that word is a transaction or posting
+/// flag (via [`ParseResult::is_flag_at`]).
 ///
 /// The word scan splits `/6J` at the `/` and `BRK.B` at the `.`, so hover,
-/// definitions and references could not reach those currencies (#2807).
-/// `character` is a character offset, as for [`get_word_at_position`].
+/// definitions and references could not reach those currencies (#2807). A
+/// one-letter flag such as `T` lexes as a currency token but is not the
+/// currency `T`, so it is no symbol, as in the LSP.
+/// `character` is a character offset.
 pub fn get_symbol_at_position(
     source: &str,
     line: u32,
@@ -62,16 +64,22 @@ pub fn get_symbol_at_position(
         .map(str::len)
         .sum();
     let line_text = source.lines().nth(line as usize)?;
-    let in_line = match line_text.char_indices().nth(character as usize) {
-        Some((byte, _)) => Some(byte),
-        None => (line_text.chars().count() == character as usize).then_some(line_text.len()),
+    let byte_of_char = |char_index: usize| {
+        line_text
+            .char_indices()
+            .nth(char_index)
+            .map_or(line_text.len(), |(byte, _)| byte)
     };
-    if let Some(in_line) = in_line
-        && let Some(occ) = parse_result.currency_at(line_start + in_line)
+    if (character as usize) <= line_text.chars().count()
+        && let Some(occ) = parse_result.currency_at(line_start + byte_of_char(character as usize))
     {
         return Some(occ.value.to_string());
     }
-    get_word_at_position(source, line, character)
+    let (start, end) = word_char_range(line_text, character as usize)?;
+    if parse_result.is_flag_at(line_start + byte_of_char(start)) {
+        return None;
+    }
+    Some(line_text.chars().skip(start).take(end - start).collect())
 }
 
 /// Check if a character is part of a word (including account separators).
@@ -214,6 +222,14 @@ mod tests {
     use super::*;
     use rustledger_parser::parse;
 
+    /// The word at a position, by the scan `get_symbol_at_position` falls
+    /// back to.
+    fn get_word_at_position(source: &str, line: u32, character: u32) -> Option<String> {
+        let line_text = source.lines().nth(line as usize)?;
+        let (start, end) = word_char_range(line_text, character as usize)?;
+        Some(line_text.chars().skip(start).take(end - start).collect())
+    }
+
     #[test]
     fn test_get_word_at_position() {
         let source = "2024-01-01 open Assets:Bank USD";
@@ -290,6 +306,21 @@ mod tests {
             get_symbol_at_position(source, 0, 20, &result).as_deref(),
             Some("Assets:Futures")
         );
+    }
+
+    /// A one-letter flag is no symbol, even next to a currency of the same
+    /// name; the currency itself still is.
+    #[test]
+    fn test_get_symbol_at_position_skips_one_letter_flags() {
+        let source = "2024-01-01 commodity T\n2024-01-16 T \"Transfer\"\n  P Assets:X  1 T\n";
+        let result = parse(source);
+        let at = |line, col| get_symbol_at_position(source, line, col, &result);
+        assert_eq!(at(1, 11), None, "header flag");
+        assert_eq!(at(1, 12), None, "just after the header flag");
+        assert_eq!(at(2, 2), None, "posting flag");
+        assert_eq!(at(2, 16).as_deref(), Some("T"));
+        assert_eq!(at(0, 21).as_deref(), Some("T"));
+        assert_eq!(at(2, 6).as_deref(), Some("Assets:X"));
     }
 
     #[test]

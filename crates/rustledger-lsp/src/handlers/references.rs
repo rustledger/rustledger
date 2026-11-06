@@ -42,7 +42,8 @@ pub fn handle_references(
     let line = lines.get(line_idx)?;
 
     // Get the word at the cursor position
-    let (word, _, _) = get_symbol_at_position(source, parse_result, position, encoding)?;
+    let (word, _, _) =
+        get_symbol_at_position(&LineIndex::new(source, encoding), parse_result, position)?;
 
     // Classify the symbol kind from the cursor's file (account / currency /
     // payee), then collect that kind's occurrences across every ledger file.
@@ -666,5 +667,45 @@ mod tests {
                 Range::new(Position::new(2, 20), Position::new(2, 23)),
             ]
         );
+    }
+
+    /// A one-letter flag is not the currency of the same name: references
+    /// on the currency `T` skip the `T` header flag, and the flag itself
+    /// has no references.
+    #[test]
+    fn test_references_skip_one_letter_flags() {
+        let source = "2024-01-01 commodity T\n\
+                      2024-01-16 T \"Transfer\"\n  \
+                      P Assets:Cash  1 T\n  \
+                      Assets:Bank\n\
+                      2024-01-17 P \"Pending\"\n  \
+                      Assets:Cash  1 T\n  \
+                      Assets:Bank\n";
+        let result = parse(source);
+        let uri: Uri = "file:///test.beancount".parse().unwrap();
+        let at = |line, character| {
+            let params = ReferenceParams {
+                text_document_position: lsp_types::TextDocumentPositionParams {
+                    text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                    position: Position::new(line, character),
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+                context: lsp_types::ReferenceContext {
+                    include_declaration: true,
+                },
+            };
+            handle_references(&params, source, &result, &[], &uri, PositionEncoding::Utf16)
+                .map(|refs| refs.iter().map(|r| r.range).collect::<Vec<_>>())
+        };
+        let currency = vec![
+            Range::new(Position::new(0, 21), Position::new(0, 22)),
+            Range::new(Position::new(2, 19), Position::new(2, 20)),
+            Range::new(Position::new(5, 17), Position::new(5, 18)),
+        ];
+        assert_eq!(at(0, 21), Some(currency.clone()));
+        assert_eq!(at(2, 19), Some(currency));
+        assert_eq!(at(1, 11), None, "header flag T");
+        assert_eq!(at(2, 2), None, "posting flag P");
     }
 }

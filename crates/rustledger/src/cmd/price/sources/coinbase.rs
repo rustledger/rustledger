@@ -62,6 +62,7 @@ impl CoinbaseSource {
             url,
             self.timeout,
             &[],
+            &[],
             &format!("Failed to fetch price for {}", pair.ticker),
         )?;
 

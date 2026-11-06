@@ -113,6 +113,7 @@ impl PriceSource for OandaSource {
                 ("Authorization", &format!("Bearer {api_key}")),
                 ("Accept-Datetime-Format", "RFC3339"),
             ],
+            &[&api_key],
             &format!("Failed to fetch rate for {instrument}"),
         )?;
 

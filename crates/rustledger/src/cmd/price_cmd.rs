@@ -1082,6 +1082,8 @@ fn write_price(
 /// Report a price that could not be fetched: `Error fetching ...` with
 /// `--verbose`, else a `; Failed to fetch ...` comment line, as `rledger`
 /// has always printed it; a coded record for a caller collecting warnings.
+/// Each form carries the whole cause chain (`{e:#}`), so a timeout or the
+/// provider's error body shows, not only the outermost context.
 fn fetch_failed(
     err_out: &mut Messages<'_>,
     verbose: bool,
@@ -1090,12 +1092,15 @@ fn fetch_failed(
 ) {
     let diagnostic = Diagnostic {
         code: Some(warning_codes::PRICE_FETCH_FAILED.to_string()),
-        ..Diagnostic::message(format!("Failed to fetch {symbol}: {e}"))
+        ..Diagnostic::message(format!("Failed to fetch {symbol}: {e:#}"))
     };
     if verbose {
-        err_out.emit_as(diagnostic, format_args!("Error fetching {symbol}: {e}"));
+        err_out.emit_as(diagnostic, format_args!("Error fetching {symbol}: {e:#}"));
     } else {
-        err_out.emit_as(diagnostic, format_args!("; Failed to fetch {symbol}: {e}"));
+        err_out.emit_as(
+            diagnostic,
+            format_args!("; Failed to fetch {symbol}: {e:#}"),
+        );
     }
 }
 

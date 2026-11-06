@@ -155,6 +155,7 @@ impl PriceSource for EastMoneyFundSource {
             &url,
             self.timeout,
             &[("Referer", "https://fund.eastmoney.com/")],
+            &[],
             &format!("Failed to fetch fund {}", pair.ticker),
         )?;
 
@@ -216,6 +217,7 @@ impl PriceSource for EastMoneyFundSource {
             &url,
             self.timeout,
             &[("Referer", "https://fundf10.eastmoney.com/")],
+            &[],
             &format!("Failed to fetch history for fund {}", pair.ticker),
         )?;
 

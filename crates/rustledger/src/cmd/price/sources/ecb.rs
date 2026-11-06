@@ -76,7 +76,7 @@ impl EcbSource {
         if reply.status == 404 {
             return Ok(Vec::new());
         }
-        let json = reply.into_success_json(&what)?;
+        let json = reply.into_success_json(&what, &[])?;
 
         Self::parse_series(&json, undated_fallback)
     }

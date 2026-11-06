@@ -229,6 +229,7 @@ impl YahooFinanceSource {
             url,
             self.timeout,
             &[],
+            &[],
             &format!("Failed to fetch price for {ticker}"),
         )
     }

@@ -78,6 +78,7 @@ impl QuandlSource {
     fn fetch_rows(
         &self,
         url: &str,
+        api_key: &str,
         pair: &PricePair,
         undated_fallback: Option<rustledger_core::NaiveDate>,
     ) -> Result<Vec<PricePoint>> {
@@ -85,6 +86,7 @@ impl QuandlSource {
             url,
             self.timeout,
             &[],
+            &[api_key],
             &format!("Failed to fetch data for {}", pair.ticker),
         )?;
 
@@ -198,7 +200,7 @@ impl PriceSource for QuandlSource {
         // The row's own date, never the requested one (#1794); the
         // greatest-date pick guards against a provider that ignores
         // limit=1 (providers do not guarantee sorted series).
-        let points = self.fetch_rows(&url, pair, Some(jiff::Zoned::now().date()))?;
+        let points = self.fetch_rows(&url, &api_key, pair, Some(jiff::Zoned::now().date()))?;
         let point = points.into_iter().max_by_key(|p| p.date).with_context(
             || "No usable rows in the Quandl response (empty dataset or unparsable prices)",
         )?;
@@ -226,7 +228,7 @@ impl PriceSource for QuandlSource {
         let (database, dataset) = Self::parse_dataset(&pair.ticker);
         let full_dataset = format!("{database}/{dataset}");
         let url = self.build_url(&full_dataset, &api_key, Some(window));
-        self.fetch_rows(&url, pair, None)
+        self.fetch_rows(&url, &api_key, pair, None)
     }
 }
 

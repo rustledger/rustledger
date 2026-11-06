@@ -84,6 +84,7 @@ impl PriceSource for CoinMarketCapSource {
                 ("X-CMC_PRO_API_KEY", &api_key),
                 ("Accept", "application/json"),
             ],
+            &[&api_key],
             &format!("Failed to fetch price for {}", pair.ticker),
         )?;
 

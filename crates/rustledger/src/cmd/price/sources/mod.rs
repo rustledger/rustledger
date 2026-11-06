@@ -486,11 +486,16 @@ impl HttpReply {
     /// The body of a 2xx response. Any other status is an error naming
     /// `what` (the provider and the thing fetched), the status, and the
     /// start of the body, so the provider's own message reaches the user.
-    pub(crate) fn into_success_body(self, what: &str) -> Result<String> {
+    ///
+    /// Each of `secrets` (the API key a source sent) is replaced in the
+    /// quoted body by `[REDACTED]`: a provider or an intermediary's error
+    /// page can echo the request URL, and Alpha Vantage and Quandl carry
+    /// the key in its query string.
+    pub(crate) fn into_success_body(self, what: &str, secrets: &[&str]) -> Result<String> {
         if (200..300).contains(&self.status) {
             return Ok(self.body);
         }
-        let excerpt = body_excerpt(&self.body);
+        let excerpt = body_excerpt(&redact(&self.body, secrets));
         if excerpt.is_empty() {
             anyhow::bail!("{what}: HTTP {}", self.status);
         }
@@ -498,10 +503,25 @@ impl HttpReply {
     }
 
     /// The JSON body of a 2xx response; see [`Self::into_success_body`].
-    pub(crate) fn into_success_json(self, what: &str) -> Result<serde_json::Value> {
-        let body = self.into_success_body(what)?;
+    pub(crate) fn into_success_json(
+        self,
+        what: &str,
+        secrets: &[&str],
+    ) -> Result<serde_json::Value> {
+        let body = self.into_success_body(what, secrets)?;
         serde_json::from_str(&body).with_context(|| format!("{what}: invalid JSON response"))
     }
+}
+
+/// `text` with every non-empty string in `secrets` replaced by
+/// `[REDACTED]`.
+fn redact(text: &str, secrets: &[&str]) -> String {
+    secrets
+        .iter()
+        .filter(|secret| !secret.is_empty())
+        .fold(text.to_string(), |text, secret| {
+            text.replace(secret, "[REDACTED]")
+        })
 }
 
 /// The longest error-body excerpt [`HttpReply::into_success_body`] quotes.
@@ -519,7 +539,8 @@ fn body_excerpt(body: &str) -> String {
 
 /// GET `url` with the shared [`user_agent`] plus `headers`, the whole
 /// request (connecting, sending, and reading the body) limited to
-/// `timeout`.
+/// `timeout`. A zero `timeout` means no limit, as `[price] timeout = 0`
+/// configures (the same convention as `cache_ttl = 0`).
 ///
 /// Every price source makes its requests through this function, so none
 /// can block `rledger price` past its timeout (#2870). A 4xx/5xx status is
@@ -529,30 +550,46 @@ fn body_excerpt(body: &str) -> String {
 ///
 /// # Errors
 ///
-/// Fails if the request cannot be made or the body cannot be read,
-/// including when `timeout` elapses.
+/// Fails if the request cannot be made or the body cannot be read. When
+/// `timeout` elapses, the error says so and names the timeout.
 pub(crate) fn http_get(
     url: &str,
     timeout: Duration,
     headers: &[(&str, &str)],
 ) -> Result<HttpReply> {
+    let limit = (!timeout.is_zero()).then_some(timeout);
     let mut request = ureq::get(url)
         .config()
-        .timeout_global(Some(timeout))
+        .timeout_global(limit)
         .http_status_as_error(false)
         .build()
         .header("User-Agent", user_agent());
     for (name, value) in headers {
         request = request.header(*name, *value);
     }
-    let mut response = request.call()?;
+    let mut response = request.call().map_err(|e| request_error(e, timeout))?;
     let status = response.status().as_u16();
-    let body = response.body_mut().read_to_string()?;
+    let body = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| request_error(e, timeout))?;
     Ok(HttpReply { status, body })
 }
 
+/// A ureq error as an `anyhow` error; a timeout names the limit and the
+/// setting that configures it, so a stalled provider reads as one.
+fn request_error(error: ureq::Error, timeout: Duration) -> anyhow::Error {
+    if matches!(error, ureq::Error::Timeout(_)) {
+        let message =
+            format!("no complete response within the {timeout:?} timeout (set by [price] timeout)");
+        return anyhow::Error::new(error).context(message);
+    }
+    anyhow::Error::new(error)
+}
+
 /// [`http_get`] a 2xx body as text. `what` names the fetch in every error:
-/// a failed request, or a non-2xx status quoting the provider's body.
+/// a failed request, or a non-2xx status quoting the provider's body with
+/// `secrets` redacted (see [`HttpReply::into_success_body`]).
 ///
 /// # Errors
 ///
@@ -561,11 +598,12 @@ pub(crate) fn http_get_text(
     url: &str,
     timeout: Duration,
     headers: &[(&str, &str)],
+    secrets: &[&str],
     what: &str,
 ) -> Result<String> {
     http_get(url, timeout, headers)
         .with_context(|| what.to_string())?
-        .into_success_body(what)
+        .into_success_body(what, secrets)
 }
 
 /// [`http_get`] a 2xx body as JSON; see [`http_get_text`].
@@ -577,23 +615,40 @@ pub(crate) fn http_get_json(
     url: &str,
     timeout: Duration,
     headers: &[(&str, &str)],
+    secrets: &[&str],
     what: &str,
 ) -> Result<serde_json::Value> {
     http_get(url, timeout, headers)
         .with_context(|| what.to_string())?
-        .into_success_json(what)
+        .into_success_json(what, secrets)
 }
 
 #[cfg(test)]
 mod http_tests {
     use super::{HttpReply, body_excerpt, http_get};
+    use std::io::{Read, Write};
     use std::net::TcpListener;
     use std::sync::mpsc;
     use std::thread;
     use std::time::Duration;
 
+    /// Run `http_get` on a thread and wait at most 10s for it, so a
+    /// timeout that is not applied fails the test instead of hanging it.
+    fn http_get_within_10s(url: String, timeout: Duration) -> anyhow::Result<HttpReply> {
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = http_get(&url, timeout, &[]);
+            // The receiver is gone only if the test already failed.
+            let _ = sender.send(result);
+        });
+        receiver
+            .recv_timeout(Duration::from_secs(10))
+            .expect("the request was still waiting after 10s")
+    }
+
     /// A server that takes the connection and never answers must not
-    /// hang the request: the timeout ends it (#2870).
+    /// hang the request: the timeout ends it (#2870), and the error says
+    /// it was the timeout.
     #[test]
     fn test_http_get_applies_the_timeout() {
         // Bound but never accepted: the kernel completes the TCP
@@ -601,43 +656,61 @@ mod http_tests {
         // waits for a response that never comes.
         let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local listener");
         let url = format!("http://{}/", listener.local_addr().expect("local addr"));
-        // On a thread, so a timeout that is not applied fails the test
-        // instead of hanging it.
-        let (sender, receiver) = mpsc::channel();
-        thread::spawn(move || {
-            let result = http_get(&url, Duration::from_millis(200), &[]);
-            // The receiver is gone only if the test already failed.
-            let _ = sender.send(result);
-        });
-        let result = receiver
-            .recv_timeout(Duration::from_secs(10))
-            .expect("the 200ms timeout did not apply: the request was still waiting after 10s");
-        let err = result.expect_err("a server that never answers must time out");
-        assert!(
-            format!("{err:#}").contains("timeout"),
-            "expected a timeout error, got: {err:#}"
+        let err = http_get_within_10s(url, Duration::from_millis(200))
+            .expect_err("a server that never answers must time out");
+        assert_eq!(
+            err.to_string(),
+            "no complete response within the 200ms timeout (set by [price] timeout)"
         );
         drop(listener);
     }
 
+    /// `[price] timeout = 0` means no limit, as before #2870 and as
+    /// `cache_ttl = 0` means no cache: a zero `Duration` given to ureq
+    /// would fail every request at once.
+    #[test]
+    fn test_http_get_zero_timeout_means_no_limit() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local listener");
+        let url = format!("http://{}/", listener.local_addr().expect("local addr"));
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept the request");
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).expect("read the request");
+                assert!(read > 0, "the client closed before sending its request");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            // Answer after a pause, so a zero limit applied as-is fails.
+            thread::sleep(Duration::from_millis(100));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .expect("write the response");
+        });
+        let reply = http_get_within_10s(url, Duration::ZERO)
+            .expect("a zero timeout must not fail the request");
+        assert_eq!((reply.status, reply.body.as_str()), (200, "ok"));
+        server.join().expect("the server thread");
+    }
+
     /// No source calls ureq directly: every request goes through
-    /// `http_get`, so none can skip the timeout (#2870).
+    /// `http_get`, so none can skip the timeout (#2870). Reads the whole
+    /// directory, so a new source file is checked too.
     #[test]
     fn test_http_get_is_the_only_request_path() {
-        let sources = [
-            ("alphavantage.rs", include_str!("alphavantage.rs")),
-            ("coinbase.rs", include_str!("coinbase.rs")),
-            ("coincap.rs", include_str!("coincap.rs")),
-            ("coinmarketcap.rs", include_str!("coinmarketcap.rs")),
-            ("eastmoneyfund.rs", include_str!("eastmoneyfund.rs")),
-            ("ecb.rs", include_str!("ecb.rs")),
-            ("oanda.rs", include_str!("oanda.rs")),
-            ("quandl.rs", include_str!("quandl.rs")),
-            ("ratesapi.rs", include_str!("ratesapi.rs")),
-            ("tsp.rs", include_str!("tsp.rs")),
-            ("yahoo.rs", include_str!("yahoo.rs")),
-        ];
-        for (file, text) in sources {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cmd/price/sources");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).expect("read the sources directory") {
+            let path = entry.expect("a directory entry").path();
+            let file = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("a UTF-8 file name")
+                .to_string();
+            if file == "mod.rs" || path.extension().is_none_or(|ext| ext != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read a source file");
             assert!(
                 !text.contains("ureq::"),
                 "{file} uses ureq directly; make the request with http_get"
@@ -646,7 +719,13 @@ mod http_tests {
                 text.contains("http_get"),
                 "{file} makes no request through http_get"
             );
+            checked += 1;
         }
+        // Guards against the scan silently finding nothing.
+        assert!(
+            checked >= 11,
+            "only {checked} source files found in {dir:?}"
+        );
     }
 
     #[test]
@@ -656,11 +735,29 @@ mod http_tests {
             body: "{\"errors\": [\n  {\"message\": \"Invalid currency\"}]}".to_string(),
         };
         let err = reply
-            .into_success_body("Coinbase price for XXX")
+            .into_success_body("Coinbase price for XXX", &[])
             .expect_err("a 404 is an error");
         assert_eq!(
             err.to_string(),
             "Coinbase price for XXX: HTTP 404: {\"errors\": [ {\"message\": \"Invalid currency\"}]}"
+        );
+    }
+
+    /// An error page that echoes the request URL must not show the API
+    /// key the source put in its query string.
+    #[test]
+    fn test_into_success_body_redacts_the_api_key() {
+        let reply = HttpReply {
+            status: 502,
+            body: "<p>Upstream failed for /query?symbol=AAPL&apikey=S3CRETKEY</p>".to_string(),
+        };
+        let err = reply
+            .into_success_body("Failed to fetch quote for AAPL", &["S3CRETKEY", ""])
+            .expect_err("a 502 is an error");
+        assert_eq!(
+            err.to_string(),
+            "Failed to fetch quote for AAPL: HTTP 502: \
+             <p>Upstream failed for /query?symbol=AAPL&apikey=[REDACTED]</p>"
         );
     }
 
@@ -671,7 +768,7 @@ mod http_tests {
             body: " \n".to_string(),
         };
         let err = reply
-            .into_success_body("TSP prices")
+            .into_success_body("TSP prices", &[])
             .expect_err("a 503 is an error");
         assert_eq!(err.to_string(), "TSP prices: HTTP 503");
     }
@@ -682,7 +779,7 @@ mod http_tests {
             status: 200,
             body: "ok".to_string(),
         };
-        assert_eq!(reply.into_success_body("x").expect("2xx"), "ok");
+        assert_eq!(reply.into_success_body("x", &[]).expect("2xx"), "ok");
     }
 
     #[test]
@@ -691,7 +788,6 @@ mod http_tests {
         assert_eq!(excerpt, format!("{}...", "\u{e9}".repeat(300)));
     }
 }
-
 #[cfg(test)]
 // NOTE on clocks: the dispatch reads the wall clock internally (no
 // injection seam), so each today-arm test computes "today" separately

@@ -67,7 +67,7 @@ impl TspSource {
     fn fetch_history(&self) -> Result<Vec<serde_json::Value>> {
         let url = self.build_url();
 
-        let json = http_get_json(&url, self.timeout, &[], "Failed to fetch TSP prices")?;
+        let json = http_get_json(&url, self.timeout, &[], &[], "Failed to fetch TSP prices")?;
 
         // The TSP API returns an array of daily prices
         match json {

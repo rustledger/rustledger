@@ -133,11 +133,11 @@ pub struct PriceConfig {
     /// Default price source (defaults to "yahoo").
     pub default_source: Option<String>,
 
-    /// Request timeout in seconds (defaults to 30).
+    /// Request timeout in seconds (0 = no limit, default: 30).
     ///
-    /// Note: Currently passed to sources but not enforced at the HTTP level
-    /// due to ureq 3.x API limitations. Sources may implement their own
-    /// timeout handling in the future.
+    /// Limits each built-in source's whole HTTP request: connecting,
+    /// sending, and reading the response. A `--source-cmd` or custom
+    /// command source is not limited by it.
     pub timeout: Option<u64>,
 
     /// Cache TTL in seconds (0 = disabled, default: 1800 = 30 minutes).

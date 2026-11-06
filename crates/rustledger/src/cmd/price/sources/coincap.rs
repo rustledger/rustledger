@@ -88,6 +88,7 @@ impl PriceSource for CoinCapSource {
             &url,
             self.timeout,
             &[],
+            &[],
             &format!("Failed to fetch price for {}", pair.ticker),
         )?;
 

@@ -152,6 +152,7 @@ impl AlphaVantageSource {
             &url,
             self.timeout,
             &[],
+            &[api_key],
             &format!("Failed to fetch quote for {symbol}"),
         )?;
 
@@ -195,23 +196,30 @@ impl AlphaVantageSource {
 
     fn fetch_forex(&self, from: &str, to: &str, api_key: &str) -> Result<PriceResponse> {
         let url = self.build_forex_url(from, to, api_key);
-        self.fetch_exchange_rate(&url, from, to)
+        self.fetch_exchange_rate(&url, from, to, api_key)
     }
 
     fn fetch_crypto(&self, symbol: &str, market: &str, api_key: &str) -> Result<PriceResponse> {
         let url = self.build_crypto_url(symbol, market, api_key);
-        self.fetch_exchange_rate(&url, symbol, market)
+        self.fetch_exchange_rate(&url, symbol, market, api_key)
     }
 
     /// Shared `CURRENCY_EXCHANGE_RATE` fetch — forex and crypto hit the
     /// same endpoint and parse the same response shape (round-2 deep
     /// review: the two copies had drifted, keeping the local-clock date
     /// label in both while the stock path was fixed).
-    fn fetch_exchange_rate(&self, url: &str, from: &str, to: &str) -> Result<PriceResponse> {
+    fn fetch_exchange_rate(
+        &self,
+        url: &str,
+        from: &str,
+        to: &str,
+        api_key: &str,
+    ) -> Result<PriceResponse> {
         let json = http_get_json(
             url,
             self.timeout,
             &[],
+            &[api_key],
             &format!("Failed to fetch rate for {from}/{to}"),
         )?;
 
@@ -297,6 +305,7 @@ impl PriceSource for AlphaVantageSource {
             &url,
             self.timeout,
             &[],
+            &[&api_key],
             &format!("Failed to fetch daily series for {}", pair.ticker),
         )?;
 

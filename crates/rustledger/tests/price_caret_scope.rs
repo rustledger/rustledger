@@ -130,4 +130,10 @@ fn test_price_metadata_spec_refuses_inverse_of_another_commodity() {
         ),
         "stderr: {stderr}"
     );
+    // The refusal names the `^` as bean-price's inversion, and the way to
+    // keep a literal `^` ticker.
+    assert!(
+        stderr.contains("is kept literal in `[price.mapping]` or `--mapping SYMBOL:^TICKER`"),
+        "stderr: {stderr}"
+    );
 }

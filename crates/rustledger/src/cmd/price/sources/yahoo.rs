@@ -244,6 +244,23 @@ impl PriceSource for YahooFinanceSource {
         "Yahoo Finance - stocks, ETFs, crypto, forex"
     }
 
+    /// The Yahoo tickers that name a currency pair (#2866): forex
+    /// `XXXYYY=X` (`EURCHF=X`), based in XXX, and crypto `XXX-YYY`
+    /// (`BTC-USD`) with a three-letter quote, based in XXX. A share-class
+    /// ticker such as `BRK-B` names no pair.
+    fn pair_base(&self, ticker: &str) -> Option<String> {
+        if let Some(pair) = ticker.strip_suffix("=X") {
+            return (pair.len() == 6 && pair.chars().all(|c| c.is_ascii_alphabetic()))
+                .then(|| pair[..3].to_uppercase());
+        }
+        let (base, quote) = ticker.split_once('-')?;
+        (base.len() >= 2
+            && base.chars().all(|c| c.is_ascii_alphanumeric())
+            && quote.len() == 3
+            && quote.chars().all(|c| c.is_ascii_uppercase()))
+        .then(|| base.to_string())
+    }
+
     fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
         let url = self.build_url(&pair.ticker, None)?;
         let json = self.get_chart(&url, &pair.ticker)?;
@@ -271,6 +288,27 @@ impl PriceSource for YahooFinanceSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The base of the pair a ticker names, which a `^` inversion must
+    /// be declared in (#2866).
+    #[test]
+    fn test_pair_base() {
+        let source = YahooFinanceSource::new(Duration::from_secs(30));
+        assert_eq!(
+            source.pair_base("EURCHF=X").as_deref(),
+            Some("EUR"),
+            "EURCHF=X"
+        );
+        assert_eq!(
+            source.pair_base("BTC-USD").as_deref(),
+            Some("BTC"),
+            "BTC-USD"
+        );
+        assert_eq!(source.pair_base("BRK-B"), None, "BRK-B");
+        assert_eq!(source.pair_base("AAPL"), None, "AAPL");
+        assert_eq!(source.pair_base("^GSPC"), None, "^GSPC");
+        assert_eq!(source.pair_base("EUR=X"), None, "EUR=X");
+    }
 
     #[test]
     fn test_build_url() {

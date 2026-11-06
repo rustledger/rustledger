@@ -210,6 +210,11 @@ impl PriceSource for RatesApiSource {
         }
     }
 
+    /// `BASE-SYMBOL` names its pair, based in BASE (#2866).
+    fn pair_base(&self, ticker: &str) -> Option<String> {
+        split_dash_pair(ticker).map(|(base, _)| base.to_string())
+    }
+
     fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
         let url = self.build_url(
             &pair.ticker.to_uppercase(),
@@ -268,6 +273,19 @@ impl PriceSource for RatesApiSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The base of the pair a ticker names, which a `^` inversion must
+    /// be declared in (#2866).
+    #[test]
+    fn test_pair_base() {
+        let source = RatesApiSource::new(Duration::from_secs(30));
+        assert_eq!(
+            source.pair_base("USD-EUR").as_deref(),
+            Some("USD"),
+            "USD-EUR"
+        );
+        assert_eq!(source.pair_base("EUR"), None, "EUR");
+    }
 
     fn pair(ticker: &str, currency: &str) -> PricePair {
         PricePair {

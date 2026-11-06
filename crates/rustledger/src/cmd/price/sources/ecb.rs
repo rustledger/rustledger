@@ -185,6 +185,11 @@ impl PriceSource for EcbSource {
         }
     }
 
+    /// `BASE-SYMBOL` names its pair, based in BASE (#2866).
+    fn pair_base(&self, ticker: &str) -> Option<String> {
+        split_dash_pair(ticker).map(|(base, _)| base.to_string())
+    }
+
     fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
         let ticker = pair.ticker.to_uppercase();
         let currency = pair.currency.to_uppercase();
@@ -355,6 +360,19 @@ impl PriceSource for EcbSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The base of the pair a ticker names, which a `^` inversion must
+    /// be declared in (#2866).
+    #[test]
+    fn test_pair_base() {
+        let source = EcbSource::new(Duration::from_secs(30));
+        assert_eq!(
+            source.pair_base("GBP-EUR").as_deref(),
+            Some("GBP"),
+            "GBP-EUR"
+        );
+        assert_eq!(source.pair_base("GBP"), None, "GBP");
+    }
 
     fn pair(ticker: &str, currency: &str) -> PricePair {
         PricePair {

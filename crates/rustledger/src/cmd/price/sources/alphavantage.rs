@@ -292,6 +292,22 @@ impl PriceSource for AlphaVantageSource {
         }
     }
 
+    /// The tickers that name both sides of their pair (#2866): beanprice's
+    /// `price:SYMBOL:BASE` and `fx:CCY:BASE`, based in SYMBOL and CCY, and
+    /// rledger's forex `CCY/BASE`, based in CCY.
+    fn pair_base(&self, ticker: &str) -> Option<String> {
+        let pair = self.bean_price_pair(PricePair {
+            ticker: ticker.to_string(),
+            currency: String::new(),
+        });
+        if !pair.currency.is_empty() {
+            // A beanprice form, read into `SYMBOL` or `CCY/BASE`.
+            return pair.ticker.split('/').next().map(str::to_string);
+        }
+        let (base, quote) = ticker.split_once('/')?;
+        (!base.is_empty() && !quote.is_empty()).then(|| base.to_string())
+    }
+
     fn requires_api_key(&self) -> bool {
         true
     }
@@ -380,6 +396,30 @@ impl AlphaVantageSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The base of the pair a ticker names, which a `^` inversion must
+    /// be declared in (#2866).
+    #[test]
+    fn test_pair_base() {
+        let source = AlphaVantageSource::new(Duration::from_secs(30));
+        assert_eq!(
+            source.pair_base("price:IBM:USD").as_deref(),
+            Some("IBM"),
+            "price:IBM:USD"
+        );
+        assert_eq!(
+            source.pair_base("fx:USD:CHF").as_deref(),
+            Some("USD"),
+            "fx:USD:CHF"
+        );
+        assert_eq!(
+            source.pair_base("EUR/USD").as_deref(),
+            Some("EUR"),
+            "EUR/USD"
+        );
+        assert_eq!(source.pair_base("AAPL"), None, "AAPL");
+        assert_eq!(source.pair_base("CRYPTO:BTC"), None, "CRYPTO:BTC");
+    }
 
     fn pair(ticker: &str, currency: &str) -> PricePair {
         PricePair {

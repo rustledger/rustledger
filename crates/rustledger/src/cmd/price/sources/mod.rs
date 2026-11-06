@@ -282,6 +282,19 @@ pub trait PriceSource: Send + Sync {
         pair
     }
 
+    /// The base of the pair `ticker` names, when the ticker names both
+    /// sides of its own pair (`EUR-GBP` on `ratesapi`, `EUR_CHF` on
+    /// `oanda`, `EURCHF=X` on `yahoo`): `EUR`. A bean-price `^` inversion
+    /// of such a ticker is a price in that base, so it is written only when
+    /// the declared quote currency is the base (#2866).
+    ///
+    /// The default is `None`: the source's tickers name an asset priced in
+    /// the requested currency, not a pair.
+    fn pair_base(&self, ticker: &str) -> Option<String> {
+        let _ = ticker;
+        None
+    }
+
     /// Fetch the LATEST quote for a pair. Every provider has a latest
     /// endpoint, so this is the one mandatory fetch method.
     ///

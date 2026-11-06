@@ -71,6 +71,12 @@ impl PriceSource for CoinMarketCapSource {
         }
     }
 
+    /// `SYMBOL-BASE` names its pair, priced in BASE: the asset SYMBOL is
+    /// the side an inversion is a price in (#2866).
+    fn pair_base(&self, ticker: &str) -> Option<String> {
+        split_dash_pair(ticker).map(|(base, _)| base.to_string())
+    }
+
     fn requires_api_key(&self) -> bool {
         true
     }
@@ -155,6 +161,19 @@ impl PriceSource for CoinMarketCapSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The base of the pair a ticker names, which a `^` inversion must
+    /// be declared in (#2866).
+    #[test]
+    fn test_pair_base() {
+        let source = CoinMarketCapSource::new(Duration::from_secs(30));
+        assert_eq!(
+            source.pair_base("BTC-CHF").as_deref(),
+            Some("BTC"),
+            "BTC-CHF"
+        );
+        assert_eq!(source.pair_base("BTC"), None, "BTC");
+    }
 
     fn pair(ticker: &str, currency: &str) -> PricePair {
         PricePair {

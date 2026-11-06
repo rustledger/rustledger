@@ -89,6 +89,14 @@ impl PriceSource for OandaSource {
         "OANDA - forex rates (requires API key)"
     }
 
+    /// beanprice's `oanda` ticker `XXX_YYY` (`EUR_USD`, matched as
+    /// `([A-Z]+)_([A-Z]+)$`) names its pair, based in XXX (#2866).
+    fn pair_base(&self, ticker: &str) -> Option<String> {
+        let (base, quote) = ticker.split_once('_')?;
+        let letters = |s: &str| !s.is_empty() && s.chars().all(|c| c.is_ascii_alphabetic());
+        (letters(base) && letters(quote)).then(|| base.to_uppercase())
+    }
+
     fn requires_api_key(&self) -> bool {
         true
     }
@@ -172,6 +180,25 @@ impl PriceSource for OandaSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The base of the pair a ticker names, which a `^` inversion must
+    /// be declared in (#2866).
+    #[test]
+    fn test_pair_base() {
+        let source = OandaSource::new(Duration::from_secs(30));
+        assert_eq!(
+            source.pair_base("EUR_CHF").as_deref(),
+            Some("EUR"),
+            "EUR_CHF"
+        );
+        assert_eq!(
+            source.pair_base("eur_chf").as_deref(),
+            Some("EUR"),
+            "eur_chf"
+        );
+        assert_eq!(source.pair_base("EUR"), None, "EUR");
+        assert_eq!(source.pair_base("EUR_"), None, "EUR_");
+    }
 
     /// Candle open times roll forward past the 17:00 New-York session
     /// boundary onto the trading day the candle represents — in both

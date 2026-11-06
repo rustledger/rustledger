@@ -2,7 +2,10 @@
 //!
 //! Fetches cryptocurrency prices from Coinbase.
 
-use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, http_get_json};
+use super::{
+    DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, http_get_json,
+    split_dash_pair,
+};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
@@ -107,6 +110,12 @@ impl PriceSource for CoinbaseSource {
         "Coinbase - cryptocurrency spot prices"
     }
 
+    /// beanprice's `coinbase` ticker `XXX-YYY` (`BTC-USD`) names its pair,
+    /// based in XXX (#2866).
+    fn pair_base(&self, ticker: &str) -> Option<String> {
+        split_dash_pair(ticker).map(|(base, _)| base.to_string())
+    }
+
     fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
         // Label read BEFORE the network fetch: the spot endpoint
         // carries no date field, and a live quote must carry the day
@@ -163,6 +172,19 @@ impl PriceSource for CoinbaseSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The base of the pair a ticker names, which a `^` inversion must
+    /// be declared in (#2866).
+    #[test]
+    fn test_pair_base() {
+        let source = CoinbaseSource::new(Duration::from_secs(30));
+        assert_eq!(
+            source.pair_base("BTC-USD").as_deref(),
+            Some("BTC"),
+            "BTC-USD"
+        );
+        assert_eq!(source.pair_base("BTC"), None, "BTC");
+    }
 
     #[test]
     fn test_build_url() {

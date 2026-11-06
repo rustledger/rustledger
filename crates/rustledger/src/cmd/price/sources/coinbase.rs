@@ -30,6 +30,17 @@ impl CoinbaseSource {
         Self { timeout }
     }
 
+    /// The `BASE-QUOTE` pair the spot endpoint is asked for: a ticker with
+    /// a dash names its own (`BTC-USD`), and any other is quoted in the
+    /// requested currency (`BTC` is `BTC-<currency>`).
+    fn spot_pair(ticker: &str, currency: &str) -> String {
+        if ticker.contains('-') {
+            ticker.to_string()
+        } else {
+            format!("{ticker}-{currency}")
+        }
+    }
+
     /// Build the Coinbase API URL. A date adds `?date=YYYY-MM-DD`,
     /// which the spot endpoint answers with that day's price.
     fn build_url(
@@ -38,13 +49,7 @@ impl CoinbaseSource {
         currency: &str,
         date: Option<rustledger_core::NaiveDate>,
     ) -> String {
-        // If the ticker already contains a dash, use it directly
-        // Otherwise, append the currency
-        let pair = if ticker.contains('-') {
-            ticker.to_string()
-        } else {
-            format!("{ticker}-{currency}")
-        };
+        let pair = Self::spot_pair(ticker, currency);
         match date {
             Some(d) => format!("https://api.coinbase.com/v2/prices/{pair}/spot?date={d}"),
             None => format!("https://api.coinbase.com/v2/prices/{pair}/spot"),
@@ -107,6 +112,15 @@ impl PriceSource for CoinbaseSource {
         "Coinbase - cryptocurrency spot prices"
     }
 
+    /// The base of the pair the spot endpoint is asked for (#2866), read by
+    /// the same `spot_pair` the fetch uses: `BTC-USD`, and a bare
+    /// `BTC` (`BTC-<currency>`), are based in `BTC`.
+    fn pair_base(&self, ticker: &str) -> Option<String> {
+        Self::spot_pair(ticker, "")
+            .split_once('-')
+            .map(|(base, _)| base.to_uppercase())
+    }
+
     fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
         // Label read BEFORE the network fetch: the spot endpoint
         // carries no date field, and a live quote must carry the day
@@ -163,6 +177,21 @@ impl PriceSource for CoinbaseSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The base of the pair a ticker names, which a `^` inversion must
+    /// be declared in (#2866).
+    #[test]
+    fn test_pair_base() {
+        let source = CoinbaseSource::new(Duration::from_secs(30));
+        for (ticker, base) in [
+            ("BTC-USD", Some("BTC")),
+            ("btc-usd", Some("BTC")),
+            // A bare symbol is quoted in the requested currency.
+            ("BTC", Some("BTC")),
+        ] {
+            assert_eq!(source.pair_base(ticker).as_deref(), base, "{ticker}");
+        }
+    }
 
     #[test]
     fn test_build_url() {

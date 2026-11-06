@@ -565,6 +565,9 @@ fn build_mapping(specs: &[PriceSpec]) -> Option<CommodityMapping> {
 ///   `"EUR:ecbrates/GBP-EUR,ecb/GBP"`                 (bean-price chain)
 ///   `"USD:yahoo/AAPL CAD:google/AAPL"`               (bean-price multi-currency)
 ///   `"USD:google/NASDAQ:AAPL"`                       (ticker contains `:`, fine)
+///   `"EUR:ratesapi/^EUR-GBP"`                        (bean-price inversion: the `^`
+///                                                    stays on the ticker, and
+///                                                    the registry inverts, #2866)
 ///
 /// Malformed entries are silently skipped — matches bean-price's lenient
 /// parsing (it logs a warning and continues; we already surface a malformed
@@ -867,6 +870,30 @@ mod tests {
         assert_eq!(specs[0].quote_currency, "USD");
         assert_eq!(specs[0].source, "google");
         assert_eq!(specs[0].ticker, "NASDAQ:AAPL");
+    }
+
+    /// bean-price's `^` stays on the ticker: the registry strips it and
+    /// inverts the quote (#2866), so every source gets it alike.
+    #[test]
+    fn parses_inverted_bean_price_ticker() {
+        let specs = parse_price_metadata("EUR:ratesapi/^EUR-GBP,ecbrates/^EUR-GBP");
+        let tickers: Vec<(&str, &str, &str)> = specs
+            .iter()
+            .map(|s| {
+                (
+                    s.quote_currency.as_str(),
+                    s.source.as_str(),
+                    s.ticker.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            tickers,
+            vec![
+                ("EUR", "ratesapi", "^EUR-GBP"),
+                ("EUR", "ecbrates", "^EUR-GBP")
+            ]
+        );
     }
 
     #[test]

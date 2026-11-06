@@ -244,6 +244,36 @@ impl PriceSource for YahooFinanceSource {
         "Yahoo Finance - stocks, ETFs, crypto, forex"
     }
 
+    /// The Yahoo tickers that name a currency pair (#2866), matched without
+    /// regard to case as Yahoo matches them:
+    ///
+    /// - forex `XXXYYY=X` (`EURCHF=X`), based in XXX;
+    /// - forex `XXX=X` (`JPY=X`), Yahoo's USD-based pair `USDXXX=X`;
+    /// - crypto `XXX-YYY` (`BTC-USD`) with a three-letter quote, based in
+    ///   XXX.
+    ///
+    /// A share-class ticker such as `BRK-B` names no pair. This source
+    /// sends the ticker as it is and reads the quote currency from the
+    /// response, so there is no request parsing to share: these are
+    /// Yahoo's own ticker conventions.
+    fn pair_base(&self, ticker: &str) -> Option<String> {
+        let ticker = ticker.to_uppercase();
+        let letters = |s: &str| s.chars().all(|c| c.is_ascii_alphabetic());
+        if let Some(pair) = ticker.strip_suffix("=X") {
+            return match pair.len() {
+                6 if letters(pair) => Some(pair[..3].to_string()),
+                3 if letters(pair) => Some("USD".to_string()),
+                _ => None,
+            };
+        }
+        let (base, quote) = ticker.split_once('-')?;
+        (base.len() >= 2
+            && base.chars().all(|c| c.is_ascii_alphanumeric())
+            && quote.len() == 3
+            && letters(quote))
+        .then(|| base.to_string())
+    }
+
     fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
         let url = self.build_url(&pair.ticker, None)?;
         let json = self.get_chart(&url, &pair.ticker)?;
@@ -271,6 +301,28 @@ impl PriceSource for YahooFinanceSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The base of the pair a ticker names, which a `^` inversion must
+    /// be declared in (#2866).
+    #[test]
+    fn test_pair_base() {
+        let source = YahooFinanceSource::new(Duration::from_secs(30));
+        for (ticker, base) in [
+            ("EURCHF=X", Some("EUR")),
+            ("eurchf=x", Some("EUR")),
+            // Yahoo's `XXX=X` is the USD-based pair `USDXXX=X`.
+            ("JPY=X", Some("USD")),
+            ("EUR=X", Some("USD")),
+            ("BTC-USD", Some("BTC")),
+            ("btc-usd", Some("BTC")),
+            ("BRK-B", None),
+            ("AAPL", None),
+            ("^GSPC", None),
+            ("EURCH=X", None),
+        ] {
+            assert_eq!(source.pair_base(ticker).as_deref(), base, "{ticker}");
+        }
+    }
 
     #[test]
     fn test_build_url() {

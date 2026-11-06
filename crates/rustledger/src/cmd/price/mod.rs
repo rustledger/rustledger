@@ -1449,4 +1449,25 @@ mod tests {
         assert_eq!(text.matches(INVERSION_NOTE).count(), 1, "{text}");
         assert!(text.ends_with(&format!(" ({INVERSION_NOTE})")), "{text}");
     }
+
+    /// `CoinCap` quotes in USD, so `^BTC` inverts into BTC only, and
+    /// `EUR:coincap/^BTC` is refused (#2883 round 4). (`BTC:coincap/^BTC`
+    /// asks for BTC in BTC, the dispatch's identity pair.)
+    #[test]
+    fn test_fetch_price_for_spec_checks_the_coincap_base() {
+        let coincap = || -> Arc<dyn PriceSource> {
+            Arc::new(sources::CoinCapSource::new(std::time::Duration::from_secs(
+                1,
+            )))
+        };
+        let err = spec_inverse(coincap(), "^BTC", "USD", "EUR", "50000", "USD")
+            .expect_err("BTC per USD is not an EUR price");
+        assert_eq!(
+            format!("{err:#}"),
+            noted(
+                "`^BTC` inverts a price of BTC, which is a price in BTC, not in EUR; refusing \
+                 to write it as a EUR price"
+            )
+        );
+    }
 }

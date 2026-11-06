@@ -282,14 +282,18 @@ pub trait PriceSource: Send + Sync {
         pair
     }
 
-    /// The base of the pair `ticker` names, when the ticker names both
-    /// sides of its own pair (`EUR-GBP` on `ratesapi`, `EUR_CHF` on
-    /// `oanda`, `EURCHF=X` on `yahoo`): `EUR`. A bean-price `^` inversion
-    /// of such a ticker is a price in that base, so it is written only when
-    /// the declared quote currency is the base (#2866).
+    /// The base of what the source fetches for `ticker`: the asset its
+    /// quote is a price of (#2866). A pair ticker names it (`EUR-GBP` on
+    /// `ratesapi`, `EUR_CHF` on `oanda`, `EURCHF=X` on `yahoo` are all
+    /// `EUR`), and a bare ticker quoted in the requested currency is its
+    /// own base on most sources (`EUR` on `ratesapi`, `BTC` on `coincap`).
+    /// Implementations read it with the same code they build the request
+    /// with. A bean-price `^` inversion is a price in that base, so it is
+    /// written only when the declared quote currency is the base.
     ///
-    /// The default is `None`: the source's tickers name an asset priced in
-    /// the requested currency, not a pair.
+    /// The default is `None`: the ticker names an asset whose base this
+    /// source cannot read (a quandl dataset, a TSP fund, a command
+    /// source's ticker), and only the quote currency is checked.
     fn pair_base(&self, ticker: &str) -> Option<String> {
         let _ = ticker;
         None

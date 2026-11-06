@@ -73,8 +73,8 @@ impl PriceSource for CoinMarketCapSource {
 
     /// The base of the pair the source fetches (#2866), read by the same
     /// [`PriceSource::bean_price_pair`] the fetch uses: the pair ticker
-    /// (`EUR-GBP`) and a bare one quoted in the requested currency (`EUR`)
-    /// are both based in `EUR`.
+    /// (`BTC-CHF`) and a bare one quoted in the requested currency (`BTC`)
+    /// are both based in `BTC`.
     fn pair_base(&self, ticker: &str) -> Option<String> {
         let pair = self.bean_price_pair(PricePair {
             ticker: ticker.to_string(),

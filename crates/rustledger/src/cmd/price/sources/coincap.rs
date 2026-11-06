@@ -134,6 +134,14 @@ impl PriceSource for CoinCapSource {
         "CoinCap - cryptocurrency prices"
     }
 
+    /// `CoinCap` quotes every asset in USD (#2866), so the ticker, upper-case,
+    /// is the base of what is fetched: `BTC` is `BTC`. An asset ID such as
+    /// `bitcoin` is its own base, `BITCOIN`, which no declared currency
+    /// matches, so its inversion is refused.
+    fn pair_base(&self, ticker: &str) -> Option<String> {
+        Some(ticker.to_uppercase())
+    }
+
     fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
         // Label read BEFORE the network fetch: a quote labeled with the
         // local day must carry the day the request was made, not a day
@@ -183,6 +191,16 @@ impl PriceSource for CoinCapSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Every `CoinCap` quote is in USD, so the ticker is the base an
+    /// inversion must be declared in (#2866).
+    #[test]
+    fn test_pair_base() {
+        let source = CoinCapSource::new(Duration::from_secs(30));
+        for (ticker, base) in [("BTC", "BTC"), ("btc", "BTC"), ("bitcoin", "BITCOIN")] {
+            assert_eq!(source.pair_base(ticker).as_deref(), Some(base), "{ticker}");
+        }
+    }
 
     #[test]
     fn test_ticker_to_id() {

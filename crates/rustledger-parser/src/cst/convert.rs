@@ -469,6 +469,7 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
         &mut errors,
     );
     errors.sort_by_key(|e| e.span.start);
+    drop_errors_inside_a_line_error(&mut errors, stripped, bom_offset);
 
     // Post-pass: align directive spans with the legacy parser's
     // convention (skip leading trivia, extend through inter-
@@ -5359,6 +5360,10 @@ pub mod test_counters {
         /// hold a bad date, and the stretches between dates, on this thread.
         pub static DATE_LINE_SCANNED_BYTES: std::cell::Cell<usize> =
             const { std::cell::Cell::new(0) };
+        /// Bytes `drop_errors_inside_a_line_error` stepped over: the source
+        /// scan for line starts, and each line prefix it lexed (#2787).
+        pub static ERROR_LINE_SCANNED_BYTES: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
     }
 }
 
@@ -5719,6 +5724,28 @@ mod tests {
     /// the lines, and the stretches between dates, must stay within three
     /// passes over the source, whether the dates share one line or each has
     /// its own.
+    /// `drop_errors_inside_a_line_error` (#2787) scans the source once for
+    /// line starts and lexes each broken line's prefix once, so many broken
+    /// lines, or many unreadable tokens on one long line, stay linear.
+    #[test]
+    fn test_drop_errors_inside_a_line_error_is_linear_in_the_input() {
+        const N: usize = 20_000;
+        let head = "2024-01-01 open Assets:A\n2024-01-02 *\n  Assets:A  1 USD\n";
+        let many_lines = format!("{head}{}", "  * h\n".repeat(N));
+        let one_line = format!("{head}  *{}\n", " h".repeat(N));
+        for (label, src, errors) in [("many lines", many_lines, N), ("one line", one_line, N)] {
+            test_counters::ERROR_LINE_SCANNED_BYTES.with(|c| c.set(0));
+            let result = crate::parse(&src);
+            let scanned = test_counters::ERROR_LINE_SCANNED_BYTES.with(std::cell::Cell::get);
+            assert!(
+                scanned <= 3 * src.len(),
+                "{label}: stepped over {scanned} bytes of a {}-byte input",
+                src.len()
+            );
+            assert_eq!(result.errors.len(), errors, "{label}");
+        }
+    }
+
     #[test]
     fn test_report_invalid_dates_is_linear_in_the_input() {
         const N: usize = 20_000;
@@ -8561,6 +8588,148 @@ mod custom_rejected_values {
             "the tag survives as a Tag in metadata; got {meta:?}",
         );
     }
+}
+
+/// Make the count of generic errors on a line beancount cannot read match
+/// beancount's (#2787).
+///
+/// Two of our rules can fire for one line: the line (or directive) error,
+/// and an inline error for each `ERROR_TOKEN` on it. `  * h` after a
+/// transaction's postings gave two overlapping errors. Beancount reports an
+/// `Invalid token` error for each token its lexer cannot read, and a syntax
+/// error only when its grammar fails at a readable token first: once the
+/// lexer has reported an error, bison's recovery reports nothing more for
+/// that statement. So `  * h` is one error there (the `*` is a posting
+/// flag, then `h` is unreadable), while `  ** h` and `  @ x` are two (the
+/// grammar fails at the second `*`, at the `@`).
+///
+/// Here the line error stands for beancount's first error on the line. When
+/// the tokens before the first `ERROR_TOKEN` on it are a readable start of
+/// an indented line (nothing, a posting flag, or an optional flag, an
+/// account and a prefix of a plain amount), the grammar has not failed before it, so that `ERROR_TOKEN`'s
+/// own error is the one beancount reports and the line error already stands
+/// for it: it is dropped. Every later `ERROR_TOKEN` keeps its error, as each
+/// is one more `Invalid token` there. The line error is the one kept, not
+/// the inline one, because the formatter's verbatim-copy ranges are read
+/// from the outer errors. The outer error may be any syntax error (a
+/// posting's `unexpected trailing tokens` holds the `oops` in
+/// `Assets:A  -1 oops USD`); only a generic inner one is dropped. Errors of
+/// any other kind are left alone, and so is a generic error on a later line
+/// of a multi-line one.
+///
+/// `errors` is sorted by start and stays so. Linear in the number of errors
+/// plus, only when there are two or more syntax errors, the source length
+/// (for the line starts) and one lexing of each covered line's prefix.
+fn drop_errors_inside_a_line_error(
+    errors: &mut Vec<crate::ParseError>,
+    stripped: &str,
+    bom_offset: u32,
+) {
+    use crate::logos_lexer::Token;
+    let is_generic = |e: &crate::ParseError| matches!(&e.kind, crate::ParseErrorKind::SyntaxError(m) if m == "unexpected input");
+    let mut syntax: Vec<usize> = (0..errors.len())
+        .filter(|&i| matches!(errors[i].kind, crate::ParseErrorKind::SyntaxError(_)))
+        .collect();
+    if syntax.len() < 2 || !syntax.iter().any(|&i| is_generic(&errors[i])) {
+        return;
+    }
+    // Longest first among equal starts, so a container precedes what it holds.
+    syntax.sort_by_key(|&i| (errors[i].span.start, std::cmp::Reverse(errors[i].span.end)));
+    let bom = bom_offset as usize;
+    #[cfg(test)]
+    test_counters::ERROR_LINE_SCANNED_BYTES.with(|c| c.set(c.get() + stripped.len()));
+    let newlines: Vec<usize> = stripped
+        .bytes()
+        .enumerate()
+        .filter_map(|(i, b)| (b == b'\n').then_some(i + bom))
+        .collect();
+    // The line `at` is on: its start and the position of its `\n`.
+    let line_of = |at: usize| {
+        let k = newlines.partition_point(|&n| n < at);
+        let start = k.checked_sub(1).map_or(bom, |k| newlines[k] + 1);
+        (start, newlines.get(k).copied().unwrap_or(usize::MAX))
+    };
+    // Whether `prefix`, the text of an indented line before its first
+    // unreadable token, is a readable start of one.
+    let readable_start = |prefix: &str| {
+        #[cfg(test)]
+        test_counters::ERROR_LINE_SCANNED_BYTES.with(|c| c.set(c.get() + prefix.len()));
+        let tokens: Vec<Token<'_>> = crate::logos_lexer::tokenize(prefix)
+            .into_iter()
+            .map(|(t, _)| t)
+            .filter(|t| {
+                !matches!(
+                    t,
+                    Token::Indent(_) | Token::DeepIndent(_) | Token::Whitespace(_)
+                )
+            })
+            .collect();
+        let is_flag = |t: &Token<'_>| {
+            matches!(
+                t,
+                Token::Star | Token::Pending | Token::Flag(_) | Token::Hash
+            )
+        };
+        // A posting's start: an account, then a prefix of a plain amount
+        // (`[-+]? NUMBER CURRENCY`). Anything longer is left to the grammar
+        // (`Assets:A****` fails at the `*`), so both errors are kept.
+        let posting_start = |rest: &[Token<'_>]| match rest {
+            [Token::Account(_), amount @ ..] => {
+                let amount = match amount {
+                    [Token::Minus | Token::Plus, tail @ ..] => tail,
+                    other => other,
+                };
+                matches!(
+                    amount,
+                    [] | [Token::Number(_)] | [Token::Number(_), Token::Currency(_)]
+                )
+            }
+            _ => false,
+        };
+        match tokens.as_slice() {
+            [] => true,
+            [first] if is_flag(first) => true,
+            [first, rest @ ..] if is_flag(first) => posting_start(rest),
+            rest => posting_start(rest),
+        }
+    };
+    let mut dropped = vec![false; errors.len()];
+    // The outermost syntax error seen so far: its span, the end of its
+    // first line, and whether an error inside it was already considered.
+    let mut cover: Option<(usize, usize, usize, bool)> = None;
+    for &i in &syntax {
+        let span = errors[i].span;
+        match cover.as_mut() {
+            Some((start, end, line_end, seen)) if span.start >= *start && span.end <= *end => {
+                if *seen || span.start >= *line_end {
+                    continue;
+                }
+                *seen = true;
+                // Another rule's error there first stands for a grammar
+                // failure before any unreadable token: keep everything.
+                if !is_generic(&errors[i]) {
+                    continue;
+                }
+                let (line_start, _) = line_of(span.start);
+                let prefix = stripped
+                    .get(line_start - bom..span.start - bom)
+                    .unwrap_or_default();
+                if prefix.starts_with([' ', '\t']) && readable_start(prefix) {
+                    dropped[i] = true;
+                }
+            }
+            _ => {
+                let (_, line_end) = line_of(span.start);
+                cover = Some((span.start, span.end, line_end, false));
+            }
+        }
+    }
+    let mut index = 0;
+    errors.retain(|_| {
+        let keep = !dropped[index];
+        index += 1;
+        keep
+    });
 }
 
 /// Name the problem when an unlexable character is glued to the end of a

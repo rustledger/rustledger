@@ -366,7 +366,10 @@ use crate::types::{Error, LedgerOptions};
 /// v74: loader v58, PARSER OUTPUT changed (#2779). A column-0 `!`, `&`, `?` or
 /// `:` line is ignored and a bare `#`, `%` or `*` line is an error, as in
 /// beancount; a v73 blob would keep serving such a file with its old errors.
-pub const CACHE_VERSION: u32 = 74;
+/// v76: loader v59, PARSER OUTPUT changed (#2787). A line's overlapping
+/// errors are reported once, as in beancount; a v74 or v75 blob would keep
+/// serving such a file with its old errors. (v75 is #2881's layout change.)
+pub const CACHE_VERSION: u32 = 76;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -398,7 +401,7 @@ pub const CACHE_VERSION: u32 = 74;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 58;
+const LOADER_CACHE_VERSION_PIN: u32 = 59;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

@@ -2298,6 +2298,8 @@ mod account_root_tests {
         let marked = plain.clone().mark_failed();
         assert!(marked.failed && !plain.failed);
         let bytes = rmp_serde::to_vec(&marked).unwrap();
+        // A fixarray of four: message, file, line, severity.
+        assert_eq!(bytes[0], 0x94, "{bytes:02x?}");
         assert_eq!(bytes, rmp_serde::to_vec(&plain).unwrap());
         let decoded: super::PluginError = rmp_serde::from_slice(&bytes).unwrap();
         assert!(!decoded.failed);

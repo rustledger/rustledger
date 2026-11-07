@@ -569,6 +569,9 @@ fn main() -> ExitCode {
         },
         Commands::Lint { args } => match rustledger::cmd::lint::run(&args) {
             Ok(code) => code,
+            // A downstream reader (e.g. `| head`) closing the pipe is not an
+            // error, as in the Check arm.
+            Err(e) if rustledger::pager::is_broken_pipe(&e) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("error: {}", render_error(&e));
                 ExitCode::from(rustledger::cmd::lint::error_exit_code(&args))

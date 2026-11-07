@@ -11750,15 +11750,9 @@ fn test_unusable_config_marks_the_error_failed() {
             None => make_input(input()),
         };
         let output = plugin.process(input);
-        assert!(
-            !output.errors.is_empty(),
-            "{name}: no error for an unusable config"
-        );
-        assert!(
-            output.errors.iter().all(|e| e.failed),
-            "{name}: {:?}",
-            output.errors
-        );
+        // One error, which says the plugin did nothing.
+        assert_eq!(output.errors.len(), 1, "{name}: {:?}", output.errors);
+        assert!(output.errors[0].failed, "{name}: {:?}", output.errors);
     }
 }
 
@@ -11770,9 +11764,9 @@ fn test_a_plugin_finding_is_not_marked_failed() {
         "Assets:Cash",
         vec!["USD"],
     )]));
-    assert!(!output.errors.is_empty());
+    assert_eq!(output.errors.len(), 1, "{:?}", output.errors);
     assert!(
-        output.errors.iter().all(|e| !e.failed),
+        output.errors[0].message.contains("Missing Commodity") && !output.errors[0].failed,
         "{:?}",
         output.errors
     );

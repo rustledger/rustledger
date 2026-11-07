@@ -106,22 +106,21 @@ impl NativePlugin for OneCommodityPlugin {
                     skip.insert(&open.account);
                     continue;
                 }
-                let unmatched =
-                    match accounts_re
-                        .as_ref()
-                        .map(|re| python_match(re, &open.account))
-                    {
-                        None | Some(Ok(true)) => false,
-                        Some(Ok(false)) => true,
-                        Some(Err(error)) => {
-                            refused.push(PluginError::error(format!(
+                let unmatched = match accounts_re
+                    .as_ref()
+                    .map(|re| python_match(re, &open.account))
+                {
+                    None | Some(Ok(true)) => false,
+                    Some(Ok(false)) => true,
+                    Some(Err(error)) => {
+                        let message = format!(
                             "onecommodity: the pattern cannot be matched against {}: {error}",
                             open.account
-                        ))
-                        .mark_failed());
-                            true
-                        }
-                    };
+                        );
+                        refused.push(PluginError::error(message).mark_failed());
+                        true
+                    }
+                };
                 if unmatched {
                     skip.insert(&open.account);
                 }

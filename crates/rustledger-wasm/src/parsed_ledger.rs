@@ -370,10 +370,17 @@ impl ParsedLedger {
     #[wasm_bindgen]
     pub fn query(&self, query_str: &str) -> Result<JsValue, JsError> {
         if self.query_refused {
+            // The load's errors and option diagnostics, as the free `query`
+            // refuses with them (`reported_errors`).
             let result = QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
-                errors: self.parse_errors.clone(),
+                errors: self
+                    .parse_errors
+                    .iter()
+                    .chain(&self.option_errors)
+                    .cloned()
+                    .collect(),
             };
             return to_js(&result);
         }

@@ -766,7 +766,10 @@ class QueryResult(BaseModel):
     """
 
     columns: list[str] = Field(..., description="Column names.")
-    errors: list[BeancountError] = Field(..., description="Query errors.")
+    errors: list[BeancountError] = Field(
+        ...,
+        description="The load's errors and warnings, then the query's own.\n\nA result with `columns` is an answer, whatever `errors` holds: a query\nanswers over a failed balance assertion, an include of a missing file,\na plugin's error or an option diagnostic, and reports them here\n(#2861, #2882). A refusal (a parse or booking failure, or a query that\ndoes not parse or run) has no `columns`. Tell the two apart by\n`columns`, not by whether `errors` is empty.",
+    )
     rows: list[list[CellValue]] = Field(..., description="Result rows.")
 
 

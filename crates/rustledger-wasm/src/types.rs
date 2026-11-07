@@ -754,7 +754,14 @@ pub struct QueryResult {
     pub columns: Vec<String>,
     /// Result rows.
     pub rows: Vec<Vec<CellValue>>,
-    /// Query errors.
+    /// The load's errors and warnings, then the query's own.
+    ///
+    /// A result with `columns` is an answer, whatever `errors` holds: a query
+    /// answers over a failed balance assertion, an include of a missing file,
+    /// a plugin's error or an option diagnostic, and reports them here
+    /// (#2861, #2882). A refusal (a parse or booking failure, or a query that
+    /// does not parse or run) has no `columns`. Tell the two apart by
+    /// `columns`, not by whether `errors` is empty.
     pub errors: Vec<Error>,
 }
 

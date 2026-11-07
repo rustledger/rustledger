@@ -9081,10 +9081,16 @@ fn report_posting_filename_lineno(
 /// `TRUE` and `FALSE`, so `true`, `false`, `True` and `False` are its
 /// `Invalid token`, and a parse error here too. The generic `unexpected input`
 /// on such a word becomes `invalid token 'true' (booleans are written TRUE or
-/// FALSE)`, so the fix is in the message. The word is read from the source
-/// around the error (`True` lexes as the currency `T` and an error token
-/// `rue`), at most five letters each way, so `Truex` is left alone and a long
-/// word costs nothing.
+/// FALSE)`, so the fix is in the message.
+///
+/// The word is read from the source around the error (`True` lexes as the
+/// currency `T` and an error token `rue`): the ASCII letters on both sides,
+/// at most one more than the five of `false`, so `Truex` is left alone and a
+/// long word costs nothing. It is renamed only when it stands alone as a
+/// value: a line start or whitespace before it, and whitespace, a line end, a
+/// comment's `;` or the end of the source after it. Anything else around it
+/// (`Assets:true`, `true.`, `True'`, `trueé`) makes it part of a longer token,
+/// which beancount names whole, so the generic message stays.
 fn name_misspelled_booleans(errors: &mut [crate::ParseError], stripped: &str, bom_offset: u32) {
     const LIMIT: usize = 5;
     let bom = bom_offset as usize;
@@ -9100,17 +9106,23 @@ fn name_misspelled_booleans(errors: &mut [crate::ParseError], stripped: &str, bo
         if end > bytes.len() || start >= end || end - start > LIMIT {
             continue;
         }
-        let is_letter = |i: usize| bytes.get(i).is_some_and(u8::is_ascii_alphanumeric);
+        let is_letter = |i: usize| bytes.get(i).is_some_and(u8::is_ascii_alphabetic);
+        // At most `LIMIT + 1` letters in all: enough to tell a five-letter
+        // boolean from a longer word.
         let mut from = start;
-        while from > 0 && start - from <= LIMIT && is_letter(from - 1) {
+        while from > 0 && end - from <= LIMIT && is_letter(from - 1) {
             from -= 1;
         }
         let mut to = end;
         while to - from <= LIMIT && is_letter(to) {
             to += 1;
         }
+        let before_ok = from == 0 || matches!(bytes[from - 1], b' ' | b'\t' | b'\n');
+        let after_ok = bytes
+            .get(to)
+            .is_none_or(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n' | b';'));
         let word = &stripped[from..to];
-        if matches!(word, "true" | "false" | "True" | "False") {
+        if before_ok && after_ok && matches!(word, "true" | "false" | "True" | "False") {
             e.kind = crate::ParseErrorKind::SyntaxError(format!(
                 "invalid token '{word}' (booleans are written TRUE or FALSE)"
             ));

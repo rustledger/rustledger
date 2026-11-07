@@ -132,14 +132,40 @@ fn test_parse_names_a_misspelled_boolean() {
             );
         }
     }
-    // Another word is not taken for one.
-    let messages: Vec<String> = parse("2024-01-01 open Assets:A\n  kk: Truex\n")
-        .errors
-        .iter()
-        .map(ToString::to_string)
-        .collect();
+    // At the end of the source, and before a comment.
+    for src in [
+        "2024-01-01 open Assets:A\n  kk: true",
+        "2024-01-01 open Assets:A\n  kk: true ; c\n",
+        "2024-01-01 open Assets:A\n  kk: true;c\n",
+    ] {
+        let messages: Vec<String> = parse(src).errors.iter().map(ToString::to_string).collect();
+        assert!(
+            messages.iter().any(|m| m.contains("invalid token 'true'")),
+            "{src:?}: {messages:?}"
+        );
+    }
+    // Part of a longer token, which beancount names whole: not taken for one.
+    for value in [
+        "Truex",
+        "Assets:true",
+        "trueé",
+        "true.",
+        "True'",
+        "😀true",
+        "xfalse",
+        "falsee",
+    ] {
+        let src = format!("2024-01-01 open Assets:A\n  kk: {value}\n");
+        let messages: Vec<String> = parse(&src).errors.iter().map(ToString::to_string).collect();
+        assert!(
+            !messages.iter().any(|m| m.contains("booleans")),
+            "{src:?}: {messages:?}"
+        );
+    }
+    let src = "2024-01-01 open Assets:true\n";
+    let messages: Vec<String> = parse(src).errors.iter().map(ToString::to_string).collect();
     assert!(
         !messages.iter().any(|m| m.contains("booleans")),
-        "{messages:?}"
+        "{src:?}: {messages:?}"
     );
 }

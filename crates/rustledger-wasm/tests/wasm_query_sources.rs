@@ -162,9 +162,8 @@ fn parsed_ledger_names_the_plugin_that_created_a_directive_after_the_cache() {
 }
 
 /// `queryMultiFile` answers over an include cycle and over an include glob
-/// matching nothing, as bean-query does: every file was read once, so the
-/// ledger is complete (`LoadError::leaves_ledger_complete`). It returned no
-/// rows.
+/// matching nothing, as bean-query does: no load error but a parse error stops
+/// a query (`LoadError::blocks_queries`, #2861). It returned no rows.
 #[wasm_bindgen_test]
 fn query_multi_file_answers_over_a_cycle_and_an_empty_glob() {
     let cases = [
@@ -199,5 +198,161 @@ fn query_multi_file_answers_over_a_cycle_and_an_empty_glob() {
         assert_eq!(number_cell(&row, 1), 2.0, "{includes}");
         let errors = js_sys::Array::from(&get_field(&result, "errors"));
         assert_eq!(errors.length(), 1, "{includes}: {errors:?}");
+    }
+}
+
+/// The WASM side of the drift guard for the rule for whether a file-based
+/// query answers despite load errors (#2861). `queryMultiFile` and
+/// `Ledger.fromFiles` give exactly the rows the loader, CLI and FFI tests
+/// expect on the same ledgers, or refuse, reporting the same load error.
+/// Neither confines includes (an in-memory filesystem has no tree to escape:
+/// `root/../other.beancount` is the key `other.beancount`, which is read), so
+/// they run the unconfined cases; the cases needing a real filesystem (a
+/// directory, a file to decrypt) are skipped. `queryMultiFile` refused over a
+/// missing include, and `Ledger.query` answered over a parse or booking error.
+mod query_answer_rule {
+    include!("../../rustledger-loader/tests/query_answer_rule/cases.rs");
+
+    use super::get_field;
+    use wasm_bindgen::JsValue;
+    use wasm_bindgen_test::*;
+
+    fn files(case: &QueryRuleCase) -> JsValue {
+        let files = js_sys::Object::new();
+        for (path, text) in case.files {
+            js_sys::Reflect::set(&files, &JsValue::from_str(path), &JsValue::from_str(text))
+                .expect("set");
+        }
+        files.into()
+    }
+
+    /// `result` is exactly `case`'s answer: its rows, or a refusal, with its
+    /// load error among `errors` (the result's own, or a `Ledger`'s
+    /// `getErrors`, where a query that answers reports the load's errors).
+    fn check(case: &QueryRuleCase, surface: &str, result: &JsValue, errors: &JsValue) {
+        let rows: Vec<String> = js_sys::Array::from(&get_field(result, "rows"))
+            .iter()
+            .map(|row| {
+                let row = js_sys::Array::from(&row);
+                assert_eq!(row.length(), 1, "{} via {surface}", case.name);
+                row.get(0)
+                    .as_string()
+                    .unwrap_or_else(|| panic!("{} via {surface}: not text", case.name))
+            })
+            .collect();
+        let errors: Vec<String> = js_sys::Array::from(errors)
+            .iter()
+            .map(|e| get_field(&e, "message").as_string().unwrap_or_default())
+            .collect();
+        let context = format!(
+            "{} via {surface}: rows {rows:?}, errors {errors:?}",
+            case.name
+        );
+        match case.rows {
+            Some(want) => assert_eq!(rows, want, "{context}"),
+            None => {
+                assert!(rows.is_empty(), "{context}");
+                assert!(!errors.is_empty(), "{context}");
+            }
+        }
+        if let Some(error) = case.error {
+            assert!(
+                errors.iter().any(|m| m.contains(error)),
+                "`{error}` not reported: {context}"
+            );
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn query_surfaces_answer_or_refuse_by_the_shared_rule() {
+        for case in QUERY_RULE_CASES {
+            if case.disk_only || case.confinement == Confinement::ConfinedOnly {
+                continue;
+            }
+            let result =
+                rustledger_wasm::query_multi_file(files(case), case.entry, QUERY_RULE_QUERY)
+                    .expect("queryMultiFile");
+            check(
+                case,
+                "queryMultiFile",
+                &result,
+                &get_field(&result, "errors"),
+            );
+
+            let ledger =
+                rustledger_wasm::Ledger::from_files(files(case), case.entry).expect("fromFiles");
+            check(
+                case,
+                "Ledger.query",
+                &ledger.query(QUERY_RULE_QUERY).expect("query"),
+                &ledger.get_errors().expect("getErrors"),
+            );
+            let restored = rustledger_wasm::Ledger::from_cache(&ledger.serialize().expect("ser"))
+                .expect("fromCache");
+            check(
+                case,
+                "Ledger.query from cache",
+                &restored.query(QUERY_RULE_QUERY).expect("query"),
+                &restored.get_errors().expect("getErrors"),
+            );
+        }
+    }
+}
+
+/// `queryWithHost` treats a `readFile` that throws an error whose `code` is
+/// set and is not `ENOENT` as a file the host could not read, which stops the
+/// query, as `rledger query` and bean-query refuse an include they cannot read
+/// (#2861). Every such throw was "not found", so the query answered without
+/// the file. A throw with no `code`, an `ENOENT` one and a `null` return stay
+/// a missing file, which the query answers over: the contract these entry
+/// points shipped with (v0.22.0).
+#[wasm_bindgen_test]
+fn query_with_host_refuses_an_include_the_host_cannot_read() {
+    // `missing` is the JS the host runs for any path but the entry file.
+    let run = |missing: &str| {
+        let read_file = js_sys::Function::new_with_args(
+            "p",
+            &format!(
+                "if (p.endsWith('main.beancount')) {{ return 'include \"sub.beancount\"\\n\
+                 2024-01-01 open Assets:Cash\\n2024-01-01 open Income:Salary\\n\
+                 2024-01-02 * \"pay\"\\n  Assets:Cash  100 USD\\n  Income:Salary\\n'; }}\
+                 {missing}"
+            ),
+        );
+        let host = js_sys::Object::new();
+        js_sys::Reflect::set(&host, &JsValue::from_str("readFile"), &read_file).expect("set");
+        let q = "SELECT narration FROM postings WHERE account = 'Assets:Cash'";
+        rustledger_wasm::query_with_host(&host.into(), "main.beancount", q).expect("query")
+    };
+
+    for code in ["EACCES", "EISDIR"] {
+        let refused = run(&format!(
+            "const e = new Error('cannot read ' + p); e.code = '{code}'; throw e;"
+        ));
+        let rows = js_sys::Array::from(&get_field(&refused, "rows"));
+        assert_eq!(rows.length(), 0, "{code}");
+        let errors = js_sys::Array::from(&get_field(&refused, "errors"));
+        assert!(
+            errors.length() > 0,
+            "{code}: the unreadable include is reported"
+        );
+    }
+
+    for (label, missing) in [
+        (
+            "ENOENT",
+            "const e = new Error('no such file ' + p); e.code = 'ENOENT'; throw e;",
+        ),
+        ("a throw without a code", "throw new Error('not found');"),
+        ("null", "return null;"),
+    ] {
+        let answered = run(missing);
+        let row = first_row(&answered, label);
+        assert_eq!(string_cell(&row, 0), "pay", "{label}");
+        let errors = js_sys::Array::from(&get_field(&answered, "errors"));
+        assert!(
+            errors.length() > 0,
+            "{label}: the missing include is reported"
+        );
     }
 }

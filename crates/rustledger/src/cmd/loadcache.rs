@@ -155,6 +155,21 @@ pub fn load_result_cached(
 /// is the common messy-ledger case and breaking it would be a real
 /// compatibility loss for no safety gain.
 ///
+/// It also refuses, as bean-query does (#2861), when a file that exists could
+/// not be read: a decryption failure or an I/O error other than not-found
+/// (an include naming a directory). bean-query raises an uncaught `OSError`
+/// there and prints no rows; answering would silently leave the file out (a
+/// locked gpg-agent would make every balance zero). Every other LOAD error
+/// (an include of a missing file, an include cycle, a duplicate include, an
+/// empty glob) is reported and the query answers, as bean-query answers.
+///
+/// This and [`bail_on_booking_errors`] are the CLI's application of the rule
+/// every file-based query surface shares (#2861):
+/// [`rustledger_loader::LoadError::blocks_queries`] and
+/// [`rustledger_loader::LedgerError::blocks_queries`]. WASM and the FFI call
+/// the same predicates; the `query_answer_rule` drift-guard tests pin them
+/// together.
+///
 /// Deliberately NOT registered under `KNOWN_RUST_DIVERGENCES`: the BQL compat
 /// suite's `load_valid_files` already requires `python_ok AND rust_ok`, so a
 /// file neither tool can parse never reaches that comparison. Adding an entry
@@ -162,21 +177,38 @@ pub fn load_result_cached(
 ///
 /// # Errors
 ///
-/// Returns an error naming the file when the load reported any
-/// [`rustledger_loader::LoadError::ParseErrors`].
-pub fn bail_on_parse_errors(raw: &rustledger_loader::LoadResult, file: &Path) -> Result<()> {
+/// Returns an error naming the file when the load reported a load error that
+/// [`rustledger_loader::LoadError::blocks_queries`]: a parse error, or a file
+/// that could not be read or decrypted.
+pub fn bail_on_load_errors(raw: &rustledger_loader::LoadResult, file: &Path) -> Result<()> {
     // Sum the INNER errors, not the number of `ParseErrors` groups. There is
     // one group per file, so counting groups would report "1 parse error" for
     // a file with twenty, and for a tree of includes would count files rather
     // than problems.
-    let parse_failures: usize = raw
-        .errors
+    let blocking: Vec<&rustledger_loader::LoadError> =
+        raw.errors.iter().filter(|e| e.blocks_queries()).collect();
+    let parse_failures: usize = blocking
         .iter()
         .filter_map(|e| match e {
             rustledger_loader::LoadError::ParseErrors { errors, .. } => Some(errors.len()),
             _ => None,
         })
         .sum();
+    let unread: Vec<String> = blocking
+        .iter()
+        .filter(|e| !matches!(e, rustledger_loader::LoadError::ParseErrors { .. }))
+        .map(ToString::to_string)
+        .collect();
+    if !unread.is_empty() {
+        anyhow::bail!(
+            "{}: {} file(s) could not be read; refusing to report on a ledger \
+             missing them. Run `rledger check {}` to see them.\n  {}",
+            file.display(),
+            unread.len(),
+            file.display(),
+            unread.join("\n  "),
+        );
+    }
     if parse_failures > 0 {
         anyhow::bail!(
             "{}: {parse_failures} parse error(s); refusing to report on a file that \
@@ -190,7 +222,7 @@ pub fn bail_on_parse_errors(raw: &rustledger_loader::LoadResult, file: &Path) ->
 
 /// Refuse to derive figures from a ledger whose transactions did not book.
 ///
-/// The same principle as [`bail_on_parse_errors`], one phase later. A booking
+/// The same principle as [`bail_on_load_errors`], one phase later. A booking
 /// failure — an ambiguous STRICT lot match, a reduction with no matching lot —
 /// leaves that transaction in the directive stream in PRE-BOOKING shape:
 /// `run_booking` partitions failures out, and `finalize` re-merges them so the
@@ -218,7 +250,17 @@ pub fn bail_on_booking_errors(ledger: &rustledger_loader::Ledger, file: &Path) -
     // validation diagnostics, which do NOT leave the stream unbooked and must
     // not gate a report — `rledger check` is where those are read. Not by
     // code: a lot-matching failure carries its E4xxx code (#2631), which a
-    // validator can raise too.
+    // validator can raise too. Of the canonical query rule's blockers
+    // (`LedgerError::blocks_queries`, #2861), `bail_on_load_errors` has
+    // already refused the load-error half, so what is left is the booking
+    // failures; this message names only those.
+    debug_assert!(
+        ledger
+            .errors
+            .iter()
+            .all(|e| !e.blocks_queries() || e.is_booking_failure()),
+        "a blocking load error reached the booking gate; call bail_on_load_errors first"
+    );
     let failures: Vec<&str> = ledger
         .errors
         .iter()

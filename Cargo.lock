@@ -3284,6 +3284,7 @@ dependencies = [
  "rustledger-returns",
  "rustledger-validate",
  "serde_json",
+ "tempfile",
  "wit-bindgen 0.63.0",
 ]
 

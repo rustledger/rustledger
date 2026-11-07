@@ -831,6 +831,13 @@ function handleValidateFile(args: ToolArguments | undefined): ToolResponse {
     // the same `Loader` that backs `rledger check`, so include semantics and
     // — crucially — per-file error locations come from one implementation
     // instead of a TypeScript re-creation of them.
+    //
+    // An include that exists but cannot be read (a directory, no permission)
+    // makes `collectLedgerFiles` throw, so this reports that one error and not
+    // the ledger's other diagnostics. Deliberate: the map handed to the wasm
+    // can only hold a file or leave it out, and left out the loader would
+    // call it MISSING, a different and wrong diagnosis (#2861). Fix the
+    // unreadable include and the full validation runs.
     const { files, entry } = collectLedgerFiles(absolutePath);
     const result = rustledger.validateMultiFile(files, entry);
     return textResponse(formatValidation(result, absolutePath));

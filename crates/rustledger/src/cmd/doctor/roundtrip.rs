@@ -25,24 +25,21 @@ pub(super) fn cmd_roundtrip<W: Write>(file: &PathBuf, writer: &mut W) -> Result<
         .load(file)
         .with_context(|| format!("failed to load {}", file.display()))?;
 
-    // Abort on EVERY load error except GlobNoMatch. The doctor's
-    // contract is "predict what `rledger format` would do on every file
-    // in the ledger"; that's only meaningful if we actually read every
-    // file. Unread files (Io, PathTraversal, Decryption, IncludeCycle,
-    // GlobError) silently hide format-instability bugs from the
-    // diagnosis. Only GlobNoMatch is genuinely advisory — an
-    // intentionally-empty glob (e.g., `include "2025/*.bean"` when 2025
-    // hasn't started yet) is a common ledger pattern.
-    let blocking: Vec<&LoadError> = load_result
+    // Abort on every load error that leaves a named file unread or
+    // unparsed. The doctor's contract is "predict what `rledger format`
+    // would do on every file in the ledger"; that's only meaningful if we
+    // actually read every file. Unread files (Io, PathTraversal,
+    // Decryption, GlobError) and unparsed ones silently hide
+    // format-instability bugs from the diagnosis. The question is exactly
+    // the loader's `LoadError::leaves_ledger_complete` (#2861), not a copy
+    // of it here: an intentionally-empty glob (e.g., `include "2025/*.bean"`
+    // when 2025 hasn't started yet), a duplicate include and an include
+    // cycle (the file reached again was already read) leave every file read
+    // once, so they are advisory.
+    let (advisory, blocking): (Vec<&LoadError>, Vec<&LoadError>) = load_result
         .errors
         .iter()
-        .filter(|e| !matches!(e, LoadError::GlobNoMatch { .. }))
-        .collect();
-    let advisory: Vec<&LoadError> = load_result
-        .errors
-        .iter()
-        .filter(|e| matches!(e, LoadError::GlobNoMatch { .. }))
-        .collect();
+        .partition(|e| e.leaves_ledger_complete());
 
     if !blocking.is_empty() {
         writeln!(
@@ -56,19 +53,6 @@ pub(super) fn cmd_roundtrip<W: Write>(file: &PathBuf, writer: &mut W) -> Result<
         if blocking.len() > 10 {
             writeln!(writer, "    ... and {} more", blocking.len() - 10)?;
         }
-        // Behavior-change hint: include cycles previously surfaced as
-        // advisory; they now block diagnosis because a cycle means the
-        // loader stopped partway through resolving the graph and the
-        // doctor cannot give a complete verdict.
-        if blocking
-            .iter()
-            .any(|e| matches!(e, LoadError::IncludeCycle { .. }))
-        {
-            writeln!(
-                writer,
-                "  Note: include cycles now block the doctor (previously advisory). Break the cycle to enable diagnosis."
-            )?;
-        }
         anyhow::bail!(
             "round-trip aborted: {} blocking load error(s); diagnosis on a partially-read ledger would be unreliable",
             blocking.len()
@@ -78,7 +62,7 @@ pub(super) fn cmd_roundtrip<W: Write>(file: &PathBuf, writer: &mut W) -> Result<
     if !advisory.is_empty() {
         writeln!(
             writer,
-            "  Note: {} empty-glob include(s) — these are valid ledger patterns and the diagnosis proceeds:",
+            "  Note: {} load notice(s) that leave every file read (an empty-glob, duplicate or cyclic include); the diagnosis proceeds:",
             advisory.len()
         )?;
         for err in advisory.iter().take(5) {
@@ -304,10 +288,53 @@ mod tests {
         cmd_roundtrip(&main, &mut out).expect("GlobNoMatch should not abort");
         let report = String::from_utf8(out).unwrap();
         assert!(
-            report.contains("empty-glob include"),
+            report.contains("leave every file read"),
             "should describe empty-glob advisory: {report}"
         );
         assert!(report.contains("[stable]"), "{report}");
+    }
+
+    /// An include cycle and a duplicate include leave every file read once
+    /// (`LoadError::leaves_ledger_complete`, #2861), so the doctor notes
+    /// them and diagnoses every file, as it does an empty glob.
+    #[test]
+    fn test_cmd_roundtrip_cycle_and_duplicate_continue_with_advisory() {
+        let dir = TempDir::new().unwrap();
+        write_file(
+            dir.path(),
+            "a.beancount",
+            "include \"main.beancount\"\n\n2024-01-01 open Assets:Cash\n",
+        );
+        let main = write_file(
+            dir.path(),
+            "main.beancount",
+            "include \"a.beancount\"\ninclude \"a.beancount\"\n",
+        );
+        let mut out = Vec::new();
+        cmd_roundtrip(&main, &mut out).expect("a cycle and a duplicate leave every file read");
+        let report = String::from_utf8(out).unwrap();
+        assert!(report.contains("leave every file read"), "{report}");
+        assert!(report.contains("Duplicate filename parsed"), "{report}");
+        assert!(report.contains("Resolved 2 file(s)"), "{report}");
+    }
+
+    /// A missing include leaves a named file unread, so the doctor stops.
+    #[test]
+    fn test_cmd_roundtrip_missing_include_blocks_diagnosis() {
+        let dir = TempDir::new().unwrap();
+        let main = write_file(
+            dir.path(),
+            "main.beancount",
+            "include \"missing.beancount\"\n2024-01-01 open Assets:Cash\n",
+        );
+        let mut out = Vec::new();
+        let result = cmd_roundtrip(&main, &mut out);
+        assert!(
+            result.is_err(),
+            "a missing include should abort: {result:?}"
+        );
+        let report = String::from_utf8(out).unwrap();
+        assert!(report.contains("preventing complete diagnosis"), "{report}");
     }
 
     /// Unread-include errors (IO permission, path traversal,

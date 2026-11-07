@@ -1036,3 +1036,144 @@ fn test_validate_reports_an_account_metadata_value_with_an_invalid_root() {
     assert_eq!(errors.len(), 1, "{errors:?}");
     assert!(errors[0].contains("\"Assets:B\""), "{errors:?}");
 }
+
+// ============================================================================
+// Account names in custom values and pads (#2809)
+// ============================================================================
+
+/// The `E1005` messages for `source` under the default roots.
+fn invalid_account_names(source: &str) -> Vec<String> {
+    meta_account_errors(
+        source,
+        &["Assets", "Liabilities", "Equity", "Income", "Expenses"],
+    )
+}
+
+/// An account among a `custom` directive's values is checked against the
+/// roots, as beancount checks every account token (bean-check 3.2.3:
+/// `Invalid account name` for each), in the order written, and under the
+/// ledger's configured roots.
+#[test]
+fn test_validate_reports_an_invalid_account_in_a_custom_directive() {
+    for (source, names) in [
+        (
+            "2024-01-01 custom \"budget\" AAssets:A \"x\" 10 USD TRUE\n",
+            vec!["AAssets:A"],
+        ),
+        (
+            "2024-01-01 custom \"budget\" A-ssets:A \"x\" 10 USD TRUE\n",
+            vec!["A-ssets:A"],
+        ),
+        (
+            "2024-01-01 custom \"budget\" Assets0:A \"x\" 10 USD TRUE\n",
+            vec!["Assets0:A"],
+        ),
+        (
+            "2024-01-01 custom \"x\" Assets:A Foo:Bar Bar:Baz\n",
+            vec!["Foo:Bar", "Bar:Baz"],
+        ),
+        // A value first, then its metadata, as beancount orders them.
+        (
+            "2024-01-01 custom \"x\" Foo:Bar\n  kk: Bar:Baz\n",
+            vec!["Foo:Bar", "Bar:Baz"],
+        ),
+        ("2024-01-01 custom \"x\" Assets:A\n", vec![]),
+        // A string is not an account.
+        ("2024-01-01 custom \"x\" \"Foo:Bar\"\n", vec![]),
+    ] {
+        let errors = invalid_account_names(source);
+        assert_eq!(errors.len(), names.len(), "{source:?}: {errors:?}");
+        for (error, name) in errors.iter().zip(&names) {
+            assert!(
+                error.contains(&format!("\"{name}\"")),
+                "{source:?}: {errors:?}"
+            );
+        }
+    }
+    let renamed = ["Actifs", "Liabilities", "Equity", "Income", "Expenses"];
+    let errors = meta_account_errors("2024-01-01 custom \"x\" Actifs:A Assets:B\n", &renamed);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("\"Assets:B\""), "{errors:?}");
+}
+
+/// A pad checks both of its accounts before an unopened one stops it, as
+/// beancount reports each: an unopened target hid an invalid source name.
+#[test]
+fn test_validate_pad_reports_an_invalid_source_after_an_unopened_target() {
+    let errors = invalid_account_names("2024-01-01 pad Assets:A AEquity:B\n");
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("\"AEquity:B\""), "{errors:?}");
+}
+
+/// The stray-character matrix (`rustledger-parser/tests/stray_char_matrix.rs`)
+/// excludes the rows beancount rejects with `Invalid account name` (`x`),
+/// because rledger reports those when it validates the file rather than when
+/// it parses it. This holds that up: every excluded row outside `option`
+/// (whose excluded rows are invalid option names, reported by the loader) is a
+/// parse error or an `E1005` here. The `custom` rows and the pad rows with an
+/// invalid source after an unopened target were the exceptions (#2809).
+#[test]
+fn test_validate_reports_every_account_name_row_the_stray_char_matrix_excludes() {
+    // Must match `CHARS` and `cases()` in `stray_char_matrix.rs` and
+    // `scripts/stray-char-matrix.py`; the length check below catches a drift.
+    const CHARS: &str = "!@?*~^$&|{}(),#%\"/_-'.A0";
+    fn cases(base: &str) -> Vec<String> {
+        let mut out = Vec::new();
+        for i in 0..base.len() {
+            let before = &base[..i];
+            let line = &before[before.rfind('\n').map_or(0, |p| p + 1)..];
+            if !line.is_empty() && line.chars().all(|c| c == ' ') {
+                continue;
+            }
+            for ch in CHARS.chars() {
+                out.push(format!("{before}{ch}{}", &base[i..]));
+                if i > 0 && base.as_bytes()[i - 1] == b' ' {
+                    out.push(format!("{before}{ch} {}", &base[i..]));
+                }
+            }
+        }
+        out
+    }
+    let data = include_str!("../../rustledger-parser/tests/data/stray_char_matrix.tsv");
+    let mut checked = 0;
+    let mut unreported = Vec::new();
+    for line in data.lines() {
+        let fields: Vec<&str> = line.split('\t').collect();
+        let base: String = serde_json::from_str(fields[2]).expect("the snippet is a JSON string");
+        let generated = cases(&base);
+        assert_eq!(
+            generated.len(),
+            fields[3].len(),
+            "{}: case count",
+            fields[1]
+        );
+        if fields[1] == "option" {
+            continue;
+        }
+        for (src, verdict) in generated.iter().zip(fields[3].chars()) {
+            if verdict != 'x' {
+                continue;
+            }
+            checked += 1;
+            let parsed = rustledger_parser::parse(src);
+            if !parsed.errors.is_empty() {
+                continue;
+            }
+            let directives: Vec<Directive> =
+                parsed.directives.into_iter().map(|d| d.value).collect();
+            let reported = validate(&directives)
+                .iter()
+                .any(|e| e.code == ErrorCode::InvalidAccountName);
+            if !reported {
+                unreported.push(format!("{}: {src:?}", fields[1]));
+            }
+        }
+    }
+    assert!(checked > 1_500, "only {checked} excluded rows checked");
+    assert!(
+        unreported.is_empty(),
+        "{} excluded rows not reported, first 10:\n{}",
+        unreported.len(),
+        unreported[..unreported.len().min(10)].join("\n")
+    );
+}

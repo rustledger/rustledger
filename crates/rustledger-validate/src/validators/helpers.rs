@@ -106,14 +106,29 @@ pub fn require_account_open(
     false
 }
 
+/// Report each of `accounts` whose name is invalid under this ledger's roots
+/// (`E1005`), as beancount does: it checks every account token against the
+/// configured roots when it reads it, wherever the token stands. The check
+/// is [`validate_account_name`] with the ledger's `account_types`, so a root
+/// renamed by `option "name_assets"` counts. The one place an account read
+/// from a value (metadata, a `custom` directive's values) is checked.
+pub fn push_invalid_accounts<'a>(
+    state: &LedgerState,
+    accounts: impl IntoIterator<Item = &'a Account>,
+    date: NaiveDate,
+    errors: &mut Vec<ValidationError>,
+) {
+    for account in accounts {
+        if let Some(reason) = validate_account_name(account, &state.options.account_types) {
+            errors.push(invalid_account_name_error(account, &reason, date));
+        }
+    }
+}
+
 /// Report each account-valued metadata entry in `meta` whose name is invalid
-/// under this ledger's roots (`E1005`), as beancount does (#2813): it checks
-/// every account token against the configured roots when it reads it, a
-/// metadata value included, so `kk: Foo:Bar` is `Invalid account name`
-/// there. rledger kept such a value as an account. The check is
-/// [`validate_account_name`] with the ledger's `account_types`, so a root
-/// renamed by `option "name_assets"` counts. Entries are visited in key
-/// order, so the errors come out in a stable order.
+/// under this ledger's roots, through [`push_invalid_accounts`] (#2813):
+/// `kk: Foo:Bar` is `Invalid account name` in beancount. Entries are visited
+/// in key order, so the errors come out in a stable order.
 pub fn push_invalid_meta_accounts(
     state: &LedgerState,
     meta: &rustledger_core::Metadata,
@@ -131,11 +146,23 @@ pub fn push_invalid_meta_accounts(
         return;
     }
     accounts.sort_by(|a, b| a.0.cmp(b.0));
-    for (_, account) in accounts {
-        if let Some(reason) = validate_account_name(account, &state.options.account_types) {
-            errors.push(invalid_account_name_error(account, &reason, date));
-        }
-    }
+    push_invalid_accounts(state, accounts.into_iter().map(|(_, a)| a), date, errors);
+}
+
+/// Report each account among a `custom` directive's values whose name is
+/// invalid under this ledger's roots, through [`push_invalid_accounts`], in
+/// the order written (#2809): `custom "budget" AAssets:A ...` is `Invalid
+/// account name` in beancount, as an account anywhere else is.
+pub fn push_invalid_custom_accounts(
+    state: &LedgerState,
+    custom: &rustledger_core::Custom,
+    errors: &mut Vec<ValidationError>,
+) {
+    let accounts = custom.values.iter().filter_map(|value| match value {
+        rustledger_core::MetaValue::Account(account) => Some(account),
+        _ => None,
+    });
+    push_invalid_accounts(state, accounts, custom.date, errors);
 }
 
 /// Validate an account name according to beancount rules.

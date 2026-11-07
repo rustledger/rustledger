@@ -69,9 +69,12 @@ impl NativePlugin for CheckAverageCostPlugin {
                 None => {
                     return PluginOutput {
                         ops: keep(),
-                        errors: vec![PluginError::error(
-                            "Invalid configuration for check_average_cost: must be a float",
-                        )],
+                        errors: vec![
+                            PluginError::error(
+                                "Invalid configuration for check_average_cost: must be a float",
+                            )
+                            .mark_failed(),
+                        ],
                     };
                 }
             },

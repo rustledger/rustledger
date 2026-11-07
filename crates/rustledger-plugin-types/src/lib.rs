@@ -466,6 +466,17 @@ pub struct PluginError {
     pub line_number: Option<u32>,
     /// Error severity.
     pub severity: PluginErrorSeverity,
+    /// Whether the plugin could not do its work (a config it cannot use, a
+    /// pattern it cannot evaluate) and returned its input as it was, rather
+    /// than reporting a finding about the ledger. Set with
+    /// [`PluginError::mark_failed`] by the host's native plugins; the host
+    /// reports such an error as a plugin failure.
+    ///
+    /// Never on the wire (`serde(skip)`): the `MessagePack` array a WASM
+    /// guest sends is unchanged, so the ABI is too, and a WASM or Python
+    /// plugin's errors are always findings.
+    #[serde(skip)]
+    pub failed: bool,
 }
 
 /// Severity of a plugin error.
@@ -488,6 +499,7 @@ impl PluginError {
             source_file: None,
             line_number: None,
             severity: PluginErrorSeverity::Error,
+            failed: false,
         }
     }
 
@@ -499,7 +511,16 @@ impl PluginError {
             source_file: None,
             line_number: None,
             severity: PluginErrorSeverity::Warning,
+            failed: false,
         }
+    }
+
+    /// Mark this error as the plugin failing to do its work (see
+    /// [`Self::failed`]).
+    #[must_use]
+    pub const fn mark_failed(mut self) -> Self {
+        self.failed = true;
+        self
     }
 
     /// Set the source location.
@@ -2267,6 +2288,23 @@ mod account_root_tests {
             "a version-2 guest decoded version-3 options; the ABI bump is unneeded"
         );
         assert_eq!(super::ABI_VERSION, 3);
+    }
+
+    /// `failed` never crosses the wire: a marked error encodes exactly as an
+    /// unmarked one, the four-element array of ABI 3, so the ABI is unchanged.
+    #[test]
+    fn test_plugin_error_failed_is_not_on_the_wire() {
+        let plain = super::PluginError::error("bad config").at("ledger.beancount", 3);
+        let marked = plain.clone().mark_failed();
+        assert!(marked.failed && !plain.failed);
+        let bytes = rmp_serde::to_vec(&marked).unwrap();
+        // A fixarray of four: message, file, line, severity.
+        assert_eq!(bytes[0], 0x94, "{bytes:02x?}");
+        assert_eq!(bytes, rmp_serde::to_vec(&plain).unwrap());
+        let decoded: super::PluginError = rmp_serde::from_slice(&bytes).unwrap();
+        assert!(!decoded.failed);
+        assert_eq!(decoded.message, "bad config");
+        assert_eq!(decoded.line_number, Some(3));
     }
 
     /// `is_interpolated` reads beancount's mark, by presence (#2653).

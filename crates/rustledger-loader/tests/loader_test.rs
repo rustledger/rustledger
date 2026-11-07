@@ -3638,3 +3638,63 @@ fn test_plugin_created_directives_have_placeholder_locations() {
     // Dated before the account opens.
     assert_eq!(located("Assets:Cash"), (path, 0, 0));
 }
+
+/// A plugin that cannot run is a plugin failure; a plugin's own finding is
+/// not, though both are `PLUGIN`-phase errors.
+#[cfg(feature = "plugins")]
+#[test]
+fn test_is_plugin_failure_tells_a_failed_plugin_from_its_findings() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("ledger.beancount");
+    std::fs::write(
+        &path,
+        "plugin \"no.such.plugin_xyz\"\n\
+         plugin \"beancount.plugins.check_commodity\"\n\
+         2024-01-01 open Assets:Cash\n\
+         2024-01-01 open Equity:Opening\n\
+         2024-01-02 * \"deposit\"\n  Assets:Cash  1 USD\n  Equity:Opening\n",
+    )
+    .unwrap();
+    let ledger = rustledger_loader::load(&path, &rustledger_loader::LoadOptions::default())
+        .expect("should load");
+    let not_found: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("no.such.plugin_xyz"))
+        .collect();
+    assert_eq!(not_found.len(), 1, "{:?}", ledger.errors);
+    assert!(not_found[0].is_plugin_failure(), "{not_found:?}");
+    let finding: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.message.contains("Missing Commodity"))
+        .collect();
+    assert!(!finding.is_empty(), "{:?}", ledger.errors);
+    assert!(
+        finding.iter().all(|e| !e.is_plugin_failure()),
+        "{finding:?}"
+    );
+}
+
+/// A WASM plugin that fails to run is a plugin failure (the run-error site).
+#[cfg(feature = "wasm-plugins")]
+#[test]
+fn test_is_plugin_failure_marks_a_plugin_that_fails_to_run() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(dir.path().join("broken.wasm"), b"not a wasm module").unwrap();
+    let path = dir.path().join("ledger.beancount");
+    std::fs::write(
+        &path,
+        "plugin \"broken.wasm\"\n2024-01-01 open Assets:Cash\n",
+    )
+    .unwrap();
+    let ledger = rustledger_loader::load(&path, &rustledger_loader::LoadOptions::default())
+        .expect("should load");
+    let failed: Vec<_> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.phase == "plugin")
+        .collect();
+    assert!(!failed.is_empty(), "{:?}", ledger.errors);
+    assert!(failed.iter().all(|e| e.is_plugin_failure()), "{failed:?}");
+}

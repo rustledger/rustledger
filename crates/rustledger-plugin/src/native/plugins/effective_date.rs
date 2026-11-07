@@ -82,6 +82,8 @@ impl NativePlugin for EffectiveDatePlugin {
                         source_file: None,
                         line_number: None,
                         severity: PluginErrorSeverity::Error,
+                        // A config it cannot use: nothing is moved.
+                        failed: true,
                     }],
                 };
             }
@@ -197,6 +199,7 @@ impl NativePlugin for EffectiveDatePlugin {
                         source_file: directive.filename.clone(),
                         line_number: directive.lineno,
                         severity: PluginErrorSeverity::Error,
+                        failed: false,
                     });
                 }
                 ops.push(PluginOp::Keep(i));

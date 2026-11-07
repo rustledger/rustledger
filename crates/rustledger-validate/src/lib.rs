@@ -780,6 +780,26 @@ fn validate_phase_inner<D: ValidatableDirective>(
             // ── Everything else: skipped in this phase ──
             _ => {}
         }
+        // An account-valued metadata entry is checked against the roots, on
+        // every directive and posting (#2813).
+        if phase == Phase::Late {
+            validators::helpers::push_invalid_meta_accounts(
+                state,
+                directive.meta(),
+                date,
+                &mut errors,
+            );
+            if let Directive::Transaction(txn) = directive {
+                for posting in &txn.postings {
+                    validators::helpers::push_invalid_meta_accounts(
+                        state,
+                        &posting.meta,
+                        date,
+                        &mut errors,
+                    );
+                }
+            }
+        }
 
         anchor_errors(&mut errors, error_count_before, d.span_info());
     }

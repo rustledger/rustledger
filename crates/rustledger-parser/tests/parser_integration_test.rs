@@ -851,8 +851,6 @@ fn test_parse_boolean_metadata() {
 2024-01-15 * "Test"
   recurring: TRUE
   active: FALSE
-  enabled: True
-  disabled: False
   Expenses:Test  100.00 USD
   Assets:Cash
 "#;
@@ -862,10 +860,20 @@ fn test_parse_boolean_metadata() {
         use rustledger_core::MetaValue;
         assert_eq!(txn.meta.get("recurring"), Some(&MetaValue::Bool(true)));
         assert_eq!(txn.meta.get("active"), Some(&MetaValue::Bool(false)));
-        assert_eq!(txn.meta.get("enabled"), Some(&MetaValue::Bool(true)));
-        assert_eq!(txn.meta.get("disabled"), Some(&MetaValue::Bool(false)));
     } else {
         panic!("expected transaction");
+    }
+}
+
+/// Only `TRUE` and `FALSE` are booleans, as in beancount, whose lexer has no
+/// other spelling: `True`, `true`, `False` and `false` are its `Invalid
+/// token` (#2813).
+#[test]
+fn test_parse_boolean_metadata_other_spellings_are_errors() {
+    for value in ["True", "true", "False", "false"] {
+        let source = format!("2024-01-01 open Assets:A\n  kk: {value}\n");
+        let result = parse(&source);
+        assert_eq!(result.errors.len(), 1, "{source:?}: {:?}", result.errors);
     }
 }
 

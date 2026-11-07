@@ -305,7 +305,8 @@ fn test_parse_reads_a_slash_currency_with_a_digit_after_the_slash() {
     let D::Price(p) = one("2024-01-01 price HOOL 10/4 USD\n") else {
         panic!()
     };
-    assert_eq!(p.amount.to_string(), "2.50 USD");
+    // Python's division, as beancount computes it: `2.5`, not `2.50` (#2813).
+    assert_eq!(p.amount.to_string(), "2.5 USD");
     // And `rledger format` keeps the currency whole.
     for src in [
         "2024-01-01 price HOOL 10 /6J\n",

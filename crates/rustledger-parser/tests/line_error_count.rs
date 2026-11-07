@@ -87,3 +87,30 @@ fn test_parse_reports_the_other_leniencies_of_2787() {
         Vec::<usize>::new()
     );
 }
+
+/// The kept line error names the unreadable token whose own error it stands
+/// for, as bean-check's `Invalid token: 'h'` does: escaped, and capped at 40
+/// characters.
+#[test]
+fn test_parse_line_error_names_the_invalid_token() {
+    let head = "2024-01-01 open Assets:A\n2024-01-02 *\n  Assets:A  1 USD\n";
+    let message = |line: &str| {
+        let src = format!("{head}{line}\n");
+        let errors = parse(&src).errors;
+        assert_eq!(errors.len(), 1, "{src:?}: {errors:?}");
+        errors[0].to_string()
+    };
+    assert!(
+        message("  * h").contains("unexpected input: invalid token 'h'"),
+        "{}",
+        message("  * h")
+    );
+    let long = "h".repeat(60);
+    let capped = message(&format!("  * {long}"));
+    assert!(
+        capped.contains(&format!("invalid token '{}...'", "h".repeat(40))),
+        "{capped}"
+    );
+    let control = message("  * \u{1}");
+    assert!(control.contains("invalid token '\\u{1}'"), "{control}");
+}

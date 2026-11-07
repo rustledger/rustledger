@@ -5718,12 +5718,6 @@ fn fixup_directive_spans(
 mod tests {
     use super::*;
 
-    /// Reporting bad dates must stay linear in the input (#2868 review): one
-    /// `custom` line of 40,000 bad dates took 63 s when each date looked back
-    /// and ahead for its own line's bounds. The bytes stepped over finding
-    /// the lines, and the stretches between dates, must stay within three
-    /// passes over the source, whether the dates share one line or each has
-    /// its own.
     /// `drop_errors_inside_a_line_error` (#2787) scans the source once for
     /// line starts and lexes each broken line's prefix once, so many broken
     /// lines, or many unreadable tokens on one long line, stay linear.
@@ -5746,6 +5740,12 @@ mod tests {
         }
     }
 
+    /// Reporting bad dates must stay linear in the input (#2868 review): one
+    /// `custom` line of 40,000 bad dates took 63 s when each date looked back
+    /// and ahead for its own line's bounds. The bytes stepped over finding
+    /// the lines, and the stretches between dates, must stay within three
+    /// passes over the source, whether the dates share one line or each has
+    /// its own.
     #[test]
     fn test_report_invalid_dates_is_linear_in_the_input() {
         const N: usize = 20_000;
@@ -8606,12 +8606,15 @@ mod custom_rejected_values {
 /// Here the line error stands for beancount's first error on the line. When
 /// the tokens before the first `ERROR_TOKEN` on it are a readable start of
 /// an indented line (nothing, a posting flag, or an optional flag, an
-/// account and a prefix of a plain amount), the grammar has not failed before it, so that `ERROR_TOKEN`'s
-/// own error is the one beancount reports and the line error already stands
-/// for it: it is dropped. Every later `ERROR_TOKEN` keeps its error, as each
-/// is one more `Invalid token` there. The line error is the one kept, not
-/// the inline one, because the formatter's verbatim-copy ranges are read
-/// from the outer errors. The outer error may be any syntax error (a
+/// account and a prefix of a plain amount), the grammar has not failed
+/// before it, so that `ERROR_TOKEN`'s own error is the one beancount reports
+/// and the line error already stands for it: it is dropped, and a generic
+/// line error takes over its name (`unexpected input: invalid token 'h'`,
+/// as bean-check's `Invalid token: 'h'`), so the editor still names it.
+/// Every later `ERROR_TOKEN` keeps its error, as each is one more `Invalid
+/// token` there. The line error is the one kept, not the inline one,
+/// because the formatter's verbatim-copy ranges are read from the outer
+/// errors. The outer error may be any syntax error (a
 /// posting's `unexpected trailing tokens` holds the `oops` in
 /// `Assets:A  -1 oops USD`); only a generic inner one is dropped. Errors of
 /// any other kind are left alone, and so is a generic error on a later line
@@ -8626,7 +8629,10 @@ fn drop_errors_inside_a_line_error(
     bom_offset: u32,
 ) {
     use crate::logos_lexer::Token;
-    let is_generic = |e: &crate::ParseError| matches!(&e.kind, crate::ParseErrorKind::SyntaxError(m) if m == "unexpected input");
+    let is_generic = |e: &crate::ParseError| match &e.kind {
+        crate::ParseErrorKind::SyntaxError(m) => m == "unexpected input",
+        _ => false,
+    };
     let mut syntax: Vec<usize> = (0..errors.len())
         .filter(|&i| matches!(errors[i].kind, crate::ParseErrorKind::SyntaxError(_)))
         .collect();
@@ -8696,11 +8702,15 @@ fn drop_errors_inside_a_line_error(
     let mut dropped = vec![false; errors.len()];
     // The outermost syntax error seen so far: its span, the end of its
     // first line, and whether an error inside it was already considered.
-    let mut cover: Option<(usize, usize, usize, bool)> = None;
+    let mut cover: Option<(usize, usize, usize, bool, usize)> = None;
+    // The line errors that take over a dropped error's name.
+    let mut renamed: Vec<(usize, usize)> = Vec::new();
     for &i in &syntax {
         let span = errors[i].span;
         match cover.as_mut() {
-            Some((start, end, line_end, seen)) if span.start >= *start && span.end <= *end => {
+            Some((start, end, line_end, seen, outer))
+                if span.start >= *start && span.end <= *end =>
+            {
                 if *seen || span.start >= *line_end {
                     continue;
                 }
@@ -8716,13 +8726,27 @@ fn drop_errors_inside_a_line_error(
                     .unwrap_or_default();
                 if prefix.starts_with([' ', '\t']) && readable_start(prefix) {
                     dropped[i] = true;
+                    renamed.push((*outer, i));
                 }
             }
             _ => {
                 let (_, line_end) = line_of(span.start);
-                cover = Some((span.start, span.end, line_end, false));
+                cover = Some((span.start, span.end, line_end, false, i));
             }
         }
+    }
+    for (outer, inner) in renamed {
+        if !is_generic(&errors[outer]) {
+            continue;
+        }
+        let span = errors[inner].span;
+        let text = stripped
+            .get(span.start.saturating_sub(bom)..span.end.saturating_sub(bom))
+            .unwrap_or_default();
+        errors[outer].kind = crate::ParseErrorKind::SyntaxError(format!(
+            "unexpected input: invalid token '{}'",
+            invalid_token_name(text)
+        ));
     }
     let mut index = 0;
     errors.retain(|_| {
@@ -8730,6 +8754,22 @@ fn drop_errors_inside_a_line_error(
         index += 1;
         keep
     });
+}
+
+/// An unreadable token's text as an error message names it: escaped (so a
+/// control character or a quote cannot garble the message) and capped at 40
+/// characters, with `...` after a longer one.
+fn invalid_token_name(text: &str) -> String {
+    const MAX: usize = 40;
+    let mut name: String = text
+        .chars()
+        .take(MAX)
+        .flat_map(char::escape_debug)
+        .collect();
+    if text.chars().nth(MAX).is_some() {
+        name.push_str("...");
+    }
+    name
 }
 
 /// Name the problem when an unlexable character is glued to the end of a

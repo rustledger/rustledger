@@ -22,6 +22,11 @@
 //!   transaction location such as `check_commodity`'s, and warnings) is
 //!   passed through as a warning and does not refuse the input.
 //!
+//! A transaction a plugin inserted with no source location, or at a
+//! location another transaction already has (forecast's copies keep the
+//! template's, effective_date's keep the parent's), cannot be told from
+//! another, so its link is `ambiguous` rather than merged into a match.
+//!
 //! A configuration that cannot match anything is said so, not answered with
 //! an empty report: an `--account` that is not an account name is refused, a
 //! leading `^` on `--link-prefix` is dropped with a note, and a configured
@@ -86,6 +91,9 @@ struct Leg {
     /// Indices into the run's [`Reported`] list of the errors located on
     /// this leg's transaction.
     errors: BTreeSet<usize>,
+    /// Why the transaction cannot be told apart from another (see where it
+    /// is set), which makes its link `ambiguous`.
+    unidentified: Option<&'static str>,
 }
 
 #[derive(Serialize)]
@@ -201,6 +209,9 @@ pub fn run_with_writer<W: std::io::Write>(
     };
     let mut groups: BTreeMap<String, BTreeMap<(PathBuf, usize), Leg>> = BTreeMap::new();
     let mut reported: Vec<Reported> = Vec::new();
+    // Plugin-inserted transactions with no source location, numbered so
+    // that none is merged with another.
+    let mut unlocated = 0usize;
     for path in &args.files {
         let result = Loader::new()
             .load(path)
@@ -258,6 +269,16 @@ pub fn run_with_writer<W: std::io::Write>(
                 on_leg: false,
             });
         }
+        // How many transactions each source location holds: more than one
+        // means a plugin inserted a transaction at its parent's location.
+        let mut located: HashMap<(u16, usize), usize> = HashMap::new();
+        for directive in &ledger.directives {
+            if matches!(directive.value, Directive::Transaction(_)) {
+                *located
+                    .entry((directive.file_id, directive.span.start))
+                    .or_default() += 1;
+            }
+        }
         for directive in &ledger.directives {
             let txn = match &directive.value {
                 Directive::Open(open) => {
@@ -284,20 +305,57 @@ pub fn run_with_writer<W: std::io::Write>(
                 continue;
             }
             any_link_matches = true;
-            let source = ledger
+            // Where the transaction is, which is also how a transaction read
+            // twice (an included file given again as an input) is told from
+            // two transactions. A plugin-inserted one may have no source
+            // location, or reuse its parent's: neither identifies it, so
+            // its link is `ambiguous`, never merged into a match.
+            let (key, location, at, unidentified) = match ledger
                 .source_map
                 .get(directive.file_id as usize)
-                .context("linked transaction has no source location")?;
-            let canonical = source
-                .path
-                .canonicalize()
-                .with_context(|| format!("cannot identify source {}", source.path.display()))?;
-            let key = (canonical.clone(), directive.span.start);
-            let (line, _) = source.line_col(directive.span.start);
+            {
+                Some(source) => {
+                    let canonical = source.path.canonicalize().with_context(|| {
+                        format!("cannot identify source {}", source.path.display())
+                    })?;
+                    let (line, _) = source.line_col(directive.span.start);
+                    let shared = located
+                        .get(&(directive.file_id, directive.span.start))
+                        .is_some_and(|&count| count > 1);
+                    (
+                        (canonical.clone(), directive.span.start),
+                        Location {
+                            file: canonical.display().to_string(),
+                            line,
+                        },
+                        Some((source.path.clone(), line)),
+                        shared.then_some(
+                            "several transactions share one source location \
+                                 (a plugin inserted one)",
+                        ),
+                    )
+                }
+                None => {
+                    unlocated += 1;
+                    let (file, line) = ledger
+                        .source_map
+                        .placeholder(directive.file_id)
+                        .map_or_else(
+                            || ("<plugin>".to_string(), 0),
+                            |(name, line)| (name.display().to_string(), line as usize),
+                        );
+                    (
+                        (PathBuf::from(format!("<unlocated {unlocated}>")), 0),
+                        Location { file, line },
+                        None,
+                        Some("a plugin inserted this transaction, which has no source location"),
+                    )
+                }
+            };
             let errors: BTreeSet<usize> = by_span
                 .get(&(directive.file_id, directive.span.start))
                 .into_iter()
-                .chain(by_line.get(&(source.path.clone(), line)))
+                .chain(at.as_ref().and_then(|at| by_line.get(at)))
                 .flatten()
                 .copied()
                 .collect();
@@ -309,8 +367,8 @@ pub fn run_with_writer<W: std::io::Write>(
                     .entry(key.clone())
                     .or_insert_with(|| Leg {
                         location: Location {
-                            file: canonical.display().to_string(),
-                            line,
+                            file: location.file.clone(),
+                            line: location.line,
                         },
                         postings: txn
                             .postings
@@ -330,10 +388,12 @@ pub fn run_with_writer<W: std::io::Write>(
                                 .iter()
                                 .any(|p| p.cost.is_some() || p.price.is_some()),
                         errors: BTreeSet::new(),
+                        unidentified: None,
                     });
                 // The same transaction read again from another input: what
                 // either run reported on it counts.
                 leg.errors.extend(errors.iter().copied());
+                leg.unidentified = leg.unidentified.or(unidentified);
             }
         }
     }
@@ -362,6 +422,8 @@ pub fn run_with_writer<W: std::io::Write>(
                         .join("; ")
                 ),
             )
+        } else if let Some(reason) = legs.iter().find_map(|l| l.unidentified) {
+            ("ambiguous", reason.to_string())
         } else if legs.len() > 2 || legs.iter().any(|l| l.postings.len() > 1) {
             (
                 "ambiguous",
@@ -996,6 +1058,72 @@ mod tests {
                     .iter()
                     .any(|m| m.contains("'EUR' in 'Assets:Bank'")),
             "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_run_with_writer_inserted_transactions_at_a_shared_location_are_ambiguous() {
+        // forecast's copies keep the template's location, so two copies of
+        // one leg are at one place; merged as one transaction read twice,
+        // they matched the receiving leg.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.bean");
+        fs::write(
+            &path,
+            format!(
+                "plugin \"beancount.plugins.forecast\"\n{OPENS}{}",
+                concat!(
+                    "2026-01-02 # \"Send [MONTHLY REPEAT 2 TIMES]\" ^xfer-f\n",
+                    "  Assets:Cash     -10 USD\n",
+                    "  Assets:Transit   10 USD\n",
+                    "2026-01-03 * \"Receive\" ^xfer-f\n",
+                    "  Assets:Transit  -10 USD\n",
+                    "  Assets:Bank      10 USD\n",
+                ),
+            ),
+        )
+        .unwrap();
+        let report = inspect(vec![path], &["Assets:Transit"]).unwrap();
+        let found = finding(&report, "xfer-f");
+        assert_eq!(found["status"], "ambiguous", "{found}");
+        assert!(
+            found["reason"]
+                .as_str()
+                .unwrap()
+                .contains("share one source location"),
+            "{found}"
+        );
+
+        // effective_date inserts the moved posting's transaction at its
+        // parent's location, with the parent's links.
+        let path = dir.path().join("effective.bean");
+        fs::write(
+            &path,
+            format!(
+                "plugin \"beancount_reds_plugins.effective_date.effective_date\" \
+                 \"{{'Assets:Transit': {{'earlier': 'Liabilities:Hold:Transit', \
+                 'later': 'Assets:Hold:Transit'}}}}\"\n{OPENS}{}",
+                concat!(
+                    "2026-01-02 * \"Send\" ^xfer-e\n",
+                    "  Assets:Cash     -100.00 USD\n",
+                    "  Assets:Transit   100.00 USD\n",
+                    "    effective_date: 2026-01-05\n",
+                    "2026-01-06 * \"Receive\" ^xfer-e\n",
+                    "  Assets:Transit  -100.00 USD\n",
+                    "  Assets:Bank\n",
+                ),
+            ),
+        )
+        .unwrap();
+        let report = inspect(vec![path], &["Assets:Transit"]).unwrap();
+        let found = finding(&report, "xfer-e");
+        assert_eq!(found["status"], "ambiguous", "{found}");
+        assert!(
+            found["reason"]
+                .as_str()
+                .unwrap()
+                .contains("share one source location"),
+            "{found}"
         );
     }
 }

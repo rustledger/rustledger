@@ -79,6 +79,10 @@ answer:
   as `check_commodity`'s), and warnings are passed through as warnings and
   do not stop the lint.
 
+A transaction a plugin inserted with no source location of its own, or at a
+location another transaction already has (`forecast` copies, `effective_date`
+splits), makes its link `ambiguous`: it cannot be told apart from the other.
+
 Findings are advisory and do not change the exit status. A match is not
 evidence of external settlement, domain isolation, or a persistent transfer
 lifecycle.

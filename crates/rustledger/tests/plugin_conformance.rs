@@ -2384,8 +2384,23 @@ fn plugin_text_control_characters_are_escaped() {
 /// mid-sleep: each is reported, the next one still runs, the process ends
 /// promptly (no guest thread or runtime outlives its call), and nothing
 /// is left in the temp directory.
+///
+/// The budget is wall-clock and applies to every plugin, so it has to be
+/// long enough for `error_plugin.py` to finish on a loaded machine
+/// (#2879): with a 2-second budget it timed out too at a load average of
+/// about 40, and with 64 CPU hogs on 16 cores (load 75 to 100) a
+/// 6-second budget still timed it out once in three, so 15 seconds
+/// leaves about twice the worst seen. The naps sleep far past any budget,
+/// so they still time out, and ending in less than one nap's sleep still
+/// shows nothing waited for one.
 #[test]
 fn python_plugins_back_to_back_after_a_timeout() {
+    const LOADED_BUDGET_SECS: u64 = 15;
+    const NAP_SECS: u64 = 600;
+    // The two naps' budgets, plus a minute for a loaded machine to start
+    // rledger and run `error_plugin.py`: well short of one nap's sleep.
+    const BOUND_SECS: u64 = 2 * LOADED_BUDGET_SECS + 60;
+    const _: () = assert!(BOUND_SECS < NAP_SECS);
     if !python_ready() {
         return;
     }
@@ -2393,22 +2408,34 @@ fn python_plugins_back_to_back_after_a_timeout() {
     install_python_fixtures(dir.path());
     std::fs::write(
         dir.path().join("nap.py"),
-        "import time\n__plugins__ = ['nap']\ndef nap(entries, options_map):\n    \
-         time.sleep(90)\n    return entries, []\n",
+        format!(
+            "import time\n__plugins__ = ['nap']\ndef nap(entries, options_map):\n    \
+             time.sleep({NAP_SECS})\n    return entries, []\n"
+        ),
     )
     .unwrap();
     let tmp = tempfile::tempdir().unwrap();
     let start = std::time::Instant::now();
     let out = run_env(
         dir.path(),
-        &["--plugin-max-time-secs", "2", "check", "ledger.beancount"],
+        &[
+            "--plugin-max-time-secs",
+            &LOADED_BUDGET_SECS.to_string(),
+            "check",
+            "ledger.beancount",
+        ],
         &[("TMPDIR", tmp.path())],
     );
     out.failed_cleanly()
         .has("Transaction on 2024-01-03 has no payee");
-    assert_eq!(out.text.matches(&budget(2)).count(), 2, "{}", out.text);
+    assert_eq!(
+        out.text.matches(&budget(LOADED_BUDGET_SECS)).count(),
+        2,
+        "{}",
+        out.text
+    );
     assert!(
-        start.elapsed() < std::time::Duration::from_secs(60),
+        start.elapsed() < std::time::Duration::from_secs(BOUND_SECS),
         "took {:?}",
         start.elapsed()
     );

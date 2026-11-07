@@ -40,57 +40,8 @@ rledger check [OPTIONS] [FILE]
 
 ## Linked transit lint
 
-For explicitly linked transfers, opt in to a separate read-only
-inspection (it does not alter `check` or the transfer-pairing lint):
-
-```bash
-rledger lint linked-transit main.beancount --link-prefix xfer- \
-  --account Assets:Transit --format json
-```
-
-Repeat `--account` for additional exact transit account names. Only links
-beginning with the supplied prefix and having at least one posting to a
-configured account are reported. A match requires exactly two distinct source
-transactions, each with one posting to the same configured transit account,
-with equal nonzero amounts in the same currency and opposite signs. Other
-results are `missing`, `mismatch`, or `ambiguous`, with source locations.
-Includes and repeated input paths are deduplicated.
-
-An `--account` that is not a valid account name is refused. A leading `^` on
-`--link-prefix` is dropped with a note (links are matched without it). A
-configured account the ledger never opens or posts to, and a prefix that no
-link starts with, are reported as warnings on stderr (in `ag-rledger`, in the
-envelope's `warnings`), so a typo does not pass as "No linked transit
-transfers found."
-
-The lint conservatively marks extra postings, multiple scoped links, prices,
-or costs as ambiguous. It reads the ledger as `rledger check` does: booked,
-with plugins and validation run, so an elided transit amount is the amount
-booking computed. What processing reports is handled by what it does to the
-answer:
-
-- A file with load errors, a transaction that cannot be booked, or a plugin
-  that fails to run (or whose output is discarded) is refused: those drop or
-  alter transactions, so any answer could be wrong.
-- Any other error located on a linked transaction (an unbalanced leg, an
-  unopened or closed account, a plugin's finding on that transaction) makes
-  the link `ambiguous`, with the error as the reason.
-- Errors elsewhere in the ledger, errors with no transaction location (such
-  as `check_commodity`'s), and warnings are passed through as warnings and
-  do not stop the lint.
-
-A transaction a plugin inserted with no source location of its own, or at a
-location another transaction already has (`forecast` copies, `effective_date`
-splits), makes its link `ambiguous`: it cannot be told apart from the other.
-
-Findings are advisory and exit 0 unless `--fail-on` names a status:
-`--fail-on mismatch,missing,ambiguous` (comma-separated or repeated) exits 1
-when any link ends in one of them, as `rledger check` exits 1 on an error, so
-the lint can gate CI or a pre-commit hook. A refusal (load or processing
-failure, bad configuration) also exits 1. In `ag-rledger` the envelope stays
-`"ok": true`, with `exit_code` and `result.exit_status` 1, as for `check`. A
-match is not evidence of external settlement, domain isolation, or a persistent transfer
-lifecycle.
+The opt-in check of linked transit transfers is `rledger lint linked-transit`;
+see [lint](lint.md#linked-transit). It does not change what `check` reports.
 
 ## Examples
 

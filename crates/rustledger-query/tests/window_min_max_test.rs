@@ -264,17 +264,20 @@ fn each_window_uses_its_own_over_clause() {
 /// aggregates are still not window functions.
 #[test]
 fn arguments_are_checked() {
-    for query in [
-        "SELECT MIN() OVER ()",
-        "SELECT MAX(number, number) OVER ()",
-        "SELECT MIN(*) OVER ()",
-    ] {
+    for query in ["SELECT MIN() OVER ()", "SELECT MAX(number, number) OVER ()"] {
         assert!(
             matches!(execute(query), Err(QueryError::InvalidArguments(..))),
             "{query}: {:?}",
             execute(query)
         );
     }
+    // A `*` is refused for every call but `count`, before the arguments are
+    // counted, as the aggregate `min(*)` is (#2880).
+    assert!(
+        matches!(execute("SELECT MIN(*) OVER ()"), Err(QueryError::UnknownFunction(ref call)) if call == "min(*)"),
+        "{:?}",
+        execute("SELECT MIN(*) OVER ()")
+    );
     let err = execute("SELECT SUM(number) OVER ()").unwrap_err();
     assert!(err.to_string().contains("not yet implemented"), "{err}");
     // Checked up front, so even when no row matches.

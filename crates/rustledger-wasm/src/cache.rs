@@ -381,7 +381,12 @@ use crate::types::{Error, LedgerOptions};
 /// that blocks queries (`LedgerError::blocks_queries`) stops them (#2882); a
 /// restored ledger refused on any load error. Loader output is unchanged; a
 /// v77 blob has no such field and would not deserialize as this layout.
-pub const CACHE_VERSION: u32 = 78;
+/// v79: loader v60, unchanged. What moved is `Ledger`'s error list: an
+/// invalid account name among a `custom` directive's values is `E1005`, and a
+/// `pad` reports an unopened or invalid source behind an unopened target
+/// (#2809). `fromCache` restores the errors verbatim, so a v78 blob would keep
+/// serving such a ledger without them.
+pub const CACHE_VERSION: u32 = 79;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

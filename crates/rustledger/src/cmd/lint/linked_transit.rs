@@ -116,6 +116,9 @@ struct Reported {
     described: String,
     code: String,
     message: String,
+    /// Where the error is, for the warning's `file` and `line`.
+    file: Option<String>,
+    line: Option<usize>,
     /// Whether a finding names it, so it is not repeated as a warning.
     on_leg: bool,
 }
@@ -266,6 +269,11 @@ pub fn run_with_writer<W: std::io::Write>(
                 described: describe_error(error),
                 code: error.code.clone(),
                 message: error.message.clone(),
+                file: error
+                    .location
+                    .as_ref()
+                    .map(|l| l.file.display().to_string()),
+                line: error.location.as_ref().map(|l| l.line),
                 on_leg: false,
             });
         }
@@ -473,6 +481,8 @@ pub fn run_with_writer<W: std::io::Write>(
         messages.emit_as(
             Diagnostic {
                 code: Some(item.code.clone()),
+                file: item.file.clone(),
+                line: item.line,
                 ..Diagnostic::message(item.message.clone())
             },
             format!("warning: {line}"),
@@ -1023,6 +1033,16 @@ mod tests {
         assert_eq!(codes(&warnings), vec!["E3001"], "{warnings:?}");
         assert!(
             warnings[0].message.contains("residual 1 USD"),
+            "{warnings:?}"
+        );
+        // Where it is, as a field: 6 opens, then the unrelated one at body
+        // line 20.
+        assert_eq!(warnings[0].line, Some(26), "{warnings:?}");
+        assert!(
+            warnings[0]
+                .file
+                .as_deref()
+                .is_some_and(|f| f.ends_with("main.bean")),
             "{warnings:?}"
         );
     }

@@ -2291,6 +2291,12 @@ fn warnings_json(diagnostics: &CollectedDiagnostics) -> Option<Value> {
             if let Some(account) = &d.account {
                 o.insert("account".to_string(), json!(account));
             }
+            if let Some(file) = &d.file {
+                o.insert("file".to_string(), json!(file));
+            }
+            if let Some(line) = d.line {
+                o.insert("line".to_string(), json!(line));
+            }
             o.insert("message".to_string(), json!(d.message));
             Value::Object(o)
         })

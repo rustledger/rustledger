@@ -387,6 +387,11 @@ pub struct Diagnostic {
     pub date: Option<NaiveDate>,
     /// The account it concerns, when it can be attributed to one.
     pub account: Option<String>,
+    /// The source file it is located in, when it has a location (a
+    /// ledger error passed through as a warning).
+    pub file: Option<String>,
+    /// The 1-based line in [`Self::file`].
+    pub line: Option<usize>,
     /// What is wrong, phrased for a human.
     pub message: String,
 }
@@ -398,6 +403,8 @@ impl Diagnostic {
             code: None,
             date: None,
             account: None,
+            file: None,
+            line: None,
             message: message.into(),
         }
     }
@@ -590,9 +597,7 @@ fn load(
     for err in &ledger.errors {
         warnings.emit(Diagnostic {
             code: Some(err.code.clone()),
-            date: None,
-            account: None,
-            message: err.message.clone(),
+            ..Diagnostic::message(err.message.clone())
         });
     }
 
@@ -1013,10 +1018,8 @@ fn resolve_window(
         let (fye, ignored) = fava_time::fiscal_year_end_from_directives(directives);
         for (date, message) in ignored {
             warnings.emit(Diagnostic {
-                code: None,
                 date: Some(date),
-                account: None,
-                message,
+                ..Diagnostic::message(message)
             });
         }
         fye

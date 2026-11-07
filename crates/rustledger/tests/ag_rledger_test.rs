@@ -2566,3 +2566,43 @@ fn declared_value_flags_echo_their_values() {
         assert!(!command.contains("<redacted>"), "{args:?}: {command}");
     }
 }
+
+/// A ledger error passed through as a warning keeps where it is, in the
+/// envelope's `file` and `line`.
+#[test]
+fn test_lint_linked_transit_warnings_carry_their_location() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        tmp.path(),
+        "transfer.beancount",
+        "2000-01-01 open Assets:Transit\n2000-01-01 open Assets:Cash\n\
+         2024-01-01 * \"unrelated\"\n  Assets:Cash -1 USD\n  Assets:Transit 2 USD\n",
+    );
+    let file = file.to_str().unwrap();
+    let (code, envelope, _) = run_in(
+        tmp.path(),
+        &[
+            "lint",
+            "linked-transit",
+            file,
+            "--link-prefix",
+            "xfer-",
+            "--account",
+            "Assets:Transit",
+        ],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    let warning = envelope["result"]["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warnings: {envelope}"))
+        .iter()
+        .find(|w| w["code"] == "E3001")
+        .unwrap_or_else(|| panic!("no E3001: {envelope}"));
+    assert_eq!(warning["line"], 3, "{envelope}");
+    assert!(
+        warning["file"]
+            .as_str()
+            .is_some_and(|f| f.ends_with("transfer.beancount")),
+        "{envelope}"
+    );
+}

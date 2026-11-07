@@ -11,9 +11,10 @@
 //!
 //! - An error that drops or alters transactions refuses the input: a
 //!   transaction booking rejected is left out of the booked stream, and a
-//!   plugin that failed (or whose output was discarded) left the directives
-//!   other than it would have. Reporting a link as `missing`, or its partner
-//!   as matched, over either would be a misleading answer.
+//!   plugin that failed (it could not run, its output was discarded, or a
+//!   native plugin could not use its config and did nothing) left the
+//!   directives other than it would have. Reporting a link as `missing`, or
+//!   its partner as matched, over either would be a misleading answer.
 //! - Any other error located on a linked transaction (an unbalanced leg, an
 //!   unopened or closed account, a plugin's finding on that transaction)
 //!   makes the link `ambiguous`, with the error as the reason: a leg `check`
@@ -1556,5 +1557,32 @@ mod tests {
             ])
             .is_err()
         );
+    }
+
+    /// A native plugin that cannot use its config returns the ledger as it
+    /// was: a plugin failure, so the file is refused. With `rename_accounts`
+    /// failing on a bad pattern, two clean legs read as `matched`, where the
+    /// rename the config meant makes them `ambiguous`.
+    #[test]
+    fn test_run_with_writer_refuses_a_plugin_that_cannot_use_its_config() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.bean");
+        let ledger = |pattern: &str| {
+            format!(
+                "plugin \"beancount.plugins.rename_accounts\" \"{{'{pattern}': 'Assets:Transit'}}\"\n\
+                 {OPENS}{}{}",
+                transaction("xfer-a", "Assets:Transit 5 USD", "Assets:Cash"),
+                transaction("xfer-a", "Assets:Transit -5 USD", "Assets:Cash"),
+            )
+        };
+        fs::write(&path, ledger("Assets:Cash(")).unwrap();
+        let err = inspect(vec![path.clone()], &["Assets:Transit"]).unwrap_err();
+        assert!(err.to_string().contains("processing failed"), "{err:#}");
+        assert!(err.to_string().contains("rename_accounts"), "{err:#}");
+        // The pattern fixed, the rename runs and each leg has two transit
+        // postings.
+        fs::write(&path, ledger("Assets:Cash")).unwrap();
+        let report = inspect(vec![path], &["Assets:Transit"]).unwrap();
+        assert_status(&report, "xfer-a", "ambiguous");
     }
 }

@@ -1128,6 +1128,9 @@ fn parse_plugin_output(output: &[u8], input_len: usize) -> Result<PluginOutput, 
                     .get("line_number")
                     .and_then(serde_json::Value::as_u64)
                     .map(|n| n as u32),
+                // A Python plugin's errors are findings: only the host's
+                // native plugins mark a failure.
+                failed: false,
             })
         })
         .collect();

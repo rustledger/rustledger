@@ -122,9 +122,10 @@ impl NativePlugin for DocumentDiscoveryPlugin {
             Err(e) => {
                 return PluginOutput {
                     ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
-                    errors: vec![PluginError::error(format!(
-                        "document_discovery: invalid config JSON: {e}"
-                    ))],
+                    errors: vec![
+                        PluginError::error(format!("document_discovery: invalid config JSON: {e}"))
+                            .mark_failed(),
+                    ],
                 };
             }
         };
@@ -211,9 +212,10 @@ impl NativePlugin for DocumentDiscoveryPlugin {
                 &mut ancestors,
                 0, // Initial depth
             ) {
-                errors.push(PluginError::error(format!(
-                    "Error scanning documents in {dir}: {e}"
-                )));
+                errors.push(
+                    PluginError::error(format!("Error scanning documents in {dir}: {e}"))
+                        .mark_failed(),
+                );
             }
         }
 

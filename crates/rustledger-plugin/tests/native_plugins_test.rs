@@ -11695,3 +11695,85 @@ proptest::proptest! {
         proptest::prop_assert_eq!(bad.len(), 1, "{:?}", bad);
     }
 }
+
+// ============================================================================
+// A config a plugin cannot use marks its error `failed`
+// ============================================================================
+
+/// Each native plugin that returns its input unchanged because it cannot
+/// use its config says so with `PluginError::failed`, which the host
+/// reports as a plugin failure rather than a finding.
+#[test]
+fn test_unusable_config_marks_the_error_failed() {
+    use rustledger_plugin::native::{CheckOptionExpiryPlugin, DocumentDiscoveryPlugin};
+    let input = || vec![make_open("2024-01-01", "Assets:Cash")];
+    let cases: Vec<(&str, Box<dyn NativePlugin>, Option<&str>)> = vec![
+        (
+            "rename_accounts",
+            Box::new(RenameAccountsPlugin),
+            Some("{'Assets:Cash(': 'Assets:X'}"),
+        ),
+        ("zerosum (no config)", Box::new(ZerosumPlugin), None),
+        ("effective_date", Box::new(EffectiveDatePlugin), Some("{")),
+        (
+            "check_average_cost",
+            Box::new(CheckAverageCostPlugin::new()),
+            Some("abc"),
+        ),
+        ("check_commodity", Box::new(CheckCommodityPlugin), Some("[")),
+        (
+            "commodity_attr",
+            Box::new(CommodityAttrPlugin::new()),
+            Some("["),
+        ),
+        ("onecommodity", Box::new(OneCommodityPlugin), Some("(")),
+        (
+            "long_short",
+            Box::new(CapitalGainsLongShortPlugin),
+            Some("["),
+        ),
+        ("gain_loss", Box::new(CapitalGainsGainLossPlugin), Some("[")),
+        (
+            "check_option_expiry",
+            Box::new(CheckOptionExpiryPlugin),
+            Some("["),
+        ),
+        (
+            "document_discovery",
+            Box::new(DocumentDiscoveryPlugin),
+            Some("{"),
+        ),
+    ];
+    for (name, plugin, config) in cases {
+        let input = match config {
+            Some(config) => make_input_with_config(input(), config),
+            None => make_input(input()),
+        };
+        let output = plugin.process(input);
+        assert!(
+            !output.errors.is_empty(),
+            "{name}: no error for an unusable config"
+        );
+        assert!(
+            output.errors.iter().all(|e| e.failed),
+            "{name}: {:?}",
+            output.errors
+        );
+    }
+}
+
+/// A finding is not a failure.
+#[test]
+fn test_a_plugin_finding_is_not_marked_failed() {
+    let output = CheckCommodityPlugin.process(make_input(vec![make_open_with_currencies(
+        "2024-01-01",
+        "Assets:Cash",
+        vec!["USD"],
+    )]));
+    assert!(!output.errors.is_empty());
+    assert!(
+        output.errors.iter().all(|e| !e.failed),
+        "{:?}",
+        output.errors
+    );
+}

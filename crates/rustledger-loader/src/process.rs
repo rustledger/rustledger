@@ -456,14 +456,16 @@ impl LedgerError {
 
     /// Whether a plugin failed rather than reported a finding: it could not
     /// be resolved (not found, a runtime this build lacks, a path outside
-    /// the ledger), it failed while running, or its output was discarded
-    /// (an op set that does not cover its input, an entry that is not
-    /// valid). The directives are then not what the plugin would have made
-    /// of them.
+    /// the ledger), it failed while running, its output was discarded (an
+    /// op set that does not cover its input, an entry that is not valid), or
+    /// a native plugin could not do its work and returned its input as it
+    /// was (a config it cannot use, a pattern it cannot evaluate:
+    /// `rustledger_plugin::PluginError::failed`). The directives are then
+    /// not what the plugin would have made of them.
     ///
-    /// Not readable from the code: a plugin's own findings (`check_commodity`,
-    /// `leafonly`) are `PLUGIN` errors too, and leave the directives as the
-    /// plugin returned them.
+    /// Not readable from the code: a plugin's own findings
+    /// (`check_commodity`, `leafonly`) are `PLUGIN` errors too, and leave the
+    /// directives as the plugin returned them.
     #[must_use]
     pub const fn is_plugin_failure(&self) -> bool {
         self.plugin_failure
@@ -1570,6 +1572,11 @@ fn record_plugin_errors(
                 LedgerError::warning("PLUGIN", message).with_phase("plugin")
             }
         };
+        // A native plugin that could not do its work (a config it cannot
+        // use) says so on the error; it returned its input unchanged.
+        if err.failed {
+            ledger_err = ledger_err.with_plugin_failure();
+        }
         // Propagate plugin-set source location into `ErrorLocation`.
         // Column defaults to 1 — plugin errors don't carry column info
         // through the wrapper protocol.
@@ -2559,6 +2566,52 @@ mod plugin_decision_tests {
             after(|_| vec![PluginOp::Keep(1), PluginOp::Keep(0)]),
             [Undecided, Undecided]
         );
+    }
+
+    /// The two sites in `apply_plugin_ops` that discard a plugin's output
+    /// mark the error as a plugin failure: an op set that does not cover the
+    /// input, and an entry that is not valid.
+    #[test]
+    fn test_apply_plugin_ops_discarded_output_is_a_plugin_failure() {
+        let run = |ops: Vec<PluginOp>| {
+            let mut directives: Vec<Spanned<Directive>> = vec![
+                Spanned::synthesized(cash_only()),
+                Spanned::synthesized(cash_only()),
+            ];
+            let mut errors = Vec::new();
+            apply_plugin_ops(&mut directives, ops, &mut errors, &SourceMap::new()).unwrap();
+            errors
+        };
+        // Index 1 is neither kept, modified nor deleted.
+        let errors = run(vec![PluginOp::Keep(0)]);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].is_plugin_failure(), "{errors:?}");
+        let mut bad = wrapper(&cash_only());
+        bad.date = "not-a-date".to_string();
+        let errors = run(vec![
+            PluginOp::Keep(0),
+            PluginOp::Keep(1),
+            PluginOp::Insert(bad),
+        ]);
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert!(errors[0].is_plugin_failure(), "{errors:?}");
+    }
+
+    /// A native plugin's error marked `failed` is a plugin failure; an
+    /// unmarked one is a finding.
+    #[test]
+    fn test_record_plugin_errors_maps_failed_to_a_plugin_failure() {
+        let mut errors = Vec::new();
+        super::record_plugin_errors(
+            &mut errors,
+            vec![
+                rustledger_plugin::PluginError::error("cannot use the config").mark_failed(),
+                rustledger_plugin::PluginError::error("a finding"),
+            ],
+            &SourceMap::new(),
+        );
+        assert!(errors[0].is_plugin_failure(), "{errors:?}");
+        assert!(!errors[1].is_plugin_failure(), "{errors:?}");
     }
 }
 

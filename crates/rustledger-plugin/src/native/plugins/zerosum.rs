@@ -74,6 +74,8 @@ impl NativePlugin for ZerosumPlugin {
                         source_file: None,
                         line_number: None,
                         severity: PluginErrorSeverity::Error,
+                        // A config it cannot use: nothing is matched.
+                        failed: true,
                     }],
                 };
             }
@@ -90,6 +92,8 @@ impl NativePlugin for ZerosumPlugin {
                         source_file: None,
                         line_number: None,
                         severity: PluginErrorSeverity::Error,
+                        // A config it cannot use: nothing is matched.
+                        failed: true,
                     }],
                 };
             }

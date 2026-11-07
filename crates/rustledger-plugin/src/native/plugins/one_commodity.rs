@@ -80,9 +80,12 @@ impl NativePlugin for OneCommodityPlugin {
                 Err(e) => {
                     return PluginOutput {
                         ops,
-                        errors: vec![PluginError::error(format!(
-                            "Invalid regular expression for onecommodity: '{pattern}': {e}"
-                        ))],
+                        errors: vec![
+                            PluginError::error(format!(
+                                "Invalid regular expression for onecommodity: '{pattern}': {e}"
+                            ))
+                            .mark_failed(),
+                        ],
                     };
                 }
             },
@@ -103,20 +106,22 @@ impl NativePlugin for OneCommodityPlugin {
                     skip.insert(&open.account);
                     continue;
                 }
-                let unmatched = match accounts_re
-                    .as_ref()
-                    .map(|re| python_match(re, &open.account))
-                {
-                    None | Some(Ok(true)) => false,
-                    Some(Ok(false)) => true,
-                    Some(Err(error)) => {
-                        refused.push(PluginError::error(format!(
+                let unmatched =
+                    match accounts_re
+                        .as_ref()
+                        .map(|re| python_match(re, &open.account))
+                    {
+                        None | Some(Ok(true)) => false,
+                        Some(Ok(false)) => true,
+                        Some(Err(error)) => {
+                            refused.push(PluginError::error(format!(
                             "onecommodity: the pattern cannot be matched against {}: {error}",
                             open.account
-                        )));
-                        true
-                    }
-                };
+                        ))
+                        .mark_failed());
+                            true
+                        }
+                    };
                 if unmatched {
                     skip.insert(&open.account);
                 }

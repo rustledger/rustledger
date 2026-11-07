@@ -64,8 +64,11 @@ validation run, so an elided transit amount is the amount booking computed.
 What processing reports is handled by what it does to the answer:
 
 - A file with load errors, a transaction that cannot be booked, or a plugin
-  that fails to run (or whose output is discarded) is refused: those drop or
-  alter transactions, so any answer could be wrong.
+  that fails (it cannot run, its output is discarded, or a built-in plugin
+  cannot use its config and leaves the ledger as it was) is refused: those
+  drop or alter transactions, or skip changes the ledger relies on, so any
+  answer could be wrong. A WASM or Python plugin's own errors are read as
+  findings.
 - Any other error located on a linked transaction (an unbalanced leg, an
   unopened or closed account, a plugin's finding on that transaction) makes
   the link `ambiguous`, with the error as the reason.

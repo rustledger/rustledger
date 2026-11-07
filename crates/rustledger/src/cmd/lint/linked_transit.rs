@@ -431,16 +431,16 @@ pub fn run_with_writer<W: std::io::Write>(
                 .get(directive.file_id as usize)
             {
                 Some(source) => {
-                    let canonical = source.path.canonicalize().with_context(|| {
-                        format!("cannot identify source {}", source.path.display())
-                    })?;
+                    // `path` is the file's identity (symlinks resolved, one
+                    // path for every include of it), and the path the other
+                    // lints print.
                     let (line, _) = source.line_col(directive.span.start);
                     let shared = located
                         .get(&(directive.file_id, directive.span.start))
                         .is_some_and(|&count| count > 1);
                     (
-                        (canonical.clone(), directive.span.start),
-                        (canonical.display().to_string(), line),
+                        (source.path.clone(), directive.span.start),
+                        (source.path.display().to_string(), line),
                         Some((source.path.clone(), line)),
                         shared.then_some(
                             "several transactions share one source location \
@@ -1395,6 +1395,45 @@ mod tests {
             report["counts"],
             serde_json::json!({"matched": 1, "mismatch": 1, "missing": 0, "ambiguous": 0}),
             "{report}"
+        );
+    }
+
+    /// A location names the file as the other lints do, here
+    /// `closed-nonempty` on the same ledger, reached through a symlink.
+    #[cfg(unix)]
+    #[test]
+    fn test_run_with_writer_prints_paths_as_the_other_lints_do() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join("real")).unwrap();
+        std::os::unix::fs::symlink(dir.path().join("real"), dir.path().join("link")).unwrap();
+        // Assets:Cash is closed holding 1 USD, for closed-nonempty to report.
+        write_ledger(
+            &dir.path().join("real/main.bean"),
+            format!(
+                "{}{}{}2030-01-01 close Assets:Cash\n",
+                transaction("xfer-a", "Assets:Transit 5 USD", "Assets:Bank"),
+                transaction("xfer-a", "Assets:Transit -5 USD", "Assets:Bank"),
+                transaction("other", "Assets:Cash 1 USD", "Equity:Capital"),
+            ),
+        )
+        .unwrap();
+        let path = dir.path().join("link/main.bean");
+
+        let report = inspect(vec![path.clone()], &["Assets:Transit"]).unwrap();
+        let mut closed = Vec::new();
+        super::super::closed_nonempty::run_with_writer(
+            &super::super::closed_nonempty::Args {
+                files: vec![path],
+                format: OutputFormat::Json,
+            },
+            &mut closed,
+        )
+        .unwrap();
+        let closed: serde_json::Value = serde_json::from_slice(&closed).unwrap();
+        assert_eq!(
+            finding(&report, "xfer-a")["locations"][0]["file"],
+            closed["findings"][0]["file"],
+            "{report}\n{closed}"
         );
     }
 }

@@ -14,15 +14,16 @@ use crate::types::{
 
 /// A directive's metadata as the wire's ordered `Vec`, sorted by key.
 ///
-/// [`Metadata`](rustledger_core::Metadata) is an `FxHashMap`, so iterating it
-/// yields no particular order -- while the wire type is a `Vec`, whose
+/// [`Metadata`](rustledger_core::Metadata) iterates in insertion order (a hash
+/// order before #2835), which says how the map was built, not what it holds --
+/// while the wire type is a `Vec`, whose
 /// equality and encoding ARE ordered. Collecting the map directly therefore
 /// made the wire representation depend on the order keys happened to be
 /// inserted in: two directives with identical metadata could serialize to
 /// different bytes and compare unequal.
 ///
-/// Sorting by key costs nothing that could be preserved -- a hash map holds no
-/// authored ordering to begin with -- and buys a deterministic encoding, so
+/// Sorting by key gives up only the insertion order, which the wire never
+/// carried, and buys a deterministic encoding, so
 /// equal metadata is equal on the wire.
 ///
 /// Keys are unique (map keys), so `sort_by` on the key alone is a total order
@@ -30,7 +31,7 @@ use crate::types::{
 fn meta_to_data(meta: &rustledger_core::Metadata) -> Vec<(String, MetaValueData)> {
     let mut pairs: Vec<(String, MetaValueData)> = meta
         .iter()
-        .map(|(k, v)| (k.clone(), meta_value_to_data(v)))
+        .map(|(k, v)| (k.to_string(), meta_value_to_data(v)))
         .collect();
     pairs.sort_by(|(a, _), (b, _)| a.cmp(b));
     pairs

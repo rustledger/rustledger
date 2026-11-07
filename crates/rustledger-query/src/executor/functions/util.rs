@@ -136,17 +136,26 @@ impl Executor<'_> {
     /// Return `raw` extended with beanquery's synthetic `filename`/`lineno`
     /// metadata keys resolved from `loc` (existing user keys win). Used to
     /// materialize the full `meta` column value.
+    ///
+    /// The location keys come FIRST, then the directive's own keys in source
+    /// order: that is beancount's order, whose parser builds every `meta` dict
+    /// from `filename` and `lineno` before adding the written keys. Since
+    /// #2835 `Metadata` keeps insertion order, so this order is what a `meta`
+    /// cell renders (it was the hash map's order before).
     pub(crate) fn augmented_meta(raw: &Metadata, loc: Option<&SourceLocation>) -> Metadata {
         if loc.is_none() {
             return raw.clone();
         }
-        let mut meta = raw.clone();
+        let mut meta = Metadata::with_capacity(raw.len() + 2);
         for key in ["filename", "lineno"] {
-            if !meta.contains_key(key)
+            if !raw.contains_key(key)
                 && let Some(value) = Self::source_location_meta_key(loc, key)
             {
-                meta.insert(key.to_string(), value);
+                meta.insert(key, value);
             }
+        }
+        for (key, value) in raw {
+            meta.insert(key.clone(), value.clone());
         }
         meta
     }
@@ -334,5 +343,33 @@ mod tests {
         );
         assert_eq!(Executor::source_filename_value(None), Value::Null);
         assert_eq!(Executor::source_location_value(None), Value::Null);
+    }
+
+    #[test]
+    fn test_augmented_meta_location_keys_first_then_source_order() {
+        // beancount builds every `meta` dict from `filename` and `lineno` and
+        // then adds the written keys, so a `meta` cell lists them in that
+        // order. `Metadata` keeps insertion order since #2835, so this order
+        // is what renders; a hash map gave an arbitrary one.
+        use rustledger_core::{MetaValue, Metadata};
+        let mut raw = Metadata::new();
+        raw.insert("zeta", MetaValue::Int(1));
+        raw.insert("alpha", MetaValue::Int(2));
+        let meta = Executor::augmented_meta(&raw, Some(&loc(7)));
+        let keys: Vec<&str> = meta
+            .keys()
+            .map(rustledger_core::InternedStr::as_str)
+            .collect();
+        assert_eq!(keys, ["filename", "lineno", "zeta", "alpha"]);
+
+        // A written `lineno` wins and keeps its own place.
+        raw.insert("lineno", MetaValue::Int(99));
+        let meta = Executor::augmented_meta(&raw, Some(&loc(7)));
+        let keys: Vec<&str> = meta
+            .keys()
+            .map(rustledger_core::InternedStr::as_str)
+            .collect();
+        assert_eq!(keys, ["filename", "zeta", "alpha", "lineno"]);
+        assert_eq!(meta.get("lineno"), Some(&MetaValue::Int(99)));
     }
 }

@@ -120,7 +120,7 @@ pub fn push_invalid_meta_accounts(
     date: NaiveDate,
     errors: &mut Vec<ValidationError>,
 ) {
-    let mut accounts: Vec<(&String, &Account)> = meta
+    let mut accounts: Vec<(&rustledger_core::InternedStr, &Account)> = meta
         .iter()
         .filter_map(|(key, value)| match value {
             rustledger_core::MetaValue::Account(account) => Some((key, account)),

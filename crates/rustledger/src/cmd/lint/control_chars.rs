@@ -90,12 +90,12 @@ impl Strings<'_> {
     }
 
     fn meta(&mut self, meta: &Metadata, prefix: &str) {
-        let mut keys: Vec<&String> = meta.keys().collect();
-        // A hash map's order; the report's is stable.
+        let mut keys: Vec<&rustledger_core::InternedStr> = meta.keys().collect();
+        // The report names keys in sorted order, not the map's source order.
         keys.sort();
         for key in keys {
             if let Some(MetaValue::String(s)) = meta.get(key) {
-                self.check(|| format!("{prefix}metadata {key:?}"), s);
+                self.check(|| format!("{prefix}metadata {:?}", key.as_str()), s);
             }
         }
     }

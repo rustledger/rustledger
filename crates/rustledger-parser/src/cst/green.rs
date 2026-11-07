@@ -326,13 +326,15 @@ fn meta_value(entry: &rowan::GreenNodeData) -> MetaValue {
 /// `META_KEY` token with the trailing `:` stripped), or `None` if it has no key.
 /// Folded directly into the posting/transaction conversion loops so the parent's
 /// children are walked only once — no separate metadata pass over them.
-fn meta_entry_kv(entry: &rowan::GreenNodeData) -> Option<(String, MetaValue)> {
+fn meta_entry_kv(entry: &rowan::GreenNodeData) -> Option<(InternedStr, MetaValue)> {
     use crate::SyntaxKind as K;
     let key = entry.children().find_map(|c| match c {
         NodeOrToken::Token(t)
             if crate::BeancountLanguage::kind_from_raw(t.kind()) == K::META_KEY =>
         {
-            Some(t.text().strip_suffix(':').unwrap_or(t.text()).to_string())
+            Some(InternedStr::from(
+                t.text().strip_suffix(':').unwrap_or(t.text()),
+            ))
         }
         _ => None,
     })?;

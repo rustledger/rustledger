@@ -28,33 +28,32 @@ fn ledger() -> Vec<Directive> {
         .with_synthesized_posting(Posting::new("Expenses:Food", Amount::new(dec!(10), "EUR")));
     shop.payee = Some("Shop".into());
     shop.meta
-        .insert("concept".into(), MetaValue::String("SHOP 123".into()));
+        .insert("concept", MetaValue::String("SHOP 123".into()));
 
     let mut priced = Posting::new("Assets:Bank", Amount::new(dec!(-100), "MAD"));
     priced
         .meta
-        .insert("note".into(), MetaValue::String("priced".into()));
+        .insert("note", MetaValue::String("priced".into()));
     let mut market = Transaction::new(date(1, 3), "Fruit")
         .with_synthesized_posting(priced)
         .with_synthesized_posting(Posting::new("Expenses:Food", Amount::new(dec!(100), "MAD")));
     market.payee = Some("Market".into());
 
     let mut eur = Commodity::new(date(1, 1), "EUR");
-    eur.meta
-        .insert("name".into(), MetaValue::String("Euro".into()));
+    eur.meta.insert("name", MetaValue::String("Euro".into()));
     let mut balance = Balance::new(date(1, 4), "Assets:Bank", Amount::new(dec!(-10), "EUR"));
-    balance.meta.insert("checked".into(), MetaValue::Bool(true));
+    balance.meta.insert("checked", MetaValue::Bool(true));
 
     let mut event = Event::new(date(1, 5), "location", "Paris");
     event
         .meta
-        .insert("venue".into(), MetaValue::String("Grand Hall".into()));
+        .insert("venue", MetaValue::String("Grand Hall".into()));
     let mut note = Note::new(date(1, 6), "Assets:Bank", "bring receipts");
-    note.meta.insert("checked".into(), MetaValue::Bool(true));
+    note.meta.insert("checked", MetaValue::Bool(true));
     let mut document = Document::new(date(1, 7), "Assets:Bank", "/x.pdf");
     document
         .meta
-        .insert("ref".into(), MetaValue::String("DOC 9".into()));
+        .insert("ref", MetaValue::String("DOC 9".into()));
 
     vec![
         Directive::Commodity(eur),
@@ -199,8 +198,8 @@ fn key_with_no_value_is_present() {
     let mut txn = Transaction::new(date(1, 5), "Blank")
         .with_synthesized_posting(Posting::new("Assets:Bank", Amount::new(dec!(-1), "EUR")))
         .with_synthesized_posting(Posting::new("Expenses:Food", Amount::new(dec!(1), "EUR")));
-    txn.meta.insert("empty".into(), MetaValue::None);
-    txn.postings[0].meta.insert("blank".into(), MetaValue::None);
+    txn.meta.insert("empty", MetaValue::None);
+    txn.postings[0].meta.insert("blank", MetaValue::None);
     let directives = vec![Directive::Transaction(txn)];
     let mut executor = Executor::new(&directives);
     let mut flags = |query: &str| -> Vec<Value> {

@@ -474,8 +474,8 @@ fn metadata_value_types_do_not_collide() {
 
 /// The same metadata hashes the same however the map was built.
 ///
-/// `Metadata` is an `FxHashMap`, so iteration order is an implementation
-/// detail. Hashing it as it iterates would make the digest depend on insertion
+/// `Metadata` iterates in insertion order, so its order is how the map was
+/// built, not what it holds. Hashing it as it iterates would make the digest depend on insertion
 /// history — nondeterminism in the one field every consumer treats as stable.
 /// Inserting the same pairs in the opposite order is the cheapest way to reach
 /// a differently-ordered map.
@@ -505,8 +505,8 @@ fn metadata_hashing_does_not_depend_on_map_order() {
     // both iterate identically, the assertion below would pass with the sort
     // deleted. Failing loudly here is the difference between a guard and a
     // decoration.
-    let f: Vec<&String> = forward.keys().collect();
-    let b: Vec<&String> = backward.keys().collect();
+    let f: Vec<&rustledger_core::InternedStr> = forward.keys().collect();
+    let b: Vec<&rustledger_core::InternedStr> = backward.keys().collect();
     assert_ne!(
         f, b,
         "these two maps iterate identically, so this test can no longer \

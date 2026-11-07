@@ -54,6 +54,7 @@ pub mod implicit_prices;
 pub mod intern;
 pub mod inventory;
 pub mod meta_json;
+pub mod metadata;
 pub mod position;
 pub mod py_regex;
 pub mod shift_spans_impls;

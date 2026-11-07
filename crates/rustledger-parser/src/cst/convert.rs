@@ -2537,9 +2537,8 @@ fn convert_meta_entries(node: &crate::SyntaxNode) -> Metadata {
         let Some(key_token) = entry.key() else {
             continue;
         };
-        let key = key_token.text_without_colon().to_string();
         let value = meta_value_from_entry(&entry);
-        meta.insert(key, value);
+        meta.insert(key_token.text_without_colon(), value);
     }
     meta
 }

@@ -3442,7 +3442,7 @@ mod tests {
 
     fn commodity_with_precision(value: MetaValue) -> Directive {
         let mut meta = rustledger_core::Metadata::default();
-        meta.insert("precision".into(), value);
+        meta.insert("precision", value);
         Directive::Commodity(
             rustledger_core::Commodity::new(date(2024, 1, 1), "USD").with_meta(meta),
         )

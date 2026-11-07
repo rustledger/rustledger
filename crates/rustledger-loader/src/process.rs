@@ -463,7 +463,7 @@ impl LedgerError {
     /// `rustledger_plugin::PluginError::failed`). The directives are then
     /// not what the plugin would have made of them.
     ///
-    /// Not readable from the code: a plugin's own findings
+    /// The error code does not tell them apart: a plugin's own findings
     /// (`check_commodity`, `leafonly`) are `PLUGIN` errors too, and leave the
     /// directives as the plugin returned them.
     #[must_use]

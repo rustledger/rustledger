@@ -83,3 +83,63 @@ fn test_parse_reports_posting_filename_and_lineno_metadata() {
         assert_eq!(error_lines(&src), Vec::<usize>::new(), "{src:?}");
     }
 }
+
+/// The rule for what swallows the indented line after a directive that
+/// takes no metadata is one predicate, shared by the indented-line report and
+/// the bad-date gap rule (#2813 review). A `poptag` / `popmeta` of nothing
+/// pushed is the builder's error, not the grammar's, so the indented line is
+/// still `unexpected INDENT`; a syntax error or an invalid date on the header
+/// swallows it. Each expectation is bean-check 3.2.3's.
+#[test]
+fn test_parse_no_metadata_header_errors_swallow_the_next_line_as_beancount() {
+    for (src, lines) in [
+        // Absent tag, INDENT, then the date.
+        ("poptag #zz\n  2024-02-30 open Assets:A\n", vec![1, 2, 2]),
+        ("poptag #zz\n  kk: 1\n", vec![1, 2]),
+        ("popmeta zz:\n  2024-02-30 5\n", vec![1, 2, 2]),
+        // An invalid date on the header swallows the indented line.
+        (
+            "pushmeta kk: 2024-02-30\n  jj: 1\npopmeta kk:\n",
+            vec![1, 3],
+        ),
+        // A syntax error on the header too; the date is still named.
+        ("option \"title\" \"a\" \"b\"\n  2024-02-30 5\n", vec![1, 2]),
+        (
+            "pushtag #a\npushtag #a\n  kk: 1\npoptag #a\npoptag #a\n",
+            vec![3],
+        ),
+    ] {
+        assert_eq!(error_lines(src), lines, "{src:?}");
+    }
+}
+
+/// A misspelled boolean is named (#2813, maintainer's decision: match
+/// beancount, with a kind error).
+#[test]
+fn test_parse_names_a_misspelled_boolean() {
+    for word in ["true", "false", "True", "False"] {
+        for src in [
+            format!("2024-01-01 open Assets:A\n  kk: {word}\n"),
+            format!("2024-01-01 custom \"a\" {word}\n"),
+            format!("pushmeta kk: {word}\npopmeta kk:\n"),
+        ] {
+            let messages: Vec<String> =
+                parse(&src).errors.iter().map(ToString::to_string).collect();
+            let want = format!("invalid token '{word}' (booleans are written TRUE or FALSE)");
+            assert!(
+                messages.iter().any(|m| m.contains(&want)),
+                "{src:?}: {messages:?}"
+            );
+        }
+    }
+    // Another word is not taken for one.
+    let messages: Vec<String> = parse("2024-01-01 open Assets:A\n  kk: Truex\n")
+        .errors
+        .iter()
+        .map(ToString::to_string)
+        .collect();
+    assert!(
+        !messages.iter().any(|m| m.contains("booleans")),
+        "{messages:?}"
+    );
+}

@@ -352,10 +352,13 @@ impl RegularPlugin for ZerosumPlugin {}
 /// order.
 type ZerosumAccounts = Vec<(String, (Option<String>, i64))>;
 
-/// Parse the Python-style config dict, as beancount's `literal_eval` reads
-/// it: anything that is not that dict, or whose entries are not the shapes
-/// below, is an error (the plugin then does nothing, and says so), where a
-/// pattern match on the text used to skip it silently.
+/// Parse the Python-style config dict, as the Python `zerosum` plugin
+/// (`beancount_reds_plugins` 0.4.0) reads it: `literal_eval`, then each key
+/// `pop`ped with a default, and each entry unpacked into two values. It
+/// fails on a config that is not a literal, one that is not a dict, and an
+/// entry or `account_name_replace` that does not unpack into two; so does
+/// this, and the plugin then does nothing and says so. Where the text used
+/// to be pattern-matched, all three were skipped without a word.
 ///
 /// ```text
 /// {'zerosum_accounts': {'Account': ('Target', 30), ...},
@@ -363,8 +366,11 @@ type ZerosumAccounts = Vec<(String, (Option<String>, i64))>;
 ///  'tolerance': 0.01}
 /// ```
 ///
-/// Every key is optional, as beancount `pop`s each with a default; other
-/// keys are ignored, as there.
+/// Every key is optional. The Python plugin also reads `flag_unmatched`,
+/// `match_metadata`, `match_metadata_name`, `link_transactions` and
+/// `link_prefix`; they are accepted here and, like any other key, ignored:
+/// rledger's plugin does not flag unmatched entries, add match metadata or
+/// link matched transactions.
 fn parse_config(
     config: &str,
 ) -> Result<(ZerosumAccounts, Option<(String, String)>, Decimal), String> {
@@ -384,6 +390,7 @@ fn parse_config(
 
     let mut zerosum_accounts: ZerosumAccounts = Vec::new();
     if let Some(value) = get("zerosum_accounts") {
+        // `.items()` on anything but a dict raises in the Python plugin.
         let PyValue::Dict(accounts) = value else {
             return Err("'zerosum_accounts' must be a dict".to_string());
         };
@@ -391,28 +398,25 @@ fn parse_config(
             let PyValue::Str(account) = key else {
                 return Err(format!("a zerosum account must be a string, found {key:?}"));
             };
-            let (target, days) = match entry {
-                PyValue::Seq(items) => match items.as_slice() {
-                    [PyValue::Str(target), PyValue::Number { text, .. }] => {
-                        let days: i64 = text.parse().map_err(|_| {
-                            format!("the days for '{account}' must be a whole number, found {text}")
-                        })?;
-                        (target, days)
-                    }
-                    _ => {
-                        return Err(format!(
-                            "the entry for '{account}' must be ('target account', days)"
-                        ));
-                    }
-                },
-                _ => {
-                    return Err(format!(
-                        "the entry for '{account}' must be ('target account', days)"
-                    ));
-                }
+            let unpack = || format!("the entry for '{account}' must be ('target account', days)");
+            // `(target_account, date_range) = ...`: exactly two values.
+            let PyValue::Seq(items) = entry else {
+                return Err(unpack());
             };
+            let [target, days] = items.as_slice() else {
+                return Err(unpack());
+            };
+            // `if not target_account:` derives it, so `None` is as `''`.
+            let target = match target {
+                PyValue::Str(target) => target.clone(),
+                PyValue::None => String::new(),
+                _ => return Err(format!("the target for '{account}' must be a string")),
+            };
+            let days = py_days(days).ok_or_else(|| {
+                format!("the days for '{account}' must be a number, found {days:?}")
+            })?;
             // An empty target means: use account_name_replace.
-            let target = (!target.is_empty()).then(|| target.clone());
+            let target = (!target.is_empty()).then_some(target);
             // As in a Python dict: a repeated account keeps its first
             // position and takes its last value.
             if let Some(slot) = zerosum_accounts.iter_mut().find(|(a, _)| a == account) {
@@ -429,18 +433,66 @@ fn parse_config(
             [PyValue::Str(from), PyValue::Str(to)] => Some((from.clone(), to.clone())),
             _ => return Err("'account_name_replace' must be ('from', 'to')".to_string()),
         },
+        // A string unpacks into its characters in Python, so a two-character
+        // one is a pair there too.
+        Some(PyValue::Str(pair)) if pair.chars().count() == 2 => {
+            let mut chars = pair.chars().map(String::from);
+            chars.next().zip(chars.next())
+        }
         Some(_) => return Err("'account_name_replace' must be ('from', 'to')".to_string()),
     };
 
+    // Stricter than the Python plugin, deliberately: it compares any
+    // `tolerance` against amounts and fails only when a zerosum posting is
+    // reached (a string), or matches nothing sensible (`None`). A tolerance
+    // that is not a number is refused up front instead.
     let tolerance = match get("tolerance") {
         None => Decimal::from_str(DEFAULT_TOLERANCE).expect("DEFAULT_TOLERANCE is a decimal"),
-        Some(PyValue::Number { text, .. }) => Decimal::from_str(text)
-            .or_else(|_| Decimal::from_scientific(text))
-            .map_err(|_| format!("'tolerance' must be a number, found {text}"))?,
+        Some(PyValue::Number { text, .. }) => {
+            let text = text.replace('_', "");
+            Decimal::from_str(&text)
+                .or_else(|_| Decimal::from_scientific(&text))
+                .map_err(|_| format!("'tolerance' must be a number, found {text}"))?
+        }
         Some(other) => return Err(format!("'tolerance' must be a number, found {other:?}")),
     };
 
     Ok((zerosum_accounts, account_replace, tolerance))
+}
+
+/// A date range as the Python plugin uses it, `timedelta(days=value)`
+/// added to a date: the whole days, rounded down (`30.5` is 30, `-0.5` is
+/// -1). An int in any literal form (`3_0`, `0x1e`), a float, or a bool
+/// (`True` is 1); `None` for anything else, which fails there too.
+fn py_days(value: &super::py_literal::PyValue) -> Option<i64> {
+    use super::py_literal::PyValue;
+    let text = match value {
+        PyValue::Bool(b) => return Some(i64::from(*b)),
+        PyValue::Number { text, .. } => text.replace('_', "").to_ascii_lowercase(),
+        _ => return None,
+    };
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(&text)),
+    };
+    let radix = [("0x", 16), ("0o", 8), ("0b", 2)]
+        .into_iter()
+        .find_map(|(prefix, radix)| digits.strip_prefix(prefix).map(|d| (d, radix)));
+    if let Some((digits, radix)) = radix {
+        let whole = i64::from_str_radix(digits, radix).ok()?;
+        return Some(if negative { -whole } else { whole });
+    }
+    if let Ok(whole) = digits.parse::<i64>() {
+        return Some(if negative { -whole } else { whole });
+    }
+    let float: f64 = digits.parse().ok().filter(|f: &f64| f.is_finite())?;
+    let floored = if negative { -float } else { float }.floor();
+    // Far past any real date range, and within i64.
+    if floored.abs() > 1e15 {
+        return None;
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    Some(floored as i64)
 }
 
 /// Check if two dates are within a given range (in days).
@@ -785,37 +837,97 @@ mod tests {
         );
     }
 
-    /// A config `literal_eval` would refuse is an error, which the plugin
+    /// What the Python plugin cannot read is an error, which the plugin
     /// reports as a failure, where the pattern match it replaced found no
-    /// accounts and did nothing without a word.
+    /// accounts and did nothing without a word: a config that is not a
+    /// literal (`literal_eval`), not a dict, or an entry or
+    /// `account_name_replace` that does not unpack into two.
     #[test]
-    fn test_parse_config_refuses_what_beancount_cannot_read() {
+    fn test_parse_config_refuses_what_the_python_plugin_cannot_read() {
         for (config, why) in [
-            // Malformed: a missing colon.
+            // Not a literal: a missing colon.
             (
                 "{'zerosum_accounts': {'Assets:Transit' ('Assets:Transit-Matched', 30)}}",
                 "",
             ),
-            // Not a dict.
             ("['Assets:Transit']", "expected a dict"),
-            // Wrong value shapes.
+            (
+                "{'zerosum_accounts': ['Assets:Transit']}",
+                "'zerosum_accounts' must be a dict",
+            ),
+            // Entries that do not unpack into (target, days).
             (
                 "{'zerosum_accounts': {'Assets:Transit': 'Assets:Transit-Matched'}}",
                 "must be ('target account', days)",
             ),
             (
-                "{'zerosum_accounts': {'Assets:Transit': ('Assets:Matched', 'thirty')}}",
+                "{'zerosum_accounts': {'Assets:Transit': ('Assets:Matched', 30, 1)}}",
                 "must be ('target account', days)",
-            ),
-            (
-                "{'zerosum_accounts': ['Assets:Transit']}",
-                "'zerosum_accounts' must be a dict",
             ),
             (
                 "{'account_name_replace': 'ZeroSum'}",
                 "'account_name_replace' must be ('from', 'to')",
             ),
+        ] {
+            let err = parse_config(config).expect_err(config);
+            assert!(err.contains(why), "{config}: {err}");
+        }
+    }
+
+    /// What the Python plugin runs and matches with is read the same way:
+    /// days written as a float or with `_`, a bool, a `None` target, and
+    /// the keys rledger does not act on.
+    #[test]
+    fn test_parse_config_accepts_what_the_python_plugin_runs() {
+        let config = "{
+            'zerosum_accounts': {
+                'Assets:A': ('Assets:A-Matched', 30.0),
+                'Assets:B': (None, 3_0),
+                'Assets:C': ('', True),
+                'Assets:D': ('', 30.5),
+                'Assets:E': ('', 0x1e),
+            },
+            'account_name_replace': ('', '-Matched'),
+            'flag_unmatched': True,
+            'match_metadata': True,
+            'match_metadata_name': 'match',
+            'link_transactions': True,
+            'link_prefix': 'ZS.',
+        }";
+        let (accounts, replace, _) = parse_config(config).unwrap();
+        assert_eq!(
+            accounts,
+            vec![
+                (
+                    "Assets:A".to_string(),
+                    (Some("Assets:A-Matched".to_string()), 30)
+                ),
+                ("Assets:B".to_string(), (None, 30)),
+                ("Assets:C".to_string(), (None, 1)),
+                // `timedelta(days=30.5)` added to a date adds 30 days.
+                ("Assets:D".to_string(), (None, 30)),
+                ("Assets:E".to_string(), (None, 30)),
+            ]
+        );
+        assert_eq!(replace, Some((String::new(), "-Matched".to_string())));
+        // A two-character string unpacks into its characters, there and here.
+        let (_, replace, _) = parse_config("{'account_name_replace': 'ZS'}").unwrap();
+        assert_eq!(replace, Some(("Z".to_string(), "S".to_string())));
+    }
+
+    /// Stricter than the Python plugin, deliberately: it unpacks days and a
+    /// tolerance of any type and fails (or matches nothing) only once a
+    /// zerosum posting is reached. A value that is not a number is refused
+    /// up front here.
+    #[test]
+    fn test_parse_config_refuses_a_non_number_up_front() {
+        for (config, why) in [
+            (
+                "{'zerosum_accounts': {'Assets:Transit': ('Assets:Matched', 'thirty')}}",
+                "the days for 'Assets:Transit' must be a number",
+            ),
             ("{'tolerance': 'small'}", "'tolerance' must be a number"),
+            ("{'tolerance': None}", "'tolerance' must be a number"),
         ] {
             let err = parse_config(config).expect_err(config);
             assert!(err.contains(why), "{config}: {err}");

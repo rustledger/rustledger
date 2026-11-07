@@ -382,3 +382,179 @@ fn test_parse_names_an_unclosed_bracket_or_quote_at_the_end() {
         assert!(err.to_string().contains(message), "{query:?}: {err}");
     }
 }
+
+/// The error `query` gives when it is run.
+fn run_err(bql: &str) -> String {
+    let directives = directives();
+    let mut executor = Executor::new(&directives);
+    let query = parse(bql).unwrap_or_else(|e| panic!("{bql:?}: {e}"));
+    match executor.execute(&query) {
+        Ok(result) => panic!("{bql:?} answered {:?}", result.rows),
+        Err(e) => e.to_string(),
+    }
+}
+
+/// bean-query 0.2.0 parses `*` as any call's only argument, then refuses it
+/// when it compiles the query unless the call is `count`: `SELECT sum(*)` is
+/// `no function matches "sum(*)" name and argument types`, in every clause
+/// and in a subquery (each row checked against it). rledger answered one
+/// blank row, or a WHERE that matched nothing (#2880). A window call takes
+/// `*` only for `count` too.
+#[test]
+fn test_execute_refuses_a_wildcard_argument_but_count() {
+    for (query, call) in [
+        ("SELECT sum(*)", "sum(*)"),
+        ("SELECT SUM(*)", "sum(*)"),
+        ("SELECT first(*)", "first(*)"),
+        ("SELECT units(*)", "units(*)"),
+        ("SELECT nosuch(*)", "nosuch(*)"),
+        ("SELECT account, sum(*) GROUP BY account", "sum(*)"),
+        ("SELECT sum(*), account GROUP BY account", "sum(*)"),
+        ("SELECT * WHERE sum(*) > 0", "sum(*)"),
+        ("SELECT date FROM sum(*) = 1", "sum(*)"),
+        ("SELECT date ORDER BY sum(*)", "sum(*)"),
+        (
+            "SELECT account GROUP BY account HAVING sum(*) > 0",
+            "sum(*)",
+        ),
+        ("SELECT * FROM (SELECT sum(*))", "sum(*)"),
+        ("SELECT count(*) WHERE length(*) > 0", "length(*)"),
+        ("SELECT sum(*) OVER ()", "sum(*)"),
+    ] {
+        let err = run_err(query);
+        assert_eq!(err, format!("no function matches \"{call}\""), "{query}");
+    }
+    for query in [
+        "SELECT count(*)",
+        "SELECT COUNT(*)",
+        "SELECT account, count(*) GROUP BY account",
+    ] {
+        run(query);
+    }
+    let (_, rows) = run("SELECT Count(*)");
+    assert_eq!(rows, [[Value::Integer(4)]]);
+}
+
+/// A window's PARTITION BY and ORDER BY take no `*` either: it is refused
+/// at the `*`, by name, as anywhere a value belongs. bean-query has no window
+/// functions; rledger took the `*` (#2880).
+#[test]
+fn test_parse_refuses_the_wildcard_in_a_window() {
+    for (query, position) in [
+        ("SELECT count(*) OVER (PARTITION BY *)", 35),
+        ("SELECT count(*) OVER (PARTITION BY account, *)", 44),
+        ("SELECT count(*) OVER (ORDER BY *)", 31),
+        ("SELECT count(*) OVER (ORDER BY * DESC)", 31),
+    ] {
+        let err = parse(query).expect_err(query);
+        assert_eq!(err.position, position, "{query}: {err}");
+        assert!(
+            err.to_string().contains(STAR_IS_NOT_A_VALUE),
+            "{query}: {err}"
+        );
+    }
+}
+
+/// A value right after a call's `*` (`count(* 1)`, a syntax error in
+/// bean-query) is named at the value as the `)` the `*` needs. It read
+/// "found '1' expected ..., ',', or ')'", as if a `,` could follow the `*`
+/// (#2880). A `*` an operator or `,` follows is still refused by name.
+#[test]
+fn test_parse_names_the_close_a_call_star_needs() {
+    for (query, position) in [
+        ("SELECT count(* 1)", 15),
+        ("SELECT count(*1)", 14),
+        ("SELECT count(* account)", 15),
+        ("SELECT count(* 'a')", 15),
+        ("SELECT count(* (1))", 15),
+        ("SELECT date WHERE length(* x) > 0", 27),
+    ] {
+        let err = parse(query).expect_err(query);
+        assert_eq!(err.position, position, "{query}: {err}");
+        assert!(
+            err.to_string()
+                .contains("expected ')' after the '*': it stands alone in a call such as count(*)"),
+            "{query}: {err}"
+        );
+    }
+    for query in ["SELECT count(*, 1)", "SELECT count(* + 1)"] {
+        let err = parse(query).expect_err(query);
+        assert!(
+            err.to_string().contains(STAR_IS_NOT_A_VALUE),
+            "{query}: {err}"
+        );
+    }
+}
+
+/// A target `*` that an operator follows is a `*` used as a value, refused
+/// by name, for every binary operator. The parser reads that from a
+/// hand-written copy of the operators (`operator_follows`); without an
+/// operator there, `SELECT * <op> 1` read as the target list followed by an
+/// unexpected token. The exhaustive match makes a new `BinaryOperator` add
+/// its row here (#2880).
+#[test]
+fn test_star_before_every_operator_is_named() {
+    use rustledger_query::ast::BinaryOperator;
+    let all = [
+        BinaryOperator::Eq,
+        BinaryOperator::Ne,
+        BinaryOperator::Lt,
+        BinaryOperator::Le,
+        BinaryOperator::Gt,
+        BinaryOperator::Ge,
+        BinaryOperator::Regex,
+        BinaryOperator::NotRegex,
+        BinaryOperator::In,
+        BinaryOperator::NotIn,
+        BinaryOperator::And,
+        BinaryOperator::Or,
+        BinaryOperator::Add,
+        BinaryOperator::Sub,
+        BinaryOperator::Mul,
+        BinaryOperator::Div,
+        BinaryOperator::Mod,
+    ];
+    for op in all {
+        let right = match op {
+            BinaryOperator::In | BinaryOperator::NotIn => "(1, 2)",
+            BinaryOperator::Regex | BinaryOperator::NotRegex => "'a'",
+            BinaryOperator::Eq
+            | BinaryOperator::Ne
+            | BinaryOperator::Lt
+            | BinaryOperator::Le
+            | BinaryOperator::Gt
+            | BinaryOperator::Ge
+            | BinaryOperator::And
+            | BinaryOperator::Or
+            | BinaryOperator::Add
+            | BinaryOperator::Sub
+            | BinaryOperator::Mul
+            | BinaryOperator::Div
+            | BinaryOperator::Mod => "1",
+        };
+        for spacing in [" ", ""] {
+            if spacing.is_empty() && op.to_string().starts_with(char::is_alphabetic) {
+                continue;
+            }
+            let query = format!("SELECT *{spacing}{op}{spacing}{right}");
+            let err = parse(&query).expect_err(&query);
+            assert_eq!(err.position, 7, "{query}: {err}");
+            assert!(
+                err.to_string().contains(STAR_IS_NOT_A_VALUE),
+                "{query}: {err}"
+            );
+        }
+    }
+    for query in [
+        "SELECT * IS NULL",
+        "SELECT * IS NOT NULL",
+        "SELECT * BETWEEN 1 AND 2",
+        "SELECT * NOT BETWEEN 1 AND 2",
+    ] {
+        let err = parse(query).expect_err(query);
+        assert!(
+            err.to_string().contains(STAR_IS_NOT_A_VALUE),
+            "{query}: {err}"
+        );
+    }
+}

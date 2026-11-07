@@ -6,8 +6,9 @@ ______________________________________________________________________
 
 Run a named advisory pass over one or more ledger files. A lint reports what
 it finds without failing: unless a lint's own option says otherwise, it exits
-0 whether or not it finds anything, and 1 only when it cannot run (a missing
-file, a file that does not load).
+0 whether or not it finds anything, and non-zero only when it cannot run (a
+missing file, a file that does not load): 1, or 2 for `linked-transit` (see
+its exit status below).
 
 ## Usage
 
@@ -91,12 +92,19 @@ stderr; in `ag-rledger` they are the envelope's `warnings`, each with a
 
 ### Exit status
 
-Findings exit 0 unless `--fail-on` names a status: `--fail-on
-mismatch,missing,ambiguous` (comma-separated or repeated) exits 1 when any
-link ends in one of them, as `rledger check` exits 1 on an error, so the lint
-can gate CI or a pre-commit hook. A refusal also exits 1. In `ag-rledger` a
-`--fail-on` failure is still `"ok": true`, with `exit_code` and
-`result.exit_status` 1, as for `check`.
+| Exit | `rledger lint linked-transit` |
+|------|-------------------------------|
+| 0 | It ran; no link ends in a `--fail-on` status (always, without `--fail-on`) |
+| 1 | A link ends in a status `--fail-on` names, as `rledger check` exits 1 on an error |
+| 2 | It could not answer: a missing file, load errors, a processing failure, or a configuration it refuses, as `rledger check` exits 2 on a file it cannot read |
+
+`--fail-on mismatch,missing,ambiguous` takes the statuses comma-separated or
+repeated, so the lint can gate CI or a pre-commit hook, and 1 always means a
+finding. In `ag-rledger` a `--fail-on` failure is still `"ok": true`, with
+`exit_code` and `result.exit_status` 1, as for `check`; a run that could not
+answer is an error envelope, `"ok": false`, whose `error.code` says why
+(`FILE_NOT_FOUND`, exit 3, or `COMMAND_FAILED`, exit 1). Exit 2 there means a
+usage error, so it is not reused.
 
 A match is not evidence of external settlement, domain isolation, or a
 persistent transfer lifecycle.

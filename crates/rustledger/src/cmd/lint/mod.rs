@@ -80,3 +80,17 @@ pub fn run_with_writer<W: std::io::Write>(
         LintKind::ControlChars(c_args) => control_chars::run_with_writer(c_args, out),
     }
 }
+
+/// The exit status for a lint that could not run (a missing file, a file
+/// that does not load, a configuration it refuses).
+///
+/// `linked-transit` exits 2, as `rledger check` does on a file it cannot
+/// read, so that with `--fail-on` a 1 always means a finding. The other
+/// lints exit 1, as they always have.
+#[must_use]
+pub const fn error_exit_code(args: &Args) -> u8 {
+    match args.lint {
+        LintKind::LinkedTransit(_) => 2,
+        LintKind::Transfers(_) | LintKind::ClosedNonempty(_) | LintKind::ControlChars(_) => 1,
+    }
+}

@@ -2656,3 +2656,66 @@ fn test_lint_linked_transit_fail_on_exits_one_like_check() {
     assert_ne!(code, 0, "{envelope}");
     assert!(envelope.to_string().contains("INVALID_VALUE"), "{envelope}");
 }
+
+/// A linked-transit run that cannot answer exits 2 in `rledger`, as
+/// `rledger check` does on a file it cannot read, so `--fail-on`'s 1 always
+/// means a finding. `ag-rledger` keeps its own convention: an error
+/// envelope, `"ok": false`, whose code says why.
+#[test]
+fn test_lint_linked_transit_exits_two_when_it_cannot_answer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let broken = write_fixture(
+        tmp.path(),
+        "broken.beancount",
+        "2024-01-01 * \"x\"\n  bad\n",
+    );
+    let plugin = write_fixture(
+        tmp.path(),
+        "plugin.beancount",
+        "plugin \"no.such.plugin_xyz\"\n2000-01-01 open Assets:Transit\n",
+    );
+    let good = write_fixture(
+        tmp.path(),
+        "good.beancount",
+        "2000-01-01 open Assets:Transit\n2000-01-01 open Assets:Cash\n\
+         2024-01-01 * \"first\" ^xfer-demo\n  Assets:Transit 100 USD\n  Assets:Cash -100 USD\n",
+    );
+    let missing = tmp.path().join("missing.beancount");
+    let lint = |file: &std::path::Path, account: &str| {
+        let file = file.to_str().unwrap().to_string();
+        let args = [
+            "lint",
+            "linked-transit",
+            &file,
+            "--link-prefix",
+            "xfer-",
+            "--account",
+            account,
+            "--fail-on",
+            "missing",
+        ];
+        let (cli, _) = rledger_stdout(tmp.path(), &args);
+        let (_, envelope, _) = run_in(tmp.path(), &args);
+        (cli, envelope)
+    };
+    for (file, account) in [
+        (missing.as_path(), "Assets:Transit"),
+        (broken.as_path(), "Assets:Transit"),
+        (plugin.as_path(), "Assets:Transit"),
+        (good.as_path(), "Transit"),
+    ] {
+        let (cli, envelope) = lint(file, account);
+        assert_eq!(cli, 2, "{}: {envelope}", file.display());
+        assert_eq!(envelope["ok"], false, "{}: {envelope}", file.display());
+    }
+    // A finding under --fail-on is 1, and ok.
+    let (cli, envelope) = lint(&good, "Assets:Transit");
+    assert_eq!(cli, 1, "{envelope}");
+    assert_eq!(envelope["ok"], true, "{envelope}");
+    // The other lints keep exiting 1 when they cannot run.
+    let (code, _) = rledger_stdout(
+        tmp.path(),
+        &["lint", "closed-nonempty", missing.to_str().unwrap()],
+    );
+    assert_eq!(code, 1);
+}

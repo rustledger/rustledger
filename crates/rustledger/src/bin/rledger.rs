@@ -571,7 +571,7 @@ fn main() -> ExitCode {
             Ok(code) => code,
             Err(e) => {
                 eprintln!("error: {}", render_error(&e));
-                ExitCode::from(1)
+                ExitCode::from(rustledger::cmd::lint::error_exit_code(&args))
             }
         },
         Commands::Compat { action } => match action {

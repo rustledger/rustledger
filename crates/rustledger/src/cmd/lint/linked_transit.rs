@@ -23,8 +23,8 @@
 //!   passed through as a warning and does not refuse the input.
 //!
 //! A transaction a plugin inserted with no source location, or at a
-//! location another transaction already has (forecast's copies keep the
-//! template's, effective_date's keep the parent's), cannot be told from
+//! location another transaction already has (`forecast`'s copies keep the
+//! template's, `effective_date`'s keep the parent's), cannot be told from
 //! another, so its link is `ambiguous` rather than merged into a match.
 //!
 //! A configuration that cannot match anything is said so, not answered with
@@ -439,11 +439,8 @@ pub fn run_with_writer<W: std::io::Write>(
             // two transactions. A plugin-inserted one may have no source
             // location, or reuse its parent's: neither identifies it, so
             // its link is `ambiguous`, never merged into a match.
-            let (key, location, at, unidentified) = match ledger
-                .source_map
-                .get(directive.file_id as usize)
-            {
-                Some(source) => {
+            let (key, location, at, unidentified) =
+                if let Some(source) = ledger.source_map.get(directive.file_id as usize) {
                     // `path` is the file's identity (symlinks resolved, one
                     // path for every include of it), and the path the other
                     // lints print.
@@ -457,11 +454,10 @@ pub fn run_with_writer<W: std::io::Write>(
                         Some((source.path.clone(), line)),
                         shared.then_some(
                             "several transactions share one source location \
-                                 (a plugin inserted one)",
+                             (a plugin inserted one)",
                         ),
                     )
-                }
-                None => {
+                } else {
                     unlocated += 1;
                     let (file, line) = ledger
                         .source_map
@@ -476,8 +472,7 @@ pub fn run_with_writer<W: std::io::Write>(
                         None,
                         Some("a plugin inserted this transaction, which has no source location"),
                     )
-                }
-            };
+                };
             let errors: BTreeSet<usize> = by_span
                 .get(&(directive.file_id, directive.span.start))
                 .into_iter()

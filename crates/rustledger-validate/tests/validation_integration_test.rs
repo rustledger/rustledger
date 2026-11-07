@@ -992,3 +992,47 @@ fn test_source_directive_does_not_get_attribution_note() {
         account_error.note,
     );
 }
+
+// ============================================================================
+// Account-valued metadata (#2813)
+// ============================================================================
+
+/// The `E1005` errors for `source`, validated under `roots`.
+fn meta_account_errors(source: &str, roots: &[&str]) -> Vec<String> {
+    let parsed = rustledger_parser::parse(source);
+    assert!(parsed.errors.is_empty(), "{source:?}: {:?}", parsed.errors);
+    let directives: Vec<Directive> = parsed.directives.into_iter().map(|d| d.value).collect();
+    let options = ValidationOptions::default()
+        .with_account_types(roots.iter().map(ToString::to_string).collect());
+    common::validate_with_options(&directives, options)
+        .into_iter()
+        .filter(|e| e.code == ErrorCode::InvalidAccountName)
+        .map(|e| e.message)
+        .collect()
+}
+
+/// An account-valued metadata entry is checked against the roots, as
+/// beancount checks every account token (`kk: Foo:Bar` is `Invalid account
+/// name` there), on a directive and on a posting, and under the ledger's
+/// configured roots (`option "name_assets"`), not a fixed list.
+#[test]
+fn test_validate_reports_an_account_metadata_value_with_an_invalid_root() {
+    const ROOTS: [&str; 5] = ["Assets", "Liabilities", "Equity", "Income", "Expenses"];
+    let open = "2024-01-01 open Assets:A\n  kk: Foo:Bar\n";
+    let errors = meta_account_errors(open, &ROOTS);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("\"Foo:Bar\""), "{errors:?}");
+
+    let posting = "2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n\
+                   2024-01-02 *\n  Assets:A  1 USD\n    kk: Foo:Bar\n  Assets:B\n";
+    assert_eq!(meta_account_errors(posting, &ROOTS).len(), 1);
+
+    // A valid root, under the default roots and under renamed ones.
+    let valid = "2024-01-01 open Assets:A\n  kk: Equity:B\n";
+    assert_eq!(meta_account_errors(valid, &ROOTS), Vec::<String>::new());
+    let renamed = ["Actifs", "Liabilities", "Equity", "Income", "Expenses"];
+    let actifs = "2024-01-01 open Actifs:A\n  kk: Actifs:B\n  jj: Assets:B\n";
+    let errors = meta_account_errors(actifs, &renamed);
+    assert_eq!(errors.len(), 1, "{errors:?}");
+    assert!(errors[0].contains("\"Assets:B\""), "{errors:?}");
+}

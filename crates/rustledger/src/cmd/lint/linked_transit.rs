@@ -178,7 +178,43 @@ struct Finding {
 
 #[derive(Serialize)]
 struct Report {
+    counts: Counts,
     findings: Vec<Finding>,
+}
+
+/// How many links ended in each status.
+#[derive(Serialize, Clone, Copy, Default)]
+struct Counts {
+    matched: usize,
+    mismatch: usize,
+    missing: usize,
+    ambiguous: usize,
+}
+
+impl Counts {
+    fn of(findings: &[Finding]) -> Self {
+        let mut counts = Self::default();
+        for finding in findings {
+            *match finding.status {
+                Status::Matched => &mut counts.matched,
+                Status::Mismatch => &mut counts.mismatch,
+                Status::Missing => &mut counts.missing,
+                Status::Ambiguous => &mut counts.ambiguous,
+            } += 1;
+        }
+        counts
+    }
+}
+
+/// `312 matched, 2 mismatch, 1 missing, 0 ambiguous`.
+impl std::fmt::Display for Counts {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} matched, {} mismatch, {} missing, {} ambiguous",
+            self.matched, self.mismatch, self.missing, self.ambiguous
+        )
+    }
 }
 
 /// A processing diagnostic this lint reports rather than refuses on: the
@@ -606,23 +642,38 @@ pub fn run_with_writer<W: std::io::Write>(
         );
     }
 
+    let counts = Counts::of(&findings);
     match args.format {
         OutputFormat::Json => {
-            writeln!(out, "{}", crate::cmd::to_json_pretty(&Report { findings })?)?;
+            writeln!(
+                out,
+                "{}",
+                crate::cmd::to_json_pretty(&Report { counts, findings })?
+            )?;
         }
         OutputFormat::Text => {
             if findings.is_empty() {
                 writeln!(out, "No linked transit transfers found.")?;
-            }
-            for finding in findings {
-                writeln!(
-                    out,
-                    "^{}: {}: {}",
-                    finding.link, finding.status, finding.reason
-                )?;
-                for location in finding.locations {
-                    writeln!(out, "  {}:{}", location.file, location.line)?;
+            } else {
+                // Only what needs a look: on a ledger with hundreds of
+                // transfers, listing every match hid the few problems. The
+                // JSON keeps every finding.
+                let mut listed = false;
+                for finding in findings.iter().filter(|f| f.status != Status::Matched) {
+                    listed = true;
+                    writeln!(
+                        out,
+                        "^{}: {}: {}",
+                        finding.link, finding.status, finding.reason
+                    )?;
+                    for location in &finding.locations {
+                        writeln!(out, "  {}:{}", location.file, location.line)?;
+                    }
                 }
+                if listed {
+                    writeln!(out)?;
+                }
+                writeln!(out, "{counts}")?;
             }
         }
     }
@@ -1049,10 +1100,9 @@ mod tests {
             "warning: --link-prefix ^xfer-: links are matched without the leading ^; using xfer-\n\
              warning: --account Assets:Transitt: the ledger never opens or posts to this account\n"
         );
-        assert!(
-            String::from_utf8(out)
-                .unwrap()
-                .starts_with("^xfer-a: matched"),
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "1 matched, 0 mismatch, 0 missing, 0 ambiguous\n"
         );
     }
 
@@ -1303,6 +1353,47 @@ mod tests {
                 "account": "Assets:Transit",
                 "amount": {"number": "-90.00", "currency": "USD"}
             }]),
+            "{report}"
+        );
+    }
+
+    #[test]
+    fn test_run_with_writer_text_lists_only_what_did_not_match() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.bean");
+        write_ledger(
+            &path,
+            format!(
+                "{}{}{}{}",
+                transaction("xfer-a", "Assets:Transit 5 USD", "Assets:Cash"),
+                transaction("xfer-a", "Assets:Transit -5 USD", "Assets:Cash"),
+                transaction("xfer-b", "Assets:Transit 5 USD", "Assets:Cash"),
+                transaction("xfer-b", "Assets:Transit -4 USD", "Assets:Cash"),
+            ),
+        )
+        .unwrap();
+        let args = Args {
+            files: vec![path.clone()],
+            link_prefix: "xfer-".into(),
+            account: vec!["Assets:Transit".into()],
+            format: OutputFormat::Text,
+        };
+        let mut out = Vec::new();
+        run_with_writer(&args, &mut out, None, &mut Vec::new()).unwrap();
+        let file = path.display();
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            format!(
+                "^xfer-b: mismatch: amount: 5 USD vs -4 USD\n  {file}:13\n  {file}:16\n\n\
+                 1 matched, 1 mismatch, 0 missing, 0 ambiguous\n"
+            )
+        );
+        // The JSON keeps the match, and the counts.
+        let report = inspect(vec![path], &["Assets:Transit"]).unwrap();
+        assert_eq!(report["findings"].as_array().unwrap().len(), 2, "{report}");
+        assert_eq!(
+            report["counts"],
+            serde_json::json!({"matched": 1, "mismatch": 1, "missing": 0, "ambiguous": 0}),
             "{report}"
         );
     }

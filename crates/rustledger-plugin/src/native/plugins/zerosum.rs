@@ -14,31 +14,9 @@
 //! }"
 //! ```
 
-use regex::Regex;
 use rust_decimal::Decimal;
 use std::collections::{HashMap, HashSet};
 use std::str::FromStr;
-use std::sync::LazyLock;
-
-/// Regex for parsing zerosum account entries.
-/// Format: `'AccountName': ('TargetAccount', days)` where `TargetAccount` may be empty (`''`).
-static ACCOUNT_ENTRY_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"'([^']+)'\s*:\s*\(\s*'([^']*)'\s*,\s*(\d+)\s*\)")
-        .expect("ACCOUNT_ENTRY_RE: invalid regex pattern")
-});
-
-/// Regex for parsing `account_name_replace`.
-/// Format: `'account_name_replace': ('from', 'to')`
-static ACCOUNT_REPLACE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"'account_name_replace'\s*:\s*\(\s*'([^']*)'\s*,\s*'([^']*)'\s*\)")
-        .expect("ACCOUNT_REPLACE_RE: invalid regex pattern")
-});
-
-/// Regex for parsing tolerance.
-/// Format: `'tolerance': 0.01`
-static TOLERANCE_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"'tolerance'\s*:\s*([0-9.]+)").expect("TOLERANCE_RE: invalid regex pattern")
-});
 
 use crate::types::{
     DirectiveData, DirectiveWrapper, OpenData, PluginError, PluginErrorSeverity, PluginInput,
@@ -374,75 +352,93 @@ impl RegularPlugin for ZerosumPlugin {}
 /// order.
 type ZerosumAccounts = Vec<(String, (Option<String>, i64))>;
 
-/// Parse the Python-style config dict.
+/// Parse the Python-style config dict, as beancount's `literal_eval` reads
+/// it: anything that is not that dict, or whose entries are not the shapes
+/// below, is an error (the plugin then does nothing, and says so), where a
+/// pattern match on the text used to skip it silently.
+///
+/// ```text
+/// {'zerosum_accounts': {'Account': ('Target', 30), ...},
+///  'account_name_replace': ('From', 'To'),
+///  'tolerance': 0.01}
+/// ```
+///
+/// Every key is optional, as beancount `pop`s each with a default; other
+/// keys are ignored, as there.
 fn parse_config(
     config: &str,
 ) -> Result<(ZerosumAccounts, Option<(String, String)>, Decimal), String> {
+    use super::py_literal::{self, PyValue};
+
+    let PyValue::Dict(entries) = py_literal::parse(config)? else {
+        return Err("expected a dict".to_string());
+    };
+    // The last value of a repeated key wins, as in a Python dict.
+    let get = |name: &str| {
+        entries
+            .iter()
+            .rev()
+            .find(|(k, _)| matches!(k, PyValue::Str(k) if k == name))
+            .map(|(_, v)| v)
+    };
+
     let mut zerosum_accounts: ZerosumAccounts = Vec::new();
-    let mut account_replace: Option<(String, String)> = None;
-    let mut tolerance = Decimal::from_str(DEFAULT_TOLERANCE).unwrap();
-
-    // Simple parsing of Python dict format
-    // 'zerosum_accounts': {'Account': ('Target', 30), ...}
-    // 'account_name_replace': ('From', 'To')
-
-    // Extract zerosum_accounts
-    if let Some(start) = config.find("'zerosum_accounts'")
-        && let Some(dict_offset) = config[start..].find('{')
-    {
-        let dict_start = start + dict_offset;
-        let mut depth = 0;
-        let mut dict_end = dict_start;
-        for (i, c) in config[dict_start..].char_indices() {
-            match c {
-                '{' => depth += 1,
-                '}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        dict_end = dict_start + i + 1;
-                        break;
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        let dict_str = &config[dict_start..dict_end];
-        // Parse individual account entries
-        // Format: 'AccountName': ('TargetAccount', days)
-        // or: 'AccountName': ('', days)
-        for cap in ACCOUNT_ENTRY_RE.captures_iter(dict_str) {
-            let account = cap[1].to_string();
-            let target = if cap[2].is_empty() {
-                None
-            } else {
-                Some(cap[2].to_string())
+    if let Some(value) = get("zerosum_accounts") {
+        let PyValue::Dict(accounts) = value else {
+            return Err("'zerosum_accounts' must be a dict".to_string());
+        };
+        for (key, entry) in accounts {
+            let PyValue::Str(account) = key else {
+                return Err(format!("a zerosum account must be a string, found {key:?}"));
             };
-            let days: i64 = cap[3].parse().unwrap_or(30);
+            let (target, days) = match entry {
+                PyValue::Seq(items) => match items.as_slice() {
+                    [PyValue::Str(target), PyValue::Number { text, .. }] => {
+                        let days: i64 = text.parse().map_err(|_| {
+                            format!("the days for '{account}' must be a whole number, found {text}")
+                        })?;
+                        (target, days)
+                    }
+                    _ => {
+                        return Err(format!(
+                            "the entry for '{account}' must be ('target account', days)"
+                        ));
+                    }
+                },
+                _ => {
+                    return Err(format!(
+                        "the entry for '{account}' must be ('target account', days)"
+                    ));
+                }
+            };
+            // An empty target means: use account_name_replace.
+            let target = (!target.is_empty()).then(|| target.clone());
             // As in a Python dict: a repeated account keeps its first
             // position and takes its last value.
-            if let Some(entry) = zerosum_accounts.iter_mut().find(|(a, _)| *a == account) {
-                entry.1 = (target, days);
+            if let Some(slot) = zerosum_accounts.iter_mut().find(|(a, _)| a == account) {
+                slot.1 = (target, days);
             } else {
-                zerosum_accounts.push((account, (target, days)));
+                zerosum_accounts.push((account.clone(), (target, days)));
             }
         }
     }
 
-    // Extract account_name_replace
-    if let Some(start) = config.find("'account_name_replace'")
-        && let Some(cap) = ACCOUNT_REPLACE_RE.captures(&config[start..])
-    {
-        account_replace = Some((cap[1].to_string(), cap[2].to_string()));
-    }
+    let account_replace = match get("account_name_replace") {
+        None => None,
+        Some(PyValue::Seq(items)) => match items.as_slice() {
+            [PyValue::Str(from), PyValue::Str(to)] => Some((from.clone(), to.clone())),
+            _ => return Err("'account_name_replace' must be ('from', 'to')".to_string()),
+        },
+        Some(_) => return Err("'account_name_replace' must be ('from', 'to')".to_string()),
+    };
 
-    // Extract tolerance
-    if let Some(start) = config.find("'tolerance'")
-        && let Some(cap) = TOLERANCE_RE.captures(&config[start..])
-        && let Ok(t) = Decimal::from_str(&cap[1])
-    {
-        tolerance = t;
-    }
+    let tolerance = match get("tolerance") {
+        None => Decimal::from_str(DEFAULT_TOLERANCE).expect("DEFAULT_TOLERANCE is a decimal"),
+        Some(PyValue::Number { text, .. }) => Decimal::from_str(text)
+            .or_else(|_| Decimal::from_scientific(text))
+            .map_err(|_| format!("'tolerance' must be a number, found {text}"))?,
+        Some(other) => return Err(format!("'tolerance' must be a number, found {other:?}")),
+    };
 
     Ok((zerosum_accounts, account_replace, tolerance))
 }
@@ -787,6 +783,68 @@ mod tests {
             open_count, 1,
             "Should not create duplicate Open directives for existing accounts"
         );
+    }
+
+    /// A config `literal_eval` would refuse is an error, which the plugin
+    /// reports as a failure, where the pattern match it replaced found no
+    /// accounts and did nothing without a word.
+    #[test]
+    fn test_parse_config_refuses_what_beancount_cannot_read() {
+        for (config, why) in [
+            // Malformed: a missing colon.
+            (
+                "{'zerosum_accounts': {'Assets:Transit' ('Assets:Transit-Matched', 30)}}",
+                "",
+            ),
+            // Not a dict.
+            ("['Assets:Transit']", "expected a dict"),
+            // Wrong value shapes.
+            (
+                "{'zerosum_accounts': {'Assets:Transit': 'Assets:Transit-Matched'}}",
+                "must be ('target account', days)",
+            ),
+            (
+                "{'zerosum_accounts': {'Assets:Transit': ('Assets:Matched', 'thirty')}}",
+                "must be ('target account', days)",
+            ),
+            (
+                "{'zerosum_accounts': ['Assets:Transit']}",
+                "'zerosum_accounts' must be a dict",
+            ),
+            (
+                "{'account_name_replace': 'ZeroSum'}",
+                "'account_name_replace' must be ('from', 'to')",
+            ),
+            ("{'tolerance': 'small'}", "'tolerance' must be a number"),
+        ] {
+            let err = parse_config(config).expect_err(config);
+            assert!(err.contains(why), "{config}: {err}");
+        }
+    }
+
+    #[test]
+    fn test_process_marks_an_unusable_config_failed() {
+        let input = PluginInput {
+            directives: vec![],
+            options: crate::types::PluginOptions::default(),
+            config: Some(
+                "{'zerosum_accounts': {'Assets:Transit' ('Assets:Transit-Matched', 30)}}"
+                    .to_string(),
+            ),
+        };
+        let output = ZerosumPlugin.process(input);
+        assert_eq!(output.errors.len(), 1, "{:?}", output.errors);
+        assert!(output.errors[0].failed, "{:?}", output.errors);
+    }
+
+    /// Keys are optional and the last of a repeated key wins, as in Python.
+    #[test]
+    fn test_parse_config_defaults_and_repeated_keys() {
+        let (accounts, replace, tolerance) = parse_config("{}").unwrap();
+        assert!(accounts.is_empty() && replace.is_none());
+        assert_eq!(tolerance, Decimal::from_str(DEFAULT_TOLERANCE).unwrap());
+        let (_, _, tolerance) = parse_config("{'tolerance': 0.5, 'tolerance': 0.25}").unwrap();
+        assert_eq!(tolerance, Decimal::from_str("0.25").unwrap());
     }
 
     #[test]

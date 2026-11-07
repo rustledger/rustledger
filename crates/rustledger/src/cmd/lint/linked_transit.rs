@@ -7,6 +7,13 @@
 //! `check`. A processing error refuses the input too: a transaction booking
 //! rejected is left out of the booked stream, and reporting its link as
 //! `missing` (or its partner as matched) would be a misleading answer.
+//!
+//! A configuration that cannot match anything is said so, not answered with
+//! an empty report: an `--account` that is not an account name is refused, a
+//! leading `^` on `--link-prefix` is dropped with a note, and a configured
+//! account the ledger never uses, or a prefix no link starts with, is a
+//! warning. Warnings go where the CLI's warnings go (stderr, or the
+//! `ag-rledger` envelope's `warnings`).
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -18,6 +25,20 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use super::closed_nonempty::OutputFormat;
+use crate::cmd::messages::Messages;
+use crate::cmd::report_cmd::{Diagnostic, Diagnostics};
+
+/// The codes of the warnings this lint emits, as carried in `ag-rledger`'s
+/// `warnings`.
+pub mod warning_codes {
+    /// `--link-prefix` began with `^`, which was dropped: links are matched
+    /// without it.
+    pub const LINK_PREFIX_CARET: &str = "LINK_PREFIX_CARET";
+    /// A configured `--account` appears nowhere in the ledger.
+    pub const ACCOUNT_NOT_IN_LEDGER: &str = "ACCOUNT_NOT_IN_LEDGER";
+    /// No link in the ledger starts with `--link-prefix`.
+    pub const NO_LINK_MATCHES_PREFIX: &str = "NO_LINK_MATCHES_PREFIX";
+}
 
 /// Inspect linked transfer legs in the booked ledger.
 #[derive(Parser, Debug)]
@@ -62,12 +83,17 @@ struct Report {
     findings: Vec<Finding>,
 }
 
-/// Run the lint on stdout.
+/// Run the lint on stdout, its warnings on stderr.
 ///
 /// # Errors
 /// Returns an error when the inputs cannot be safely inspected or output fails.
 pub fn run(args: &Args) -> Result<ExitCode> {
-    run_with_writer(args, &mut std::io::stdout().lock())
+    run_with_writer(
+        args,
+        &mut std::io::stdout().lock(),
+        None,
+        &mut std::io::stderr().lock(),
+    )
 }
 
 /// `file:line: CODE: message` for each error, joined for one refusal.
@@ -87,19 +113,51 @@ fn describe_errors<'a>(errors: impl Iterator<Item = &'a LedgerError>) -> String 
 
 /// Inspect booked transactions and write an advisory report.
 ///
+/// The report goes to `out`. Warnings (a dropped `^`, an account or prefix
+/// the ledger never uses, a processing warning) go to `warnings` when given,
+/// else to `err` as `warning: ...` lines.
+///
 /// # Errors
-/// Returns an error when the inputs cannot be safely inspected or output fails.
-pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<ExitCode> {
+/// Returns an error when the inputs cannot be safely inspected, when an
+/// `--account` is not a valid account name, or when output fails.
+pub fn run_with_writer<W: std::io::Write>(
+    args: &Args,
+    out: &mut W,
+    warnings: Option<&mut dyn Diagnostics>,
+    err: &mut dyn std::io::Write,
+) -> Result<ExitCode> {
+    let messages = &mut Messages::new(err, warnings);
     anyhow::ensure!(!args.files.is_empty(), "at least one file is required");
-    anyhow::ensure!(
-        !args.link_prefix.is_empty(),
-        "--link-prefix must not be empty"
-    );
+    // Links are written `^xfer-a` but matched as `xfer-a`, so `^xfer-` is
+    // an easy slip that would match nothing. Dropped, with a note.
+    let link_prefix = match args.link_prefix.strip_prefix('^') {
+        Some(stripped) => {
+            messages.warn(
+                warning_codes::LINK_PREFIX_CARET,
+                format!(
+                    "--link-prefix {}: links are matched without the leading ^; using {stripped}",
+                    args.link_prefix
+                ),
+            );
+            stripped
+        }
+        None => args.link_prefix.as_str(),
+    };
+    anyhow::ensure!(!link_prefix.is_empty(), "--link-prefix must not be empty");
     anyhow::ensure!(
         !args.account.is_empty() && args.account.iter().all(|a| !a.is_empty()),
         "at least one non-empty --account is required"
     );
+    for account in &args.account {
+        anyhow::ensure!(
+            rustledger_parser::is_valid_account_name(account),
+            "--account {account}: not a valid account name \
+             (expected two or more `:`-separated components, such as Assets:Transit)"
+        );
+    }
     let accounts: BTreeSet<&str> = args.account.iter().map(String::as_str).collect();
+    let mut seen_accounts: BTreeSet<&str> = BTreeSet::new();
+    let mut any_link_matches = false;
     // Booking only: validation diagnostics (an unopened account, a failed
     // balance assertion) do not change the amounts this lint compares, and
     // `rledger check` is where they belong.
@@ -139,19 +197,46 @@ pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<Ex
             path.display(),
             describe_errors(errors)
         );
+        for warning in ledger
+            .errors
+            .iter()
+            .filter(|e| e.severity == ErrorSeverity::Warning)
+        {
+            let line = format!("warning: {}", describe_errors(std::iter::once(warning)));
+            messages.emit_as(
+                Diagnostic {
+                    code: Some(warning.code.clone()),
+                    ..Diagnostic::message(warning.message.clone())
+                },
+                line,
+            );
+        }
         for directive in &ledger.directives {
-            let Directive::Transaction(txn) = &directive.value else {
-                continue;
+            let txn = match &directive.value {
+                Directive::Open(open) => {
+                    if let Some(account) = accounts.get(open.account.as_str()) {
+                        seen_accounts.insert(account);
+                    }
+                    continue;
+                }
+                Directive::Transaction(txn) => txn,
+                _ => continue,
             };
+            for posting in &txn.postings {
+                if let Some(account) = accounts.get(posting.account.as_str()) {
+                    seen_accounts.insert(account);
+                }
+            }
             let links: Vec<&str> = txn
                 .links
                 .iter()
                 .map(Link::as_str)
-                .filter(|l| l.starts_with(&args.link_prefix))
+                .filter(|l| l.starts_with(link_prefix))
                 .collect();
             if links.is_empty() {
                 continue;
             }
+            any_link_matches = true;
             let source = ledger
                 .source_map
                 .get(directive.file_id as usize)
@@ -193,6 +278,32 @@ pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<Ex
                     });
             }
         }
+    }
+
+    // A misspelled account or prefix matches nothing, which would otherwise
+    // read as a clean "No linked transit transfers found."
+    for account in &accounts {
+        if !seen_accounts.contains(account) {
+            let message =
+                format!("--account {account}: the ledger never opens or posts to this account");
+            let line = format!("warning: {message}");
+            messages.emit_as(
+                Diagnostic {
+                    code: Some(warning_codes::ACCOUNT_NOT_IN_LEDGER.to_string()),
+                    account: Some((*account).to_string()),
+                    ..Diagnostic::message(message)
+                },
+                line,
+            );
+        }
+    }
+    if !any_link_matches {
+        messages.warn(
+            warning_codes::NO_LINK_MATCHES_PREFIX,
+            format!(
+                "--link-prefix {link_prefix}: no link in the ledger starts with ^{link_prefix}"
+            ),
+        );
     }
 
     let mut findings = Vec::new();
@@ -261,18 +372,35 @@ pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<Ex
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::report_cmd::CollectedDiagnostics;
     use std::fs;
 
     fn inspect(files: Vec<PathBuf>, accounts: &[&str]) -> Result<serde_json::Value> {
+        inspect_with_warnings(files, "xfer-", accounts).map(|(report, _)| report)
+    }
+
+    /// The JSON report and the warnings, collected as `ag-rledger` does.
+    fn inspect_with_warnings(
+        files: Vec<PathBuf>,
+        link_prefix: &str,
+        accounts: &[&str],
+    ) -> Result<(serde_json::Value, Vec<Diagnostic>)> {
         let args = Args {
             files,
-            link_prefix: "xfer-".into(),
+            link_prefix: link_prefix.into(),
             account: accounts.iter().map(|a| (*a).into()).collect(),
             format: OutputFormat::Json,
         };
         let mut output = Vec::new();
-        run_with_writer(&args, &mut output)?;
-        Ok(serde_json::from_slice(&output)?)
+        let mut warnings = CollectedDiagnostics::default();
+        let mut err = Vec::new();
+        run_with_writer(&args, &mut output, Some(&mut warnings), &mut err)?;
+        assert!(err.is_empty(), "{}", String::from_utf8_lossy(&err));
+        Ok((serde_json::from_slice(&output)?, warnings.0))
+    }
+
+    fn codes(warnings: &[Diagnostic]) -> Vec<&str> {
+        warnings.iter().filter_map(|w| w.code.as_deref()).collect()
     }
 
     fn transaction(link: &str, transit: &str, other: &str) -> String {
@@ -551,6 +679,105 @@ mod tests {
             account: vec!["Assets:Transit".into()],
             format: OutputFormat::Json,
         };
-        assert!(run_with_writer(&args, &mut Vec::new()).is_err());
+        assert!(run_with_writer(&args, &mut Vec::new(), None, &mut Vec::new()).is_err());
+    }
+
+    /// A matched pair on `Assets:Transit`, for the configuration tests.
+    fn matched_pair(dir: &std::path::Path) -> PathBuf {
+        let path = dir.join("main.bean");
+        fs::write(
+            &path,
+            format!(
+                "{}{}",
+                transaction("xfer-a", "Assets:Transit 5 USD", "Assets:Cash"),
+                transaction("xfer-a", "Assets:Transit -5 USD", "Assets:Cash"),
+            ),
+        )
+        .unwrap();
+        path
+    }
+
+    #[test]
+    fn test_run_with_writer_rejects_invalid_account_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = matched_pair(dir.path());
+        for bad in [
+            "Transit",
+            "assets:transit",
+            "Assets:Transit:",
+            "Assets Transit",
+        ] {
+            let err = inspect(vec![path.clone()], &["Assets:Transit", bad]).unwrap_err();
+            assert!(
+                err.to_string()
+                    .contains(&format!("--account {bad}: not a valid account name")),
+                "{bad}: {err:#}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_run_with_writer_strips_leading_caret_with_note() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = matched_pair(dir.path());
+        let (report, warnings) =
+            inspect_with_warnings(vec![path], "^xfer-", &["Assets:Transit"]).unwrap();
+        assert_eq!(report["findings"][0]["status"], "matched", "{report}");
+        assert_eq!(codes(&warnings), vec![warning_codes::LINK_PREFIX_CARET]);
+        assert!(warnings[0].message.contains("using xfer-"), "{warnings:?}");
+        let dir = tempfile::tempdir().unwrap();
+        let path = matched_pair(dir.path());
+        assert!(inspect_with_warnings(vec![path], "^", &["Assets:Transit"]).is_err());
+    }
+
+    #[test]
+    fn test_run_with_writer_warns_on_unused_account_and_unmatched_prefix() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = matched_pair(dir.path());
+        let (report, warnings) =
+            inspect_with_warnings(vec![path.clone()], "xfer-", &["Assets:Transit"]).unwrap();
+        assert_eq!(report["findings"][0]["status"], "matched", "{report}");
+        assert!(warnings.is_empty(), "{warnings:?}");
+
+        let (report, warnings) =
+            inspect_with_warnings(vec![path.clone()], "xfer-", &["Assets:Transitt"]).unwrap();
+        assert_eq!(report["findings"], serde_json::json!([]), "{report}");
+        assert_eq!(codes(&warnings), vec![warning_codes::ACCOUNT_NOT_IN_LEDGER]);
+        assert!(
+            warnings[0].message.contains("Assets:Transitt"),
+            "{warnings:?}"
+        );
+
+        let (_, warnings) =
+            inspect_with_warnings(vec![path], "transfer-", &["Assets:Transit"]).unwrap();
+        assert_eq!(
+            codes(&warnings),
+            vec![warning_codes::NO_LINK_MATCHES_PREFIX]
+        );
+    }
+
+    #[test]
+    fn test_run_with_writer_writes_warnings_to_err_without_a_sink() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = matched_pair(dir.path());
+        let args = Args {
+            files: vec![path],
+            link_prefix: "^xfer-".into(),
+            account: vec!["Assets:Transit".into(), "Assets:Transitt".into()],
+            format: OutputFormat::Text,
+        };
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        run_with_writer(&args, &mut out, None, &mut err).unwrap();
+        assert_eq!(
+            String::from_utf8(err).unwrap(),
+            "warning: --link-prefix ^xfer-: links are matched without the leading ^; using xfer-\n\
+             warning: --account Assets:Transitt: the ledger never opens or posts to this account\n"
+        );
+        assert!(
+            String::from_utf8(out)
+                .unwrap()
+                .starts_with("^xfer-a: matched"),
+        );
     }
 }

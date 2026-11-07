@@ -56,6 +56,13 @@ with equal nonzero amounts in the same currency and opposite signs. Other
 results are `missing`, `mismatch`, or `ambiguous`, with source locations.
 Includes and repeated input paths are deduplicated.
 
+An `--account` that is not a valid account name is refused. A leading `^` on
+`--link-prefix` is dropped with a note (links are matched without it). A
+configured account the ledger never opens or posts to, and a prefix that no
+link starts with, are reported as warnings on stderr (in `ag-rledger`, in the
+envelope's `warnings`), so a typo does not pass as "No linked transit
+transfers found."
+
 The lint conservatively marks extra postings, multiple scoped links, prices,
 or costs as ambiguous. It reads the booked ledger: plugins run, and an elided
 transit amount is the amount booking computed. Files with load or processing

@@ -97,6 +97,69 @@ fn linked_transit_matches_cli_and_accepts_repeated_accounts() {
     );
 }
 
+/// A configuration that matches nothing is said so in `warnings`, with a
+/// stable code, rather than answered with a quiet empty report.
+#[test]
+fn test_lint_linked_transit_reports_configuration_warnings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        tmp.path(),
+        "transfer.beancount",
+        "2024-01-01 * \"first\" ^xfer-demo\n  Assets:Transit 100 USD\n  Assets:Cash -100 USD\n",
+    );
+    let file = file.to_str().unwrap();
+    let (code, envelope, _) = run_in(
+        tmp.path(),
+        &[
+            "lint",
+            "linked-transit",
+            file,
+            "--link-prefix",
+            "^transfer-",
+            "--account",
+            "Assets:Transitt",
+        ],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    let codes: Vec<&str> = envelope["result"]["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warnings: {envelope}"))
+        .iter()
+        .map(|w| w["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        codes,
+        [
+            "LINK_PREFIX_CARET",
+            "ACCOUNT_NOT_IN_LEDGER",
+            "NO_LINK_MATCHES_PREFIX"
+        ],
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["result"]["warnings"][1]["account"], "Assets:Transitt",
+        "{envelope}"
+    );
+
+    let (code, envelope, _) = run_in(
+        tmp.path(),
+        &[
+            "lint",
+            "linked-transit",
+            file,
+            "--link-prefix",
+            "xfer-",
+            "--account",
+            "Transit",
+        ],
+    );
+    assert_ne!(code, 0, "{envelope}");
+    assert!(
+        envelope.to_string().contains("not a valid account name"),
+        "{envelope}"
+    );
+}
+
 #[test]
 fn check_good_file_exits_zero_with_ok_envelope() {
     let tmp = tempfile::tempdir().unwrap();

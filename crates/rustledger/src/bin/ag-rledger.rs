@@ -938,8 +938,9 @@ fn lint_command() -> Command {
             async move {
                 let (args, globals) = parsed?;
                 load_config(&globals.budget)?;
-                run_buffered("lint", |out| {
-                    rustledger::cmd::lint::run_with_writer(&args, out).map(exit_code_to_i32)
+                run_buffered_with_warnings("lint", |out, warnings, err| {
+                    rustledger::cmd::lint::run_with_writer(&args, out, Some(warnings), err)
+                        .map(exit_code_to_i32)
                 })
             }
         })

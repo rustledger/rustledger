@@ -5,6 +5,7 @@
 //! which finds likely inter-account transfer pairs and (optionally) links
 //! them with `^link:` tags.
 
+use crate::cmd::report_cmd::Diagnostics;
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::process::ExitCode;
@@ -59,14 +60,22 @@ pub fn run(args: &Args) -> Result<ExitCode> {
 /// Dispatch to the requested lint, writing its report to `out`.
 ///
 /// Writer-injectable variant used by `ag-rledger`; behavior otherwise
-/// matches [`run`].
+/// matches [`run`]. `warnings` and `err` are where a lint's warnings go (see
+/// [`crate::cmd::messages::Messages`]); only `linked-transit` emits any.
 ///
 /// # Errors
 /// Propagates errors from the underlying lint implementation.
-pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<ExitCode> {
+pub fn run_with_writer<W: std::io::Write>(
+    args: &Args,
+    out: &mut W,
+    warnings: Option<&mut dyn Diagnostics>,
+    err: &mut dyn std::io::Write,
+) -> Result<ExitCode> {
     match &args.lint {
         LintKind::Transfers(t_args) => transfers::run_with_writer(t_args, out),
-        LintKind::LinkedTransit(t_args) => linked_transit::run_with_writer(t_args, out),
+        LintKind::LinkedTransit(t_args) => {
+            linked_transit::run_with_writer(t_args, out, warnings, err)
+        }
         LintKind::ClosedNonempty(c_args) => closed_nonempty::run_with_writer(c_args, out),
         LintKind::ControlChars(c_args) => control_chars::run_with_writer(c_args, out),
     }

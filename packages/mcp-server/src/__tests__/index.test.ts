@@ -6,10 +6,11 @@ import { fileURLToPath } from 'url';
 import { initSync } from '@rustledger/wasm';
 import * as rustledger from '@rustledger/wasm';
 import { handleToolCall } from '../handlers.js';
-import { validateArgs, formatErrors, formatValidation, fatalErrors, formatQueryResult, formatCell, textResponse, errorResponse, jsonResponse, collectLedgerFiles, withIncludedContext } from '../helpers.js';
+import { validateArgs, formatErrors, formatValidation, fatalErrors, formatQueryResult, queryResponse, formatCell, textResponse, errorResponse, jsonResponse, collectLedgerFiles, withIncludedContext } from '../helpers.js';
 import { TOOLS } from '../tools.js';
 import { RESOURCES, getResourceContents } from '../resources.js';
 import { PROMPTS, getPrompt } from '../prompts.js';
+import type { BeancountError } from '../types.js';
 
 // Initialize WASM before tests using synchronous initialization for Node.js
 beforeAll(() => {
@@ -473,6 +474,112 @@ describe('Tool Handlers', () => {
       const result = handleToolCall('query', { source: SAMPLE_LEDGER });
       expect(result.isError).toBe(true);
       expect(result.content[0].text).toContain('query');
+    });
+  });
+
+  // The source-text cases of the shared query-rule table
+  // (crates/rustledger-loader/tests/query_answer_rule/cases.rs), which this
+  // package cannot include: a parse or booking failure refuses, and any other
+  // load error, a plugin's, is reported beside the rows (#2882). The tool
+  // refused over a plugin's error before.
+  describe('query answer rule (source text)', () => {
+    const QUERY = "SELECT narration FROM postings WHERE account = 'Assets:Cash' ORDER BY date";
+    const BASE =
+      '2024-01-01 open Assets:Cash\n2024-01-01 open Income:Salary\n' +
+      '2024-01-02 * "pay"\n  Assets:Cash  100 USD\n  Income:Salary\n';
+    const MISSING_COMMODITY = "Missing Commodity directive for 'USD' in 'Assets:Cash'";
+    const PARSE_ERROR =
+      BASE + '2024-01-03 * "bad"\n  Assets:Cash  10 USD USD @@@\n  Income:Salary\n';
+    const BOOKING_ERROR =
+      '2024-01-01 open Assets:Cash\n2024-01-01 open Assets:Stock "STRICT"\n' +
+      '2024-01-01 open Income:Salary\n' +
+      '2024-01-02 * "pay"\n  Assets:Cash  100 USD\n  Income:Salary\n' +
+      '2024-01-02 * "buy1"\n  Assets:Stock  10 AAPL {100 USD}\n  Assets:Cash  -1000 USD\n' +
+      '2024-01-03 * "buy2"\n  Assets:Stock  10 AAPL {110 USD}\n  Assets:Cash  -1100 USD\n' +
+      '2024-01-05 * "sell"\n  Assets:Stock  -5 AAPL {}\n  Assets:Cash  500 USD\n  Income:Salary\n';
+
+    /** The table rows of a successful response, header and rule dropped. */
+    function rows(text: string): string[] {
+      const table = text.split('\n\n')[0];
+      return table.split('\n').slice(2).map((line) => line.trim());
+    }
+
+    it('answers a clean ledger with exactly its rows', () => {
+      const result = handleToolCall('query', { source: BASE, query: QUERY });
+      expect(result.isError).toBeFalsy();
+      expect(rows(result.content[0].text)).toEqual(['pay']);
+    });
+
+    // A plugin's diagnostic is shown beside the rows; the tool dropped it. The
+    // wasm releases word and grade `check_commodity`'s finding differently
+    // (the published 0.24.0: a warning, `commodity 'USD' used but not
+    // declared`; main since then: an error, `Missing Commodity directive for
+    // 'USD' in 'Assets:Cash'`, which the wasm answers over from #2882 on),
+    // hence the loose match.
+    it("answers over a plugin's diagnostic, showing it beside the rows", () => {
+      const plugin = 'plugin "beancount.plugins.check_commodity"\n' + BASE;
+      const query = handleToolCall('query', { source: plugin, query: QUERY });
+      expect(query.isError).toBeFalsy();
+      expect(rows(query.content[0].text)).toEqual(['pay']);
+      expect(query.content[0].text).toMatch(/commodity .*'USD'/i);
+      for (const [tool, args] of [
+        ['balances', { source: plugin }],
+        ['report', { source: plugin, report_type: 'balsheet' }],
+      ] as const) {
+        const result = handleToolCall(tool, args);
+        expect(result.isError, tool).toBeFalsy();
+        expect(result.content[0].text, tool).toContain('Assets:Cash');
+        expect(result.content[0].text, tool).toMatch(/commodity .*'USD'/i);
+      }
+    });
+
+    // The tool answers over a plugin's error when the wasm does. CI runs this
+    // package against the published `@rustledger/wasm` 0.24.0, whose
+    // `check_commodity` reports a warning, not an error, so no tool-level
+    // case there carries a plugin's error. The tool's half of the rule is
+    // pinned on the result shapes the wasm gives from #2882 on: an answer
+    // with the plugin's error beside it, and a refusal (no columns).
+    it("answers a result that carries a plugin's error, reporting it", () => {
+      const pluginError: BeancountError = { severity: 'error', message: MISSING_COMMODITY };
+      const answered = queryResponse({ columns: ['narration'], rows: [['pay']], errors: [pluginError] });
+      expect(answered.isError).toBeFalsy();
+      expect(rows(answered.content[0].text)).toEqual(['pay']);
+      expect(answered.content[0].text).toContain(MISSING_COMMODITY);
+      const headed = queryResponse(
+        { columns: ['narration'], rows: [['pay']], errors: [pluginError] },
+        '# BALSHEET Report\n\n'
+      );
+      expect(headed.content[0].text.startsWith('# BALSHEET Report\n\n')).toBe(true);
+      expect(headed.content[0].text).toContain(MISSING_COMMODITY);
+      const refused = queryResponse({ columns: [], rows: [], errors: [pluginError] });
+      expect(refused.isError).toBe(true);
+      expect(refused.content[0].text).toContain(MISSING_COMMODITY);
+      // A BQL error keeps the load's warnings beside it.
+      const warning: BeancountError = { severity: 'warning', message: 'a plugin warning' };
+      const bqlError: BeancountError = { severity: 'error', message: 'syntax error at position 0' };
+      const failed = queryResponse({ columns: [], rows: [], errors: [warning, bqlError] });
+      expect(failed.isError).toBe(true);
+      expect(failed.content[0].text).toContain('a plugin warning');
+      expect(failed.content[0].text).toContain('syntax error at position 0');
+    });
+
+    it('refuses over a parse error', () => {
+      const result = handleToolCall('query', { source: PARSE_ERROR, query: QUERY });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).not.toContain('pay');
+    });
+
+    it('refuses over a booking error', () => {
+      const result = handleToolCall('query', { source: BOOKING_ERROR, query: QUERY });
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).not.toContain('buy1');
+    });
+
+    it('balances and report refuse over a parse error', () => {
+      expect(handleToolCall('balances', { source: PARSE_ERROR }).isError).toBe(true);
+      expect(
+        handleToolCall('report', { source: PARSE_ERROR, report_type: 'balsheet' }).isError
+      ).toBe(true);
     });
   });
 

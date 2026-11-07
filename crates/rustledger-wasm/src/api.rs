@@ -162,9 +162,12 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
 
     let load = load_and_book(source);
 
-    // Return early only on actual errors (parse/booking); warnings must not
-    // abort processing.
-    if has_fatal(&load.errors) {
+    // Refuse only by the rule the file-based query surfaces share (#2861,
+    // #2882): a parse error or a booking failure. Any other load error, a
+    // plugin's error or an include the text cannot resolve, is reported beside
+    // the rows, as bean-query answers over it; before #2882 every
+    // severity-error refused here (`has_fatal`), a plugin's included.
+    if load.query_blocked {
         let result = QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
@@ -173,8 +176,8 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
         return to_js(&result);
     }
 
-    // Carry any non-fatal load warnings through every result path so callers
-    // still see them alongside (or instead of) query output.
+    // Carry the load's errors and warnings through every result path so
+    // callers still see them alongside (or instead of) query output.
     let warnings = load.reported_errors();
 
     // Parse the query

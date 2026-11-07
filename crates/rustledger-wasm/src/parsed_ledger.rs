@@ -41,12 +41,19 @@ fn query_directives<'c>(
 /// columns resolve from `source_map`, #2825) with the ledger's `context`, through
 /// [`rustledger_query::Executor::for_ledger`], the constructor the CLI and the
 /// FFI component use too.
+///
+/// `load_errors` are the errors the ledger's load reported, none of which
+/// stops a query (the caller has refused if one does). They lead the result's
+/// `errors` on every path, answered or not, as the free `query` reports its
+/// load's, so a caller reading only the result still learns that the rows
+/// may be partial (#2882).
 fn execute_query(
     expanded: &[rustledger_core::Spanned<Directive>],
     source_map: &rustledger_loader::SourceMap,
     context: rustledger_query::executor::LedgerContext<'_>,
     query_str: &str,
     created_tables: &std::cell::RefCell<rustledger_query::executor::CreatedTables>,
+    load_errors: Vec<Error>,
 ) -> Result<JsValue, JsError> {
     use crate::convert::value_to_cell;
     use rustledger_query::{Executor, parse as parse_query};
@@ -54,10 +61,12 @@ fn execute_query(
     let query = match parse_query(query_str) {
         Ok(q) => q,
         Err(e) => {
+            let mut errors = load_errors;
+            errors.push(Error::new(e.to_string()));
             let result = QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
-                errors: vec![Error::new(e.to_string())],
+                errors,
             };
             return to_js(&result);
         }
@@ -87,15 +96,17 @@ fn execute_query(
             let query_result = QueryResult {
                 columns: result.columns,
                 rows,
-                errors: Vec::new(),
+                errors: load_errors,
             };
             to_js(&query_result)
         }
         Err(e) => {
+            let mut errors = load_errors;
+            errors.push(Error::new(format!("Query execution error: {e}")));
             let result = QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
-                errors: vec![Error::new(format!("Query execution error: {e}"))],
+                errors,
             };
             to_js(&result)
         }
@@ -240,6 +251,12 @@ pub struct ParsedLedger {
     option_errors: Vec<Error>,
     /// Validation errors.
     validation_errors: Vec<Error>,
+    /// Whether a query refuses: the load reported a parse error or a booking
+    /// failure (`LedgerError::blocks_queries`, the rule the file-based query
+    /// surfaces share, #2861, #2882). Any other load error in `parse_errors`,
+    /// a plugin's among them, is reported by `getErrors` while the query
+    /// answers, as `Ledger.query` does; before #2882 any load error refused.
+    query_refused: bool,
     /// Cached editor data (accounts, currencies, payees, line index).
     editor_cache: editor::EditorCache,
     /// The tables this ledger's `CREATE TABLE` queries made, there for its
@@ -274,6 +291,7 @@ impl ParsedLedger {
             parse_errors: load.errors,
             option_errors: load.option_errors,
             validation_errors,
+            query_refused: load.query_blocked,
             editor_cache,
             created_tables: std::cell::RefCell::default(),
         }
@@ -338,15 +356,31 @@ impl ParsedLedger {
 
     /// Run a BQL query on this ledger.
     ///
+    /// Refuses, with no columns and the load's errors, when the source failed
+    /// to parse or a transaction failed to book (`LedgerError::blocks_queries`,
+    /// the rule every query surface shares, #2861, #2882). Otherwise it
+    /// answers, and the result's `errors` lead with the load's other errors
+    /// (a plugin's, an unresolved include's) and option diagnostics, as the
+    /// free `query` reports them; validation errors stay in `getErrors`, as
+    /// the free `query` does not validate. Before #2882 it refused on any load
+    /// error and answered with no errors.
+    ///
     /// A table a `CREATE TABLE` makes stays for this ledger's later queries
     /// (#2579).
     #[wasm_bindgen]
     pub fn query(&self, query_str: &str) -> Result<JsValue, JsError> {
-        if !self.parse_errors.is_empty() {
+        if self.query_refused {
+            // The load's errors and option diagnostics, as the free `query`
+            // refuses with them (`reported_errors`).
             let result = QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
-                errors: self.parse_errors.clone(),
+                errors: self
+                    .parse_errors
+                    .iter()
+                    .chain(&self.option_errors)
+                    .cloned()
+                    .collect(),
             };
             return to_js(&result);
         }
@@ -371,6 +405,11 @@ impl ParsedLedger {
             ),
             query_str,
             &self.created_tables,
+            self.parse_errors
+                .iter()
+                .chain(&self.option_errors)
+                .cloned()
+                .collect(),
         )
     }
 
@@ -518,6 +557,7 @@ impl ParsedLedger {
             parse_errors: self.parse_errors.clone(),
             option_errors: self.option_errors.clone(),
             validation_errors: self.validation_errors.clone(),
+            query_refused: self.query_refused,
         };
         cache::serialize_parsed(&payload).map_err(|e| JsError::new(&e))
     }
@@ -559,6 +599,7 @@ impl ParsedLedger {
             parse_errors: payload.parse_errors,
             option_errors: payload.option_errors,
             validation_errors: payload.validation_errors,
+            query_refused: payload.query_refused,
             editor_cache,
             created_tables: std::cell::RefCell::default(),
         })
@@ -809,9 +850,10 @@ impl Ledger {
         // Refuses when a file failed to parse or a transaction failed to
         // book (`LedgerError::blocks_queries`), and answers otherwise,
         // reporting every other error (an include of a missing file, a failed
-        // assertion, ...) through `getErrors`, as `rledger query` and
-        // `queryMultiFile` do (#2861). It answered over a parse or booking
-        // failure.
+        // assertion, ...) in the result's `errors` ahead of its own, and in
+        // `getErrors`, as `rledger query` and `queryMultiFile` do (#2861). It
+        // answered over a parse or booking failure; until #2882 an answer
+        // carried none of the load's errors.
         if self.query_refused {
             return to_js(&QueryResult {
                 columns: Vec::new(),
@@ -837,6 +879,7 @@ impl Ledger {
             },
             query_str,
             &self.created_tables,
+            self.errors.clone(),
         )
     }
 

@@ -27,8 +27,8 @@ use rowan::{Language, NodeOrToken};
 use rustledger_core::cost::CostSpec;
 use rustledger_core::directive::{PriceAnnotation, PriceKind};
 use rustledger_core::{
-    Account, Amount, Currency, IncompleteAmount, InternedStr, Link, MetaValue, Metadata, NaiveDate,
-    Posting, Span, Spanned, Tag,
+    Account, Amount, Currency, IncompleteAmount, InternedStr, Link, MetaValue, MetadataBuilder,
+    NaiveDate, Posting, Span, Spanned, Tag,
 };
 
 /// Every top-level (child-of-root) **node** paired with its source [`Span`],
@@ -411,7 +411,7 @@ pub(super) fn convert_simple_posting(
     let mut units: Option<IncompleteAmount> = None;
     let mut cost: Option<CostSpec> = None;
     let mut price: Option<PriceAnnotation> = None;
-    let mut meta = Metadata::default();
+    let mut meta = MetadataBuilder::new();
     let mut trailing_comments: Vec<String> = Vec::new();
     let mut newline_off: Option<usize> = None;
     let mut amount_seen = false;
@@ -451,7 +451,7 @@ pub(super) fn convert_simple_posting(
                 }
                 K::META_ENTRY => {
                     if let Some((k, v)) = meta_entry_kv(n) {
-                        meta.insert(k, v);
+                        meta.push(k, v);
                     }
                 }
                 // second amount — arithmetic/multi-amount falls back to red.
@@ -477,7 +477,7 @@ pub(super) fn convert_simple_posting(
             cost: cost.map(Box::new),
             price: price.map(Box::new),
             flag,
-            meta: meta.into(),
+            meta: meta.build().into(),
             comments: Default::default(),
             trailing_comments: trailing_comments.into(),
             booking: Default::default(),
@@ -524,7 +524,7 @@ pub(super) fn convert_transaction(
         })
         .count();
     let mut postings = Vec::with_capacity(posting_count);
-    let mut meta = Metadata::default();
+    let mut meta = MetadataBuilder::new();
     let mut offset = base;
     for child in node.children() {
         let len = match &child {
@@ -547,7 +547,7 @@ pub(super) fn convert_transaction(
                 K::POSTING => postings.push(convert_simple_posting(n, offset)?),
                 K::META_ENTRY => {
                     if let Some((k, v)) = meta_entry_kv(n) {
-                        meta.insert(k, v);
+                        meta.push(k, v);
                     }
                 }
                 _ => {}
@@ -556,7 +556,7 @@ pub(super) fn convert_transaction(
         offset += len;
     }
     txn.postings = postings;
-    txn.meta = meta.into();
+    txn.meta = meta.build().into();
     Some(Spanned::new(
         rustledger_core::Directive::Transaction(txn),
         span,

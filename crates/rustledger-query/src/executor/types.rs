@@ -251,12 +251,12 @@ impl Value {
             }
             Self::Metadata(meta) => {
                 // Hash metadata in canonical order by sorting keys (boxed)
-                let mut keys: Vec<_> = meta.keys().collect();
-                keys.sort();
-                for key in keys {
+                let mut entries: Vec<_> = meta.iter().collect();
+                entries.sort_by(|a, b| a.0.cmp(b.0));
+                for (key, value) in entries {
                     key.hash(state);
                     // Hash the debug representation of the value
-                    format!("{:?}", meta.get(key)).hash(state);
+                    format!("{:?}", Some(value)).hash(state);
                 }
             }
             Self::Interval(interval) => {

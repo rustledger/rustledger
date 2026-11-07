@@ -103,6 +103,7 @@ pub use inventory::{
     MergeSpecMismatch, OverflowError, ReductionScope, sum_account_and_subaccounts,
 };
 pub use meta_json::{json_to_meta_value, meta_value_to_json, meta_value_type_tag};
+pub use metadata::MetadataBuilder;
 pub use position::Position;
 pub use sorted_set::{LinkSet, SortedSet, TagSet};
 pub use span::{

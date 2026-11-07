@@ -165,11 +165,12 @@ fn meta_value(hasher: &mut Sha256, v: &rustledger_core::MetaValue) {
 /// them would mean fixing a typo in a comment changes a directive's identity.
 fn metadata(hasher: &mut Sha256, m: &rustledger_core::Metadata) {
     count(hasher, m.len());
-    let mut keys: Vec<&rustledger_core::InternedStr> = m.keys().collect();
-    keys.sort_unstable();
-    for k in keys {
+    // Entries, not keys looked up again, so this is not quadratic.
+    let mut entries: Vec<_> = m.iter().collect();
+    entries.sort_unstable_by(|a, b| a.0.cmp(b.0));
+    for (k, v) in entries {
         field(hasher, k.as_bytes());
-        meta_value(hasher, &m[k.as_str()]);
+        meta_value(hasher, v);
     }
 }
 

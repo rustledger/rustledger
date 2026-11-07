@@ -90,11 +90,11 @@ impl Strings<'_> {
     }
 
     fn meta(&mut self, meta: &Metadata, prefix: &str) {
-        let mut keys: Vec<&rustledger_core::InternedStr> = meta.keys().collect();
+        let mut entries: Vec<_> = meta.iter().collect();
         // The report names keys in sorted order, not the map's source order.
-        keys.sort();
-        for key in keys {
-            if let Some(MetaValue::String(s)) = meta.get(key) {
+        entries.sort_by(|a, b| a.0.cmp(b.0));
+        for (key, value) in entries {
+            if let MetaValue::String(s) = value {
                 self.check(|| format!("{prefix}metadata {:?}", key.as_str()), s);
             }
         }

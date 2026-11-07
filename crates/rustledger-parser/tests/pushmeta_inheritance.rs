@@ -189,3 +189,39 @@ fn test_parse_lima_pushmeta_fixtures_give_beancounts_values() {
         assert_eq!(got, want, "{file}");
     }
 }
+
+#[test]
+fn test_parse_orders_pushed_keys_before_written_ones_as_beancount() {
+    // bean-query 0.2.0 on this ledger prints the transaction's meta as
+    // {'zz-pushed': 'p', 'shared': 'written', 'written': 'w'}: the pushed keys
+    // first, each where it was first pushed, then the written ones, and a key
+    // written over a pushed one keeps the pushed place with the written value.
+    let src = "\
+pushmeta zz-pushed: \"p\"
+pushmeta shared: \"pushed\"
+2024-01-02 * \"t\"
+  written: \"w\"
+  shared: \"written\"
+popmeta shared:
+popmeta zz-pushed:
+";
+    for (path, directives) in [
+        ("green", parse(src).directives),
+        ("red", parse_red_only(src).directives),
+    ] {
+        let Directive::Transaction(t) = &directives[0].value else {
+            panic!("{path}: expected a transaction, got {directives:?}");
+        };
+        let entries: Vec<(&str, &MetaValue)> =
+            t.meta.iter().map(|(k, v)| (k.as_str(), v)).collect();
+        assert_eq!(
+            entries,
+            [
+                ("zz-pushed", &MetaValue::String("p".into())),
+                ("shared", &MetaValue::String("written".into())),
+                ("written", &MetaValue::String("w".into())),
+            ],
+            "{path}"
+        );
+    }
+}

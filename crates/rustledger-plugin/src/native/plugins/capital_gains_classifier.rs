@@ -162,7 +162,8 @@ fn parse_rules(config: &str, plugin: &str, first_only: bool) -> Result<Vec<Rule>
 fn unchanged(input: &PluginInput, error: Option<PluginError>) -> PluginOutput {
     PluginOutput {
         ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
-        errors: error.into_iter().collect(),
+        // Every error here stops the plugin before it changes anything.
+        errors: error.into_iter().map(PluginError::mark_failed).collect(),
     }
 }
 

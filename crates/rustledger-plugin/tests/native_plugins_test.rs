@@ -11695,3 +11695,209 @@ proptest::proptest! {
         proptest::prop_assert_eq!(bad.len(), 1, "{:?}", bad);
     }
 }
+
+// ============================================================================
+// A config a plugin cannot use marks its error `failed`
+// ============================================================================
+
+/// Each native plugin that returns its input unchanged because it cannot
+/// use its config says so with `PluginError::failed`, which the host
+/// reports as a plugin failure rather than a finding.
+#[test]
+fn test_unusable_config_marks_the_error_failed() {
+    use rustledger_plugin::native::{CheckOptionExpiryPlugin, DocumentDiscoveryPlugin};
+    let input = || vec![make_open("2024-01-01", "Assets:Cash")];
+    let cases: Vec<(&str, Box<dyn NativePlugin>, Option<&str>)> = vec![
+        (
+            "rename_accounts",
+            Box::new(RenameAccountsPlugin),
+            Some("{'Assets:Cash(': 'Assets:X'}"),
+        ),
+        ("zerosum (no config)", Box::new(ZerosumPlugin), None),
+        ("zerosum (not a dict)", Box::new(ZerosumPlugin), Some("[")),
+        ("effective_date", Box::new(EffectiveDatePlugin), Some("{")),
+        (
+            "check_average_cost",
+            Box::new(CheckAverageCostPlugin::new()),
+            Some("abc"),
+        ),
+        ("check_commodity", Box::new(CheckCommodityPlugin), Some("[")),
+        (
+            "commodity_attr",
+            Box::new(CommodityAttrPlugin::new()),
+            Some("["),
+        ),
+        ("onecommodity", Box::new(OneCommodityPlugin), Some("(")),
+        (
+            "long_short",
+            Box::new(CapitalGainsLongShortPlugin),
+            Some("["),
+        ),
+        ("gain_loss", Box::new(CapitalGainsGainLossPlugin), Some("[")),
+        (
+            "check_option_expiry",
+            Box::new(CheckOptionExpiryPlugin),
+            Some("["),
+        ),
+        (
+            "document_discovery",
+            Box::new(DocumentDiscoveryPlugin),
+            Some("{"),
+        ),
+    ];
+    for (name, plugin, config) in cases {
+        let input = match config {
+            Some(config) => make_input_with_config(input(), config),
+            None => make_input(input()),
+        };
+        let output = plugin.process(input);
+        // One error, which says the plugin did nothing.
+        assert_eq!(output.errors.len(), 1, "{name}: {:?}", output.errors);
+        assert!(output.errors[0].failed, "{name}: {:?}", output.errors);
+    }
+}
+
+/// A finding is not a failure.
+#[test]
+fn test_a_plugin_finding_is_not_marked_failed() {
+    let output = CheckCommodityPlugin.process(make_input(vec![make_open_with_currencies(
+        "2024-01-01",
+        "Assets:Cash",
+        vec!["USD"],
+    )]));
+    assert_eq!(output.errors.len(), 1, "{:?}", output.errors);
+    assert!(
+        output.errors[0].message.contains("Missing Commodity") && !output.errors[0].failed,
+        "{:?}",
+        output.errors
+    );
+}
+
+/// The other sites where a native plugin gives up mark the error too: a
+/// pattern it cannot match against an account (a word boundary on `²`,
+/// whose word-ness Python and rledger disagree on), a pattern it cannot
+/// compile, a second rule matching a rewritten account, and a documents
+/// directory it cannot scan. Each case has exactly one marked error, unless
+/// noted.
+#[test]
+fn test_plugin_that_gives_up_marks_the_error_failed() {
+    use rustledger_plugin::native::DocumentDiscoveryPlugin;
+    let odd = "Assets:Cash\u{b2}";
+    let not_a_dir = tempfile::NamedTempFile::new().unwrap();
+    let discovery = format!(
+        "{{\"base_dir\": \"/\", \"directories\": [{:?}]}}",
+        not_a_dir.path().display().to_string()
+    );
+    let cases: Vec<(&str, Box<dyn NativePlugin>, String, Vec<DirectiveWrapper>)> = vec![
+        (
+            "rename_accounts, a pattern it cannot match",
+            Box::new(RenameAccountsPlugin),
+            r"{'\\bCash': 'Bank'}".to_string(),
+            vec![make_open("2024-01-01", odd)],
+        ),
+        (
+            "check_commodity, a pattern it cannot match",
+            Box::new(CheckCommodityPlugin),
+            r"{'\\bAssets': 'USD'}".to_string(),
+            vec![make_open_with_currencies("2024-01-01", odd, vec!["USD"])],
+        ),
+        (
+            "onecommodity, a pattern it cannot match",
+            Box::new(OneCommodityPlugin),
+            r"\bAssets".to_string(),
+            vec![make_open_with_currencies("2024-01-01", odd, vec!["USD"])],
+        ),
+        (
+            "long_short, a pattern it cannot match",
+            Box::new(CapitalGainsLongShortPlugin),
+            r"{'\\bAssets': [':Cash', ':Short', ':Long']}".to_string(),
+            vec![make_transaction("2024-01-15", "x", vec![(odd, "1", "USD")])],
+        ),
+        (
+            "gain_loss, a pattern it cannot match",
+            Box::new(CapitalGainsGainLossPlugin),
+            r"{'\\bAssets': [':Cash', ':Gains', ':Losses']}".to_string(),
+            vec![make_transaction("2024-01-15", "x", vec![(odd, "-1", "USD")])],
+        ),
+        (
+            "gain_loss, a second rule after a rewrite",
+            Box::new(CapitalGainsGainLossPlugin),
+            "{'Income:G': [':G', ':G:Gains', ':G:Losses'], 'Income': ['Income', 'Income2', 'Income3']}"
+                .to_string(),
+            vec![make_transaction("2024-01-15", "x", vec![("Income:G", "-1", "USD")])],
+        ),
+        (
+            "document_discovery, a directory it cannot scan",
+            Box::new(DocumentDiscoveryPlugin),
+            discovery,
+            vec![make_open("2024-01-01", "Assets:Cash")],
+        ),
+    ];
+    for (name, plugin, config, directives) in cases {
+        let output = plugin.process(make_input_with_config(directives, &config));
+        assert_eq!(output.errors.len(), 1, "{name}: {:?}", output.errors);
+        assert!(output.errors[0].failed, "{name}: {:?}", output.errors);
+    }
+
+    // check_commodity with a pattern it cannot compile still checks the
+    // rest, so the failure comes with a finding, which stays unmarked.
+    let output = CheckCommodityPlugin.process(make_input_with_config(
+        vec![make_open_with_currencies(
+            "2024-01-01",
+            "Assets:Cash",
+            vec!["USD"],
+        )],
+        "{'Assets:(': 'USD'}",
+    ));
+    let marked: Vec<(bool, &str)> = output
+        .errors
+        .iter()
+        .map(|e| (e.failed, e.message.as_str()))
+        .collect();
+    assert_eq!(
+        marked,
+        [
+            (true, "Invalid regexp: 'USD' for Assets:("),
+            (
+                false,
+                "Missing Commodity directive for 'USD' in 'Assets:Cash'"
+            ),
+        ],
+        "{marked:?}"
+    );
+}
+
+/// The drift guard the other way: findings about one directive, which the
+/// plugin reports and leaves the ledger to, are never marked failed.
+#[test]
+fn test_per_directive_findings_stay_unmarked() {
+    let cases: Vec<(&str, Box<dyn NativePlugin>, Vec<DirectiveWrapper>)> = vec![
+        (
+            "leafonly",
+            Box::new(LeafOnlyPlugin),
+            vec![
+                make_open("2024-01-01", "Expenses:Food"),
+                make_open("2024-01-01", "Expenses:Food:Restaurant"),
+                make_transaction("2024-01-15", "x", vec![("Expenses:Food", "1", "USD")]),
+            ],
+        ),
+        (
+            "no_unused",
+            Box::new(NoUnusedPlugin),
+            vec![make_open("2024-01-01", "Expenses:Unused")],
+        ),
+        (
+            "unique_prices",
+            Box::new(UniquePricesPlugin),
+            vec![
+                make_price("2024-01-15", "HOOL", "520.00", "USD"),
+                make_price("2024-01-15", "HOOL", "525.00", "USD"),
+            ],
+        ),
+    ];
+    for (name, plugin, directives) in cases {
+        let output = plugin.process(make_input(directives));
+        assert_eq!(output.errors.len(), 1, "{name}: {:?}", output.errors);
+        assert!(!output.errors[0].failed, "{name}: {:?}", output.errors);
+    }
+}

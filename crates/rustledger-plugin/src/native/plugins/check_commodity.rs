@@ -30,8 +30,10 @@ fn ignore_patterns(
     let Some(config) = config.filter(|c| !c.trim().is_empty()) else {
         return Ok((Vec::new(), Vec::new()));
     };
-    let invalid =
-        || PluginError::error("Invalid configuration for check_commodity plugin; skipping.");
+    let invalid = || {
+        PluginError::error("Invalid configuration for check_commodity plugin; skipping.")
+            .mark_failed()
+    };
     let Ok(PyValue::Dict(entries)) = py_literal::parse(config) else {
         return Err(invalid());
     };
@@ -59,12 +61,16 @@ fn ignore_patterns(
         // express gets its own message, naming the construct (#2601).
         for (pattern, result) in [(&key, &compiled.0), (&value, &compiled.1)] {
             match result {
-                Err(PyRegexError::Invalid(_)) => errors.push(PluginError::error(format!(
-                    "Invalid regexp: '{value}' for {key}"
-                ))),
-                Err(e @ PyRegexError::Unsupported(_)) => errors.push(PluginError::error(format!(
-                    "check_commodity: the pattern '{pattern}' cannot be used: {e}"
-                ))),
+                Err(PyRegexError::Invalid(_)) => errors.push(
+                    PluginError::error(format!("Invalid regexp: '{value}' for {key}"))
+                        .mark_failed(),
+                ),
+                Err(e @ PyRegexError::Unsupported(_)) => errors.push(
+                    PluginError::error(format!(
+                        "check_commodity: the pattern '{pattern}' cannot be used: {e}"
+                    ))
+                    .mark_failed(),
+                ),
                 Ok(_) => {}
             }
         }
@@ -203,7 +209,12 @@ impl NativePlugin for CheckCommodityPlugin {
             }
             errors.push(missing(currency, context));
         }
-        errors.extend(refused.into_iter().map(PluginError::error));
+        // Left unchecked, so the plugin failing, not a finding.
+        errors.extend(
+            refused
+                .into_iter()
+                .map(|message| PluginError::error(message).mark_failed()),
+        );
 
         PluginOutput { ops, errors }
     }

@@ -167,9 +167,12 @@ impl NativePlugin for CommodityAttrPlugin {
                 None => {
                     return PluginOutput {
                         ops,
-                        errors: vec![PluginError::error(
-                            "Invalid configuration for commodity_attr plugin; skipping.",
-                        )],
+                        errors: vec![
+                            PluginError::error(
+                                "Invalid configuration for commodity_attr plugin; skipping.",
+                            )
+                            .mark_failed(),
+                        ],
                     };
                 }
             },

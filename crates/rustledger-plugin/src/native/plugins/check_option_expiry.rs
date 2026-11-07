@@ -184,7 +184,8 @@ impl NativePlugin for CheckOptionExpiryPlugin {
                     PluginError::error(format!(
                         "Invalid configuration for check_option_expiry plugin: {problem}; skipping."
                     ))
-                    .at("<check_option_expiry>", 0),
+                    .at("<check_option_expiry>", 0)
+                    .mark_failed(),
                 );
                 return PluginOutput {
                     ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),

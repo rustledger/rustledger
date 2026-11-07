@@ -427,7 +427,7 @@ fn filter_existing_duplicates(
                 code: Some(warning_codes::DUPLICATE_SKIPPED.to_string()),
                 date: Some(new[m.new_index].date),
                 account: Some(account.to_string()),
-                message: skipped.clone(),
+                ..Diagnostic::message(skipped.clone())
             },
             format_args!("  {skipped}"),
         );

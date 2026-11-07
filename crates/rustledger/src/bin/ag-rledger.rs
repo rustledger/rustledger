@@ -922,9 +922,11 @@ fn build_explain_args(req: &Req<'_>) -> Result<rustledger::cmd::explain::Args, C
 fn lint_command() -> Command {
     Command::new("lint", "Run non-fatal advisory passes")
         .usage(with_globals(
-            "ag-rledger lint <transfers|closed-nonempty|control-chars> <file>... [--format <format>] [-f <format>]  |  \
+            "ag-rledger lint <transfers|linked-transit|closed-nonempty|control-chars> <file>... [--format <format>] [-f <format>]  |  \
              transfers: [--min-confidence <n>] [--date-window <days>] \
-             [--amount-tolerance <amount>] [--apply]",
+             [--amount-tolerance <amount>] [--apply]  |  \
+             linked-transit: --link-prefix <prefix> --account <account>... \
+             [--fail-on <mismatch,missing,ambiguous,matched>]",
         ))
         .allow_unknown_flags()
         .allow_extra_args()
@@ -937,8 +939,9 @@ fn lint_command() -> Command {
             async move {
                 let (args, globals) = parsed?;
                 load_config(&globals.budget)?;
-                run_buffered("lint", |out| {
-                    rustledger::cmd::lint::run_with_writer(&args, out).map(exit_code_to_i32)
+                run_buffered_with_warnings("lint", |out, warnings, err| {
+                    rustledger::cmd::lint::run_with_writer(&args, out, Some(warnings), err)
+                        .map(exit_code_to_i32)
                 })
             }
         })
@@ -1543,11 +1546,15 @@ fn build_check_args(req: &Req<'_>) -> Result<rustledger::cmd::check::Args, Comma
         }
     };
 
-    let lints = match flag(req, "lint", None) {
-        Some("transfers") => vec![rustledger::cmd::check::LintName::Transfers],
-        Some(other) => return Err(invalid_enum("lint", other, &["transfers"])),
-        None => Vec::new(),
-    };
+    // Repeatable in rledger (`--lint a --lint b`), so merged when repeated
+    // (MULTI_VALUE_COMMAND_FLAGS) and read as a list.
+    let lints = flag_values(req, "lint", None)
+        .iter()
+        .map(|name| match name.as_str() {
+            "transfers" => Ok(rustledger::cmd::check::LintName::Transfers),
+            other => Err(invalid_enum("lint", other, &["transfers"])),
+        })
+        .collect::<Result<Vec<_>, _>>()?;
 
     Ok(rustledger::cmd::check::Args {
         file: path_flag(req, "file", None).or_else(|| req.arg(0).map(PathBuf::from)),
@@ -2076,10 +2083,17 @@ fn build_add_args(req: &Req<'_>) -> Result<rustledger::cmd::add_cmd::Args, Comma
 }
 
 /// The lints `ag-rledger lint` runs: every `rledger lint` subcommand.
-const LINTS: &[&str] = &["transfers", "closed-nonempty", "control-chars"];
+const LINTS: &[&str] = &[
+    "transfers",
+    "linked-transit",
+    "closed-nonempty",
+    "control-chars",
+];
 
 fn build_lint_args(req: &Req<'_>) -> Result<rustledger::cmd::lint::Args, CommandError> {
-    use rustledger::cmd::lint::{Args, LintKind, closed_nonempty, control_chars, transfers};
+    use rustledger::cmd::lint::{
+        Args, LintKind, closed_nonempty, control_chars, linked_transit, transfers,
+    };
     let subcommand = req.arg(0).ok_or_else(|| {
         command_error(
             "lint name is required",
@@ -2104,6 +2118,32 @@ fn build_lint_args(req: &Req<'_>) -> Result<rustledger::cmd::lint::Args, Command
                 other => return Err(invalid_enum("format", other, &["text", "json"])),
             },
         }),
+        "linked-transit" => LintKind::LinkedTransit(linked_transit::Args {
+            files,
+            link_prefix: string_flag(req, "link-prefix", None).unwrap_or_default(),
+            account: flag_values(req, "account", None),
+            fail_on: {
+                let names: Vec<&str> = linked_transit::Status::ALL
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect();
+                flag_values(req, "fail-on", None)
+                    .iter()
+                    .map(|value| {
+                        linked_transit::Status::ALL
+                            .iter()
+                            .copied()
+                            .find(|s| s.as_str() == value)
+                            .ok_or_else(|| invalid_enum("fail-on", value, &names))
+                    })
+                    .collect::<Result<_, _>>()?
+            },
+            format: match format {
+                "text" => closed_nonempty::OutputFormat::Text,
+                "json" => closed_nonempty::OutputFormat::Json,
+                other => return Err(invalid_enum("format", other, &["text", "json"])),
+            },
+        }),
         "closed-nonempty" => LintKind::ClosedNonempty(closed_nonempty::Args {
             files,
             format: match format {
@@ -2124,6 +2164,7 @@ fn build_lint_args(req: &Req<'_>) -> Result<rustledger::cmd::lint::Args, Command
     };
     let files = match &lint {
         LintKind::Transfers(args) => &args.files,
+        LintKind::LinkedTransit(args) => &args.files,
         LintKind::ClosedNonempty(args) => &args.files,
         LintKind::ControlChars(args) => &args.files,
     };
@@ -2270,6 +2311,12 @@ fn warnings_json(diagnostics: &CollectedDiagnostics) -> Option<Value> {
             }
             if let Some(account) = &d.account {
                 o.insert("account".to_string(), json!(account));
+            }
+            if let Some(file) = &d.file {
+                o.insert("file".to_string(), json!(file));
+            }
+            if let Some(line) = d.line {
+                o.insert("line".to_string(), json!(line));
             }
             o.insert("message".to_string(), json!(d.message));
             Value::Object(o)
@@ -2789,7 +2836,18 @@ const MULTI_VALUE_SHORTS: &[(&[&str], char, &str)] = &[
     (&["price", "p"], 'm', "mapping"),
 ];
 
-/// Merge every repeated [`MULTI_VALUE_FLAGS`] flag into one comma-joined
+/// Long flags that are lists only in the commands named: elsewhere the same
+/// name takes one value (`report --account` and `extract --account` are a
+/// single account; `lint linked-transit --account` is repeated, one transit
+/// account each).
+const MULTI_VALUE_COMMAND_FLAGS: &[(&[&str], &str)] = &[
+    (&["lint"], "account"),
+    (&["lint"], "fail-on"),
+    (&["check", "c"], "lint"),
+];
+
+/// Merge every repeated [`MULTI_VALUE_FLAGS`] flag (and each
+/// [`MULTI_VALUE_COMMAND_FLAGS`] flag, in its command) into one comma-joined
 /// `--flag=a,b` at its first occurrence.
 ///
 /// agcli 0.18 refuses a flag given twice (`PARSE_ERROR`), with no opt-out,
@@ -2809,8 +2867,20 @@ fn merge_repeated_value_flags(args: Vec<String>, is_alias: impl Fn(&str) -> bool
             };
             return MULTI_VALUE_FLAGS
                 .iter()
-                .find(|long| **long == name)
-                .map(|long| (*long, value));
+                .copied()
+                .find(|long| *long == name)
+                .or_else(|| {
+                    MULTI_VALUE_COMMAND_FLAGS
+                        .iter()
+                        .find(|(commands, long)| {
+                            *long == name
+                                && command
+                                    .as_deref()
+                                    .is_some_and(|command| commands.contains(&command))
+                        })
+                        .map(|(_, long)| *long)
+                })
+                .map(|long| (long, value));
         }
         let rest = arg.strip_prefix('-')?;
         let mut chars = rest.chars();
@@ -3417,6 +3487,189 @@ mod tests {
         }
     }
 
+    /// Every `rledger` command definition `ag-rledger` runs, by the
+    /// `ag-rledger` names (command and aliases) that run it.
+    fn rledger_definitions() -> Vec<(&'static [&'static str], clap::Command)> {
+        use clap::Args as _;
+        use rustledger::cmd;
+        let command = |name: &'static str| clap::Command::new(name);
+        vec![
+            (
+                &["check", "c"],
+                cmd::check::Args::augment_args(command("check")),
+            ),
+            (
+                &["query", "q"],
+                cmd::query::Args::augment_args(command("query")),
+            ),
+            (
+                &["format", "fmt"],
+                cmd::format::Args::augment_args(command("format")),
+            ),
+            (
+                &["report", "r"],
+                cmd::report_cmd::Args::augment_args(command("report")),
+            ),
+            (
+                &["doctor", "d"],
+                cmd::doctor::Args::augment_args(command("doctor")),
+            ),
+            (
+                &["extract", "x"],
+                cmd::extract_cmd::Args::augment_args(command("extract")),
+            ),
+            (
+                &["price", "p"],
+                cmd::price_cmd::Args::augment_args(command("price")),
+            ),
+            (
+                &["config", "cfg"],
+                cmd::config_cmd::Args::augment_args(command("config")),
+            ),
+            (
+                &["add", "a"],
+                cmd::add_cmd::Args::augment_args(command("add")),
+            ),
+            (
+                &["explain"],
+                cmd::explain::Args::augment_args(command("explain")),
+            ),
+            (&["lint"], cmd::lint::Args::augment_args(command("lint"))),
+            (&["split"], split_definition()),
+            (&["merge"], merge_definition()),
+        ]
+    }
+
+    /// Each option of `cmd` and of its subcommands, at any depth.
+    fn all_options(cmd: &clap::Command) -> Vec<clap::Arg> {
+        // Built, so each argument's `num_args` is set.
+        let mut cmd = cmd.clone();
+        cmd.build();
+        options_of(&cmd)
+    }
+
+    fn options_of(cmd: &clap::Command) -> Vec<clap::Arg> {
+        cmd.get_arguments()
+            .filter(|arg| !arg.is_positional())
+            .cloned()
+            .chain(cmd.get_subcommands().flat_map(options_of))
+            .collect()
+    }
+
+    /// Whether `rledger` takes `arg` more than once, one value each time (a
+    /// clap `Vec`). A flag that takes several values at once (`add --quick
+    /// <ARGS>...`) is not one the merge can join.
+    fn is_list(arg: &clap::Arg) -> bool {
+        matches!(arg.get_action(), clap::ArgAction::Append)
+            && arg.get_num_args().is_none_or(|n| n.max_values() <= 1)
+    }
+
+    /// The drift guard for the repeated-flag merge (#2859): agcli refuses a
+    /// flag given twice unless [`merge_repeated_value_flags`] merges it, so
+    /// every flag `rledger` takes as a list must be in [`MULTI_VALUE_FLAGS`]
+    /// or, for its command, in [`MULTI_VALUE_COMMAND_FLAGS`] (and its short
+    /// form in [`MULTI_VALUE_SHORTS`]). And no entry may be stale, or merge
+    /// a flag that takes one value in a command it applies to (the reason
+    /// `--account` is scoped to `lint`).
+    #[test]
+    fn test_multi_value_flags_cover_every_rledger_list_flag() {
+        let definitions = rledger_definitions();
+        // `compat` and `completions` are defined in the `rledger` binary,
+        // out of reach here; neither takes a list.
+        let unreachable = ["compat", "completions"];
+        let covered: BTreeSet<&str> = definitions
+            .iter()
+            .flat_map(|(names, _)| names.iter().copied())
+            .chain(unreachable)
+            .collect();
+        let registered: BTreeSet<&str> = COMMAND_NAMES.iter().copied().collect();
+        assert_eq!(
+            covered, registered,
+            "a command is missing from rledger_definitions"
+        );
+
+        // A set: a flag shared by several subcommands is one problem.
+        let mut problems: BTreeSet<String> = BTreeSet::new();
+        let scoped = |names: &[&str], long: &str| {
+            MULTI_VALUE_COMMAND_FLAGS
+                .iter()
+                .any(|(commands, flag)| *flag == long && names.iter().all(|n| commands.contains(n)))
+        };
+        for (names, definition) in &definitions {
+            let command = names[0];
+            for arg in all_options(definition) {
+                let Some(long) = arg.get_long() else { continue };
+                if is_list(&arg) {
+                    if !MULTI_VALUE_FLAGS.contains(&long) && !scoped(names, long) {
+                        problems.insert(format!(
+                            "`{command} --{long}` is a list in rledger: add it to \
+                             MULTI_VALUE_FLAGS, or to MULTI_VALUE_COMMAND_FLAGS for {names:?}"
+                        ));
+                    }
+                    if let Some(short) = arg.get_short()
+                        && !MULTI_VALUE_SHORTS.iter().any(|(commands, letter, flag)| {
+                            *letter == short
+                                && *flag == long
+                                && names.iter().all(|n| commands.contains(n))
+                        })
+                    {
+                        problems.insert(format!(
+                            "`{command} -{short}` (--{long}) is a list in rledger: add it to \
+                             MULTI_VALUE_SHORTS for {names:?}"
+                        ));
+                    }
+                } else if arg.get_action().takes_values()
+                    && (MULTI_VALUE_FLAGS.contains(&long) || scoped(names, long))
+                {
+                    // Two values would reach it as one comma-joined string.
+                    problems.insert(format!(
+                        "`{command} --{long}` takes one value, but is merged when repeated: \
+                         scope the entry to the commands where it is a list"
+                    ));
+                }
+            }
+        }
+
+        // No stale entry: each names a list flag where it applies.
+        let lists_in = |commands: &[&str], long: &str, short: Option<char>| {
+            definitions.iter().any(|(names, definition)| {
+                commands.iter().any(|c| names.contains(c))
+                    && all_options(definition).iter().any(|arg| {
+                        arg.get_long() == Some(long)
+                            && short.is_none_or(|s| arg.get_short() == Some(s))
+                            && is_list(arg)
+                    })
+            })
+        };
+        let every: Vec<&str> = COMMAND_NAMES.to_vec();
+        for long in MULTI_VALUE_FLAGS {
+            if !lists_in(&every, long, None) {
+                problems.insert(format!(
+                    "MULTI_VALUE_FLAGS names --{long}, which no rledger command takes as a list"
+                ));
+            }
+        }
+        for (commands, long) in MULTI_VALUE_COMMAND_FLAGS {
+            if !lists_in(commands, long, None) {
+                problems.insert(format!(
+                    "MULTI_VALUE_COMMAND_FLAGS names {commands:?} --{long}, not a list there"
+                ));
+            }
+        }
+        for (commands, short, long) in MULTI_VALUE_SHORTS {
+            if !lists_in(commands, long, Some(*short)) {
+                problems.insert(format!(
+                    "MULTI_VALUE_SHORTS names {commands:?} -{short} --{long}, not a list there"
+                ));
+            }
+        }
+        assert!(
+            problems.is_empty(),
+            "{}",
+            problems.into_iter().collect::<Vec<_>>().join("\n")
+        );
+    }
+
     /// The drift guard for #2522/#2552: a flag added to a `rledger` command
     /// fails here until `ag-rledger` reads it or says it does not. Before,
     /// `ag-rledger` ignored whatever it had not wired, so a new `rledger`
@@ -3825,6 +4078,81 @@ mod tests {
         // `format -i` is `--in-place`: a boolean, not merged, left for agcli.
         let argv = strings(&["ag-rledger", "format", "f", "-i", "-i"]);
         assert_eq!(merge_repeated_value_flags(argv.clone(), |_| false), argv);
+    }
+
+    /// A command-scoped list flag merges in its command, and only there:
+    /// `lint linked-transit --account` is a list, `report --account` is one
+    /// account, so a repeat there is left for agcli to refuse.
+    #[test]
+    fn test_merge_repeated_value_flags_scopes_long_flags_to_their_command() {
+        for argv in [
+            vec![
+                "ag-rledger",
+                "lint",
+                "linked-transit",
+                "f",
+                "--account",
+                "A",
+                "--account",
+                "B",
+            ],
+            vec![
+                "ag-rledger",
+                "lint",
+                "linked-transit",
+                "f",
+                "--account=A",
+                "--account",
+                "B",
+            ],
+        ] {
+            assert_eq!(
+                merged_values(&argv, "account", None),
+                vec!["A", "B"],
+                "{argv:?}"
+            );
+        }
+        for argv in [
+            vec![
+                "ag-rledger",
+                "report",
+                "f",
+                "balances",
+                "--account",
+                "A",
+                "--account",
+                "B",
+            ],
+            vec![
+                "ag-rledger",
+                "extract",
+                "f",
+                "--account",
+                "A",
+                "--account",
+                "B",
+            ],
+        ] {
+            let argv = strings(&argv);
+            assert_eq!(merge_repeated_value_flags(argv.clone(), |_| false), argv);
+        }
+        // `check --lint` is a list in check (and its alias).
+        for command in ["check", "c"] {
+            let argv = [
+                "ag-rledger",
+                command,
+                "f",
+                "--lint",
+                "transfers",
+                "--lint",
+                "transfers",
+            ];
+            assert_eq!(
+                merged_values(&argv, "lint", None),
+                vec!["transfers", "transfers"],
+                "{argv:?}"
+            );
+        }
     }
 
     /// A flag given once, a repeated boolean, and anything after `--` are

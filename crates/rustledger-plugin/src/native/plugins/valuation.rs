@@ -367,6 +367,7 @@ fn transform_transaction(
                         source_file: directive.filename.clone(),
                         line_number: directive.lineno,
                         severity: PluginErrorSeverity::Error,
+                        failed: false,
                     });
                     new_postings.push(posting.clone());
                     continue;
@@ -431,6 +432,7 @@ fn transform_transaction(
                         source_file: directive.filename.clone(),
                         line_number: directive.lineno,
                         severity: PluginErrorSeverity::Error,
+                        failed: false,
                     });
                     new_postings.push(posting.clone());
                     continue;
@@ -604,6 +606,7 @@ fn handle_total_price_posting(
             source_file: directive.filename.clone(),
             line_number: directive.lineno,
             severity: PluginErrorSeverity::Error,
+            failed: false,
         });
         return (vec![posting.clone()], None, errors);
     };
@@ -823,6 +826,7 @@ fn process_valuation_assertion(
             source_file: directive.filename.clone(),
             line_number: directive.lineno,
             severity: PluginErrorSeverity::Error,
+            failed: false,
         });
         new_directives.push(directive.clone());
         return (new_directives, errors);
@@ -843,6 +847,7 @@ fn process_valuation_assertion(
             source_file: directive.filename.clone(),
             line_number: directive.lineno,
             severity: PluginErrorSeverity::Error,
+            failed: false,
         });
         new_directives.push(directive.clone());
         return (new_directives, errors);
@@ -1424,6 +1429,9 @@ mod tests {
             "the message must name the cause: {}",
             errors[0].message
         );
+        // A per-directive error the plugin leaves as written: located, so a
+        // finding, never a failure of the whole plugin.
+        assert!(!errors[0].failed, "{errors:?}");
     }
 
     /// The INFLOW call site must keep the exactness too (#2360).

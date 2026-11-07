@@ -616,6 +616,13 @@ impl std::error::Error for CanonicalizeError {}
 /// the user's data. Uses the shared `SourceState` state machine
 /// to track string / comment boundaries.
 ///
+/// One change besides the line endings: a line that is one column-0 marker
+/// followed by a `\r` (`#\r\n`, `*\r\n`) gets a space after the marker. Such
+/// a line is ignored by beancount, and the lone marker left by dropping the
+/// `\r` would be an error there (#2779).
+/// Stricter than bean-format: it reads the file in Python's text mode, which
+/// folds `#\r\n` to `#\n`, a line bean-check then rejects.
+///
 /// Cheap fast path: if the input contains no `\r`, returns the
 /// source slice borrowed (no allocation). Used by
 /// [`format_source`] before parsing so the lexer never has to see
@@ -648,11 +655,29 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
     let mut run_end = 0;
     let mut run_is_stray = false;
     let mut unclosed_until = 0;
+    // Where the current output line starts, found by `out_line_start` from
+    // where its last scan stopped, so the lone-marker check below steps over
+    // each output byte once in all (an `rfind` over `out` for every `\r` made
+    // a long line of stray `\r`s quadratic).
+    let mut line = OutLine {
+        start: bom.len(),
+        scanned: bom.len(),
+    };
     while let Some((i, ch)) = chars.next() {
         let peek = chars.peek().map(|&(_, c)| c);
         // A CRLF pair outside a string is consumed whole here, so the
         // `\n` never reaches `next_at_line_start`; it still ends the line.
         let mut ate_lf = false;
+        // A lone column-0 marker followed by a `\r` is a line beancount
+        // ignores (flex's `.` takes the `\r`); without the `\r` it is a
+        // bare-marker error. Outside a string, every branch below drops or
+        // folds the `\r`, so a space stands in for it (#2779).
+        if ch == '\r' && state != SourceState::InString {
+            let text = &out[line.start_in(&out)..];
+            if is_lone_marker(text.strip_prefix('\u{FEFF}').unwrap_or(text)) {
+                out.push(' ');
+            }
+        }
         match state {
             SourceState::InString => out.push(ch),
             _ => {
@@ -688,6 +713,30 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
         at_line_start = ate_lf || next_at_line_start(ch, at_line_start);
     }
     std::borrow::Cow::Owned(out)
+}
+
+/// Where the last line of a growing output string starts, for
+/// [`crlf_to_lf_outside_strings`]'s lone-marker check (#2779).
+struct OutLine {
+    start: usize,
+    /// How far `out` has been scanned for line breaks.
+    scanned: usize,
+}
+
+impl OutLine {
+    /// The start of `out`'s last line. Scans only what was pushed since the
+    /// last call, so all calls together step over each byte once. Counted in
+    /// tests (`crlf_to_lf_lone_marker_check_is_linear`).
+    fn start_in(&mut self, out: &str) -> usize {
+        let new = &out[self.scanned..];
+        #[cfg(test)]
+        CR_FOLD_LINE_SCAN_BYTES.with(|c| c.set(c.get() + new.len()));
+        if let Some(p) = new.rfind('\n') {
+            self.start = self.scanned + p + 1;
+        }
+        self.scanned = out.len();
+        self.start
+    }
 }
 
 /// The `[ \t\r]` run that starts at the bare `\r` at `body[at]`: where it
@@ -763,8 +812,8 @@ pub fn cr_outside_strings_present(src: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceState {
     /// In normal code. `"` opens a string; `;` / `%` / `#!` /
-    /// `#+`, a column-0 `#`, or a column-0 `*` (an org-mode heading)
-    /// opens a comment; everything else is just bytes.
+    /// `#+`, a column-0 `#`, `!`, `&`, `?` or `:`, or a column-0 `*`
+    /// (an org-mode heading) opens a comment; everything else is just bytes.
     Code,
     /// Inside `"…"`. Bytes pass through; an unescaped `"` exits.
     InString,
@@ -791,6 +840,11 @@ enum SourceState {
 /// an org-mode heading: the lexer's `Token::Star` arm emits the rest
 /// of the line as one token without lexing it, so a `"` there is
 /// heading text, and the line is treated as a comment here (#2778).
+/// A `!`, `&`, `?` or `:` at line start opens a comment too: beancount
+/// ignores such a line, and the lexer's column-0 comment arm in
+/// `TokenIter` makes it one comment token (#2779). A bare marker (its
+/// line ending right after it) is a token of its own there, but has
+/// nothing after it to misread, so it needs no case here.
 ///
 /// The column-0 `#` comment and the heading close on the first `\n`
 /// or `\r`, like the others. A run of stray `\r` bytes before the
@@ -831,10 +885,20 @@ const fn advance_source_state(
             // A `%` is a comment only at column 0; elsewhere the lexer reads a
             // flag, as beancount does (#2802).
             let is_percent_line_comment = ch == '%' && at_line_start;
+            // A column-0 `!`, `&`, `?` or `:` line is ignored, as in beancount
+            // (#2779). A char-level mirror of
+            // `logos_lexer::beancount_ignores_line`, which documents why it
+            // is not called here; it also takes a bare marker as a comment,
+            // which is harmless (the comment closes right after it).
+            let is_flag_line_comment = matches!(ch, '!' | '&' | '?' | ':') && at_line_start;
             if ch == '"' {
                 *prev_was_backslash = false;
                 SourceState::InString
-            } else if ch == ';' || is_percent_line_comment || is_hash_line_comment || is_org_heading
+            } else if ch == ';'
+                || is_percent_line_comment
+                || is_hash_line_comment
+                || is_org_heading
+                || is_flag_line_comment
             {
                 SourceState::InComment
             } else {
@@ -898,6 +962,9 @@ thread_local! {
     /// Bytes `lexer_source_state` has scanned looking for a closing quote,
     /// for the linear-cost test.
     static QUOTE_SCAN_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Bytes `crlf_to_lf_outside_strings` has stepped over tracking where
+    /// its current output line starts, for the linear-cost test (#2779).
+    static CR_FOLD_LINE_SCAN_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// A character the lexer's `Tag` regex (`#[a-zA-Z0-9-_/.]+`) accepts
@@ -1242,7 +1309,7 @@ impl TopLevelSpacing {
             | crate::SyntaxKind::SHEBANG
             | crate::SyntaxKind::EMACS_DIRECTIVE => {
                 self.flush(out);
-                out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                push_comment_text(out, t.text());
                 out.push('\n');
                 self.line_has_comment = true;
             }
@@ -1809,6 +1876,33 @@ fn emit_directive(
     }
 }
 
+/// Whether `line` is one column-0 marker, which beancount reads as a bare
+/// token (`unexpected FLAG`, `HASH`, `ASTERISK` or `COLON`). A line that
+/// beancount ignores only because of the whitespace or `\r` after its marker
+/// (`crate::logos_lexer::beancount_ignores_line` needs one more byte) becomes
+/// such a line once that is trimmed or folded away, so the formatter keeps a
+/// space there (#2779).
+const fn is_lone_marker(line: &str) -> bool {
+    matches!(
+        line.as_bytes(),
+        [b'#' | b'!' | b'&' | b'?' | b':' | b'%' | b'*']
+    )
+}
+
+/// Write a comment token's text, without its line ending. A comment that is
+/// one marker (`#\r\n`, `!\r\n`, `%\r\n`: the `\r` is trivia after the
+/// comment) keeps a space after it, so the formatted line is still one
+/// beancount ignores and not a bare-marker error (#2779). bean-format keeps
+/// such a line's trailing whitespace too; a `\r` cannot survive the LF
+/// output, so a space stands in for it.
+fn push_comment_text(out: &mut String, text: &str) {
+    let text = text.trim_end_matches(['\n', '\r']);
+    out.push_str(text);
+    if is_lone_marker(text) {
+        out.push(' ');
+    }
+}
+
 /// Emit an `ERROR_NODE`'s text verbatim, so `format` never deletes content it
 /// could not parse (#1335) — chiefly org-mode `*` section headers and the
 /// comments grouped with them. Only trailing whitespace per line is stripped
@@ -1826,10 +1920,19 @@ fn emit_error_node(node: &crate::SyntaxNode, out: &mut String) -> usize {
     // Trim a line's trailing whitespace, but not past the start of the line
     // (the newline ending the line before is not this line's, so a blank
     // line stays) nor past the end of the last string on it.
+    //
+    // An org-mode heading that is one `*` and whitespace (`* `, `*\t`,
+    // `*\r`) is ignored by beancount, but a lone `*` is an error there, so
+    // one space is kept after the `*` (#2779). A line that was a lone marker
+    // already stays one: it is an error either way.
     fn end_line(text: &mut String, string_end: usize) {
         let line_start = text.rfind('\n').map_or(0, |i| i + 1);
+        let ignored = crate::logos_lexer::beancount_ignores_line(&text[line_start..]);
         let keep = text.trim_end().len().max(line_start).max(string_end);
         text.truncate(keep);
+        if ignored && is_lone_marker(&text[line_start..]) {
+            text.push(' ');
+        }
     }
     let mut text = String::new();
     let mut string_end = 0;
@@ -1839,6 +1942,11 @@ fn emit_error_node(node: &crate::SyntaxNode, out: &mut String) -> usize {
     {
         match t.kind() {
             crate::SyntaxKind::NEWLINE if t.text().contains('\n') => {
+                // A CRLF's `\r` is part of the line for `end_line`'s
+                // ignored-line check (`*\r\n` is a heading), and trimmed.
+                if t.text().starts_with('\r') {
+                    text.push('\r');
+                }
                 end_line(&mut text, string_end);
                 text.push('\n');
             }
@@ -1914,7 +2022,7 @@ fn emit_leading_comments(node: &crate::SyntaxNode, out: &mut String) {
                     out.push('\n');
                 }
                 pending = 0;
-                out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                push_comment_text(out, t.text());
                 out.push('\n');
                 seen_comment = true;
                 line_has_comment = true;
@@ -2483,7 +2591,7 @@ fn emit_transaction(
                 match t.kind() {
                     k if super::convert::is_comment_kind(k) => {
                         out.push_str(INDENT);
-                        out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                        push_comment_text(out, t.text());
                         out.push('\n');
                     }
                     crate::SyntaxKind::TAG | crate::SyntaxKind::LINK => {
@@ -2658,7 +2766,7 @@ fn emit_posting(
                 }
                 if super::convert::is_comment_kind(t.kind()) {
                     out.push_str("    ");
-                    out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                    push_comment_text(out, t.text());
                     out.push('\n');
                 }
             }
@@ -3115,7 +3223,7 @@ fn emit_meta_entries_of(node: &crate::SyntaxNode, group: GroupingStyle<'_>, out:
                 }
                 if super::convert::is_comment_kind(t.kind()) {
                     out.push_str(INDENT);
-                    out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                    push_comment_text(out, t.text());
                     out.push('\n');
                 }
             }
@@ -4439,6 +4547,13 @@ mod tests {
             "org_heading_quote_then_string",
             "** Sub \"heading\n2024-01-15 note Assets:A \"x\"\n",
         ),
+        // A column-0 `!`, `&`, `?` or `:` line is one comment token, so a
+        // `"` there is comment text (#2779), and the string on the later
+        // line is still read as one.
+        (
+            "flag_line_quote_then_string",
+            "! a \"q\n& b \"q\n? c \"q\n: d \"q\n2024-01-15 note Assets:A \"x\"\n",
+        ),
         ("pushtag_directive", "pushtag #active\n"),
         ("poptag_directive", "poptag #active\n"),
         ("pushmeta_directive", "pushmeta location: \"NYC\"\n"),
@@ -5387,6 +5502,35 @@ mod tests {
         assert_eq!(crlf, src.replace('\n', "\r\n"));
     }
 
+    /// The lone-marker check in `crlf_to_lf_outside_strings` (#2779) finds
+    /// the current output line's start with `OutLine`, which scans each
+    /// output byte once, so a long line of `\r`s is folded in linear time. It
+    /// scanned back over the whole output for every `\r` (1.8 s on this input
+    /// in a release build); with that `rfind` restored, this counts
+    /// 25,600,320,000 bytes on the first input and fails.
+    #[test]
+    fn crlf_to_lf_lone_marker_check_is_linear() {
+        const N: usize = 160_000;
+        for src in [
+            format!("; {}{}\n", "a".repeat(N), "\r".repeat(N)),
+            format!("#\r{}\n", "\r".repeat(N)),
+        ] {
+            CR_FOLD_LINE_SCAN_BYTES.with(|c| c.set(0));
+            let folded = crlf_to_lf_outside_strings(&src);
+            let scanned = CR_FOLD_LINE_SCAN_BYTES.with(std::cell::Cell::get);
+            assert!(
+                scanned <= 2 * src.len(),
+                "line-start tracking stepped over {scanned} bytes of a {}-byte input",
+                src.len()
+            );
+            assert!(!folded.contains('\r'));
+        }
+        assert_eq!(
+            crlf_to_lf_outside_strings(&format!("#\r{}\n", "\r".repeat(N))),
+            "# \n"
+        );
+    }
+
     /// `cr_outside_strings_present` reads quotes as the line-ending helpers
     /// do: a stray quote ends at its own line, so the `\r` after it is
     /// outside a string, as `crlf_to_lf_outside_strings` folds it (#2803).
@@ -5441,6 +5585,21 @@ mod tests {
                 "#! c\r\r\n",
                 "#+ c\r\r\n",
                 "* c\r\r\n",
+                // A lone marker before the `\r`: ignored with it, a bare-marker
+                // error without it, so the fold keeps a space (#2779).
+                "#\r\n",
+                "!\r\n",
+                "&\r\n",
+                "?\r\n",
+                ":\r\n",
+                "%\r\n",
+                "*\r\n",
+                "#\r\r\n",
+                "#\r \r\n",
+                "# c\r \r\n",
+                "#\t\r\n",
+                "* c\r \r\n",
+                "*\r \r\n",
                 "\r\r\n",
                 "  \r\r\n",
             ]
@@ -5453,6 +5612,10 @@ mod tests {
                 "2024-01-01 open Assets:A\r\r",
                 "2024-01-01 open Assets:A\r\n; c\r",
                 "2024-01-01 open Assets:A\r\n\r",
+                "2024-01-01 open Assets:A\r\n#\r",
+                "2024-01-01 open Assets:A\r\n*\r",
+                "2024-01-01 open Assets:A\r\n#\r ",
+                "2024-01-01 open Assets:A\r\n# c\r \r",
                 "\r",
             ]
             .map(String::from),

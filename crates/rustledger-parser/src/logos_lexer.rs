@@ -885,8 +885,16 @@ impl<'src> Iterator for TokenIter<'src> {
             // still gets its `Indent` like any other token; the lexer resumes
             // right after it, and a stray `%` elsewhere is reported by the line's
             // own rule.
+            //
+            // A column-0 `%` with nothing after it on its line is a FLAG too:
+            // beancount's rule is `^{FLAGS}/.`, which needs one more character
+            // before the line ending, so a bare `%` line is its `unexpected
+            // FLAG` error there (#2779). A `\r` counts as that character, so a
+            // bare `%` on a CRLF line is still skipped.
             if matches!(result, Ok(Token::PercentComment(_)))
-                && !(self.at_line_start && span.start == self.last_newline_end)
+                && !(self.at_line_start
+                    && span.start == self.last_newline_end
+                    && beancount_ignores_line(&source[span.start..]))
             {
                 self.restart_lexer(span.start + 1);
                 span.end = span.start + 1;
@@ -907,9 +915,23 @@ impl<'src> Iterator for TokenIter<'src> {
                     self.last_newline_end = span.end;
                     return Some((Token::Newline, span.into()));
                 }
-                Ok(Token::Hash) if self.at_line_start && span.start == self.last_newline_end => {
-                    // Hash at very start of line (no indentation) is a comment
-                    // Find end of line and create a comment token for the whole line
+                // A column-0 `#`, `!`, `&`, `?` or `:` with more of its line
+                // after it: beancount ignores the whole line (`^[\*\:\#]/.`
+                // and `^{FLAGS}/.`, with `FLAGS [!&#?%]`, enter its IGNORE
+                // state), so it is one comment token here. The `!`, `&`, `?`
+                // and `:` lines were errors before (#2779). A bare marker,
+                // with its line ending (or the end of the source) right after
+                // it, is not ignored there, as the rule needs one more
+                // character: it stays its own token and the parser reports the
+                // line, as beancount reports `unexpected HASH`, `FLAG` or
+                // `COLON`. `%` is handled above and `*` below. A `#` followed
+                // by a tag character never gets here: logos lexes it as a
+                // `Tag`, as beancount's tag rule wins over `^#/.` there too.
+                Ok(Token::Hash | Token::Pending | Token::Colon | Token::Flag("&" | "?"))
+                    if self.at_line_start
+                        && span.start == self.last_newline_end
+                        && beancount_ignores_line(&source[span.start..]) =>
+                {
                     let comment_start = span.start;
                     let line_end = line_end_before_newline(source, span.end);
                     let comment_text = &source[comment_start..line_end];
@@ -920,9 +942,10 @@ impl<'src> Iterator for TokenIter<'src> {
                     // past the line ending and swallowed the directives
                     // after it, with no error (#2775). The lexer resumes
                     // exactly at `line_end`, so the next call emits the
-                    // `Newline` (or ends the stream) normally. `line_end`
-                    // sits on a `\r`, a `\n` or the end of the source, so
-                    // it is always a char boundary in range.
+                    // `Newline` (or the stray-`\r` trivia before it, or ends
+                    // the stream) normally. `line_end` sits on a `\r`, a
+                    // `\n` or the end of the source, so it is always a char
+                    // boundary in range.
                     self.lexer.bump(line_end - span.end);
                     self.at_line_start = false;
                     return Some((
@@ -1060,6 +1083,45 @@ impl<'src> Iterator for TokenIter<'src> {
     }
 }
 
+/// Whether beancount ignores the whole line starting at column 0 with `line`.
+///
+/// `line` is the line's text from column 0 on (the rest of the source from
+/// there will do). Ignored are a `;` comment, and a `#`, `*`, `:` or flag
+/// character (`[!&#?%]`) with at least one more byte on its line, except a
+/// `#` that starts a tag (#2779).
+///
+/// Beancount's rules are `^[\*\:\#]/.` and `^{FLAGS}/.`, and flex's `.` is
+/// any byte but `\n`: a bare marker, with its line ending or the end of the
+/// source right after it, is a token there (reported as `unexpected HASH`,
+/// `FLAG`, `ASTERISK` or `COLON`), and a `\r` counts as the byte, so a bare
+/// marker on a CRLF line is ignored. A `#` with a tag character after it is
+/// a `TAG`, as beancount's longer tag match wins. The one rule for the
+/// lexer's column-0 `#`, `!`, `&`, `?`, `:` and `%` arms in `TokenIter` and
+/// for `convert`'s `previous_line_is_a_gap` and `is_section_marker` (the
+/// `*` heading), of the formatter's `emit_error_node`, and of the LSP's
+/// parse-error surface cleanup (`clean_line` in `rustledger-lsp`), which is
+/// why it is public.
+///
+/// One deliberate mirror: `format::advance_source_state`, the formatter's
+/// char-at-a-time line-ending state machine, cannot call this (it is a
+/// `const fn` over one char and a peek), so it opens a comment at any
+/// column-0 `!`, `&`, `?`, `:`, `%`, `*` or non-tag `#`. It may treat a bare
+/// marker as a comment, which is harmless there (the comment closes at the
+/// line ending right after it). Agreement on the lines that matter is pinned
+/// by `source_state_classification_agrees_with_lexer`; revisit if the state
+/// machine ever needs the bare-marker distinction.
+#[must_use]
+pub fn beancount_ignores_line(line: &str) -> bool {
+    match line.as_bytes() {
+        [b';', ..] => true,
+        [b'#', next, ..] => {
+            *next != b'\n' && !(next.is_ascii_alphanumeric() || b"-_/.".contains(next))
+        }
+        [b'*' | b':' | b'!' | b'&' | b'?' | b'%', next, ..] => *next != b'\n',
+        _ => false,
+    }
+}
+
 /// The end of the line that contains `from`, including its `\n` (or the end
 /// of the source). `TokenIter` lexes one such line at a time after a failed
 /// string scan was cut at its line, up to where that scan stopped (#2784).
@@ -1071,20 +1133,28 @@ fn line_chunk_end(source: &str, from: usize) -> usize {
 
 /// Where a whole-line token that starts before `from` ends: before the
 /// `Newline` token that follows it, or at the end of the source, and before
-/// any run of `\r` bytes right in front of either.
+/// the stray-`\r` run (a `[ \t\r]` run from a `\r` on) right in front of
+/// either.
 ///
 /// `Newline` is `\r?\n`, so on a CRLF line it starts at the `\r`; ending at
 /// the `\n` would hand that byte to both tokens and break the lossless
-/// round-trip (#2769). Further `\r` bytes before it (`\r\r\n`), and a
-/// trailing `\r` at the end of the source, are left out too: they lex as the
-/// `Whitespace` trivia that follows the line (#2774), as after any other
-/// token. A `\r` with more of the line after it stays in the line. The
-/// result sits on a `\r`, a `\n` or the end of the source, so it is always a
-/// char boundary. Shared by the column-0 `#` comment and `*` heading arms of
-/// `TokenIter`, and by its cut of an unterminated string.
+/// round-trip (#2769). A run of spaces, tabs and `\r`s from a `\r` on before
+/// it (`\r\r\n`, `\r \r\n`), or before the end of the source, is left out
+/// too: it lexes as the `Whitespace` trivia that follows the line (#2774),
+/// as after any other token, and `format::crlf_to_lf_outside_strings` drops
+/// it, so the formatter reads the line the same with or without that fold
+/// (#2779). Spaces and tabs before the run's first `\r` stay in the line,
+/// and so does a `\r` with more of the line after it. The result sits on a
+/// `\r`, a `\n` or the end of the source, so it is always a char boundary.
+/// Shared by the column-0 `#` comment and `*` heading arms of `TokenIter`,
+/// and by its cut of an unterminated string.
 fn line_end_before_newline(source: &str, from: usize) -> usize {
     let nl = source[from..].find('\n').map_or(source.len(), |i| from + i);
-    from + source[from..nl].trim_end_matches('\r').len()
+    let line = &source[from..nl];
+    let run_start = line.trim_end_matches([' ', '\t', '\r']).len();
+    from + line[run_start..]
+        .find('\r')
+        .map_or(line.len(), |i| run_start + i)
 }
 
 fn tokenize_inner(source: &str, keep_whitespace: bool) -> Vec<(Token<'_>, Span)> {
@@ -1469,6 +1539,55 @@ mod tests {
                 .any(|k| k.starts_with("PercentComment(\"% note\")")),
             "{kinds:?}"
         );
+    }
+
+    /// Which column-0 lines beancount ignores (#2779), checked against
+    /// bean-check 3.2.3, and that the lexer makes exactly those (but `*`,
+    /// which keeps its own token shape) one comment token.
+    #[test]
+    fn test_beancount_ignores_line_matches_the_lexer() {
+        let cases = [
+            ("; x", true),
+            (";", true),
+            ("# x", true),
+            ("#!x", true),
+            ("#\r", true),
+            ("#", false),
+            ("#\n", false),
+            ("#a b", false),
+            ("#.x", false),
+            ("! x", true),
+            ("!x", true),
+            ("!\r", true),
+            ("!", false),
+            ("!\n", false),
+            ("&x", true),
+            ("&", false),
+            ("?x", true),
+            ("?\n", false),
+            (":x", true),
+            (": \"q", true),
+            (":\n", false),
+            ("%x", true),
+            ("%\r", true),
+            ("%\n", false),
+            ("*x", true),
+            ("*", false),
+            ("P x", false),
+            ("2024", false),
+        ];
+        for (line, ignored) in cases {
+            assert_eq!(beancount_ignores_line(line), ignored, "{line:?}");
+            if line.starts_with('*') {
+                continue;
+            }
+            let first = &tokenize(line)[0].0;
+            let is_comment = matches!(
+                first,
+                Token::Comment(_) | Token::PercentComment(_) | Token::Shebang(_)
+            );
+            assert_eq!(is_comment, ignored, "{line:?}: {first:?}");
+        }
     }
 
     /// A mid-file BOM (any U+FEFF not at strict byte 0) reaches the

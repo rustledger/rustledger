@@ -476,6 +476,58 @@ impl Executor<'_> {
     /// [`QueryError::UnknownFunction`] naming the call as bean-query does,
     /// its name lower-cased (`SUM(*)` is `sum(*)`).
     fn check_star_arguments(query: &SelectQuery) -> Result<(), QueryError> {
+        Self::refuse_star_arguments(
+            query
+                .targets
+                .iter()
+                .map(|t| &t.expr)
+                .chain(query.from.iter().filter_map(|f| f.filter.as_ref()))
+                .chain(query.where_clause.iter())
+                .chain(query.group_by.iter().flatten())
+                .chain(query.having.iter())
+                .chain(query.pivot_by.iter().flatten())
+                .chain(query.order_by.iter().flatten().map(|o| &o.expr)),
+        )
+    }
+
+    /// The compile-time checks of a `JOURNAL`, `BALANCES` or `PRINT`
+    /// statement's FROM filter and WHERE clause, in the order bean-query
+    /// compiles them (FROM, then WHERE; in each, the calls, then where the
+    /// aggregates are): a `*` argument to anything but `count`
+    /// ([`Self::check_star_arguments`]), and an aggregate, which bean-query
+    /// refuses in both (`aggregates are not allowed in FROM clause`). These
+    /// statements ran neither check, so `BALANCES WHERE sum(*) > 0` and
+    /// `PRINT FROM count(*) = 1` answered (#2880).
+    ///
+    /// # Errors
+    ///
+    /// [`QueryError::UnknownFunction`] or [`QueryError::Aggregation`].
+    pub(super) fn check_shorthand_filters(
+        from: Option<&crate::ast::FromClause>,
+        where_clause: Option<&Expr>,
+    ) -> Result<(), QueryError> {
+        let clauses = [
+            (from.and_then(|f| f.filter.as_ref()), "FROM"),
+            (where_clause, "WHERE"),
+        ];
+        for (expr, clause) in clauses {
+            let Some(expr) = expr else { continue };
+            Self::refuse_star_arguments(std::iter::once(expr))?;
+            if Self::is_aggregate_expr(expr) {
+                return Err(QueryError::Aggregation(format!(
+                    "aggregates are not allowed in {clause} clause"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The first call among `exprs` (and the expressions inside them) that
+    /// takes a `*` but is not `count`, refused (see
+    /// [`Self::check_star_arguments`]).
+    fn refuse_star_arguments<'e>(
+        exprs: impl IntoIterator<Item = &'e Expr>,
+    ) -> Result<(), QueryError> {
         let mut refused = None;
         let mut note = |expr: &Expr| {
             let (name, args) = match expr {
@@ -490,17 +542,7 @@ impl Executor<'_> {
                 refused = Some(format!("{}(*)", name.to_lowercase()));
             }
         };
-        for expr in query
-            .targets
-            .iter()
-            .map(|t| &t.expr)
-            .chain(query.from.iter().filter_map(|f| f.filter.as_ref()))
-            .chain(query.where_clause.iter())
-            .chain(query.group_by.iter().flatten())
-            .chain(query.having.iter())
-            .chain(query.pivot_by.iter().flatten())
-            .chain(query.order_by.iter().flatten().map(|o| &o.expr))
-        {
+        for expr in exprs {
             super::visit_expr(expr, &mut note);
         }
         refused.map_or(Ok(()), |call| Err(QueryError::UnknownFunction(call)))
@@ -1336,6 +1378,7 @@ impl Executor<'_> {
         &self,
         query: &crate::ast::JournalQuery,
     ) -> Result<QueryResult, QueryError> {
+        Self::check_shorthand_filters(query.from.as_ref(), None)?;
         // A double-quoted string naming a posting column in the FROM filter
         // is that column, as in bean-query (#2596).
         if let Some(from) = &query.from
@@ -1747,6 +1790,7 @@ impl Executor<'_> {
         if let Some(at_func) = at_other {
             self.check_at_function(at_func, false)?;
         }
+        Self::check_shorthand_filters(query.from.as_ref(), query.where_clause.as_ref())?;
         // A double-quoted string naming a posting column, in the FROM filter
         // or the WHERE, is that column, as in bean-query, whose BALANCES is a
         // SELECT over the postings (#2596).
@@ -1870,6 +1914,7 @@ impl Executor<'_> {
         &self,
         query: &crate::ast::PrintQuery,
     ) -> Result<QueryResult, QueryError> {
+        Self::check_shorthand_filters(query.from.as_ref(), None)?;
         // A double-quoted string naming an entry column in the FROM filter is
         // that column, as in bean-query, which compiles it against its
         // `entries` table (#2596): the posting columns but the posting-only

@@ -420,6 +420,12 @@ fn test_execute_refuses_a_wildcard_argument_but_count() {
         ("SELECT * FROM (SELECT sum(*))", "sum(*)"),
         ("SELECT count(*) WHERE length(*) > 0", "length(*)"),
         ("SELECT sum(*) OVER ()", "sum(*)"),
+        // The shorthand statements' FROM and WHERE, which skipped the check
+        // and answered nothing (#2880 review).
+        ("JOURNAL \"Assets\" FROM sum(*) = 1", "sum(*)"),
+        ("BALANCES WHERE sum(*) > 0", "sum(*)"),
+        ("BALANCES FROM sum(*) = 1", "sum(*)"),
+        ("PRINT FROM sum(*) = 1", "sum(*)"),
     ] {
         let err = run_err(query);
         assert_eq!(err, format!("no function matches \"{call}\""), "{query}");
@@ -433,6 +439,55 @@ fn test_execute_refuses_a_wildcard_argument_but_count() {
     }
     let (_, rows) = run("SELECT Count(*)");
     assert_eq!(rows, [[Value::Integer(4)]]);
+}
+
+/// `JOURNAL`, `BALANCES` and `PRINT` refuse an aggregate in their FROM filter
+/// and WHERE clause, as bean-query 0.2.0's compiler does, with its messages;
+/// they answered (`BALANCES WHERE count(*) > 0` gave no rows). bean-query
+/// compiles FROM before WHERE, and in each the calls before the aggregates,
+/// so the first error is FROM's (each row checked against it).
+#[test]
+fn test_execute_refuses_an_aggregate_in_a_shorthand_filter() {
+    for (query, error) in [
+        (
+            "JOURNAL \"Assets\" FROM count(*) = 1",
+            "aggregation error: aggregates are not allowed in FROM clause",
+        ),
+        (
+            "JOURNAL FROM count(*) = 1",
+            "aggregation error: aggregates are not allowed in FROM clause",
+        ),
+        (
+            "BALANCES WHERE count(*) > 0",
+            "aggregation error: aggregates are not allowed in WHERE clause",
+        ),
+        (
+            "BALANCES FROM count(*) = 1",
+            "aggregation error: aggregates are not allowed in FROM clause",
+        ),
+        (
+            "PRINT FROM count(*) = 1",
+            "aggregation error: aggregates are not allowed in FROM clause",
+        ),
+        (
+            "BALANCES FROM count(*) = 1 WHERE sum(*) > 0",
+            "aggregation error: aggregates are not allowed in FROM clause",
+        ),
+        (
+            "BALANCES FROM sum(*) = 1 WHERE count(*) > 0",
+            "no function matches \"sum(*)\"",
+        ),
+    ] {
+        assert_eq!(run_err(query), error, "{query}");
+    }
+    // Without an aggregate they still answer. (BALANCES needs booked
+    // postings, which this unbooked fixture has not.)
+    for query in [
+        "JOURNAL \"Assets\" FROM year = 2024",
+        "PRINT FROM year = 2024",
+    ] {
+        run(query);
+    }
 }
 
 /// A window's PARTITION BY and ORDER BY take no `*` either: it is refused
@@ -490,48 +545,46 @@ fn test_parse_names_the_close_a_call_star_needs() {
 /// by name, for every binary operator. The parser reads that from a
 /// hand-written copy of the operators (`operator_follows`); without an
 /// operator there, `SELECT * <op> 1` read as the target list followed by an
-/// unexpected token. The exhaustive match makes a new `BinaryOperator` add
-/// its row here (#2880).
+/// unexpected token. The list of operators and the exhaustive match that
+/// checks it are generated from one macro invocation, so a new
+/// `BinaryOperator` does not compile until it is listed, and is then tested
+/// (#2880).
 #[test]
 fn test_star_before_every_operator_is_named() {
     use rustledger_query::ast::BinaryOperator;
-    let all = [
-        BinaryOperator::Eq,
-        BinaryOperator::Ne,
-        BinaryOperator::Lt,
-        BinaryOperator::Le,
-        BinaryOperator::Gt,
-        BinaryOperator::Ge,
-        BinaryOperator::Regex,
-        BinaryOperator::NotRegex,
-        BinaryOperator::In,
-        BinaryOperator::NotIn,
-        BinaryOperator::And,
-        BinaryOperator::Or,
-        BinaryOperator::Add,
-        BinaryOperator::Sub,
-        BinaryOperator::Mul,
-        BinaryOperator::Div,
-        BinaryOperator::Mod,
+    /// `[(operator, right operand)]` for the listed variants, with a match
+    /// over the same names that fails to compile when one is missing.
+    macro_rules! every_operator {
+        ($($variant:ident => $right:literal),* $(,)?) => {{
+            #[allow(dead_code)]
+            const fn listed(op: BinaryOperator) {
+                match op {
+                    $(BinaryOperator::$variant)|* => {}
+                }
+            }
+            [$((BinaryOperator::$variant, $right)),*]
+        }};
+    }
+    let all = every_operator![
+        Eq => "1",
+        Ne => "1",
+        Lt => "1",
+        Le => "1",
+        Gt => "1",
+        Ge => "1",
+        Regex => "'a'",
+        NotRegex => "'a'",
+        In => "(1, 2)",
+        NotIn => "(1, 2)",
+        And => "1",
+        Or => "1",
+        Add => "1",
+        Sub => "1",
+        Mul => "1",
+        Div => "1",
+        Mod => "1",
     ];
-    for op in all {
-        let right = match op {
-            BinaryOperator::In | BinaryOperator::NotIn => "(1, 2)",
-            BinaryOperator::Regex | BinaryOperator::NotRegex => "'a'",
-            BinaryOperator::Eq
-            | BinaryOperator::Ne
-            | BinaryOperator::Lt
-            | BinaryOperator::Le
-            | BinaryOperator::Gt
-            | BinaryOperator::Ge
-            | BinaryOperator::And
-            | BinaryOperator::Or
-            | BinaryOperator::Add
-            | BinaryOperator::Sub
-            | BinaryOperator::Mul
-            | BinaryOperator::Div
-            | BinaryOperator::Mod => "1",
-        };
+    for (op, right) in all {
         for spacing in [" ", ""] {
             if spacing.is_empty() && op.to_string().starts_with(char::is_alphabetic) {
                 continue;

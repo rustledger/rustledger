@@ -793,7 +793,15 @@ Options: None
 Matches pairs of postings that sum to zero within a date range. Useful for tracking reimbursements, loans, or transfers.
 
 ```beancount
-plugin "beancount.plugins.zerosum" "Assets:Reimbursable 30"
+plugin "beancount_reds_plugins.zerosum.zerosum" "{
+  'zerosum_accounts': {
+    'Assets:Reimbursable': ('Assets:Reimbursable-Matched', 30),
+  },
+}"
+
+2024-01-01 open Assets:Cash
+2024-01-01 open Assets:Bank
+2024-01-01 open Assets:Reimbursable
 
 2024-01-15 * "Expense to be reimbursed"
   Assets:Reimbursable   100 USD
@@ -802,10 +810,18 @@ plugin "beancount.plugins.zerosum" "Assets:Reimbursable 30"
 2024-01-20 * "Reimbursement received"
   Assets:Bank           100 USD
   Assets:Reimbursable  -100 USD
-; These two postings match and are linked
+; The two postings sum to zero within 30 days, so both move to
+; Assets:Reimbursable-Matched (opened by the plugin). Postings left in
+; Assets:Reimbursable are the unmatched ones.
 ```
 
-Options: `"Account:Pattern days"` - Account pattern to match and maximum days between matching postings
+Options: a Python dict, as the Python `zerosum` plugin (`beancount_reds_plugins`) reads it:
+
+- `'zerosum_accounts'`: `{account: (target_account, days)}`. Postings to `account` that sum to zero within `days` move to `target_account`; an empty (or `None`) target is derived from `account` with `'account_name_replace'`.
+- `'account_name_replace'`: `('from', 'to')`, the replacement that derives an empty target.
+- `'tolerance'`: the largest difference between two matching amounts (default `0.0099`).
+
+A config that is not such a dict is a plugin error. The Python plugin's `flag_unmatched`, `match_metadata`, `match_metadata_name`, `link_transactions` and `link_prefix` are accepted and ignored.
 
 ## Custom Plugins
 

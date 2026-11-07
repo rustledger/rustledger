@@ -307,8 +307,9 @@ mod tests {
 
     #[test]
     fn test_historical_price_never_expires() {
+        let dir = tempfile::tempdir().expect("create a temp dir");
         let mut cache = PriceCache {
-            path: PathBuf::from("/tmp/test-price-cache-hist.json"),
+            path: dir.path().join("price-cache.json"),
             ttl: Duration::from_secs(0), // TTL=0 would expire latest prices
             entries: HashMap::new(),
             dirty: false,
@@ -330,8 +331,9 @@ mod tests {
 
     #[test]
     fn test_insert_and_get() {
+        let dir = tempfile::tempdir().expect("create a temp dir");
         let mut cache = PriceCache {
-            path: PathBuf::from("/tmp/test-price-cache.json"),
+            path: dir.path().join("price-cache.json"),
             ttl: Duration::from_hours(1),
             entries: HashMap::new(),
             dirty: false,
@@ -358,8 +360,9 @@ mod tests {
 
     #[test]
     fn test_get_expired_returns_none() {
+        let dir = tempfile::tempdir().expect("create a temp dir");
         let mut cache = PriceCache {
-            path: PathBuf::from("/tmp/test-price-cache.json"),
+            path: dir.path().join("price-cache.json"),
             ttl: Duration::from_secs(0), // Expire immediately
             entries: HashMap::new(),
             dirty: false,
@@ -380,8 +383,9 @@ mod tests {
 
     #[test]
     fn test_get_missing_returns_none() {
+        let dir = tempfile::tempdir().expect("create a temp dir");
         let cache = PriceCache {
-            path: PathBuf::from("/tmp/test-price-cache.json"),
+            path: dir.path().join("price-cache.json"),
             ttl: Duration::from_hours(1),
             entries: HashMap::new(),
             dirty: false,
@@ -432,8 +436,9 @@ mod tests {
 
     #[test]
     fn test_clear() {
+        let dir = tempfile::tempdir().expect("create a temp dir");
         let mut cache = PriceCache {
-            path: PathBuf::from("/tmp/test-price-cache-clear.json"),
+            path: dir.path().join("price-cache.json"),
             ttl: Duration::from_hours(1),
             entries: HashMap::new(),
             dirty: false,
@@ -543,8 +548,9 @@ mod tests {
     #[test]
     fn today_dated_key_honors_ttl() {
         let today = jiff::Zoned::now().date();
+        let dir = tempfile::tempdir().expect("create a temp dir");
         let mut cache = PriceCache {
-            path: PathBuf::from("/tmp/test-price-cache-today.json"),
+            path: dir.path().join("price-cache.json"),
             ttl: Duration::from_secs(0), // everything TTL-subject expires
             entries: HashMap::new(),
             dirty: false,
@@ -667,8 +673,9 @@ mod tests {
                 cached_at,
             },
         );
+        let dir = tempfile::tempdir().expect("create a temp dir");
         let cache = PriceCache {
-            path: PathBuf::from("/tmp/test-price-cache-intraday.json"),
+            path: dir.path().join("price-cache.json"),
             ttl: Duration::from_mins(30),
             entries,
             dirty: false,
@@ -701,8 +708,9 @@ mod tests {
                 cached_at,
             },
         );
+        let dir = tempfile::tempdir().expect("create a temp dir");
         let cache = PriceCache {
-            path: PathBuf::from("/tmp/test-price-cache-settled.json"),
+            path: dir.path().join("price-cache.json"),
             ttl: Duration::from_secs(0), // TTL 0 would expire anything TTL-bound
             entries,
             dirty: false,

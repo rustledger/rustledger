@@ -1146,11 +1146,12 @@ mod tests {
         );
     }
 
-    // Note: end-to-end coverage of `cache_path()` (including the
-    // `BEANCOUNT_LOAD_CACHE_FILENAME` env var) lives in
-    // `tests/cache_env_var_test.rs`, which can mutate process env without
-    // tripping the crate's `forbid(unsafe_code)`. The tests below cover the
-    // pure pattern-resolution logic and the legacy-path helper.
+    // Note: coverage of the cache settings (`CacheEnv`, including how the
+    // `BEANCOUNT_LOAD_CACHE_FILENAME` and `BEANCOUNT_DISABLE_LOAD_CACHE`
+    // variables are read, through an injected lookup) lives in
+    // `tests/cache_env_var_test.rs`; nothing there or here touches the process
+    // environment. The tests below cover the pure pattern-resolution logic and
+    // the legacy-path helper, and the round trips under no settings.
 
     /// The cache settings these tests run under: none, whatever the
     /// developer's environment holds, so they are hermetic (the `*_in`

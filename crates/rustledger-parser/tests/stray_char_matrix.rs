@@ -26,9 +26,6 @@ const CHARS: &str = "!@?*~^$&|{}(),#%\"/_-'.A0";
 
 const DATA: &str = include_str!("data/stray_char_matrix.tsv");
 
-/// Rows pinned as known differences, by count: see the `known_*` functions.
-const KNOWN_COLUMN_0: usize = 192;
-
 /// One generated input.
 struct Case {
     /// Byte offset the character was inserted at.
@@ -134,14 +131,6 @@ fn stage(row: &Row, case: &Case) -> u8 {
     }
 }
 
-/// beancount ignores a whole line that starts with `!`, `?` or `&` at column
-/// 0; we report it. That is #2779, a separate fix, so these rows may disagree
-/// until it lands (the count is pinned below, so the fix will have to update
-/// it).
-fn known_column_0_divergence(row: &Row, case: &Case) -> bool {
-    "!?&".contains(case.ch) && (case.offset == 0 || row.base.as_bytes()[case.offset - 1] == b'\n')
-}
-
 /// A character inserted right after a `\r` that the line goes on past: a
 /// mid-line `\r`, which we report and beancount accepts. A deliberate
 /// deviation (#2804): the formatter turns a bare `\r` into a line break, so
@@ -170,7 +159,6 @@ fn known_cost_merge(case: &Case) -> bool {
 #[test]
 fn test_parse_reports_a_stray_character_exactly_when_beancount_does() {
     let mut checked = [0usize; 3];
-    let mut known = 0usize;
     let mut known_cr = 0usize;
     let mut known_merge = 0usize;
     let mut wrong = Vec::new();
@@ -183,10 +171,6 @@ fn test_parse_reports_a_stray_character_exactly_when_beancount_does() {
             let beancount_rejects = *verdict == '1';
             let we_reject = !parse(&case.src).errors.is_empty();
             let disagree = we_reject != beancount_rejects;
-            if known_column_0_divergence(&row, case) && we_reject && !beancount_rejects {
-                known += 1;
-                continue;
-            }
             if known_mid_line_cr(&row, case) && we_reject && !beancount_rejects {
                 known_cr += 1;
                 continue;
@@ -224,7 +208,6 @@ fn test_parse_reports_a_stray_character_exactly_when_beancount_does() {
         "only {} metadata cases checked",
         checked[1]
     );
-    assert_eq!(known, KNOWN_COLUMN_0, "the #2779 rows changed");
     assert!(
         checked[2] > 20_000,
         "only {} transaction and posting cases checked",

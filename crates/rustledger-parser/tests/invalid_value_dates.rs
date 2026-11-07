@@ -691,16 +691,16 @@ fn test_parse_keeps_a_grammar_error_before_an_invalid_date() {
             result.errors
         );
     }
-    // A bare `#`, `%` or `*` line is a token to beancount, not a comment, so
-    // it is no gap: no `unexpected INDENT` on the indented line after it,
-    // only the date. (bean-check also reports the bare marker on its own
-    // line; rledger, before this change as after, does not.)
-    for marker in ["#", "%", "*"] {
+    // A bare marker line is a token to beancount, not a comment, so it is no
+    // gap: no `unexpected INDENT` on the indented line after it, only the
+    // date. The bare marker is an error on its own line, as bean-check
+    // reports it (#2779).
+    for marker in ["#", "%", "*", "!", "&", "?", ":"] {
         let src = format!("2024-01-01 open Assets:A\n{marker}\n  2024-02-30 5\n");
         let result = parse(&src);
         assert_eq!(
             error_lines(&src, &result.errors),
-            vec![3],
+            vec![2, 3],
             "{marker:?}: {:?}",
             result.errors
         );

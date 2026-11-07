@@ -2,7 +2,9 @@
 //!
 //! Fetches stock, forex, and crypto prices from Alpha Vantage.
 
-use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, http_get_json};
+use super::{
+    DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, http_get_json, is_word,
+};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
@@ -25,10 +27,22 @@ use std::time::Duration;
 /// - Stocks: `AAPL`, `MSFT`, `GOOGL`
 /// - Forex: Use `from_currency/to_currency` format (e.g., `EUR/USD`)
 /// - Crypto: Use `CRYPTO:symbol` format (e.g., `CRYPTO:BTC`)
+/// - beanprice's forms: `price:SYMBOL:BASE` (e.g., `price:IBM:USD`) and
+///   `fx:CCY:BASE` (e.g., `fx:USD:CHF`)
 #[derive(Debug)]
 pub struct AlphaVantageSource {
     /// Whole-request timeout, applied to each request.
     timeout: Duration,
+}
+
+/// The endpoint a ticker is fetched from (see [`AlphaVantageSource::route`]).
+enum Route<'a> {
+    /// `CRYPTO:SYMBOL`.
+    Crypto(&'a str),
+    /// `FROM/TO`.
+    Forex(&'a str, &'a str),
+    /// A stock symbol.
+    Stock(&'a str),
 }
 
 impl AlphaVantageSource {
@@ -126,23 +140,32 @@ impl AlphaVantageSource {
 
     /// Determine the type of request and fetch accordingly.
     fn fetch_internal(&self, pair: &PricePair, api_key: &str) -> Result<PriceResponse> {
-        let ticker = &pair.ticker;
+        match Self::route(&pair.ticker) {
+            Route::Crypto(symbol) => self.fetch_crypto(symbol, &pair.currency, api_key),
+            Route::Forex(from, to) => self.fetch_forex(from, to, api_key),
+            Route::Stock(symbol) => self.fetch_stock(symbol, &pair.currency, api_key),
+        }
+    }
 
-        // Check for crypto prefix
+    /// Which endpoint a ticker is fetched from: `CRYPTO:BTC` (crypto),
+    /// `EUR/USD` (forex), or anything else (a stock).
+    fn route(ticker: &str) -> Route<'_> {
         if let Some(symbol) = ticker.strip_prefix("CRYPTO:") {
-            return self.fetch_crypto(symbol, &pair.currency, api_key);
+            return Route::Crypto(symbol);
         }
-
-        // Check for forex format (contains /)
-        if ticker.contains('/') {
-            let parts: Vec<&str> = ticker.split('/').collect();
-            if parts.len() == 2 {
-                return self.fetch_forex(parts[0], parts[1], api_key);
-            }
+        let parts: Vec<&str> = ticker.split('/').collect();
+        if let [from, to] = parts[..] {
+            return Route::Forex(from, to);
         }
+        Route::Stock(ticker)
+    }
 
-        // Default to stock
-        self.fetch_stock(ticker, &pair.currency, api_key)
+    /// The asset a ticker's quote is a price of, as [`Self::route`] reads
+    /// it: the crypto symbol, the forex base, or the stock.
+    fn request_base(ticker: &str) -> &str {
+        match Self::route(ticker) {
+            Route::Crypto(base) | Route::Forex(base, _) | Route::Stock(base) => base,
+        }
     }
 
     fn fetch_stock(&self, symbol: &str, currency: &str, api_key: &str) -> Result<PriceResponse> {
@@ -263,6 +286,43 @@ impl PriceSource for AlphaVantageSource {
         "Alpha Vantage - stocks, forex, crypto (requires API key)"
     }
 
+    /// beanprice's `alphavantage` tickers (#2866): `price:SYMBOL:BASE`
+    /// (`price:IBM:USD`) is the stock SYMBOL quoted in BASE, and
+    /// `fx:CCY:BASE` (`fx:USD:CHF`) the exchange rate of CCY in BASE, read
+    /// into rledger's own `SYMBOL` and `CCY/BASE` forms. beanprice matches
+    /// `^(price|fx):([^:]+):(\w+)$`.
+    fn bean_price_pair(&self, pair: PricePair) -> PricePair {
+        let mut parts = pair.ticker.splitn(3, ':');
+        let (Some(kind), Some(symbol), Some(base)) = (parts.next(), parts.next(), parts.next())
+        else {
+            return pair;
+        };
+        if symbol.is_empty() || !is_word(base) {
+            return pair;
+        }
+        let ticker = match kind {
+            "price" => symbol.to_string(),
+            "fx" => format!("{symbol}/{base}"),
+            _ => return pair,
+        };
+        PricePair {
+            ticker,
+            currency: base.to_string(),
+        }
+    }
+
+    /// The base of what the source fetches (#2866): the ticker read by the
+    /// same [`PriceSource::bean_price_pair`] and `request_base` the
+    /// fetch routes by. `fx:USD:CHF` and `USD/CHF` are based in `USD`,
+    /// `price:IBM:USD` and `IBM` in `IBM`, `CRYPTO:BTC` in `BTC`.
+    fn pair_base(&self, ticker: &str) -> Option<String> {
+        let pair = self.bean_price_pair(PricePair {
+            ticker: ticker.to_string(),
+            currency: String::new(),
+        });
+        Some(Self::request_base(&pair.ticker).to_uppercase())
+    }
+
     fn requires_api_key(&self) -> bool {
         true
     }
@@ -351,6 +411,69 @@ impl AlphaVantageSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The base of the pair a ticker names, which a `^` inversion must
+    /// be declared in (#2866).
+    #[test]
+    fn test_pair_base() {
+        let source = AlphaVantageSource::new(Duration::from_secs(30));
+        for (ticker, base) in [
+            ("price:IBM:USD", Some("IBM")),
+            ("fx:USD:CHF", Some("USD")),
+            ("EUR/USD", Some("EUR")),
+            ("AAPL", Some("AAPL")),
+            ("CRYPTO:BTC", Some("BTC")),
+        ] {
+            assert_eq!(source.pair_base(ticker).as_deref(), base, "{ticker}");
+        }
+    }
+
+    fn pair(ticker: &str, currency: &str) -> PricePair {
+        PricePair {
+            ticker: ticker.to_string(),
+            currency: currency.to_string(),
+        }
+    }
+
+    fn read(source: &dyn PriceSource, ticker: &str, currency: &str) -> (String, String) {
+        let pair = source.bean_price_pair(pair(ticker, currency));
+        (pair.ticker, pair.currency)
+    }
+
+    /// beanprice's `alphavantage` `price:SYMBOL:BASE` and `fx:CCY:BASE`
+    /// read into rledger's stock and `CCY/BASE` forms (#2866), the cases
+    /// of beanprice's own `alphavantage_test.py`.
+    #[test]
+    fn test_bean_price_pair() {
+        let source = AlphaVantageSource::new(Duration::from_secs(30));
+        assert_eq!(
+            read(&source, "price:IBM:USD", "EUR"),
+            ("IBM".to_string(), "USD".to_string())
+        );
+        assert_eq!(
+            read(&source, "fx:USD:CHF", "EUR"),
+            ("USD/CHF".to_string(), "CHF".to_string())
+        );
+        assert_eq!(
+            read(&source, "price:BRK.B:USD", "USD"),
+            ("BRK.B".to_string(), "USD".to_string())
+        );
+        // rledger's own forms, and what beanprice refuses, are left as
+        // they are.
+        for ticker in [
+            "AAPL",
+            "EUR/USD",
+            "CRYPTO:BTC",
+            "INVALID",
+            "price::USD",
+            "bond:X:USD",
+        ] {
+            assert_eq!(
+                read(&source, ticker, "USD"),
+                (ticker.to_string(), "USD".to_string())
+            );
+        }
+    }
 
     #[test]
     fn test_build_stock_url() {

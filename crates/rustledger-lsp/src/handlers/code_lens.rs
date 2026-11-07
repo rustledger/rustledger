@@ -817,10 +817,11 @@ mod tests {
         // recovers from the trailing garbage). The malformed line at
         // the END forces `parse_result.errors` to be non-empty without
         // making the test depend on parser-recovery behavior at the
-        // top of the file.
+        // top of the file. The line starts with `@`: a column-0 `!` line
+        // is a comment, as in beancount (#2779), so it would not do.
         let source = r#"2024-01-01 open Assets:Bank USD
 2024-01-31 balance Assets:Bank 100.00 USD
-!!! syntax garbage on a trailing line
+@@@ syntax garbage on a trailing line
 "#;
         let result = parse(source);
         assert!(

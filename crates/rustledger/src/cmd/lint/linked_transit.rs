@@ -116,6 +116,44 @@ impl std::fmt::Display for Status {
 struct Location {
     file: String,
     line: usize,
+    /// The leg's postings to a configured transit account, as booked.
+    transit: Vec<TransitPosting>,
+}
+
+/// One posting to a configured transit account, in the JSON report.
+#[derive(Serialize)]
+struct TransitPosting {
+    account: String,
+    /// `None` when booking left the amount incomplete.
+    amount: Option<TransitAmount>,
+}
+
+/// A booked amount, its number as written (`"100.00"`), so no precision
+/// is lost to a JSON float.
+#[derive(Serialize)]
+struct TransitAmount {
+    number: String,
+    currency: String,
+}
+
+/// Why two comparable transit postings are not a match, naming what
+/// differs, or `None` when they match: one account, one currency, equal
+/// non-zero amounts of opposite sign.
+fn mismatch_reason(a: (&str, &Amount), b: (&str, &Amount)) -> Option<String> {
+    let ((account_a, amount_a), (account_b, amount_b)) = (a, b);
+    if account_a != account_b {
+        Some(format!("account: {account_a} vs {account_b}"))
+    } else if amount_a.currency != amount_b.currency {
+        Some(format!("currency: {amount_a} vs {amount_b}"))
+    } else if amount_a.number.is_zero() || amount_b.number.is_zero() {
+        Some(format!("zero transit amount: {amount_a} vs {amount_b}"))
+    } else if amount_a.number.is_sign_negative() == amount_b.number.is_sign_negative() {
+        Some(format!("direction: {amount_a} vs {amount_b} (same sign)"))
+    } else if amount_a.number != -amount_b.number {
+        Some(format!("amount: {amount_a} vs {amount_b}"))
+    } else {
+        None
+    }
 }
 
 struct Leg {
@@ -366,10 +404,7 @@ pub fn run_with_writer<W: std::io::Write>(
                         .is_some_and(|&count| count > 1);
                     (
                         (canonical.clone(), directive.span.start),
-                        Location {
-                            file: canonical.display().to_string(),
-                            line,
-                        },
+                        (canonical.display().to_string(), line),
                         Some((source.path.clone(), line)),
                         shared.then_some(
                             "several transactions share one source location \
@@ -388,7 +423,7 @@ pub fn run_with_writer<W: std::io::Write>(
                         );
                     (
                         (PathBuf::from(format!("<unlocated {unlocated}>")), 0),
-                        Location { file, line },
+                        (file, line),
                         None,
                         Some("a plugin inserted this transaction, which has no source location"),
                     )
@@ -409,8 +444,9 @@ pub fn run_with_writer<W: std::io::Write>(
                     .entry(key.clone())
                     .or_insert_with(|| Leg {
                         location: Location {
-                            file: location.file.clone(),
-                            line: location.line,
+                            file: location.0.clone(),
+                            line: location.1,
+                            transit: Vec::new(),
                         },
                         postings: txn
                             .postings
@@ -485,20 +521,14 @@ pub fn run_with_writer<W: std::io::Write>(
             let (account_a, amount_a) = &legs[0].postings[0];
             let (account_b, amount_b) = &legs[1].postings[0];
             match (amount_a, amount_b) {
-                (Some(a), Some(b))
-                    if account_a == account_b
-                        && a.currency == b.currency
-                        && !a.number.is_zero()
-                        && a.number == -b.number =>
-                {
-                    (
-                        Status::Matched,
-                        "opposite equal transit amounts".to_string(),
-                    )
-                }
-                (Some(_), Some(_)) => (
-                    Status::Mismatch,
-                    "transit account, currency, amount, or direction differs".to_string(),
+                (Some(a), Some(b)) => mismatch_reason((account_a, a), (account_b, b)).map_or_else(
+                    || {
+                        (
+                            Status::Matched,
+                            "opposite equal transit amounts".to_string(),
+                        )
+                    },
+                    |reason| (Status::Mismatch, reason),
                 ),
                 // Booking completes every posting it accepts; an amount it
                 // left incomplete is not one this lint can compare.
@@ -512,7 +542,23 @@ pub fn run_with_writer<W: std::io::Write>(
             link,
             status,
             reason,
-            locations: legs.into_iter().map(|l| l.location).collect(),
+            locations: legs
+                .into_iter()
+                .map(|leg| Location {
+                    transit: leg
+                        .postings
+                        .into_iter()
+                        .map(|(account, amount)| TransitPosting {
+                            account,
+                            amount: amount.map(|a| TransitAmount {
+                                number: a.number.to_string(),
+                                currency: a.currency.to_string(),
+                            }),
+                        })
+                        .collect(),
+                    ..leg.location
+                })
+                .collect(),
         });
     }
 
@@ -1190,6 +1236,74 @@ mod tests {
                 .unwrap()
                 .contains("share one source location"),
             "{found}"
+        );
+    }
+
+    #[test]
+    fn test_run_with_writer_mismatch_names_what_differs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.bean");
+        let cases = [
+            (
+                "xfer-amount",
+                "Assets:Transit 100.00 USD",
+                "Assets:Transit -90.00 USD",
+                "amount: 100.00 USD vs -90.00 USD",
+            ),
+            (
+                "xfer-currency",
+                "Assets:Transit 100 USD",
+                "Assets:Transit -100 EUR",
+                "currency: 100 USD vs -100 EUR",
+            ),
+            (
+                "xfer-direction",
+                "Assets:Transit 100 USD",
+                "Assets:Transit 100 USD",
+                "direction: 100 USD vs 100 USD (same sign)",
+            ),
+            (
+                "xfer-account",
+                "Assets:Transit 100 USD",
+                "Assets:OtherTransit -100 USD",
+                "account: Assets:Transit vs Assets:OtherTransit",
+            ),
+        ];
+        let mut source = String::new();
+        for (link, a, b, _) in cases {
+            source.push_str(&transaction(link, a, "Assets:Cash"));
+            source.push_str(&transaction(link, b, "Assets:Cash"));
+        }
+        // Both sides explicit, so booking keeps the zero postings.
+        source.push_str(&transaction(
+            "xfer-zero",
+            "Assets:Transit 0 USD",
+            "Assets:Cash 0 USD",
+        ));
+        source.push_str(&transaction(
+            "xfer-zero",
+            "Assets:Transit 0 USD",
+            "Assets:Cash 0 USD",
+        ));
+        write_ledger(&path, source).unwrap();
+        let report = inspect(vec![path], &["Assets:Transit", "Assets:OtherTransit"]).unwrap();
+        for (link, _, _, reason) in cases
+            .iter()
+            .map(|&(link, a, b, reason)| (link, a, b, reason))
+            .chain([("xfer-zero", "", "", "zero transit amount: 0 USD vs 0 USD")])
+        {
+            let found = finding(&report, link);
+            assert_eq!(found["status"], "mismatch", "{link}: {found}");
+            assert_eq!(found["reason"], reason, "{link}: {found}");
+        }
+        // The amounts are in the JSON, numbers as written.
+        assert_eq!(
+            finding(&report, "xfer-amount")["locations"][1]["transit"],
+            serde_json::json!([{
+                "account": "Assets:Transit",
+                "amount": {"number": "-90.00", "currency": "USD"}
+            }]),
+            "{report}"
         );
     }
 }

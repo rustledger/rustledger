@@ -429,6 +429,33 @@ export function formatQueryResult(result: QueryResult): string {
   return [header, separator, ...formattedRows].join("\n");
 }
 
+/**
+ * The response to a query result from the wasm entry points (`query`,
+ * `balances`, `queryMultiFile`), by the rule they decide with (#2861, #2882).
+ *
+ * The wasm side decides whether the ledger could be queried: a parse or
+ * booking failure, or a query that does not parse, gives no columns, and that
+ * is an error response. Anything else it reports, a plugin's error, a missing
+ * include, a failing balance assertion, is a diagnostic shown beside the rows:
+ * such a ledger still answers, as `rledger query` and bean-query answer.
+ * Before #2882 the source-text tools (`query`, `balances`, `report`) refused
+ * whenever the result held an error, so a plugin's error hid the rows.
+ */
+export function queryResponse(result: QueryResult, heading = ""): ToolResponse {
+  if (!result.columns || result.columns.length === 0) {
+    const blocking = fatalErrors(result.errors);
+    if (blocking.length > 0) {
+      return errorResponse(formatErrors(blocking));
+    }
+  }
+  const table = formatQueryResult(result);
+  const diagnostics = result.errors ?? [];
+  return textResponse(
+    heading +
+      (diagnostics.length > 0 ? `${table}\n\n${formatErrors(diagnostics)}` : table)
+  );
+}
+
 /** A position as the wasm query wire sends it: units, and its cost if any. */
 interface PositionCell {
   units: { number: string; currency: string };

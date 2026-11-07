@@ -297,6 +297,78 @@ mod query_answer_rule {
             );
         }
     }
+
+    /// The source-text surfaces follow the same rule (#2882) on the cases
+    /// whose ledger is one file: `query(source)`, and `ParsedLedger.query`
+    /// fresh and from cache. `query` refused on any severity-error, and
+    /// `ParsedLedger.query` on any load error, so both returned no rows over
+    /// the plugin-error case.
+    #[wasm_bindgen_test]
+    fn source_query_surfaces_answer_or_refuse_by_the_shared_rule() {
+        let mut ran = 0;
+        for case in QUERY_RULE_CASES.iter().filter(|c| c.source_text) {
+            ran += 1;
+            let source = case
+                .files
+                .iter()
+                .find(|(path, _)| *path == case.entry)
+                .expect("the entry file")
+                .1;
+            let result = rustledger_wasm::query(source, QUERY_RULE_QUERY).expect("query");
+            check(case, "query", &result, &get_field(&result, "errors"));
+
+            let ledger = rustledger_wasm::ParsedLedger::new(source);
+            check(
+                case,
+                "ParsedLedger.query",
+                &ledger.query(QUERY_RULE_QUERY).expect("query"),
+                &ledger.get_errors().expect("getErrors"),
+            );
+            let restored = rustledger_wasm::ParsedLedger::from_cache(
+                &ledger.serialize().expect("serialize"),
+                source,
+            )
+            .expect("fromCache");
+            check(
+                case,
+                "ParsedLedger.query from cache",
+                &restored.query(QUERY_RULE_QUERY).expect("query"),
+                &restored.get_errors().expect("getErrors"),
+            );
+        }
+        assert!(ran >= 4, "only {ran} source-text cases");
+    }
+
+    /// An `include` in source text has no file to read, and is reported as
+    /// missing; `query(source)` answers over it, as over a missing include
+    /// in a file (#2882). It refused, the error being severity-error.
+    #[wasm_bindgen_test]
+    fn source_query_answers_over_an_unresolved_include() {
+        let source = concat!(
+            "include \"other.beancount\"\n",
+            "2024-01-01 open Assets:Cash\n2024-01-01 open Income:Salary\n",
+            "2024-01-02 * \"pay\"\n  Assets:Cash  100 USD\n  Income:Salary\n",
+        );
+        let case = QueryRuleCase {
+            name: "include in source text",
+            entry: "main.beancount",
+            files: &[],
+            rows: Some(&["pay"]),
+            error: Some("other.beancount"),
+            confinement: Confinement::Any,
+            disk_only: false,
+            source_text: true,
+        };
+        let result = rustledger_wasm::query(source, QUERY_RULE_QUERY).expect("query");
+        check(&case, "query", &result, &get_field(&result, "errors"));
+        let ledger = rustledger_wasm::ParsedLedger::new(source);
+        check(
+            &case,
+            "ParsedLedger.query",
+            &ledger.query(QUERY_RULE_QUERY).expect("query"),
+            &ledger.get_errors().expect("getErrors"),
+        );
+    }
 }
 
 /// `queryWithHost` treats a `readFile` that throws an error whose `code` is

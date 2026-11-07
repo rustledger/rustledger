@@ -373,7 +373,11 @@ use crate::types::{Error, LedgerOptions};
 /// v76: loader v59, PARSER OUTPUT changed (#2787). A line's overlapping
 /// errors are reported once, as in beancount; a v75 blob would keep serving
 /// such a file with its old errors.
-pub const CACHE_VERSION: u32 = 76;
+/// v77: the `ParsedLedger` payload gained `query_refused`, whether an error
+/// that blocks queries (`LedgerError::blocks_queries`) stops them (#2882); a
+/// restored ledger refused on any load error. Loader output is unchanged; a
+/// v76 blob has no such field and would not deserialize as this layout.
+pub const CACHE_VERSION: u32 = 77;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -437,6 +441,10 @@ pub struct ParsedLedgerPayload {
     /// a query over an invalid option.
     pub option_errors: Vec<Error>,
     pub validation_errors: Vec<Error>,
+    /// Whether a query over the ledger refuses (`LedgerError::blocks_queries`,
+    /// #2882: a parse error or a booking failure). The archived
+    /// `parse_errors` do not carry the flag, so it is archived beside them.
+    pub query_refused: bool,
 }
 
 /// Cache payload for a [`super::parsed_ledger::Ledger`].
@@ -869,6 +877,7 @@ option "operating_currency" "USD"
             parse_errors: Vec::new(),
             option_errors: Vec::new(),
             validation_errors: Vec::new(),
+            query_refused: false,
         };
 
         let bytes = serialize_parsed(&payload).expect("serialize");
@@ -971,6 +980,7 @@ option "operating_currency" "USD"
             parse_errors: Vec::new(),
             option_errors: Vec::new(),
             validation_errors: Vec::new(),
+            query_refused: false,
         })
         .unwrap();
         assert!(

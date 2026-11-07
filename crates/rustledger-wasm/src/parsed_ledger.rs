@@ -240,6 +240,12 @@ pub struct ParsedLedger {
     option_errors: Vec<Error>,
     /// Validation errors.
     validation_errors: Vec<Error>,
+    /// Whether a query refuses: the load reported a parse error or a booking
+    /// failure (`LedgerError::blocks_queries`, the rule the file-based query
+    /// surfaces share, #2861, #2882). Any other load error in `parse_errors`,
+    /// a plugin's among them, is reported by `getErrors` while the query
+    /// answers, as `Ledger.query` does; before #2882 any load error refused.
+    query_refused: bool,
     /// Cached editor data (accounts, currencies, payees, line index).
     editor_cache: editor::EditorCache,
     /// The tables this ledger's `CREATE TABLE` queries made, there for its
@@ -274,6 +280,7 @@ impl ParsedLedger {
             parse_errors: load.errors,
             option_errors: load.option_errors,
             validation_errors,
+            query_refused: load.query_blocked,
             editor_cache,
             created_tables: std::cell::RefCell::default(),
         }
@@ -342,7 +349,7 @@ impl ParsedLedger {
     /// (#2579).
     #[wasm_bindgen]
     pub fn query(&self, query_str: &str) -> Result<JsValue, JsError> {
-        if !self.parse_errors.is_empty() {
+        if self.query_refused {
             let result = QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
@@ -518,6 +525,7 @@ impl ParsedLedger {
             parse_errors: self.parse_errors.clone(),
             option_errors: self.option_errors.clone(),
             validation_errors: self.validation_errors.clone(),
+            query_refused: self.query_refused,
         };
         cache::serialize_parsed(&payload).map_err(|e| JsError::new(&e))
     }
@@ -559,6 +567,7 @@ impl ParsedLedger {
             parse_errors: payload.parse_errors,
             option_errors: payload.option_errors,
             validation_errors: payload.validation_errors,
+            query_refused: payload.query_refused,
             editor_cache,
             created_tables: std::cell::RefCell::default(),
         })

@@ -769,11 +769,16 @@ macro_rules! summary_options {
     };
 }
 
-/// Short-circuit on load (parse/booking) errors, then run one query over the
-/// pad-expanded directives — matching `handle_query` (FFI's `load_source` does
-/// not pad-expand, so balance-computing consumers must opt in explicitly).
+/// Refuse when a load error blocks queries, then run one query over the
+/// pad-expanded directives (FFI's `load_source` does not pad-expand, so
+/// balance-computing consumers must opt in explicitly).
+///
+/// The rule is the file-based surfaces' (#2861, #2882): a parse error or a
+/// booking failure refuses, reporting the load's errors; any other load error,
+/// a plugin's among them, is reported ahead of the rows. Before #2882 any load
+/// error refused, a plugin's warning included.
 fn query_loaded(loaded: &ffi::helpers::LoadResult, query_str: &str) -> out::QueryResult {
-    if !loaded.errors.is_empty() {
+    if loaded.blocks_queries() {
         return out::QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
@@ -782,12 +787,27 @@ fn query_loaded(loaded: &ffi::helpers::LoadResult, query_str: &str) -> out::Quer
     }
     let directives = rustledger_booking::merge_with_padding_spanned(&loaded.spanned_directives);
     let memo = std::sync::OnceLock::new();
-    run_query(
-        &directives,
-        &loaded.source_map,
-        loaded_query_context(loaded, &memo),
-        query_str,
+    with_load_errors(
+        loaded,
+        run_query(
+            &directives,
+            &loaded.source_map,
+            loaded_query_context(loaded, &memo),
+            query_str,
+        ),
     )
+}
+
+/// `result` with `loaded`'s errors (none of which blocks queries) ahead of
+/// the query's own, as a session's `query` reports them.
+fn with_load_errors(
+    loaded: &ffi::helpers::LoadResult,
+    mut result: out::QueryResult,
+) -> out::QueryResult {
+    result
+        .errors
+        .splice(0..0, loaded.errors.iter().cloned().map(error));
+    result
 }
 
 /// The context of a query over a source loaded with
@@ -931,12 +951,30 @@ fn run_query_with_tables(
     }
 }
 
-/// `query.batch` — load `source` once, then run several queries against it.
-/// On parse errors, every query returns the canonical short-circuit error
-/// (matching `handle_batch`); otherwise pads are expanded once for all queries.
+/// The error every query of a refused [`batch`] reports; the load errors that
+/// caused it are in the batch's `load`.
+const BATCH_REFUSED: &str = "Cannot execute query: a load error leaves the ledger incomplete (a parse or booking error); see the load errors";
+
+/// `query.batch`: load `source` once, then run several queries against it,
+/// by [`query`]'s rule (#2882): when a load error blocks queries (a parse
+/// error, a booking failure), every query refuses with the one error naming
+/// that; otherwise pads are expanded once for all queries, and each result
+/// reports the load's errors ahead of its own, as `batch-file`'s do.
+///
+/// Before #2882 any load error refused, a plugin's warning included, with
+/// `Cannot execute query: parse errors exist` whatever the cause.
 pub fn batch(source: &str, queries: &[String]) -> out::BatchResult {
     let loaded = ffi::helpers::load_source(source);
-    let query_results: Vec<out::QueryResult> = if loaded.errors.is_empty() {
+    let query_results: Vec<out::QueryResult> = if loaded.blocks_queries() {
+        queries
+            .iter()
+            .map(|_| out::QueryResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+                errors: vec![simple_error(BATCH_REFUSED.to_string())],
+            })
+            .collect()
+    } else {
         let directives = rustledger_booking::merge_with_padding_spanned(&loaded.spanned_directives);
         // One memo for the batch: discrepancies are recomputed at most once,
         // by the first query that reads them (#2823).
@@ -944,23 +982,15 @@ pub fn batch(source: &str, queries: &[String]) -> out::BatchResult {
         queries
             .iter()
             .map(|q| {
-                run_query(
-                    &directives,
-                    &loaded.source_map,
-                    loaded_query_context(&loaded, &memo),
-                    q,
+                with_load_errors(
+                    &loaded,
+                    run_query(
+                        &directives,
+                        &loaded.source_map,
+                        loaded_query_context(&loaded, &memo),
+                        q,
+                    ),
                 )
-            })
-            .collect()
-    } else {
-        queries
-            .iter()
-            .map(|_| out::QueryResult {
-                columns: Vec::new(),
-                rows: Vec::new(),
-                errors: vec![simple_error(
-                    "Cannot execute query: parse errors exist".to_string(),
-                )],
             })
             .collect()
     };
@@ -1762,8 +1792,8 @@ pub struct SessionState {
     /// booking failure: [`rustledger_loader::LedgerError::blocks_queries`],
     /// the rule the file-based query surfaces share, #2861), or the load
     /// failed outright. Every other error, an include of a missing file among
-    /// them, is reported beside the rows. A session from source text sets it
-    /// by its own, older rule: any load error.
+    /// them, is reported beside the rows. A session from source text follows
+    /// the same rule (#2882); it refused on any load error before.
     query_blocked: bool,
     options: wit::LedgerOptions,
     plugins: Vec<ffi::Plugin>,
@@ -1851,11 +1881,15 @@ impl SessionState {
             .iter()
             .map(|s| (s.span, s.file_id))
             .collect();
+        // The file-based rule (#2882): only a parse error or a booking failure
+        // refuses; any other load error is reported beside the rows. Any load
+        // error refused before.
+        let query_blocked = loaded.blocks_queries();
         Self {
             directives: loaded.directives,
             lines: loaded.directive_lines,
             files,
-            query_blocked: !loaded.errors.is_empty(),
+            query_blocked,
             errors: loaded.errors.into_iter().map(error).collect(),
             options: options(loaded.options),
             plugins: loaded.plugins,
@@ -4485,12 +4519,11 @@ mod query_answer_rule {
                 text(&row[0])
             })
             .collect();
-        match case.rows {
-            Some(rows) => assert_eq!(got, rows, "{context}"),
-            None => {
-                assert!(got.is_empty(), "{context}");
-                assert!(!result.errors.is_empty(), "{context}");
-            }
+        if let Some(rows) = case.rows {
+            assert_eq!(got, rows, "{context}");
+        } else {
+            assert!(got.is_empty(), "{context}");
+            assert!(!result.errors.is_empty(), "{context}");
         }
         if let Some(error) = case.error {
             assert!(
@@ -4530,5 +4563,43 @@ mod query_answer_rule {
                 );
             }
         }
+    }
+
+    /// The source-text surfaces follow the same rule (#2882) on the cases
+    /// whose ledger is one file: `query`, `batch` and a session from source.
+    /// Before, each refused over any load error, so the plugin-error case
+    /// returned no rows.
+    #[test]
+    fn test_source_queries_answer_or_refuse_by_the_shared_rule() {
+        let mut ran = 0;
+        for case in QUERY_RULE_CASES.iter().filter(|c| c.source_text) {
+            ran += 1;
+            let source = case
+                .files
+                .iter()
+                .find(|(path, _)| *path == case.entry)
+                .expect("the entry file")
+                .1;
+            check(case, "query", &super::query(source, QUERY_RULE_QUERY));
+            let batch = super::batch(source, &[QUERY_RULE_QUERY.to_string()]);
+            check(case, "batch", &batch.queries[0]);
+            if case.rows.is_none() {
+                // The refusal names itself; the cause is in the load.
+                assert_eq!(
+                    batch.queries[0].errors[0].message,
+                    super::BATCH_REFUSED,
+                    "{}",
+                    case.name
+                );
+                assert!(!batch.load.errors.is_empty(), "{}", case.name);
+            }
+            let session = super::SessionState::from_source(source);
+            check(
+                case,
+                "session from source",
+                &session.query(QUERY_RULE_QUERY),
+            );
+        }
+        assert!(ran >= 4, "only {ran} source-text cases");
     }
 }

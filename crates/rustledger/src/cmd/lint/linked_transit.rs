@@ -73,6 +73,11 @@ pub struct Args {
     /// Exact transit account name (repeat for multiple accounts).
     #[arg(long, required = true)]
     pub account: Vec<String>,
+    /// Exit 1 when a link ends in one of these statuses (comma-separated or
+    /// repeated), as `check` exits 1 on an error; for CI or a pre-commit
+    /// hook. Without it, findings are advisory and the exit status is 0.
+    #[arg(long, value_enum, value_delimiter = ',', value_name = "STATUS")]
+    pub fail_on: Vec<Status>,
     /// Output format.
     #[arg(long, short = 'f', value_enum, default_value_t = OutputFormat::Text)]
     pub format: OutputFormat,
@@ -94,6 +99,14 @@ pub enum Status {
 }
 
 impl Status {
+    /// Every status, in the order the count line lists them.
+    pub const ALL: [Self; 4] = [
+        Self::Matched,
+        Self::Mismatch,
+        Self::Missing,
+        Self::Ambiguous,
+    ];
+
     /// The lowercase name, as in the JSON and the text output.
     #[must_use]
     pub const fn as_str(self) -> &'static str {
@@ -642,6 +655,8 @@ pub fn run_with_writer<W: std::io::Write>(
         );
     }
 
+    // `--fail-on`: decided before the findings are consumed by the output.
+    let failed = findings.iter().any(|f| args.fail_on.contains(&f.status));
     let counts = Counts::of(&findings);
     match args.format {
         OutputFormat::Json => {
@@ -677,7 +692,11 @@ pub fn run_with_writer<W: std::io::Write>(
             }
         }
     }
-    Ok(ExitCode::SUCCESS)
+    Ok(if failed {
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    })
 }
 
 #[cfg(test)]
@@ -700,6 +719,7 @@ mod tests {
             files,
             link_prefix: link_prefix.into(),
             account: accounts.iter().map(|a| (*a).into()).collect(),
+            fail_on: Vec::new(),
             format: OutputFormat::Json,
         };
         let mut output = Vec::new();
@@ -1003,6 +1023,7 @@ mod tests {
             files: vec![path],
             link_prefix: String::new(),
             account: vec!["Assets:Transit".into()],
+            fail_on: Vec::new(),
             format: OutputFormat::Json,
         };
         assert!(run_with_writer(&args, &mut Vec::new(), None, &mut Vec::new()).is_err());
@@ -1090,6 +1111,7 @@ mod tests {
             files: vec![path],
             link_prefix: "^xfer-".into(),
             account: vec!["Assets:Transit".into(), "Assets:Transitt".into()],
+            fail_on: Vec::new(),
             format: OutputFormat::Text,
         };
         let mut out = Vec::new();
@@ -1376,6 +1398,7 @@ mod tests {
             files: vec![path.clone()],
             link_prefix: "xfer-".into(),
             account: vec!["Assets:Transit".into()],
+            fail_on: Vec::new(),
             format: OutputFormat::Text,
         };
         let mut out = Vec::new();
@@ -1434,6 +1457,88 @@ mod tests {
             finding(&report, "xfer-a")["locations"][0]["file"],
             closed["findings"][0]["file"],
             "{report}\n{closed}"
+        );
+    }
+
+    #[test]
+    fn test_run_with_writer_fail_on_exits_one_for_a_listed_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.bean");
+        write_ledger(
+            &path,
+            format!(
+                "{}{}{}",
+                transaction("xfer-a", "Assets:Transit 5 USD", "Assets:Cash"),
+                transaction("xfer-a", "Assets:Transit -5 USD", "Assets:Cash"),
+                transaction("xfer-b", "Assets:Transit 5 USD", "Assets:Cash"),
+            ),
+        )
+        .unwrap();
+        let exit = |fail_on: Vec<Status>| {
+            let args = Args {
+                files: vec![path.clone()],
+                link_prefix: "xfer-".into(),
+                account: vec!["Assets:Transit".into()],
+                fail_on,
+                format: OutputFormat::Json,
+            };
+            run_with_writer(&args, &mut Vec::new(), None, &mut Vec::new()).unwrap()
+        };
+        // One match and one missing leg.
+        assert_eq!(exit(vec![]), ExitCode::SUCCESS);
+        assert_eq!(
+            exit(vec![Status::Mismatch, Status::Ambiguous]),
+            ExitCode::SUCCESS
+        );
+        assert_eq!(exit(vec![Status::Missing]), ExitCode::from(1));
+        assert_eq!(
+            exit(vec![Status::Mismatch, Status::Missing]),
+            ExitCode::from(1)
+        );
+        // From the command line, comma-separated or repeated.
+        for argv in [
+            vec![
+                "lint",
+                "f",
+                "--link-prefix",
+                "x",
+                "--account",
+                "A:B",
+                "--fail-on",
+                "mismatch,missing",
+            ],
+            vec![
+                "lint",
+                "f",
+                "--link-prefix",
+                "x",
+                "--account",
+                "A:B",
+                "--fail-on",
+                "mismatch",
+                "--fail-on",
+                "missing",
+            ],
+        ] {
+            let parsed = Args::try_parse_from(&argv).unwrap();
+            assert_eq!(
+                parsed.fail_on,
+                vec![Status::Mismatch, Status::Missing],
+                "{argv:?}"
+            );
+        }
+        assert!(
+            Args::try_parse_from([
+                "lint",
+                "f",
+                "--link-prefix",
+                "x",
+                "--account",
+                "A:B",
+                "--fail-on",
+                "nope"
+            ])
+            .is_err()
         );
     }
 }

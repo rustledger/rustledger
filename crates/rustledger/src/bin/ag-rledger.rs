@@ -925,7 +925,8 @@ fn lint_command() -> Command {
             "ag-rledger lint <transfers|linked-transit|closed-nonempty|control-chars> <file>... [--format <format>] [-f <format>]  |  \
              transfers: [--min-confidence <n>] [--date-window <days>] \
              [--amount-tolerance <amount>] [--apply]  |  \
-             linked-transit: --link-prefix <prefix> --account <account>...",
+             linked-transit: --link-prefix <prefix> --account <account>... \
+             [--fail-on <mismatch,missing,ambiguous,matched>]",
         ))
         .allow_unknown_flags()
         .allow_extra_args()
@@ -2117,6 +2118,22 @@ fn build_lint_args(req: &Req<'_>) -> Result<rustledger::cmd::lint::Args, Command
             files,
             link_prefix: string_flag(req, "link-prefix", None).unwrap_or_default(),
             account: flag_values(req, "account", None),
+            fail_on: {
+                let names: Vec<&str> = linked_transit::Status::ALL
+                    .iter()
+                    .map(|s| s.as_str())
+                    .collect();
+                flag_values(req, "fail-on", None)
+                    .iter()
+                    .map(|value| {
+                        linked_transit::Status::ALL
+                            .iter()
+                            .copied()
+                            .find(|s| s.as_str() == value)
+                            .ok_or_else(|| invalid_enum("fail-on", value, &names))
+                    })
+                    .collect::<Result<_, _>>()?
+            },
             format: match format {
                 "text" => closed_nonempty::OutputFormat::Text,
                 "json" => closed_nonempty::OutputFormat::Json,
@@ -2819,7 +2836,8 @@ const MULTI_VALUE_SHORTS: &[(&[&str], char, &str)] = &[
 /// name takes one value (`report --account` and `extract --account` are a
 /// single account; `lint linked-transit --account` is repeated, one transit
 /// account each).
-const MULTI_VALUE_COMMAND_FLAGS: &[(&[&str], &str)] = &[(&["lint"], "account")];
+const MULTI_VALUE_COMMAND_FLAGS: &[(&[&str], &str)] =
+    &[(&["lint"], "account"), (&["lint"], "fail-on")];
 
 /// Merge every repeated [`MULTI_VALUE_FLAGS`] flag (and each
 /// [`MULTI_VALUE_COMMAND_FLAGS`] flag, in its command) into one comma-joined

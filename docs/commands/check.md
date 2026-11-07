@@ -83,8 +83,13 @@ A transaction a plugin inserted with no source location of its own, or at a
 location another transaction already has (`forecast` copies, `effective_date`
 splits), makes its link `ambiguous`: it cannot be told apart from the other.
 
-Findings are advisory and do not change the exit status. A match is not
-evidence of external settlement, domain isolation, or a persistent transfer
+Findings are advisory and exit 0 unless `--fail-on` names a status:
+`--fail-on mismatch,missing,ambiguous` (comma-separated or repeated) exits 1
+when any link ends in one of them, as `rledger check` exits 1 on an error, so
+the lint can gate CI or a pre-commit hook. A refusal (load or processing
+failure, bad configuration) also exits 1. In `ag-rledger` the envelope stays
+`"ok": true`, with `exit_code` and `result.exit_status` 1, as for `check`. A
+match is not evidence of external settlement, domain isolation, or a persistent transfer
 lifecycle.
 
 ## Examples

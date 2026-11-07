@@ -57,19 +57,20 @@ pub fn validate_pad(
     location: Option<(rustledger_parser::Span, u16)>,
     errors: &mut Vec<ValidationError>,
 ) {
-    // Check that the target account exists
-    if !require_account_open(state, &pad.account, pad.date, "Pad target account", errors) {
-        return;
-    }
-
-    // Check that the source account exists
-    if !require_account_open(
+    // Check that both accounts exist. Both are checked before either fails
+    // the pad, as beancount reports each (`Invalid account name` or `unknown
+    // account`): stopping at an unopened target hid an invalid source name
+    // (#2809).
+    let target_open =
+        require_account_open(state, &pad.account, pad.date, "Pad target account", errors);
+    let source_open = require_account_open(
         state,
         &pad.source_account,
         pad.date,
         "Pad source account",
         errors,
-    ) {
+    );
+    if !(target_open && source_open) {
         return;
     }
 

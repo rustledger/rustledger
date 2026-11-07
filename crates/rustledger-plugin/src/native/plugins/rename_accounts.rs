@@ -44,7 +44,7 @@ impl NativePlugin for RenameAccountsPlugin {
                     // says why: beancount's plugin raises on one.
                     return PluginOutput {
                         ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
-                        errors: vec![PluginError::error(message)],
+                        errors: vec![PluginError::error(message).mark_failed()],
                     };
                 }
             },
@@ -69,7 +69,7 @@ impl NativePlugin for RenameAccountsPlugin {
                 Err(message) => {
                     return PluginOutput {
                         ops: (0..input.directives.len()).map(PluginOp::Keep).collect(),
-                        errors: vec![PluginError::error(message)],
+                        errors: vec![PluginError::error(message).mark_failed()],
                     };
                 }
             };

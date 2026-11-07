@@ -80,9 +80,12 @@ impl NativePlugin for OneCommodityPlugin {
                 Err(e) => {
                     return PluginOutput {
                         ops,
-                        errors: vec![PluginError::error(format!(
-                            "Invalid regular expression for onecommodity: '{pattern}': {e}"
-                        ))],
+                        errors: vec![
+                            PluginError::error(format!(
+                                "Invalid regular expression for onecommodity: '{pattern}': {e}"
+                            ))
+                            .mark_failed(),
+                        ],
                     };
                 }
             },
@@ -110,10 +113,11 @@ impl NativePlugin for OneCommodityPlugin {
                     None | Some(Ok(true)) => false,
                     Some(Ok(false)) => true,
                     Some(Err(error)) => {
-                        refused.push(PluginError::error(format!(
+                        let message = format!(
                             "onecommodity: the pattern cannot be matched against {}: {error}",
                             open.account
-                        )));
+                        );
+                        refused.push(PluginError::error(message).mark_failed());
                         true
                     }
                 };

@@ -249,9 +249,22 @@ struct Reported {
 /// [`Reported`] list.
 type ErrorsByLine = HashMap<PathBuf, BTreeMap<usize, Vec<usize>>>;
 
-/// The errors located on lines `first..=last` of `file`: a transaction's
-/// header line and its postings', so a plugin error located at a posting is
-/// the transaction's too.
+/// The first and last line `span` covers in `source`. A directive's span
+/// runs from its date to the start of the next directive, so for a
+/// transaction it covers the header, the postings, and any blank or comment
+/// lines before the next directive (none of which an error is located at).
+fn span_lines(
+    source: &rustledger_loader::SourceFile,
+    span: rustledger_core::Span,
+) -> (usize, usize) {
+    let (first, _) = source.line_col(span.start);
+    let (last, _) = source.line_col(span.end.saturating_sub(1).max(span.start));
+    (first, last)
+}
+
+/// The errors located on lines `first..=last` of `file`: for a transaction,
+/// the lines [`span_lines`] gives, so a plugin error located at one of its
+/// postings is the transaction's too.
 fn errors_within<'a>(
     by_line: &'a ErrorsByLine,
     file: &std::path::Path,
@@ -468,15 +481,8 @@ pub fn run_with_writer<W: std::io::Write>(
                     // path for every include of it), and the path the other
                     // lints print.
                     let (line, _) = source.line_col(directive.span.start);
-                    // The last line of the transaction: a plugin can locate
-                    // an error at one of its postings.
-                    let (last, _) = source.line_col(
-                        directive
-                            .span
-                            .end
-                            .saturating_sub(1)
-                            .max(directive.span.start),
-                    );
+                    // A plugin can locate an error at one of its postings.
+                    let (_, last) = span_lines(source, directive.span);
                     let shared = located
                         .get(&(directive.file_id, directive.span.start))
                         .is_some_and(|&count| count > 1);
@@ -1620,10 +1626,10 @@ mod tests {
         assert_status(&report, "xfer-a", "ambiguous");
     }
 
-    /// A plugin error at a posting line is the transaction's, as one at its
-    /// header is; one past its last posting, or in another file, is not.
+    /// Every line in the range counts, header and postings alike; a line
+    /// past it, or one in another file, does not.
     #[test]
-    fn test_errors_within_takes_the_transactions_posting_lines() {
+    fn test_errors_within_takes_every_line_in_the_range() {
         let file = PathBuf::from("/ledger/main.bean");
         let mut by_line = ErrorsByLine::new();
         for (line, index) in [(10, 0), (12, 1), (13, 2), (20, 3)] {
@@ -1640,12 +1646,67 @@ mod tests {
             .entry(11)
             .or_default()
             .push(4);
-        // A transaction on lines 10 to 12: its header and two postings.
+        // A range of lines 10 to 12, as span_lines gives for a transaction.
         let found: Vec<usize> = errors_within(&by_line, &file, 10, 12).collect();
         assert_eq!(found, [0, 1]);
         assert_eq!(
             errors_within(&by_line, std::path::Path::new("/ledger/none.bean"), 1, 99).count(),
             0
+        );
+    }
+
+    /// The range of a real transaction: from its header up to the next
+    /// directive, so its postings (and blank and comment lines after them)
+    /// are in it, and the next transaction is not.
+    #[test]
+    fn test_span_lines_covers_a_parsed_transaction() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.bean");
+        fs::write(
+            &path,
+            concat!(
+                "2000-01-01 open Assets:Cash\n",
+                "\n",
+                "2024-01-01 * \"a\" ^xfer-a\n",
+                "  Assets:Transit 5 USD\n",
+                "  Assets:Cash\n",
+                "\n",
+                "; a comment\n",
+                "2024-01-02 * \"b\"\n",
+                "  Assets:Cash 1 USD\n",
+                "  Assets:Transit\n",
+            ),
+        )
+        .unwrap();
+        let loaded = Loader::new().load(&path).unwrap();
+        let file = &loaded.source_map.files()[0];
+        let spans: Vec<(usize, usize)> = loaded
+            .directives
+            .iter()
+            .filter(|d| matches!(d.value, Directive::Transaction(_)))
+            .map(|d| span_lines(file, d.span))
+            .collect();
+        assert_eq!(spans.len(), 2, "{spans:?}");
+        let (first, last) = spans[0];
+        assert_eq!(first, 3, "{spans:?}");
+        // Up to the line before the next directive: the comment.
+        assert_eq!(last, 7, "{spans:?}");
+        assert_eq!(spans[1].0, 8, "{spans:?}");
+        // An error at the first transaction's second posting is its own,
+        // not the next one's.
+        let mut by_line = ErrorsByLine::new();
+        by_line
+            .entry(file.path.clone())
+            .or_default()
+            .entry(5)
+            .or_default()
+            .push(0);
+        assert_eq!(errors_within(&by_line, &file.path, first, last).count(), 1);
+        let (next_first, next_last) = spans[1];
+        assert_eq!(
+            errors_within(&by_line, &file.path, next_first, next_last).count(),
+            0,
+            "{spans:?}"
         );
     }
 }

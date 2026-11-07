@@ -61,7 +61,7 @@ const BAD_LEDGER: &str = "\
 ";
 
 #[test]
-fn linked_transit_matches_cli_and_accepts_repeated_accounts() {
+fn test_lint_linked_transit_matches_cli_and_accepts_repeated_accounts() {
     let tmp = tempfile::tempdir().unwrap();
     let file = write_fixture(
         tmp.path(),

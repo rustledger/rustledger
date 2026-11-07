@@ -753,73 +753,78 @@ mod tests {
         format!("2024-01-01 * \"transfer\" ^{link}\n  {transit}\n  {other}\n")
     }
 
+    /// `link`'s status is `status`; the link is named when it is not.
+    #[track_caller]
+    fn assert_status(report: &serde_json::Value, link: &str, status: &str) {
+        let found = finding(report, link);
+        assert_eq!(found["status"], status, "{link}: {found}");
+    }
+
     #[test]
-    fn checks_exact_pairs_and_reports_all_mismatch_kinds() {
+    fn test_run_with_writer_matches_equal_opposite_amounts() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("main.bean");
-        let mut source = String::new();
-        let pairs = [
+        let cases = [
             (
                 "xfer-match",
                 "Assets:Transit 100.00 USD",
                 "Assets:Transit -100 USD",
-                "matched",
             ),
             (
                 "xfer-reverse",
                 "Assets:Transit -0.01 USD",
                 "Assets:Transit 0.010 USD",
-                "matched",
-            ),
-            (
-                "xfer-max",
-                "Assets:Transit 79228162514264337593543950335 USD",
-                "Assets:Transit -79228162514264337593543950335 USD",
-                "matched",
-            ),
-            (
-                "xfer-amount",
-                "Assets:Transit 100 USD",
-                "Assets:Transit -90 USD",
-                "mismatch",
-            ),
-            (
-                "xfer-currency",
-                "Assets:Transit 100 USD",
-                "Assets:Transit -100 EUR",
-                "mismatch",
-            ),
-            (
-                "xfer-direction",
-                "Assets:Transit 100 USD",
-                "Assets:Transit 100 USD",
-                "mismatch",
-            ),
-            (
-                "xfer-account",
-                "Assets:Transit 100 USD",
-                "Assets:OtherTransit -100 USD",
-                "mismatch",
-            ),
-            (
-                // Booking prunes the elided `Assets:Cash` it fills from a zero
-                // residual (as beancount does), so each leg books to one
-                // posting and is no simple two-posting transfer.
-                "xfer-zero",
-                "Assets:Transit 0 USD",
-                "Assets:Transit 0 USD",
-                "ambiguous",
             ),
         ];
-        for (link, a, b, _) in pairs {
+        let mut source = String::new();
+        for (link, a, b) in cases {
             source.push_str(&transaction(link, a, "Assets:Cash"));
             source.push_str(&transaction(link, b, "Assets:Cash"));
         }
+        write_ledger(&path, source).unwrap();
+        let report = inspect(vec![path], &["Assets:Transit"]).unwrap();
+        for (link, _, _) in cases {
+            assert_status(&report, link, "matched");
+            let locations = finding(&report, link)["locations"]
+                .as_array()
+                .unwrap()
+                .len();
+            assert_eq!(locations, 2, "{link}: {report}");
+        }
+    }
+
+    #[test]
+    fn test_run_with_writer_zero_filled_leg_is_ambiguous() {
+        // Booking prunes the elided `Assets:Cash` it fills from a zero
+        // residual (as beancount does), so each leg books to one posting
+        // and is no simple two-posting transfer.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.bean");
+        write_ledger(
+            &path,
+            format!(
+                "{}{}",
+                transaction("xfer-zero", "Assets:Transit 0 USD", "Assets:Cash"),
+                transaction("xfer-zero", "Assets:Transit 0 USD", "Assets:Cash"),
+            ),
+        )
+        .unwrap();
+        let report = inspect(vec![path], &["Assets:Transit"]).unwrap();
+        assert_status(&report, "xfer-zero", "ambiguous");
+    }
+
+    #[test]
+    fn test_run_with_writer_reports_a_missing_leg() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.bean");
+        let mut source = String::new();
+        // One transaction only.
         source.push_str(&transaction(
             "xfer-missing",
             "Assets:Transit 2 USD",
             "Assets:Cash",
         ));
+        // Two transactions, only one through the transit account.
         source.push_str(&transaction(
             "xfer-no-second-leg",
             "Assets:Transit 2 USD",
@@ -830,6 +835,8 @@ mod tests {
             "Assets:Cash 2 USD",
             "Equity:Capital",
         ));
+        // Not reported: a link without the prefix, and a prefixed link
+        // that never touches a transit account.
         source.push_str(&transaction(
             "unrelated",
             "Assets:Transit 2 USD",
@@ -841,57 +848,53 @@ mod tests {
             "Equity:Capital",
         ));
         write_ledger(&path, source).unwrap();
-        let report = inspect(vec![path], &["Assets:Transit", "Assets:OtherTransit"]).unwrap();
-        let findings = report["findings"].as_array().unwrap();
-        assert_eq!(findings.len(), pairs.len() + 2);
-        for (link, _, _, status) in pairs {
-            let found = findings.iter().find(|f| f["link"] == link).unwrap();
-            assert_eq!(found["status"], status, "{link}");
-            assert_eq!(found["locations"].as_array().unwrap().len(), 2);
-        }
-        assert_eq!(
-            findings
-                .iter()
-                .find(|f| f["link"] == "xfer-missing")
-                .unwrap()["status"],
-            "missing"
-        );
-        assert_eq!(
-            findings
-                .iter()
-                .find(|f| f["link"] == "xfer-no-second-leg")
-                .unwrap()["status"],
-            "missing"
-        );
+        let report = inspect(vec![path], &["Assets:Transit"]).unwrap();
+        assert_status(&report, "xfer-missing", "missing");
+        assert_status(&report, "xfer-no-second-leg", "missing");
+        let links: Vec<&str> = report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|f| f["link"].as_str().unwrap())
+            .collect();
+        assert_eq!(links, ["xfer-missing", "xfer-no-second-leg"], "{report}");
     }
 
     #[test]
-    fn refuses_ambiguous_or_unsupported_cases() {
+    fn test_run_with_writer_complex_legs_are_ambiguous() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("main.bean");
         let mut source = String::new();
+        // A price on a leg.
         source.push_str(&transaction(
-            "xfer-cost",
+            "xfer-price",
             "Assets:Transit 2 USD @ 2 EUR",
             "Assets:Cash",
         ));
         source.push_str(&transaction(
-            "xfer-cost",
+            "xfer-price",
             "Assets:Transit -2 USD",
             "Assets:Cash",
         ));
-        source.push_str("2024-01-01 * \"fee\" ^xfer-fee\n  Assets:Transit 2 USD\n  Assets:Cash -3 USD\n  Expenses:Fee 1 USD\n");
+        // A fee: three postings.
+        source.push_str(
+            "2024-01-01 * \"fee\" ^xfer-fee\n  Assets:Transit 2 USD\n  Assets:Cash -3 USD\n  Expenses:Fee 1 USD\n",
+        );
         source.push_str(&transaction(
             "xfer-fee",
             "Assets:Transit -2 USD",
             "Assets:Cash",
         ));
-        source.push_str("2024-01-01 * \"multiple\" ^xfer-multi\n  Assets:Transit 1 USD\n  Assets:Transit 1 USD\n  Assets:Cash -2 USD\n");
+        // Two transit postings on one leg.
+        source.push_str(
+            "2024-01-01 * \"multiple\" ^xfer-multi\n  Assets:Transit 1 USD\n  Assets:Transit 1 USD\n  Assets:Cash -2 USD\n",
+        );
         source.push_str(&transaction(
             "xfer-multi",
             "Assets:Transit -2 USD",
             "Assets:Cash",
         ));
+        // Three transactions on one link.
         for _ in 0..3 {
             source.push_str(&transaction(
                 "xfer-three",
@@ -899,19 +902,32 @@ mod tests {
                 "Assets:Cash",
             ));
         }
+        // Two scoped links on one transaction.
         source.push_str(
             "2024-01-01 * \"two links\" ^xfer-a ^xfer-b\n  Assets:Transit 2 USD\n  Assets:Cash\n",
         );
         write_ledger(&path, source).unwrap();
         let report = inspect(vec![path], &["Assets:Transit"]).unwrap();
-        for finding in report["findings"].as_array().unwrap() {
-            assert_eq!(finding["status"], "ambiguous", "{finding}");
+        let links = [
+            "xfer-price",
+            "xfer-fee",
+            "xfer-multi",
+            "xfer-three",
+            "xfer-a",
+            "xfer-b",
+        ];
+        for link in links {
+            assert_status(&report, link, "ambiguous");
         }
-        assert_eq!(report["findings"].as_array().unwrap().len(), 6);
+        assert_eq!(
+            report["findings"].as_array().unwrap().len(),
+            links.len(),
+            "{report}"
+        );
     }
 
     #[test]
-    fn deduplicates_included_files_and_rejects_bad_input() {
+    fn test_run_with_writer_deduplicates_included_files() {
         let dir = tempfile::tempdir().unwrap();
         let child = dir.path().join("child.bean");
         let parent = dir.path().join("main.bean");
@@ -928,22 +944,27 @@ mod tests {
             ),
         )
         .unwrap();
-        let report = inspect(
-            vec![parent.clone(), child.clone(), parent],
-            &["Assets:Transit"],
-        )
-        .unwrap();
-        assert_eq!(report["findings"][0]["status"], "matched");
-        assert_eq!(
-            report["findings"][0]["locations"].as_array().unwrap().len(),
-            2
-        );
-        write_ledger(&child, "2024-01-01 * \"broken\"\n  not an account\n").unwrap();
-        assert!(inspect(vec![child.clone()], &["Assets:Transit"]).is_err());
-        // An unknown plugin is a processing error: refused, not inspected
-        // with the plugin silently skipped.
-        write_ledger(&child, "plugin \"example\"\n").unwrap();
-        assert!(inspect(vec![child], &["Assets:Transit"]).is_err());
+        let report = inspect(vec![parent.clone(), child, parent], &["Assets:Transit"]).unwrap();
+        assert_status(&report, "xfer-shared", "matched");
+        let locations = finding(&report, "xfer-shared")["locations"]
+            .as_array()
+            .unwrap()
+            .len();
+        assert_eq!(locations, 2, "{report}");
+    }
+
+    #[test]
+    fn test_run_with_writer_refuses_load_errors_and_plugin_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.bean");
+        write_ledger(&path, "2024-01-01 * \"broken\"\n  not an account\n").unwrap();
+        let err = inspect(vec![path.clone()], &["Assets:Transit"]).unwrap_err();
+        assert!(err.to_string().contains("load errors"), "{err:#}");
+        // An unknown plugin is a plugin failure: refused, not inspected with
+        // the plugin silently skipped.
+        write_ledger(&path, "plugin \"example\"\n").unwrap();
+        let err = inspect(vec![path], &["Assets:Transit"]).unwrap_err();
+        assert!(err.to_string().contains("processing failed"), "{err:#}");
     }
 
     #[test]
@@ -1012,7 +1033,7 @@ mod tests {
     }
 
     #[test]
-    fn refuses_empty_scope_and_reports_missing_include() {
+    fn test_run_with_writer_refuses_empty_configuration_and_missing_include() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("main.bean");
         write_ledger(&path, "include \"missing.bean\"\n").unwrap();

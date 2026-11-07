@@ -817,7 +817,7 @@ plugin "beancount_reds_plugins.zerosum.zerosum" "{
 
 Options: a Python dict, as the Python `zerosum` plugin (`beancount_reds_plugins`) reads it:
 
-- `'zerosum_accounts'`: `{account: (target_account, days)}`. Postings to `account` that sum to zero within `days` move to `target_account`; an empty (or `None`) target is derived from `account` with `'account_name_replace'`.
+- `'zerosum_accounts'`: `{account: (target_account, days)}`. Postings to `account` that sum to zero within `days` move to `target_account`; an empty (or `None`) target is derived from `account` with `'account_name_replace'`, or is `<account>-Matched` when there is none.
 - `'account_name_replace'`: `('from', 'to')`, the replacement that derives an empty target.
 - `'tolerance'`: the largest difference between two matching amounts (default `0.0099`).
 

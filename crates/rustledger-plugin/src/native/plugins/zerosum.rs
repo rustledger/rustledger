@@ -443,8 +443,8 @@ fn parse_config(
     };
 
     // Stricter than the Python plugin, deliberately: it compares any
-    // `tolerance` against amounts and fails only when a zerosum posting is
-    // reached (a string), or matches nothing sensible (`None`). A tolerance
+    // `tolerance` against amounts only once a zerosum posting is reached,
+    // and fails there (a string or `None` raises `TypeError`). A tolerance
     // that is not a number is refused up front instead.
     let tolerance = match get("tolerance") {
         None => Decimal::from_str(DEFAULT_TOLERANCE).expect("DEFAULT_TOLERANCE is a decimal"),
@@ -464,6 +464,11 @@ fn parse_config(
 /// added to a date: the whole days, rounded down (`30.5` is 30, `-0.5` is
 /// -1). An int in any literal form (`3_0`, `0x1e`), a float, or a bool
 /// (`True` is 1); `None` for anything else, which fails there too.
+///
+/// A known difference on a negative range: across two transactions it
+/// matches nothing, as in Python, but two postings in one transaction are
+/// matched here regardless of the range (the same-transaction branch does
+/// not check dates), where Python's date check still matches nothing.
 fn py_days(value: &super::py_literal::PyValue) -> Option<i64> {
     use super::py_literal::PyValue;
     let text = match value {
@@ -916,7 +921,7 @@ mod tests {
     }
 
     /// Stricter than the Python plugin, deliberately: it unpacks days and a
-    /// tolerance of any type and fails (or matches nothing) only once a
+    /// tolerance of any type and fails (`TypeError`) only once a
     /// zerosum posting is reached. A value that is not a number is refused
     /// up front here.
     #[test]

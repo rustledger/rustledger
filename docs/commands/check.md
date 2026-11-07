@@ -40,7 +40,7 @@ rledger check [OPTIONS] [FILE]
 
 ## Linked transit lint
 
-For explicitly linked transfers, opt in to a separate read-only source
+For explicitly linked transfers, opt in to a separate read-only
 inspection (it does not alter `check` or the transfer-pairing lint):
 
 ```bash
@@ -57,11 +57,13 @@ results are `missing`, `mismatch`, or `ambiguous`, with source locations.
 Includes and repeated input paths are deduplicated.
 
 The lint conservatively marks extra postings, multiple scoped links, prices,
-costs, or inferred transit amounts as ambiguous. Files with load errors or
-plugin directives are rejected. It inspects raw source, not a booked or
-validated ledger; run `rledger check` separately. Findings are advisory and
-do not change the exit status. A match is not evidence of external settlement,
-domain isolation, or a persistent transfer lifecycle.
+or costs as ambiguous. It reads the booked ledger: plugins run, and an elided
+transit amount is the amount booking computed. Files with load or processing
+errors (a plugin that fails, a transaction that cannot be booked) are refused
+rather than inspected. Validation is not run; use `rledger check` for that.
+Findings are advisory and do not change the exit status. A match is not
+evidence of external settlement, domain isolation, or a persistent transfer
+lifecycle.
 
 ## Examples
 

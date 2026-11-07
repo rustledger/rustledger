@@ -1,10 +1,17 @@
 //! Read-only inspection of explicitly linked transit postings.
+//!
+//! The lint reads the booked ledger: each input is loaded, refused if it has
+//! load errors (as `lint closed-nonempty` does), then run through
+//! [`rustledger_loader::process`] with plugins, so an elided transit amount
+//! is the amount booking computed and a `plugin` line runs as it does in
+//! `check`. A processing error refuses the input too: a transaction booking
+//! rejected is left out of the booked stream, and reporting its link as
+//! `missing` (or its partner as matched) would be a misleading answer.
 
 use anyhow::{Context, Result};
 use clap::Parser;
-use rust_decimal::Decimal;
-use rustledger_core::{Directive, Link};
-use rustledger_loader::Loader;
+use rustledger_core::{Amount, Directive, Link};
+use rustledger_loader::{ErrorSeverity, LedgerError, LoadOptions, Loader};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
@@ -12,7 +19,7 @@ use std::process::ExitCode;
 
 use super::closed_nonempty::OutputFormat;
 
-/// Inspect linked transfer legs in the unprocessed source.
+/// Inspect linked transfer legs in the booked ledger.
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 pub struct Args {
@@ -38,7 +45,7 @@ struct Location {
 
 struct Leg {
     location: Location,
-    postings: Vec<(String, Option<(Decimal, String)>)>,
+    postings: Vec<(String, Option<Amount>)>,
     complex: bool,
 }
 
@@ -63,7 +70,22 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     run_with_writer(args, &mut std::io::stdout().lock())
 }
 
-/// Inspect source transactions and write an advisory report.
+/// `file:line: CODE: message` for each error, joined for one refusal.
+fn describe_errors<'a>(errors: impl Iterator<Item = &'a LedgerError>) -> String {
+    errors
+        .map(|err| {
+            let at = err
+                .location
+                .as_ref()
+                .map(|l| format!("{}:{}: ", l.file.display(), l.line))
+                .unwrap_or_default();
+            format!("{at}{}: {}", err.code, err.message)
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Inspect booked transactions and write an advisory report.
 ///
 /// # Errors
 /// Returns an error when the inputs cannot be safely inspected or output fails.
@@ -78,6 +100,16 @@ pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<Ex
         "at least one non-empty --account is required"
     );
     let accounts: BTreeSet<&str> = args.account.iter().map(String::as_str).collect();
+    // Booking only: validation diagnostics (an unopened account, a failed
+    // balance assertion) do not change the amounts this lint compares, and
+    // `rledger check` is where they belong.
+    let options = LoadOptions {
+        run_plugins: true,
+        validate: false,
+        plugin_max_time_secs: crate::plugin_budget::max_time_secs(),
+        plugin_max_memory_mb: crate::plugin_budget::max_memory_mb(),
+        ..Default::default()
+    };
     let mut groups: BTreeMap<String, BTreeMap<(PathBuf, usize), Leg>> = BTreeMap::new();
     for path in &args.files {
         let result = Loader::new()
@@ -94,12 +126,20 @@ pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<Ex
                 .collect::<Vec<_>>()
                 .join("; ")
         );
+        let ledger = rustledger_loader::process(result, &options)
+            .with_context(|| format!("failed to process {}", path.display()))?;
+        let mut errors = ledger
+            .errors
+            .iter()
+            .filter(|e| e.severity == ErrorSeverity::Error)
+            .peekable();
         anyhow::ensure!(
-            result.plugins.is_empty(),
-            "{}: plugin directives are unsupported by linked-transit source inspection",
-            path.display()
+            errors.peek().is_none(),
+            "{}: cannot inspect a ledger with processing errors: {}",
+            path.display(),
+            describe_errors(errors)
         );
-        for directive in &result.directives {
+        for directive in &ledger.directives {
             let Directive::Transaction(txn) = &directive.value else {
                 continue;
             };
@@ -112,7 +152,7 @@ pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<Ex
             if links.is_empty() {
                 continue;
             }
-            let source = result
+            let source = ledger
                 .source_map
                 .get(directive.file_id as usize)
                 .context("linked transaction has no source location")?;
@@ -140,10 +180,7 @@ pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<Ex
                             .map(|p| {
                                 (
                                     p.account.as_str().to_string(),
-                                    p.units
-                                        .as_ref()
-                                        .and_then(|u| u.as_amount())
-                                        .map(|a| (a.number, a.currency.to_string())),
+                                    p.units.as_ref().and_then(|u| u.as_amount()).cloned(),
                                 )
                             })
                             .collect(),
@@ -166,25 +203,19 @@ pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<Ex
         }
         let (status, reason) = if legs.len() > 2 || legs.iter().any(|l| l.postings.len() > 1) {
             ("ambiguous", "multiple transactions or transit postings")
-        } else if legs
-            .iter()
-            .any(|l| l.complex || l.postings.iter().any(|(_, amount)| amount.is_none()))
-        {
-            (
-                "ambiguous",
-                "unsupported complex transaction or inferred transit amount",
-            )
+        } else if legs.iter().any(|l| l.complex) {
+            ("ambiguous", "unsupported complex transaction")
         } else if legs.len() < 2 || legs.iter().any(|l| l.postings.is_empty()) {
             ("missing", "a linked transit leg is missing")
         } else {
             let (account_a, amount_a) = &legs[0].postings[0];
             let (account_b, amount_b) = &legs[1].postings[0];
             match (amount_a, amount_b) {
-                (Some((a, currency_a)), Some((b, currency_b)))
+                (Some(a), Some(b))
                     if account_a == account_b
-                        && currency_a == currency_b
-                        && !a.is_zero()
-                        && *a == -*b =>
+                        && a.currency == b.currency
+                        && !a.number.is_zero()
+                        && a.number == -b.number =>
                 {
                     ("matched", "opposite equal transit amounts")
                 }
@@ -192,7 +223,9 @@ pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<Ex
                     "mismatch",
                     "transit account, currency, amount, or direction differs",
                 ),
-                _ => ("ambiguous", "inferred transit amount"),
+                // Booking completes every posting it accepts; an amount it
+                // left incomplete is not one this lint can compare.
+                _ => ("ambiguous", "transit amount was not booked"),
             }
         };
         findings.push(Finding {
@@ -295,10 +328,13 @@ mod tests {
                 "mismatch",
             ),
             (
+                // Booking prunes the elided `Assets:Cash` it fills from a zero
+                // residual (as beancount does), so each leg books to one
+                // posting and is no simple two-posting transfer.
                 "xfer-zero",
                 "Assets:Transit 0 USD",
                 "Assets:Transit 0 USD",
-                "mismatch",
+                "ambiguous",
             ),
         ];
         for (link, a, b, _) in pairs {
@@ -361,16 +397,6 @@ mod tests {
         let path = dir.path().join("main.bean");
         let mut source = String::new();
         source.push_str(&transaction(
-            "xfer-inferred",
-            "Assets:Transit",
-            "Assets:Cash -2 USD",
-        ));
-        source.push_str(&transaction(
-            "xfer-inferred",
-            "Assets:Transit -2 USD",
-            "Assets:Cash",
-        ));
-        source.push_str(&transaction(
             "xfer-cost",
             "Assets:Transit 2 USD @ 2 EUR",
             "Assets:Cash",
@@ -407,7 +433,7 @@ mod tests {
         for finding in report["findings"].as_array().unwrap() {
             assert_eq!(finding["status"], "ambiguous", "{finding}");
         }
-        assert_eq!(report["findings"].as_array().unwrap().len(), 7);
+        assert_eq!(report["findings"].as_array().unwrap().len(), 6);
     }
 
     #[test]
@@ -440,8 +466,75 @@ mod tests {
         );
         fs::write(&child, "2024-01-01 * \"broken\"\n  not an account\n").unwrap();
         assert!(inspect(vec![child.clone()], &["Assets:Transit"]).is_err());
+        // An unknown plugin is a processing error: refused, not inspected
+        // with the plugin silently skipped.
         fs::write(&child, "plugin \"example\"\n").unwrap();
         assert!(inspect(vec![child], &["Assets:Transit"]).is_err());
+    }
+
+    #[test]
+    fn test_run_with_writer_matches_elided_transit_amount() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.bean");
+        fs::write(
+            &path,
+            concat!(
+                "2026-01-02 * \"Send\" ^xfer-a\n",
+                "  Assets:Cash     -100.00 USD\n",
+                "  Assets:Transit\n",
+                "2026-01-03 * \"Receive\" ^xfer-a\n",
+                "  Assets:Transit  -100.00 USD\n",
+                "  Assets:Bank\n",
+            ),
+        )
+        .unwrap();
+        let report = inspect(vec![path], &["Assets:Transit"]).unwrap();
+        assert_eq!(report["findings"][0]["link"], "xfer-a", "{report}");
+        assert_eq!(report["findings"][0]["status"], "matched", "{report}");
+    }
+
+    #[test]
+    fn test_run_with_writer_runs_ledger_plugins() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.bean");
+        fs::write(
+            &path,
+            concat!(
+                "plugin \"beancount.plugins.auto_accounts\"\n",
+                "2026-01-02 * \"Send\" ^xfer-a\n",
+                "  Assets:Cash     -100.00 USD\n",
+                "  Assets:Transit\n",
+                "2026-01-03 * \"Receive\" ^xfer-a\n",
+                "  Assets:Transit  -90.00 USD\n",
+                "  Assets:Bank\n",
+            ),
+        )
+        .unwrap();
+        let report = inspect(vec![path], &["Assets:Transit"]).unwrap();
+        assert_eq!(report["findings"][0]["status"], "mismatch", "{report}");
+    }
+
+    #[test]
+    fn test_run_with_writer_refuses_booking_errors() {
+        // Two elided postings cannot be booked; the transaction is dropped
+        // from the booked stream, so reporting `^xfer-a` as `missing` would
+        // be misleading. The lint refuses instead.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.bean");
+        fs::write(
+            &path,
+            concat!(
+                "2026-01-02 * \"Send\" ^xfer-a\n",
+                "  Assets:Cash     -100.00 USD\n",
+                "  Assets:Transit\n",
+                "2026-01-03 * \"Receive\" ^xfer-a\n",
+                "  Assets:Transit\n",
+                "  Assets:Bank\n",
+            ),
+        )
+        .unwrap();
+        let err = inspect(vec![path], &["Assets:Transit"]).unwrap_err();
+        assert!(err.to_string().contains("processing errors"), "{err:#}");
     }
 
     #[test]

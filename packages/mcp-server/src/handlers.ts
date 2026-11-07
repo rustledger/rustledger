@@ -17,7 +17,7 @@ import {
   formatErrors,
   formatValidation,
   fatalErrors,
-  formatQueryResult,
+  queryResponse,
   collectLedgerFiles,
   withIncludedContext,
 } from "./helpers.js";
@@ -262,24 +262,14 @@ function handleQuery(args: ToolArguments | undefined): ToolResponse {
   const validation = validateArgs(args, ["source", "query"]);
   if (validation) return validation;
 
-  const result = rustledger.query(args!.source!, args!.query!);
-  const blocking = fatalErrors(result.errors);
-  if (blocking.length > 0) {
-    return errorResponse(formatErrors(blocking));
-  }
-  return textResponse(formatQueryResult(result));
+  return queryResponse(rustledger.query(args!.source!, args!.query!));
 }
 
 function handleBalances(args: ToolArguments | undefined): ToolResponse {
   const validation = validateArgs(args, ["source"]);
   if (validation) return validation;
 
-  const result = rustledger.balances(args!.source!);
-  const blocking = fatalErrors(result.errors);
-  if (blocking.length > 0) {
-    return errorResponse(formatErrors(blocking));
-  }
-  return textResponse(formatQueryResult(result));
+  return queryResponse(rustledger.balances(args!.source!));
 }
 
 function handleFormat(args: ToolArguments | undefined): ToolResponse {
@@ -810,13 +800,10 @@ function handleReport(args: ToolArguments | undefined): ToolResponse {
       return errorResponse(`Unknown report type: ${reportType}`);
   }
 
-  const result = rustledger.query(args!.source!, query);
-  const blocking = fatalErrors(result.errors);
-  if (blocking.length > 0) {
-    return errorResponse(formatErrors(blocking));
-  }
-
-  return textResponse(`# ${reportType.toUpperCase()} Report\n\n${formatQueryResult(result)}`);
+  return queryResponse(
+    rustledger.query(args!.source!, query),
+    `# ${reportType.toUpperCase()} Report\n\n`
+  );
 }
 
 // === File Operation Tools ===
@@ -856,23 +843,11 @@ function handleQueryFile(args: ToolArguments | undefined): ToolResponse {
     const absolutePath = path.resolve(args!.file_path!);
     // Same as `validate_file`: the loader resolves the includes, not us.
     const { files, entry } = collectLedgerFiles(absolutePath);
-    const result = rustledger.queryMultiFile(files, entry, args!.query!);
     // `queryMultiFile` decides whether the ledger could be queried, with the
-    // rule `rledger query` uses: a parse or booking failure, or a query that
-    // does not parse, gives no columns. Anything else it reports, such as a
-    // failing balance assertion, is a diagnostic shown beside the rows: a
-    // ledger with one must still answer (#2823).
-    if (!result.columns || result.columns.length === 0) {
-      const blocking = fatalErrors(result.errors);
-      if (blocking.length > 0) {
-        return errorResponse(formatErrors(blocking));
-      }
-    }
-    const table = formatQueryResult(result);
-    const diagnostics = result.errors ?? [];
-    return textResponse(
-      diagnostics.length > 0 ? `${table}\n\n${formatErrors(diagnostics)}` : table
-    );
+    // rule `rledger query` uses; anything else it reports, such as a failing
+    // balance assertion, is a diagnostic shown beside the rows: a ledger with
+    // one must still answer (#2823). See `queryResponse`.
+    return queryResponse(rustledger.queryMultiFile(files, entry, args!.query!));
   } catch (error) {
     return errorResponse(
       `Error: ${error instanceof Error ? error.message : String(error)}`

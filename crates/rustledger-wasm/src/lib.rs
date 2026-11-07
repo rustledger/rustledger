@@ -882,6 +882,7 @@ option "operating_currency" "USD"
             parse_errors: Vec::new(),
             option_errors: Vec::new(),
             validation_errors: Vec::new(),
+            query_refused: false,
         };
 
         let bytes = cache::serialize_parsed(&payload).expect("serialize");

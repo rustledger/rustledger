@@ -1,16 +1,21 @@
-// The ledger shapes that pin the rule for whether a file-based query answers
-// despite load errors (#2861): `LoadError::blocks_queries` and
+// The ledger shapes that pin the rule for whether a query answers despite load
+// errors (#2861, #2882): `LoadError::blocks_queries` and
 // `LedgerError::blocks_queries`.
 //
-// Shared, through `include!`, by the drift-guard tests of every file-based
-// query surface:
+// Shared, through `include!`, by the drift-guard tests of every query surface:
 //
 // - `rustledger-loader/tests/query_answer_rule_test.rs` (the predicates),
 // - `rustledger/tests/query_answer_rule_test.rs` (`rledger query`),
 // - `rustledger-ffi-component` (`query-file`, `batch-file`,
-//   `session.from-file`),
+//   `session.from-file`; and, from source text, `query`, `batch` and a
+//   session from source),
 // - `rustledger-wasm/tests/wasm_query_sources.rs` (`queryMultiFile`,
-//   `Ledger.fromFiles`).
+//   `Ledger.fromFiles`; and, from source text, `query` and
+//   `ParsedLedger.query`).
+//
+// The MCP server's `query` tool is built on WASM `query`; its own tests
+// (`packages/mcp-server`) cannot include this file, and repeat the
+// source-text cases' answers.
 //
 // Each surface runs `QUERY_RULE_QUERY` and must return exactly `rows` (or
 // refuse, for `None`), with `error` among the errors it reports. The expected
@@ -53,6 +58,13 @@ pub struct QueryRuleCase {
     /// Whether the case needs a real filesystem (a directory, a file to
     /// decrypt). WASM's in-memory filesystem has neither, so it skips these.
     pub disk_only: bool,
+    /// Whether the source-text surfaces run the case too, the entry file's
+    /// text passed as the source: only a case whose ledger is that one file
+    /// and includes nothing. Source text has no files beside it to include:
+    /// the FFI lists an `include` there unresolved and reports nothing, and
+    /// WASM reports it as a missing file, so the include cases' answers are
+    /// the file surfaces' alone.
+    pub source_text: bool,
 }
 
 /// The query each surface runs: the narration of every posting to
@@ -94,6 +106,7 @@ pub const QUERY_RULE_CASES: &[QueryRuleCase] = &[
         error: None,
         confinement: Confinement::Any,
         disk_only: false,
+        source_text: true,
     },
     // bean-query: `File glob "nope.beancount" does not match any files`, then
     // the rows.
@@ -108,6 +121,7 @@ pub const QUERY_RULE_CASES: &[QueryRuleCase] = &[
         error: Some("nope.beancount"),
         confinement: Confinement::Any,
         disk_only: false,
+        source_text: false,
     },
     // bean-query: `Duplicate filename parsed`, then the rows.
     QueryRuleCase {
@@ -121,6 +135,7 @@ pub const QUERY_RULE_CASES: &[QueryRuleCase] = &[
         error: Some("Duplicate filename parsed"),
         confinement: Confinement::Any,
         disk_only: false,
+        source_text: false,
     },
     // bean-query: `Duplicate filename parsed`, then the rows, `more` once.
     QueryRuleCase {
@@ -137,6 +152,7 @@ pub const QUERY_RULE_CASES: &[QueryRuleCase] = &[
         error: Some("Duplicate filename parsed"),
         confinement: Confinement::Any,
         disk_only: false,
+        source_text: false,
     },
     // bean-query: `File glob "none/*.beancount" does not match any files`,
     // then the rows.
@@ -151,6 +167,7 @@ pub const QUERY_RULE_CASES: &[QueryRuleCase] = &[
         error: Some("none/*.beancount"),
         confinement: Confinement::Any,
         disk_only: false,
+        source_text: false,
     },
     // Unconfined, the file outside the root is read, as bean-query reads it:
     // no error, its rows included.
@@ -168,6 +185,7 @@ pub const QUERY_RULE_CASES: &[QueryRuleCase] = &[
         error: None,
         confinement: Confinement::UnconfinedOnly,
         disk_only: false,
+        source_text: false,
     },
     // rledger's own: confined, the include is reported and left unread, and
     // the query answers without it. (bean-query does not confine.)
@@ -185,6 +203,7 @@ pub const QUERY_RULE_CASES: &[QueryRuleCase] = &[
         error: Some("path traversal"),
         confinement: Confinement::ConfinedOnly,
         disk_only: false,
+        source_text: false,
     },
     // bean-query: an uncaught `IsADirectoryError`, exit 1, no rows.
     QueryRuleCase {
@@ -198,6 +217,7 @@ pub const QUERY_RULE_CASES: &[QueryRuleCase] = &[
         error: Some("sub"),
         confinement: Confinement::Any,
         disk_only: true,
+        source_text: false,
     },
     // bean-query: an uncaught `OSError: Could not decrypt file`, exit 1, no
     // rows. (Garbage under a `.gpg` name: gpg fails, or is absent, and the
@@ -216,6 +236,7 @@ pub const QUERY_RULE_CASES: &[QueryRuleCase] = &[
         error: Some("decrypt"),
         confinement: Confinement::Any,
         disk_only: true,
+        source_text: false,
     },
     // bean-query answers, dropping the bad entry; rledger refuses (#1908).
     QueryRuleCase {
@@ -233,6 +254,7 @@ pub const QUERY_RULE_CASES: &[QueryRuleCase] = &[
         error: None,
         confinement: Confinement::Any,
         disk_only: false,
+        source_text: true,
     },
     // bean-query answers, dropping the sale; rledger refuses (#1987). Were
     // the gate gone, the rows would be `pay`, `buy1`, `buy2`, `sell`.
@@ -254,5 +276,26 @@ pub const QUERY_RULE_CASES: &[QueryRuleCase] = &[
         error: None,
         confinement: Confinement::Any,
         disk_only: false,
+        source_text: true,
+    },
+    // bean-query: `<check_commodity>:0: Missing Commodity directive for 'USD'
+    // in 'Assets:Cash'`, then the rows. A plugin's error never stopped a
+    // file query; the source-text surfaces refused over it before #2882.
+    QueryRuleCase {
+        name: "plugin error",
+        entry: "main.beancount",
+        files: &[(
+            "main.beancount",
+            concat!(
+                "plugin \"beancount.plugins.check_commodity\"\n",
+                "2024-01-01 open Assets:Cash\n2024-01-01 open Income:Salary\n",
+                "2024-01-02 * \"pay\"\n  Assets:Cash  100 USD\n  Income:Salary\n",
+            ),
+        )],
+        rows: Some(&["pay"]),
+        error: Some("Missing Commodity directive for 'USD' in 'Assets:Cash'"),
+        confinement: Confinement::Any,
+        disk_only: false,
+        source_text: true,
     },
 ];

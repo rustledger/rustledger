@@ -42,9 +42,25 @@ pub struct LoadResult {
     pub directive_lines: Vec<u32>,
     pub line_lookup: LineLookup,
     pub errors: Vec<Error>,
+    /// Parallel to `errors`: whether the error stops a query over the source
+    /// from answering: a parse error or a booking failure
+    /// ([`rustledger_loader::LedgerError::blocks_queries`], the rule the
+    /// file-based query surfaces share, #2861, #2882), or a load that failed
+    /// outright. Every other error, a plugin's among them, is reported beside
+    /// the rows.
+    pub error_blocks_queries: Vec<bool>,
     pub options: LedgerOptions,
     pub plugins: Vec<Plugin>,
     pub includes: Vec<Include>,
+}
+
+impl LoadResult {
+    /// Whether a query over this load refuses: one of its errors blocks
+    /// queries (see [`Self::error_blocks_queries`]).
+    #[must_use]
+    pub fn blocks_queries(&self) -> bool {
+        self.error_blocks_queries.iter().any(|&blocks| blocks)
+    }
 }
 
 /// Parse and interpolate source, returning directives with line numbers.
@@ -101,6 +117,8 @@ pub fn load_source(source: &str) -> LoadResult {
                 directive_lines: Vec::new(),
                 line_lookup: lookup,
                 errors: vec![Error::new(e).validate_phase()],
+                // Nothing was loaded, so a query has nothing to answer from.
+                error_blocks_queries: vec![true],
                 options: LedgerOptions::default(),
                 plugins: Vec::new(),
                 includes,
@@ -172,7 +190,7 @@ pub fn load_source(source: &str) -> LoadResult {
     // `\` on Windows, while declared include paths use `/`.
     let normalized_includes: Vec<String> =
         includes.iter().map(|i| i.path.replace('\\', "/")).collect();
-    let errors: Vec<Error> = ledger
+    let (errors, error_blocks_queries): (Vec<Error>, Vec<bool>) = ledger
         .errors
         .iter()
         .filter(|e| {
@@ -184,8 +202,8 @@ pub fn load_source(source: &str) -> LoadResult {
             let msg = e.message.replace('\\', "/");
             !normalized_includes.iter().any(|p| msg.contains(p))
         })
-        .map(ledger_error_to_ffi)
-        .collect();
+        .map(|e| (ledger_error_to_ffi(e), e.blocks_queries()))
+        .unzip();
 
     let mut options = build_ledger_options(&ledger.options, &ledger.display_context);
     let mut commodity_list: Vec<_> = commodities.into_iter().collect();
@@ -208,6 +226,7 @@ pub fn load_source(source: &str) -> LoadResult {
         directive_lines,
         line_lookup: lookup,
         errors,
+        error_blocks_queries,
         options,
         plugins,
         includes,

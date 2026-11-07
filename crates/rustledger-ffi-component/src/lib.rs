@@ -45,7 +45,9 @@ use exports::rustledger::ledger::ledger::{
 };
 use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 
-/// The Component-Model api-version this build implements. 3.17: `query-file`,
+/// The Component-Model api-version this build implements. 3.18: `query`,
+/// `batch` and a session from source text answer by the same rule as the
+/// file variants (#2882); 3.17: `query-file`,
 /// `batch-file` and a session from a file refuse only when a file failed to
 /// parse or to be read or decrypted, or a transaction failed to book, the
 /// rule the file-based query surfaces share (#2861); 3.16: every
@@ -76,7 +78,7 @@ use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 /// encrypted (`.gpg`/`.asc`) ledgers can be decrypted by the host (#1667);
 /// 3.1 added the `diff` field on `balance-dir` (#1663); 3.0 was the breaking
 /// `expand-pads` parameter on `load`/`load-file` (#1628).
-const API_VERSION: &str = "3.17";
+const API_VERSION: &str = "3.18";
 
 struct Component;
 

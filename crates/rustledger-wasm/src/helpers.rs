@@ -93,6 +93,14 @@ pub struct ProcessedLedger {
     /// exact drop #2292 fixed for plugin warnings). Surfaces that *report*
     /// diagnostics merge this in; surfaces that gate on soundness do not.
     pub option_errors: Vec<Error>,
+    /// Whether a query over the source refuses: it failed to parse, a
+    /// transaction failed to book
+    /// ([`rustledger_loader::LedgerError::blocks_queries`], the rule the
+    /// file-based query surfaces share, #2861, #2882), or it did not load at
+    /// all. Every other load error, a plugin's or an unresolved include's, is
+    /// reported beside the rows. This is the query rule, not the soundness
+    /// gate [`has_fatal`] reads, which also stops on a plugin's error.
+    pub query_blocked: bool,
     /// Raw parse result, needed by editor features and `ParsedLedger`.
     pub parse_result: ParserResult,
     pub lookup: LineLookup,
@@ -149,6 +157,8 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             options,
             errors,
             option_errors,
+            // A parse error refuses a query (#1908).
+            query_blocked: true,
             parse_result,
             lookup,
         };
@@ -173,6 +183,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 options,
                 errors: vec![Error::new(format!("Load error: {e}"))],
                 option_errors,
+                query_blocked: true,
                 parse_result,
                 lookup,
             };
@@ -206,6 +217,10 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 .map(|s| (s.value, (s.span, s.file_id)))
                 .unzip();
 
+            let query_blocked = ledger
+                .errors
+                .iter()
+                .any(rustledger_loader::LedgerError::blocks_queries);
             let errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
 
             ProcessedLedger {
@@ -215,6 +230,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 options,
                 errors,
                 option_errors,
+                query_blocked,
                 parse_result,
                 lookup,
             }
@@ -226,6 +242,7 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
             options,
             errors: vec![Error::new(format!("Processing error: {e}"))],
             option_errors,
+            query_blocked: true,
             parse_result,
             lookup,
         },

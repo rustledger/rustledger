@@ -78,6 +78,40 @@ pub struct Args {
     pub format: OutputFormat,
 }
 
+/// What the lint concluded about one link.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum Status {
+    /// Two transactions, one transit posting each, equal and opposite
+    /// amounts in one currency on one account.
+    Matched,
+    /// Two comparable legs whose transit postings differ.
+    Mismatch,
+    /// Only one leg has a transit posting.
+    Missing,
+    /// The legs are not something this lint can compare safely.
+    Ambiguous,
+}
+
+impl Status {
+    /// The lowercase name, as in the JSON and the text output.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Matched => "matched",
+            Self::Mismatch => "mismatch",
+            Self::Missing => "missing",
+            Self::Ambiguous => "ambiguous",
+        }
+    }
+}
+
+impl std::fmt::Display for Status {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
 #[derive(Serialize)]
 struct Location {
     file: String,
@@ -99,7 +133,7 @@ struct Leg {
 #[derive(Serialize)]
 struct Finding {
     link: String,
-    status: &'static str,
+    status: Status,
     reason: String,
     locations: Vec<Location>,
 }
@@ -418,7 +452,7 @@ pub fn run_with_writer<W: std::io::Write>(
                 reported[index].on_leg = true;
             }
             (
-                "ambiguous",
+                Status::Ambiguous,
                 format!(
                     "error on a linked transaction: {}",
                     on_legs
@@ -431,16 +465,22 @@ pub fn run_with_writer<W: std::io::Write>(
                 ),
             )
         } else if let Some(reason) = legs.iter().find_map(|l| l.unidentified) {
-            ("ambiguous", reason.to_string())
+            (Status::Ambiguous, reason.to_string())
         } else if legs.len() > 2 || legs.iter().any(|l| l.postings.len() > 1) {
             (
-                "ambiguous",
+                Status::Ambiguous,
                 "multiple transactions or transit postings".to_string(),
             )
         } else if legs.iter().any(|l| l.complex) {
-            ("ambiguous", "unsupported complex transaction".to_string())
+            (
+                Status::Ambiguous,
+                "unsupported complex transaction".to_string(),
+            )
         } else if legs.len() < 2 || legs.iter().any(|l| l.postings.is_empty()) {
-            ("missing", "a linked transit leg is missing".to_string())
+            (
+                Status::Missing,
+                "a linked transit leg is missing".to_string(),
+            )
         } else {
             let (account_a, amount_a) = &legs[0].postings[0];
             let (account_b, amount_b) = &legs[1].postings[0];
@@ -451,15 +491,21 @@ pub fn run_with_writer<W: std::io::Write>(
                         && !a.number.is_zero()
                         && a.number == -b.number =>
                 {
-                    ("matched", "opposite equal transit amounts".to_string())
+                    (
+                        Status::Matched,
+                        "opposite equal transit amounts".to_string(),
+                    )
                 }
                 (Some(_), Some(_)) => (
-                    "mismatch",
+                    Status::Mismatch,
                     "transit account, currency, amount, or direction differs".to_string(),
                 ),
                 // Booking completes every posting it accepts; an amount it
                 // left incomplete is not one this lint can compare.
-                _ => ("ambiguous", "transit amount was not booked".to_string()),
+                _ => (
+                    Status::Ambiguous,
+                    "transit amount was not booked".to_string(),
+                ),
             }
         };
         findings.push(Finding {

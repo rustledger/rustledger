@@ -5490,12 +5490,15 @@ mod tests {
     /// The classifier property on generated inputs: every string of up to
     /// five characters over an alphabet of the characters the two
     /// classifiers treat specially (#2780; the gap above was found this way).
-    /// `\r` is left out: a `\r` with more of its line after it closes a
-    /// comment here and stays in it for the lexer, a documented difference
-    /// (see `advance_source_state`).
+    /// An input with a `\r` that has more of its line after it is skipped: such
+    /// a `\r` closes a comment here and stays in it for the lexer, a documented
+    /// difference (see `advance_source_state`). A `\r` before its line ending
+    /// is trivia to both and is checked.
     #[test]
     fn source_state_classification_agrees_with_lexer_on_generated_inputs() {
-        const ALPHABET: [char; 12] = ['{', '#', '!', '+', '%', ';', '"', '\n', ' ', 'a', '*', '\\'];
+        const ALPHABET: [char; 13] = [
+            '\r', '{', '#', '!', '+', '%', ';', '"', '\n', ' ', 'a', '*', '\\',
+        ];
         let mut frontier = vec![String::new()];
         let mut checked = 0usize;
         for _ in 0..5 {
@@ -5504,14 +5507,25 @@ mod tests {
                 for c in ALPHABET {
                     let mut src = prefix.clone();
                     src.push(c);
-                    assert_source_state_agrees_with_lexer("generated", &src);
-                    checked += 1;
+                    if !has_mid_line_cr(&src) {
+                        assert_source_state_agrees_with_lexer("generated", &src);
+                        checked += 1;
+                    }
                     next.push(src);
                 }
             }
             frontier = next;
         }
-        assert!(checked > 200_000, "only {checked} inputs");
+        assert!(checked > 300_000, "only {checked} inputs");
+    }
+
+    /// Whether `src` has a `\r` with more of its line (anything but spaces,
+    /// tabs and `\r`s) after it.
+    fn has_mid_line_cr(src: &str) -> bool {
+        src.split('\n').any(|line| {
+            line.find('\r')
+                .is_some_and(|i| !line[i..].trim_start_matches([' ', '\t', '\r']).is_empty())
+        })
     }
 
     /// The per-byte comparison behind the classifier properties: panics at
@@ -5558,15 +5572,15 @@ mod tests {
 
         // Run the state-machine classifier and compare per
         // byte. We skip ONLY the exact bytes where a
-        // transition fires — the lexer includes those bytes
+        // transition fires; the lexer includes those bytes
         // inside the resulting token while the state machine
         // tags them with the PRE-transition state (the
         // 'opener' is still Code, the closing LF is still
         // InComment). Tracking the transition indices
         // explicitly (rather than skipping every `"`/`;`/`%`
         // / newline byte) means a state-machine bug at any
-        // non-transition `"`/`;`/`%` byte — e.g. inside a
-        // comment or string — surfaces as a real failure
+        // non-transition `"`/`;`/`%` byte (inside a
+        // comment or string, say) surfaces as a real failure
         // instead of being silently masked.
         let (actual, transitions) = classify_source_bytes_with_transitions(src);
 

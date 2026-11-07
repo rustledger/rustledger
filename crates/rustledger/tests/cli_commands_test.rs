@@ -851,8 +851,8 @@ fn test_error_message_includes_line_number() {
   Assets:Bank   -5.00 USD
 "#;
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("error-line-test.beancount");
+    let temp_dir = tempfile::tempdir().expect("create a temp dir");
+    let temp_file = temp_dir.path().join("error-line-test.beancount");
     std::fs::write(&temp_file, content).expect("Failed to write temp file");
 
     let output = Command::new(require_rledger!())
@@ -872,8 +872,6 @@ fn test_error_message_includes_line_number() {
         combined.contains(':') && combined.chars().any(|c| c.is_ascii_digit()),
         "Error should include line number reference"
     );
-
-    std::fs::remove_file(&temp_file).ok();
 }
 
 #[test]
@@ -883,8 +881,8 @@ fn test_error_message_includes_file_path() {
 2024-01-01 open Assets:Bank USD  ; Duplicate!
 ";
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("error-path-test.beancount");
+    let temp_dir = tempfile::tempdir().expect("create a temp dir");
+    let temp_file = temp_dir.path().join("error-path-test.beancount");
     std::fs::write(&temp_file, content).expect("Failed to write temp file");
 
     let output = Command::new(require_rledger!())
@@ -904,8 +902,6 @@ fn test_error_message_includes_file_path() {
         combined.contains("error-path-test.beancount") || combined.contains(".beancount"),
         "Error should reference file path"
     );
-
-    std::fs::remove_file(&temp_file).ok();
 }
 
 // =============================================================================

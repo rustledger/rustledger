@@ -149,8 +149,8 @@ option "title" "Error Test"
   Equity:Opening
 "#;
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("error-test.beancount");
+    let temp_dir = tempfile::tempdir().expect("create a temp dir");
+    let temp_file = temp_dir.path().join("error-test.beancount");
     std::fs::write(&temp_file, content).expect("Failed to write temp file");
 
     let (py_success, _py_output) = python_bean_check(&temp_file);
@@ -162,8 +162,6 @@ option "title" "Error Test"
     // Both should report errors
     assert!(!py_success, "Python should detect duplicate open error");
     assert!(!rs_success, "Rust should detect duplicate open error");
-
-    std::fs::remove_file(&temp_file).ok();
 }
 
 #[test]
@@ -187,8 +185,8 @@ option "title" "Balance Test"
 2020-01-15 balance Assets:Bank  500 USD  ; Wrong amount!
 "#;
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("balance-test.beancount");
+    let temp_dir = tempfile::tempdir().expect("create a temp dir");
+    let temp_file = temp_dir.path().join("balance-test.beancount");
     std::fs::write(&temp_file, content).expect("Failed to write temp file");
 
     let (py_success, _) = python_bean_check(&temp_file);
@@ -203,8 +201,6 @@ option "title" "Balance Test"
         "Python should detect balance assertion failure"
     );
     assert!(!rs_success, "Rust should detect balance assertion failure");
-
-    std::fs::remove_file(&temp_file).ok();
 }
 
 #[test]
@@ -226,8 +222,8 @@ option "title" "Currency Test"
   Equity:Opening
 "#;
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("currency-test.beancount");
+    let temp_dir = tempfile::tempdir().expect("create a temp dir");
+    let temp_file = temp_dir.path().join("currency-test.beancount");
     std::fs::write(&temp_file, content).expect("Failed to write temp file");
 
     let (py_success, _) = python_bean_check(&temp_file);
@@ -245,8 +241,6 @@ option "title" "Currency Test"
         !rs_success,
         "Rust should detect currency constraint violation"
     );
-
-    std::fs::remove_file(&temp_file).ok();
 }
 
 #[test]
@@ -270,8 +264,8 @@ option "title" "Lifecycle Test"
 2020-02-01 open Assets:Bank USD
 "#;
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("lifecycle-test.beancount");
+    let temp_dir = tempfile::tempdir().expect("create a temp dir");
+    let temp_file = temp_dir.path().join("lifecycle-test.beancount");
     std::fs::write(&temp_file, content).expect("Failed to write temp file");
 
     let (py_success, _) = python_bean_check(&temp_file);
@@ -283,8 +277,6 @@ option "title" "Lifecycle Test"
     // Both should fail
     assert!(!py_success, "Python should detect account used before open");
     assert!(!rs_success, "Rust should detect account used before open");
-
-    std::fs::remove_file(&temp_file).ok();
 }
 
 #[test]
@@ -306,8 +298,8 @@ option "title" "Unbalanced Test"
   Expenses:Food     50 USD  ; Should be 100 to balance
 "#;
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("unbalanced-test.beancount");
+    let temp_dir = tempfile::tempdir().expect("create a temp dir");
+    let temp_file = temp_dir.path().join("unbalanced-test.beancount");
     std::fs::write(&temp_file, content).expect("Failed to write temp file");
 
     let (py_success, _) = python_bean_check(&temp_file);
@@ -319,8 +311,6 @@ option "title" "Unbalanced Test"
     // Both should fail on unbalanced transaction
     assert!(!py_success, "Python should detect unbalanced transaction");
     assert!(!rs_success, "Rust should detect unbalanced transaction");
-
-    std::fs::remove_file(&temp_file).ok();
 }
 
 #[test]
@@ -341,8 +331,8 @@ option "title" "Pad Test"
 2020-01-15 balance Assets:Bank 1000 USD
 "#;
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("pad-test.beancount");
+    let temp_dir = tempfile::tempdir().expect("create a temp dir");
+    let temp_file = temp_dir.path().join("pad-test.beancount");
     std::fs::write(&temp_file, content).expect("Failed to write temp file");
 
     let (py_success, py_output) = python_bean_check(&temp_file);
@@ -357,8 +347,6 @@ option "title" "Pad Test"
         "Python should handle pad directive: {py_output}"
     );
     assert!(rs_success, "Rust should handle pad directive: {rs_output}");
-
-    std::fs::remove_file(&temp_file).ok();
 }
 
 #[test]
@@ -385,8 +373,8 @@ option "title" "Price Test"
   Assets:Cash   -1500 USD
 "#;
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("price-test.beancount");
+    let temp_dir = tempfile::tempdir().expect("create a temp dir");
+    let temp_file = temp_dir.path().join("price-test.beancount");
     std::fs::write(&temp_file, content).expect("Failed to write temp file");
 
     let (py_success, py_output) = python_bean_check(&temp_file);
@@ -404,8 +392,6 @@ option "title" "Price Test"
         rs_success,
         "Rust should handle price directive: {rs_output}"
     );
-
-    std::fs::remove_file(&temp_file).ok();
 }
 
 #[test]
@@ -439,8 +425,8 @@ poptag #trip
   Assets:Bank
 "#;
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("pushtag-test.beancount");
+    let temp_dir = tempfile::tempdir().expect("create a temp dir");
+    let temp_file = temp_dir.path().join("pushtag-test.beancount");
     std::fs::write(&temp_file, content).expect("Failed to write temp file");
 
     let (py_success, py_output) = python_bean_check(&temp_file);
@@ -455,8 +441,6 @@ poptag #trip
         "Python should handle pushtag/poptag: {py_output}"
     );
     assert!(rs_success, "Rust should handle pushtag/poptag: {rs_output}");
-
-    std::fs::remove_file(&temp_file).ok();
 }
 
 #[test]
@@ -486,8 +470,8 @@ option "title" "Arithmetic Test"
   Assets:Bank      -50 USD
 "#;
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("arithmetic-test.beancount");
+    let temp_dir = tempfile::tempdir().expect("create a temp dir");
+    let temp_file = temp_dir.path().join("arithmetic-test.beancount");
     std::fs::write(&temp_file, content).expect("Failed to write temp file");
 
     let (py_success, py_output) = python_bean_check(&temp_file);
@@ -505,8 +489,6 @@ option "title" "Arithmetic Test"
         rs_success,
         "Rust should handle arithmetic expressions: {rs_output}"
     );
-
-    std::fs::remove_file(&temp_file).ok();
 }
 
 #[test]
@@ -533,8 +515,8 @@ option "title" "Metadata Test"
   Assets:Bank     -50 USD
 "#;
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("metadata-test.beancount");
+    let temp_dir = tempfile::tempdir().expect("create a temp dir");
+    let temp_file = temp_dir.path().join("metadata-test.beancount");
     std::fs::write(&temp_file, content).expect("Failed to write temp file");
 
     let (py_success, py_output) = python_bean_check(&temp_file);
@@ -546,8 +528,6 @@ option "title" "Metadata Test"
     // Both should succeed
     assert!(py_success, "Python should handle metadata: {py_output}");
     assert!(rs_success, "Rust should handle metadata: {rs_output}");
-
-    std::fs::remove_file(&temp_file).ok();
 }
 
 #[test]
@@ -580,8 +560,8 @@ option "operating_currency" "USD"
   Income:Gains   -250 USD
 "#;
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("cost-price-test.beancount");
+    let temp_dir = tempfile::tempdir().expect("create a temp dir");
+    let temp_file = temp_dir.path().join("cost-price-test.beancount");
     std::fs::write(&temp_file, content).expect("Failed to write temp file");
 
     let (py_success, py_output) = python_bean_check(&temp_file);
@@ -593,8 +573,6 @@ option "operating_currency" "USD"
     // Both should succeed
     assert!(py_success, "Python should handle cost/price: {py_output}");
     assert!(rs_success, "Rust should handle cost/price: {rs_output}");
-
-    std::fs::remove_file(&temp_file).ok();
 }
 
 #[test]
@@ -625,8 +603,8 @@ option "title" "Event/Query Test"
   Assets:Bank
 "#;
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("event-query-test.beancount");
+    let temp_dir = tempfile::tempdir().expect("create a temp dir");
+    let temp_file = temp_dir.path().join("event-query-test.beancount");
     std::fs::write(&temp_file, content).expect("Failed to write temp file");
 
     let (py_success, py_output) = python_bean_check(&temp_file);
@@ -638,8 +616,6 @@ option "title" "Event/Query Test"
     // Both should succeed
     assert!(py_success, "Python should handle event/query: {py_output}");
     assert!(rs_success, "Rust should handle event/query: {rs_output}");
-
-    std::fs::remove_file(&temp_file).ok();
 }
 
 #[test]
@@ -664,8 +640,8 @@ option "title" "Note Test"
   Equity:Opening
 "#;
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("note-test.beancount");
+    let temp_dir = tempfile::tempdir().expect("create a temp dir");
+    let temp_file = temp_dir.path().join("note-test.beancount");
     std::fs::write(&temp_file, content).expect("Failed to write temp file");
 
     let (py_success, py_output) = python_bean_check(&temp_file);
@@ -680,8 +656,6 @@ option "title" "Note Test"
         "Python should handle note directive: {py_output}"
     );
     assert!(rs_success, "Rust should handle note directive: {rs_output}");
-
-    std::fs::remove_file(&temp_file).ok();
 }
 
 /// Path to beancount's canonical example.beancount file.

@@ -754,16 +754,57 @@ pub const DISABLE_CACHE_ENV: &str = "BEANCOUNT_DISABLE_LOAD_CACHE";
 /// explorers without breaking from the established beancount ecosystem
 /// behavior. See issue #939.
 ///
-/// This function reads process env. Tests that need a deterministic path
-/// regardless of the caller's environment should use [`default_cache_path`]
-/// directly.
+/// This function reads process env; [`cache_path_in`] takes the settings
+/// instead, so a test can pass them without touching the environment.
 pub fn cache_path(source: &Path) -> PathBuf {
-    if let Ok(pattern) = std::env::var(CACHE_FILENAME_ENV)
-        && !pattern.is_empty()
-    {
-        return resolve_cache_pattern(source, &pattern);
+    cache_path_in(source, &CacheEnv::from_process())
+}
+
+/// The cache settings the two environment variables carry
+/// ([`CACHE_FILENAME_ENV`], [`DISABLE_CACHE_ENV`]), as a value.
+///
+/// The `*_in` functions take one of these instead of reading process env, so
+/// a caller (a test, chiefly) can choose the settings without `set_var`,
+/// which races with every other thread reading the environment. The plain
+/// functions ([`cache_path`], [`load_cache_entry`], ...) read the process
+/// environment through [`CacheEnv::from_process`] and delegate.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CacheEnv {
+    /// The `BEANCOUNT_LOAD_CACHE_FILENAME` pattern, if set and not empty.
+    pub filename_pattern: Option<String>,
+    /// Whether `BEANCOUNT_DISABLE_LOAD_CACHE` is set (to anything, including
+    /// the empty string, as Python beancount checks `is None`).
+    pub disabled: bool,
+}
+
+impl CacheEnv {
+    /// The settings in the process environment.
+    #[must_use]
+    pub fn from_process() -> Self {
+        Self::from_lookup(|key| std::env::var_os(key))
     }
-    default_cache_path(source)
+
+    /// The settings `lookup` reports for the two variable names, so the
+    /// reading rule can be tested without the process environment. A pattern
+    /// that is empty or not valid UTF-8 counts as unset, as before.
+    #[must_use]
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<std::ffi::OsString>) -> Self {
+        Self {
+            filename_pattern: lookup(CACHE_FILENAME_ENV)
+                .and_then(|v| v.into_string().ok())
+                .filter(|p| !p.is_empty()),
+            disabled: lookup(DISABLE_CACHE_ENV).is_some(),
+        }
+    }
+}
+
+/// [`cache_path`] under the settings `env`.
+#[must_use]
+pub fn cache_path_in(source: &Path, env: &CacheEnv) -> PathBuf {
+    match &env.filename_pattern {
+        Some(pattern) => resolve_cache_pattern(source, pattern),
+        None => default_cache_path(source),
+    }
 }
 
 /// Returns the default cache file path (no env-var lookup).
@@ -822,7 +863,7 @@ fn legacy_cache_path(source: &Path) -> PathBuf {
 /// check.
 #[must_use]
 pub fn cache_disabled_by_env() -> bool {
-    std::env::var_os(DISABLE_CACHE_ENV).is_some()
+    CacheEnv::from_process().disabled
 }
 
 /// Try to load a cache entry from disk.
@@ -831,10 +872,16 @@ pub fn cache_disabled_by_env() -> bool {
 /// `None` if cache is missing, invalid, outdated, or
 /// `BEANCOUNT_DISABLE_LOAD_CACHE` is set.
 pub fn load_cache_entry(main_file: &Path) -> Option<CacheEntry> {
-    if cache_disabled_by_env() {
+    load_cache_entry_in(main_file, &CacheEnv::from_process())
+}
+
+/// [`load_cache_entry`] under the settings `env`.
+#[must_use]
+pub fn load_cache_entry_in(main_file: &Path, env: &CacheEnv) -> Option<CacheEntry> {
+    if env.disabled {
         return None;
     }
-    let cache_file = cache_path(main_file);
+    let cache_file = cache_path_in(main_file, env);
     let mut file = fs::File::open(&cache_file).ok()?;
 
     // Read header
@@ -885,11 +932,29 @@ pub fn load_cache_entry(main_file: &Path) -> Option<CacheEntry> {
 /// Save a cache entry to disk.
 ///
 /// No-op (returns Ok) when `BEANCOUNT_DISABLE_LOAD_CACHE` is set.
+///
+/// # Errors
+///
+/// As [`save_cache_entry_in`].
 pub fn save_cache_entry(main_file: &Path, entry: &CacheEntry) -> Result<(), std::io::Error> {
-    if cache_disabled_by_env() {
+    save_cache_entry_in(main_file, entry, &CacheEnv::from_process())
+}
+
+/// [`save_cache_entry`] under the settings `env`.
+///
+/// # Errors
+///
+/// The I/O error from creating the cache file's directory or writing it, or
+/// a serialization failure.
+pub fn save_cache_entry_in(
+    main_file: &Path,
+    entry: &CacheEntry,
+    env: &CacheEnv,
+) -> Result<(), std::io::Error> {
+    if env.disabled {
         return Ok(());
     }
-    let cache_file = cache_path(main_file);
+    let cache_file = cache_path_in(main_file, env);
 
     // Compute hash from the files in the entry
     let file_paths = entry.file_paths();
@@ -953,7 +1018,12 @@ fn deserialize_directives(data: &[u8]) -> Option<Vec<Spanned<Directive>>> {
 /// Removes both the current cache file and any legacy pre-#939
 /// `<file>.cache` sidecar so a subsequent load can't pick up stale data.
 pub fn invalidate_cache(main_file: &Path) {
-    let cache_file = cache_path(main_file);
+    invalidate_cache_in(main_file, &CacheEnv::from_process());
+}
+
+/// [`invalidate_cache`] under the settings `env`.
+pub fn invalidate_cache_in(main_file: &Path, env: &CacheEnv) {
+    let cache_file = cache_path_in(main_file, env);
     let _ = fs::remove_file(&cache_file);
 
     let legacy = legacy_cache_path(main_file);
@@ -1082,17 +1152,11 @@ mod tests {
     // tripping the crate's `forbid(unsafe_code)`. The tests below cover the
     // pure pattern-resolution logic and the legacy-path helper.
 
-    /// Fail fast if a developer has set the cache env vars locally — the
-    /// roundtrip tests in this module call `save_cache_entry`/`invalidate_cache`
-    /// which read process env, and a custom pattern would silently redirect
-    /// writes elsewhere (or fail in surprising ways). CI runs with a clean env.
-    fn assert_clean_cache_env() {
-        for var in [CACHE_FILENAME_ENV, DISABLE_CACHE_ENV] {
-            assert!(
-                std::env::var_os(var).is_none(),
-                "unset {var} before running this test"
-            );
-        }
+    /// The cache settings these tests run under: none, whatever the
+    /// developer's environment holds, so they are hermetic (the `*_in`
+    /// functions take the settings instead of reading process env).
+    fn no_env() -> CacheEnv {
+        CacheEnv::default()
     }
 
     #[test]
@@ -1136,14 +1200,11 @@ mod tests {
     fn test_save_load_cache_entry_roundtrip() {
         use std::io::Write;
 
-        assert_clean_cache_env();
-
         // Create a temp directory
-        let temp_dir = std::env::temp_dir().join("rustledger_cache_test");
-        let _ = fs::create_dir_all(&temp_dir);
+        let temp_dir = tempfile::tempdir().expect("create a temp dir");
 
         // Create a temp beancount file
-        let beancount_file = temp_dir.join("test.beancount");
+        let beancount_file = temp_dir.path().join("test.beancount");
         let mut f = fs::File::create(&beancount_file).unwrap();
         writeln!(f, "2024-01-01 open Assets:Test").unwrap();
         drop(f);
@@ -1166,10 +1227,10 @@ mod tests {
         };
 
         // Save cache
-        save_cache_entry(&beancount_file, &entry).expect("save failed");
+        save_cache_entry_in(&beancount_file, &entry, &no_env()).expect("save failed");
 
         // Load cache
-        let loaded = load_cache_entry(&beancount_file).expect("load failed");
+        let loaded = load_cache_entry_in(&beancount_file, &no_env()).expect("load failed");
 
         // Verify
         assert_eq!(loaded.directives.len(), entry.directives.len());
@@ -1177,23 +1238,15 @@ mod tests {
         assert_eq!(loaded.plugins[0].name, "test_plugin");
         assert_eq!(loaded.plugins[0].config, Some("config".to_string()));
         assert_eq!(loaded.files.len(), 1);
-
-        // Cleanup
-        let _ = fs::remove_file(&beancount_file);
-        let _ = fs::remove_file(cache_path(&beancount_file));
-        let _ = fs::remove_dir(&temp_dir);
     }
 
     #[test]
     fn test_invalidate_cache() {
         use std::io::Write;
 
-        assert_clean_cache_env();
+        let temp_dir = tempfile::tempdir().expect("create a temp dir");
 
-        let temp_dir = std::env::temp_dir().join("rustledger_invalidate_test");
-        let _ = fs::create_dir_all(&temp_dir);
-
-        let beancount_file = temp_dir.join("test.beancount");
+        let beancount_file = temp_dir.path().join("test.beancount");
         let mut f = fs::File::create(&beancount_file).unwrap();
         writeln!(f, "2024-01-01 open Assets:Test").unwrap();
         drop(f);
@@ -1205,76 +1258,60 @@ mod tests {
             plugins: vec![],
             files: vec![beancount_file.to_string_lossy().to_string()],
         };
-        save_cache_entry(&beancount_file, &entry).unwrap();
+        save_cache_entry_in(&beancount_file, &entry, &no_env()).unwrap();
 
         // Verify cache exists
-        assert!(cache_path(&beancount_file).exists());
+        assert!(cache_path_in(&beancount_file, &no_env()).exists());
 
         // Invalidate
-        invalidate_cache(&beancount_file);
+        invalidate_cache_in(&beancount_file, &no_env());
 
         // Verify cache is gone
-        assert!(!cache_path(&beancount_file).exists());
-
-        // Cleanup
-        let _ = fs::remove_file(&beancount_file);
-        let _ = fs::remove_dir(&temp_dir);
+        assert!(!cache_path_in(&beancount_file, &no_env()).exists());
     }
 
     #[test]
     fn test_invalidate_cache_removes_legacy_sidecar() {
         // invalidate_cache should remove both the new dotfile cache and any
         // pre-#939 visible cache file alongside the source.
-        assert_clean_cache_env();
+        let temp_dir = tempfile::tempdir().expect("create a temp dir");
 
-        let temp_dir = std::env::temp_dir().join("rustledger_invalidate_legacy_test");
-        let _ = fs::create_dir_all(&temp_dir);
-
-        let beancount_file = temp_dir.join("legacy.beancount");
+        let beancount_file = temp_dir.path().join("legacy.beancount");
         // Synthesize a leftover legacy cache file (no need to be valid — we're
         // only testing that invalidate removes it).
         let legacy = legacy_cache_path(&beancount_file);
         fs::write(&legacy, b"stale").unwrap();
         assert!(legacy.exists());
 
-        invalidate_cache(&beancount_file);
+        invalidate_cache_in(&beancount_file, &no_env());
         assert!(
             !legacy.exists(),
             "invalidate_cache should remove the legacy sidecar file"
         );
-
-        let _ = fs::remove_dir(&temp_dir);
     }
 
     #[test]
     fn test_load_cache_missing_file() {
         let missing = Path::new("/nonexistent/path/to/file.beancount");
-        assert!(load_cache_entry(missing).is_none());
+        assert!(load_cache_entry_in(missing, &no_env()).is_none());
     }
 
     #[test]
     fn test_load_cache_invalid_magic() {
         use std::io::Write;
 
-        assert_clean_cache_env();
+        let temp_dir = tempfile::tempdir().expect("create a temp dir");
 
-        let temp_dir = std::env::temp_dir().join("rustledger_magic_test");
-        let _ = fs::create_dir_all(&temp_dir);
-
-        let beancount_file = temp_dir.join("test.beancount");
+        let beancount_file = temp_dir.path().join("test.beancount");
         // Write a malformed cache file at the path load_cache_entry will look up.
-        let cache_file = cache_path(&beancount_file);
+        let cache_file = cache_path_in(&beancount_file, &no_env());
         let mut f = fs::File::create(&cache_file).unwrap();
         // Write invalid magic
         f.write_all(b"INVALID\0").unwrap();
         f.write_all(&[0u8; CacheHeader::SIZE - 8]).unwrap();
         drop(f);
 
-        assert!(load_cache_entry(&beancount_file).is_none());
-
-        // Cleanup
-        let _ = fs::remove_file(&cache_file);
-        let _ = fs::remove_dir(&temp_dir);
+        assert!(load_cache_entry_in(&beancount_file, &no_env()).is_none());
     }
 
     /// Bumping `CACHE_VERSION` must short-circuit at the header so we
@@ -1286,13 +1323,10 @@ mod tests {
     fn test_load_cache_rejects_older_version() {
         use std::io::Write;
 
-        assert_clean_cache_env();
+        let temp_dir = tempfile::tempdir().expect("create a temp dir");
 
-        let temp_dir = std::env::temp_dir().join("rustledger_old_version_test");
-        let _ = fs::create_dir_all(&temp_dir);
-
-        let beancount_file = temp_dir.join("test.beancount");
-        let cache_file = cache_path(&beancount_file);
+        let beancount_file = temp_dir.path().join("test.beancount");
+        let cache_file = cache_path_in(&beancount_file, &no_env());
         let mut f = fs::File::create(&cache_file).unwrap();
 
         // Valid magic + previous CACHE_VERSION. The version check at
@@ -1305,12 +1339,9 @@ mod tests {
         drop(f);
 
         assert!(
-            load_cache_entry(&beancount_file).is_none(),
+            load_cache_entry_in(&beancount_file, &no_env()).is_none(),
             "loader must reject cache files with an older CACHE_VERSION"
         );
-
-        let _ = fs::remove_file(&cache_file);
-        let _ = fs::remove_dir(&temp_dir);
     }
 
     /// Frozen byte fixtures for the v8 cache layout of

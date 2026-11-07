@@ -393,8 +393,8 @@ mod tests {
 
     #[test]
     fn test_save_and_load_round_trip() {
-        let path = std::env::temp_dir().join("rustledger-test-cache-roundtrip.json");
-        let _ = std::fs::remove_file(&path); // Clean up from previous runs
+        let dir = tempfile::tempdir().expect("create a temp dir");
+        let path = dir.path().join("price-cache.json");
 
         let response = PriceResponse {
             price: Decimal::new(15000, 2),
@@ -423,13 +423,11 @@ mod tests {
             let file: CacheFile =
                 serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
             assert_eq!(file.version, CACHE_SCHEMA_VERSION);
-            let cache = PriceCache::load_from_path(path.clone(), 3600);
+            let cache = PriceCache::load_from_path(path, 3600);
             let cached = cache.get("yahoo:AAPL:USD:latest");
             assert!(cached.is_some(), "should find cached entry after load");
             assert_eq!(cached.unwrap().price, response.price);
         }
-
-        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

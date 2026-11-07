@@ -61,6 +61,108 @@ const BAD_LEDGER: &str = "\
 ";
 
 #[test]
+fn test_lint_linked_transit_matches_cli_and_accepts_repeated_accounts() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        tmp.path(),
+        "transfer.beancount",
+        "2000-01-01 open Assets:Transit\n2000-01-01 open Assets:Cash\n\
+         2024-01-01 * \"first\" ^xfer-demo\n  Assets:Transit 100 USD\n  Assets:Cash -100 USD\n\
+         2024-01-02 * \"second\" ^xfer-demo\n  Assets:Transit -90 USD\n  Assets:Cash 90 USD\n",
+    );
+    let file = file.to_str().unwrap();
+    let args = [
+        "lint",
+        "linked-transit",
+        file,
+        "--link-prefix",
+        "xfer-",
+        "--account",
+        "Assets:Other",
+        "--account",
+        "Assets:Transit",
+        "--format",
+        "json",
+    ];
+    let (ag_code, envelope, _) = run_in(tmp.path(), &args);
+    let (cli_code, output) = rledger_stdout(tmp.path(), &args);
+    assert_eq!(ag_code, cli_code, "{envelope}");
+    assert_eq!(
+        envelope["result"]["stdout"].as_str(),
+        Some(output.as_str()),
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["result"]["data"]["findings"][0]["status"],
+        "mismatch"
+    );
+}
+
+/// A configuration that matches nothing is said so in `warnings`, with a
+/// stable code, rather than answered with a quiet empty report.
+#[test]
+fn test_lint_linked_transit_reports_configuration_warnings() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        tmp.path(),
+        "transfer.beancount",
+        "2000-01-01 open Assets:Transit\n2000-01-01 open Assets:Cash\n\
+         2024-01-01 * \"first\" ^xfer-demo\n  Assets:Transit 100 USD\n  Assets:Cash -100 USD\n",
+    );
+    let file = file.to_str().unwrap();
+    let (code, envelope, _) = run_in(
+        tmp.path(),
+        &[
+            "lint",
+            "linked-transit",
+            file,
+            "--link-prefix",
+            "^transfer-",
+            "--account",
+            "Assets:Transitt",
+        ],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    let codes: Vec<&str> = envelope["result"]["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warnings: {envelope}"))
+        .iter()
+        .map(|w| w["code"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        codes,
+        [
+            "LINK_PREFIX_CARET",
+            "ACCOUNT_NOT_IN_LEDGER",
+            "NO_LINK_MATCHES_PREFIX"
+        ],
+        "{envelope}"
+    );
+    assert_eq!(
+        envelope["result"]["warnings"][1]["account"], "Assets:Transitt",
+        "{envelope}"
+    );
+
+    let (code, envelope, _) = run_in(
+        tmp.path(),
+        &[
+            "lint",
+            "linked-transit",
+            file,
+            "--link-prefix",
+            "xfer-",
+            "--account",
+            "Transit",
+        ],
+    );
+    assert_ne!(code, 0, "{envelope}");
+    assert!(
+        envelope.to_string().contains("not a valid account name"),
+        "{envelope}"
+    );
+}
+
+#[test]
 fn check_good_file_exits_zero_with_ok_envelope() {
     let tmp = tempfile::tempdir().unwrap();
     let file = write_fixture(tmp.path(), "good.beancount", GOOD_LEDGER);
@@ -2463,4 +2565,94 @@ fn declared_value_flags_echo_their_values() {
         );
         assert!(!command.contains("<redacted>"), "{args:?}: {command}");
     }
+}
+
+/// A ledger error passed through as a warning keeps where it is, in the
+/// envelope's `file` and `line`.
+#[test]
+fn test_lint_linked_transit_warnings_carry_their_location() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        tmp.path(),
+        "transfer.beancount",
+        "2000-01-01 open Assets:Transit\n2000-01-01 open Assets:Cash\n\
+         2024-01-01 * \"unrelated\"\n  Assets:Cash -1 USD\n  Assets:Transit 2 USD\n",
+    );
+    let file = file.to_str().unwrap();
+    let (code, envelope, _) = run_in(
+        tmp.path(),
+        &[
+            "lint",
+            "linked-transit",
+            file,
+            "--link-prefix",
+            "xfer-",
+            "--account",
+            "Assets:Transit",
+        ],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    let warning = envelope["result"]["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warnings: {envelope}"))
+        .iter()
+        .find(|w| w["code"] == "E3001")
+        .unwrap_or_else(|| panic!("no E3001: {envelope}"));
+    assert_eq!(warning["line"], 3, "{envelope}");
+    assert!(
+        warning["file"]
+            .as_str()
+            .is_some_and(|f| f.ends_with("transfer.beancount")),
+        "{envelope}"
+    );
+}
+
+/// `--fail-on` exits 1 on a listed status in both binaries, as `check`
+/// exits 1 on an error: the envelope is still `ok`, with `exit_code` and
+/// `result.exit_status` 1. Repeated or comma-separated, the same.
+#[test]
+fn test_lint_linked_transit_fail_on_exits_one_like_check() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        tmp.path(),
+        "transfer.beancount",
+        "2000-01-01 open Assets:Transit\n2000-01-01 open Assets:Cash\n\
+         2024-01-01 * \"first\" ^xfer-demo\n  Assets:Transit 100 USD\n  Assets:Cash -100 USD\n\
+         2024-01-02 * \"second\" ^xfer-demo\n  Assets:Transit -90 USD\n  Assets:Cash 90 USD\n",
+    );
+    let file = file.to_str().unwrap();
+    let base = [
+        "lint",
+        "linked-transit",
+        file,
+        "--link-prefix",
+        "xfer-",
+        "--account",
+        "Assets:Transit",
+    ];
+    for (extra, expected) in [
+        (vec![], 0),
+        (vec!["--fail-on", "missing,ambiguous"], 0),
+        (vec!["--fail-on", "mismatch"], 1),
+        (vec!["--fail-on", "missing", "--fail-on", "mismatch"], 1),
+    ] {
+        let args: Vec<&str> = base.iter().copied().chain(extra.iter().copied()).collect();
+        let (ag_code, envelope, _) = run_in(tmp.path(), &args);
+        let (cli_code, _) = rledger_stdout(tmp.path(), &args);
+        assert_eq!(cli_code, expected, "{args:?}");
+        assert_eq!(ag_code, expected, "{args:?}: {envelope}");
+        assert_eq!(envelope["ok"], true, "{envelope}");
+        assert_eq!(envelope["exit_code"], expected, "{envelope}");
+        assert_eq!(envelope["result"]["exit_status"], expected, "{envelope}");
+    }
+    let (code, envelope, _) = run_in(
+        tmp.path(),
+        &base
+            .iter()
+            .copied()
+            .chain(["--fail-on", "sometimes"])
+            .collect::<Vec<_>>(),
+    );
+    assert_ne!(code, 0, "{envelope}");
+    assert!(envelope.to_string().contains("INVALID_VALUE"), "{envelope}");
 }

@@ -22,7 +22,7 @@ rustledger provides several commands for working with beancount ledgers.
 | [split](split.md) | Split a file into one file per year or month |
 | [merge](merge.md) | Inline a ledger's includes back into one file |
 | compat | Install or uninstall bean-* compatibility wrapper scripts |
-| lint | Non-fatal advisory passes (e.g. detect inter-account transfer pairs) |
+| [lint](lint.md) | Non-fatal advisory passes (transfer pairs, linked transit transfers, closed accounts with a balance, control characters) |
 | completions | Generate shell completions |
 
 ## Global Options

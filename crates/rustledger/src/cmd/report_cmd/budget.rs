@@ -110,10 +110,9 @@ pub(super) fn report_budget<W: Write>(
         // this is about, and flattening them into a line threw away exactly the
         // fields an agent wants to key on.
         warnings.emit(super::Diagnostic {
-            code: None,
             date: Some(e.date),
             account: e.account.as_ref().map(|a| a.as_str().to_string()),
-            message: e.reason.clone(),
+            ..super::Diagnostic::message(e.reason.clone())
         });
     }
     render(

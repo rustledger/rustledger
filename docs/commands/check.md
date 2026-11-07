@@ -38,6 +38,11 @@ rledger check [OPTIONS] [FILE]
 | `--include-rules <CODES>` | Report only these rule codes (comma-separated, e.g. `E2001,E1001`) |
 | `--exclude-rules <CODES>` | Report everything except these rule codes (comma-separated) |
 
+## Linked transit lint
+
+The opt-in check of linked transit transfers is `rledger lint linked-transit`;
+see [lint](lint.md#linked-transit). It does not change what `check` reports.
+
 ## Examples
 
 ### Basic Validation

@@ -24,9 +24,12 @@ Output format, one line per snippet, tab-separated:
 `0` beancount accepts the input, `1` it reports an error, `x` excluded
 because the verdict is not a syntax verdict (beancount raised or crashed, or
 rejected an option name or an account name, which rledger validates when it
-loads the file rather than when it parses). The case order is defined by `cases()` below and mirrored
-by `cases()` in the Rust test; the test checks the lengths agree, so the two
-cannot drift silently.
+loads the file rather than when it parses; `rustledger-validate`'s
+`test_validate_reports_every_account_name_row_the_stray_char_matrix_excludes`
+holds that up for every excluded row outside `option`). The case order is
+defined by `cases()` below and mirrored by `cases()` in both Rust tests (the
+parser's matrix test and that validator test); each checks the lengths agree,
+so the copies cannot drift silently.
 
 Changing BASES or CHARS here means changing them in the test too.
 """

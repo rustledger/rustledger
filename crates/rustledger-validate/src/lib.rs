@@ -768,6 +768,7 @@ fn validate_phase_inner<D: ValidatableDirective>(
                 validate_note(state, note, &mut errors);
             }
             (Phase::Late, Directive::Custom(custom)) => {
+                validators::helpers::push_invalid_custom_accounts(state, custom, &mut errors);
                 validate_budget_custom(custom, &mut errors);
             }
             (Phase::Late, Directive::Transaction(txn)) => {

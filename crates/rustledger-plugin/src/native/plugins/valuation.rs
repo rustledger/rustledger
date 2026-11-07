@@ -1429,6 +1429,9 @@ mod tests {
             "the message must name the cause: {}",
             errors[0].message
         );
+        // A per-directive error the plugin leaves as written: located, so a
+        // finding, never a failure of the whole plugin.
+        assert!(!errors[0].failed, "{errors:?}");
     }
 
     /// The INFLOW call site must keep the exactness too (#2360).

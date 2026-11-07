@@ -69,8 +69,11 @@ impl Executor<'_> {
         query: &SelectQuery,
         keep_origins: bool,
     ) -> Result<QueryResult, QueryError> {
-        // Aggregates where bean-query's compiler refuses them (#2827), before
-        // any path runs the query.
+        // A `*` argument to anything but `count` (#2880), then aggregates
+        // where bean-query's compiler refuses them (#2827), before any path
+        // runs the query. bean-query resolves a call before it checks where
+        // the call is, so `WHERE sum(*) > 0` names the call.
+        Self::check_star_arguments(query)?;
         Self::check_aggregate_placement(query)?;
         // Check if we have a subquery
         if let Some(from) = &query.from {
@@ -459,6 +462,48 @@ impl Executor<'_> {
             super::visit_expr(expr, &mut note);
         }
         reads
+    }
+
+    /// Refuse a `*` argument to any function but `count`, in any clause, as
+    /// bean-query 0.2.0's compiler does: its grammar takes `fname '(' '*'
+    /// ')'` for every function, and only `count(*)` has a signature for it,
+    /// so `sum(*)` is `no function matches "sum(*)" name and argument types`.
+    /// rledger ran `sum(*)` and answered one blank row (#2880). A window
+    /// call (an rledger extension) takes `*` only for `count` too.
+    ///
+    /// # Errors
+    ///
+    /// [`QueryError::UnknownFunction`] naming the call as bean-query does,
+    /// its name lower-cased (`SUM(*)` is `sum(*)`).
+    fn check_star_arguments(query: &SelectQuery) -> Result<(), QueryError> {
+        let mut refused = None;
+        let mut note = |expr: &Expr| {
+            let (name, args) = match expr {
+                Expr::Function(call) => (&call.name, &call.args),
+                Expr::Window(call) => (&call.name, &call.args),
+                _ => return,
+            };
+            if refused.is_none()
+                && !name.eq_ignore_ascii_case("count")
+                && args.iter().any(|a| matches!(a, Expr::Wildcard))
+            {
+                refused = Some(format!("{}(*)", name.to_lowercase()));
+            }
+        };
+        for expr in query
+            .targets
+            .iter()
+            .map(|t| &t.expr)
+            .chain(query.from.iter().filter_map(|f| f.filter.as_ref()))
+            .chain(query.where_clause.iter())
+            .chain(query.group_by.iter().flatten())
+            .chain(query.having.iter())
+            .chain(query.pivot_by.iter().flatten())
+            .chain(query.order_by.iter().flatten().map(|o| &o.expr))
+        {
+            super::visit_expr(expr, &mut note);
+        }
+        refused.map_or(Ok(()), |call| Err(QueryError::UnknownFunction(call)))
     }
 
     /// Execute a SELECT query that sources from a subquery.

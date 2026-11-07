@@ -366,9 +366,13 @@ use crate::types::{Error, LedgerOptions};
 /// v74: loader v58, PARSER OUTPUT changed (#2779). A column-0 `!`, `&`, `?` or
 /// `:` line is ignored and a bare `#`, `%` or `*` line is an error, as in
 /// beancount; a v73 blob would keep serving such a file with its old errors.
+/// v75: the `Ledger` payload gained `query_refused`, whether an error that
+/// blocks queries (`LedgerError::blocks_queries`) stops them (#2861); the
+/// restored `errors` no longer carry that flag. Loader output is unchanged; a
+/// v74 blob has no such field and would not deserialize as this layout.
 /// v76: loader v59, PARSER OUTPUT changed (#2787). A line's overlapping
-/// errors are reported once, as in beancount; a v74 or v75 blob would keep
-/// serving such a file with its old errors. (v75 is #2881's layout change.)
+/// errors are reported once, as in beancount; a v75 blob would keep serving
+/// such a file with its old errors.
 pub const CACHE_VERSION: u32 = 76;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
@@ -457,6 +461,11 @@ pub struct LedgerPayload {
     /// strings for the same reason as `account_type_names`.
     pub summary_account_names: Vec<String>,
     pub errors: Vec<Error>,
+    /// Whether a query over the ledger refuses (`LedgerError::blocks_queries`,
+    /// #2861: a parse error, a file that could not be read or decrypted, a
+    /// booking failure). Archived because
+    /// `errors` lost the flag in conversion.
+    pub query_refused: bool,
 }
 
 // =============================================================================
@@ -807,6 +816,7 @@ mod tests {
                 "EUR".to_string(),
             ],
             errors: vec![Error::new("a warning")],
+            query_refused: true,
         };
         let bytes = serialize_ledger(&payload).expect("serialize");
         assert!(bytes.starts_with(MAGIC_LEDGER));
@@ -827,6 +837,10 @@ mod tests {
             ]
         );
         assert_eq!(restored.errors.len(), 1);
+        assert!(
+            restored.query_refused,
+            "the query gate survives the cache (#2861)"
+        );
     }
 
     #[test]
@@ -872,6 +886,7 @@ option "operating_currency" "USD"
             booking_method: "STRICT".to_string(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
+            query_refused: false,
         })
         .unwrap();
         bytes[0] = b'X';
@@ -896,6 +911,7 @@ option "operating_currency" "USD"
             booking_method: "STRICT".to_string(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
+            query_refused: false,
         })
         .unwrap();
         bytes[8..12].copy_from_slice(&99u32.to_le_bytes());
@@ -938,6 +954,7 @@ option "operating_currency" "USD"
             booking_method: "STRICT".to_string(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
+            query_refused: false,
         })
         .unwrap();
         assert!(

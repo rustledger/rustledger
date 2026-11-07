@@ -68,6 +68,7 @@ mod parsed_ledger;
 // Re-export public API
 pub use api::{balances, format, parse, query, validate_source, version};
 pub use api::{hash_sources, parse_multi_file, query_multi_file, validate_multi_file};
+pub use api::{query_with_host, validate_with_host};
 
 #[cfg(feature = "completions")]
 pub use api::bql_completions;
@@ -936,6 +937,7 @@ option "operating_currency" "EUR"
             booking_method: "STRICT".to_string(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
+            query_refused: false,
         };
 
         let bytes = cache::serialize_ledger(&payload).expect("serialize");

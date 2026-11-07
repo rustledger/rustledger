@@ -621,6 +621,12 @@ pub struct Ledger {
     summary_accounts: rustledger_query::executor::SummaryAccounts,
     /// Processing errors (load, booking, validation).
     errors: Vec<Error>,
+    /// Whether `errors` holds one that stops a query from answering
+    /// (`LedgerError::blocks_queries`, #2861: a parse error, a file that
+    /// could not be read or decrypted, a booking failure), or the load or
+    /// processing failed outright. Archived in the cache payload, since the
+    /// restored `errors` no longer carry the flag.
+    query_refused: bool,
     /// Editor cache for cross-file completions.
     editor_cache: editor::EditorCache,
     /// The tables this ledger's `CREATE TABLE` queries made, there for its
@@ -678,6 +684,7 @@ impl Ledger {
                     summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
                     errors: vec![Error::new(format!("Load error: {e}"))],
                     editor_cache: editor::EditorCache::from_directives(&[]),
+                    query_refused: true,
                     created_tables: std::cell::RefCell::default(),
                 });
             }
@@ -710,6 +717,13 @@ impl Ledger {
                     .into_iter()
                     .map(|s| (s.value, (s.span, s.file_id)))
                     .unzip();
+                // The file-based query rule (#2861): not over a parse error,
+                // a file that could not be read or decrypted, or a booking
+                // failure; every other error is reported beside the rows.
+                let query_refused = ledger
+                    .errors
+                    .iter()
+                    .any(rustledger_loader::LedgerError::blocks_queries);
                 let mut errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
                 errors.extend(option_warnings_to_errors(&ledger.options.warnings));
                 let editor_cache = editor::EditorCache::from_directives(&directives);
@@ -727,6 +741,7 @@ impl Ledger {
                     summary_accounts,
                     errors,
                     editor_cache,
+                    query_refused,
                     created_tables: std::cell::RefCell::default(),
                 })
             }
@@ -743,6 +758,7 @@ impl Ledger {
                 summary_accounts,
                 errors: vec![Error::new(format!("Processing error: {e}"))],
                 editor_cache: editor::EditorCache::from_directives(&[]),
+                query_refused: true,
                 created_tables: std::cell::RefCell::default(),
             }),
         }
@@ -790,6 +806,19 @@ impl Ledger {
     /// (#2579).
     #[wasm_bindgen]
     pub fn query(&self, query_str: &str) -> Result<JsValue, JsError> {
+        // Refuses when a file failed to parse or a transaction failed to
+        // book (`LedgerError::blocks_queries`), and answers otherwise,
+        // reporting every other error (an include of a missing file, a failed
+        // assertion, ...) through `getErrors`, as `rledger query` and
+        // `queryMultiFile` do (#2861). It answered over a parse or booking
+        // failure.
+        if self.query_refused {
+            return to_js(&QueryResult {
+                columns: Vec::new(),
+                rows: Vec::new(),
+                errors: self.errors.clone(),
+            });
+        }
         let expanded = query_directives(
             &self.query_directives,
             &self.directives,
@@ -875,6 +904,7 @@ impl Ledger {
                 self.summary_accounts.conversion_currency.clone(),
             ],
             errors: self.errors.clone(),
+            query_refused: self.query_refused,
         };
         cache::serialize_ledger(&payload).map_err(|e| JsError::new(&e))
     }
@@ -950,6 +980,7 @@ impl Ledger {
             summary_accounts,
             errors: payload.errors,
             editor_cache,
+            query_refused: payload.query_refused,
             created_tables: std::cell::RefCell::default(),
         })
     }
@@ -1045,6 +1076,7 @@ mod option_warning_severity_tests {
             summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
             errors: option_warnings_to_errors(&[warn("E7009")]),
             editor_cache: editor::EditorCache::from_directives(&[]),
+            query_refused: false,
             created_tables: std::cell::RefCell::default(),
         };
         assert_eq!(
@@ -1070,6 +1102,7 @@ mod option_warning_severity_tests {
             summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
             errors: option_warnings_to_errors(&[warn("E7001")]),
             editor_cache: editor::EditorCache::from_directives(&[]),
+            query_refused: false,
             created_tables: std::cell::RefCell::default(),
         };
         assert!(
@@ -1111,6 +1144,7 @@ mod option_warning_severity_tests {
                 summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
                 errors,
                 editor_cache: editor::EditorCache::from_directives(&[]),
+                query_refused: false,
                 created_tables: std::cell::RefCell::default(),
             };
             let restored =

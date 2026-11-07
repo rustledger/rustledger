@@ -2808,7 +2808,14 @@ const MULTI_VALUE_SHORTS: &[(&[&str], char, &str)] = &[
     (&["price", "p"], 'm', "mapping"),
 ];
 
-/// Merge every repeated [`MULTI_VALUE_FLAGS`] flag into one comma-joined
+/// Long flags that are lists only in the commands named: elsewhere the same
+/// name takes one value (`report --account` and `extract --account` are a
+/// single account; `lint linked-transit --account` is repeated, one transit
+/// account each).
+const MULTI_VALUE_COMMAND_FLAGS: &[(&[&str], &str)] = &[(&["lint"], "account")];
+
+/// Merge every repeated [`MULTI_VALUE_FLAGS`] flag (and each
+/// [`MULTI_VALUE_COMMAND_FLAGS`] flag, in its command) into one comma-joined
 /// `--flag=a,b` at its first occurrence.
 ///
 /// agcli 0.18 refuses a flag given twice (`PARSE_ERROR`), with no opt-out,
@@ -2828,8 +2835,20 @@ fn merge_repeated_value_flags(args: Vec<String>, is_alias: impl Fn(&str) -> bool
             };
             return MULTI_VALUE_FLAGS
                 .iter()
-                .find(|long| **long == name)
-                .map(|long| (*long, value));
+                .copied()
+                .find(|long| *long == name)
+                .or_else(|| {
+                    MULTI_VALUE_COMMAND_FLAGS
+                        .iter()
+                        .find(|(commands, long)| {
+                            *long == name
+                                && command
+                                    .as_deref()
+                                    .is_some_and(|command| commands.contains(&command))
+                        })
+                        .map(|(_, long)| *long)
+                })
+                .map(|long| (long, value));
         }
         let rest = arg.strip_prefix('-')?;
         let mut chars = rest.chars();
@@ -3844,6 +3863,64 @@ mod tests {
         // `format -i` is `--in-place`: a boolean, not merged, left for agcli.
         let argv = strings(&["ag-rledger", "format", "f", "-i", "-i"]);
         assert_eq!(merge_repeated_value_flags(argv.clone(), |_| false), argv);
+    }
+
+    /// A command-scoped list flag merges in its command, and only there:
+    /// `lint linked-transit --account` is a list, `report --account` is one
+    /// account, so a repeat there is left for agcli to refuse.
+    #[test]
+    fn test_merge_repeated_value_flags_scopes_long_flags_to_their_command() {
+        for argv in [
+            vec![
+                "ag-rledger",
+                "lint",
+                "linked-transit",
+                "f",
+                "--account",
+                "A",
+                "--account",
+                "B",
+            ],
+            vec![
+                "ag-rledger",
+                "lint",
+                "linked-transit",
+                "f",
+                "--account=A",
+                "--account",
+                "B",
+            ],
+        ] {
+            assert_eq!(
+                merged_values(&argv, "account", None),
+                vec!["A", "B"],
+                "{argv:?}"
+            );
+        }
+        for argv in [
+            vec![
+                "ag-rledger",
+                "report",
+                "f",
+                "balances",
+                "--account",
+                "A",
+                "--account",
+                "B",
+            ],
+            vec![
+                "ag-rledger",
+                "extract",
+                "f",
+                "--account",
+                "A",
+                "--account",
+                "B",
+            ],
+        ] {
+            let argv = strings(&argv);
+            assert_eq!(merge_repeated_value_flags(argv.clone(), |_| false), argv);
+        }
     }
 
     /// A flag given once, a repeated boolean, and anything after `--` are

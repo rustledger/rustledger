@@ -128,25 +128,19 @@ pub fn push_invalid_accounts<'a>(
 /// Report each account-valued metadata entry in `meta` whose name is invalid
 /// under this ledger's roots, through [`push_invalid_accounts`] (#2813):
 /// `kk: Foo:Bar` is `Invalid account name` in beancount. Entries are visited
-/// in key order, so the errors come out in a stable order.
+/// in the order written, as bean-check reports them: `Metadata` keeps
+/// insertion order since #2835, so no sort is needed for a stable order.
 pub fn push_invalid_meta_accounts(
     state: &LedgerState,
     meta: &rustledger_core::Metadata,
     date: NaiveDate,
     errors: &mut Vec<ValidationError>,
 ) {
-    let mut accounts: Vec<(&rustledger_core::InternedStr, &Account)> = meta
-        .iter()
-        .filter_map(|(key, value)| match value {
-            rustledger_core::MetaValue::Account(account) => Some((key, account)),
-            _ => None,
-        })
-        .collect();
-    if accounts.is_empty() {
-        return;
-    }
-    accounts.sort_by(|a, b| a.0.cmp(b.0));
-    push_invalid_accounts(state, accounts.into_iter().map(|(_, a)| a), date, errors);
+    let accounts = meta.values().filter_map(|value| match value {
+        rustledger_core::MetaValue::Account(account) => Some(account),
+        _ => None,
+    });
+    push_invalid_accounts(state, accounts, date, errors);
 }
 
 /// Report each account among a `custom` directive's values whose name is

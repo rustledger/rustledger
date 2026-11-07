@@ -1037,6 +1037,21 @@ fn test_validate_reports_an_account_metadata_value_with_an_invalid_root() {
     assert!(errors[0].contains("\"Assets:B\""), "{errors:?}");
 }
 
+/// Invalid account metadata values are reported in the order written, as
+/// bean-check 3.2.3 reports them (`zz`, `aa`, `mm` here, lines 2 to 4), not
+/// sorted by key. Sorting was only needed while `Metadata` was a hash map
+/// (#2835).
+#[test]
+fn test_validate_reports_invalid_account_metadata_in_written_order() {
+    const ROOTS: [&str; 5] = ["Assets", "Liabilities", "Equity", "Income", "Expenses"];
+    let open = "2024-01-01 open Assets:A\n  zz: Foo:Bar\n  aa: Baz:Qux\n  mm: Qux:Zed\n";
+    let errors = meta_account_errors(open, &ROOTS);
+    assert_eq!(errors.len(), 3, "{errors:?}");
+    for (error, name) in errors.iter().zip(["Foo:Bar", "Baz:Qux", "Qux:Zed"]) {
+        assert!(error.contains(&format!("\"{name}\"")), "{errors:?}");
+    }
+}
+
 // ============================================================================
 // Account names in custom values and pads (#2809)
 // ============================================================================

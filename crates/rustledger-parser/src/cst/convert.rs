@@ -446,6 +446,10 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
         }
     }
 
+    if stripped.contains("filename:") || stripped.contains("lineno:") {
+        report_posting_filename_lineno(source_file.syntax(), bom_offset, &mut errors);
+    }
+
     // Unclosed pushtag/pushmeta at EOF - legacy emits one error
     // per leftover stack entry, pointing at the originating push
     // directive's span.
@@ -468,8 +472,12 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
         &grammar_failures,
         &mut errors,
     );
+    // After `report_invalid_dates`, so an invalid date on a header is among
+    // the errors that swallow the indented line after it.
+    report_no_metadata_continuations(source_file.syntax(), stripped, bom_offset, &mut errors);
     errors.sort_by_key(|e| e.span.start);
     drop_errors_inside_a_line_error(&mut errors, stripped, bom_offset);
+    name_misspelled_booleans(&mut errors, stripped, bom_offset);
 
     // Post-pass: align directive spans with the legacy parser's
     // convention (skip leading trivia, extend through inter-
@@ -1742,7 +1750,8 @@ fn convert_amount_to_incomplete(
             let span = Span::new((start + bom_offset) as usize, (end + bom_offset) as usize);
             errors.push(crate::ParseError::new(
                 crate::ParseErrorKind::SyntaxError(
-                    "invalid arithmetic expression in amount (overflow, division by zero, or malformed)"
+                    "invalid arithmetic expression in amount (overflow, division by zero, \
+                     an inexact quotient below 1e-28, or malformed)"
                         .to_string(),
                 ),
                 span,
@@ -2070,9 +2079,13 @@ fn read_arith_term<T: TokenView>(tokens: &[T], cursor: &mut usize) -> ArithStep 
             crate::SyntaxKind::SLASH => {
                 *cursor += 1;
                 let rhs = read_arith_primary(tokens, cursor)?;
+                // Python's division, as beancount's grammar computes it:
+                // the ideal exponent on an exact quotient (`10/4` is `2.5`,
+                // where `checked_div` gave `2.50`), 28 significant digits on
+                // an inexact one (#2813). `None` on a zero divisor.
                 result = result
                     .zip(rhs)
-                    .and_then(|(a, b)| if b.is_zero() { None } else { a.checked_div(b) });
+                    .and_then(|(a, b)| rustledger_core::py_div(a, b));
             }
             _ => break,
         }
@@ -2849,7 +2862,8 @@ pub(super) fn unevaluable_value_expressions<T: TokenView>(
 pub(super) fn unevaluable_value_error(what: &str, span: Span) -> crate::ParseError {
     crate::ParseError::new(
         crate::ParseErrorKind::SyntaxError(format!(
-            "invalid arithmetic expression in {what} value (overflow or division by zero)"
+            "invalid arithmetic expression in {what} value (overflow, division by zero, \
+             or an inexact quotient below 1e-28)"
         )),
         span,
     )
@@ -5224,8 +5238,11 @@ fn report_invalid_dates(
     // the line's first token in beancount (`  "x" 2024-02-30`: `unexpected
     // STRING`, then the date; `  2024-02-30 5`: the date alone).
     // Where every error starts, sorted, stripped frame.
+    // Only an error that swallows the next line keeps a directive that takes
+    // no metadata from leaving a gap (`swallows_the_next_line`).
     let mut error_starts: Vec<usize> = errors
         .iter()
+        .filter(|e| swallows_the_next_line(&e.kind))
         .map(|e| e.span.start.saturating_sub(off))
         .collect();
     error_starts.sort_unstable();
@@ -5282,6 +5299,39 @@ fn report_invalid_dates(
     });
 }
 
+/// The directives that take no metadata, with their keywords: beancount's
+/// grammar has no indented continuation for them, so an indented line after
+/// one is `unexpected INDENT`. The one list for `previous_line_is_a_gap` and
+/// `report_no_metadata_continuations`.
+const NO_METADATA_DIRECTIVES: [(crate::SyntaxKind, &str); 7] = [
+    (crate::SyntaxKind::OPTION_DIRECTIVE, "option"),
+    (crate::SyntaxKind::INCLUDE_DIRECTIVE, "include"),
+    (crate::SyntaxKind::PLUGIN_DIRECTIVE, "plugin"),
+    (crate::SyntaxKind::PUSHTAG_DIRECTIVE, "pushtag"),
+    (crate::SyntaxKind::POPTAG_DIRECTIVE, "poptag"),
+    (crate::SyntaxKind::PUSHMETA_DIRECTIVE, "pushmeta"),
+    (crate::SyntaxKind::POPMETA_DIRECTIVE, "popmeta"),
+];
+
+/// Whether an error on a directive's header means beancount's recovery
+/// swallows the indented line after it, so that line is not `unexpected
+/// INDENT` there. A syntax error or a lexer error (an invalid date) does: bison
+/// discards up to the next statement. A `poptag` / `popmeta` of nothing pushed,
+/// or a push never popped, does not: beancount's builder reports it and the
+/// parser carries on, so the indented line is still `unexpected INDENT`
+/// (bean-check 3.2.3: `poptag #zz` then `  2024-02-30 open Assets:A` is three
+/// errors). The one rule for `previous_line_is_a_gap` and
+/// `report_no_metadata_continuations`.
+const fn swallows_the_next_line(kind: &crate::ParseErrorKind) -> bool {
+    !matches!(
+        kind,
+        crate::ParseErrorKind::InvalidPoptag(_)
+            | crate::ParseErrorKind::InvalidPopmeta(_)
+            | crate::ParseErrorKind::UnclosedPushtag(_)
+            | crate::ParseErrorKind::UnclosedPushmeta(_)
+    )
+}
+
 /// Whether the line before the one starting at `line_start` leaves an indented
 /// line nothing to continue, so beancount reports `unexpected INDENT` there
 /// (bean-check 3.2.3): it is blank, missing, a comment at column 0, or one of
@@ -5309,11 +5359,8 @@ fn previous_line_is_a_gap(
     multiline_strings: &[std::ops::Range<usize>],
     error_starts: &[usize],
 ) -> bool {
-    const NO_METADATA: [&str; 7] = [
-        "option", "include", "plugin", "pushtag", "poptag", "pushmeta", "popmeta",
-    ];
     let takes_no_metadata = |line: &str| {
-        NO_METADATA.iter().any(|keyword| {
+        NO_METADATA_DIRECTIVES.iter().any(|(_, keyword)| {
             line.strip_prefix(keyword)
                 .is_some_and(|rest| rest.starts_with([' ', '\t']))
         })
@@ -5364,6 +5411,9 @@ pub mod test_counters {
         /// scan for line starts, and each line prefix it lexed (#2787).
         pub static ERROR_LINE_SCANNED_BYTES: std::cell::Cell<usize> =
             const { std::cell::Cell::new(0) };
+        /// Work `report_no_metadata_continuations` did: header tokens and
+        /// line bytes stepped over, and errors visited (#2813).
+        pub static NO_META_SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 }
 
@@ -5721,6 +5771,30 @@ mod tests {
     /// `drop_errors_inside_a_line_error` (#2787) scans the source once for
     /// line starts and lexes each broken line's prefix once, so many broken
     /// lines, or many unreadable tokens on one long line, stay linear.
+    /// `report_no_metadata_continuations` (#2813) visits each header token,
+    /// each checked line and each error once, so many `option` / `pushtag`
+    /// lines with an indented line after each, among many other errors,
+    /// stay linear.
+    #[test]
+    fn test_report_no_metadata_continuations_is_linear_in_the_input() {
+        const N: usize = 20_000;
+        let src = "pushtag #t\n  ; c\npoptag #t\n  2024-01-01 open\n".repeat(N);
+        test_counters::NO_META_SCANNED.with(|c| c.set(0));
+        let result = crate::parse(&src);
+        let scanned = test_counters::NO_META_SCANNED.with(std::cell::Cell::get);
+        assert!(
+            scanned <= 2 * src.len(),
+            "visited {scanned} units of a {}-byte input",
+            src.len()
+        );
+        let indented = result
+            .errors
+            .iter()
+            .filter(|e| e.to_string().contains("takes no metadata"))
+            .count();
+        assert_eq!(indented, N);
+    }
+
     #[test]
     fn test_drop_errors_inside_a_line_error_is_linear_in_the_input() {
         const N: usize = 20_000;
@@ -8099,10 +8173,8 @@ mod tests {
             // Both trees, which must agree (asserted by the helper).
             let (errors, values) = custom_errors_and_values(src);
             assert!(errors.is_empty(), "{src:?}: {errors:?}");
-            // Equal as numbers. The scale is not compared: a division here
-            // gives `2.50` where beancount gives `2.5`, from the shared
-            // evaluator's `checked_div` (balance, price and metadata amounts
-            // do the same; `rustledger_core::py_div` is Python's division).
+            // Equal as numbers; the scale of a quotient is pinned by
+            // `test_arithmetic_division_has_pythons_scale`.
             assert_eq!(values, want, "{src:?}");
         }
     }
@@ -8184,9 +8256,34 @@ mod tests {
         ] {
             let (errors, pushed) = pushed_value(value);
             assert!(errors.is_empty(), "{value:?}: {errors:?}");
-            // Equal as numbers; `10/4` is `2.50` here, see
-            // `test_custom_values_evaluate_arithmetic`.
+            // Equal as numbers; the scale of a quotient is pinned by
+            // `test_arithmetic_division_has_pythons_scale`.
             assert_eq!(pushed, Some(want), "{value:?}");
+        }
+    }
+
+    /// A division in a value is Python's, as beancount's grammar computes it
+    /// (#2813): `10/4` is `2.5` (it was `2.50`, `checked_div`'s scale),
+    /// `10.00/4` keeps the ideal `2.50`, and an inexact quotient has 28
+    /// significant digits. Checked against beancount 3.2.3's metadata values.
+    #[test]
+    fn test_arithmetic_division_has_pythons_scale() {
+        for (value, want) in [
+            ("10/4", "2.5"),
+            ("10.00/4", "2.50"),
+            ("7.5/3", "2.5"),
+            ("1/3", "0.3333333333333333333333333333"),
+            ("10/3", "3.333333333333333333333333333"),
+            ("10/4 USD", "2.5 USD"),
+        ] {
+            let (errors, meta) = metadata_value(value);
+            assert!(errors.is_empty(), "{value:?}: {errors:?}");
+            let text = match meta {
+                Some(MetaValue::Number(n)) => n.to_string(),
+                Some(MetaValue::Amount(a)) => format!("{} {}", a.number, a.currency),
+                other => panic!("{value:?}: {other:?}"),
+            };
+            assert_eq!(text, want, "{value:?}");
         }
     }
 
@@ -8236,7 +8333,7 @@ mod tests {
     fn test_meta_value_reports_an_overflowing_expression() {
         let overflow = "79228162514264337593543950335 * 10";
         let message = "parse error: invalid arithmetic expression in metadata value \
-                       (overflow or division by zero)";
+                       (overflow, division by zero, or an inexact quotient below 1e-28)";
         let (errors, value) = metadata_value(overflow);
         assert_eq!(errors, vec![message.to_string()]);
         assert_eq!(value, Some(MetaValue::None));
@@ -8282,8 +8379,9 @@ mod tests {
         (errors, values)
     }
 
-    const UNEVALUABLE_CUSTOM: &str =
-        "parse error: invalid arithmetic expression in custom value (overflow or division by zero)";
+    const UNEVALUABLE_CUSTOM: &str = "parse error: invalid arithmetic expression in custom \
+                                      value (overflow, division by zero, or an inexact \
+                                      quotient below 1e-28)";
 
     /// An expression in a custom value that is well formed but has no value
     /// is a parse error over the expression and its currency, in both trees,
@@ -8489,7 +8587,7 @@ mod tests {
             errors,
             vec![(
                 "parse error: invalid arithmetic expression in pushmeta value \
-                 (overflow or division by zero)"
+                 (overflow, division by zero, or an inexact quotient below 1e-28)"
                     .to_string(),
                 "1/0"
             )]
@@ -8770,6 +8868,266 @@ fn invalid_token_name(text: &str) -> String {
         name.push_str("...");
     }
     name
+}
+
+/// Report an indented line right after a directive that takes no metadata
+/// (`option`, `include`, `plugin`, `pushtag`, `poptag`, `pushmeta`,
+/// `popmeta`), as beancount does (#2813): its grammar has no indented
+/// continuation for them, so it reports `syntax error, unexpected INDENT` at
+/// the first indented line (metadata, a comment, anything but a blank line)
+/// and its recovery swallows the rest of that indented block. rledger's
+/// parser absorbed `  kk: 1` into the directive as metadata and the
+/// converters ignored it, so the line was dropped with no error.
+///
+/// Not reported where that line already has a syntax error of its own (an
+/// orphan indented line, `  2024-02-30 5`), nor after a directive whose
+/// header already has an error: beancount's recovery from that swallows the
+/// indented line, which `previous_line_is_a_gap` relies on too. Walks the
+/// green root's children and only these directives' tokens, so it costs no
+/// red nodes.
+fn report_no_metadata_continuations(
+    root: &crate::SyntaxNode,
+    stripped: &str,
+    bom_offset: u32,
+    errors: &mut Vec<crate::ParseError>,
+) {
+    use crate::SyntaxKind as K;
+    use rowan::Language as _;
+    use rowan::NodeOrToken;
+    let bom = bom_offset as usize;
+    let mut found: Vec<(usize, usize, &str)> = Vec::new();
+    let mut offset = 0usize;
+    for child in root.green().children() {
+        let len = match child {
+            NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
+            NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
+        };
+        if let NodeOrToken::Node(n) = child {
+            let kind = crate::BeancountLanguage::kind_from_raw(n.kind());
+            if let Some(&(_, keyword)) = NO_METADATA_DIRECTIVES.iter().find(|(k, _)| *k == kind) {
+                // The header's start (its keyword) and the end of the
+                // NEWLINE that ends it. A `\n` inside a multi-line string is
+                // part of a STRING token, so it does not end the header.
+                let mut at = offset;
+                let mut header: Option<(usize, &str)> = None;
+                let mut header_end = None;
+                for token in n.children() {
+                    let token_len = match token {
+                        NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
+                        NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
+                    };
+                    #[cfg(test)]
+                    test_counters::NO_META_SCANNED.with(|c| c.set(c.get() + 1));
+                    if let NodeOrToken::Token(t) = token {
+                        let k = crate::BeancountLanguage::kind_from_raw(t.kind());
+                        if header.is_none() && !is_trivia_kind(k) {
+                            header = Some((at, keyword));
+                        } else if header.is_some() && k == K::NEWLINE {
+                            header_end = Some(at + token_len);
+                            break;
+                        }
+                    }
+                    at += token_len;
+                }
+                if let (Some((start, keyword)), Some(end)) = (header, header_end) {
+                    found.push((start, end, keyword));
+                }
+            }
+        }
+        offset += len;
+    }
+    if found.is_empty() {
+        return;
+    }
+    // Sorted starts (BOM frame) of the errors on a header that swallow the
+    // indented line after it (`swallows_the_next_line`), and of the syntax
+    // errors that already stand for a line.
+    #[cfg(test)]
+    test_counters::NO_META_SCANNED.with(|c| c.set(c.get() + errors.len()));
+    let starts_of = |keep: &dyn Fn(&crate::ParseErrorKind) -> bool| {
+        let mut starts: Vec<usize> = errors
+            .iter()
+            .filter(|e| keep(&e.kind))
+            .map(|e| e.span.start)
+            .collect();
+        starts.sort_unstable();
+        starts
+    };
+    let swallowing = starts_of(&swallows_the_next_line);
+    let syntax = starts_of(&|k| matches!(k, crate::ParseErrorKind::SyntaxError(_)));
+    let error_in = |starts: &[usize], from: usize, to: usize| {
+        let i = starts.partition_point(|&s| s < from + bom);
+        starts.get(i).is_some_and(|&s| s < to + bom)
+    };
+    for (header_start, line_start, keyword) in found {
+        let rest = &stripped[line_start..];
+        let line = &rest[..rest.find('\n').map_or(rest.len(), |i| i + 1)];
+        #[cfg(test)]
+        test_counters::NO_META_SCANNED.with(|c| c.set(c.get() + line.len()));
+        let body = line.trim_start_matches([' ', '\t']);
+        let indented = body.len() < line.len();
+        let blank = body.trim_start_matches([' ', '\t', '\r', '\n']).is_empty();
+        let line_end = line_start + line.len();
+        if !indented
+            || blank
+            || error_in(&swallowing, header_start, line_start)
+            || error_in(&syntax, line_start, line_end)
+        {
+            continue;
+        }
+        errors.push(crate::ParseError::new(
+            crate::ParseErrorKind::SyntaxError(format!(
+                "unexpected indented line: `{keyword}` takes no metadata"
+            )),
+            Span::new(line_start + bom, line_end + bom),
+        ));
+    }
+}
+
+/// Report a posting's `filename:` or `lineno:` metadata, as beancount does
+/// (#2813): it sets both on every posting itself, so one written in the
+/// file is `Duplicate posting metadata field`, reported at the transaction's
+/// line. rledger accepted it, so the written value stood in for the real
+/// location. A directive's own `filename:` / `lineno:` is accepted by
+/// beancount and is left alone here.
+///
+/// Called only when the source holds `filename:` or `lineno:` at all, and
+/// walks the green tree, so it costs no red nodes.
+fn report_posting_filename_lineno(
+    root: &crate::SyntaxNode,
+    bom_offset: u32,
+    errors: &mut Vec<crate::ParseError>,
+) {
+    use crate::SyntaxKind as K;
+    use rowan::Language as _;
+    use rowan::NodeOrToken;
+    fn len_of(child: NodeOrToken<&rowan::GreenNodeData, &rowan::GreenTokenData>) -> usize {
+        match child {
+            NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
+            NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
+        }
+    }
+    let bom = bom_offset as usize;
+    let mut offset = 0usize;
+    for child in root.green().children() {
+        let len = len_of(child);
+        if let NodeOrToken::Node(txn) = child
+            && crate::BeancountLanguage::kind_from_raw(txn.kind()) == K::TRANSACTION
+        {
+            // The header line: from the first non-trivia token to the end of
+            // its NEWLINE.
+            let mut header: Option<usize> = None;
+            let mut header_end: Option<usize> = None;
+            let mut keys: Vec<&str> = Vec::new();
+            let mut at = offset;
+            for part in txn.children() {
+                let part_len = len_of(part);
+                match part {
+                    NodeOrToken::Token(t) => {
+                        let k = crate::BeancountLanguage::kind_from_raw(t.kind());
+                        if header.is_none() && !is_trivia_kind(k) {
+                            header = Some(at);
+                        } else if header.is_some() && header_end.is_none() && k == K::NEWLINE {
+                            header_end = Some(at + part_len);
+                        }
+                    }
+                    NodeOrToken::Node(posting)
+                        if crate::BeancountLanguage::kind_from_raw(posting.kind())
+                            == K::POSTING =>
+                    {
+                        for meta in posting.children() {
+                            let NodeOrToken::Node(meta) = meta else {
+                                continue;
+                            };
+                            if crate::BeancountLanguage::kind_from_raw(meta.kind()) != K::META_ENTRY
+                            {
+                                continue;
+                            }
+                            for t in meta.children() {
+                                if let NodeOrToken::Token(t) = t
+                                    && crate::BeancountLanguage::kind_from_raw(t.kind())
+                                        == K::META_KEY
+                                {
+                                    let key = t.text().trim_end_matches(':');
+                                    if matches!(key, "filename" | "lineno") {
+                                        keys.push(key);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    NodeOrToken::Node(_) => {}
+                }
+                at += part_len;
+            }
+            if let (Some(start), false) = (header, keys.is_empty()) {
+                let end = header_end.unwrap_or(offset + len);
+                for key in keys {
+                    errors.push(crate::ParseError::new(
+                        crate::ParseErrorKind::SyntaxError(format!(
+                            "duplicate posting metadata field `{key}`: beancount sets \
+                             `filename` and `lineno` on every posting itself"
+                        )),
+                        Span::new(start + bom, end + bom),
+                    ));
+                }
+            }
+        }
+        offset += len;
+    }
+}
+
+/// Name a misspelled boolean (#2813): beancount's only boolean spellings are
+/// `TRUE` and `FALSE`, so `true`, `false`, `True` and `False` are its
+/// `Invalid token`, and a parse error here too. The generic `unexpected input`
+/// on such a word becomes `invalid token 'true' (booleans are written TRUE or
+/// FALSE)`, so the fix is in the message.
+///
+/// The word is read from the source around the error (`True` lexes as the
+/// currency `T` and an error token `rue`): the ASCII letters on both sides,
+/// at most one more than the five of `false`, so `Truex` is left alone and a
+/// long word costs nothing. It is renamed only when it stands alone as a
+/// value: a line start or whitespace before it, and whitespace, a line end, a
+/// comment's `;` or the end of the source after it. Anything else around it
+/// (`Assets:true`, `true.`, `True'`, `trueé`) makes it part of a longer token,
+/// which beancount names whole, so the generic message stays.
+fn name_misspelled_booleans(errors: &mut [crate::ParseError], stripped: &str, bom_offset: u32) {
+    const LIMIT: usize = 5;
+    let bom = bom_offset as usize;
+    let bytes = stripped.as_bytes();
+    for e in errors.iter_mut() {
+        if !matches!(&e.kind, crate::ParseErrorKind::SyntaxError(m) if m == "unexpected input") {
+            continue;
+        }
+        let (Some(start), Some(end)) = (e.span.start.checked_sub(bom), e.span.end.checked_sub(bom))
+        else {
+            continue;
+        };
+        if end > bytes.len() || start >= end || end - start > LIMIT {
+            continue;
+        }
+        let is_letter = |i: usize| bytes.get(i).is_some_and(u8::is_ascii_alphabetic);
+        // At most `LIMIT + 1` letters in all: enough to tell a five-letter
+        // boolean from a longer word.
+        let mut from = start;
+        while from > 0 && end - from <= LIMIT && is_letter(from - 1) {
+            from -= 1;
+        }
+        let mut to = end;
+        while to - from <= LIMIT && is_letter(to) {
+            to += 1;
+        }
+        let before_ok = from == 0 || matches!(bytes[from - 1], b' ' | b'\t' | b'\n');
+        let after_ok = bytes
+            .get(to)
+            .is_none_or(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n' | b';'));
+        let word = &stripped[from..to];
+        if before_ok && after_ok && matches!(word, "true" | "false" | "True" | "False") {
+            e.kind = crate::ParseErrorKind::SyntaxError(format!(
+                "invalid token '{word}' (booleans are written TRUE or FALSE)"
+            ));
+        }
+    }
 }
 
 /// Name the problem when an unlexable character is glued to the end of a

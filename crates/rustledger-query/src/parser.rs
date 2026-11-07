@@ -579,8 +579,13 @@ fn targets<'a>() -> impl Parser<'a, ParserInput<'a>, Vec<Target>, ParserExtra<'a
 /// (`* * 2`, `*.x`) is not a target but a `*` used as a value, and falls
 /// through to `expr` to be refused there by name (#2871).
 fn target<'a>() -> impl Parser<'a, ParserInput<'a>, Target, ParserExtra<'a>> + Clone {
+    // A hand-written copy of what may follow an operand in `expr`: the
+    // symbols in `OPERATOR_STARTS` and these keywords. A new operator in
+    // `expr` belongs here too, with its row in
+    // `test_star_before_every_operator_is_named`, which pins that every
+    // `BinaryOperator` gets the named error.
     let operator_follows = choice((
-        ws().then(one_of(".[*/%+-=<>!~")).ignored(),
+        ws().then(one_of(OPERATOR_STARTS)).ignored(),
         ws1()
             .then(choice((
                 kw("AND"),
@@ -1061,6 +1066,11 @@ fn expr<'a>() -> Boxed<'a, 'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
             .boxed();
 
         // Multiplicative: * / %
+        //
+        // Every operator here and below (and the postfix `.` and `[`
+        // above) is copied by hand into `OPERATOR_STARTS` and `target`'s
+        // `operator_follows`, so a `*` before it gets the named error (#2880).
+        // A new operator goes there too.
         let multiplicative = unary
             .clone()
             .foldl(
@@ -1303,14 +1313,23 @@ const STAR_IS_NOT_A_VALUE: &str = "'*' is not a value: it stands only for the wh
 /// The error for a sign after a unary `+` (`++6`, `+-*`).
 const SIGN_AFTER_PLUS: &str = "a '+' sign takes a bare value, not another sign after it";
 
+/// The error for a value after a call's `*` (`count(* 1)`, #2880). The
+/// generic error listed `,` among what may follow the `*`, which it may not.
+const STAR_STANDS_ALONE: &str =
+    "expected ')' after the '*': it stands alone in a call such as count(*)";
+
 /// Whether `error` is one an operand emits to refuse what it parsed
-/// ([`STAR_IS_NOT_A_VALUE`], [`SIGN_AFTER_PLUS`]). Such an error names what
-/// is wrong where it is, so it is reported as written even when a later
+/// ([`STAR_IS_NOT_A_VALUE`], [`SIGN_AFTER_PLUS`]), or a call's lone `*`
+/// raises at the value after it ([`STAR_STANDS_ALONE`]). Such an error names
+/// what is wrong where it is, so it is reported as written even when a later
 /// part of the query also fails to parse (``SELECT -*, `x` ``).
 fn is_operand_refusal(error: &Rich<'_, char>) -> bool {
     matches!(
         error.reason(),
-        RichReason::Custom(message) if message == STAR_IS_NOT_A_VALUE || message == SIGN_AFTER_PLUS
+        RichReason::Custom(message)
+            if message == STAR_IS_NOT_A_VALUE
+                || message == SIGN_AFTER_PLUS
+                || message == STAR_STANDS_ALONE
     )
 }
 
@@ -1423,18 +1442,51 @@ fn function_args<'a>(
     let wildcard = just('*')
         .then_ignore(ws().then(just(')')).rewind())
         .to(vec![Expr::Wildcard]);
+    // A `*` and then a value, not an operator, `,` or `)` (`count(* 1)`):
+    // name the `)` the lone `*` needs, at the value, where the generic error
+    // listed `,` too (#2880). The value is parsed, and the error kept by
+    // `validate`, so that the call parses on and the error survives; a
+    // failing branch's error loses to the other branches'. Anything else
+    // after the `*` is left to the expression branch, which refuses the `*`
+    // by name.
+    let star_then_value = just('*')
+        .ignore_then(ws())
+        .ignore_then(
+            any()
+                .filter(|c: &char| *c != ')' && *c != ',' && !OPERATOR_STARTS.contains(*c))
+                .rewind(),
+        )
+        .ignore_then(expr.clone().map_with(|_, e| e.span()))
+        .validate(|span, _, emitter| {
+            emitter.emit(Rich::custom(span, STAR_STANDS_ALONE));
+            vec![Expr::Wildcard]
+        });
     // Otherwise empty args or comma-separated full expressions
     // This enables nested function calls like units(sum(position))
     choice((
         wildcard,
+        star_then_value,
         expr.separated_by(ws().then(just(',')).then(ws())).collect(),
     ))
 }
 
-/// Parse a simple function argument (column, wildcard, or literal).
+/// The characters an operator (or the postfix `.` and `[`) after an operand
+/// in `expr` starts with. Kept beside the operators' definitions by hand
+/// (the `multiplicative`, `additive` and `comparison` folds, and the
+/// postfix loop); `test_star_before_every_operator_is_named` pins it.
+const OPERATOR_STARTS: &str = ".[*/%+-=<>!~";
+
+/// Parse a simple argument of a window's `PARTITION BY` or `ORDER BY`
+/// (column or literal).
+///
+/// A `*` is no value there either (#2880): it is parsed only so that the
+/// error, kept by `validate`, names it, as `primary_expr` does.
 fn simple_arg<'a>() -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> + Clone {
     choice((
-        just('*').to(Expr::Wildcard),
+        just('*').validate(|_, e, emitter| {
+            emitter.emit(Rich::custom(e.span(), STAR_IS_NOT_A_VALUE));
+            Expr::Wildcard
+        }),
         identifier().map(Expr::Column),
         literal().map(Expr::Literal),
     ))

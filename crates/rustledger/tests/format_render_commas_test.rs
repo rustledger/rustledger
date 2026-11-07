@@ -142,14 +142,15 @@ fn grouped_output_is_canonical_and_check_accepts_it() {
 /// The reporter's actual shape: ONE hyperinflated commodity declares grouping,
 /// with no global option, so everything else is untouched (#1892).
 ///
-/// Also exercises the metadata path for `TRUE`. An uppercase bare word's token
-/// classification depends on context, so all the spellings a ledger author
-/// might write are accepted — silently ignoring the declaration is the failure
-/// mode that makes a display option look broken.
+/// Also exercises the metadata path for `TRUE`, bare and quoted: silently
+/// ignoring the declaration is the failure mode that makes a display option
+/// look broken. A bare `true` is no longer one of them: as in beancount, whose
+/// only boolean spellings are `TRUE` and `FALSE`, it is a parse error (#2813),
+/// so `format` refuses the file instead of ignoring the declaration.
 #[test]
 fn a_single_commodity_can_opt_in_via_metadata() {
     let bin = require_rledger!();
-    for spelling in ["TRUE", "\"TRUE\"", "true"] {
+    for spelling in ["TRUE", "\"TRUE\""] {
         let dir = tempfile::Builder::new()
             .prefix("fmt-opt-in-")
             .tempdir()

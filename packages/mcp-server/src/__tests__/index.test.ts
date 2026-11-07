@@ -512,8 +512,10 @@ describe('Tool Handlers', () => {
 
     // A plugin's diagnostic is shown beside the rows; the tool dropped it. The
     // wasm releases word and grade `check_commodity`'s finding differently
-    // (0.24.0: a warning, `commodity 'USD' used but not declared`; after
-    // #2882 an error the query answers over), hence the loose match.
+    // (the published 0.24.0: a warning, `commodity 'USD' used but not
+    // declared`; main since then: an error, `Missing Commodity directive for
+    // 'USD' in 'Assets:Cash'`, which the wasm answers over from #2882 on),
+    // hence the loose match.
     it("answers over a plugin's diagnostic, showing it beside the rows", () => {
       const plugin = 'plugin "beancount.plugins.check_commodity"\n' + BASE;
       const query = handleToolCall('query', { source: plugin, query: QUERY });
@@ -532,10 +534,11 @@ describe('Tool Handlers', () => {
     });
 
     // The tool answers over a plugin's error when the wasm does. CI runs this
-    // package against the published `@rustledger/wasm`, which refused there
-    // before #2882, so the tool's half of the rule is pinned on the result
-    // shapes the wasm gives: an answer with the plugin's error beside it, and
-    // a refusal (no columns).
+    // package against the published `@rustledger/wasm` 0.24.0, whose
+    // `check_commodity` reports a warning, not an error, so no tool-level
+    // case there carries a plugin's error. The tool's half of the rule is
+    // pinned on the result shapes the wasm gives from #2882 on: an answer
+    // with the plugin's error beside it, and a refusal (no columns).
     it("answers a result that carries a plugin's error, reporting it", () => {
       const pluginError: BeancountError = { severity: 'error', message: MISSING_COMMODITY };
       const answered = queryResponse({ columns: ['narration'], rows: [['pay']], errors: [pluginError] });
@@ -551,6 +554,13 @@ describe('Tool Handlers', () => {
       const refused = queryResponse({ columns: [], rows: [], errors: [pluginError] });
       expect(refused.isError).toBe(true);
       expect(refused.content[0].text).toContain(MISSING_COMMODITY);
+      // A BQL error keeps the load's warnings beside it.
+      const warning: BeancountError = { severity: 'warning', message: 'a plugin warning' };
+      const bqlError: BeancountError = { severity: 'error', message: 'syntax error at position 0' };
+      const failed = queryResponse({ columns: [], rows: [], errors: [warning, bqlError] });
+      expect(failed.isError).toBe(true);
+      expect(failed.content[0].text).toContain('a plugin warning');
+      expect(failed.content[0].text).toContain('syntax error at position 0');
     });
 
     it('refuses over a parse error', () => {

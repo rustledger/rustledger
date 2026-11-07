@@ -959,7 +959,8 @@ const BATCH_REFUSED: &str = "Cannot execute query: a load error leaves the ledge
 /// by [`query`]'s rule (#2882): when a load error blocks queries (a parse
 /// error, a booking failure), every query refuses with the one error naming
 /// that; otherwise pads are expanded once for all queries, and each result
-/// reports the load's errors ahead of its own, as `batch-file`'s do.
+/// reports the load's errors ahead of its own, as [`query`] does (the
+/// semantic validation errors the batch's `load` lists are not among them).
 ///
 /// Before #2882 any load error refused, a plugin's warning included, with
 /// `Cannot execute query: parse errors exist` whatever the cause.

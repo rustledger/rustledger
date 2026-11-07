@@ -592,7 +592,11 @@ interface ledger {
   /// holds one error saying so, and `load.errors` holds the cause (before
   /// 3.18.0 that one error read `parse errors exist`, whatever the cause,
   /// and any load error refused). When it answers, each query's `errors`
-  /// repeats the load errors ahead of its own, as `batch-file`'s do.
+  /// repeats the load's parse, booking and plugin errors ahead of its own,
+  /// as `query` reports them. The semantic validation errors `load.errors`
+  /// also lists (a failed balance assertion, an unopened account) are in
+  /// `load.errors` only: a query neither checks for them nor refuses over
+  /// them.
   batch: func(source: string, queries: list<string>) -> batch-result;
   /// Like `batch`, but the ledger is loaded from a file path, as `query-file`
   /// loads it, confinement and load-error rule included (3.16.0, #2825).

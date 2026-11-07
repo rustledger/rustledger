@@ -226,10 +226,17 @@ mod query_answer_rule {
         files.into()
     }
 
-    /// `result` is exactly `case`'s answer: its rows, or a refusal, with its
-    /// load error among `errors` (the result's own, or a `Ledger`'s
-    /// `getErrors`, where a query that answers reports the load's errors).
-    fn check(case: &QueryRuleCase, surface: &str, result: &JsValue, errors: &JsValue) {
+    /// `result` is exactly `case`'s answer: its rows (under the query's one
+    /// column), or a refusal (no columns), with its load error among the
+    /// result's own `errors`. Every surface reports its load's errors in the
+    /// result, refusing or answering (#2882): a refusal is told from an answer
+    /// with no rows by its columns, which a ledger that failed to parse, and
+    /// so has no entries, would otherwise answer with.
+    fn check(case: &QueryRuleCase, surface: &str, result: &JsValue) {
+        let columns: Vec<String> = js_sys::Array::from(&get_field(result, "columns"))
+            .iter()
+            .map(|c| c.as_string().unwrap_or_default())
+            .collect();
         let rows: Vec<String> = js_sys::Array::from(&get_field(result, "rows"))
             .iter()
             .map(|row| {
@@ -240,17 +247,21 @@ mod query_answer_rule {
                     .unwrap_or_else(|| panic!("{} via {surface}: not text", case.name))
             })
             .collect();
-        let errors: Vec<String> = js_sys::Array::from(errors)
+        let errors: Vec<String> = js_sys::Array::from(&get_field(result, "errors"))
             .iter()
             .map(|e| get_field(&e, "message").as_string().unwrap_or_default())
             .collect();
         let context = format!(
-            "{} via {surface}: rows {rows:?}, errors {errors:?}",
+            "{} via {surface}: columns {columns:?}, rows {rows:?}, errors {errors:?}",
             case.name
         );
         match case.rows {
-            Some(want) => assert_eq!(rows, want, "{context}"),
+            Some(want) => {
+                assert_eq!(columns, ["narration"], "{context}");
+                assert_eq!(rows, want, "{context}");
+            }
             None => {
+                assert!(columns.is_empty(), "a refusal has no columns: {context}");
                 assert!(rows.is_empty(), "{context}");
                 assert!(!errors.is_empty(), "{context}");
             }
@@ -272,12 +283,7 @@ mod query_answer_rule {
             let result =
                 rustledger_wasm::query_multi_file(files(case), case.entry, QUERY_RULE_QUERY)
                     .expect("queryMultiFile");
-            check(
-                case,
-                "queryMultiFile",
-                &result,
-                &get_field(&result, "errors"),
-            );
+            check(case, "queryMultiFile", &result);
 
             let ledger =
                 rustledger_wasm::Ledger::from_files(files(case), case.entry).expect("fromFiles");
@@ -285,7 +291,6 @@ mod query_answer_rule {
                 case,
                 "Ledger.query",
                 &ledger.query(QUERY_RULE_QUERY).expect("query"),
-                &ledger.get_errors().expect("getErrors"),
             );
             let restored = rustledger_wasm::Ledger::from_cache(&ledger.serialize().expect("ser"))
                 .expect("fromCache");
@@ -293,7 +298,6 @@ mod query_answer_rule {
                 case,
                 "Ledger.query from cache",
                 &restored.query(QUERY_RULE_QUERY).expect("query"),
-                &restored.get_errors().expect("getErrors"),
             );
         }
     }
@@ -315,14 +319,13 @@ mod query_answer_rule {
                 .expect("the entry file")
                 .1;
             let result = rustledger_wasm::query(source, QUERY_RULE_QUERY).expect("query");
-            check(case, "query", &result, &get_field(&result, "errors"));
+            check(case, "query", &result);
 
             let ledger = rustledger_wasm::ParsedLedger::new(source);
             check(
                 case,
                 "ParsedLedger.query",
                 &ledger.query(QUERY_RULE_QUERY).expect("query"),
-                &ledger.get_errors().expect("getErrors"),
             );
             let restored = rustledger_wasm::ParsedLedger::from_cache(
                 &ledger.serialize().expect("serialize"),
@@ -333,7 +336,6 @@ mod query_answer_rule {
                 case,
                 "ParsedLedger.query from cache",
                 &restored.query(QUERY_RULE_QUERY).expect("query"),
-                &restored.get_errors().expect("getErrors"),
             );
         }
         assert!(ran >= 4, "only {ran} source-text cases");
@@ -360,13 +362,12 @@ mod query_answer_rule {
             source_text: true,
         };
         let result = rustledger_wasm::query(source, QUERY_RULE_QUERY).expect("query");
-        check(&case, "query", &result, &get_field(&result, "errors"));
+        check(&case, "query", &result);
         let ledger = rustledger_wasm::ParsedLedger::new(source);
         check(
             &case,
             "ParsedLedger.query",
             &ledger.query(QUERY_RULE_QUERY).expect("query"),
-            &ledger.get_errors().expect("getErrors"),
         );
     }
 }

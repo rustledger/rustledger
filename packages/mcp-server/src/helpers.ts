@@ -443,9 +443,10 @@ export function formatQueryResult(result: QueryResult): string {
  */
 export function queryResponse(result: QueryResult, heading = ""): ToolResponse {
   if (!result.columns || result.columns.length === 0) {
-    const blocking = fatalErrors(result.errors);
-    if (blocking.length > 0) {
-      return errorResponse(formatErrors(blocking));
+    // Every error, the load's warnings included: a BQL error beside a
+    // plugin's warning still says the ledger had one.
+    if (fatalErrors(result.errors).length > 0) {
+      return errorResponse(formatErrors(result.errors ?? []));
     }
   }
   const table = formatQueryResult(result);

@@ -2,7 +2,9 @@
 //!
 //! Fetches currency exchange rates from the ECB.
 
-use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, user_agent};
+use super::{
+    DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, http_get, split_dash_pair,
+};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
@@ -25,15 +27,15 @@ use std::time::Duration;
 /// - Rates are against EUR (EUR is the base currency)
 /// - Weekend/holiday rates use the last available rate
 #[derive(Debug)]
-pub struct EcbSource {}
+pub struct EcbSource {
+    /// Whole-request timeout, applied to each request.
+    timeout: Duration,
+}
 
 impl EcbSource {
     /// Create a new ECB source.
-    ///
-    /// The timeout parameter is accepted for API consistency but not
-    /// currently applied to HTTP requests.
-    pub const fn new(_timeout: Duration) -> Self {
-        Self {}
+    pub const fn new(timeout: Duration) -> Self {
+        Self { timeout }
     }
 
     /// Build the ECB API URL for a currency's EUR-reference series:
@@ -65,27 +67,18 @@ impl EcbSource {
     ) -> Result<Vec<(NaiveDate, Decimal)>> {
         let url = self.build_url(&currency.to_uppercase(), window);
 
-        let mut response = match ureq::get(&url)
-            .header("User-Agent", user_agent())
-            .header("Accept", "application/json")
-            .call()
-        {
-            Ok(response) => response,
-            // The SDMX API answers an EMPTY selection with HTTP 404
-            // ("No results found") — that is the fetch_window
-            // contract's "no observations here" (a clean no-quote at
-            // the dispatch), not a transport failure (deep review of
-            // #1804: a frozen HRK window read as a network error).
-            Err(ureq::Error::StatusCode(404)) => return Ok(Vec::new()),
-            Err(e) => {
-                return Err(e).with_context(|| format!("Failed to fetch ECB rate for {currency}"));
-            }
-        };
-
-        let json: serde_json::Value = response
-            .body_mut()
-            .read_json()
-            .with_context(|| format!("Failed to parse ECB response for {currency}"))?;
+        let what = format!("Failed to fetch ECB rate for {currency}");
+        let reply = http_get(&url, self.timeout, &[("Accept", "application/json")])
+            .with_context(|| what.clone())?;
+        // The SDMX API answers an EMPTY selection with HTTP 404
+        // ("No results found"): that is the fetch_window contract's
+        // "no observations here" (a clean no-quote at the dispatch), not a
+        // transport failure (deep review of #1804: a frozen HRK window
+        // read as a network error).
+        if reply.status == 404 {
+            return Ok(Vec::new());
+        }
+        let json = reply.into_success_json(&what, &[])?;
 
         Self::parse_series(&json, undated_fallback)
     }
@@ -177,6 +170,31 @@ impl PriceSource for EcbSource {
 
     fn description(&self) -> &'static str {
         "European Central Bank - currency exchange rates"
+    }
+
+    /// beanprice's `ecbrates` ticker `BASE-SYMBOL` (`GBP-EUR`) is the
+    /// rate of BASE in SYMBOL (#2866); rledger's own form, the currency
+    /// alone (`GBP`, quoted in the requested currency), still works.
+    fn bean_price_pair(&self, pair: PricePair) -> PricePair {
+        match split_dash_pair(&pair.ticker) {
+            Some((ticker, currency)) => PricePair {
+                ticker: ticker.to_string(),
+                currency: currency.to_string(),
+            },
+            None => pair,
+        }
+    }
+
+    /// The base of the pair the source fetches (#2866), read by the same
+    /// [`PriceSource::bean_price_pair`] the fetch uses: the pair ticker
+    /// (`EUR-GBP`) and a bare one quoted in the requested currency (`EUR`)
+    /// are both based in `EUR`.
+    fn pair_base(&self, ticker: &str) -> Option<String> {
+        let pair = self.bean_price_pair(PricePair {
+            ticker: ticker.to_string(),
+            currency: String::new(),
+        });
+        Some(pair.ticker.to_uppercase())
     }
 
     fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
@@ -349,6 +367,47 @@ impl PriceSource for EcbSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The base of the pair a ticker names, which a `^` inversion must
+    /// be declared in (#2866).
+    #[test]
+    fn test_pair_base() {
+        let source = EcbSource::new(Duration::from_secs(30));
+        for (ticker, base) in [("GBP-EUR", Some("GBP")), ("GBP", Some("GBP"))] {
+            assert_eq!(source.pair_base(ticker).as_deref(), base, "{ticker}");
+        }
+    }
+
+    fn pair(ticker: &str, currency: &str) -> PricePair {
+        PricePair {
+            ticker: ticker.to_string(),
+            currency: currency.to_string(),
+        }
+    }
+
+    fn read(source: &dyn PriceSource, ticker: &str, currency: &str) -> (String, String) {
+        let pair = source.bean_price_pair(pair(ticker, currency));
+        (pair.ticker, pair.currency)
+    }
+
+    /// beanprice's `ecbrates` `BASE-SYMBOL` names the pair; rledger's
+    /// bare currency keeps the requested one (#2866).
+    #[test]
+    fn test_bean_price_pair() {
+        let source = EcbSource::new(Duration::from_secs(30));
+        assert_eq!(
+            read(&source, "GBP-EUR", "EUR"),
+            ("GBP".to_string(), "EUR".to_string())
+        );
+        assert_eq!(
+            read(&source, "EUR-SEK", "SEK"),
+            ("EUR".to_string(), "SEK".to_string())
+        );
+        assert_eq!(
+            read(&source, "GBP", "EUR"),
+            ("GBP".to_string(), "EUR".to_string())
+        );
+    }
 
     #[test]
     fn test_build_url() {

@@ -18,27 +18,27 @@ use crate::helpers::{
 #[cfg(feature = "completions")]
 use crate::types::{CompletionJson, CompletionResultJson};
 use crate::types::{
-    Error, FormatResult, Ledger, PadResult, ParseResult, QueryResult, Severity, ValidationResult,
+    Error, FormatResult, Ledger, PadResult, ParseResult, QueryResult, ValidationResult,
 };
 #[cfg(feature = "plugins")]
 use crate::types::{PluginInfo, PluginResult};
 use crate::utils::LineLookup;
 
-/// Whether a load error makes the directive stream unusable.
+/// Whether a load error stops `validateMultiFile` before it validates.
 ///
 /// Not every load error does. `DuplicateInclude` says a file was reached twice
-/// in the include graph — the loader still loaded it exactly once, so the
-/// ledger is complete and every figure derived from it is right. It has to be
-/// REPORTED (beancount says `Duplicate filename parsed` and `bean-check` exits
-/// 1, as does `rledger check`), but aborting on it throws away a correct
-/// answer: `rledger query` prints the notice and still returns the rows.
+/// in the include graph; the loader still loaded it exactly once, so the
+/// ledger is complete. It has to be REPORTED (beancount says `Duplicate
+/// filename parsed` and `bean-check` exits 1, as does `rledger check`), and
+/// validation still runs. An include cycle (the file included again was
+/// already read) and an include glob matching nothing (nothing to read) leave
+/// it complete too: the loader's [`LoadError::leaves_ledger_complete`].
 ///
-/// Treating every load error as fatal did exactly that — a query over a ledger
-/// with a shared prices file included from two journals returned NO rows,
-/// where the CLI returns them. The same shape as a warning being treated as an
-/// error, one layer down.
+/// This is validation's rule, not the query rule: whether a query answers is
+/// [`LoadError::blocks_queries`] (#2861), which the file-based query
+/// surfaces share.
 fn load_error_is_fatal(error: &LoadError) -> bool {
-    !matches!(error, LoadError::DuplicateInclude { .. })
+    !error.leaves_ledger_complete()
 }
 
 /// Convert [`LoadResult`] errors to detailed Error objects with line/column info.
@@ -157,7 +157,7 @@ pub fn validate_source(source: &str) -> Result<JsValue, JsError> {
 /// Returns a `QueryResult` with columns, rows, and any errors.
 #[wasm_bindgen]
 pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
-    use rustledger_booking::merge_with_padding;
+    use rustledger_booking::merge_with_padding_spanned;
     use rustledger_query::{Executor, parse as parse_query};
 
     let load = load_and_book(source);
@@ -197,19 +197,25 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
     // Pad directives so `FROM #entries WHERE type = 'pad'` audits
     // continue to enumerate them, AND handles multi-pad shadowing
     // (#1300) correctly by construction via `process_pads`.
-    let directives = merge_with_padding(&load.directives);
-    let mut executor = Executor::new(&directives);
-    // Config-aware classification (POSSIGN/ACCOUNT_SORTKEY honor name_*
-    // renames) — same wiring as the CLI query path.
-    executor.set_account_types(crate::helpers::account_types_from_raw(
-        &load.parse_result.options,
-    ));
-    executor.set_booking_method(crate::helpers::booking_method_from_raw(
-        &load.parse_result.options,
-    ));
-    executor.set_summary_accounts(crate::helpers::summary_accounts_from_raw(
-        &load.parse_result.options,
-    ));
+    // Spanned, with the text named `<string>`, so the source columns resolve
+    // (#2825); `#balances.discrepancy` is computed only if the query reads it
+    // (#2823). The same constructor as the CLI and the FFI component.
+    let source_map = &load.source_map;
+    let spanned = crate::helpers::spanned_directives(&load.directives, &load.directive_spans);
+    let directives = merge_with_padding_spanned(&spanned);
+    let options = &load.parse_result.options;
+    let memo = std::sync::OnceLock::new();
+    let mut executor = Executor::for_ledger(
+        &directives,
+        source_map,
+        crate::helpers::lazy_query_context(
+            source_map,
+            &memo,
+            crate::helpers::account_types_from_raw(options),
+            crate::helpers::booking_method_from_raw(options),
+            crate::helpers::summary_accounts_from_raw(options),
+        ),
+    );
     match executor.execute(&query) {
         Ok(result) => {
             let rows: Vec<Vec<_>> = result
@@ -715,9 +721,14 @@ pub fn validate_multi_file(files: JsValue, entry_point: &str) -> Result<JsValue,
 ///
 /// `host` is an object with:
 ///
-/// - `readFile(path) => string | null` — required. `null` means "cannot read
-///   this", which the loader reports as a missing include against the file
-///   that asked for it.
+/// - `readFile(path) => string | null`: required. `null` means "no such
+///   file", which the loader reports as a missing include against the file
+///   that asked for it, and a query answers over. A throw means the same,
+///   unless the thrown error carries a `code` other than `ENOENT`, as Node's
+///   `fs` errors do (`EACCES`, `EISDIR`, ...): then the file exists but could
+///   not be read, which stops a query, as it stops `rledger query` (#2861). A
+///   host that can tell an unreadable file from a missing one should set
+///   `code` on what it throws.
 /// - `glob(pattern) => string[]` — optional. Without it, a glob `include`
 ///   reports "does not match any files", as a backend without glob support
 ///   does.
@@ -778,8 +789,9 @@ fn query_with_filesystem(
     entry_point: &str,
     query_str: &str,
 ) -> Result<JsValue, JsError> {
-    use rustledger_booking::merge_with_padding;
+    use rustledger_booking::merge_with_padding_spanned;
     use rustledger_loader::{LoadOptions, Loader, process};
+    use rustledger_query::executor::LedgerContext;
     use rustledger_query::{Executor, parse as parse_query};
     let mut loader = Loader::new().with_filesystem(fs);
 
@@ -796,11 +808,14 @@ fn query_with_filesystem(
         }
     };
 
-    // Report every load error, but abort only on one that makes the directive
-    // stream unusable. A duplicate include is not one: the ledger loaded
-    // correctly and `rledger query` returns its rows alongside the notice.
+    // Report every load error, but refuse on one that blocks queries (a
+    // parse error; the in-memory filesystem cannot fail a read or a
+    // decryption otherwise): the rule the file-based query surfaces share
+    // (`LoadError::blocks_queries`, #2861). An include of a missing file, an
+    // include cycle, a duplicate include or an empty glob is reported beside
+    // the rows, as `bean-query` and `rledger query` report it.
     let load_errors = load_errors_to_errors(&load_result);
-    if load_result.errors.iter().any(load_error_is_fatal) {
+    if load_result.errors.iter().any(LoadError::blocks_queries) {
         let result = QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
@@ -809,14 +824,18 @@ fn query_with_filesystem(
         return to_js(&result);
     }
 
-    // Run the shared processing pipeline (queries skip validation):
-    // sort → synth-plugins → book → regular-plugins → finalize
+    // Run the shared processing pipeline WITH validation, as `rledger query`
+    // does: `#balances.discrepancy` comes from the balance checker, which runs
+    // only in a validating load (#2823). As in the CLI, only a booking
+    // failure (an unbooked directive stream) stops the query; validation
+    // diagnostics are reported alongside the rows. A failing assertion is
+    // one of them, and a query about it must still answer.
     let options = LoadOptions {
-        validate: false,
+        validate: true,
         ..Default::default()
     };
 
-    let ledger = match process(load_result, &options) {
+    let mut ledger = match process(load_result, &options) {
         Ok(ledger) => ledger,
         Err(e) => {
             let result = QueryResult {
@@ -828,18 +847,20 @@ fn query_with_filesystem(
         }
     };
 
-    // Only abort on actual errors, not warnings (matching CLI query behavior)
-    // — and not on a LOAD-phase notice either. `process` turns every load
-    // error into a blocking `LOAD` ledger error, which is right for `check`
-    // but not here: anything genuinely unusable already aborted above via
-    // `load_error_is_fatal`, so what survives to this point is reportable and
-    // no reason to throw away a correct answer. `rledger query` prints
-    // `LOAD: Duplicate filename parsed` and still returns the rows.
-    let errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
-    let has_errors = errors
+    // The other half of the same rule (`LedgerError::blocks_queries`): a
+    // booking failure leaves the directive stream unbooked.
+    let booking_failed = ledger
+        .errors
         .iter()
-        .any(|e| e.severity == Severity::Error && e.code.as_deref() != Some("LOAD"));
-    if has_errors {
+        .any(rustledger_loader::LedgerError::blocks_queries);
+    // Advisory-only codes (E1004, closing an account with a balance) are not
+    // reported by `rledger query` either: the same canonical predicate.
+    let errors: Vec<Error> = std::mem::take(&mut ledger.errors)
+        .into_iter()
+        .filter(|e| !rustledger_validate::is_advisory_only_code(&e.code))
+        .map(Error::from)
+        .collect();
+    if booking_failed {
         let result = QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
@@ -847,36 +868,33 @@ fn query_with_filesystem(
         };
         return to_js(&result);
     }
-
-    // Merge pad-synthesized transactions into the directive stream
-    // (matching CLI query pipeline). See `wasm::query` above for the
-    // architectural rule.
-    // Grab the configured account types before `ledger` fields are moved.
-    let account_types = ledger.options.to_account_types();
-    let booking_method = ledger.booking_method;
-    let summary_accounts =
-        rustledger_query::executor::SummaryAccounts::from_options(&ledger.options);
-    let booked_directives: Vec<_> = ledger.directives.into_iter().map(|s| s.value).collect();
-    let directives = merge_with_padding(&booked_directives);
-
     // Parse the query
     let query = match parse_query(query_str) {
         Ok(q) => q,
         Err(e) => {
+            let mut errors = errors;
+            errors.push(Error::new(e.to_string()));
             let result = QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
-                errors: vec![Error::new(e.to_string())],
+                errors,
             };
             return to_js(&result);
         }
     };
 
-    // Execute query
-    let mut executor = Executor::new(&directives);
-    executor.set_account_types(account_types);
-    executor.set_booking_method(booking_method);
-    executor.set_summary_accounts(summary_accounts);
+    // Pad-expanded and spanned, so the source columns resolve (#2825); the
+    // context carries the validating load's discrepancies (#2823). The same
+    // constructor as the CLI and the FFI component.
+    let directives = merge_with_padding_spanned(&ledger.directives);
+    let mut executor = Executor::for_ledger(
+        &directives,
+        &ledger.source_map,
+        LedgerContext::from_ledger(&ledger),
+    );
+    // `process` already carries every load error as a `LOAD` ledger error,
+    // so the reported list is the ledger's, not the load's again.
+    let load_errors = errors;
     match executor.execute(&query) {
         Ok(result) => {
             let rows: Vec<Vec<_>> = result
@@ -906,6 +924,11 @@ fn query_with_filesystem(
 /// Run a BQL query on multiple Beancount files.
 ///
 /// Similar to `query`, but accepts multiple files with include resolution.
+///
+/// Answers unless a file failed to parse or a transaction failed to book,
+/// reporting every load error (an include of a missing file, an include
+/// cycle, ...) beside the rows: the rule the file-based query surfaces share
+/// (`LoadError::blocks_queries`, #2861).
 ///
 /// Note: Glob patterns in `include` directives are not supported in multi-file mode
 /// since there is no real filesystem to enumerate. Use explicit file paths instead.
@@ -1025,14 +1048,17 @@ mod load_error_tests {
 
     #[test]
     fn only_unusable_load_errors_are_fatal() {
-        // A duplicate include leaves a usable directive stream; a parse error
-        // does not. This predicate is what lets the query path answer over the
-        // first and refuse the second.
+        // A duplicate include leaves every file read; a confined path does
+        // not. This predicate is what lets validation run over the first and
+        // stop on the second. (Queries follow `LoadError::blocks_queries`.)
         assert!(!load_error_is_fatal(&LoadError::DuplicateInclude {
             path: "shared.beancount".to_string(),
         }));
-        assert!(load_error_is_fatal(&LoadError::IncludeCycle {
+        assert!(!load_error_is_fatal(&LoadError::IncludeCycle {
             cycle: vec!["a".to_string(), "a".to_string()],
+        }));
+        assert!(!load_error_is_fatal(&LoadError::GlobNoMatch {
+            pattern: "*.bean".to_string(),
         }));
         assert!(load_error_is_fatal(&LoadError::PathTraversal {
             include_path: "../../etc/passwd".to_string(),

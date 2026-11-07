@@ -1587,12 +1587,12 @@ fn deeper_indented_shebang_attaches_to_open_posting() {
 }
 
 #[test]
-fn deeper_indented_percent_comment_attaches_to_open_posting() {
+fn deeper_indented_percent_line_is_not_a_comment() {
     use SyntaxKind::*;
-    // PERCENT_COMMENT (`%`) is included in `is_comment_token` but
-    // every other comment-attribution test uses `;`. Pin the `%`
-    // path so a regression that demotes PERCENT_COMMENT (e.g., via
-    // a typo or split refactor) fails here.
+    // An indented `%` is not a comment: beancount lexes `%` as a FLAG and
+    // only skips a whole `%` line at column 0, so `    % doc` under a
+    // posting is a syntax error there (#2802). It used to attach to the
+    // posting as comment trivia here; it is a FLAG token now, and reported.
     let source = "2024-01-15 * \"x\"\n\
                   \x20\x20Assets:Cash 1 USD\n\
                   \x20\x20\x20\x20% percent-style doc\n";
@@ -1601,14 +1601,12 @@ fn deeper_indented_percent_comment_attaches_to_open_posting() {
 
     let ps = postings(&tree);
     assert_eq!(ps.len(), 1);
-    let pct_inside_posting = ps[0]
-        .children_with_tokens()
+    let pct_comments = tree
+        .descendants_with_tokens()
         .filter(|e| e.kind() == PERCENT_COMMENT)
         .count();
-    assert_eq!(
-        pct_inside_posting, 1,
-        "PERCENT_COMMENT recognized as comment-class trivia, attaches by indent",
-    );
+    assert_eq!(pct_comments, 0, "an indented `%` is not a comment");
+    assert!(!rustledger_parser::parse(source).errors.is_empty());
 }
 
 #[test]

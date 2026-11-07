@@ -203,10 +203,11 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     );
     let warnings = Vec::new();
 
-    // pushtag/poptag/pushmeta/popmeta state. The legacy parser
-    // maintains a stack across directives; each Transaction
-    // inherits the active pushed-tag set, and EVERY directive
-    // inherits the active pushed-meta set. We pair each entry
+    // pushtag/poptag/pushmeta/popmeta state, a stack across directives:
+    // transactions, notes and documents inherit the active pushed-tag set
+    // (#2544), and only transactions inherit the pushed-meta set, under
+    // their own keys (#2812), as in beancount. See `apply_inherited_state`.
+    // We pair each entry
     // with the originating directive's span so unclosed-at-EOF
     // diagnostics can point at the offending push.
     let mut tag_stack: Vec<(Tag, Span)> = Vec::new();
@@ -223,6 +224,12 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     let mut prior_error_starts: Vec<usize> = errors.iter().map(|e| e.span.start).collect();
     prior_error_starts.sort_unstable();
     let mut header_tokens = Vec::new();
+    // `(error start, header start, grammar failure point)` for each directive
+    // the converter dropped with a whole-node error, in order, BOM frame. The
+    // node's span takes in leading blank and comment lines, so the header
+    // start is what places the error on its line; the failure point is
+    // `usize::MAX` when the header grammar finds no defect.
+    let mut grammar_failures: Vec<(usize, usize, usize)> = Vec::new();
 
     for directive in source_file.directives() {
         // Helper to push a successfully-converted directive
@@ -368,13 +375,23 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
             errors.push(err);
         }
         if pushed_directive.is_some() && cst_node.kind() == crate::SyntaxKind::TRANSACTION {
-            posting_stray_token_check(
+            posting_line_check(
                 &cst_node,
                 stripped,
                 bom_offset,
                 &prior_error_starts,
                 errors_before,
                 &mut errors,
+                &mut header_tokens,
+            );
+            indented_comment_check(
+                &cst_node,
+                stripped,
+                bom_offset,
+                &prior_error_starts,
+                errors_before,
+                &mut errors,
+                &mut header_tokens,
             );
         }
         if converted_or_stateful {
@@ -400,9 +417,31 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
             // top-level error-recovery path which emits a
             // `SyntaxError("unexpected input")` for the failed
             // span so downstream tooling sees the same shape.
+            // The node's span takes in the blank and comment lines before it;
+            // the error starts at the header, where beancount reports it.
+            let mut span = node_span(&cst_node, bom_offset);
+            // Where beancount's grammar fails on the header line, so a bad
+            // date after that point does not swallow this error
+            // (`report_invalid_dates`).
+            if super::directive_header::directive_keyword(cst_node.kind()).is_some() {
+                let off = bom_offset as usize;
+                let end = header_line_tokens(&cst_node, &mut header_tokens);
+                let header_start = header_tokens
+                    .first()
+                    .map_or(span.start, |(_, r)| r.start + off);
+                let failed_at = super::directive_header::first_header_defect(
+                    cst_node.kind(),
+                    &header_tokens,
+                    end,
+                    stripped,
+                )
+                .map_or(usize::MAX, |defect| defect.range.start + off);
+                span = Span::new(header_start.min(span.end), span.end);
+                grammar_failures.push((span.start, header_start, failed_at));
+            }
             errors.push(crate::ParseError::new(
                 crate::ParseErrorKind::SyntaxError("unexpected input".to_string()),
-                node_span(&cst_node, bom_offset),
+                span,
             ));
         }
     }
@@ -422,6 +461,13 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
             *span,
         ));
     }
+    report_invalid_dates(
+        source_file.syntax(),
+        stripped,
+        bom_offset,
+        &grammar_failures,
+        &mut errors,
+    );
     errors.sort_by_key(|e| e.span.start);
 
     // Post-pass: align directive spans with the legacy parser's
@@ -1434,7 +1480,16 @@ fn collect_postings_with_comments(
     bom_offset: u32,
     errors: &mut Vec<crate::ParseError>,
 ) -> (Vec<Spanned<Posting>>, Vec<String>) {
-    let mut out = Vec::new();
+    // Sized to the POSTING children up front, as the green fast path does
+    // (`green.rs`, `posting_count`): growing by push left a 2-posting
+    // transaction at capacity 4, 256 unused bytes held for the life of the
+    // ledger on every transaction that takes this path (#2834).
+    let posting_count = node
+        .syntax()
+        .children()
+        .filter(|n| n.kind() == crate::SyntaxKind::POSTING)
+        .count();
+    let mut out = Vec::with_capacity(posting_count);
     let mut pending: Vec<String> = Vec::new();
     // Leading trivia (blank lines, comment lines) sits inside the node before
     // the header; only the NEWLINE after the header content ends it (#2628).
@@ -3012,15 +3067,21 @@ pub(super) fn meta_value_from_tokens(tokens: impl Iterator<Item = impl TokenView
 /// `Document` and `Note`, as beancount 3 does (its grammar unions the tag
 /// stack into each of those three). They used to apply to transactions only
 /// (#2544). The tags are a [`TagSet`], so a pushed tag the line already
-/// wrote is not added twice (#2545). Meta applies to every directive's
-/// `meta` field.
+/// wrote is not added twice (#2545).
+///
+/// Pushed metadata applies to transactions only, as in beancount 3, whose
+/// grammar reads its meta stack in `transaction()` and nowhere else; an
+/// `open`, `balance`, `note` or any other directive gets none (#2812). A key
+/// the transaction writes itself wins over a pushed one, as beancount
+/// applies the pushed values first and its explicit metadata on top (#2812;
+/// rledger used to let the push override it). Postings get no pushed
+/// metadata in either.
 ///
 /// The meta stack is a `Vec` (not a map) to preserve shadow/pop
 /// semantics - `pushmeta x: 1; pushmeta x: 2; popmeta x` should
 /// leave `x = 1` active, which a map-replacing-on-insert can't
-/// express. Iterating in push order and inserting into the
-/// directive's meta means later entries naturally win, matching
-/// "topmost-shadow wins" behavior.
+/// express. Iterating in push order means the latest push of a key
+/// wins over earlier ones, as beancount's `value_list[-1]`.
 fn apply_inherited_state(
     value: &mut Directive,
     tag_stack: &[(Tag, Span)],
@@ -3046,22 +3107,17 @@ fn apply_inherited_state(
     if meta_stack.is_empty() {
         return;
     }
-    let meta = match value {
-        Directive::Transaction(d) => &mut d.meta,
-        Directive::Balance(d) => &mut d.meta,
-        Directive::Open(d) => &mut d.meta,
-        Directive::Close(d) => &mut d.meta,
-        Directive::Commodity(d) => &mut d.meta,
-        Directive::Pad(d) => &mut d.meta,
-        Directive::Event(d) => &mut d.meta,
-        Directive::Query(d) => &mut d.meta,
-        Directive::Note(d) => &mut d.meta,
-        Directive::Document(d) => &mut d.meta,
-        Directive::Price(d) => &mut d.meta,
-        Directive::Custom(d) => &mut d.meta,
+    let Directive::Transaction(txn) = value else {
+        return;
     };
-    for (k, v, _) in meta_stack {
-        meta.insert(k.clone(), v.clone());
+    let explicit = txn.meta.as_map();
+    let pushed: Vec<(String, MetaValue)> = meta_stack
+        .iter()
+        .filter(|(k, _, _)| !explicit.contains_key(k))
+        .map(|(k, v, _)| (k.clone(), v.clone()))
+        .collect();
+    for (k, v) in pushed {
+        txn.meta.insert(k, v);
     }
 }
 
@@ -3114,48 +3170,15 @@ fn pushmeta_value(node: &crate::SyntaxNode) -> Option<MetaValue> {
         }
         header.push((t.kind(), range));
     }
-    // Except a value that is exactly one split date (`pushmeta kk:
-    // 2024-02-002`): beancount reads it as one valid date and pushes it, and
-    // rledger reports it only until #2808, so it still pushes here rather than
-    // adding a second error at `popmeta`. Anything else on the line, or a run
-    // past the date (`2024-02-002.`, `2024-002-02,000`), is a syntax error in
-    // beancount too, so it pushes nothing.
-    if super::directive_header::first_header_defect(node.kind(), &header, end, &text).is_some()
-        && !is_only_a_split_date(&header, &text)
-    {
+    if super::directive_header::first_header_defect(node.kind(), &header, end, &text).is_some() {
+        return None;
+    }
+    // A date that is not a real calendar date (`pushmeta kk: 2024-02-30`) is
+    // a lexer error in beancount, which pushes nothing (#2811).
+    if invalid_value_date(&header, &text, false).is_some() {
         return None;
     }
     Some(meta_value_from_tokens(tokens.into_iter()))
-}
-
-/// Whether the `pushmeta` value (everything after its `META_KEY`) is exactly
-/// one date in beancount's `DATE` shape, `[0-9]{4,}[-/][0-9]+[-/][0-9]+`, that
-/// rledger's lexer splits (#2808).
-fn is_only_a_split_date(
-    header: &[(crate::SyntaxKind, std::ops::Range<usize>)],
-    text: &str,
-) -> bool {
-    let Some(split) = super::directive_header::split_beancount_date(header, text) else {
-        return false;
-    };
-    let mut value = header
-        .iter()
-        .skip_while(|(k, _)| *k != crate::SyntaxKind::META_KEY)
-        .skip(1)
-        .filter(|(k, _)| !is_trivia_kind(*k));
-    let (Some((_, first)), last) = (value.next(), value.last()) else {
-        return false;
-    };
-    let value_end = last.map_or(first.end, |(_, r)| r.end);
-    if split.range.start != first.start || split.range.end != value_end {
-        return false;
-    }
-    let Some(date) = text.get(split.range) else {
-        return false;
-    };
-    let fields: Vec<&str> = date.split(['-', '/']).collect();
-    matches!(fields.as_slice(), [y, m, d]
-        if y.len() >= 4 && [y, m, d].iter().all(|f| !f.is_empty() && f.bytes().all(|b| b.is_ascii_digit())))
 }
 
 // ---- ParseResult.comments --------------------------------------
@@ -3189,6 +3212,12 @@ pub(super) const fn is_comment_kind(kind: crate::SyntaxKind) -> bool {
 /// before a directive. `offset` indexes `stripped`, the post-BOM-strip
 /// source, so a file's single leading BOM is already gone.
 ///
+/// A bare `*` line, with its line ending (or the end of the source) right
+/// after the `*`, is not a heading either: beancount's `^\*/.` needs one more
+/// character on the line (a `\r` counts), so it reports `unexpected ASTERISK`
+/// there, and the line is an ordinary error line here (#2779). That rule is
+/// [`crate::logos_lexer::beancount_ignores_line`], shared with the lexer.
+///
 /// The lexer has its own, deliberately broader, rule for the same line:
 /// `TokenIter`'s `Token::Star` arm in `logos_lexer.rs` (#2778) skips the
 /// rest of any line-start `*` line (BOMs included) without lexing it.
@@ -3199,6 +3228,9 @@ pub(super) const fn is_comment_kind(kind: crate::SyntaxKind) -> bool {
 pub(super) fn is_section_marker(kind: crate::SyntaxKind, stripped: &str, offset: usize) -> bool {
     kind == crate::SyntaxKind::STAR
         && (offset == 0 || stripped.as_bytes().get(offset - 1) == Some(&b'\n'))
+        && stripped
+            .get(offset..)
+            .is_some_and(crate::logos_lexer::beancount_ignores_line)
 }
 
 /// Output of the fused top-level pass [`walk_top_level_once`].
@@ -3734,13 +3766,46 @@ fn transaction_header_check(
     let Some(txn) = ast::Transaction::cast(child.clone()) else {
         return;
     };
-    let tokens = txn.header_tokens().map(|t| {
-        let r = t.text_range();
-        (t.kind(), usize::from(r.start())..usize::from(r.end()))
-    });
-    if let Some((defect, range)) = super::txn_header::first_header_defect(tokens) {
+    let tokens = txn
+        .header_tokens()
+        .map(|t| {
+            let r = t.text_range();
+            (t.kind(), usize::from(r.start())..usize::from(r.end()))
+        })
+        .collect();
+    if let Some((defect, range)) = super::txn_header::first_header_defect_in(tokens, stripped) {
         out.push(header_defect_error(defect, &range, stripped, bom_offset));
     }
+}
+
+/// A directive's header-line tokens into `tokens` (cleared first): its direct
+/// tokens from the first content token (past leading trivia) up to the
+/// `NEWLINE` that ends the line. Returns where the line's content ends.
+/// Walks GREEN children only.
+fn header_line_tokens(
+    node: &crate::SyntaxNode,
+    tokens: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
+) -> usize {
+    tokens.clear();
+    let mut at = usize::from(node.text_range().start());
+    let mut end = usize::from(node.text_range().end());
+    for child in node.green().children() {
+        let rowan::NodeOrToken::Token(t) = child else {
+            break;
+        };
+        let kind = <crate::BeancountLanguage as rowan::Language>::kind_from_raw(t.kind());
+        let range = at..at + t.text().len();
+        at = range.end;
+        if tokens.is_empty() && (is_trivia_kind(kind) || kind == crate::SyntaxKind::BOM) {
+            continue;
+        }
+        if kind == crate::SyntaxKind::NEWLINE {
+            end = range.start;
+            break;
+        }
+        tokens.push((kind, range));
+    }
+    end
 }
 
 /// Reject a non-transaction directive header line that beancount's grammar
@@ -3767,25 +3832,7 @@ fn directive_header_check(
     tokens: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
 ) -> Option<crate::ParseError> {
     let keyword = super::directive_header::directive_keyword(node.kind())?;
-    tokens.clear();
-    let mut at = usize::from(node.text_range().start());
-    let mut end = usize::from(node.text_range().end());
-    for child in node.green().children() {
-        let rowan::NodeOrToken::Token(t) = child else {
-            break;
-        };
-        let kind = <crate::BeancountLanguage as rowan::Language>::kind_from_raw(t.kind());
-        let range = at..at + t.text().len();
-        at = range.end;
-        if tokens.is_empty() && (is_trivia_kind(kind) || kind == crate::SyntaxKind::BOM) {
-            continue;
-        }
-        if kind == crate::SyntaxKind::NEWLINE {
-            end = range.start;
-            break;
-        }
-        tokens.push((kind, range));
-    }
+    let end = header_line_tokens(node, tokens);
     let off = bom_offset as usize;
     let from = usize::from(node.text_range().start()) + off;
     let first_after = prior_error_starts.partition_point(|&s| s < from);
@@ -3798,6 +3845,8 @@ fn directive_header_check(
     let Some(defect) =
         super::directive_header::first_header_defect(node.kind(), tokens, end, stripped)
     else {
+        // A value date that is not a real calendar date (`custom "x"
+        // 2024-02-30`) is reported by `report_invalid_dates`, for every line.
         // A grammatical `pushmeta` value can still be an expression with no
         // value (`pushmeta kk: 1/0`): the same check, and the same error, as a
         // metadata line (#2812).
@@ -3939,6 +3988,8 @@ impl MetaCheck<'_> {
         let Some(defect) =
             super::directive_header::first_meta_defect(self.tokens, end, self.stripped)
         else {
+            // A date that is not a real calendar date (`kk: 2024-02-30`) is
+            // reported by `report_invalid_dates`, for every line.
             // Grammatical, but an expression with no value (`kk: 1/0`) is
             // still an error, from the check `pushmeta` uses too.
             if let Some(range) = unevaluable_meta_value(self.tokens, self.stripped) {
@@ -3961,85 +4012,81 @@ impl MetaCheck<'_> {
     }
 }
 
-/// Report a token left over after a posting's amount, cost or price.
+/// Check each posting line against beancount's posting rule (#2802, stage 3;
+/// the rule is [`super::directive_header::first_posting_defect`]).
 ///
-/// The posting converter reads its `AMOUNT`, `COST_SPEC` and
-/// `PRICE_ANNOTATION` children and nothing else, so a flat token after them
-/// was dropped in silence. That became reachable from ordinary text when the
-/// lexer started ending a currency at its last letter or digit, as beancount
-/// does (#2802): `1 USD-` is `USD` then `-`, which loaded as `1 USD` and was
-/// written back that way, where bean-check reports `unexpected MINUS`.
+/// The posting converter reads its flag, account and `AMOUNT`, `COST_SPEC`
+/// and `PRICE_ANNOTATION` children and nothing else, so a token with no place
+/// in a posting was dropped in silence: `Assets:A ! 1 USD`, `1 USD %`, or a
+/// second cost spec loaded clean, and `rledger format` deleted the stray
+/// text. The posting is still KEPT, as a directive with a stray character on
+/// its header is (#2805): the error is reported, nothing cascades.
 ///
-/// Comment kinds are left alone here: a mid-line `%`, `#!` or `#+` on a
-/// posting line is stage 3 of #2802, like the rest of the posting grammar.
 /// A posting that already has an error anywhere on it (`5 USD + 3 USD`'s
-/// trailing amount, an `ERROR_TOKEN`) is not reported twice.
+/// trailing amount, a cost-spec shape error, an `ERROR_TOKEN`) is not
+/// reported twice.
 ///
 /// Runs from the shared directive loop over GREEN children, so the green and
 /// red parse paths cannot disagree on it.
-fn posting_stray_token_check(
+fn posting_line_check(
     node: &crate::SyntaxNode,
     stripped: &str,
     bom_offset: u32,
     prior_error_starts: &[usize],
     errors_before: usize,
     errors: &mut Vec<crate::ParseError>,
+    tokens: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
 ) {
     use crate::SyntaxKind as K;
     let kind_of = <crate::BeancountLanguage as rowan::Language>::kind_from_raw;
     let off = bom_offset as usize;
     let mut at = usize::from(node.text_range().start());
     for child in node.green().children() {
-        let len = match child {
+        let posting_start = at;
+        at += match child {
             rowan::NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
             rowan::NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
         };
-        let posting_start = at;
-        at += len;
         let rowan::NodeOrToken::Node(posting) = child else {
             continue;
         };
         if kind_of(posting.kind()) != K::POSTING {
             continue;
         }
+        tokens.clear();
+        let mut end = at;
         let mut p = posting_start;
-        let mut after_amount: Option<usize> = None;
-        // Whether the last amount-like child ends in a `CURRENCY` token.
-        let mut ends_in_currency = false;
-        let mut stray: Option<std::ops::Range<usize>> = None;
+        // Flatten the line: its own tokens, and those of its amount, cost and
+        // price nodes. Stop at the NEWLINE, or at a metadata child.
+        let mut done = false;
         for part in posting.children() {
-            let start = p;
-            p += match part {
-                rowan::NodeOrToken::Node(n) => u32::from(n.text_len()) as usize,
-                rowan::NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
-            };
+            if done {
+                break;
+            }
             match part {
-                rowan::NodeOrToken::Node(n) => match kind_of(n.kind()) {
-                    K::AMOUNT | K::COST_SPEC | K::PRICE_ANNOTATION => {
-                        after_amount = Some(p);
-                        ends_in_currency = last_token_kind(n) == Some(K::CURRENCY);
-                    }
-                    _ => break,
-                },
                 rowan::NodeOrToken::Token(t) => {
                     let kind = kind_of(t.kind());
+                    let range = p..p + u32::from(t.text_len()) as usize;
+                    p = range.end;
                     if kind == K::NEWLINE {
-                        break;
-                    }
-                    if after_amount.is_some()
-                        && !is_trivia_kind(kind)
-                        && !matches!(kind, K::ERROR_TOKEN | K::BOM)
-                    {
-                        stray = Some(start..p);
-                        break;
+                        end = range.start;
+                        done = true;
+                    } else if !(tokens.is_empty() && kind == K::WHITESPACE) {
+                        tokens.push((kind, range));
                     }
                 }
+                rowan::NodeOrToken::Node(n) => match kind_of(n.kind()) {
+                    K::AMOUNT | K::COST_SPEC | K::PRICE_ANNOTATION => {
+                        flatten_green(n, &mut p, tokens);
+                    }
+                    _ => {
+                        end = p;
+                        done = true;
+                    }
+                },
             }
         }
-        let (Some(range), Some(amount_end)) = (stray, after_amount) else {
-            continue;
-        };
-        let (from, to) = (posting_start + off, at + off);
+        let (from, to) = (posting_start + off, end + off);
         let first_after = prior_error_starts.partition_point(|&s| s < from);
         let reported = prior_error_starts.get(first_after).is_some_and(|&s| s < to)
             || errors[errors_before..]
@@ -4048,24 +4095,343 @@ fn posting_stray_token_check(
         if reported {
             continue;
         }
-        let text = stripped.get(range.clone()).unwrap_or_default();
-        // Glued to a currency, and a character a currency may hold inside it:
-        // the lexer ended the currency before it. Anything else (`1-`,
-        // `{1 USD}-`, `1 USD+`) is just a stray token.
-        let why = if range.start == amount_end
-            && ends_in_currency
-            && matches!(text, "-" | "'" | "." | "_")
-        {
-            format!(": a currency cannot end in `{text}`")
+        let Some(defect) = super::directive_header::first_posting_defect(tokens, end, stripped)
+        else {
+            // A cost date that is not a real calendar date (`{1 USD,
+            // 2024-02-30}`) is reported by `report_invalid_dates`.
+            // Grammatical; beancount's builder still rejects some postings.
+            if let Some((range, message)) = posting_builder_error(tokens, stripped) {
+                errors.push(crate::ParseError::new(
+                    crate::ParseErrorKind::SyntaxError(message),
+                    Span::new(range.start + off, range.end + off),
+                ));
+            }
+            continue;
+        };
+        let text = stripped.get(defect.range.clone()).unwrap_or_default();
+        // Glued to the currency that ended the amount, and a character a
+        // currency may hold inside it: the lexer ended the currency before it
+        // (`1 USD-`, where beancount reads one invalid token).
+        let glued_to_currency = tokens
+            .iter()
+            .position(|(_, r)| r.start == defect.range.start)
+            .and_then(|i| i.checked_sub(1))
+            .is_some_and(|i| tokens[i].0 == K::CURRENCY && tokens[i].1.end == defect.range.start);
+        let message = if glued_to_currency && matches!(text, "-" | "'" | "." | "_") {
+            format!(
+                "unexpected {text:?} after the posting amount: a currency cannot end in `{text}`"
+            )
         } else {
-            String::new()
+            super::directive_header::defect_message("a posting", &defect, text)
         };
         errors.push(crate::ParseError::new(
-            crate::ParseErrorKind::SyntaxError(format!(
-                "unexpected {text:?} after the posting amount{why}"
-            )),
-            Span::new(range.start + off, range.end + off),
+            crate::ParseErrorKind::SyntaxError(message),
+            Span::new(defect.range.start + off, defect.range.end + off),
         ));
+    }
+}
+
+/// What beancount's grammar BUILDER rejects in a grammatical posting line
+/// (`grammar.py`'s `cost_spec` and `posting`), reported at parse time there
+/// like a syntax error, so here too (#2802, stage 3). The first, in
+/// beancount's order:
+///
+/// - a cost spec with two numbers-and-currencies, two dates or two labels
+///   (`{2, USD}` is the number `2` and the currency `USD`, two costs);
+/// - a `#` in a `{{ }}` total cost ("Per-unit cost may not be specified using
+///   total cost syntax");
+/// - a negative price (`@ -3 USD`), evaluated by the shared reader;
+/// - `@@` on a posting without a number for its units;
+/// - a cost and a price whose currencies are both written and differ
+///   (`{100 USD} @ 120 EUR`): "Cost and price currencies must match", for a
+///   buy and a sale alike. A cost spec written without a currency (`{}`,
+///   `{100}`) or a price without one is not checked, as in beancount. A sale
+///   with mismatched currencies is then not booked, deliberately, where
+///   beancount books it, and booking says so
+///   (`BookingError::CostPriceCurrencyMismatch`, #2571).
+///
+/// `tokens` is the posting line as [`posting_line_check`] flattens it, and
+/// grammatical: [`super::directive_header::first_posting_defect`] found
+/// nothing.
+fn posting_builder_error(
+    tokens: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
+    src: &str,
+) -> Option<(std::ops::Range<usize>, String)> {
+    use crate::SyntaxKind as K;
+    // Most postings have neither a cost spec nor a price: nothing to check.
+    if !tokens.iter().any(|(k, _)| {
+        matches!(
+            k,
+            K::L_BRACE | K::L_BRACE_HASH | K::L_DOUBLE_BRACE | K::AT | K::AT_AT
+        )
+    }) {
+        return None;
+    }
+    // In place, so the caller's reused buffer is the only allocation: this
+    // runs on every posting with a cost or a price.
+    tokens.retain(|(k, _)| !is_trivia_kind(*k) && *k != K::BOM);
+    let sig = tokens.as_slice();
+    let account = sig.iter().position(|(k, _)| *k == K::ACCOUNT)?;
+    let opener = |k: K| matches!(k, K::L_BRACE | K::L_BRACE_HASH | K::L_DOUBLE_BRACE);
+    let units_end = sig[account + 1..]
+        .iter()
+        .position(|(k, _)| opener(*k) || matches!(k, K::AT | K::AT_AT))
+        .map_or(sig.len(), |i| account + 1 + i);
+    let units_have_number = sig[account + 1..units_end]
+        .iter()
+        .any(|(k, _)| *k == K::NUMBER);
+
+    // The cost spec, component by component; a component is `sig[start..i]`.
+    let mut i = units_end;
+    if let Some((open, _)) = sig.get(i)
+        && opener(*open)
+    {
+        let is_total = *open == K::L_DOUBLE_BRACE;
+        let close = if is_total {
+            K::R_DOUBLE_BRACE
+        } else {
+            K::R_BRACE
+        };
+        let (mut costs, mut dates, mut labels) = (0usize, 0usize, 0usize);
+        // `{#` begins the first component with its `#`.
+        let mut component_has_hash = *open == K::L_BRACE_HASH;
+        i += 1;
+        let mut start = i;
+        loop {
+            let token = sig.get(i);
+            let ends = token.is_none_or(|(k, _)| *k == K::COMMA || *k == close);
+            if !ends {
+                component_has_hash |= token?.0 == K::HASH;
+                i += 1;
+                continue;
+            }
+            let component = &sig[start..i];
+            if let Some(first) = component.first().or_else(|| {
+                // `{# 2 USD}`: the hash was the opener.
+                component_has_hash.then_some(&sig[units_end])
+            }) {
+                let duplicate = |n: &mut usize, what: &str| {
+                    *n += 1;
+                    (*n > 1).then(|| {
+                        (
+                            first.1.start..component.last().map_or(first.1.end, |t| t.1.end),
+                            format!("duplicate {what} in the cost spec, as beancount reports"),
+                        )
+                    })
+                };
+                let found = match (component.len(), first.0) {
+                    (1, K::DATE) => duplicate(&mut dates, "date"),
+                    (1, K::STRING) => duplicate(&mut labels, "label"),
+                    // Cost merging, `{*}`. Deliberately NOT reported, unlike
+                    // beancount 3.2.3 ("Cost merging is not supported yet"):
+                    // rledger implements it (average-cost merge booking, see
+                    // `rustledger_core::inventory::booking`), a correct
+                    // feature beancount lacks, which we keep. The matrix pins
+                    // its rows (`known_cost_merge`).
+                    (1, K::STAR) => None,
+                    _ => duplicate(&mut costs, "cost"),
+                };
+                if found.is_some() {
+                    return found;
+                }
+                if is_total && component_has_hash {
+                    let hash = component.iter().find(|(k, _)| *k == K::HASH)?;
+                    return Some((
+                        hash.1.clone(),
+                        "a per-unit cost (`#`) cannot be written with the total-cost `{{ }}` \
+                         syntax, as beancount reports"
+                            .to_string(),
+                    ));
+                }
+            }
+            component_has_hash = false;
+            i += 1;
+            start = i;
+            if token.is_none_or(|(k, _)| *k == close) {
+                break;
+            }
+        }
+    }
+
+    // The price.
+    let (at, at_range) = sig.get(i)?;
+    if !matches!(at, K::AT | K::AT_AT) {
+        return None;
+    }
+    let price = &sig[i + 1..];
+    let number_tokens = match price.last() {
+        Some((K::CURRENCY, _)) => &price[..price.len() - 1],
+        _ => price,
+    };
+    // Only an expression with a `-` can be negative; skip the evaluator (and
+    // its token view) for every other price.
+    if number_tokens.iter().any(|(k, _)| *k == K::MINUS) {
+        let view: Vec<TextToken<'_>> = number_tokens
+            .iter()
+            .map(|(k, r)| TextToken {
+                kind: *k,
+                text: src.get(r.clone()).unwrap_or_default(),
+            })
+            .collect();
+        let mut cursor = 0;
+        if let Some(value) = parse_arith_expr(&view, &mut cursor)
+            && value.is_sign_negative()
+            && !value.is_zero()
+        {
+            let from = number_tokens[0].1.start;
+            let to = price.last().map_or(from, |t| t.1.end);
+            return Some((
+                from..to,
+                format!(
+                    "negative prices are not allowed: {}, as in beancount",
+                    src.get(from..to).unwrap_or_default()
+                ),
+            ));
+        }
+    }
+    if *at == K::AT_AT && !units_have_number {
+        return Some((
+            at_range.clone(),
+            "a total price (`@@`) on a posting without a number for its units, \
+             as beancount reports"
+                .to_string(),
+        ));
+    }
+    // Both currencies written and different: beancount's builder rejects the
+    // posting for a buy and a sale alike (`grammar.py` `posting`). A cost
+    // spec's currency is its one `CURRENCY` token (dates and labels have
+    // none); the price's is its last token.
+    let cost_currency = sig[units_end..i].iter().find(|(k, _)| *k == K::CURRENCY);
+    if let (Some((_, cost)), Some((K::CURRENCY, price_currency))) = (cost_currency, price.last()) {
+        let (cost_text, price_text) = (
+            src.get(cost.clone()).unwrap_or_default(),
+            src.get(price_currency.clone()).unwrap_or_default(),
+        );
+        if cost_text != price_text {
+            return Some((
+                cost.start..price_currency.end,
+                format!(
+                    "{}: {cost_text} != {price_text}",
+                    crate::COST_PRICE_CURRENCY_MISMATCH
+                ),
+            ));
+        }
+    }
+    None
+}
+
+/// Report a `#!` or `#+` that is not at column 0 anywhere in a transaction
+/// (#2802, stage 3). (A `%` there is no longer a comment token at all: the
+/// lexer reads it as a FLAG, as beancount does.)
+///
+/// Only `;` starts a comment that is indented or in the middle of a line in
+/// beancount: `%` lexes as a FLAG and `#` as a HASH, so `  % note`, `  #!t`
+/// or `  #t ^l %` inside a transaction is a syntax error there, and ours read
+/// each as a comment to the end of the line. At column 0 they are whole-line
+/// comments in both (#2769, #2779). The header line and posting lines report
+/// theirs from their own rules; a token one of those already reported is not
+/// reported again, so this catches the rest: tag lines, and indented comment
+/// lines in the body or under a posting.
+///
+/// Runs from the shared directive loop over GREEN tokens, so the green and
+/// red parse paths cannot disagree on it.
+fn indented_comment_check(
+    node: &crate::SyntaxNode,
+    stripped: &str,
+    bom_offset: u32,
+    prior_error_starts: &[usize],
+    errors_before: usize,
+    errors: &mut Vec<crate::ParseError>,
+    tokens: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
+) {
+    use crate::SyntaxKind as K;
+    // Runs on every transaction, and the kinds it looks for are rare: only a
+    // `#!` or a `#+` can be one (`%` is a comment only at column 0, where it
+    // is fine, and a FLAG anywhere else). A byte search of the transaction's
+    // own source is far cheaper than walking its tree, or than `text()`,
+    // which builds red nodes.
+    let (from, to) = (
+        usize::from(node.text_range().start()),
+        usize::from(node.text_range().end()),
+    );
+    let Some(source) = stripped.get(from..to) else {
+        return;
+    };
+    if !source.contains("#!") && !source.contains("#+") {
+        return;
+    }
+    tokens.clear();
+    let mut at = usize::from(node.text_range().start());
+    flatten_green_matching(node.green(), &mut at, tokens, |k| {
+        matches!(k, K::SHEBANG | K::EMACS_DIRECTIVE)
+    });
+    let off = bom_offset as usize;
+    for (_, range) in tokens.iter() {
+        if range.start == 0 || stripped.as_bytes().get(range.start - 1) == Some(&b'\n') {
+            continue;
+        }
+        let start = range.start + off;
+        let reported = prior_error_starts.binary_search(&start).is_ok()
+            || errors[errors_before..]
+                .iter()
+                .any(|e| e.span.start == start);
+        if reported {
+            continue;
+        }
+        let end = (range.start + 2).min(range.end);
+        let text = stripped.get(range.start..end).unwrap_or_default();
+        errors.push(crate::ParseError::new(
+            crate::ParseErrorKind::SyntaxError(format!(
+                "unexpected {text:?} in a transaction: only `;` starts a comment \
+                 that is indented or in the middle of a line; `{text}` starts one only \
+                 at the beginning of a line"
+            )),
+            Span::new(start, end + off),
+        ));
+    }
+}
+
+/// [`flatten_green`], keeping only the tokens whose kind `keep` accepts (the
+/// offsets still advance over the others).
+fn flatten_green_matching(
+    node: &rowan::GreenNodeData,
+    at: &mut usize,
+    out: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
+    keep: impl Fn(crate::SyntaxKind) -> bool + Copy,
+) {
+    let kind_of = <crate::BeancountLanguage as rowan::Language>::kind_from_raw;
+    for child in node.children() {
+        match child {
+            rowan::NodeOrToken::Token(t) => {
+                let range = *at..*at + u32::from(t.text_len()) as usize;
+                *at = range.end;
+                let kind = kind_of(t.kind());
+                if keep(kind) {
+                    out.push((kind, range));
+                }
+            }
+            rowan::NodeOrToken::Node(n) => flatten_green_matching(n, at, out, keep),
+        }
+    }
+}
+
+/// Append every token under `node` to `out`, with absolute ranges starting at
+/// `*at`, which it advances.
+fn flatten_green(
+    node: &rowan::GreenNodeData,
+    at: &mut usize,
+    out: &mut Vec<(crate::SyntaxKind, std::ops::Range<usize>)>,
+) {
+    let kind_of = <crate::BeancountLanguage as rowan::Language>::kind_from_raw;
+    for child in node.children() {
+        match child {
+            rowan::NodeOrToken::Token(t) => {
+                let range = *at..*at + u32::from(t.text_len()) as usize;
+                *at = range.end;
+                out.push((kind_of(t.kind()), range));
+            }
+            rowan::NodeOrToken::Node(n) => flatten_green(n, at, out),
+        }
     }
 }
 
@@ -4381,6 +4747,31 @@ pub(super) struct DescendantsWalkResult {
     pub(super) custom_pushmeta_errors: Vec<crate::ParseError>,
 }
 
+/// Whether `token` is the flag of its transaction header or posting, as
+/// [`ast::Transaction::flag`] / [`ast::Posting::flag`] read it.
+///
+/// Used to keep a one-letter flag (`T`, `P`, ...), which lexes as `CURRENCY`,
+/// out of `currency_occurrences`. Asks the AST accessors themselves, so it
+/// cannot disagree with how the directive's flag is read. The green walker
+/// cannot build red nodes and mirrors this in `green::flag_child_index`; the
+/// `parse_green_eq_red_corpus` test and the `fuzz_green_eq_red` target pin the
+/// two to the same occurrences.
+pub(super) fn is_flag_token(token: &crate::SyntaxToken) -> bool {
+    let Some(parent) = token.parent() else {
+        return false;
+    };
+    let flag = match parent.kind() {
+        crate::SyntaxKind::TRANSACTION => ast::Transaction::cast(parent)
+            .and_then(|t| t.flag())
+            .map(|f| f.syntax().clone()),
+        crate::SyntaxKind::POSTING => ast::Posting::cast(parent)
+            .and_then(|p| p.flag())
+            .map(|f| f.syntax().clone()),
+        _ => None,
+    };
+    flag.as_ref() == Some(token)
+}
+
 /// Fused single-pass visitor over `source_file`'s descendants -
 /// replaces three separate walks (`extract_inline_token_errors`,
 /// `extract_top_level_comments`, `extract_currency_occurrences`)
@@ -4465,8 +4856,17 @@ fn walk_descendants_once(
             .any(|a| a.kind() == crate::SyntaxKind::ERROR_NODE);
 
         // CURRENCY occurrences: only outside ERROR_NODE, and only when the
-        // caller wants them (LSP path).
-        if collect_occurrences && kind == crate::SyntaxKind::CURRENCY && !in_error_node {
+        // caller wants them (LSP path). A one-letter flag (`T` in
+        // `2024-01-16 T "x"`, `P` before a posting's account) lexes as
+        // CURRENCY too, but it is a flag, not a currency, so it is left out:
+        // otherwise references, highlight, rename and linked editing on a
+        // currency `T` would also touch every `T` flag. The green walker
+        // mirrors this with `flag_child_index`.
+        if collect_occurrences
+            && kind == crate::SyntaxKind::CURRENCY
+            && !in_error_node
+            && !is_flag_token(&t)
+        {
             let range = t.text_range();
             let start: u32 = range.start().into();
             let end: u32 = range.end().into();
@@ -4589,12 +4989,17 @@ fn section_marker_check(
 
 // ---- Token parsing helpers -------------------------------------
 
-/// Parse a date token, accepting the same shapes as the legacy
-/// parser: canonical `YYYY-MM-DD`, slash-separated `YYYY/M/D`,
-/// and single-digit month/day. Returns `None` when the token
-/// can't be turned into a real calendar date (invalid month,
-/// invalid day for the given month, etc.).
-pub(super) fn parse_date_token(text: &str) -> Option<NaiveDate> {
+/// Parse a date token the way beancount builds a date from its `DATE` token:
+/// the three fields are integers ([`crate::diagnostics::date_fields`]), so
+/// single-digit fields, `/` separators and extra leading zeros all read
+/// (`02024-001-01` is 2024-01-01, #2808). Returns `None` when they do not form
+/// a real calendar date (a month or day out of range, Feb 29 in a common year,
+/// a year outside 1 to 9999).
+///
+/// Year 0 is refused as beancount refuses it (`year 0 is out of range`):
+/// Python's `datetime.date` starts at year 1, while `jiff` would accept
+/// it (#2811).
+pub fn parse_date_token(text: &str) -> Option<NaiveDate> {
     // Fast path: canonical "YYYY-MM-DD".
     if text.len() == 10
         && text.as_bytes()[4] == b'-'
@@ -4605,14 +5010,368 @@ pub(super) fn parse_date_token(text: &str) -> Option<NaiveDate> {
             text[8..10].parse::<u32>(),
         )
     {
-        return naive_date(y, m, d);
+        return naive_date(y, m, d).filter(|date| date.year() >= 1);
     }
-    // Slow path: share legacy's normalizer so single-digit
-    // month/day (`2024-1-15`, `2024-01-5`) and slash separators
-    // are accepted everywhere the legacy parser accepts them.
-    crate::diagnostics::normalize_date_str(text)
-        .parse::<NaiveDate>()
-        .ok()
+    // Slow path: any other shape the lexer accepts.
+    let [year, month, day] = crate::diagnostics::date_fields(text)?;
+    let year = year.parse::<i32>().ok()?;
+    if !(1..=9999).contains(&year) {
+        return None;
+    }
+    naive_date(year, month.parse().ok()?, day.parse().ok()?)
+}
+
+/// The first date in a value position on one line that is not a real
+/// calendar date (`kk: 2024-02-30`, `custom "x" 2024-13-01`), with the
+/// message the directive's own date gets (`InvalidDateValue`, from
+/// [`crate::diagnostics::describe_invalid_date`]), or `None`.
+///
+/// `tokens` are the line's `(kind, range)` pairs over `src`, from its first
+/// content token. `skip_leading_date` skips the first token when it is the
+/// directive's own `DATE`, which [`parse_directive_date`] already reports.
+///
+/// One check for metadata lines, `custom` and `pushmeta` values: those dates
+/// used to load as no value at all, with no error (#2811). beancount reports
+/// each (`day is out of range for month`).
+pub(super) fn invalid_value_date(
+    tokens: &[(crate::SyntaxKind, std::ops::Range<usize>)],
+    src: &str,
+    skip_leading_date: bool,
+) -> Option<(std::ops::Range<usize>, String)> {
+    let skip = usize::from(
+        skip_leading_date
+            && tokens
+                .first()
+                .is_some_and(|(k, _)| *k == crate::SyntaxKind::DATE),
+    );
+    tokens[skip..].iter().find_map(|(kind, range)| {
+        if *kind != crate::SyntaxKind::DATE {
+            return None;
+        }
+        let text = src.get(range.clone())?;
+        parse_date_token(text).is_none().then(|| {
+            (
+                range.clone(),
+                crate::diagnostics::describe_invalid_date(text),
+            )
+        })
+    })
+}
+
+/// Report every `DATE` token that is not a real calendar date, wherever it
+/// stands, and let that error stand for its line's grammar errors, as
+/// beancount does (#2856).
+///
+/// beancount builds the date while lexing, so a bad date is a lexer error: it
+/// is named (`day is out of range for month`) in every position, a header, a
+/// metadata or `custom` value, an `event` or `option` argument, a price, a
+/// transaction header, an orphan indented line; two bad dates on one line are
+/// two errors; and the rest of the line gets no grammar error on top, because
+/// the parser never sees a date token there. A grammar error BEFORE the date
+/// still stands: the parser fails at that earlier token before the lexer
+/// reaches the date (`balance Assets:A USD 2024-02-30` is `unexpected
+/// CURRENCY` and the date). Its OTHER lexer errors still stand: the
+/// lexer goes on past the date, so a stray `` ` `` or a mid-file BOM on the
+/// same line is reported too. Here the date is one token like any other until
+/// it is read, so this pass, run once over the whole tree after every other
+/// check, applies that rule in one place: each invalid date not already
+/// reported at its position (a directive's own date, by
+/// `parse_directive_date`) gets `InvalidDateValue`, and a parse error is
+/// dropped when the parser failed at or after its line's first bad date
+/// (`reaches_a_bad_date` says where it failed), unless it covers an
+/// `ERROR_TOKEN` (the lexer's own error: a character no token takes, a
+/// mid-file BOM). A directive with a bad date of
+/// its own is still dropped, as in beancount, but the bad dates under it are
+/// now reported too. A date inside one of beancount's invalid tokens (an
+/// invalid character takes the rest of its run of non-blank characters) is
+/// never read there, so it is not named here either.
+///
+/// Linear in the source and the error count: the line bounds are found in one
+/// forward pass over the sorted dates, and each error is looked up by binary
+/// search (#2868 review: a line of 40,000 bad dates took a minute).
+///
+/// Walks GREEN tokens (kind and length, no red-node allocation).
+fn report_invalid_dates(
+    root: &crate::SyntaxNode,
+    stripped: &str,
+    bom_offset: u32,
+    grammar_failures: &[(usize, usize, usize)],
+    errors: &mut Vec<crate::ParseError>,
+) {
+    use crate::SyntaxKind as K;
+    let off = bom_offset as usize;
+    let mut bad: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut lexer_errors: Vec<std::ops::Range<usize>> = Vec::new();
+    // `STRING` tokens that run over a line end (stripped frame), so a line
+    // that starts inside one is not taken for a gap line.
+    let mut multiline_strings: Vec<std::ops::Range<usize>> = Vec::new();
+    let mut stack = vec![(
+        root.green().to_owned(),
+        usize::from(root.text_range().start()),
+    )];
+    while let Some((node, start)) = stack.pop() {
+        let mut at = start;
+        for child in node.children() {
+            match child {
+                rowan::NodeOrToken::Node(n) => {
+                    let len = usize::from(n.text_len());
+                    stack.push((n.to_owned(), at));
+                    at += len;
+                }
+                rowan::NodeOrToken::Token(t) => {
+                    let len = t.text().len();
+                    match <crate::BeancountLanguage as rowan::Language>::kind_from_raw(t.kind()) {
+                        K::DATE if parse_date_token(t.text()).is_none() => {
+                            bad.push(at..at + len);
+                        }
+                        K::ERROR_TOKEN => lexer_errors.push(at + off..at + len + off),
+                        K::STRING if t.text().contains('\n') => {
+                            multiline_strings.push(at..at + len);
+                        }
+                        _ => {}
+                    }
+                    at += len;
+                }
+            }
+        }
+    }
+    if bad.is_empty() {
+        return;
+    }
+    bad.sort_unstable_by_key(|r| r.start);
+    lexer_errors.sort_unstable_by_key(|r| r.start);
+    multiline_strings.sort_unstable_by_key(|r| r.start);
+    let reported: std::collections::HashSet<usize> = errors
+        .iter()
+        .filter(|e| matches!(e.kind, crate::ParseErrorKind::InvalidDateValue(_)))
+        .map(|e| e.span.start)
+        .collect();
+    // Whether a lexer error starts in `from..to` (BOM frame).
+    let lexer_error_in = |from: usize, to: usize| {
+        let i = lexer_errors.partition_point(|t| t.start < from);
+        lexer_errors.get(i).is_some_and(|t| t.start < to)
+    };
+    // For each line holding a reported bad date, in order and once, its start
+    // and the stretch from its first such date to its end, in the BOM frame.
+    // `line` is the current date's line in the stripped frame, and `scanned`
+    // is where it ended (its `\n`), so every byte is stepped over at most
+    // once looking back for a line start and once looking ahead for a line
+    // end.
+    let mut lines: Vec<(usize, std::ops::Range<usize>)> = Vec::new();
+    let mut line = 0..0;
+    let mut scanned = 0;
+    // Where the last date on this line ended, and whether it stood inside an
+    // invalid token (below), so each stretch between dates is scanned once.
+    let mut prev_end = 0;
+    let mut prev_in_invalid = false;
+    for range in bad {
+        if range.start >= line.end {
+            let back = &stripped[scanned..range.start];
+            let ahead = &stripped[range.end..];
+            let line_start = back.rfind('\n').map_or(scanned, |i| scanned + i + 1);
+            let line_end = ahead.find('\n').map_or(stripped.len(), |i| range.end + i);
+            #[cfg(test)]
+            test_counters::DATE_LINE_SCANNED_BYTES
+                .with(|c| c.set(c.get() + (range.start - scanned) + (line_end - range.end)));
+            line = line_start..line_end;
+            scanned = line_end;
+            prev_end = line_start;
+            prev_in_invalid = false;
+        }
+        // beancount's lexer takes everything from an invalid character up to
+        // the next space, tab or line end as ONE invalid token, so a date
+        // inside that run is never read, and never named. Here the error token
+        // is the character alone, and the date after it lexes on its own.
+        let between = &stripped[prev_end..range.start];
+        #[cfg(test)]
+        test_counters::DATE_LINE_SCANNED_BYTES.with(|c| c.set(c.get() + between.len()));
+        let in_invalid = match between.rfind([' ', '\t', '\r']) {
+            Some(i) => lexer_error_in(prev_end + i + 1 + off, range.start + off),
+            None => prev_in_invalid || lexer_error_in(prev_end + off, range.start + off),
+        };
+        prev_end = range.end;
+        prev_in_invalid = in_invalid;
+        if in_invalid {
+            continue;
+        }
+        if lines
+            .last()
+            .is_none_or(|(_, stretch)| stretch.end != line.end + off)
+        {
+            lines.push((line.start + off, range.start + off..line.end + off));
+        }
+        if !reported.contains(&(range.start + off)) {
+            let text = &stripped[range.clone()];
+            errors.push(invalid_value_date_error(
+                range,
+                crate::diagnostics::describe_invalid_date(text),
+                off,
+            ));
+        }
+    }
+    // Whether a grammar error is the date's doing: the parser failed at or
+    // after the first bad date on its line, which it reaches. An error from
+    // an earlier failure is reported by beancount too (`balance Assets:A USD
+    // 2024-02-30`: `unexpected CURRENCY`, then the date).
+    //
+    // Where the parser failed: for a dropped directive's whole-node error,
+    // what the header grammar says (`grammar_failures`), placed on the line by
+    // the header's start, since the node's span takes in leading blank and
+    // comment lines. For any other error, its first non-blank character: a
+    // precise error starts at its token, and a whole-line recovery error (an
+    // orphan indented line, a transaction-body line no posting takes) fails at
+    // the line's first token in beancount (`  "x" 2024-02-30`: `unexpected
+    // STRING`, then the date; `  2024-02-30 5`: the date alone).
+    // Where every error starts, sorted, stripped frame.
+    let mut error_starts: Vec<usize> = errors
+        .iter()
+        .map(|e| e.span.start.saturating_sub(off))
+        .collect();
+    error_starts.sort_unstable();
+    let reaches_a_bad_date = |span: &Span| {
+        let j = grammar_failures.partition_point(|&(start, _, _)| start < span.start);
+        let (anchor, failed_at) = match grammar_failures.get(j) {
+            Some(&(start, header_start, failed_at)) if start == span.start => {
+                (header_start, failed_at)
+            }
+            _ => {
+                let from = span.start.saturating_sub(off).min(stripped.len());
+                let is_blank = |b: &u8| matches!(b, b' ' | b'\t');
+                let ahead = stripped[from..].bytes().take_while(is_blank).count();
+                let behind = stripped[..from].bytes().rev().take_while(is_blank).count();
+                let line_begin = from - behind;
+                // An indented line after a blank line, a comment, a directive
+                // that takes no metadata or the top of the file
+                // (`previous_line_is_a_gap`) is no directive's continuation, so
+                // beancount fails at the indent itself (`unexpected INDENT`),
+                // before any date on it.
+                let after_a_gap = ahead + behind > 0
+                    && (line_begin == 0 || stripped.as_bytes()[line_begin - 1] == b'\n')
+                    && previous_line_is_a_gap(
+                        stripped,
+                        line_begin,
+                        &multiline_strings,
+                        &error_starts,
+                    );
+                let failed_at = if after_a_gap {
+                    line_begin + off
+                } else {
+                    span.start + ahead
+                };
+                (span.start, failed_at)
+            }
+        };
+        let i = lines.partition_point(|(_, stretch)| stretch.end <= anchor);
+        let Some((line_start, stretch)) = lines.get(i) else {
+            return false;
+        };
+        *line_start <= anchor
+            && stretch.start < span.end.max(span.start + 1)
+            && failed_at >= stretch.start
+    };
+    let covers_a_lexer_error = |span: &Span| {
+        let end = span.end.max(span.start + 1);
+        let i = lexer_errors.partition_point(|t| t.end <= span.start);
+        lexer_errors.get(i).is_some_and(|t| t.start < end)
+    };
+    errors.retain(|e| {
+        matches!(e.kind, crate::ParseErrorKind::InvalidDateValue(_))
+            || !reaches_a_bad_date(&e.span)
+            || covers_a_lexer_error(&e.span)
+    });
+}
+
+/// Whether the line before the one starting at `line_start` leaves an indented
+/// line nothing to continue, so beancount reports `unexpected INDENT` there
+/// (bean-check 3.2.3): it is blank, missing, a comment at column 0, or one of
+/// the undated directives that take no metadata (`option`, `include`,
+/// `plugin`, `pushtag`, `poptag`, `pushmeta`, `popmeta`) with no error of its
+/// own (`error_starts`, sorted): beancount's recovery from a broken one
+/// swallows the indented line. An indented comment continues the directive
+/// above.
+///
+/// A column-0 comment is a line beancount ignores, per
+/// [`crate::logos_lexer::beancount_ignores_line`]: `;` and anything, or `*`,
+/// `:` or a flag character (`!`, `&`, `#`, `?`, `%`) followed by at least one
+/// more character on the line, except `#` starting a tag (`#a1`, `#a b`). A
+/// bare marker is a token, not a comment, and beancount reports it on its own
+/// line.
+///
+/// A previous line that starts inside a multi-line string (`multiline_strings`,
+/// sorted) is the string's text. Its directive is the one on the line where
+/// the string starts, so step back to that line (again, while it too starts
+/// inside a string) and apply only the no-metadata check there. Each step
+/// goes back over one string, so the walk is bounded by the lines above.
+fn previous_line_is_a_gap(
+    src: &str,
+    line_start: usize,
+    multiline_strings: &[std::ops::Range<usize>],
+    error_starts: &[usize],
+) -> bool {
+    const NO_METADATA: [&str; 7] = [
+        "option", "include", "plugin", "pushtag", "poptag", "pushmeta", "popmeta",
+    ];
+    let takes_no_metadata = |line: &str| {
+        NO_METADATA.iter().any(|keyword| {
+            line.strip_prefix(keyword)
+                .is_some_and(|rest| rest.starts_with([' ', '\t']))
+        })
+    };
+    // The string a line starting at `at` starts inside, if any.
+    let string_around = |at: usize| {
+        let i = multiline_strings.partition_point(|s| s.end <= at);
+        multiline_strings.get(i).filter(|s| s.start < at)
+    };
+    let line_start_of = |at: usize| src[..at].rfind('\n').map_or(0, |i| i + 1);
+    // Whether an error starts in `from..to`: a directive that is already a
+    // syntax error is no gap, because beancount's recovery from it swallows
+    // the indented line after it (`option "a" "b" "c"`).
+    let has_an_error = |from: usize, to: usize| {
+        let i = error_starts.partition_point(|&s| s < from);
+        error_starts.get(i).is_some_and(|&s| s < to)
+    };
+    let Some(before) = src[..line_start].strip_suffix('\n') else {
+        return true;
+    };
+    let previous_start = line_start_of(before.len());
+    if let Some(mut string) = string_around(previous_start) {
+        let mut start = line_start_of(string.start);
+        while let Some(outer) = string_around(start) {
+            string = outer;
+            start = line_start_of(string.start);
+        }
+        let end = src[start..].find('\n').map_or(src.len(), |i| start + i);
+        return takes_no_metadata(&src[start..end]) && !has_an_error(start, line_start);
+    }
+    // Not trimmed of `\r`: a `#\r` line is a comment, as flex's `.` takes the
+    // `\r` (bean-check 3.2.3).
+    let previous = &before[previous_start..];
+    crate::logos_lexer::beancount_ignores_line(previous)
+        || previous.trim_start_matches([' ', '\t', '\r']).is_empty()
+        || takes_no_metadata(previous) && !has_an_error(previous_start, line_start)
+}
+
+/// Counters the linear-cost tests read (test builds only).
+#[cfg(test)]
+pub mod test_counters {
+    thread_local! {
+        /// Bytes `report_invalid_dates` stepped over finding the lines that
+        /// hold a bad date, and the stretches between dates, on this thread.
+        pub static DATE_LINE_SCANNED_BYTES: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
+    }
+}
+
+/// The error for [`invalid_value_date`]'s finding, in the BOM frame.
+const fn invalid_value_date_error(
+    range: std::ops::Range<usize>,
+    message: String,
+    off: usize,
+) -> crate::ParseError {
+    crate::ParseError::new(
+        crate::ParseErrorKind::InvalidDateValue(message),
+        Span::new(range.start + off, range.end + off),
+    )
 }
 
 /// Parse a directive's `DATE` token. On success returns the
@@ -4953,6 +5712,36 @@ fn fixup_directive_spans(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Reporting bad dates must stay linear in the input (#2868 review): one
+    /// `custom` line of 40,000 bad dates took 63 s when each date looked back
+    /// and ahead for its own line's bounds. The bytes stepped over finding
+    /// the lines, and the stretches between dates, must stay within three
+    /// passes over the source, whether the dates share one line or each has
+    /// its own.
+    #[test]
+    fn test_report_invalid_dates_is_linear_in_the_input() {
+        const N: usize = 20_000;
+        let one_line = "2024-01-02 custom \"x\"".to_string() + &" 2024-02-30".repeat(N) + "\n";
+        let many_lines =
+            "2024-01-02 custom \"x\" 2024-02-30\n2024-01-02 custom \"y\" `\n".repeat(N);
+        for (label, src) in [("one line", one_line), ("many lines", many_lines)] {
+            test_counters::DATE_LINE_SCANNED_BYTES.with(|c| c.set(0));
+            let result = crate::parse(&src);
+            let scanned = test_counters::DATE_LINE_SCANNED_BYTES.with(std::cell::Cell::get);
+            assert!(
+                scanned <= 3 * src.len(),
+                "{label}: stepped over {scanned} bytes of a {}-byte input",
+                src.len()
+            );
+            let named = result
+                .errors
+                .iter()
+                .filter(|e| matches!(e.kind, crate::ParseErrorKind::InvalidDateValue(_)))
+                .count();
+            assert_eq!(named, N, "{label}");
+        }
+    }
 
     /// A directive's span ends at the next *input* directive's content start,
     /// INCLUDING directives filtered out of the `ParseResult`
@@ -5621,17 +6410,17 @@ mod tests {
         let src = "pushmeta loc: \"NYC\"\n\
                    pushmeta loc: \"LDN\"\n\
                    popmeta loc:\n\
-                   2024-01-01 open Assets:Bank USD\n\
+                   2024-01-01 * \"t\"\n  Assets:A  1 USD\n  Assets:B\n\
                    popmeta loc:\n";
         let result = parse_via_cst(src);
-        let Directive::Open(open) = &result.directives[0].value else {
-            panic!("expected Open");
+        let Directive::Transaction(txn) = &result.directives[0].value else {
+            panic!("expected Transaction");
         };
         assert_eq!(
-            open.meta.get("loc"),
+            txn.meta.get("loc"),
             Some(&MetaValue::String("NYC".to_string())),
             "shadow pop should restore NYC, got {:?}",
-            open.meta.get("loc"),
+            txn.meta.get("loc"),
         );
     }
 
@@ -7291,10 +8080,13 @@ mod tests {
         }
     }
 
-    /// The value `pushmeta key: <value>` pushes onto the directive after it,
-    /// from the green-wired parse, after checking both trees agree.
+    /// The value `pushmeta key: <value>` pushes onto the transaction after
+    /// it (pushed metadata reaches transactions only, #2812), from the
+    /// green-wired parse, after checking both trees agree.
     fn pushed_value(value: &str) -> (Vec<String>, Option<MetaValue>) {
-        let src = format!("pushmeta kk: {value}\n2024-01-01 open Assets:Bank USD\npopmeta kk:\n");
+        let src = format!(
+            "pushmeta kk: {value}\n2024-01-01 * \"t\"\n  Assets:A  1 USD\n  Assets:B\npopmeta kk:\n"
+        );
         let green = parse_via_cst(&src);
         let red = parse_red_only(&src);
         assert_eq!(
@@ -7307,15 +8099,15 @@ mod tests {
             format!("{:?}", red.directives),
             "trees disagree on directives for {src:?}"
         );
-        let Directive::Open(open) = &green.directives[0].value else {
-            panic!("expected Open from {src:?}");
+        let Directive::Transaction(txn) = &green.directives[0].value else {
+            panic!("expected Transaction from {src:?}");
         };
         let errors = green
             .errors
             .iter()
             .map(crate::ParseError::message)
             .collect();
-        (errors, open.meta.get("kk").cloned())
+        (errors, txn.meta.get("kk").cloned())
     }
 
     /// The value a metadata line `kk: <value>` gives, from the green-wired
@@ -7656,7 +8448,7 @@ mod tests {
     #[test]
     fn test_pushmeta_value_reports_an_unevaluable_expression() {
         let src = "pushmeta kk: 1/0\n\
-                   2024-01-01 open Assets:Bank USD\n\
+                   2024-01-01 * \"t\"\n  Assets:A  1 USD\n  Assets:B\n\
                    popmeta kk:\n";
         let green = parse_via_cst(src);
         let red = parse_red_only(src);
@@ -7675,10 +8467,10 @@ mod tests {
                 "1/0"
             )]
         );
-        let Directive::Open(open) = &green.directives[0].value else {
-            panic!("expected Open");
+        let Directive::Transaction(txn) = &green.directives[0].value else {
+            panic!("expected Transaction");
         };
-        assert_eq!(open.meta.get("kk"), Some(&MetaValue::None));
+        assert_eq!(txn.meta.get("kk"), Some(&MetaValue::None));
     }
 }
 
@@ -7820,14 +8612,5 @@ fn name_a_currency_tail(
             "unexpected `{tail}` after the currency `{word}`: a currency cannot end in `{tail}`"
         )),
         ..err
-    }
-}
-
-/// The kind of the last token under a green node, if it has one.
-fn last_token_kind(node: &rowan::GreenNodeData) -> Option<crate::SyntaxKind> {
-    let kind_of = <crate::BeancountLanguage as rowan::Language>::kind_from_raw;
-    match node.children().last()? {
-        rowan::NodeOrToken::Token(t) => Some(kind_of(t.kind())),
-        rowan::NodeOrToken::Node(n) => last_token_kind(n),
     }
 }

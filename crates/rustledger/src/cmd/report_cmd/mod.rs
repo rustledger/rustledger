@@ -571,8 +571,8 @@ fn load(
     // Disable with `--no-cache` or `BEANCOUNT_DISABLE_LOAD_CACHE`.
     let (raw, _from_cache) =
         crate::cmd::loadcache::load_result_cached(file, no_cache, verbose, err)?;
-    // Deliberate deviation from bean-query (#1908) — see `bail_on_parse_errors`.
-    crate::cmd::loadcache::bail_on_parse_errors(&raw, file)?;
+    // Deliberate deviation from bean-query (#1908): see `bail_on_load_errors`.
+    crate::cmd::loadcache::bail_on_load_errors(&raw, file)?;
     let ledger = rustledger_loader::process(raw, &options)
         .with_context(|| format!("failed to load {}", file.display()))?;
 

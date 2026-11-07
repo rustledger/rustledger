@@ -196,8 +196,8 @@ pub fn run_with_writer<W: io::Write>(
     // `BEANCOUNT_DISABLE_LOAD_CACHE`.
     let (raw, _from_cache) =
         crate::cmd::loadcache::load_result_cached(file, args.no_cache, args.verbose, err)?;
-    // Deliberate deviation from bean-query (#1908) — see `bail_on_parse_errors`.
-    crate::cmd::loadcache::bail_on_parse_errors(&raw, file)?;
+    // Deliberate deviation from bean-query (#1908): see `bail_on_load_errors`.
+    crate::cmd::loadcache::bail_on_load_errors(&raw, file)?;
     let ledger = rustledger_loader::process(raw, &options)
         .with_context(|| format!("failed to load {}", file.display()))?;
 
@@ -259,8 +259,9 @@ pub fn run_with_writer<W: io::Write>(
     // Merge pad-synthesized transactions into the directive stream
     // (BQL is a balance-computing consumer). The span-preserving variant keeps
     // each directive's source `Spanned` wrapper so the query engine can resolve
-    // the `filename`/`lineno` columns (pad-synth transactions are marked
-    // synthesized → no source location). `merge_with_padding_spanned` preserves
+    // the `filename`/`lineno` columns (a pad-synthesized transaction is located
+    // at its `pad` and its postings at the `balance`, as beancount locates
+    // them, #2825). `merge_with_padding_spanned` preserves
     // the original Pad directives in the output so `FROM #entries WHERE type =
     // 'pad'` audits still enumerate them, AND handles multi-pad shadowing
     // (#1300) correctly by construction via `process_pads`.
@@ -293,28 +294,7 @@ pub fn run_with_writer<W: io::Write>(
     }
 
     // Determine query source
-    // Flatten the loader's failing-assertion list into the executor's key
-    // shape once. Computed here rather than per query so the REPL, which
-    // reuses one ledger across prompts, does not redo it at every prompt.
-    let balance_discrepancies: Vec<(
-        rustledger_core::NaiveDate,
-        String,
-        String,
-        rustledger_core::Decimal,
-        rustledger_core::Amount,
-    )> = ledger
-        .balance_discrepancies
-        .iter()
-        .map(|d| {
-            (
-                d.date,
-                d.account.to_string(),
-                d.amount.currency.to_string(),
-                d.asserted,
-                d.amount.clone(),
-            )
-        })
-        .collect();
+    let balance_discrepancies = ledger.balance_discrepancies.clone();
 
     // One settings value for both modes, built from the loaded ledger.
     let settings = ShellSettings::from_args(
@@ -381,15 +361,9 @@ struct ShellSettings {
     /// The ledger's `account_previous_*` accounts, which `FROM ... OPEN ON`
     /// summarizes into (#2401).
     summary_accounts: rustledger_query::executor::SummaryAccounts,
-    /// The balance checker's computed difference per FAILING assertion,
-    /// keyed by `(date, account, currency)`. Backs `#balances.discrepancy`.
-    balance_discrepancies: Vec<(
-        rustledger_core::NaiveDate,
-        String,
-        String,
-        rustledger_core::Decimal,
-        rustledger_core::Amount,
-    )>,
+    /// The balance checker's computed difference per FAILING assertion, from
+    /// the validating load. Backs `#balances.discrepancy`.
+    balance_discrepancies: Vec<rustledger_loader::BalanceDiscrepancy>,
 }
 
 impl ShellSettings {
@@ -399,13 +373,7 @@ impl ShellSettings {
         account_types: rustledger_core::AccountTypes,
         booking_method: rustledger_core::BookingMethod,
         summary_accounts: rustledger_query::executor::SummaryAccounts,
-        balance_discrepancies: Vec<(
-            rustledger_core::NaiveDate,
-            String,
-            String,
-            rustledger_core::Decimal,
-            rustledger_core::Amount,
-        )>,
+        balance_discrepancies: Vec<rustledger_loader::BalanceDiscrepancy>,
     ) -> Self {
         Self {
             format: args.format.unwrap_or(OutputFormat::Text),

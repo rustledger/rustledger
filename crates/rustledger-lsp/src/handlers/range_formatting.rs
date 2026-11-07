@@ -16,7 +16,7 @@
 //! to format because the file has parse errors, the private
 //! `fallback_cst_snap_edit` helper runs as the second-chance path: it
 //! walks the cached CST root via
-//! [`rustledger_parser::format::format_node_range`], snaps the user's
+//! [`rustledger_parser::format::format_parsed_range`], snaps the user's
 //! selection up to the smallest set of top-level directives that
 //! intersect it, and emits a single `TextEdit` replacing the snapped
 //! range with the formatted text. The fallback INTENTIONALLY extends
@@ -29,13 +29,14 @@
 //!
 //! The fallback REFUSES to format (returns `None`) whenever the
 //! snapped range would cover an `ERROR_NODE` byte. Range formatting
-//! must not delete content the parser couldn't classify — the
-//! "Format Selection" keybinding has no opt-in to content loss. This
-//! is the deliberate divergence from `format_node`'s whole-file
-//! policy (which silently drops `ERROR_NODE` content); the whole-file
-//! path is invoked through tooling (`rledger format` CLI, FFI
-//! `format.entry`) that decides to accept content loss, while the
-//! per-handler LSP path does not.
+//! must not touch content the parser couldn't classify: the
+//! "Format Selection" keybinding should give a clean reformat or a
+//! no-op. (The whole-file error-tolerant formatter copies an
+//! `ERROR_NODE` verbatim instead, #1335.) A directive that merely
+//! *holds* a parse error (junk after its header or a posting) is
+//! copied verbatim rather than rebuilt from its typed values, as the
+//! whole-file formatter does, so its unparsable text is never
+//! deleted (#2803).
 //!
 //! Both paths use the LSP's negotiated position encoding (UTF-16 by
 //! spec default, UTF-8 when modern editors negotiate). The fallback
@@ -63,10 +64,7 @@
 
 use lsp_types::{DocumentRangeFormattingParams, Position, Range, TextEdit};
 use rustledger_parser::ParseResult;
-use rustledger_parser::format::{
-    GroupingStyle, format_node_range_grouped, format_node_range_with_alignment,
-    lf_to_crlf_outside_strings,
-};
+use rustledger_parser::format::{GroupingStyle, format_parsed_range, lf_to_crlf_outside_strings};
 
 use super::formatting::format_document;
 use super::utils::{LineIndex, PositionEncoding};
@@ -215,10 +213,9 @@ fn edit_inside_range(
 /// - **ERROR_NODE content is preserved, by refusing to format.**
 ///   If the snapped range would cover any top-level `ERROR_NODE`
 ///   byte, the fallback returns `None` and the client sees
-///   "nothing to format". This diverges from
-///   [`format_node`](rustledger_parser::format::format_node)'s
-///   whole-file policy of silently dropping `ERROR_NODE` content —
-///   the LSP keybinding has no opt-in to data loss. Users editing
+///   "nothing to format" (the whole-file formatter copies an
+///   `ERROR_NODE` verbatim instead, #1335). A directive that holds a
+///   parse error is copied verbatim within the edit (#2803). Users editing
 ///   through a typo get a "Format Selection did nothing" response
 ///   while the error sits inside their selection, but no in-
 ///   progress content is silently deleted. For byte-conservative
@@ -273,27 +270,15 @@ fn fallback_cst_snap_edit(
     let cst_start_ts = rustledger_parser::TextSize::try_from(cst_start).ok()?;
     let cst_end_ts = rustledger_parser::TextSize::try_from(cst_end).ok()?;
     let cst_range = rustledger_parser::TextRange::new(cst_start_ts, cst_end_ts);
-    let node = parse_result.syntax_node();
-    // Reuse the file-wide alignment the parser pre-computed at
-    // parse time (see `ParseResult::alignment`). This skips the
-    // O(N_postings) `compute_alignment` walk that the bare
-    // `format_node_range` would do per call — the difference
-    // matters on format-on-type clients that send a
-    // rangeFormatting request per keystroke while the user is
-    // editing through a parse error in a large ledger.
-    //
-    // When the ledger groups numerals that cached alignment is unusable —
-    // it was measured ungrouped, and a separator widens the number column
-    // — so pay for one `compute_alignment` under the real style instead.
-    // Emitting with mismatched alignment would misplace the currency
-    // column; emitting ungrouped would strip separators the file's other
-    // lines still carry. Grouping is opt-in, so the common path keeps the
-    // per-keystroke fast path.
-    let (snap_cst, mut new_text) = if style.groups_anything() {
-        format_node_range_grouped(&node, cst_range, style)?
-    } else {
-        format_node_range_with_alignment(&node, cst_range, parse_result.alignment())?
-    };
+    // `format_parsed_range` reuses the file-wide alignment cached on
+    // `parse_result` (skipping a per-keystroke `compute_alignment` walk on
+    // format-on-type clients) unless the ledger groups numerals, where the
+    // ungrouped cache is unusable and it measures under the real style.
+    // It also copies verbatim every directive holding one of the file's
+    // parse errors, as the whole-file formatter does: rebuilt from its
+    // typed values such a directive would lose the text the parser could
+    // not read (#2803).
+    let (snap_cst, mut new_text) = format_parsed_range(parse_result, cst_range, style)?;
 
     // CRLF preservation: `format_node_range` always emits LF (it
     // re-uses the canonical-form pipeline, which is LF-only by
@@ -686,6 +671,50 @@ mod tests {
              would persist alongside the formatted text",
         );
         let _ = line0_end; // value not used directly; line-1-col-0 is the canonical form
+    }
+
+    /// A directive holding a parse error (junk after its header or after
+    /// a posting) is copied verbatim by the fallback, so the edit never
+    /// deletes the unparsable text; the well-formed directives around it
+    /// in the selection are still formatted (#2803).
+    #[test]
+    fn parse_errors_inside_a_directive_keep_their_text_in_the_fallback_edit() {
+        for (source, kept) in [
+            (
+                "2024-01-01 open   Assets:A junk\n2024-01-02 open   Assets:B\n",
+                "2024-01-01 open   Assets:A junk\n2024-01-02 open Assets:B\n",
+            ),
+            (
+                "2024-01-01 * \"x\"\n  Assets:A    1 USD junk\n  Assets:B\n2024-01-02 open   Assets:B\n",
+                "2024-01-01 * \"x\"\n  Assets:A    1 USD junk\n  Assets:B\n2024-01-02 open Assets:B\n",
+            ),
+            // A CRLF file: the copied stray quote must not stop CRLF
+            // re-injection for the lines after it.
+            (
+                "2024-01-01 open   Assets:A\r\n2024-01-02 open   Assets:B \"\r\n2024-01-03 open   Assets:C\r\n",
+                "2024-01-01 open Assets:A\r\n2024-01-02 open   Assets:B \"\r\n2024-01-03 open Assets:C\r\n",
+            ),
+        ] {
+            let result = parse(source);
+            assert!(
+                !result.errors.is_empty(),
+                "{source:?}: expected a parse error"
+            );
+            let p = params(Range {
+                start: Position::new(0, 0),
+                end: Position::new(source.lines().count() as u32, 0),
+            });
+            let edits = handle_range_formatting(
+                &p,
+                source,
+                &result,
+                PositionEncoding::Utf16,
+                GroupingStyle::default(),
+            )
+            .expect("CST-snap fallback must fire");
+            assert_eq!(edits.len(), 1, "{source:?}: {edits:?}");
+            assert_eq!(edits[0].new_text, kept, "{source:?}");
+        }
     }
 
     /// Parse-error file + selection causes the snap to cover an

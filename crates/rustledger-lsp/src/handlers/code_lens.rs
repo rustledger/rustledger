@@ -423,9 +423,14 @@ fn collect_account_stats(parse_result: &ParseResult) -> HashMap<String, AccountS
 
     for spanned in &parse_result.directives {
         if let Directive::Transaction(txn) = &spanned.value {
-            for posting in &txn.postings {
-                let account = posting.account.to_string();
-                stats.entry(account).or_default().transaction_count += 1;
+            // Each transaction counts once per account, however many of its
+            // postings touch it: the shared rule of `account_activity`
+            // (#2850), applied to every account in one pass.
+            for account in super::utils::transaction_accounts(txn) {
+                stats
+                    .entry(account.to_string())
+                    .or_default()
+                    .transaction_count += 1;
             }
         }
     }
@@ -521,6 +526,107 @@ mod tests {
                 .title
                 .contains("2 transactions")
         );
+    }
+
+    /// Drift guard (#2850): for the same buffer, the `open` code lens and
+    /// completion resolve report the same transaction count for every
+    /// account, and the two shared helpers agree (completion and the inlay
+    /// tooltip both call `account_activity`; the lens tallies with
+    /// `transaction_accounts`).
+    #[test]
+    fn test_code_lens_and_completion_resolve_agree_on_transaction_counts() {
+        let source = r#"2000-01-01 open Assets:Bank KRW
+2000-01-01 open Expenses:Supplies KRW
+2000-01-01 open Expenses:Food KRW
+2021-01-02 * "Split invoice"
+  Expenses:Supplies  10000 KRW
+  Expenses:Supplies  20000 KRW
+  Assets:Bank       -30000 KRW
+2021-01-03 * "Lunch"
+  Expenses:Food  5000 KRW
+  Assets:Bank
+2021-01-04 * "Two kinds"
+  Expenses:Food  1000 KRW
+  Expenses:Supplies  1000 KRW
+  Expenses:Food  1000 KRW
+  Assets:Bank
+"#;
+        let result = parse(source);
+        let lenses = handle_code_lens(
+            &code_lens_params(),
+            source,
+            &result,
+            Some(&[]),
+            PositionEncoding::Utf16,
+        )
+        .expect("lenses emitted");
+        let txns: Vec<&rustledger_core::Transaction> = result
+            .directives
+            .iter()
+            .filter_map(|s| match &s.value {
+                Directive::Transaction(t) => Some(t),
+                _ => None,
+            })
+            .collect();
+        for (lens_index, account, want) in [
+            (0, "Assets:Bank", 3),
+            (1, "Expenses:Supplies", 2),
+            (2, "Expenses:Food", 2),
+        ] {
+            let lens = lenses[lens_index]
+                .command
+                .as_ref()
+                .expect("command")
+                .title
+                .clone();
+            assert_eq!(
+                lens,
+                format!("{} | KRW", count_noun(want, "transaction")),
+                "{account}"
+            );
+            let resolved = super::super::completion_resolve::handle_completion_resolve(
+                lsp_types::CompletionItem {
+                    label: account.to_string(),
+                    ..Default::default()
+                },
+                &result.directives,
+            );
+            let detail = resolved.detail.expect("detail");
+            assert!(
+                detail.ends_with(&format!(" · {}", count_noun(want, "txn"))),
+                "{account}: {detail}"
+            );
+            let by_activity =
+                super::super::utils::account_activity(account, txns.iter().copied()).transactions;
+            let by_accounts = txns
+                .iter()
+                .filter(|t| super::super::utils::transaction_accounts(t).any(|a| a == account))
+                .count();
+            assert_eq!((by_activity, by_accounts), (want, want), "{account}");
+        }
+    }
+
+    /// Two postings to the account in one transaction are one transaction on
+    /// the `open` lens (#2850).
+    #[test]
+    fn test_code_lens_counts_each_transaction_once() {
+        let source = r#"2000-01-01 open Expenses:Supplies KRW
+2021-01-02 * "Split invoice"
+  Expenses:Supplies  10000 KRW
+  Expenses:Supplies  20000 KRW
+  Assets:Bank       -30000 KRW
+"#;
+        let result = parse(source);
+        let lenses = handle_code_lens(
+            &code_lens_params(),
+            source,
+            &result,
+            Some(&[]),
+            PositionEncoding::Utf16,
+        )
+        .expect("lenses emitted");
+        let title = &lenses[0].command.as_ref().expect("command").title;
+        assert_eq!(title, "1 transaction | KRW");
     }
 
     /// Cold-start case: no diagnostics have been computed yet for this
@@ -711,10 +817,11 @@ mod tests {
         // recovers from the trailing garbage). The malformed line at
         // the END forces `parse_result.errors` to be non-empty without
         // making the test depend on parser-recovery behavior at the
-        // top of the file.
+        // top of the file. The line starts with `@`: a column-0 `!` line
+        // is a comment, as in beancount (#2779), so it would not do.
         let source = r#"2024-01-01 open Assets:Bank USD
 2024-01-31 balance Assets:Bank 100.00 USD
-!!! syntax garbage on a trailing line
+@@@ syntax garbage on a trailing line
 "#;
         let result = parse(source);
         assert!(

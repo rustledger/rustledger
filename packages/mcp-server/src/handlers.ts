@@ -831,6 +831,13 @@ function handleValidateFile(args: ToolArguments | undefined): ToolResponse {
     // the same `Loader` that backs `rledger check`, so include semantics and
     // — crucially — per-file error locations come from one implementation
     // instead of a TypeScript re-creation of them.
+    //
+    // An include that exists but cannot be read (a directory, no permission)
+    // makes `collectLedgerFiles` throw, so this reports that one error and not
+    // the ledger's other diagnostics. Deliberate: the map handed to the wasm
+    // can only hold a file or leave it out, and left out the loader would
+    // call it MISSING, a different and wrong diagnosis (#2861). Fix the
+    // unreadable include and the full validation runs.
     const { files, entry } = collectLedgerFiles(absolutePath);
     const result = rustledger.validateMultiFile(files, entry);
     return textResponse(formatValidation(result, absolutePath));
@@ -850,11 +857,22 @@ function handleQueryFile(args: ToolArguments | undefined): ToolResponse {
     // Same as `validate_file`: the loader resolves the includes, not us.
     const { files, entry } = collectLedgerFiles(absolutePath);
     const result = rustledger.queryMultiFile(files, entry, args!.query!);
-    const blocking = fatalErrors(result.errors);
-    if (blocking.length > 0) {
-      return errorResponse(formatErrors(blocking));
+    // `queryMultiFile` decides whether the ledger could be queried, with the
+    // rule `rledger query` uses: a parse or booking failure, or a query that
+    // does not parse, gives no columns. Anything else it reports, such as a
+    // failing balance assertion, is a diagnostic shown beside the rows: a
+    // ledger with one must still answer (#2823).
+    if (!result.columns || result.columns.length === 0) {
+      const blocking = fatalErrors(result.errors);
+      if (blocking.length > 0) {
+        return errorResponse(formatErrors(blocking));
+      }
     }
-    return textResponse(formatQueryResult(result));
+    const table = formatQueryResult(result);
+    const diagnostics = result.errors ?? [];
+    return textResponse(
+      diagnostics.length > 0 ? `${table}\n\n${formatErrors(diagnostics)}` : table
+    );
   } catch (error) {
     return errorResponse(
       `Error: ${error instanceof Error ? error.message : String(error)}`

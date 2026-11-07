@@ -341,7 +341,36 @@ use crate::types::{Error, LedgerOptions};
 /// v67: loader v52, PARSER OUTPUT changed (#2806, #2812). `custom` values
 /// evaluate arithmetic and `pushmeta` values read like metadata values; a v66
 /// blob would keep serving the old split values.
-pub const CACHE_VERSION: u32 = 67;
+/// v68: loader v53, PARSER OUTPUT changed (#2802, stage 3). A stray token in a
+/// transaction or posting line is a parse error, and `!Assets:A` and `--1 USD`
+/// parse; a v67 blob would keep serving such a file without the error, or
+/// with one.
+/// v69: loader v54, PARSER OUTPUT changed. A posting whose cost and price
+/// currencies are both written and differ is a parse error, a purchase too; a
+/// v68 blob would keep serving such a purchase without the error.
+/// v70: loader v55, PARSER OUTPUT changed (#2811). A value date that is not a
+/// real calendar date, and a year-0 date, are parse errors; a v69 blob would
+/// keep serving such a file without the error.
+/// v71: loader v56, PARSER OUTPUT changed (#2812). Pushed metadata reaches
+/// transactions only, and a transaction's own key wins over a pushed one; a v70
+/// blob would keep serving the old attachment.
+/// v72: the `ParsedLedger` payload gained `directive_spans` and `placeholders`
+/// (the source map's placeholder locations), so a restored ledger's queries
+/// resolve the `filename` / `lineno` / `location` columns and still name the
+/// plugin that created a directive (`<auto_accounts>`, 0) (#2825). Loader
+/// output is unchanged; a v71 blob has neither and would not deserialize as
+/// this layout.
+/// v73: loader v57, PARSER OUTPUT changed (#2808, #2856). A date with extra
+/// digits is one date, as in beancount, and every invalid date is reported; a
+/// v72 blob would keep serving such a file with its old errors.
+/// v74: loader v58, PARSER OUTPUT changed (#2779). A column-0 `!`, `&`, `?` or
+/// `:` line is ignored and a bare `#`, `%` or `*` line is an error, as in
+/// beancount; a v73 blob would keep serving such a file with its old errors.
+/// v75: the `Ledger` payload gained `query_refused`, whether an error that
+/// blocks queries (`LedgerError::blocks_queries`) stops them (#2861); the
+/// restored `errors` no longer carry that flag. Loader output is unchanged; a
+/// v74 blob has no such field and would not deserialize as this layout.
+pub const CACHE_VERSION: u32 = 75;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -373,7 +402,7 @@ pub const CACHE_VERSION: u32 = 67;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 52;
+const LOADER_CACHE_VERSION_PIN: u32 = 58;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";
@@ -392,6 +421,12 @@ const HEADER_SIZE: usize = 12;
 #[derive(Debug, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
 pub struct ParsedLedgerPayload {
     pub directives: Vec<Directive>,
+    /// Each directive's span and file id, so a restored ledger's queries
+    /// still resolve the source columns (#2825).
+    pub directive_spans: Vec<(rustledger_core::Span, u16)>,
+    /// The source map's placeholder locations (name, line), in id order, so
+    /// the restored map gives each the id `directive_spans` holds (#2825).
+    pub placeholders: Vec<(String, u32)>,
     pub options: LedgerOptions,
     pub parse_errors: Vec<Error>,
     /// Option diagnostics, archived apart from `parse_errors` because the
@@ -423,6 +458,11 @@ pub struct LedgerPayload {
     /// strings for the same reason as `account_type_names`.
     pub summary_account_names: Vec<String>,
     pub errors: Vec<Error>,
+    /// Whether a query over the ledger refuses (`LedgerError::blocks_queries`,
+    /// #2861: a parse error, a file that could not be read or decrypted, a
+    /// booking failure). Archived because
+    /// `errors` lost the flag in conversion.
+    pub query_refused: bool,
 }
 
 // =============================================================================
@@ -773,6 +813,7 @@ mod tests {
                 "EUR".to_string(),
             ],
             errors: vec![Error::new("a warning")],
+            query_refused: true,
         };
         let bytes = serialize_ledger(&payload).expect("serialize");
         assert!(bytes.starts_with(MAGIC_LEDGER));
@@ -793,6 +834,10 @@ mod tests {
             ]
         );
         assert_eq!(restored.errors.len(), 1);
+        assert!(
+            restored.query_refused,
+            "the query gate survives the cache (#2861)"
+        );
     }
 
     #[test]
@@ -815,6 +860,8 @@ option "operating_currency" "USD"
 
         let payload = ParsedLedgerPayload {
             directives: processed.directives.clone(),
+            directive_spans: processed.directive_spans.clone(),
+            placeholders: Vec::new(),
             options: processed.options.clone(),
             parse_errors: Vec::new(),
             option_errors: Vec::new(),
@@ -836,6 +883,7 @@ option "operating_currency" "USD"
             booking_method: "STRICT".to_string(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
+            query_refused: false,
         })
         .unwrap();
         bytes[0] = b'X';
@@ -860,6 +908,7 @@ option "operating_currency" "USD"
             booking_method: "STRICT".to_string(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
+            query_refused: false,
         })
         .unwrap();
         bytes[8..12].copy_from_slice(&99u32.to_le_bytes());
@@ -902,6 +951,7 @@ option "operating_currency" "USD"
             booking_method: "STRICT".to_string(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
+            query_refused: false,
         })
         .unwrap();
         assert!(
@@ -912,6 +962,8 @@ option "operating_currency" "USD"
         // Serialized ParsedLedger bytes should not deserialize as Ledger
         let bytes = serialize_parsed(&ParsedLedgerPayload {
             directives: Vec::new(),
+            directive_spans: Vec::new(),
+            placeholders: Vec::new(),
             options: LedgerOptions::default(),
             parse_errors: Vec::new(),
             option_errors: Vec::new(),

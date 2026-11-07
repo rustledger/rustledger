@@ -2,7 +2,7 @@
 //!
 //! Fetches forex rates from OANDA's API.
 
-use super::{PricePair, PriceSource, user_agent};
+use super::{PricePair, PriceSource, http_get_json};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
@@ -25,15 +25,15 @@ use std::time::Duration;
 /// All major and minor forex pairs:
 /// - `EUR_USD`, `GBP_USD`, `USD_JPY`, etc.
 #[derive(Debug)]
-pub struct OandaSource {}
+pub struct OandaSource {
+    /// Whole-request timeout, applied to each request.
+    timeout: Duration,
+}
 
 impl OandaSource {
     /// Create a new OANDA source.
-    ///
-    /// The timeout parameter is accepted for API consistency but not
-    /// currently applied to HTTP requests.
-    pub const fn new(_timeout: Duration) -> Self {
-        Self {}
+    pub const fn new(timeout: Duration) -> Self {
+        Self { timeout }
     }
 
     /// Get the API key from environment.
@@ -78,6 +78,13 @@ impl OandaSource {
             format!("{}_{}", ticker.to_uppercase(), currency.to_uppercase())
         }
     }
+
+    /// The `(base, quote)` sides of an instrument (`NAS100_USD` is
+    /// `(NAS100, USD)`): the quote labels the response, and the base is
+    /// what a `^` inversion is a price in (see `pair_base`).
+    fn instrument_sides(instrument: &str) -> Option<(&str, &str)> {
+        instrument.rsplit_once('_')
+    }
 }
 
 impl PriceSource for OandaSource {
@@ -87,6 +94,16 @@ impl PriceSource for OandaSource {
 
     fn description(&self) -> &'static str {
         "OANDA - forex rates (requires API key)"
+    }
+
+    /// The base of the instrument the ticker is fetched as (#2866), read by
+    /// the same `format_instrument` and `instrument_sides`
+    /// the fetch uses: `EUR_CHF` and CFDs such as `NAS100_USD` name their
+    /// own pair, and a bare `EUR` is the instrument `EUR_<currency>`, based
+    /// in `EUR`.
+    fn pair_base(&self, ticker: &str) -> Option<String> {
+        let instrument = Self::format_instrument(ticker, "");
+        Self::instrument_sides(&instrument).map(|(base, _)| base.to_string())
     }
 
     fn requires_api_key(&self) -> bool {
@@ -106,17 +123,16 @@ impl PriceSource for OandaSource {
         let instrument = Self::format_instrument(&pair.ticker, &pair.currency);
         let url = self.build_url(&instrument);
 
-        let mut response = ureq::get(&url)
-            .header("User-Agent", user_agent())
-            .header("Authorization", &format!("Bearer {api_key}"))
-            .header("Accept-Datetime-Format", "RFC3339")
-            .call()
-            .with_context(|| format!("Failed to fetch rate for {instrument}"))?;
-
-        let json: serde_json::Value = response
-            .body_mut()
-            .read_json()
-            .with_context(|| "Failed to parse OANDA response")?;
+        let json = http_get_json(
+            &url,
+            self.timeout,
+            &[
+                ("Authorization", &format!("Bearer {api_key}")),
+                ("Accept-Datetime-Format", "RFC3339"),
+            ],
+            &[&api_key],
+            &format!("Failed to fetch rate for {instrument}"),
+        )?;
 
         // Check for errors
         if let Some(error_message) = json.get("errorMessage") {
@@ -155,11 +171,8 @@ impl PriceSource for OandaSource {
             .and_then(Self::candle_trading_day)
             .unwrap_or(fallback_date);
 
-        let target_currency = if instrument.contains('_') {
-            instrument.split('_').next_back().unwrap_or(&pair.currency)
-        } else {
-            &pair.currency
-        };
+        let target_currency =
+            Self::instrument_sides(&instrument).map_or(pair.currency.as_str(), |(_, quote)| quote);
 
         Ok(PriceResponse {
             price,
@@ -173,6 +186,26 @@ impl PriceSource for OandaSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The base of the pair a ticker names, which a `^` inversion must
+    /// be declared in (#2866).
+    #[test]
+    fn test_pair_base() {
+        let source = OandaSource::new(Duration::from_secs(30));
+        for (ticker, base) in [
+            ("EUR_CHF", Some("EUR")),
+            ("eur_chf", Some("EUR")),
+            // CFDs, sent and labeled as the same `_` instrument.
+            ("SPX500_USD", Some("SPX500")),
+            ("NAS100_USD", Some("NAS100")),
+            ("DE30_EUR", Some("DE30")),
+            ("JP225_USD", Some("JP225")),
+            // A bare ticker is the instrument `EUR_<currency>`.
+            ("EUR", Some("EUR")),
+        ] {
+            assert_eq!(source.pair_base(ticker).as_deref(), base, "{ticker}");
+        }
+    }
 
     /// Candle open times roll forward past the 17:00 New-York session
     /// boundary onto the trading day the candle represents — in both

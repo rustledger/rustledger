@@ -57,7 +57,7 @@ name = "rustledger"
 
 [workspace.dependencies]
 # Agent-native CLI framework for the `agledger` binary (#1291).
-agcli = "0.17.0"
+agcli = "0.19.0"
 # Core
 rust_decimal = { version = "1.42", features = ["serde"] }
 # `js` feature is wasm32-only (cfg-gated inside jiff) and pulls in
@@ -75,6 +75,8 @@ anyhow = "1"
 regex = "1"
 # NFC folding for import dedup text comparison (#2507).
 unicode-normalization = "0.1"
+# Display width of account names for the formatter's amount alignment (#2852).
+unicode-width = "0.2"
 
 # Parsing
 format_num_pattern = { version = "0.9.5", features = ["rust_decimal"] }

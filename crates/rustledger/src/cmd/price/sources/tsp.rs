@@ -2,7 +2,7 @@
 //!
 //! Fetches TSP fund share prices from the TSP.gov website.
 
-use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, user_agent};
+use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, http_get_json};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use std::time::Duration;
@@ -21,15 +21,15 @@ use std::time::Duration;
 /// - `SFUND` - S Fund (Small Cap Stock Index)
 /// - `IFUND` - I Fund (International Stock Index)
 #[derive(Debug)]
-pub struct TspSource {}
+pub struct TspSource {
+    /// Whole-request timeout, applied to each request.
+    timeout: Duration,
+}
 
 impl TspSource {
     /// Create a new TSP source.
-    ///
-    /// The timeout parameter is accepted for API consistency but not
-    /// currently applied to HTTP requests.
-    pub const fn new(_timeout: Duration) -> Self {
-        Self {}
+    pub const fn new(timeout: Duration) -> Self {
+        Self { timeout }
     }
 
     /// Normalize TSP fund name.
@@ -50,7 +50,8 @@ impl TspSource {
             "L2055" => Some("L 2055"),
             "L2060" => Some("L 2060"),
             "L2065" => Some("L 2065"),
-            "LINCOME" | "L INCOME" => Some("L Income"),
+            // beanprice's `tsp` names the L Income fund `LInco` (#2866).
+            "LINCOME" | "L INCOME" | "LINCO" => Some("L Income"),
             _ => None,
         }
     }
@@ -67,15 +68,7 @@ impl TspSource {
     fn fetch_history(&self) -> Result<Vec<serde_json::Value>> {
         let url = self.build_url();
 
-        let mut response = ureq::get(&url)
-            .header("User-Agent", user_agent())
-            .call()
-            .with_context(|| "Failed to fetch TSP prices")?;
-
-        let json: serde_json::Value = response
-            .body_mut()
-            .read_json()
-            .with_context(|| "Failed to parse TSP response")?;
+        let json = http_get_json(&url, self.timeout, &[], &[], "Failed to fetch TSP prices")?;
 
         // The TSP API returns an array of daily prices
         match json {
@@ -189,6 +182,14 @@ mod tests {
         assert_eq!(TspSource::normalize_fund("cfund"), Some("C Fund"));
         assert_eq!(TspSource::normalize_fund("L2030"), Some("L 2030"));
         assert_eq!(TspSource::normalize_fund("UNKNOWN"), None);
+        // Every fund name beanprice's `tsp` accepts (its `TSP_FUND_NAMES`)
+        // is one rledger reads too (#2866).
+        for fund in [
+            "LInco", "L2025", "L2030", "L2035", "L2040", "L2045", "L2050", "L2055", "L2060",
+            "L2065", "GFund", "FFund", "CFund", "SFund", "IFund",
+        ] {
+            assert!(TspSource::normalize_fund(fund).is_some(), "{fund}");
+        }
     }
 
     #[test]

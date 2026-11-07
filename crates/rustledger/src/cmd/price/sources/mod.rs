@@ -31,6 +31,7 @@ use super::{PriceRequest, PriceResponse};
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
 use rustledger_core::NaiveDate;
+use std::time::Duration;
 
 /// A `(ticker, quote-currency)` pair — the date-free fetch target.
 ///
@@ -210,6 +211,21 @@ fn reject_url_metacharacters(kind: &str, value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Whether `s` is a non-empty run of ASCII word characters, the `\w+` of
+/// the beanprice ticker patterns.
+pub(crate) fn is_word(s: &str) -> bool {
+    !s.is_empty() && s.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Split a bean-price `XXX-YYY` ticker into its two codes, as the
+/// beanprice modules that take one (`ratesapi`, `ecbrates`,
+/// `coinmarketcap`) match it: `^(\w+)-(\w+)$`, so exactly one `-` with a
+/// word on each side (#2866).
+pub(crate) fn split_dash_pair(ticker: &str) -> Option<(&str, &str)> {
+    let (first, second) = ticker.split_once('-')?;
+    (is_word(first) && is_word(second)).then_some((first, second))
+}
+
 /// Trait for price data sources.
 ///
 /// All price sources must implement this trait. The trait is object-safe
@@ -232,9 +248,8 @@ fn reject_url_metacharacters(kind: &str, value: &str) -> Result<()> {
 ///
 /// # Implementation Notes
 ///
-/// Source implementations store a `timeout` field for future use. Currently,
-/// ureq 3.x doesn't support timeout on individual requests (only on the Agent).
-/// A future enhancement could use `ureq::Agent` with timeout configuration.
+/// Sources receive a `timeout` and make every request through
+/// `http_get`, which applies it to the whole request.
 pub trait PriceSource: Send + Sync {
     /// Returns the unique name of this source.
     fn name(&self) -> &'static str;
@@ -249,6 +264,38 @@ pub trait PriceSource: Send + Sync {
 
     /// Returns the environment variable name for the API key, if required.
     fn api_key_env_var(&self) -> Option<&'static str> {
+        None
+    }
+
+    /// Read a ticker that names its own quote currency, the way the
+    /// matching beanprice module reads it (#2866): `ratesapi`'s
+    /// `BASE-SYMBOL` is the pair `(BASE, SYMBOL)`, whatever the requested
+    /// currency. A bean-price ticker fully names what is fetched, and the
+    /// requested currency only labels the result; reading it here, before
+    /// any routing, lets every source keep fetching a plain
+    /// `(ticker, currency)` pair.
+    ///
+    /// The default keeps the pair: the source's tickers name no currency,
+    /// or (`coinbase`'s `BTC-USD`, `oanda`'s `EUR_USD`) the source already
+    /// reads one itself.
+    fn bean_price_pair(&self, pair: PricePair) -> PricePair {
+        pair
+    }
+
+    /// The base of what the source fetches for `ticker`: the asset its
+    /// quote is a price of (#2866). A pair ticker names it (`EUR-GBP` on
+    /// `ratesapi`, `EUR_CHF` on `oanda`, `EURCHF=X` on `yahoo` are all
+    /// `EUR`), and a bare ticker quoted in the requested currency is its
+    /// own base on most sources (`EUR` on `ratesapi`, `BTC` on `coincap`).
+    /// Implementations read it with the same code they build the request
+    /// with. A bean-price `^` inversion is a price in that base, so it is
+    /// written only when the declared quote currency is the base.
+    ///
+    /// The default is `None`: the ticker names an asset whose base this
+    /// source cannot read (a quandl dataset, a TSP fund, a command
+    /// source's ticker), and only the quote currency is checked.
+    fn pair_base(&self, ticker: &str) -> Option<String> {
+        let _ = ticker;
         None
     }
 
@@ -334,24 +381,27 @@ pub trait PriceSource: Send + Sync {
         reject_url_metacharacters("ticker", &request.ticker)?;
         reject_url_metacharacters("currency", &request.currency)?;
 
+        // A bean-price ticker that names its own quote currency is read
+        // into the pair first, so the identity check below sees the pair
+        // actually fetched (#2866).
+        let pair = self.bean_price_pair(PricePair {
+            ticker: request.ticker.clone(),
+            currency: request.currency.clone(),
+        });
+
         // 1. Identity: X priced in X is 1.0 on any past-or-today date,
         // source-independent (hoisted out of per-source branches by the
         // #1801 reviews; future labels refuse). The currency is
         // uppercased — beancount commodities are uppercase, and main's
         // ecb identity branch normalized (deep review of #1803).
-        if request.ticker.eq_ignore_ascii_case(&request.currency) {
+        if pair.ticker.eq_ignore_ascii_case(&pair.currency) {
             return Ok(PriceResponse {
                 price: Decimal::ONE,
-                currency: request.currency.to_uppercase(),
+                currency: pair.currency.to_uppercase(),
                 date: identity_label_date(self.name(), request)?,
                 source: self.name().to_string(),
             });
         }
-
-        let pair = PricePair {
-            ticker: request.ticker.clone(),
-            currency: request.currency.clone(),
-        };
 
         // 2. Undated → latest. The response currency is uppercased on
         // the way out, like every other arm: feeds return uppercase,
@@ -473,6 +523,377 @@ pub(crate) const fn user_agent() -> &'static str {
     "Mozilla/5.0 (compatible; rustledger/1.0; +https://github.com/rustledger/rustledger)"
 }
 
+/// The status and body of an HTTP response, read by [`http_get`].
+#[derive(Debug)]
+pub(crate) struct HttpReply {
+    /// HTTP status code.
+    pub(crate) status: u16,
+    /// Response body, read whole (ureq's 10 MB limit applies).
+    pub(crate) body: String,
+}
+
+impl HttpReply {
+    /// The body of a 2xx response. Any other status is an error naming
+    /// `what` (the provider and the thing fetched), the status, and the
+    /// start of the body, so the provider's own message reaches the user.
+    ///
+    /// Each of `secrets` (the API key a source sent) is replaced in the
+    /// quoted body by `[REDACTED]`: a provider or an intermediary's error
+    /// page can echo the request URL, and Alpha Vantage and Quandl carry
+    /// the key in its query string.
+    pub(crate) fn into_success_body(self, what: &str, secrets: &[&str]) -> Result<String> {
+        if (200..300).contains(&self.status) {
+            return Ok(self.body);
+        }
+        let excerpt = body_excerpt(&redact(&self.body, secrets));
+        if excerpt.is_empty() {
+            anyhow::bail!("{what}: HTTP {}", self.status);
+        }
+        anyhow::bail!("{what}: HTTP {}: {excerpt}", self.status)
+    }
+
+    /// The JSON body of a 2xx response; see [`Self::into_success_body`].
+    pub(crate) fn into_success_json(
+        self,
+        what: &str,
+        secrets: &[&str],
+    ) -> Result<serde_json::Value> {
+        let body = self.into_success_body(what, secrets)?;
+        serde_json::from_str(&body).with_context(|| format!("{what}: invalid JSON response"))
+    }
+}
+
+/// `text` with every non-empty string in `secrets` replaced by
+/// `[REDACTED]`.
+fn redact(text: &str, secrets: &[&str]) -> String {
+    secrets
+        .iter()
+        .filter(|secret| !secret.is_empty())
+        .fold(text.to_string(), |text, secret| {
+            text.replace(secret, "[REDACTED]")
+        })
+}
+
+/// The longest error-body excerpt [`HttpReply::into_success_body`] quotes.
+const MAX_ERROR_EXCERPT_CHARS: usize = 300;
+
+/// The start of an error body on one line: whitespace runs collapsed,
+/// cut at [`MAX_ERROR_EXCERPT_CHARS`] characters.
+fn body_excerpt(body: &str) -> String {
+    let line = body.split_whitespace().collect::<Vec<_>>().join(" ");
+    match line.char_indices().nth(MAX_ERROR_EXCERPT_CHARS) {
+        Some((cut, _)) => format!("{}...", &line[..cut]),
+        None => line,
+    }
+}
+
+/// GET `url` with the shared [`user_agent`] plus `headers`, the whole
+/// request (connecting, sending, and reading the body) limited to
+/// `timeout`. A zero `timeout` means no limit, as `[price] timeout = 0`
+/// configures (the same convention as `cache_ttl = 0`), and so does one past
+/// [`MAX_REQUEST_TIMEOUT`].
+///
+/// Every price source makes its requests through this function, so none
+/// can block `rledger price` past its timeout (#2870). A 4xx/5xx status is
+/// returned as a reply rather than an error, so the provider's error body
+/// can be read (#2864); [`HttpReply::into_success_body`] turns it into an
+/// error that quotes it.
+///
+/// # Errors
+///
+/// Fails if the request cannot be made or the body cannot be read. When
+/// `timeout` elapses, the error says so and names the timeout.
+pub(crate) fn http_get(
+    url: &str,
+    timeout: Duration,
+    headers: &[(&str, &str)],
+) -> Result<HttpReply> {
+    let mut request = ureq::get(url)
+        .config()
+        .timeout_global(request_limit(timeout))
+        .http_status_as_error(false)
+        .build()
+        .header("User-Agent", user_agent());
+    for (name, value) in headers {
+        request = request.header(*name, *value);
+    }
+    let mut response = request.call().map_err(|e| request_error(e, timeout))?;
+    let status = response.status().as_u16();
+    let body = response
+        .body_mut()
+        .read_to_string()
+        .map_err(|e| request_error(e, timeout))?;
+    Ok(HttpReply { status, body })
+}
+
+/// The longest timeout [`http_get`] applies: 100 years. ureq adds the
+/// timeout to an `Instant`, which panics on overflow, and a timeout of
+/// `[price] timeout = 9223372036854775807` (the largest TOML integer)
+/// overflows it.
+const MAX_REQUEST_TIMEOUT: Duration = Duration::from_hours(100 * 365 * 24);
+
+/// The limit ureq is given for `timeout`: none for zero (`[price] timeout
+/// = 0`) or for anything past [`MAX_REQUEST_TIMEOUT`], which no request
+/// could reach anyway.
+fn request_limit(timeout: Duration) -> Option<Duration> {
+    (!timeout.is_zero() && timeout <= MAX_REQUEST_TIMEOUT).then_some(timeout)
+}
+
+/// A ureq error as an `anyhow` error. A timeout is reported as one
+/// message naming the limit and the setting that configures it, so a
+/// stalled provider reads as a timeout (ureq's own `timeout: global`
+/// would only repeat it).
+fn request_error(error: ureq::Error, timeout: Duration) -> anyhow::Error {
+    if matches!(error, ureq::Error::Timeout(_)) {
+        return anyhow::anyhow!(
+            "no complete response within the {timeout:?} timeout (set by [price] timeout)"
+        );
+    }
+    anyhow::Error::new(error)
+}
+
+/// [`http_get`] a 2xx body as text. `what` names the fetch in every error:
+/// a failed request, or a non-2xx status quoting the provider's body with
+/// `secrets` redacted (see [`HttpReply::into_success_body`]).
+///
+/// # Errors
+///
+/// As [`http_get`], plus any non-2xx status.
+pub(crate) fn http_get_text(
+    url: &str,
+    timeout: Duration,
+    headers: &[(&str, &str)],
+    secrets: &[&str],
+    what: &str,
+) -> Result<String> {
+    http_get(url, timeout, headers)
+        .with_context(|| what.to_string())?
+        .into_success_body(what, secrets)
+}
+
+/// [`http_get`] a 2xx body as JSON; see [`http_get_text`].
+///
+/// # Errors
+///
+/// As [`http_get_text`], plus a body that is not JSON.
+pub(crate) fn http_get_json(
+    url: &str,
+    timeout: Duration,
+    headers: &[(&str, &str)],
+    secrets: &[&str],
+    what: &str,
+) -> Result<serde_json::Value> {
+    http_get(url, timeout, headers)
+        .with_context(|| what.to_string())?
+        .into_success_json(what, secrets)
+}
+
+#[cfg(test)]
+mod http_tests {
+    use super::{HttpReply, MAX_REQUEST_TIMEOUT, body_excerpt, http_get, request_limit};
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    use std::sync::mpsc;
+    use std::thread;
+    use std::time::Duration;
+
+    /// Run `http_get` on a thread and wait at most 10s for it, so a
+    /// timeout that is not applied fails the test instead of hanging it.
+    fn http_get_within_10s(url: String, timeout: Duration) -> anyhow::Result<HttpReply> {
+        let (sender, receiver) = mpsc::channel();
+        thread::spawn(move || {
+            let result = http_get(&url, timeout, &[]);
+            // The receiver is gone only if the test already failed.
+            let _ = sender.send(result);
+        });
+        match receiver.recv_timeout(Duration::from_secs(10)) {
+            Ok(result) => result,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                panic!("the request was still waiting after 10s")
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => panic!("http_get panicked"),
+        }
+    }
+
+    /// A server that takes the connection and never answers must not
+    /// hang the request: the timeout ends it (#2870), and the error says
+    /// it was the timeout.
+    #[test]
+    fn test_http_get_applies_the_timeout() {
+        // Bound but never accepted: the kernel completes the TCP
+        // handshake into the backlog, so the request connects and then
+        // waits for a response that never comes.
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local listener");
+        let url = format!("http://{}/", listener.local_addr().expect("local addr"));
+        let err = http_get_within_10s(url, Duration::from_millis(200))
+            .expect_err("a server that never answers must time out");
+        assert_eq!(
+            format!("{err:#}"),
+            "no complete response within the 200ms timeout (set by [price] timeout)"
+        );
+        drop(listener);
+    }
+
+    /// `[price] timeout = 0` means no limit, as before #2870 and as
+    /// `cache_ttl = 0` means no cache: a zero `Duration` given to ureq
+    /// would fail every request at once.
+    #[test]
+    fn test_http_get_zero_timeout_means_no_limit() {
+        assert_eq!(request_limit(Duration::ZERO), None);
+        let (url, server) = serve_ok_after_100ms();
+        let reply = http_get_within_10s(url, Duration::ZERO)
+            .expect("a zero timeout must not fail the request");
+        assert_eq!((reply.status, reply.body.as_str()), (200, "ok"));
+        server.join().expect("the server thread");
+    }
+
+    /// A timeout too large to add to an `Instant` (the largest TOML
+    /// integer is `i64::MAX` seconds) means no limit: given to ureq as-is
+    /// it panics with "overflow when adding duration to instant".
+    #[test]
+    fn test_http_get_huge_timeout_means_no_limit() {
+        for secs in [
+            i64::MAX.unsigned_abs(),
+            u64::MAX,
+            MAX_REQUEST_TIMEOUT.as_secs() + 1,
+        ] {
+            assert_eq!(request_limit(Duration::from_secs(secs)), None, "{secs}s");
+        }
+        assert_eq!(
+            request_limit(MAX_REQUEST_TIMEOUT),
+            Some(MAX_REQUEST_TIMEOUT)
+        );
+        // The cap itself is applied, and a timeout past it is not, so
+        // neither overflows inside ureq.
+        for timeout in [
+            MAX_REQUEST_TIMEOUT,
+            Duration::from_secs(i64::MAX.unsigned_abs()),
+        ] {
+            let (url, server) = serve_ok_after_100ms();
+            let reply = http_get_within_10s(url, timeout)
+                .unwrap_or_else(|e| panic!("a {timeout:?} timeout failed the request: {e:#}"));
+            assert_eq!((reply.status, reply.body.as_str()), (200, "ok"));
+            server.join().expect("the server thread");
+        }
+    }
+
+    /// A local server that reads one request and answers `200 ok` after
+    /// 100ms, so a zero limit applied as-is fails. Returns its URL.
+    fn serve_ok_after_100ms() -> (String, thread::JoinHandle<()>) {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a local listener");
+        let url = format!("http://{}/", listener.local_addr().expect("local addr"));
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("accept the request");
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.ends_with(b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).expect("read the request");
+                assert!(read > 0, "the client closed before sending its request");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            thread::sleep(Duration::from_millis(100));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok")
+                .expect("write the response");
+        });
+        (url, server)
+    }
+
+    /// No source calls ureq directly: every request goes through
+    /// `http_get`, so none can skip the timeout (#2870). Reads the whole
+    /// directory, so a new source file is checked too.
+    #[test]
+    fn test_http_get_is_the_only_request_path() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/cmd/price/sources");
+        let mut checked = 0;
+        for entry in std::fs::read_dir(&dir).expect("read the sources directory") {
+            let path = entry.expect("a directory entry").path();
+            let file = path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .expect("a UTF-8 file name")
+                .to_string();
+            if file == "mod.rs" || path.extension().is_none_or(|ext| ext != "rs") {
+                continue;
+            }
+            let text = std::fs::read_to_string(&path).expect("read a source file");
+            assert!(
+                !text.contains("ureq::"),
+                "{file} uses ureq directly; make the request with http_get"
+            );
+            assert!(
+                text.contains("http_get"),
+                "{file} makes no request through http_get"
+            );
+            checked += 1;
+        }
+        // Guards against the scan silently finding nothing.
+        assert!(
+            checked >= 11,
+            "only {checked} source files found in {dir:?}"
+        );
+    }
+
+    #[test]
+    fn test_into_success_body_quotes_the_error_body() {
+        let reply = HttpReply {
+            status: 404,
+            body: "{\"errors\": [\n  {\"message\": \"Invalid currency\"}]}".to_string(),
+        };
+        let err = reply
+            .into_success_body("Coinbase price for XXX", &[])
+            .expect_err("a 404 is an error");
+        assert_eq!(
+            err.to_string(),
+            "Coinbase price for XXX: HTTP 404: {\"errors\": [ {\"message\": \"Invalid currency\"}]}"
+        );
+    }
+
+    /// An error page that echoes the request URL must not show the API
+    /// key the source put in its query string.
+    #[test]
+    fn test_into_success_body_redacts_the_api_key() {
+        let reply = HttpReply {
+            status: 502,
+            body: "<p>Upstream failed for /query?symbol=AAPL&apikey=S3CRETKEY</p>".to_string(),
+        };
+        let err = reply
+            .into_success_body("Failed to fetch quote for AAPL", &["S3CRETKEY", ""])
+            .expect_err("a 502 is an error");
+        assert_eq!(
+            err.to_string(),
+            "Failed to fetch quote for AAPL: HTTP 502: \
+             <p>Upstream failed for /query?symbol=AAPL&apikey=[REDACTED]</p>"
+        );
+    }
+
+    #[test]
+    fn test_into_success_body_empty_error_body() {
+        let reply = HttpReply {
+            status: 503,
+            body: " \n".to_string(),
+        };
+        let err = reply
+            .into_success_body("TSP prices", &[])
+            .expect_err("a 503 is an error");
+        assert_eq!(err.to_string(), "TSP prices: HTTP 503");
+    }
+
+    #[test]
+    fn test_into_success_body_passes_a_2xx_body() {
+        let reply = HttpReply {
+            status: 200,
+            body: "ok".to_string(),
+        };
+        assert_eq!(reply.into_success_body("x", &[]).expect("2xx"), "ok");
+    }
+
+    #[test]
+    fn test_body_excerpt_truncates_long_bodies() {
+        let excerpt = body_excerpt(&"\u{e9}".repeat(400));
+        assert_eq!(excerpt, format!("{}...", "\u{e9}".repeat(300)));
+    }
+}
 #[cfg(test)]
 // NOTE on clocks: the dispatch reads the wall clock internally (no
 // injection seam), so each today-arm test computes "today" separately
@@ -1022,7 +1443,7 @@ mod capability_wiring_tests {
             coverage("coinbase"),
             HistoricalCoverage::Since(rustledger_core::naive_date(2015, 1, 1).unwrap())
         );
-        // exchangerate.host serves EU-reference history from 1999-01-04.
+        // Frankfurter serves EU-reference history from 1999-01-04.
         assert_eq!(
             coverage("ratesapi"),
             HistoricalCoverage::Since(rustledger_core::naive_date(1999, 1, 4).unwrap())

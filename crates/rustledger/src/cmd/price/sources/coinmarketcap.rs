@@ -2,7 +2,7 @@
 //!
 //! Fetches cryptocurrency prices from `CoinMarketCap`.
 
-use super::{PricePair, PriceSource, user_agent};
+use super::{PricePair, PriceSource, http_get_json, split_dash_pair};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use std::env;
@@ -23,12 +23,15 @@ use std::time::Duration;
 /// All cryptocurrencies listed on `CoinMarketCap`:
 /// - `BTC`, `ETH`, `SOL`, `DOGE`, etc.
 #[derive(Debug)]
-pub struct CoinMarketCapSource {}
+pub struct CoinMarketCapSource {
+    /// Whole-request timeout, applied to each request.
+    timeout: Duration,
+}
 
 impl CoinMarketCapSource {
     /// Create a new `CoinMarketCap` source.
-    pub const fn new(_timeout: Duration) -> Self {
-        Self {}
+    pub const fn new(timeout: Duration) -> Self {
+        Self { timeout }
     }
 
     /// Get the API key from environment.
@@ -55,6 +58,31 @@ impl PriceSource for CoinMarketCapSource {
         "CoinMarketCap - cryptocurrency prices (requires API key)"
     }
 
+    /// beanprice's `coinmarketcap` ticker `SYMBOL-BASE` (`BTC-CHF`) is
+    /// SYMBOL priced in BASE (#2866); rledger's own form, the symbol
+    /// alone (`BTC`, quoted in the requested currency), still works.
+    fn bean_price_pair(&self, pair: PricePair) -> PricePair {
+        match split_dash_pair(&pair.ticker) {
+            Some((ticker, currency)) => PricePair {
+                ticker: ticker.to_string(),
+                currency: currency.to_string(),
+            },
+            None => pair,
+        }
+    }
+
+    /// The base of the pair the source fetches (#2866), read by the same
+    /// [`PriceSource::bean_price_pair`] the fetch uses: the pair ticker
+    /// (`BTC-CHF`) and a bare one quoted in the requested currency (`BTC`)
+    /// are both based in `BTC`.
+    fn pair_base(&self, ticker: &str) -> Option<String> {
+        let pair = self.bean_price_pair(PricePair {
+            ticker: ticker.to_string(),
+            currency: String::new(),
+        });
+        Some(pair.ticker.to_uppercase())
+    }
+
     fn requires_api_key(&self) -> bool {
         true
     }
@@ -74,17 +102,16 @@ impl PriceSource for CoinMarketCapSource {
         let api_key = Self::get_api_key()?;
         let url = self.build_url(&pair.ticker, &pair.currency);
 
-        let mut response = ureq::get(&url)
-            .header("User-Agent", user_agent())
-            .header("X-CMC_PRO_API_KEY", &api_key)
-            .header("Accept", "application/json")
-            .call()
-            .with_context(|| format!("Failed to fetch price for {}", pair.ticker))?;
-
-        let json: serde_json::Value = response
-            .body_mut()
-            .read_json()
-            .with_context(|| "Failed to parse CoinMarketCap response")?;
+        let json = http_get_json(
+            &url,
+            self.timeout,
+            &[
+                ("X-CMC_PRO_API_KEY", &api_key),
+                ("Accept", "application/json"),
+            ],
+            &[&api_key],
+            &format!("Failed to fetch price for {}", pair.ticker),
+        )?;
 
         // Check for API errors
         let status = json
@@ -140,6 +167,43 @@ impl PriceSource for CoinMarketCapSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The base of the pair a ticker names, which a `^` inversion must
+    /// be declared in (#2866).
+    #[test]
+    fn test_pair_base() {
+        let source = CoinMarketCapSource::new(Duration::from_secs(30));
+        for (ticker, base) in [("BTC-CHF", Some("BTC")), ("BTC", Some("BTC"))] {
+            assert_eq!(source.pair_base(ticker).as_deref(), base, "{ticker}");
+        }
+    }
+
+    fn pair(ticker: &str, currency: &str) -> PricePair {
+        PricePair {
+            ticker: ticker.to_string(),
+            currency: currency.to_string(),
+        }
+    }
+
+    fn read(source: &dyn PriceSource, ticker: &str, currency: &str) -> (String, String) {
+        let pair = source.bean_price_pair(pair(ticker, currency));
+        (pair.ticker, pair.currency)
+    }
+
+    /// beanprice's `coinmarketcap` `SYMBOL-BASE` names the pair; rledger's
+    /// bare symbol keeps the requested currency (#2866).
+    #[test]
+    fn test_bean_price_pair() {
+        let source = CoinMarketCapSource::new(Duration::from_secs(30));
+        assert_eq!(
+            read(&source, "BTC-CHF", "USD"),
+            ("BTC".to_string(), "CHF".to_string())
+        );
+        assert_eq!(
+            read(&source, "BTC", "USD"),
+            ("BTC".to_string(), "USD".to_string())
+        );
+    }
 
     #[test]
     fn test_build_url() {

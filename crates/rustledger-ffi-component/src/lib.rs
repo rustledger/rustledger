@@ -45,7 +45,14 @@ use exports::rustledger::ledger::ledger::{
 };
 use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 
-/// The Component-Model api-version this build implements. 3.15: a
+/// The Component-Model api-version this build implements. 3.17: `query-file`,
+/// `batch-file` and a session from a file refuse only when a file failed to
+/// parse or to be read or decrypted, or a transaction failed to book, the
+/// rule the file-based query surfaces share (#2861); 3.16: every
+/// query (`query`, `batch`, the file variants, `session.query`) resolves the
+/// `filename` / `lineno` / `location` columns and `#balances.discrepancy`
+/// as `rledger query` does, and `query-file` / `batch-file` load the file
+/// with its includes (#2823, #2825); 3.15: a
 /// `session.query` keeps the tables a `CREATE TABLE` makes for the session's
 /// later queries (#2579); 3.11 adds
 /// `session.account-type` (the account-type root honoring THIS ledger's
@@ -69,7 +76,7 @@ use exports::rustledger::ledger::util::{Guest as UtilGuest, TypesInfo};
 /// encrypted (`.gpg`/`.asc`) ledgers can be decrypted by the host (#1667);
 /// 3.1 added the `diff` field on `balance-dir` (#1663); 3.0 was the breaking
 /// `expand-pads` parameter on `load`/`load-file` (#1628).
-const API_VERSION: &str = "3.15";
+const API_VERSION: &str = "3.17";
 
 struct Component;
 

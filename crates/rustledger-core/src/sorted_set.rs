@@ -389,6 +389,15 @@ mod tests {
     }
 
     proptest! {
+        // Each case costs over a second under Miri, where the default 256
+        // cases took seven minutes of the `rustledger-core` Miri job's
+        // 40-minute cap. A few cases still drive every path through the
+        // allocator and `serde`; the property keeps full strength natively.
+        #![proptest_config(ProptestConfig {
+            cases: if cfg!(miri) { 8 } else { ProptestConfig::default().cases },
+            ..ProptestConfig::default()
+        })]
+
         /// Every constructor and mutator yields a strictly increasing list
         /// holding exactly the distinct input elements.
         #[test]

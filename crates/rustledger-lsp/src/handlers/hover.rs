@@ -12,8 +12,7 @@ use rustledger_parser::{ParseResult, Spanned};
 use crate::ledger_state::LedgerState;
 
 use super::utils::{
-    PositionEncoding, commodity_declaration_spans, count_noun, get_word_at_source_position,
-    is_currency_like_simple,
+    LineIndex, PositionEncoding, commodity_declaration_spans, count_noun, get_symbol_at_position,
 };
 
 /// Handle a hover request.
@@ -26,8 +25,10 @@ pub fn handle_hover(
 ) -> Option<Hover> {
     let position = params.text_document_position_params.position;
 
-    // Get the word at the cursor position
-    let word = get_word_at_source_position(source, position, encoding)?;
+    // Get the symbol at the cursor position (the currency token when the
+    // cursor is on one, so `/6J` is not cut at its `/`, #2807).
+    let (word, _, _) =
+        get_symbol_at_position(&LineIndex::new(source, encoding), parse_result, position)?;
 
     tracing::debug!("Hover for word: {:?}", word);
 
@@ -49,7 +50,7 @@ pub fn handle_hover(
     }
 
     // Check if it's a currency
-    if is_currency_like_simple(&word)
+    if rustledger_parser::is_valid_currency(&word)
         && let Some(info) = get_currency_info(&word, parse_result)
     {
         return Some(Hover {
@@ -538,4 +539,132 @@ mod tests {
             "expected 4 USD usages (Open + CostSpec + Balance + Price.amount); got {count}"
         );
     }
+
+    /// Hovering a one-letter flag shows nothing: not the currency `T` it
+    /// shares a name with, and not a made-up currency `P` that does not
+    /// exist. The currency `T` itself still hovers.
+    #[test]
+    fn test_hover_skips_one_letter_flags() {
+        let source = "2024-01-01 commodity T\n\
+                      2024-01-16 T \"Transfer\"\n  \
+                      P Assets:Cash  1 T\n  \
+                      Assets:Bank\n\
+                      2024-01-17 P \"Pending\"\n  \
+                      Assets:Cash  1 T\n  \
+                      Assets:Bank\n";
+        let result = parse(source);
+        let at = |line, character| {
+            let params = HoverParams {
+                text_document_position_params: lsp_types::TextDocumentPositionParams {
+                    text_document: lsp_types::TextDocumentIdentifier {
+                        uri: "file:///test.beancount".parse().unwrap(),
+                    },
+                    position: lsp_types::Position::new(line, character),
+                },
+                work_done_progress_params: Default::default(),
+            };
+            handle_hover(&params, source, &result, None, PositionEncoding::Utf16)
+        };
+        assert_eq!(at(1, 11), None, "header flag T");
+        assert_eq!(at(4, 11), None, "header flag P, no currency P");
+        assert_eq!(at(2, 2), None, "posting flag P, no currency P");
+        let Some(Hover {
+            contents: HoverContents::Markup(markup),
+            ..
+        }) = at(2, 19)
+        else {
+            panic!("the currency T hovers");
+        };
+        assert!(markup.value.contains("Currency: `T`"), "{}", markup.value);
+        assert!(markup.value.contains("2 amounts"), "{}", markup.value);
+    }
+
+    /// Every directive keyword hovers as it did before one-letter flags
+    /// were skipped, `txn` included (it is a flag, but not a one-letter
+    /// currency-token one); `*` and `!` are not words and hover as nothing,
+    /// as before.
+    #[test]
+    fn test_hover_keywords_unchanged_by_flag_skip() {
+        let source = KEYWORD_LEDGER;
+        let result = parse(source);
+        let at = |line: u32, character: u32| {
+            let params = HoverParams {
+                text_document_position_params: lsp_types::TextDocumentPositionParams {
+                    text_document: lsp_types::TextDocumentIdentifier {
+                        uri: "file:///test.beancount".parse().unwrap(),
+                    },
+                    position: lsp_types::Position::new(line, character),
+                },
+                work_done_progress_params: Default::default(),
+            };
+            handle_hover(&params, source, &result, None, PositionEncoding::Utf16).map(|h| {
+                let HoverContents::Markup(markup) = h.contents else {
+                    panic!("markup hover");
+                };
+                markup.value
+            })
+        };
+        let keywords = [
+            "option",
+            "plugin",
+            "include",
+            "open",
+            "commodity",
+            "balance",
+            "pad",
+            "event",
+            "note",
+            "document",
+            "query",
+            "custom",
+            "price",
+            "txn",
+            "close",
+        ];
+        for keyword in keywords {
+            let (line, text) = source
+                .lines()
+                .enumerate()
+                .find(|(_, l)| l.split_whitespace().any(|w| w == keyword))
+                .unwrap();
+            let col = text.find(keyword).unwrap() as u32;
+            let expected = get_directive_info(keyword);
+            assert!(expected.is_some(), "{keyword}");
+            for c in [col, col + 1, col + keyword.len() as u32] {
+                assert_eq!(at(line as u32, c), expected, "{keyword} at {line}:{c}");
+            }
+        }
+        // The review's case: characters 12 and 13 of the `txn` header.
+        assert!(at(13, 12).unwrap().contains("Transaction"));
+        assert!(at(13, 13).unwrap().contains("Transaction"));
+        // `*` and `!`, as header and posting flags.
+        for (line, c) in [(16, 11), (17, 2), (18, 2), (19, 11)] {
+            assert_eq!(at(line, c), None, "{line}:{c}");
+        }
+    }
+
+    const KEYWORD_LEDGER: &str = r#"option "title" "x"
+plugin "beancount.plugins.auto_accounts"
+include "other.beancount"
+2024-01-01 open Assets:A USD
+2024-01-01 commodity USD
+2024-01-02 balance Assets:A 0 USD
+2024-01-02 pad Assets:A Equity:E
+2024-01-02 event "location" "x"
+2024-01-02 note Assets:A "x"
+2024-01-02 document Assets:A "/x.pdf"
+2024-01-02 query "q" "SELECT 1"
+2024-01-02 custom "budget" "x"
+2024-01-02 price USD 1 EUR
+2024-01-03 txn "Broker" "Buy"
+  Assets:A 1 USD
+  Equity:E
+2024-01-04 * "x"
+  ! Assets:A 1 USD
+  * Equity:E
+2024-01-05 ! "x"
+  Assets:A 1 USD
+  Equity:E
+2024-12-31 close Assets:A
+"#;
 }

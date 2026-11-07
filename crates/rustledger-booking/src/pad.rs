@@ -68,8 +68,23 @@ pub fn is_synthesized_pad(txn: &Transaction) -> bool {
 pub struct PadResult {
     /// Synthetic padding transactions generated.
     pub padding_transactions: Vec<Transaction>,
+    /// Where each of [`Self::padding_transactions`] came from, in the same
+    /// order: the `pad` that produced it and the `balance` it satisfies.
+    /// Beancount gives a padding entry the `pad`'s source location and its
+    /// postings the `balance`'s, so a query reports both (#2825).
+    pub padding_origins: Vec<PadOrigin>,
     /// Any errors encountered during pad processing.
     pub errors: Vec<PadError>,
+}
+
+/// The directives a padding transaction came from: indices into the slice
+/// [`process_pads`] was given.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PadOrigin {
+    /// The `pad` directive that produced the transaction.
+    pub pad: usize,
+    /// The `balance` assertion the transaction satisfies.
+    pub balance: usize,
 }
 
 /// Error during pad processing.
@@ -105,6 +120,8 @@ impl PadError {
 struct PendingPad {
     /// The pad directive.
     pad: Pad,
+    /// Its index in the input slice.
+    index: usize,
     /// Whether this pad has been used (has at least one balance assertion).
     used: bool,
     /// Currencies that have already been padded (each currency can only be padded once per pad).
@@ -140,18 +157,19 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
         HashMap::with_capacity(num_directives.min(16));
     let mut pending_pads: HashMap<rustledger_core::Account, PendingPad> = HashMap::with_capacity(4);
     let mut padding_transactions = Vec::with_capacity(num_directives.min(16));
+    let mut padding_origins = Vec::with_capacity(num_directives.min(16));
     let mut errors = Vec::with_capacity(4);
 
-    let mut sorted: Vec<&Directive> = directives.iter().collect();
+    let mut sorted: Vec<(usize, &Directive)> = directives.iter().enumerate().collect();
     // Sort by the canonical booking key, not by date alone. Date-only left
     // same-date directives in source order, so a `pad` written above the
     // `balance` it targets was processed first and the balance consumed it --
     // synthesizing a padding transaction beancount does not (#2150). The key
     // puts Balance before Pad, so that balance is seen first and the pad ends
     // up with nothing to satisfy.
-    sorted.sort_by_key(|d| rustledger_core::booking_sort_key(d));
+    sorted.sort_by_key(|(_, d)| rustledger_core::booking_sort_key(d));
 
-    for directive in sorted {
+    for (index, directive) in sorted {
         match directive {
             Directive::Open(open) => {
                 inventories.insert(open.account.clone(), Inventory::new());
@@ -185,6 +203,7 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
                     pad.account.clone(),
                     PendingPad {
                         pad: pad.clone(),
+                        index,
                         used: false,
                         padded_currencies: std::collections::HashSet::new(),
                     },
@@ -273,6 +292,10 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
                         }
 
                         padding_transactions.push(pad_txn);
+                        padding_origins.push(PadOrigin {
+                            pad: pending.index,
+                            balance: index,
+                        });
                     }
 
                     // Mark the pad as used and track that this currency has been padded
@@ -305,6 +328,7 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
 
     PadResult {
         padding_transactions,
+        padding_origins,
         errors,
     }
 }
@@ -492,11 +516,12 @@ where
 ///
 /// Identical merge behavior, but the input/output keep each directive's
 /// [`Spanned`] wrapper so downstream consumers (e.g. BQL's `filename`/`lineno`
-/// columns) can resolve real source locations. Pad-synthesized transactions
-/// have no source representation, so they are wrapped with
-/// [`Spanned::synthesized`] ([`Span::ZERO`](rustledger_core::Span) +
-/// [`SYNTHESIZED_FILE_ID`](rustledger_core::SYNTHESIZED_FILE_ID)) — exactly how
-/// other synthesized directives (plugin output, etc.) are marked.
+/// columns) can resolve real source locations. A pad-synthesized transaction
+/// is located where beancount locates it (#2825): the transaction at its
+/// `pad` directive (beancount copies the pad's metadata onto the entry, so
+/// `#entries` reports the pad's line) and each of its postings at the
+/// `balance` assertion it satisfies (bean-query's postings table reports
+/// that line). Both come from [`PadResult::padding_origins`].
 ///
 /// # Not idempotent
 ///
@@ -515,14 +540,31 @@ pub fn merge_with_padding_spanned(directives: &[Spanned<Directive>]) -> Vec<Span
 
     let result = process_pads(&plain);
 
-    // Placement via the shared [`pad_insertion_index`]. Marked synthesized so
-    // they resolve to no source location.
+    // Placement via the shared [`pad_insertion_index`]; located at the pad and
+    // the balance it came from, as beancount locates them.
     let mut merged: Vec<Spanned<Directive>> = directives.to_vec();
     merged.sort_by_key(|s| s.value.date());
 
-    for txn in result.padding_transactions {
+    for (mut txn, origin) in result
+        .padding_transactions
+        .into_iter()
+        .zip(result.padding_origins)
+    {
+        let pad = &directives[origin.pad];
+        let balance = &directives[origin.balance];
+        for posting in &mut txn.postings {
+            posting.span = balance.span;
+            posting.file_id = balance.file_id;
+        }
         let insert_at = pad_insertion_index(merged.iter().map(|s| &s.value), txn.date);
-        merged.insert(insert_at, Spanned::synthesized(Directive::Transaction(txn)));
+        merged.insert(
+            insert_at,
+            Spanned {
+                value: Directive::Transaction(txn),
+                span: pad.span,
+                file_id: pad.file_id,
+            },
+        );
     }
 
     merged

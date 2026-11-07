@@ -79,6 +79,9 @@ function resolveIncludeTargets(includePath: string, baseDir: string): string[] {
  * semantics is not. Over-collecting is harmless — the loader simply never
  * visits a file nothing includes. Under-collecting is reported properly, as a
  * missing include, against the file that asked for it.
+ *
+ * @throws When a file the ledger names exists but cannot be read (a directory,
+ * no permission). Only a file that does not exist is left to the loader.
  */
 export function collectLedgerFiles(entryPath: string): {
   files: Record<string, string>;
@@ -143,10 +146,19 @@ export function collectLedgerFiles(entryPath: string): {
     let content: string;
     try {
       content = fs.readFileSync(abs, "utf-8");
-    } catch {
-      // Leave it out and let the loader report the missing include against
-      // whichever file asked for it — better placed than anything we could say.
-      return;
+    } catch (error) {
+      // A file that does not exist: leave it out and let the loader report the
+      // missing include against whichever file asked for it, better placed
+      // than anything we could say. A query answers over it, as bean-query
+      // and `rledger query` do.
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      // Any other failure (a directory, no permission) is NOT a missing file.
+      // Leaving it out would have the loader call it one, and a query would
+      // answer without it, where `rledger query` and bean-query refuse
+      // (#2861). Stop here instead, naming the file and the cause.
+      // The code alone (`EISDIR`, `EACCES`): Node's message repeats the path.
+      const err = error as NodeJS.ErrnoException;
+      throw new Error(`failed to read file ${abs}: ${err.code ?? err.message ?? String(error)}`);
     }
     canonical.set(real, key(abs));
     files[key(abs)] = content;

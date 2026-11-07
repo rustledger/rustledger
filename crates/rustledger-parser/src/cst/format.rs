@@ -94,8 +94,8 @@ use crate::cst::ast::{self, AstNode, AstToken, MetaEntry, SourceFile};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 #[non_exhaustive]
 pub struct PostingAlignment {
-    /// 0-indexed column at which the right-justified number field
-    /// starts.
+    /// 0-indexed column, in display cells ([`display_width`]), at which the
+    /// right-justified number field starts.
     pub number_col: usize,
     /// Width of the number field; shorter numbers are left-padded
     /// with spaces so the currency column stays uniform.
@@ -152,6 +152,36 @@ impl<'a> GroupingStyle<'a> {
 
 /// Two-space indent for directive bodies (postings, metadata).
 const INDENT: &str = "  ";
+
+/// The number of terminal cells `s` occupies in a monospaced editor.
+///
+/// East Asian Wide and Fullwidth characters take 2, combining marks and other
+/// zero-width characters 0, and ambiguous-width characters 1 (as most
+/// terminals render them). Emoji take what `unicode-width` gives them (2 for
+/// emoji-presentation characters).
+///
+/// Deliberately different from bean-format 3.2.3, which never lines such
+/// amounts up (#2852): its alignment regex needs each account component after
+/// the root to start with an uppercase letter or a digit, and every character
+/// to be a letter, a digit or a hyphen. So a line like
+/// `Expenses:생활  12345 KRW`, or one with an emoji or a combining mark in the
+/// account, is left as written, and a line that does match (`Expenses:X생활`,
+/// fullwidth `Ｆｏｏｄ`) is padded by code points (Python's `len()`), which
+/// puts a wide character's amount further right on screen.
+/// So files with wide or combining characters in an account name format
+/// differently from bean-format; ASCII-only alignment is unchanged by this.
+/// See `docs/reference/compatibility.md`, "Amount Alignment With Wide
+/// Characters".
+///
+/// Every alignment computation goes through this function, so the width
+/// pre-pass (`compute_alignment`) and the emitter (`emit_posting`) cannot
+/// disagree; [`PostingAlignment`]'s columns are in these cells. Callers
+/// outside the formatter that place text against those columns (the LSP's
+/// inferred-amount inlay hint) must measure with it too.
+#[must_use]
+pub fn display_width(s: &str) -> usize {
+    unicode_width::UnicodeWidthStr::width(s)
+}
 
 /// Format a Beancount source file in opinionated canonical form.
 ///
@@ -398,12 +428,13 @@ pub fn lf_to_crlf_outside_strings(s: &str) -> String {
         None => (s, ""),
     };
     out.push_str(bom);
-    let mut chars = body.chars().peekable();
+    let mut chars = body.char_indices().peekable();
     let mut state = SourceState::Code;
     let mut prev_was_backslash = false;
     let mut at_line_start = true;
-    while let Some(ch) = chars.next() {
-        let peek = chars.peek().copied();
+    let mut unclosed_until = 0;
+    while let Some((i, ch)) = chars.next() {
+        let peek = chars.peek().map(|&(_, c)| c);
         match state {
             SourceState::InString => out.push(ch),
             SourceState::InComment | SourceState::Code => {
@@ -414,7 +445,13 @@ pub fn lf_to_crlf_outside_strings(s: &str) -> String {
                 }
             }
         }
-        state = advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
+        state = lexer_source_state(
+            body,
+            i,
+            state,
+            advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash),
+            &mut unclosed_until,
+        );
         at_line_start = next_at_line_start(ch, at_line_start);
     }
     out
@@ -579,6 +616,13 @@ impl std::error::Error for CanonicalizeError {}
 /// the user's data. Uses the shared `SourceState` state machine
 /// to track string / comment boundaries.
 ///
+/// One change besides the line endings: a line that is one column-0 marker
+/// followed by a `\r` (`#\r\n`, `*\r\n`) gets a space after the marker. Such
+/// a line is ignored by beancount, and the lone marker left by dropping the
+/// `\r` would be an error there (#2779).
+/// Stricter than bean-format: it reads the file in Python's text mode, which
+/// folds `#\r\n` to `#\n`, a line bean-check then rejects.
+///
 /// Cheap fast path: if the input contains no `\r`, returns the
 /// source slice borrowed (no allocation). Used by
 /// [`format_source`] before parsing so the lexer never has to see
@@ -610,11 +654,30 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
     // scanned once, not once per `\r`.
     let mut run_end = 0;
     let mut run_is_stray = false;
+    let mut unclosed_until = 0;
+    // Where the current output line starts, found by `out_line_start` from
+    // where its last scan stopped, so the lone-marker check below steps over
+    // each output byte once in all (an `rfind` over `out` for every `\r` made
+    // a long line of stray `\r`s quadratic).
+    let mut line = OutLine {
+        start: bom.len(),
+        scanned: bom.len(),
+    };
     while let Some((i, ch)) = chars.next() {
         let peek = chars.peek().map(|&(_, c)| c);
         // A CRLF pair outside a string is consumed whole here, so the
         // `\n` never reaches `next_at_line_start`; it still ends the line.
         let mut ate_lf = false;
+        // A lone column-0 marker followed by a `\r` is a line beancount
+        // ignores (flex's `.` takes the `\r`); without the `\r` it is a
+        // bare-marker error. Outside a string, every branch below drops or
+        // folds the `\r`, so a space stands in for it (#2779).
+        if ch == '\r' && state != SourceState::InString {
+            let text = &out[line.start_in(&out)..];
+            if is_lone_marker(text.strip_prefix('\u{FEFF}').unwrap_or(text)) {
+                out.push(' ');
+            }
+        }
         match state {
             SourceState::InString => out.push(ch),
             _ => {
@@ -640,10 +703,40 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
                 }
             }
         }
-        state = advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
+        state = lexer_source_state(
+            body,
+            i,
+            state,
+            advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash),
+            &mut unclosed_until,
+        );
         at_line_start = ate_lf || next_at_line_start(ch, at_line_start);
     }
     std::borrow::Cow::Owned(out)
+}
+
+/// Where the last line of a growing output string starts, for
+/// [`crlf_to_lf_outside_strings`]'s lone-marker check (#2779).
+struct OutLine {
+    start: usize,
+    /// How far `out` has been scanned for line breaks.
+    scanned: usize,
+}
+
+impl OutLine {
+    /// The start of `out`'s last line. Scans only what was pushed since the
+    /// last call, so all calls together step over each byte once. Counted in
+    /// tests (`crlf_to_lf_lone_marker_check_is_linear`).
+    fn start_in(&mut self, out: &str) -> usize {
+        let new = &out[self.scanned..];
+        #[cfg(test)]
+        CR_FOLD_LINE_SCAN_BYTES.with(|c| c.set(c.get() + new.len()));
+        if let Some(p) = new.rfind('\n') {
+            self.start = self.scanned + p + 1;
+        }
+        self.scanned = out.len();
+        self.start
+    }
 }
 
 /// The `[ \t\r]` run that starts at the bare `\r` at `body[at]`: where it
@@ -687,16 +780,24 @@ pub fn cr_outside_strings_present(src: &str) -> bool {
         return false;
     }
     let body = src.strip_prefix('\u{FEFF}').unwrap_or(src);
-    let mut chars = body.chars().peekable();
+    let mut chars = body.char_indices().peekable();
     let mut state = SourceState::Code;
     let mut prev_was_backslash = false;
     let mut at_line_start = true;
-    while let Some(ch) = chars.next() {
-        let peek = chars.peek().copied();
+    let mut unclosed_until = 0;
+    while let Some((i, ch)) = chars.next() {
+        let peek = chars.peek().map(|&(_, c)| c);
         if matches!(state, SourceState::Code | SourceState::InComment) && ch == '\r' {
             return true;
         }
-        state = advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
+        // The same quote rule as the two helpers it mirrors (#2803).
+        state = lexer_source_state(
+            body,
+            i,
+            state,
+            advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash),
+            &mut unclosed_until,
+        );
         at_line_start = next_at_line_start(ch, at_line_start);
     }
     false
@@ -711,8 +812,8 @@ pub fn cr_outside_strings_present(src: &str) -> bool {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SourceState {
     /// In normal code. `"` opens a string; `;` / `%` / `#!` /
-    /// `#+`, a column-0 `#`, or a column-0 `*` (an org-mode heading)
-    /// opens a comment; everything else is just bytes.
+    /// `#+`, a column-0 `#`, `!`, `&`, `?` or `:`, or a column-0 `*`
+    /// (an org-mode heading) opens a comment; everything else is just bytes.
     Code,
     /// Inside `"…"`. Bytes pass through; an unescaped `"` exits.
     InString,
@@ -739,6 +840,11 @@ enum SourceState {
 /// an org-mode heading: the lexer's `Token::Star` arm emits the rest
 /// of the line as one token without lexing it, so a `"` there is
 /// heading text, and the line is treated as a comment here (#2778).
+/// A `!`, `&`, `?` or `:` at line start opens a comment too: beancount
+/// ignores such a line, and the lexer's column-0 comment arm in
+/// `TokenIter` makes it one comment token (#2779). A bare marker (its
+/// line ending right after it) is a token of its own there, but has
+/// nothing after it to misread, so it needs no case here.
 ///
 /// The column-0 `#` comment and the heading close on the first `\n`
 /// or `\r`, like the others. A run of stray `\r` bytes before the
@@ -776,16 +882,89 @@ const fn advance_source_state(
                 && (matches!(peek, Some('!' | '+'))
                     || (at_line_start && !matches!(peek, Some(c) if is_tag_char(c))));
             let is_org_heading = ch == '*' && at_line_start;
+            // A `%` is a comment only at column 0; elsewhere the lexer reads a
+            // flag, as beancount does (#2802).
+            let is_percent_line_comment = ch == '%' && at_line_start;
+            // A column-0 `!`, `&`, `?` or `:` line is ignored, as in beancount
+            // (#2779). A char-level mirror of
+            // `logos_lexer::beancount_ignores_line`, which documents why it
+            // is not called here; it also takes a bare marker as a comment,
+            // which is harmless (the comment closes right after it).
+            let is_flag_line_comment = matches!(ch, '!' | '&' | '?' | ':') && at_line_start;
             if ch == '"' {
                 *prev_was_backslash = false;
                 SourceState::InString
-            } else if matches!(ch, ';' | '%') || is_hash_line_comment || is_org_heading {
+            } else if ch == ';'
+                || is_percent_line_comment
+                || is_hash_line_comment
+                || is_org_heading
+                || is_flag_line_comment
+            {
                 SourceState::InComment
             } else {
                 SourceState::Code
             }
         }
     }
+}
+
+/// The state after the character at `body[at]`, given the state `before` it
+/// and the state `advance_source_state` proposes `after` it, corrected for
+/// a quote the lexer does not read as a string.
+///
+/// `advance_source_state` opens a string at every `"` in code. The lexer's
+/// `STRING` (`"([^"\\]|\\.)*"`) only matches a quote that closes; one that
+/// does not (no later unescaped `"`, or a `\` before a line break first) is
+/// an error token cut at the end of its own line, and lexing resumes there
+/// (#2788). So such a quote makes the rest of its line opaque, like a
+/// comment, instead of swallowing every later line ending (#2803: a stray
+/// `"` copied verbatim into a CRLF edit left the following lines LF).
+///
+/// `unclosed_until` remembers where the last failed scan stopped: every `"`
+/// before it is escaped in that scan's alignment, so a scan from it stops
+/// there too, and is skipped. That keeps many stray quotes linear, as the
+/// lexer's own `chunk_until` does.
+fn lexer_source_state(
+    body: &str,
+    at: usize,
+    before: SourceState,
+    after: SourceState,
+    unclosed_until: &mut usize,
+) -> SourceState {
+    if before != SourceState::Code || after != SourceState::InString {
+        return after;
+    }
+    if at < *unclosed_until {
+        return SourceState::InComment;
+    }
+    let bytes = body.as_bytes();
+    let mut i = at + 1;
+    while i < bytes.len() {
+        #[cfg(test)]
+        QUOTE_SCAN_BYTES.with(|c| c.set(c.get() + 1));
+        match bytes[i] {
+            b'"' => return SourceState::InString,
+            // `\\.`: an escape takes the next character, but `.` does not
+            // match a line break, so `\` before `\n` ends the scan. Skipping
+            // one byte of a multibyte character is harmless: continuation
+            // bytes are never `"` or `\`.
+            b'\\' if bytes.get(i + 1).is_some_and(|&b| b != b'\n') => i += 2,
+            b'\\' => break,
+            _ => i += 1,
+        }
+    }
+    *unclosed_until = i;
+    SourceState::InComment
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Bytes `lexer_source_state` has scanned looking for a closing quote,
+    /// for the linear-cost test.
+    static QUOTE_SCAN_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    /// Bytes `crlf_to_lf_outside_strings` has stepped over tracking where
+    /// its current output line starts, for the linear-cost test (#2779).
+    static CR_FOLD_LINE_SCAN_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
 /// A character the lexer's `Tag` regex (`#[a-zA-Z0-9-_/.]+`) accepts
@@ -843,6 +1022,62 @@ fn format_tree(node: &crate::SyntaxNode, style: GroupingStyle<'_>, broken: &Erro
         SourceFile::cast(node.clone()).expect("format_node_grouped called on non-SOURCE_FILE node");
     let alignment = compute_alignment(&source_file, style);
     format_node_with_style(node, alignment, style, broken)
+}
+
+/// How one top-level node is written, shared by the whole-file walk
+/// (`format_node_with_style`) and the range walk
+/// (`format_node_range_with_style`), so the two cannot disagree on which
+/// directives are rebuilt and which are copied verbatim (#2803).
+struct NodeEmitter<'a, 'g> {
+    alignment: PostingAlignment,
+    group: GroupingStyle<'g>,
+    broken: &'a ErrorRanges,
+}
+
+impl NodeEmitter<'_, '_> {
+    /// Write the top-level node `n`. `line_indent` is a top-level
+    /// WHITESPACE token directly before it (see the whole-file walk).
+    fn emit(
+        &self,
+        n: &crate::SyntaxNode,
+        line_indent: Option<&crate::SyntaxToken>,
+        spacing: &mut TopLevelSpacing,
+        out: &mut String,
+    ) {
+        if let Some(directive) = ast::Directive::cast(n.clone())
+            && !self.broken.overlaps(n.text_range())
+        {
+            spacing.blank_lines(leading_blank_lines(directive.syntax()));
+            spacing.flush(out);
+            emit_directive(&directive, self.alignment, self.group, out);
+            spacing.after_node();
+        } else if n.kind() == crate::SyntaxKind::ERROR_NODE || ast::Directive::can_cast(n.kind()) {
+            // A directive lands here only when a parse error falls inside it
+            // (#2794): rebuilt from its typed values it would lose the text
+            // the parser could not read, and the error with it, so it is
+            // copied verbatim like an ERROR_NODE. The rest of that directive
+            // is not normalized either; it is once the error is fixed.
+            //
+            // Preserve unparsable content verbatim (#1335): `format` must
+            // never delete the author's text. Org-mode `*` section headers
+            // (and any comments grouped with them) parse into ERROR_NODEs;
+            // emit them as-is rather than dropping them. Treated like a
+            // directive for spacing: an ERROR_NODE is a top-level content
+            // block, so the author's blank lines around it (before it, and
+            // before the next directive) are preserved, not flushed.
+            spacing.blank_lines(leading_blank_lines(n));
+            spacing.flush(out);
+            if let Some(ws) = line_indent {
+                out.push_str(ws.text());
+            }
+            let trailing = emit_error_node(n, out);
+            spacing.after_node();
+            // The node's own trailing blank lines were trimmed off its text;
+            // they still separate it from what follows.
+            spacing.blank_lines(trailing);
+        }
+        // Any other non-directive node: nothing to emit.
+    }
 }
 
 /// The byte ranges of a tree that hold a parse error, sorted and merged.
@@ -1002,43 +1237,12 @@ fn format_node_with_style(
         let line_indent = indent.take();
         match el {
             rowan::NodeOrToken::Node(n) => {
-                if let Some(directive) = ast::Directive::cast(n.clone())
-                    && !broken.overlaps(n.text_range())
-                {
-                    spacing.blank_lines(leading_blank_lines(directive.syntax()));
-                    spacing.flush(&mut out);
-                    emit_directive(&directive, alignment, group, &mut out);
-                    spacing.after_node();
-                } else if n.kind() == crate::SyntaxKind::ERROR_NODE
-                    || ast::Directive::can_cast(n.kind())
-                {
-                    // A directive lands here only when a parse error falls
-                    // inside it (#2794): rebuilt from its typed values it
-                    // would lose the text the parser could not read, and the
-                    // error with it, so it is copied verbatim like an
-                    // ERROR_NODE. The rest of that directive is not
-                    // normalized either; it is once the error is fixed.
-                    //
-                    // Preserve unparsable content verbatim (#1335): `format`
-                    // must never delete the author's text. Org-mode `*`
-                    // section headers (and any comments grouped with them)
-                    // parse into ERROR_NODEs; emit them as-is rather than
-                    // dropping them. Treated like a directive for spacing — an
-                    // ERROR_NODE is a top-level content block, so the author's
-                    // blank lines around it (before it, and before the next
-                    // directive) are preserved, not flushed.
-                    spacing.blank_lines(leading_blank_lines(&n));
-                    spacing.flush(&mut out);
-                    if let Some(ws) = line_indent {
-                        out.push_str(ws.text());
-                    }
-                    let trailing = emit_error_node(&n, &mut out);
-                    spacing.after_node();
-                    // The node's own trailing blank lines were trimmed off
-                    // its text; they still separate it from what follows.
-                    spacing.blank_lines(trailing);
-                }
-                // Any other non-directive node: nothing to emit.
+                let emitter = NodeEmitter {
+                    alignment,
+                    group,
+                    broken,
+                };
+                emitter.emit(&n, line_indent.as_ref(), &mut spacing, &mut out);
             }
             rowan::NodeOrToken::Token(t) => {
                 if t.kind() == crate::SyntaxKind::WHITESPACE {
@@ -1105,7 +1309,7 @@ impl TopLevelSpacing {
             | crate::SyntaxKind::SHEBANG
             | crate::SyntaxKind::EMACS_DIRECTIVE => {
                 self.flush(out);
-                out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                push_comment_text(out, t.text());
                 out.push('\n');
                 self.line_has_comment = true;
             }
@@ -1153,15 +1357,14 @@ impl TopLevelSpacing {
 ///   as `[]`); the client treats it as "nothing to format".
 /// - If the computed snap range would cover any top-level
 ///   `ERROR_NODE` byte, returns `None`. **Range formatting refuses
-///   to delete user content the parser couldn't classify.** This
-///   diverges from [`format_node`], which silently drops
-///   `ERROR_NODE` children on the whole-file path; the rationale
-///   is the per-handler asymmetry the LSP exposes — the user
-///   pressing "Format Selection" expects either a clean
-///   reformat or a no-op, never a silent partial delete of an
-///   in-progress directive. Tooling that genuinely wants to drop
-///   broken regions can still call [`format_node`] on the same
-///   node.
+///   to delete user content the parser couldn't classify.** The
+///   whole-file path copies an `ERROR_NODE` verbatim instead
+///   (#1335); the range path refuses, because the user pressing
+///   "Format Selection" expects either a clean reformat or a
+///   no-op. A *directive* that holds a parse error is different:
+///   [`format_parsed_range`] copies it verbatim, as the whole-file
+///   path does (#2803). The other range entry points have no error
+///   list and treat every directive as well formed.
 /// - Otherwise returns `Some((snap, text))` where `snap` is the
 ///   union of the included children's text ranges (so it begins at
 ///   the first included child's start and ends at the last
@@ -1233,7 +1436,13 @@ pub fn format_node_range_with_alignment(
     range: rowan::TextRange,
     alignment: PostingAlignment,
 ) -> Option<(rowan::TextRange, String)> {
-    format_node_range_with_style(node, range, alignment, GroupingStyle::default())
+    format_node_range_with_style(
+        node,
+        range,
+        alignment,
+        GroupingStyle::default(),
+        &ErrorRanges::default(),
+    )
 }
 
 /// [`format_node_range`] under an explicit grouping style, measuring the
@@ -1250,7 +1459,41 @@ pub fn format_node_range_grouped(
 ) -> Option<(rowan::TextRange, String)> {
     let source_file = SourceFile::cast(node.clone())?;
     let alignment = compute_alignment(&source_file, style);
-    format_node_range_with_style(node, range, alignment, style)
+    format_node_range_with_style(node, range, alignment, style, &ErrorRanges::default())
+}
+
+/// [`format_node_range`] for a tree that may hold parse errors.
+///
+/// A directive that overlaps one of `parse_result`'s errors is copied verbatim
+/// instead of being rebuilt from its typed values, which would delete the text
+/// the parser could not read (#2803). This is the same rule, from the same
+/// `ErrorRanges`, as the whole-file error-tolerant formatter
+/// ([`format_source`], #2794), so the two agree on which directives they
+/// keep as written.
+///
+/// `range` is in the CST frame, as for [`format_node_range`]. Under the
+/// default `style` the alignment cached on `parse_result` is reused;
+/// otherwise it is measured under `style` (the cache is measured ungrouped).
+///
+/// The other range entry points know nothing of parse errors and are for
+/// trees without them.
+#[must_use]
+pub fn format_parsed_range(
+    parse_result: &crate::ParseResult,
+    range: rowan::TextRange,
+    style: GroupingStyle<'_>,
+) -> Option<(rowan::TextRange, String)> {
+    let node = parse_result.syntax_node();
+    let alignment = if style.groups_anything() {
+        compute_alignment(&SourceFile::cast(node.clone())?, style)
+    } else {
+        parse_result.alignment()
+    };
+    let broken = ErrorRanges::new(
+        &parse_result.errors,
+        if parse_result.has_leading_bom { 3 } else { 0 },
+    );
+    format_node_range_with_style(&node, range, alignment, style, &broken)
 }
 
 /// [`format_node_range_with_alignment`] with an explicit grouping style.
@@ -1265,6 +1508,7 @@ fn format_node_range_with_style(
     range: rowan::TextRange,
     alignment: PostingAlignment,
     style: GroupingStyle<'_>,
+    broken: &ErrorRanges,
 ) -> Option<(rowan::TextRange, String)> {
     // Precondition check (debug-only). Same rationale as
     // `format_node_with_alignment`: the bare delegate already
@@ -1286,9 +1530,10 @@ fn format_node_range_with_style(
     //   - Directive nodes whose `text_range` intersects `range`
     //   - top-level COMMENT/PERCENT_COMMENT/SHEBANG/EMACS_DIRECTIVE
     //     tokens whose range intersects `range`
-    // ERROR_NODE and other non-Directive nodes are skipped (matches
-    // `format_node`); a selection that lands only on them returns
-    // None below.
+    // ERROR_NODE and other non-Directive nodes are not included (the
+    // whole-file walk copies an ERROR_NODE verbatim, #1335; the range
+    // path declines instead, below); a selection that lands only on them
+    // returns None.
     let mut snap_start: Option<rowan::TextSize> = None;
     let mut snap_end: Option<rowan::TextSize> = None;
     let mut any_included = false;
@@ -1296,13 +1541,7 @@ fn format_node_range_with_style(
         let (kind, child_range) = (el.kind(), el.text_range());
         let is_formattable = match &el {
             rowan::NodeOrToken::Node(n) => ast::Directive::cast(n.clone()).is_some(),
-            rowan::NodeOrToken::Token(_) => matches!(
-                kind,
-                crate::SyntaxKind::COMMENT
-                    | crate::SyntaxKind::PERCENT_COMMENT
-                    | crate::SyntaxKind::SHEBANG
-                    | crate::SyntaxKind::EMACS_DIRECTIVE
-            ),
+            rowan::NodeOrToken::Token(_) => super::convert::is_comment_kind(kind),
         };
         if !is_formattable {
             continue;
@@ -1312,7 +1551,20 @@ fn format_node_range_with_style(
         }
         any_included = true;
         snap_start = Some(snap_start.map_or(child_range.start(), |s| s.min(child_range.start())));
-        snap_end = Some(snap_end.map_or(child_range.end(), |e| e.max(child_range.end())));
+        // A directive owns the NEWLINE that ends it; a top-level comment
+        // token does not, but its emitted line ends with one. Take the
+        // comment's own NEWLINE into the snap, so the replacement covers
+        // the line it writes instead of adding a blank line on every run
+        // (#2838).
+        let end = if let rowan::NodeOrToken::Token(t) = &el
+            && let Some(next) = t.next_sibling_or_token()
+            && next.kind() == crate::SyntaxKind::NEWLINE
+        {
+            next.text_range().end()
+        } else {
+            child_range.end()
+        };
+        snap_end = Some(snap_end.map_or(end, |e| e.max(end)));
     }
     if !any_included {
         return None;
@@ -1333,11 +1585,9 @@ fn format_node_range_with_style(
     // just the two formatted directives, deleting the user's
     // in-progress source bytes.
     //
-    // This is the deliberate divergence from `format_node`'s
-    // whole-file policy: the whole-file path runs on the
-    // assumption that the caller (CLI / FFI / `try_format_source`)
-    // has already decided to accept content loss; the per-handler
-    // LSP path has no such opt-in. The cost is occasional
+    // The whole-file path copies an ERROR_NODE verbatim instead (#1335);
+    // the range path declines, since "Format Selection" should give a
+    // clean reformat or a no-op. The cost is occasional
     // "format-selection did nothing" UX while a parse error sits
     // inside the snap; the benefit is no data loss.
     for el in node.children_with_tokens() {
@@ -1362,7 +1612,12 @@ fn format_node_range_with_style(
     // computation and emission are two distinct concerns.)
     let mut out = String::new();
     let mut spacing = TopLevelSpacing::default();
+    // A top-level WHITESPACE token directly before a node, tracked as the
+    // whole-file walk tracks it, so a verbatim copy keeps its first line's
+    // indentation (#2786) here too.
+    let mut indent: Option<crate::SyntaxToken> = None;
     for el in node.children_with_tokens() {
+        let line_indent = indent.take();
         let child_range = el.text_range();
         // Use the snap range (not the input `range`) so we emit
         // every child WITHIN the snap, even those that the
@@ -1382,20 +1637,28 @@ fn format_node_range_with_style(
         match el {
             rowan::NodeOrToken::Node(n) => {
                 // ERROR_NODEs never reach here: the range path bails out
-                // above (returns None) when the snap covers one, so it
-                // refuses to format rather than risk touching unparsable
-                // content. Only the whole-file path preserves them verbatim.
-                let Some(directive) = ast::Directive::cast(n) else {
+                // above (returns None) when the snap covers one. A directive
+                // holding a parse error is copied verbatim by the same
+                // emitter the whole-file walk uses (#2803), so its unparsable
+                // text is kept; the author's blank lines are preserved
+                // identically too (#1325, #2506).
+                if !ast::Directive::can_cast(n.kind()) {
                     continue;
+                }
+                let emitter = NodeEmitter {
+                    alignment,
+                    group: style,
+                    broken,
                 };
-                // Preserve the author's blank lines (#1325, #2506)
-                // identically to whole-file formatting.
-                spacing.blank_lines(leading_blank_lines(directive.syntax()));
-                spacing.flush(&mut out);
-                emit_directive(&directive, alignment, style, &mut out);
-                spacing.after_node();
+                emitter.emit(&n, line_indent.as_ref(), &mut spacing, &mut out);
             }
-            rowan::NodeOrToken::Token(t) => spacing.top_level_token(&t, &mut out),
+            rowan::NodeOrToken::Token(t) => {
+                if t.kind() == crate::SyntaxKind::WHITESPACE {
+                    indent = Some(t);
+                } else {
+                    spacing.top_level_token(&t, &mut out);
+                }
+            }
         }
     }
     spacing.flush(&mut out);
@@ -1469,10 +1732,10 @@ pub fn compute_alignment(sf: &SourceFile, style: GroupingStyle<'_>) -> PostingAl
             };
             let mut lhs = 0usize;
             if let Some(flag) = p.flag() {
-                lhs += flag.text().chars().count() + 1; // `! ` etc.
+                lhs += display_width(flag.text()) + 1; // `! ` etc.
             }
             if let Some(account) = p.account() {
-                lhs += account.text().chars().count();
+                lhs += display_width(account.text());
             }
 
             // Only postings that render a number drive the alignment
@@ -1492,7 +1755,7 @@ pub fn compute_alignment(sf: &SourceFile, style: GroupingStyle<'_>) -> PostingAl
             {
                 any_aligned_posting = true;
                 max_lhs = max_lhs.max(lhs);
-                max_num = max_num.max(text.chars().count());
+                max_num = max_num.max(display_width(&text));
             }
         }
     }
@@ -1613,6 +1876,33 @@ fn emit_directive(
     }
 }
 
+/// Whether `line` is one column-0 marker, which beancount reads as a bare
+/// token (`unexpected FLAG`, `HASH`, `ASTERISK` or `COLON`). A line that
+/// beancount ignores only because of the whitespace or `\r` after its marker
+/// (`crate::logos_lexer::beancount_ignores_line` needs one more byte) becomes
+/// such a line once that is trimmed or folded away, so the formatter keeps a
+/// space there (#2779).
+const fn is_lone_marker(line: &str) -> bool {
+    matches!(
+        line.as_bytes(),
+        [b'#' | b'!' | b'&' | b'?' | b':' | b'%' | b'*']
+    )
+}
+
+/// Write a comment token's text, without its line ending. A comment that is
+/// one marker (`#\r\n`, `!\r\n`, `%\r\n`: the `\r` is trivia after the
+/// comment) keeps a space after it, so the formatted line is still one
+/// beancount ignores and not a bare-marker error (#2779). bean-format keeps
+/// such a line's trailing whitespace too; a `\r` cannot survive the LF
+/// output, so a space stands in for it.
+fn push_comment_text(out: &mut String, text: &str) {
+    let text = text.trim_end_matches(['\n', '\r']);
+    out.push_str(text);
+    if is_lone_marker(text) {
+        out.push(' ');
+    }
+}
+
 /// Emit an `ERROR_NODE`'s text verbatim, so `format` never deletes content it
 /// could not parse (#1335) — chiefly org-mode `*` section headers and the
 /// comments grouped with them. Only trailing whitespace per line is stripped
@@ -1630,10 +1920,19 @@ fn emit_error_node(node: &crate::SyntaxNode, out: &mut String) -> usize {
     // Trim a line's trailing whitespace, but not past the start of the line
     // (the newline ending the line before is not this line's, so a blank
     // line stays) nor past the end of the last string on it.
+    //
+    // An org-mode heading that is one `*` and whitespace (`* `, `*\t`,
+    // `*\r`) is ignored by beancount, but a lone `*` is an error there, so
+    // one space is kept after the `*` (#2779). A line that was a lone marker
+    // already stays one: it is an error either way.
     fn end_line(text: &mut String, string_end: usize) {
         let line_start = text.rfind('\n').map_or(0, |i| i + 1);
+        let ignored = crate::logos_lexer::beancount_ignores_line(&text[line_start..]);
         let keep = text.trim_end().len().max(line_start).max(string_end);
         text.truncate(keep);
+        if ignored && is_lone_marker(&text[line_start..]) {
+            text.push(' ');
+        }
     }
     let mut text = String::new();
     let mut string_end = 0;
@@ -1643,6 +1942,11 @@ fn emit_error_node(node: &crate::SyntaxNode, out: &mut String) -> usize {
     {
         match t.kind() {
             crate::SyntaxKind::NEWLINE if t.text().contains('\n') => {
+                // A CRLF's `\r` is part of the line for `end_line`'s
+                // ignored-line check (`*\r\n` is a heading), and trimmed.
+                if t.text().starts_with('\r') {
+                    text.push('\r');
+                }
                 end_line(&mut text, string_end);
                 text.push('\n');
             }
@@ -1718,7 +2022,7 @@ fn emit_leading_comments(node: &crate::SyntaxNode, out: &mut String) {
                     out.push('\n');
                 }
                 pending = 0;
-                out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                push_comment_text(out, t.text());
                 out.push('\n');
                 seen_comment = true;
                 line_has_comment = true;
@@ -2287,7 +2591,7 @@ fn emit_transaction(
                 match t.kind() {
                     k if super::convert::is_comment_kind(k) => {
                         out.push_str(INDENT);
-                        out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                        push_comment_text(out, t.text());
                         out.push('\n');
                     }
                     crate::SyntaxKind::TAG | crate::SyntaxKind::LINK => {
@@ -2334,14 +2638,14 @@ fn emit_posting(
     if let Some(flag) = p.flag() {
         out.push_str(flag.text());
         out.push(' ');
-        col += flag.text().chars().count() + 1;
+        col += display_width(flag.text()) + 1;
     }
     let account_text = p
         .account()
         .map(|a| a.text().to_string())
         .unwrap_or_default();
     out.push_str(&account_text);
-    col += account_text.chars().count();
+    col += display_width(&account_text);
 
     if let Some(amt) = p.amount() {
         // `amount_number_text` is the shared "does this render a number?"
@@ -2357,7 +2661,7 @@ fn emit_posting(
             //      lands at a single uniform position file-wide even
             //      when numbers have different widths or signs.
             let field_pad = align.number_col.saturating_sub(col).max(2);
-            let justify_pad = align.number_width.saturating_sub(value.chars().count());
+            let justify_pad = align.number_width.saturating_sub(display_width(&value));
             for _ in 0..(field_pad + justify_pad) {
                 out.push(' ');
             }
@@ -2462,7 +2766,7 @@ fn emit_posting(
                 }
                 if super::convert::is_comment_kind(t.kind()) {
                     out.push_str("    ");
-                    out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                    push_comment_text(out, t.text());
                     out.push('\n');
                 }
             }
@@ -2919,7 +3223,7 @@ fn emit_meta_entries_of(node: &crate::SyntaxNode, group: GroupingStyle<'_>, out:
                 }
                 if super::convert::is_comment_kind(t.kind()) {
                     out.push_str(INDENT);
-                    out.push_str(t.text().trim_end_matches(['\n', '\r']));
+                    push_comment_text(out, t.text());
                     out.push('\n');
                 }
             }
@@ -3561,10 +3865,13 @@ mod tests {
                 "2024-01-15 * \"x\"\n  Assets:Bank  -5.00 USD\n  Assets:Other USD\n",
                 "Assets:Other  USD",
             ),
+            // `@@` with no number for the units is a parse error, as in
+            // beancount ("Total price on a posting without units", #2802), so
+            // the error-tolerant formatter copies the transaction as written.
             (
                 "price with no amount node at all",
                 "2013-05-18 * \"x\"\n  Assets:MSFT @@ 2000.00 USD\n  Assets:Cash  -2000.00 USD\n",
-                "Assets:MSFT  @@ 2000.00 USD",
+                "Assets:MSFT @@ 2000.00 USD",
             ),
             (
                 "cost with no amount node at all",
@@ -3574,7 +3881,7 @@ mod tests {
             (
                 "total price without units",
                 "2013-05-18 * \"x\"\n  Assets:MSFT  MSFT @@ 2000.00 USD\n  Assets:Cash  -2000.00 USD\n",
-                "Assets:MSFT  MSFT  @@ 2000.00 USD",
+                "Assets:MSFT  MSFT @@ 2000.00 USD",
             ),
             (
                 "cost without units",
@@ -4010,6 +4317,31 @@ mod tests {
 
     const IDEMPOTENCE_MATRIX: &[(&str, &str)] = &[
         ("empty", ""),
+        // `%` is a comment only as a column-0 line; elsewhere the lexer reads a
+        // FLAG (#2802), and a `"` after a column-0 `%` stays in the comment.
+        (
+            "percent_flag_and_comment",
+            "% c \"q\n2024-01-01 % \"n\"\n  % Assets:A  1 USD ; x\n  %Assets:B\n",
+        ),
+        // An unterminated quote is an error token cut at its own line
+        // (#2788); the line-ending helpers must not read the lines after it
+        // as one string (#2803). Also with a `\` before the line break,
+        // which ends the lexer's string scan.
+        (
+            "unterminated_quote",
+            "2024-01-01 open Assets:A\n2024-01-02 open Assets:B \"\n2024-01-03 open Assets:C\n",
+        ),
+        (
+            "unterminated_quote_backslash_newline",
+            "2024-01-01 note Assets:A \"a\\\n2024-01-02 open Assets:C\n",
+        ),
+        // The same with a later quote: a scan that skipped the `\` with the
+        // line break as an escape would pair the first quote with the one
+        // before `x`, swallowing a line ending.
+        (
+            "unterminated_quote_backslash_newline_later_quote",
+            "2024-01-01 note Assets:A \"a\\\n2024-01-02 note Assets:C \"x\"\n2024-01-03 open Assets:D\n",
+        ),
         ("only_comment", "; header comment\n"),
         ("only_directive", "2024-01-01 open Assets:Cash\n"),
         (
@@ -4215,6 +4547,13 @@ mod tests {
             "org_heading_quote_then_string",
             "** Sub \"heading\n2024-01-15 note Assets:A \"x\"\n",
         ),
+        // A column-0 `!`, `&`, `?` or `:` line is one comment token, so a
+        // `"` there is comment text (#2779), and the string on the later
+        // line is still read as one.
+        (
+            "flag_line_quote_then_string",
+            "! a \"q\n& b \"q\n? c \"q\n: d \"q\n2024-01-15 note Assets:A \"x\"\n",
+        ),
         ("pushtag_directive", "pushtag #active\n"),
         ("poptag_directive", "poptag #active\n"),
         ("pushmeta_directive", "pushmeta location: \"NYC\"\n"),
@@ -4260,11 +4599,17 @@ mod tests {
     ///   comment mid-line, #2802), so the skip-on-errors guard triggers. It
     ///   exists for the state machine's lexer-agreement test on a comment
     ///   with an unbalanced `"`, not the round-trip body.
+    /// - `unterminated_quote`, `unterminated_quote_backslash_newline`,
+    ///   `unterminated_quote_backslash_newline_later_quote`: an
+    ///   unterminated quote is a parse error by design (#2788), so the
+    ///   skip-on-errors guard triggers. They exist for the state machine's
+    ///   lexer-agreement test on a quote the lexer cuts at its own line
+    ///   (#2803), not the round-trip body.
     ///
     /// Note: `comment_containing_quote` DOES exercise the body: it is
     /// paired with a parseable directive, and its comment attaches as
     /// inter-directive trivia under the directive-terminator rule.
-    const ROUNDTRIP_KNOWN_ZERO_DIRECTIVE_FIXTURES: usize = 11;
+    const ROUNDTRIP_KNOWN_ZERO_DIRECTIVE_FIXTURES: usize = 14;
 
     #[test]
     fn lf_to_crlf_outside_strings_preserves_string_interior() {
@@ -5092,10 +5437,14 @@ mod tests {
                 prev = Some((token, span));
                 let classify = match token {
                     Token::String(_) => Some(SourceState::InString),
-                    Token::Comment(_) | Token::Shebang(_) | Token::EmacsDirective(_) => {
-                        Some(SourceState::InComment)
-                    }
+                    Token::Comment(_)
+                    | Token::PercentComment(_)
+                    | Token::Shebang(_)
+                    | Token::EmacsDirective(_) => Some(SourceState::InComment),
                     Token::Error(_) if heading_text => Some(SourceState::InComment),
+                    // An unterminated quote: one error token from the `"` to
+                    // the end of its line (#2788), opaque like a comment.
+                    Token::Error(text) if text.starts_with('"') => Some(SourceState::InComment),
                     _ => None,
                 };
                 if let Some(state) = classify {
@@ -5134,6 +5483,75 @@ mod tests {
         }
     }
 
+    /// Looking for a quote's close stays linear: a failed scan is
+    /// remembered, so a quote it already passed is not scanned again. One
+    /// stray quote followed by many `\"` lines (escaped from its scan's
+    /// point of view, so none closes it) would rescan to the end once per
+    /// line without the memo.
+    #[test]
+    fn lexer_source_state_scans_each_byte_once() {
+        let src = format!("2024-01-01 open Assets:A \"\n{}", "\\\"\n".repeat(20_000));
+        QUOTE_SCAN_BYTES.with(|c| c.set(0));
+        let crlf = lf_to_crlf_outside_strings(&src);
+        let scanned = QUOTE_SCAN_BYTES.with(std::cell::Cell::get);
+        assert!(
+            scanned <= 2 * src.len(),
+            "quote scans stepped over {scanned} bytes of a {}-byte input",
+            src.len()
+        );
+        assert_eq!(crlf, src.replace('\n', "\r\n"));
+    }
+
+    /// The lone-marker check in `crlf_to_lf_outside_strings` (#2779) finds
+    /// the current output line's start with `OutLine`, which scans each
+    /// output byte once, so a long line of `\r`s is folded in linear time. It
+    /// scanned back over the whole output for every `\r` (1.8 s on this input
+    /// in a release build); with that `rfind` restored, this counts
+    /// 25,600,320,000 bytes on the first input and fails.
+    #[test]
+    fn crlf_to_lf_lone_marker_check_is_linear() {
+        const N: usize = 160_000;
+        for src in [
+            format!("; {}{}\n", "a".repeat(N), "\r".repeat(N)),
+            format!("#\r{}\n", "\r".repeat(N)),
+        ] {
+            CR_FOLD_LINE_SCAN_BYTES.with(|c| c.set(0));
+            let folded = crlf_to_lf_outside_strings(&src);
+            let scanned = CR_FOLD_LINE_SCAN_BYTES.with(std::cell::Cell::get);
+            assert!(
+                scanned <= 2 * src.len(),
+                "line-start tracking stepped over {scanned} bytes of a {}-byte input",
+                src.len()
+            );
+            assert!(!folded.contains('\r'));
+        }
+        assert_eq!(
+            crlf_to_lf_outside_strings(&format!("#\r{}\n", "\r".repeat(N))),
+            "# \n"
+        );
+    }
+
+    /// `cr_outside_strings_present` reads quotes as the line-ending helpers
+    /// do: a stray quote ends at its own line, so the `\r` after it is
+    /// outside a string, as `crlf_to_lf_outside_strings` folds it (#2803).
+    #[test]
+    fn cr_outside_strings_present_ends_an_unterminated_quote_at_its_line() {
+        for src in [
+            "2024-01-01 open Assets:A \"\r\n2024-01-02 note Assets:A \"ok\"\r\n2024-01-03 open Assets:C\r\n",
+            "2024-01-01 open Assets:A \"\r\n",
+        ] {
+            assert!(cr_outside_strings_present(src), "{src:?}");
+            assert!(
+                matches!(crlf_to_lf_outside_strings(src), std::borrow::Cow::Owned(ref s) if s != src),
+                "{src:?}"
+            );
+        }
+        // A `\r` inside a string that does close is still not outside one.
+        assert!(!cr_outside_strings_present(
+            "2024-01-01 note Assets:A \"a\rb\"\n"
+        ));
+    }
+
     /// `crlf_to_lf_outside_strings` must not change the line structure
     /// the lexer sees when a run of stray `\r` bytes ends a line (#2774).
     ///
@@ -5167,6 +5585,21 @@ mod tests {
                 "#! c\r\r\n",
                 "#+ c\r\r\n",
                 "* c\r\r\n",
+                // A lone marker before the `\r`: ignored with it, a bare-marker
+                // error without it, so the fold keeps a space (#2779).
+                "#\r\n",
+                "!\r\n",
+                "&\r\n",
+                "?\r\n",
+                ":\r\n",
+                "%\r\n",
+                "*\r\n",
+                "#\r\r\n",
+                "#\r \r\n",
+                "# c\r \r\n",
+                "#\t\r\n",
+                "* c\r \r\n",
+                "*\r \r\n",
                 "\r\r\n",
                 "  \r\r\n",
             ]
@@ -5179,6 +5612,10 @@ mod tests {
                 "2024-01-01 open Assets:A\r\r",
                 "2024-01-01 open Assets:A\r\n; c\r",
                 "2024-01-01 open Assets:A\r\n\r",
+                "2024-01-01 open Assets:A\r\n#\r",
+                "2024-01-01 open Assets:A\r\n*\r",
+                "2024-01-01 open Assets:A\r\n#\r ",
+                "2024-01-01 open Assets:A\r\n# c\r \r",
                 "\r",
             ]
             .map(String::from),
@@ -5226,6 +5663,7 @@ mod tests {
         let mut state = SourceState::Code;
         let mut prev_was_backslash = false;
         let mut at_line_start = true;
+        let mut unclosed_until = 0;
         while let Some((rel_i, ch)) = chars.next() {
             let i = bom_len + rel_i;
             let peek = chars.peek().map(|&(_, c)| c);
@@ -5234,8 +5672,13 @@ mod tests {
                 *byte = state;
             }
             let prev_state = state;
-            let next_state =
-                advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash);
+            let next_state = lexer_source_state(
+                body,
+                rel_i,
+                state,
+                advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash),
+                &mut unclosed_until,
+            );
             at_line_start = next_at_line_start(ch, at_line_start);
             // Record only OPENING transitions and the comment-
             // closing newline, where the state machine and lexer
@@ -5350,6 +5793,24 @@ mod tests {
             "snap range should be the whole file's textual span"
         );
         assert_eq!(formatted, format_node(&node));
+    }
+
+    /// The whole-file range matches `format_node` with top-level comments
+    /// too: a trailing comment, consecutive comments, and a comment-only file
+    /// gained a blank line on the range path before #2838.
+    #[test]
+    fn format_node_range_full_range_matches_format_node_with_comments() {
+        for source in [
+            "2024-01-01 open Assets:A\n; c\n",
+            "; c\n; d\n",
+            "; c\n",
+            "; c\n2024-01-01 open Assets:A\n; d\n",
+        ] {
+            let (node, src) = parse_for_range(source);
+            let full = rowan::TextRange::new(ts(0), ts(src.len()));
+            let (_, formatted) = format_node_range(&node, full).expect("a range over the file");
+            assert_eq!(formatted, format_node(&node), "{source:?}");
+        }
     }
 
     /// A selection that hits only inter-directive whitespace

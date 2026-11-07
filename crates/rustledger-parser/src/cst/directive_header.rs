@@ -367,12 +367,7 @@ pub(super) fn first_header_defect(
     }
     c.bump();
     let grammar = directive_body(directive, &mut c).err();
-    // On a tie the split date wins: it says why the token is unexpected.
-    earliest([
-        split_beancount_date(tokens, src),
-        grammar,
-        glued_one_letter_currency(tokens),
-    ])
+    earliest([grammar, glued_one_letter_currency(tokens, src)])
 }
 
 /// The defect that starts first on the line; on a tie, the first listed.
@@ -387,93 +382,27 @@ fn earliest<const N: usize>(defects: [Option<HeaderDefect>; N]) -> Option<Header
 /// `lexer.l`); two or more letters are a `CURRENCY` wherever they end. So
 /// `open Assets:A U,SD` is not a list of `U` and `SD` there but the invalid
 /// token `U,SD`, while our lexer reads a `CURRENCY` `U`, a comma, and `SD`.
-fn glued_one_letter_currency(tokens: &[(K, Range<usize>)]) -> Option<HeaderDefect> {
-    tokens.windows(2).find_map(|pair| {
-        let [(kind, range), (next, _)] = pair else {
-            return None;
-        };
-        (*kind == K::CURRENCY && range.len() == 1 && *next != K::WHITESPACE).then(|| HeaderDefect {
+/// The same holds before a `\r` (`1 D\r\n`, #2802 stage 3): `Invalid token: 'D'`
+/// in beancount. `src` is the text the ranges index.
+///
+/// Deliberately more lenient than beancount at the very end of a file with no
+/// final newline, where beancount also rejects the letter (nothing follows
+/// it). `rledger format` adds that newline, after which beancount accepts the
+/// file, so reporting it would make formatting change an erroring file into a
+/// clean one on the second pass: not idempotent, which a formatter must be.
+/// Pinned by `test_parse_reports_a_one_letter_currency_before_cr_but_not_at_eof`.
+fn glued_one_letter_currency(tokens: &[(K, Range<usize>)], src: &str) -> Option<HeaderDefect> {
+    tokens.iter().find_map(|(kind, range)| {
+        let next = src.as_bytes().get(range.end);
+        (*kind == K::CURRENCY
+            && range.len() == 1
+            && !matches!(next, None | Some(b' ' | b'\t' | b'\n')))
+        .then(|| HeaderDefect {
             range: range.clone(),
             expected: "a space after a one-letter currency",
             found: Some(K::CURRENCY),
         })
     })
-}
-
-/// Text that beancount lexes as ONE date and our lexer splits (#2808).
-///
-/// beancount's `DATE` is `[0-9]{4,}[-/][0-9]+[-/][0-9]+`; ours is
-/// `\d{4}[-/]\d{1,2}[-/]\d{1,2}`. Where they differ, our tokens are glued
-/// together with no whitespace between them, in one of two shapes:
-///
-/// - a `DATE` with a `NUMBER` right after it, when the last field has more
-///   than two digits: `2024-02-002`, `2024/02/002`, `2024-2-002` and
-///   `2024-02-0002` lex as `DATE 2024-02-00` (or `2024-2-00`) then a number;
-/// - `NUMBER`, `-` or `/`, `NUMBER`, `-` or `/`, `NUMBER`, the first two plain
-///   digits and the first at least four of them, when the year has more than
-///   four digits or the month more than two: `02024-02-02`, `20024-02-02` and
-///   `2024-002-02` lex as the number expression `2024 - 002 - 02`.
-///
-/// The last number may run on past the digits (`2024-002-02.5`,
-/// `2024-002-02,000`, `2024-02-002.`): beancount's `DATE` takes the leading
-/// digits and then reports what follows, and read our way the run is
-/// arithmetic again (2019.5, 22). The first two must be plain digits, since
-/// `2024.5-02-02` and `2024-0.5-02` are arithmetic in beancount too.
-///
-/// Read our way, either shape loads as a wrong value with no error where a
-/// value may be a number (a metadata value, a `custom` value, a `pushmeta`
-/// value, an amount): `kk: 2024-002-02` was the integer 2020, `kk: 2024-02-002`
-/// the integer 2, `custom "x" 2024-02-002` just the number 2 (the invalid
-/// date `2024-02-00` is dropped, #2811). beancount reads a date (or rejects
-/// an invalid one, `20024-02-02`), so the text is reported. That is stricter
-/// than beancount where its date is valid, and deliberately so: the
-/// alternative is a silently wrong value. The fix that matches beancount is
-/// in the lexer (#2808).
-pub(super) fn split_beancount_date(
-    tokens: &[(K, Range<usize>)],
-    src: &str,
-) -> Option<HeaderDefect> {
-    let digits = |r: &Range<usize>| {
-        src.get(r.clone())
-            .is_some_and(|t| !t.is_empty() && t.bytes().all(|b| b.is_ascii_digit()))
-    };
-    let glued = |pair: &[(K, Range<usize>)]| pair[0].1.end == pair[1].1.start;
-    let defect = |from: usize, to: usize| HeaderDefect {
-        range: from..to,
-        expected: "YYYY-MM-DD if this is a date: beancount reads it as one \
-                   date, which rledger does not support yet (#2808)",
-        found: Some(K::NUMBER),
-    };
-    for (i, (kind, range)) in tokens.iter().enumerate() {
-        match kind {
-            K::DATE => {
-                if let Some(next) = tokens.get(i + 1)
-                    && next.0 == K::NUMBER
-                    && glued(&tokens[i..i + 2])
-                {
-                    return Some(defect(range.start, next.1.end));
-                }
-            }
-            K::NUMBER => {
-                let Some(run) = tokens.get(i..i + 5) else {
-                    continue;
-                };
-                let shape = run[0].1.len() >= 4
-                    && matches!(run[1].0, K::MINUS | K::SLASH)
-                    && run[2].0 == K::NUMBER
-                    && matches!(run[3].0, K::MINUS | K::SLASH)
-                    && run[4].0 == K::NUMBER
-                    && run.windows(2).all(glued)
-                    && digits(&run[0].1)
-                    && digits(&run[2].1);
-                if shape {
-                    return Some(defect(range.start, run[4].1.end));
-                }
-            }
-            _ => {}
-        }
-    }
-    None
 }
 
 /// The first defect in a metadata line (`key: value` under a directive, a
@@ -485,21 +414,15 @@ pub(super) fn split_beancount_date(
 /// `NEWLINE`; `end` is where it ends; `src` is the text the ranges index.
 /// Ranges are echoed back in the caller's frame.
 ///
-/// Stricter than beancount in two places, deliberately, both because our
-/// lexer splits a token beancount reads whole and the pieces used to load as
-/// a wrong value with no error:
-///
-/// - a date beancount's `DATE` takes and ours does not
-///   ([`split_beancount_date`]): `kk: 2024-02-002` loaded as the integer 2,
-///   `kk: 2024-002-02` as 2020. Fixed properly in the lexer by #2808.
-/// - a number with doubled thousands separators: beancount's `NUMBER` is
+/// Stricter than beancount in one place, deliberately, because our lexer
+/// splits a token beancount reads whole and the pieces used to load as a wrong
+/// value with no error: a number with doubled thousands separators: beancount's `NUMBER` is
 ///   `[0-9][0-9,]+[0-9]`, so `kk: 1,,000` is 1000 there, and ours lexes `1`,
 ///   `,`, `,`, `000`, which loaded as the integer 1. The stray comma is
 ///   reported here by the grammar; a posting amount (`1,,000 USD`) and a
 ///   header amount (`balance Assets:A 1,,000 USD`) already reported it.
 ///
-/// Pinned by `test_parse_reports_a_split_beancount_date_instead_of_misreading_it`
-/// and `test_parse_reports_doubled_thousands_separators_instead_of_misreading_them`.
+/// Pinned by `test_parse_reports_doubled_thousands_separators_instead_of_misreading_them`.
 pub(super) fn first_meta_defect(
     tokens: &[(K, Range<usize>)],
     end: usize,
@@ -518,12 +441,167 @@ pub(super) fn first_meta_defect(
         .and_then(|()| key_value_value(&mut c))
         .and_then(|()| c.finish())
         .err();
-    // On a tie the split date wins: it says why the token is unexpected.
+    earliest([grammar, glued_one_letter_currency(tokens, src)])
+}
+
+/// `maybe_number maybe_currency`: what may stand for the units of a posting,
+/// or follow `@` / `@@`. Both halves are optional.
+fn incomplete_amount<I: Iterator<Item = (K, Range<usize>)>>(c: &mut Cursor<I>) -> Step {
+    if starts_number_expr(c.peek()) {
+        number_expr(c)?;
+    }
+    c.eat(K::CURRENCY);
+    Ok(())
+}
+
+/// One `cost_comp`: `compound_amount | DATE | STRING | ASTERISK`, where
+///
+/// ```text
+/// compound_amount : maybe_number currency
+///                 | number_expr maybe_currency
+///                 | maybe_number HASH maybe_number currency
+/// ```
+///
+/// `hash_taken` is set when the opener was the fused `{#`, whose `#` begins
+/// the first component. `ASTERISK` (cost merging) is grammatical. beancount's
+/// builder rejects it; ours deliberately does not, since rledger implements
+/// cost merging (see `convert::posting_builder_error`).
+fn cost_comp<I: Iterator<Item = (K, Range<usize>)>>(c: &mut Cursor<I>, hash_taken: bool) -> Step {
+    if !hash_taken && matches!(c.peek(), Some(K::DATE | K::STRING | K::STAR)) {
+        c.bump();
+        return Ok(());
+    }
+    let number = !hash_taken && starts_number_expr(c.peek());
+    if number {
+        number_expr(c)?;
+    }
+    if hash_taken || c.eat(K::HASH) {
+        if starts_number_expr(c.peek()) {
+            number_expr(c)?;
+        }
+        return c.expect(K::CURRENCY, "a currency");
+    }
+    if number {
+        c.eat(K::CURRENCY);
+        Ok(())
+    } else {
+        c.expect(K::CURRENCY, "a cost component")
+    }
+}
+
+/// `cost_spec`: `{ cost_comp_list }` or `{{ cost_comp_list }}`, where
+/// `cost_comp_list : %empty | cost_comp | cost_comp_list COMMA cost_comp`.
+/// As for an `open` currency list, reducing from `%empty` allows ONE leading
+/// comma (`{, 2 USD}`), and two are not.
+fn cost_spec<I: Iterator<Item = (K, Range<usize>)>>(c: &mut Cursor<I>) -> Step {
+    let (close, after_component, mut hash_taken) = match c.peek() {
+        Some(K::L_BRACE) => (K::R_BRACE, "`,` or `}`", false),
+        // Our lexer fuses `{#`; beancount reads `{` then `#`.
+        Some(K::L_BRACE_HASH) => (K::R_BRACE, "`,` or `}`", true),
+        Some(K::L_DOUBLE_BRACE) => (K::R_DOUBLE_BRACE, "`,` or `}}`", false),
+        _ => return Ok(()),
+    };
+    c.bump();
+    if !hash_taken {
+        if c.eat(close) {
+            return Ok(());
+        }
+        // The one leading comma; a component must follow it.
+        c.eat(K::COMMA);
+    }
+    loop {
+        cost_comp(c, hash_taken)?;
+        hash_taken = false;
+        if c.eat(close) {
+            return Ok(());
+        }
+        if !c.eat(K::COMMA) {
+            return Err(c.defect(after_component));
+        }
+    }
+}
+
+/// The first defect in a posting line (stage 3 of #2802), if any. beancount's
+/// rule is
+///
+/// ```text
+/// posting : INDENT optflag account incomplete_amount cost_spec eol
+///         | INDENT optflag account incomplete_amount cost_spec AT price_annotation eol
+///         | INDENT optflag account incomplete_amount cost_spec ATAT price_annotation eol
+///         | INDENT optflag account eol
+/// optflag : %empty | ASTERISK | HASH | FLAG | CAPITAL
+/// price_annotation : incomplete_amount
+/// ```
+///
+/// `tokens` is the line from its flag or account (the indent excluded) up to
+/// but not including the `NEWLINE`, with the tokens inside its `AMOUNT`,
+/// `COST_SPEC` and `PRICE_ANNOTATION` nodes flattened in; `end` is where it
+/// ends; `src` is the text the ranges index. Ranges are echoed back in the
+/// caller's frame.
+///
+/// The cost-spec rule here is the full grammar. `cost_spec_shape` keeps its
+/// narrower rule (an empty component, junk after a complete one) because the
+/// converter also asks it whether a spec's number may be trusted; the two
+/// agree on everything that rule reports, which the stray-character matrix
+/// pins, and a posting it already reported is not checked again here.
+pub(super) fn first_posting_defect(
+    tokens: &[(K, Range<usize>)],
+    end: usize,
+    src: &str,
+) -> Option<HeaderDefect> {
+    let mut c = Cursor {
+        tokens: tokens
+            .iter()
+            .filter(|(k, _)| !is_skipped(*k))
+            .cloned()
+            .peekable(),
+        last: end..end,
+    };
+    let grammar = (|| {
+        if matches!(c.peek(), Some(K::STAR | K::HASH | K::FLAG | K::PENDING_KW))
+            || tokens
+                .iter()
+                .find(|(k, _)| !is_skipped(*k))
+                .is_some_and(|(k, r)| *k == K::CURRENCY && r.len() == 1)
+        {
+            c.bump();
+        }
+        c.expect(K::ACCOUNT, "an account")?;
+        incomplete_amount(&mut c)?;
+        cost_spec(&mut c)?;
+        if c.eat(K::AT) || c.eat(K::AT_AT) {
+            incomplete_amount(&mut c)?;
+        }
+        c.finish()
+    })()
+    .err();
     earliest([
-        split_beancount_date(tokens, src),
         grammar,
-        glued_one_letter_currency(tokens),
+        glued_one_letter_currency(tokens, src),
+        tag_after_brace_hash(tokens, src),
     ])
+}
+
+/// `{#2 USD}`: our lexer reads the fused opener `{#` and then `2`; beancount
+/// reads `{` and then the TAG `#2` (its `#[A-Za-z0-9\-_/.]+`), a syntax error
+/// in a cost spec. `{# 2 USD}`, with the space, is `{`, `#`, `2` in both.
+fn tag_after_brace_hash(tokens: &[(K, Range<usize>)], src: &str) -> Option<HeaderDefect> {
+    tokens.windows(2).find_map(|pair| {
+        let [(K::L_BRACE_HASH, open), (next, range)] = pair else {
+            return None;
+        };
+        let tag_char = |c: char| c.is_ascii_alphanumeric() || "-_/.".contains(c);
+        (open.end == range.start
+            && src
+                .get(range.clone())
+                .and_then(|t| t.chars().next())
+                .is_some_and(tag_char))
+        .then(|| HeaderDefect {
+            range: open.start + 1..range.end,
+            expected: "a space after `#`: beancount reads it as a tag here",
+            found: Some(*next),
+        })
+    })
 }
 
 /// Diagnostic text for a defect. `place` names where it is (`"the open
@@ -533,11 +611,15 @@ pub(super) fn defect_message(place: &str, defect: &HeaderDefect, text: &str) -> 
     let expected = defect.expected;
     match defect.found {
         None => format!("unexpected end of line in {place}: expected {expected}"),
-        Some(K::PERCENT_COMMENT | K::SHEBANG | K::EMACS_DIRECTIVE) => format!(
-            "unexpected {text:?} in {place}: expected {expected}. \
+        Some(K::PERCENT_COMMENT | K::SHEBANG | K::EMACS_DIRECTIVE | K::FLAG)
+            if defect.found != Some(K::FLAG) || text == "%" =>
+        {
+            format!(
+                "unexpected {text:?} in {place}: expected {expected}. \
              Only `;` starts a comment in the middle of a line; `{text}` starts one \
              only at the beginning of a line"
-        ),
+            )
+        }
         Some(_) => format!("unexpected {text:?} in {place}: expected {expected}"),
     }
 }

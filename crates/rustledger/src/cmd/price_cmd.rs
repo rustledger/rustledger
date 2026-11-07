@@ -507,6 +507,9 @@ pub fn run_with_writer<W: Write>(
             // mapping in the common (single-quote) case; only allocate a one-shot
             // override map when a per-spec mapping is present. The Cow keeps the
             // hot-path zero-alloc on large ledgers.
+            // A per-spec mapping is read from `price:` metadata, bean-price's
+            // source-spec grammar, where a leading `^` inverts (#2866).
+            let from_spec = per_spec_mapping.is_some();
             let fetch_mapping: std::borrow::Cow<'_, HashMap<String, CommodityMapping>> =
                 if let Some(m) = per_spec_mapping {
                     let mut m1 = combined_mapping.clone();
@@ -516,9 +519,18 @@ pub fn run_with_writer<W: Write>(
                     std::borrow::Cow::Borrowed(&combined_mapping)
                 };
 
-            // Fetch from network
+            // Fetch from network. `--source` and every mapping not read
+            // from `price:` metadata keep their tickers verbatim (Yahoo's
+            // `^GSPC`).
             let result = if let Some(source_name) = &args.source {
                 fetch_with_source(&registry, source_name, symbol, &effective_currency, date)
+            } else if from_spec {
+                registry.fetch_price_for_spec(
+                    symbol,
+                    &effective_currency,
+                    date,
+                    fetch_mapping.as_ref(),
+                )
             } else {
                 registry.fetch_price(symbol, &effective_currency, date, fetch_mapping.as_ref())
             };
@@ -1082,6 +1094,8 @@ fn write_price(
 /// Report a price that could not be fetched: `Error fetching ...` with
 /// `--verbose`, else a `; Failed to fetch ...` comment line, as `rledger`
 /// has always printed it; a coded record for a caller collecting warnings.
+/// Each form carries the whole cause chain (`{e:#}`), so a timeout or the
+/// provider's error body shows, not only the outermost context.
 fn fetch_failed(
     err_out: &mut Messages<'_>,
     verbose: bool,
@@ -1090,12 +1104,15 @@ fn fetch_failed(
 ) {
     let diagnostic = Diagnostic {
         code: Some(warning_codes::PRICE_FETCH_FAILED.to_string()),
-        ..Diagnostic::message(format!("Failed to fetch {symbol}: {e}"))
+        ..Diagnostic::message(format!("Failed to fetch {symbol}: {e:#}"))
     };
     if verbose {
-        err_out.emit_as(diagnostic, format_args!("Error fetching {symbol}: {e}"));
+        err_out.emit_as(diagnostic, format_args!("Error fetching {symbol}: {e:#}"));
     } else {
-        err_out.emit_as(diagnostic, format_args!("; Failed to fetch {symbol}: {e}"));
+        err_out.emit_as(
+            diagnostic,
+            format_args!("; Failed to fetch {symbol}: {e:#}"),
+        );
     }
 }
 

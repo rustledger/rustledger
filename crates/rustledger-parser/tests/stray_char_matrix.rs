@@ -1,4 +1,4 @@
-//! A stray character on a header or metadata line is an error when beancount
+//! A stray character on any line of a directive is an error when beancount
 //! says it is, and only then (#2802).
 //!
 //! The parser grouped a header line into tokens and each converter read the
@@ -12,10 +12,10 @@
 //! `scripts/stray-char-matrix.py`, which runs beancount, so this test needs no
 //! Python. The tests below check rledger's verdict against it, row by row.
 //!
-//! #2802 is fixed in stages. Stage 1 covers the header lines of the
-//! non-transaction directives, stage 2 metadata lines (under any directive, a
-//! transaction or a posting); transactions and postings (stage 3) are
-//! generated but not yet checked: see [`stage`] and [`in_scope`].
+//! #2802 was fixed in stages, which [`stage`] still names: stage 1 the header
+//! lines of the non-transaction directives, stage 2 metadata lines (under any
+//! directive, a transaction or a posting), stage 3 transaction headers and
+//! posting lines. Every stage is checked.
 
 use proptest::prelude::*;
 use rustledger_parser::format::try_format_source;
@@ -25,10 +25,6 @@ use rustledger_parser::parse;
 const CHARS: &str = "!@?*~^$&|{}(),#%\"/_-'.A0";
 
 const DATA: &str = include_str!("data/stray_char_matrix.tsv");
-
-/// Rows pinned as known differences, by count: see the `known_*` functions.
-const KNOWN_COLUMN_0: usize = 120;
-const KNOWN_DATES: [usize; 3] = [259, 6, 0];
 
 /// One generated input.
 struct Case {
@@ -120,11 +116,12 @@ fn stage(row: &Row, case: &Case) -> u8 {
         && body.split_once(':').is_some_and(|(key, _)| {
             key.starts_with(|c: char| c.is_ascii_lowercase()) && !key.contains(' ')
         });
-    let is_txn = row
-        .base
-        .split(' ')
-        .nth(1)
-        .is_some_and(|kw| kw.starts_with('*'));
+    // A transaction's second word is its flag: `*`, `!`, `txn`, or a capital
+    // letter (`P`).
+    let is_txn = row.base.split([' ', '\r', '\n']).nth(1).is_some_and(|kw| {
+        matches!(kw, "*" | "!" | "txn" | "%" | "#" | "?" | "&")
+            || (kw.len() == 1 && kw.bytes().all(|b| b.is_ascii_uppercase()))
+    });
     if is_meta {
         2
     } else if is_txn {
@@ -132,39 +129,6 @@ fn stage(row: &Row, case: &Case) -> u8 {
     } else {
         1
     }
-}
-
-/// Which cases the fix so far covers: stages 1 and 2.
-fn in_scope(row: &Row, case: &Case) -> bool {
-    stage(row, case) <= 2
-}
-
-/// beancount ignores a whole line that starts with `!`, `?` or `&` at column
-/// 0; we report it. That is #2779, a separate fix, so these rows may disagree
-/// until it lands (the count is pinned below, so the fix will have to update
-/// it).
-fn known_column_0_divergence(row: &Row, case: &Case) -> bool {
-    "!?&".contains(case.ch) && (case.offset == 0 || row.base.as_bytes()[case.offset - 1] == b'\n')
-}
-
-/// A digit inserted into a date: beancount's `DATE` is
-/// `[0-9]{4,}[-/][0-9]+[-/][0-9]+`, so `02024-01-01` and `2024-001-01` are
-/// dates there, and our lexer rejects them; `20024-02-02` lexes as a date
-/// there and then fails as one, where ours reads the number expression
-/// `20024 - 02 - 02`. A date-lexing difference, not a stray token: #2808.
-/// Pinned by count below until it is fixed.
-fn known_date_digit_divergence(row: &Row, case: &Case) -> bool {
-    let b = row.base.as_bytes();
-    let is_date_at = |s: usize| {
-        b.get(s..s + 10).is_some_and(|w| {
-            w.iter().enumerate().all(|(i, c)| match i {
-                4 | 7 => *c == b'-',
-                _ => c.is_ascii_digit(),
-            })
-        }) && (s == 0 || !b[s - 1].is_ascii_digit())
-    };
-    case.ch.is_ascii_digit()
-        && (0..b.len()).any(|s| is_date_at(s) && (s..=s + 10).contains(&case.offset))
 }
 
 /// A character inserted right after a `\r` that the line goes on past: a
@@ -176,32 +140,43 @@ const fn known_mid_line_cr(row: &Row, case: &Case) -> bool {
     case.offset > 0 && row.base.as_bytes()[case.offset - 1] == b'\r'
 }
 
+/// A `*` inserted as a component of its own in a cost spec: cost merging,
+/// which beancount 3.2.3 rejects ("Cost merging is not supported yet") and
+/// rledger implements, a correct feature it keeps deliberately (#2802);
+/// pinned by count. See `test_parse_accepts_cost_merging_unlike_beancount`.
+fn known_cost_merge(case: &Case) -> bool {
+    if case.ch != '*' {
+        return false;
+    }
+    let (before, after) = (&case.src[..case.offset], &case.src[case.offset + 1..]);
+    let line = &before[before.rfind('\n').map_or(0, |p| p + 1)..];
+    let open = line.rfind('{').is_some_and(|o| !line[o..].contains('}'));
+    let before = before.trim_end_matches(' ');
+    let after = after.trim_start_matches(' ');
+    open && before.ends_with(['{', ',']) && after.starts_with([',', '}'])
+}
+
 #[test]
 fn test_parse_reports_a_stray_character_exactly_when_beancount_does() {
     let mut checked = [0usize; 3];
-    let mut known = 0usize;
-    let mut known_dates = [0usize; 3];
     let mut known_cr = 0usize;
+    let mut known_merge = 0usize;
     let mut wrong = Vec::new();
     for row in rows() {
         for (case, verdict) in cases(&row.base).iter().zip(&row.verdicts) {
-            if *verdict == 'x' || !in_scope(&row, case) {
+            if *verdict == 'x' {
                 continue;
             }
             let stage = usize::from(stage(&row, case)) - 1;
             let beancount_rejects = *verdict == '1';
             let we_reject = !parse(&case.src).errors.is_empty();
             let disagree = we_reject != beancount_rejects;
-            if known_column_0_divergence(&row, case) && we_reject && !beancount_rejects {
-                known += 1;
-                continue;
-            }
-            if known_date_digit_divergence(&row, case) && disagree {
-                known_dates[stage] += 1;
-                continue;
-            }
             if known_mid_line_cr(&row, case) && we_reject && !beancount_rejects {
                 known_cr += 1;
+                continue;
+            }
+            if known_cost_merge(case) && !we_reject && beancount_rejects {
+                known_merge += 1;
                 continue;
             }
             checked[stage] += 1;
@@ -233,12 +208,13 @@ fn test_parse_reports_a_stray_character_exactly_when_beancount_does() {
         "only {} metadata cases checked",
         checked[1]
     );
-    assert_eq!(known, KNOWN_COLUMN_0, "the #2779 rows changed");
-    assert_eq!(
-        known_dates, KNOWN_DATES,
-        "the date-digit (#2808) rows changed"
+    assert!(
+        checked[2] > 20_000,
+        "only {} transaction and posting cases checked",
+        checked[2]
     );
-    assert_eq!(known_cr, 1, "the mid-line `\\r` (#2804) rows changed");
+    assert_eq!(known_cr, 5, "the mid-line `\\r` (#2804) rows changed");
+    assert_eq!(known_merge, 1, "the cost-merge (`{{*}}`) rows changed");
     assert!(
         wrong.is_empty(),
         "{} of {} cases disagree with beancount, first 20:\n{}",
@@ -362,6 +338,40 @@ fn test_try_format_source_keeps_a_leading_comma_in_a_currency_list() {
     assert!(!parse("2024-01-01 open Assets:A ,,USD\n").errors.is_empty());
 }
 
+/// A transaction flag written `txn` reads back as `*`: `txn` is the long
+/// spelling of the `*` flag, and the formatter writes the flag it parsed (a
+/// documented normalization, from before #2802).
+fn normalize_txn_flag(s: &str) -> String {
+    s.split_inclusive('\n')
+        .map(|line| {
+            // A leading date in beancount's `DATE` shape,
+            // `[0-9]{4,}[-/][0-9]+[-/][0-9]+` (#2808), then ` txn`.
+            let bytes = line.as_bytes();
+            let run = |from: usize| {
+                bytes[from..]
+                    .iter()
+                    .take_while(|b| b.is_ascii_digit())
+                    .count()
+            };
+            let year = run(0);
+            let date_len = (year >= 4 && matches!(bytes.get(year), Some(b'-' | b'/')))
+                .then(|| year + 1 + run(year + 1))
+                .filter(|&at| at > year + 1 && matches!(bytes.get(at), Some(b'-' | b'/')))
+                .map(|at| at + 1 + run(at + 1))
+                .filter(|&end| bytes.get(end - 1).is_some_and(u8::is_ascii_digit));
+            match date_len {
+                Some(n)
+                    if line[n..].starts_with(" txn")
+                        && matches!(bytes.get(n + 4), Some(b' ' | b'\n' | b'\r') | None) =>
+                {
+                    format!("{} *{}", &line[..n], &line[n + 4..])
+                }
+                _ => line.to_string(),
+            }
+        })
+        .collect()
+}
+
 /// `s` without whitespace, and without a comma between two digits: the
 /// formatter drops thousands separators (a documented normalization, see the
 /// `cst::format` module docs), so `2,024` and `2024` are the same text here.
@@ -385,25 +395,29 @@ fn non_whitespace(s: &str) -> String {
 #[test]
 fn test_try_format_source_keeps_the_text_of_every_clean_matrix_case() {
     let mut clean = 0usize;
+    let mut lost = Vec::new();
     for row in rows() {
         for case in cases(&row.base) {
-            if !in_scope(&row, &case) || !parse(&case.src).errors.is_empty() {
+            if !parse(&case.src).errors.is_empty() {
                 continue;
             }
             clean += 1;
             let out = try_format_source(&case.src).expect("a clean file formats");
-            assert_eq!(
-                non_whitespace(&out),
-                non_whitespace(&case.src),
-                "{}@{}:{:?} lost text: {:?} -> {out:?}",
-                row.name,
-                case.offset,
-                case.ch,
-                case.src
-            );
+            if non_whitespace(&out) != non_whitespace(&normalize_txn_flag(&case.src)) {
+                lost.push(format!(
+                    "{}@{}:{:?} lost text: {:?} -> {out:?}",
+                    row.name, case.offset, case.ch, case.src
+                ));
+            }
         }
     }
     assert!(clean > 900, "only {clean} clean cases");
+    assert!(
+        lost.is_empty(),
+        "{} clean cases lost text, first 20:\n{}",
+        lost.len(),
+        lost.iter().take(20).cloned().collect::<Vec<_>>().join("\n")
+    );
 }
 
 /// The header snippets of the matrix: every non-transaction directive kind.
@@ -561,7 +575,7 @@ fn test_parse_rejects_a_token_left_over_after_a_posting_amount() {
         let r = parse(&src);
         assert_eq!(r.errors.len(), 1, "{src:?}: {:?}", r.errors);
         let msg = r.errors[0].to_string();
-        assert!(msg.contains("after the posting amount"), "{msg}");
+        assert!(msg.contains("unexpected"), "{msg}");
         assert_eq!(msg.contains("a currency cannot end in"), glued, "{msg}");
         // Reported, not deleted: the error-tolerant formatter keeps the line.
         assert_eq!(rustledger_parser::format::format_source(&src), src);
@@ -765,7 +779,7 @@ fn test_parse_reports_a_stray_character_in_a_metadata_line_and_keeps_the_directi
         ("2024-01-01 open Assets:A\n  kk: 1 USD EUR\n", "EUR"),
         ("2024-01-01 open Assets:A\n  kk: TRUE FALSE\n", "FALSE"),
         ("2024-01-01 open Assets:A\n  kk: 2024-02-02 USD\n", "USD"),
-        ("2024-01-01 open Assets:A\n  kk: \"v\" % c\n", "%"),
+        ("2024-01-01 open Assets:A\n  kk: \"v\" % 1\n", "%"),
         (
             "2024-01-01 *\n  kk: 1 *\n  Assets:A  1 USD\n  Assets:B\n",
             "*",
@@ -823,104 +837,80 @@ fn test_parse_accepts_every_metadata_value_type() {
     }
 }
 
-/// Text beancount's `DATE` (`[0-9]{4,}[-/][0-9]+[-/][0-9]+`) reads as one date
-/// and our lexer splits (#2808). Read our way, each loaded as a wrong value
-/// with no error: `kk: 2024-002-02` as the integer 2020 (`2024 - 002 - 02`),
-/// `kk: 2024-02-002` as the integer 2 (`DATE 2024-02-00`, then `2`),
-/// `custom "x" 2024-02-002` as just the number 2 (the invalid date is
-/// dropped, #2811), `balance ... 2024-002-02 USD` as 2020 USD,
-/// `kk: 2024-002-02.5` as 2019.5 (beancount takes the date's digits and
-/// then rejects the `.5`). It is now reported: stricter than beancount where its
-/// date is valid (`2024-002-02` is 2024-02-02 there), on purpose, since the
-/// alternative is a wrong value. Matching beancount is the lexer fix in
-/// #2808; the matrix rows are pinned in `KNOWN_DATES` until then.
+/// A date with extra digits is one token, as beancount's `DATE`
+/// (`[0-9]{4,}[-/][0-9]+[-/][0-9]+`) is (#2808): a value date reads as that
+/// date (`2024-002-02` is 2024-02-02), a year past 9999 is an invalid date,
+/// and a date where the grammar wants a number (`balance ... 2024-002-02
+/// USD`) is the syntax error it is in beancount. What runs on past the date
+/// (`2024-002-02.5`, `2024-02-002,000`) is reported as beancount reports it.
+/// Our lexer used to split these into a number expression, which loaded as a
+/// wrong value with no error (`kk: 2024-002-02` was 2020), so they were
+/// reported until this fix. Every expectation below is bean-check 3.2.3's on
+/// the same input: the lines it reports, and whether a date is one of them.
 #[test]
-fn test_parse_reports_a_split_beancount_date_instead_of_misreading_it() {
-    for value in [
-        // A glued `DATE` and `NUMBER`: the last field has more than two digits.
-        "2024-02-002",
-        "2024-02-020",
-        "2024/02/002",
-        "2024-2-002",
-        "2024-02-0002",
-        // A glued number run: the year or the month is too long for our DATE.
-        "2024-002-02",
-        "02024-02-02",
-        "2024/002/02",
-        // Invalid dates in beancount (it reports them), wrong numbers here.
-        "20024-02-02",
-        "99999-01-01",
-        // The last number runs on past the digits: beancount takes the date
-        // and rejects the rest; read our way it was arithmetic again.
-        "2024-002-02.5",
-        "2024-002-02,000",
-        "2024-02-002.5",
-        "2024-02-002.",
-        "2024-02-002,000",
+fn test_parse_reads_a_long_form_date_in_every_position_as_beancount_does() {
+    // (value, which templates beancount reports, whether it names the date)
+    for (value, values_clean, amounts_error, date_error) in [
+        ("2024-002-02", true, true, false),
+        ("02024-02-02", true, true, false),
+        ("2024-02-002", true, true, false),
+        ("2024/002/02", true, true, false),
+        ("20024-02-02", false, true, true),
+        ("99999-01-01", false, true, true),
+        ("2024-002-02.5", false, true, false),
+        ("2024-02-002.", false, true, false),
     ] {
-        // `pushmeta` and `popmeta` produce no directive.
-        for (src, kept) in [
-            (format!("2024-01-01 open Assets:A\n  kk: {value}\n"), 1),
-            (format!("2024-01-01 custom \"x\" {value}\n"), 1),
-            (format!("pushmeta kk: {value}\npopmeta kk:\n"), 0),
-            (format!("2024-01-01 balance Assets:A {value} USD\n"), 1),
-            (format!("2024-01-01 price HOOL {value} USD\n"), 1),
+        for (src, is_value) in [
+            (format!("2024-01-01 open Assets:A\n  kk: {value}\n"), true),
+            (format!("2024-01-01 custom \"x\" {value}\n"), true),
+            (format!("2024-01-01 balance Assets:A {value} USD\n"), false),
+            (format!("2024-01-01 price HOOL {value} USD\n"), false),
+            (
+                format!("2024-01-01 *\n  Assets:A  {value} USD\n  Assets:B\n"),
+                false,
+            ),
+            (
+                format!("2024-01-01 *\n  Assets:A  1 HOOL @ {value} USD\n  Assets:B\n"),
+                false,
+            ),
         ] {
             let result = parse(&src);
-            // A value that runs on past the date (`2024-002-02.5`) is a syntax
-            // error in beancount too, so its `pushmeta` pushes nothing and the
-            // `popmeta` reports the absent key, as beancount does; a value that
-            // is exactly one date is pushed, as beancount pushes it.
-            let runs_on = value.contains(['.', ',']);
-            let expected = if src.starts_with("pushmeta") && runs_on {
-                2
+            let want_error = if is_value {
+                !values_clean
             } else {
-                1
+                amounts_error
             };
             assert_eq!(
-                result.errors.len(),
-                expected,
+                !result.errors.is_empty(),
+                want_error,
                 "{src:?}: {:?}",
                 result.errors
             );
-            if expected == 2 {
-                assert!(
+            if want_error {
+                let lines: std::collections::HashSet<usize> = result
+                    .errors
+                    .iter()
+                    .map(|e| src[..e.span.start].matches('\n').count())
+                    .collect();
+                assert_eq!(lines.len(), 1, "{src:?}: one line, {:?}", result.errors);
+                let named = result.errors.iter().any(|e| {
                     matches!(
-                        result.errors[1].kind,
-                        rustledger_parser::ParseErrorKind::InvalidPopmeta(ref key) if key == "kk"
-                    ),
-                    "{src:?}: {:?}",
-                    result.errors
-                );
+                        e.kind,
+                        rustledger_parser::ParseErrorKind::InvalidDateValue(_)
+                    )
+                });
+                assert_eq!(named, date_error, "{src:?}: {:?}", result.errors);
             }
-            let err = &result.errors[0];
-            assert_eq!(
-                &src[err.span.start..err.span.end],
-                value,
-                "{src:?}: {err:?}"
-            );
-            assert!(
-                err.message().contains("#2808"),
-                "{src:?}: {}",
-                err.message()
-            );
-            assert_eq!(
-                result.directives.len(),
-                kept,
-                "{src:?}: the directive is kept"
-            );
         }
     }
-    // Not a split date: a spaced expression, a thousands separator, a short
-    // first number, and a real date are all still read as before, and so is
-    // a decimal in the first two numbers (`2024.5-02-02`, `2024-0.5-02`),
-    // which is arithmetic in beancount too.
+    // Arithmetic stays arithmetic where beancount's `DATE` does not match: a
+    // spaced expression, a thousands separator, a short first number, one
+    // separator, and a decimal in the first two numbers.
     for value in [
         "2024 - 002 - 02",
         "1,234-02-02",
         "202-002-02",
-        "2024-02-02",
-        "10000",
+        "10000-5",
         "2024.5-02-02",
         "2024-0.5-02",
     ] {
@@ -947,4 +937,361 @@ fn test_parse_reports_doubled_thousands_separators_instead_of_misreading_them() 
         let result = parse(src);
         assert_eq!(result.errors.len(), 1, "{src:?}: {:?}", result.errors);
     }
+}
+
+/// Parse `src` on the green path (`parse`) and the red one, assert they agree,
+/// and return the green result.
+fn parse_both(src: &str) -> rustledger_parser::ParseResult {
+    let green = parse(src);
+    let red = rustledger_parser::cst::parse_red_only(src);
+    assert_eq!(
+        format!("{:?}", green.errors),
+        format!("{:?}", red.errors),
+        "{src:?}: green and red disagree on the errors"
+    );
+    assert_eq!(
+        format!("{:?}", green.directives),
+        format!("{:?}", red.directives),
+        "{src:?}: green and red disagree on the directives"
+    );
+    green
+}
+
+/// Each `src` is one transaction beancount rejects: exactly one error, the
+/// transaction is still loaded, `rledger format` refuses the file, and the
+/// error-tolerant formatter keeps it as written.
+fn assert_reported_once(label: &str, src: &str, message: &str) {
+    let r = parse_both(src);
+    assert_eq!(r.errors.len(), 1, "{label}: {src:?}: {:?}", r.errors);
+    assert!(
+        r.errors[0].to_string().contains(message),
+        "{label}: {src:?}: {}",
+        r.errors[0]
+    );
+    assert_eq!(r.directives.len(), 1, "{label}: the transaction is kept");
+    assert!(try_format_source(src).is_err(), "{label}");
+    assert_eq!(
+        rustledger_parser::format::format_source(src),
+        src,
+        "{label}"
+    );
+}
+
+/// A transaction has ONE flag, as beancount's `txn` is one token (#2802,
+/// stage 3): a second one was accepted in silence.
+#[test]
+fn test_parse_reports_a_second_transaction_flag() {
+    for header in [
+        "2024-01-01 * * \"x\"",
+        "2024-01-01 ** \"x\"",
+        "2024-01-01 !* \"x\"",
+        "2024-01-01 * ! \"x\"",
+        "2024-01-01 txn * \"x\"",
+        "2024-01-01 * A \"x\"",
+        "2024-01-01 * # \"x\"",
+        "2024-01-01A * \"x\"",
+    ] {
+        let src = format!("{header}\n  Assets:A  1 USD\n  Assets:B\n");
+        assert_reported_once(header, &src, "in transaction header");
+    }
+    // One flag of each kind is fine.
+    for flag in ["*", "!", "txn", "P", "#", "?", "&"] {
+        let src = format!("2024-01-01 {flag} \"x\"\n  Assets:A  1 USD\n  Assets:B\n");
+        assert!(parse_both(&src).errors.is_empty(), "{src:?}");
+    }
+}
+
+/// Only `;` starts a comment that is indented or in the middle of a line, in
+/// beancount; `%`, `#!` and `#+` there read the rest of the line as a comment
+/// here, so it vanished in silence. At column 0 they are still comments.
+#[test]
+fn test_parse_reports_a_percent_or_hash_comment_inside_a_transaction() {
+    for (label, src) in [
+        (
+            "header",
+            "2024-01-01 * \"p\" % 1\n  Assets:A  1 USD\n  Assets:B\n",
+        ),
+        (
+            "header #!",
+            "2024-01-01 * \"p\" #!x\n  Assets:A  1 USD\n  Assets:B\n",
+        ),
+        (
+            "posting",
+            "2024-01-01 *\n  Assets:A  1 USD % 1\n  Assets:B\n",
+        ),
+        (
+            "posting #+",
+            "2024-01-01 *\n  Assets:A  1 USD #+x\n  Assets:B\n",
+        ),
+        (
+            "tags line",
+            "2024-01-01 *\n  #t % 1\n  Assets:A  1 USD\n  Assets:B\n",
+        ),
+        (
+            "indented line",
+            "2024-01-01 *\n  % note\n  Assets:A  1 USD\n  Assets:B\n",
+        ),
+        (
+            "under a posting",
+            "2024-01-01 *\n  Assets:A  1 USD\n    #!m\n  Assets:B\n",
+        ),
+    ] {
+        assert_reported_once(label, src, "unexpected");
+    }
+    for src in [
+        "% note\n2024-01-01 *\n  Assets:A  1 USD\n  Assets:B\n",
+        "2024-01-01 * \"p\" ; c\n  Assets:A  1 USD ; c\n  ; note\n  Assets:B\n",
+    ] {
+        assert!(parse_both(src).errors.is_empty(), "{src:?}");
+    }
+}
+
+/// A token with no place in a posting line (#2802, stage 3), which the
+/// posting converter dropped and `rledger format` then deleted.
+#[test]
+fn test_parse_reports_a_stray_token_in_a_posting() {
+    for (label, posting) in [
+        ("before the amount", "Assets:A ! 1 USD"),
+        ("after the account", "Assets:A! 1 USD"),
+        ("two cost specs", "Assets:A  1 HOOL {1 USD} {2 USD}"),
+        ("two prices", "Assets:A  1 HOOL @ 2 USD @ 3 USD"),
+        ("junk in a cost", "Assets:A  1 HOOL {2 & USD}"),
+        ("two numbers in a cost", "Assets:A  1 HOOL {2 0 USD}"),
+        ("a tag after `{`", "Assets:A  1 HOOL {#2 USD}"),
+        ("two currencies", "Assets:A  1 USD EUR"),
+    ] {
+        let src = format!("2024-01-01 *\n  {posting}\n  Assets:B\n");
+        assert_reported_once(label, &src, "unexpected");
+    }
+}
+
+/// What beancount's grammar BUILDER rejects in a grammatical posting, at
+/// parse time there and here (#2802, stage 3), with the shapes it accepts.
+#[test]
+fn test_parse_reports_what_beancount_rejects_in_a_cost_or_price() {
+    for (label, posting, message) in [
+        (
+            "number and currency apart",
+            "1 HOOL {2, USD}",
+            "duplicate cost",
+        ),
+        (
+            "two dates",
+            "1 HOOL {2 USD, 2024-01-01, 2024-01-02}",
+            "duplicate date",
+        ),
+        ("two labels", "1 HOOL {\"a\", \"b\"}", "duplicate label"),
+        ("per-unit in a total", "1 HOOL {{2 # 3 USD}}", "total-cost"),
+        ("negative price", "1 HOOL @ -3 USD", "negative prices"),
+        (
+            "negative total price",
+            "1 HOOL @@ (1 - 4) USD",
+            "negative prices",
+        ),
+        (
+            "total price, no units",
+            "HOOL @@ 3 USD",
+            "without a number for its units",
+        ),
+    ] {
+        let src = format!("2024-01-01 *\n  Assets:A  {posting}\n  Assets:B\n");
+        assert_reported_once(label, &src, message);
+    }
+    for posting in [
+        "1 HOOL @ 0 USD",
+        "1 HOOL @ -0 USD",
+        "1 HOOL {2} @ 3 EUR",
+        "1 HOOL {USD} @ 3",
+        "1 HOOL {, 2 USD}",
+        "1 HOOL {# 2 USD}",
+        "1 HOOL {1 # 2 USD}",
+        "1 HOOL {2 USD, 2024-01-01, \"lot\"}",
+        "1 HOOL @",
+        "1 HOOL {}",
+    ] {
+        let src = format!("2024-01-01 *\n  Assets:A  {posting}\n  Assets:B\n");
+        assert!(parse_both(&src).errors.is_empty(), "{src:?}");
+    }
+}
+
+/// Cost merging (`{*}`) is a builder error we deliberately do not report:
+/// beancount 3.2.3 rejects it ("Cost merging is not supported yet"), and
+/// rledger implements it (average-cost merge booking). It is a correct feature
+/// beancount lacks, and rledger keeps such features: the rule is to match
+/// beancount on correctness, not on what it does not support (#2802). Pinned
+/// here, and in the matrix by `known_cost_merge`.
+#[test]
+fn test_parse_accepts_cost_merging_unlike_beancount() {
+    for posting in ["1 HOOL {*}", "1 HOOL {1 USD, *}", "-1 HOOL {*} @ 3 USD"] {
+        let src = format!("2024-01-01 *\n  Assets:A  {posting}\n  Assets:B\n");
+        assert!(parse_both(&src).errors.is_empty(), "{src:?}");
+    }
+}
+
+/// A cost and a price whose currencies are both written and differ is a
+/// parse error, for a buy and a sale alike, as beancount's builder reports
+/// it ("Cost and price currencies must match: USD != EUR"); the transaction
+/// is kept. A cost or a price written without a currency is not checked, as
+/// in beancount. Results from bean-check 3.2.3.
+#[test]
+fn test_parse_reports_a_cost_and_price_currency_mismatch() {
+    for posting in [
+        "10 HOOL {100 USD} @ 120 EUR",
+        "-10 HOOL {100 USD} @ 120 EUR",
+        "10 HOOL {100 USD} @@ 1200 EUR",
+        "10 HOOL {{1000 USD}} @ 120 EUR",
+        "10 HOOL {100 USD, 2024-01-01} @ 120 EUR",
+        "10 HOOL {10 # 5 USD} @ 120 EUR",
+    ] {
+        let src = format!("2024-01-01 *\n  Assets:A  {posting}\n  Assets:B\n");
+        let r = parse_both(&src);
+        assert_eq!(r.errors.len(), 1, "{src:?}: {:?}", r.errors);
+        assert_eq!(
+            r.errors[0].message(),
+            format!(
+                "parse error: {}: USD != EUR",
+                rustledger_parser::COST_PRICE_CURRENCY_MISMATCH
+            ),
+            "{src:?}"
+        );
+        assert_eq!(r.directives.len(), 1, "{src:?}: the transaction is kept");
+    }
+    for posting in [
+        "10 HOOL @ 120 EUR",
+        "10 HOOL {100} @ 120 EUR",
+        "10 HOOL {100 USD} @ 120",
+        "10 HOOL {100 USD} @ 120 USD",
+        "-10 HOOL {} @ 120 EUR",
+    ] {
+        let src = format!("2024-01-01 *\n  Assets:A  {posting}\n  Assets:B\n");
+        assert!(parse_both(&src).errors.is_empty(), "{src:?}");
+    }
+}
+
+/// A posting flag glued to its account is a flagged posting in beancount
+/// (`FLAG ACCOUNT`); it was an unrecognized line here.
+#[test]
+fn test_parse_accepts_a_posting_flag_glued_to_its_account() {
+    let r = parse_both("2024-01-01 *\n  !Assets:A  1 USD\n  *Assets:B\n");
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let rustledger_core::Directive::Transaction(t) = &r.directives[0].value else {
+        panic!("a transaction");
+    };
+    let flags: Vec<Option<char>> = t.postings.iter().map(|p| p.flag).collect();
+    assert_eq!(flags, [Some('!'), Some('*')]);
+}
+
+/// Stacked signs are a number in beancount (`(MINUS | PLUS) number_expr`
+/// nests), so `--1` is 1. They were reported as malformed here, and once
+/// accepted the single-sign shortcut read `--1` as -1, so both paths evaluate
+/// them now.
+#[test]
+fn test_parse_evaluates_stacked_signs_in_a_posting_amount() {
+    for (amount, expected) in [
+        ("--1 USD", "1"),
+        ("- -1 USD", "1"),
+        ("+-1 USD", "-1"),
+        ("(1 + 2) * - 3 USD", "-9"),
+        ("2 * --3 USD", "6"),
+    ] {
+        let src = format!("2024-01-01 *\n  Assets:A  {amount}\n  Assets:B\n");
+        let r = parse_both(&src);
+        assert!(r.errors.is_empty(), "{src:?}: {:?}", r.errors);
+        let rustledger_core::Directive::Transaction(t) = &r.directives[0].value else {
+            panic!("a transaction");
+        };
+        let Some(rustledger_core::IncompleteAmount::Complete(units)) = &t.postings[0].units else {
+            panic!("{src:?}: complete units");
+        };
+        assert_eq!(units.number.to_string(), expected, "{src:?}");
+        // `rledger format` keeps the expression, so the value round-trips.
+        let out = try_format_source(&src).expect("formats");
+        assert_eq!(non_whitespace(&out), non_whitespace(&src), "{src:?}");
+    }
+}
+
+/// beancount reads a one-letter currency only when a space, a tab or a `\n`
+/// follows it, so before a `\r` it is an invalid token, here too.
+///
+/// At the very end of a file with no final newline beancount rejects it as
+/// well, and we deliberately do not: `rledger format` adds the newline, after
+/// which the file is valid in both, so reporting it would make formatting not
+/// idempotent (it was found that way, by the fuzz corpus).
+#[test]
+fn test_parse_reports_a_one_letter_currency_before_cr_but_not_at_eof() {
+    for src in [
+        "2024-01-01 *\r\n  Assets:A  1 D\r\n  Assets:B\r\n",
+        "2024-01-01 price HOOL 1 D\r\n",
+    ] {
+        let r = parse_both(src);
+        assert_eq!(r.errors.len(), 1, "{src:?}: {:?}", r.errors);
+        assert!(
+            r.errors[0].to_string().contains("one-letter currency"),
+            "{src:?}: {}",
+            r.errors[0]
+        );
+    }
+    for src in [
+        "2024-01-01 price HOOL 1 D",
+        "2024-01-01 price HOOL 1 D\n",
+        "2024-01-01 *\n  Assets:A  1 USD\n  Assets:B  -1 D",
+        "2024-01-01 open Assets:A\n  kk: H",
+    ] {
+        assert!(parse_both(src).errors.is_empty(), "{src:?}");
+        let once = rustledger_parser::format::format_source(src);
+        assert_eq!(
+            rustledger_parser::format::format_source(&once),
+            once,
+            "{src:?}"
+        );
+    }
+}
+
+/// `%` is a FLAG in beancount (`[!&#?%]`), and a comment only as a whole line
+/// at column 0. As a posting flag, spaced or glued, and as a transaction flag
+/// it is valid; it was lexed as a comment to the end of the line, so the
+/// posting, or the rest of the header, vanished in silence.
+#[test]
+fn test_parse_reads_percent_as_a_flag_outside_column_0() {
+    let r = parse_both("2024-01-01 *\n  % Assets:A  1 USD\n  %Assets:B  -1 USD\n");
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let rustledger_core::Directive::Transaction(t) = &r.directives[0].value else {
+        panic!("a transaction");
+    };
+    let flags: Vec<Option<char>> = t.postings.iter().map(|p| p.flag).collect();
+    assert_eq!(flags, [Some('%'), Some('%')]);
+    let r = parse_both("2024-01-01 % \"n\"\n  Assets:A  1 USD\n  Assets:B\n");
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    let rustledger_core::Directive::Transaction(t) = &r.directives[0].value else {
+        panic!("a transaction");
+    };
+    assert_eq!(t.flag, '%');
+    // At column 0 it is still a comment line.
+    assert!(
+        parse_both("% note\n2024-01-01 open Assets:A\n")
+            .errors
+            .is_empty()
+    );
+}
+
+/// A one-letter transaction flag must be followed by a space, a tab or a
+/// `\n`, as for a one-letter currency: `P;c` and `P\r\n` are an invalid token
+/// in beancount.
+#[test]
+fn test_parse_reports_a_one_letter_transaction_flag_glued_to_what_follows() {
+    assert_reported_once(
+        "P;c",
+        "2024-01-01 P;c\n  Assets:A  1 USD\n  Assets:B\n",
+        "one-letter flag",
+    );
+    // `rledger format` normalizes the CRLF first, after which the flag is
+    // valid, so only the parse error is checked here.
+    let r = parse_both("2024-01-01 P\r\n  Assets:A  1 USD\r\n  Assets:B\r\n");
+    assert_eq!(r.errors.len(), 1, "{:?}", r.errors);
+    assert!(r.errors[0].to_string().contains("one-letter flag"));
+    assert!(
+        parse_both("2024-01-01 P ;c\n  Assets:A  1 USD\n  Assets:B\n")
+            .errors
+            .is_empty()
+    );
 }

@@ -6828,7 +6828,10 @@ fn entries_meta_carries_filename_and_lineno() {
             file_id: 0,
         })
         .collect();
-    let source_map = SourceMap::new();
+    // A real file behind `file_id` 0: a directive with no file has no
+    // location, and so no `filename` / `lineno` keys (#2825).
+    let mut source_map = SourceMap::new();
+    source_map.add_file("ledger.beancount".into(), "x".repeat(64).into());
     let mut executor = Executor::new_with_sources(&spanned, &source_map);
     let result = executor
         .execute(&parse("SELECT meta FROM #entries").expect("should parse"))
@@ -6872,7 +6875,10 @@ fn source_keys_reach_entries_meta_but_not_per_table_meta() {
             file_id: 0,
         })
         .collect();
-    let source_map = SourceMap::new();
+    // A real file behind `file_id` 0: a directive with no file has no
+    // location, and so no `filename` / `lineno` keys (#2825).
+    let mut source_map = SourceMap::new();
+    source_map.add_file("ledger.beancount".into(), "x".repeat(64).into());
     let mut executor = Executor::new_with_sources(&spanned, &source_map);
 
     let entries = executor
@@ -7043,9 +7049,9 @@ fn postings_table_materializes_balances_when_the_query_needs_them() {
     //   * a WHERE that reads `account_balance` still needs it materialized,
     //     even though the SELECT list does not mention it. Gating on the
     //     output alone made this query return zero rows.
-    //   * `SELECT *` on this table includes `balance` and `account_balance`
-    //     -- unlike the default source, whose wildcard excludes both -- so a
-    //     wildcard must force them on. Otherwise the columns come back empty.
+    //   * a query that names the columns gets them. `SELECT *` on this table
+    //     no longer shows either (#2829, bean-query's five wildcard columns),
+    //     so it no longer forces them on.
     let directives = make_test_directives();
 
     let filtered = execute_query(
@@ -7057,16 +7063,26 @@ fn postings_table_materializes_balances_when_the_query_needs_them() {
         "WHERE on account_balance returned nothing; the column was not materialized"
     );
 
+    let named = execute_query(
+        "SELECT balance, account_balance FROM #postings",
+        &directives,
+    );
+    for i in 0..2 {
+        assert!(
+            named.rows.iter().any(|r| r[i] != Value::Null),
+            "{} was empty on every row; it was not materialized",
+            named.columns[i]
+        );
+    }
+
     let starred = execute_query("SELECT * FROM #postings", &directives);
-    let ab = starred
-        .columns
-        .iter()
-        .position(|c| c == "account_balance")
-        .expect("#postings wildcard must include account_balance");
     assert!(
-        starred.rows.iter().any(|r| r[ab] != Value::Null),
-        "SELECT * left account_balance empty on every row; the wildcard did not \
-         force materialization"
+        !starred
+            .columns
+            .iter()
+            .any(|c| c == "balance" || c == "account_balance"),
+        "{:?}",
+        starred.columns
     );
 }
 
@@ -7121,19 +7137,18 @@ fn postings_table_materializes_gated_columns_when_reachable() {
         "entry.narration returned Null; the entry object was not materialized"
     );
 
-    // And the wildcard, which names nothing at all.
-    // `SELECT *` shows `meta` but NOT `entry` or the `_`-prefixed helpers --
-    // `wildcard_hidden` omits them -- so only `meta` has to be forced on for a
-    // bare wildcard. `entry` is covered by the attribute case above.
-    let star = execute_query("SELECT * FROM #postings", &directives);
-    let i = star
-        .columns
-        .iter()
-        .position(|c| c == "meta")
-        .expect("#postings wildcard must include meta");
+    // The bare `meta` column. `SELECT *` no longer shows it (#2829,
+    // bean-query's five wildcard columns), so a wildcard forces nothing on.
+    let named = execute_query("SELECT meta FROM #postings", &directives);
     assert!(
-        star.rows.iter().any(|row| row[i] != Value::Null),
-        "SELECT * left meta Null on every row; the wildcard did not force it on"
+        named.rows.iter().any(|row| row[0] != Value::Null),
+        "meta was Null on every row; it was not materialized"
+    );
+    let star = execute_query("SELECT * FROM #postings", &directives);
+    assert!(
+        !star.columns.iter().any(|c| c == "meta"),
+        "{:?}",
+        star.columns
     );
 }
 
@@ -8098,15 +8113,12 @@ fn test_postings_table_select_all() {
     let result = execute_query("SELECT * FROM #postings", &directives);
 
     assert_eq!(result.len(), 4);
-    // Check all columns are present
-    assert!(result.columns.contains(&"date".to_string()));
-    assert!(result.columns.contains(&"flag".to_string()));
-    assert!(result.columns.contains(&"payee".to_string()));
-    assert!(result.columns.contains(&"narration".to_string()));
-    assert!(result.columns.contains(&"account".to_string()));
-    assert!(result.columns.contains(&"number".to_string()));
-    assert!(result.columns.contains(&"currency".to_string()));
-    assert!(result.columns.contains(&"balance".to_string()));
+    // bean-query's postings wildcard (#2829); every other column is
+    // selectable by name (`test_postings_table_all_beancount_columns`).
+    assert_eq!(
+        result.columns,
+        ["date", "flag", "payee", "narration", "position"]
+    );
 }
 
 #[test]
@@ -9017,7 +9029,6 @@ fn test_postings_table_lineno_query() {
 fn test_postings_table_all_beancount_columns() {
     // Verify all columns from Python beancount's postings table are present
     let directives = make_postings_test_directives();
-    let result = execute_query("SELECT * FROM #postings LIMIT 1", &directives);
     let expected_columns = [
         "type",
         "id",
@@ -9050,12 +9061,16 @@ fn test_postings_table_all_beancount_columns() {
         "meta",
         "accounts",
     ];
-    for col in &expected_columns {
-        assert!(
-            result.columns.contains(&col.to_string()),
-            "Missing column: {col}"
-        );
-    }
+    // Each by name: `SELECT *` gives only the five wildcard columns (#2829).
+    let result = execute_query(
+        &format!(
+            "SELECT {} FROM #postings LIMIT 1",
+            expected_columns.join(", ")
+        ),
+        &directives,
+    );
+    assert_eq!(result.columns, expected_columns);
+    assert_eq!(result.rows[0].len(), expected_columns.len());
 }
 
 // ============================================================================
@@ -9389,7 +9404,9 @@ fn test_convert_unconvertible_currency_kept_original() {
 
     // Query positions converting to EUR - JPY has no conversion rate
     let result = execute_query(
-        "SELECT convert(sum(position), 'EUR') WHERE account ~ '^Assets:Bank' GROUP BY 1",
+        // No `GROUP BY 1`: it would reference the aggregate column, which
+        // bean-query refuses (#2827).
+        "SELECT convert(sum(position), 'EUR') WHERE account ~ '^Assets:Bank'",
         &directives,
     );
 

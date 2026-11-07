@@ -3,17 +3,6 @@
 //! This module provides a fast tokenizer for Beancount syntax using the Logos crate,
 //! which generates a DFA-based lexer with SIMD optimizations where available.
 
-// The `Logos` derive on `Token` generates one large lexer function: the
-// workspace builds logos with `state_machine_codegen`, which trades that
-// frame for no per-character recursion on long tokens (#2789). The lint
-// fires on the generated `impl`, which an attribute on the enum does not
-// reach. `expect` rather than `allow`: if the feature is dropped, the
-// expectation goes unfulfilled and clippy points back here.
-#![expect(
-    clippy::large_stack_frames,
-    reason = "state_machine_codegen trades one large lexer frame for no per-character recursion (#2789)"
-)]
-
 use logos::Logos;
 use std::fmt;
 use std::ops::Range;
@@ -83,9 +72,13 @@ pub enum Token<'src> {
     #[regex(r"[ \t]+")]
     Whitespace(&'src str),
     // ===== Literals =====
-    /// A date in YYYY-MM-DD, YYYY-M-D, YYYY/MM/DD, or YYYY/M/D format.
-    /// Single-digit month and day are accepted (e.g., 2024-1-5).
-    #[regex(r"\d{4}[-/]\d{1,2}[-/]\d{1,2}")]
+    /// A date: beancount's `DATE` rule, `[0-9]{4,}[-/][0-9]+[-/][0-9]+`, so
+    /// single-digit fields (`2024-1-5`), `/` separators and extra leading zeros
+    /// (`02024-01-01`, `2024-001-01`) all lex as one date, as in beancount
+    /// (#2808). Whether the fields form a real date is decided when the token is
+    /// read, by `parse_date_token`, as beancount decides it when its lexer
+    /// builds the date.
+    #[regex(r"[0-9]{4,}[-/][0-9]+[-/][0-9]+")]
     Date(&'src str),
 
     /// A number with optional thousands separators and decimals.
@@ -626,11 +619,34 @@ pub fn is_valid_account_name(name: &str) -> bool {
     lexer.span() == (0..name.len()) && lexer.next().is_none()
 }
 
+/// The byte length of the date `text` starts with, or `None` if it does not
+/// start with one.
+///
+/// Implemented by running the lexer, as [`is_valid_account_name`] is, so it is
+/// the parser's own rule (beancount's `DATE`, `[0-9]{4,}[-/][0-9]+[-/][0-9]+`):
+/// `2024-1-5`, `2024/01/05` and `02024-01-01` are dates, `24-01-15` is not.
+/// Says nothing about whether the fields form a real calendar date; see
+/// [`crate::parse_date`] for that.
+#[must_use]
+pub fn leading_date_len(text: &str) -> Option<usize> {
+    let mut lexer = Token::lexer(text);
+    let Some(Ok(Token::Date(date))) = lexer.next() else {
+        return None;
+    };
+    Some(date.len())
+}
+
 /// Whether `name` is a valid commodity (currency) name.
 ///
 /// Implemented by running the lexer, so it is the same rule the parser
 /// applies: a configured currency the parser would reject is caught where it
 /// is configured rather than when the emitted ledger fails to re-parse.
+///
+/// This is the canonical currency-name check; route new callers here.
+/// The one surface that cannot is `rustledger-core`'s `Amount::from_str`
+/// (core is below the parser), which keeps a documented copy
+/// (`is_valid_commodity` in `rustledger-core/src/amount.rs`) pinned to
+/// this function by the `amount_from_str_currency_matches_lexer` test.
 #[must_use]
 pub fn is_valid_currency(name: &str) -> bool {
     let mut lexer = Token::lexer(name);
@@ -860,6 +876,30 @@ impl<'src> Iterator for TokenIter<'src> {
                 span.end = end;
                 result = Ok(Token::Whitespace(&source[span.clone()]));
             }
+            // A `%` that is not at column 0 is a FLAG in beancount (`[!&#?%]`),
+            // never a comment: `  % Assets:A  1 USD` is a flagged posting and
+            // `2024-01-01 % "x"` a transaction there (#2802). Only a column-0 `%`
+            // line is skipped, as a whole-line comment. Lexing it as a comment to
+            // the end of the line dropped the posting, or the rest of the line, in
+            // silence. Rewritten here, before the arms below, so an indented one
+            // still gets its `Indent` like any other token; the lexer resumes
+            // right after it, and a stray `%` elsewhere is reported by the line's
+            // own rule.
+            //
+            // A column-0 `%` with nothing after it on its line is a FLAG too:
+            // beancount's rule is `^{FLAGS}/.`, which needs one more character
+            // before the line ending, so a bare `%` line is its `unexpected
+            // FLAG` error there (#2779). A `\r` counts as that character, so a
+            // bare `%` on a CRLF line is still skipped.
+            if matches!(result, Ok(Token::PercentComment(_)))
+                && !(self.at_line_start
+                    && span.start == self.last_newline_end
+                    && beancount_ignores_line(&source[span.start..]))
+            {
+                self.restart_lexer(span.start + 1);
+                span.end = span.start + 1;
+                result = Ok(Token::Flag(&source[span.clone()]));
+            }
 
             if !self.keep_whitespace && matches!(result, Ok(Token::Whitespace(_))) {
                 // AST-path drops mid-line whitespace; the CST path keeps
@@ -875,9 +915,23 @@ impl<'src> Iterator for TokenIter<'src> {
                     self.last_newline_end = span.end;
                     return Some((Token::Newline, span.into()));
                 }
-                Ok(Token::Hash) if self.at_line_start && span.start == self.last_newline_end => {
-                    // Hash at very start of line (no indentation) is a comment
-                    // Find end of line and create a comment token for the whole line
+                // A column-0 `#`, `!`, `&`, `?` or `:` with more of its line
+                // after it: beancount ignores the whole line (`^[\*\:\#]/.`
+                // and `^{FLAGS}/.`, with `FLAGS [!&#?%]`, enter its IGNORE
+                // state), so it is one comment token here. The `!`, `&`, `?`
+                // and `:` lines were errors before (#2779). A bare marker,
+                // with its line ending (or the end of the source) right after
+                // it, is not ignored there, as the rule needs one more
+                // character: it stays its own token and the parser reports the
+                // line, as beancount reports `unexpected HASH`, `FLAG` or
+                // `COLON`. `%` is handled above and `*` below. A `#` followed
+                // by a tag character never gets here: logos lexes it as a
+                // `Tag`, as beancount's tag rule wins over `^#/.` there too.
+                Ok(Token::Hash | Token::Pending | Token::Colon | Token::Flag("&" | "?"))
+                    if self.at_line_start
+                        && span.start == self.last_newline_end
+                        && beancount_ignores_line(&source[span.start..]) =>
+                {
                     let comment_start = span.start;
                     let line_end = line_end_before_newline(source, span.end);
                     let comment_text = &source[comment_start..line_end];
@@ -888,9 +942,10 @@ impl<'src> Iterator for TokenIter<'src> {
                     // past the line ending and swallowed the directives
                     // after it, with no error (#2775). The lexer resumes
                     // exactly at `line_end`, so the next call emits the
-                    // `Newline` (or ends the stream) normally. `line_end`
-                    // sits on a `\r`, a `\n` or the end of the source, so
-                    // it is always a char boundary in range.
+                    // `Newline` (or the stray-`\r` trivia before it, or ends
+                    // the stream) normally. `line_end` sits on a `\r`, a
+                    // `\n` or the end of the source, so it is always a char
+                    // boundary in range.
                     self.lexer.bump(line_end - span.end);
                     self.at_line_start = false;
                     return Some((
@@ -1028,6 +1083,45 @@ impl<'src> Iterator for TokenIter<'src> {
     }
 }
 
+/// Whether beancount ignores the whole line starting at column 0 with `line`.
+///
+/// `line` is the line's text from column 0 on (the rest of the source from
+/// there will do). Ignored are a `;` comment, and a `#`, `*`, `:` or flag
+/// character (`[!&#?%]`) with at least one more byte on its line, except a
+/// `#` that starts a tag (#2779).
+///
+/// Beancount's rules are `^[\*\:\#]/.` and `^{FLAGS}/.`, and flex's `.` is
+/// any byte but `\n`: a bare marker, with its line ending or the end of the
+/// source right after it, is a token there (reported as `unexpected HASH`,
+/// `FLAG`, `ASTERISK` or `COLON`), and a `\r` counts as the byte, so a bare
+/// marker on a CRLF line is ignored. A `#` with a tag character after it is
+/// a `TAG`, as beancount's longer tag match wins. The one rule for the
+/// lexer's column-0 `#`, `!`, `&`, `?`, `:` and `%` arms in `TokenIter` and
+/// for `convert`'s `previous_line_is_a_gap` and `is_section_marker` (the
+/// `*` heading), of the formatter's `emit_error_node`, and of the LSP's
+/// parse-error surface cleanup (`clean_line` in `rustledger-lsp`), which is
+/// why it is public.
+///
+/// One deliberate mirror: `format::advance_source_state`, the formatter's
+/// char-at-a-time line-ending state machine, cannot call this (it is a
+/// `const fn` over one char and a peek), so it opens a comment at any
+/// column-0 `!`, `&`, `?`, `:`, `%`, `*` or non-tag `#`. It may treat a bare
+/// marker as a comment, which is harmless there (the comment closes at the
+/// line ending right after it). Agreement on the lines that matter is pinned
+/// by `source_state_classification_agrees_with_lexer`; revisit if the state
+/// machine ever needs the bare-marker distinction.
+#[must_use]
+pub fn beancount_ignores_line(line: &str) -> bool {
+    match line.as_bytes() {
+        [b';', ..] => true,
+        [b'#', next, ..] => {
+            *next != b'\n' && !(next.is_ascii_alphanumeric() || b"-_/.".contains(next))
+        }
+        [b'*' | b':' | b'!' | b'&' | b'?' | b'%', next, ..] => *next != b'\n',
+        _ => false,
+    }
+}
+
 /// The end of the line that contains `from`, including its `\n` (or the end
 /// of the source). `TokenIter` lexes one such line at a time after a failed
 /// string scan was cut at its line, up to where that scan stopped (#2784).
@@ -1039,20 +1133,28 @@ fn line_chunk_end(source: &str, from: usize) -> usize {
 
 /// Where a whole-line token that starts before `from` ends: before the
 /// `Newline` token that follows it, or at the end of the source, and before
-/// any run of `\r` bytes right in front of either.
+/// the stray-`\r` run (a `[ \t\r]` run from a `\r` on) right in front of
+/// either.
 ///
 /// `Newline` is `\r?\n`, so on a CRLF line it starts at the `\r`; ending at
 /// the `\n` would hand that byte to both tokens and break the lossless
-/// round-trip (#2769). Further `\r` bytes before it (`\r\r\n`), and a
-/// trailing `\r` at the end of the source, are left out too: they lex as the
-/// `Whitespace` trivia that follows the line (#2774), as after any other
-/// token. A `\r` with more of the line after it stays in the line. The
-/// result sits on a `\r`, a `\n` or the end of the source, so it is always a
-/// char boundary. Shared by the column-0 `#` comment and `*` heading arms of
-/// `TokenIter`, and by its cut of an unterminated string.
+/// round-trip (#2769). A run of spaces, tabs and `\r`s from a `\r` on before
+/// it (`\r\r\n`, `\r \r\n`), or before the end of the source, is left out
+/// too: it lexes as the `Whitespace` trivia that follows the line (#2774),
+/// as after any other token, and `format::crlf_to_lf_outside_strings` drops
+/// it, so the formatter reads the line the same with or without that fold
+/// (#2779). Spaces and tabs before the run's first `\r` stay in the line,
+/// and so does a `\r` with more of the line after it. The result sits on a
+/// `\r`, a `\n` or the end of the source, so it is always a char boundary.
+/// Shared by the column-0 `#` comment and `*` heading arms of `TokenIter`,
+/// and by its cut of an unterminated string.
 fn line_end_before_newline(source: &str, from: usize) -> usize {
     let nl = source[from..].find('\n').map_or(source.len(), |i| from + i);
-    from + source[from..nl].trim_end_matches('\r').len()
+    let line = &source[from..nl];
+    let run_start = line.trim_end_matches([' ', '\t', '\r']).len();
+    from + line[run_start..]
+        .find('\r')
+        .map_or(line.len(), |i| run_start + i)
 }
 
 fn tokenize_inner(source: &str, keep_whitespace: bool) -> Vec<(Token<'_>, Span)> {
@@ -1416,6 +1518,76 @@ mod tests {
         let s = format!("{}", Token::Error(payload));
         assert_eq!(s, "foo<BOM>bar");
         assert!(!s.contains(crate::bom::BOM_CHAR));
+    }
+
+    /// A `%` that is not at column 0 is a FLAG, as in beancount (#2802), and an
+    /// indented one still gets its `Indent`, like any token starting a line. At
+    /// column 0 it is a whole-line comment.
+    #[test]
+    fn test_tokenize_percent_is_a_flag_outside_column_0() {
+        let tokens = tokenize("2024-01-01 *\n  % Assets:A  1 USD\n% note\n");
+        let kinds: Vec<String> = tokens.iter().map(|(t, _)| format!("{t:?}")).collect();
+        let at = kinds
+            .iter()
+            .position(|k| k.starts_with("Flag(\"%\")"))
+            .expect("a `%` flag");
+        assert!(kinds[at - 1].starts_with("Indent("), "{kinds:?}");
+        assert!(kinds[at + 1].starts_with("Account("), "{kinds:?}");
+        assert!(
+            kinds
+                .iter()
+                .any(|k| k.starts_with("PercentComment(\"% note\")")),
+            "{kinds:?}"
+        );
+    }
+
+    /// Which column-0 lines beancount ignores (#2779), checked against
+    /// bean-check 3.2.3, and that the lexer makes exactly those (but `*`,
+    /// which keeps its own token shape) one comment token.
+    #[test]
+    fn test_beancount_ignores_line_matches_the_lexer() {
+        let cases = [
+            ("; x", true),
+            (";", true),
+            ("# x", true),
+            ("#!x", true),
+            ("#\r", true),
+            ("#", false),
+            ("#\n", false),
+            ("#a b", false),
+            ("#.x", false),
+            ("! x", true),
+            ("!x", true),
+            ("!\r", true),
+            ("!", false),
+            ("!\n", false),
+            ("&x", true),
+            ("&", false),
+            ("?x", true),
+            ("?\n", false),
+            (":x", true),
+            (": \"q", true),
+            (":\n", false),
+            ("%x", true),
+            ("%\r", true),
+            ("%\n", false),
+            ("*x", true),
+            ("*", false),
+            ("P x", false),
+            ("2024", false),
+        ];
+        for (line, ignored) in cases {
+            assert_eq!(beancount_ignores_line(line), ignored, "{line:?}");
+            if line.starts_with('*') {
+                continue;
+            }
+            let first = &tokenize(line)[0].0;
+            let is_comment = matches!(
+                first,
+                Token::Comment(_) | Token::PercentComment(_) | Token::Shebang(_)
+            );
+            assert_eq!(is_comment, ignored, "{line:?}: {first:?}");
+        }
     }
 
     /// A mid-file BOM (any U+FEFF not at strict byte 0) reaches the
@@ -1801,6 +1973,85 @@ mod tests {
         }
         for bad in ["", "usd", "€", " USD", "USD ", "US D", "1USD"] {
             assert!(!ok(bad), "{bad:?}");
+        }
+    }
+
+    /// Drift guard for #2807: `rustledger-core`'s `Amount::from_str` cannot
+    /// call [`is_valid_currency`] (core is below the parser), so it carries a
+    /// documented copy of the rule (`is_valid_commodity` in
+    /// `rustledger-core/src/amount.rs`). This compares the two on every
+    /// string of up to five characters over an alphabet covering each
+    /// character class the rule distinguishes, plus the one-letter flag
+    /// letters, the shapes that broke and the keyword tokens that outrank a
+    /// currency.
+    #[test]
+    fn amount_from_str_currency_matches_lexer() {
+        use rustledger_core::Amount;
+        use std::str::FromStr;
+
+        fn agree(s: &str) {
+            let core = Amount::from_str(&format!("1 {s}")).is_ok();
+            assert_eq!(
+                core,
+                is_valid_currency(s),
+                "Amount::from_str and is_valid_currency disagree on {s:?}"
+            );
+        }
+
+        // `T` and `P` are flag letters (`[PSTCURM]`): a lexer change that let a
+        // flag token beat `Currency` for one letter would trip here.
+        const ALPHABET: [char; 12] = [
+            'A', 'T', 'P', '0', '\'', '.', '_', '-', '/', 'a', ':', '\u{c9}',
+        ];
+        let mut frontier = vec![String::new()];
+        for _ in 0..5 {
+            let mut next = Vec::with_capacity(frontier.len() * ALPHABET.len());
+            for prefix in &frontier {
+                for c in ALPHABET {
+                    let mut s = prefix.clone();
+                    s.push(c);
+                    agree(&s);
+                    next.push(s);
+                }
+            }
+            frontier = next;
+        }
+
+        for s in [
+            "/6J",
+            "/ESM24",
+            "/LOX21_211204_P100.25",
+            "USD_",
+            "A",
+            "C_",
+            "HOOL'",
+            "P",
+            "S",
+            "T",
+            "C",
+            "U",
+            "R",
+            "M",
+            "TT",
+            "USD-",
+            "BRK.B",
+            "/1.14",
+            "TRUE",
+            "FALSE",
+            "NULL",
+            "True",
+            "TRUEX",
+            "NULL1",
+            "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789",
+        ] {
+            agree(s);
+        }
+        // The named shapes, pinned on both sides (not just agreement).
+        for good in ["/6J", "/ESM24", "A"] {
+            assert!(is_valid_currency(good), "{good}");
+        }
+        for bad in ["USD_", "C_", "HOOL'", "USD-"] {
+            assert!(!is_valid_currency(bad), "{bad}");
         }
     }
 

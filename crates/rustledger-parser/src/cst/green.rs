@@ -200,6 +200,7 @@ pub(super) fn convert_transaction_header(
 fn simple_amount(node: &rowan::GreenNodeData) -> Option<IncompleteAmount> {
     use crate::SyntaxKind as K;
     let mut sign_minus = false;
+    let mut signs = 0usize;
     let mut number: Option<rust_decimal::Decimal> = None;
     let mut number_seen = false;
     let mut currency: Option<Currency> = None;
@@ -210,8 +211,15 @@ fn simple_amount(node: &rowan::GreenNodeData) -> Option<IncompleteAmount> {
             continue;
         };
         match crate::BeancountLanguage::kind_from_raw(t.kind()) {
-            K::MINUS if !number_seen => sign_minus = true,
-            K::PLUS if !number_seen => {}
+            // A second sign (`--1`, `- -1`) is an expression: bail to red,
+            // whose evaluator reads `--1` as 1 (mirrors `Amount::is_arithmetic`,
+            // #2802).
+            K::MINUS | K::PLUS if !number_seen && signs > 0 => complex = true,
+            K::MINUS if !number_seen => {
+                signs += 1;
+                sign_minus = true;
+            }
+            K::PLUS if !number_seen => signs += 1,
             K::NUMBER if !number_seen => {
                 number_seen = true;
                 number = parse_decimal_token(t.text());
@@ -586,8 +594,76 @@ pub(super) fn walk_descendants(
             custom_pushmeta_errors: Vec::new(),
         },
     };
-    w.walk(root.green(), false);
+    w.walk(root.green(), false, None);
     w.result
+}
+
+/// The index, among `node`'s children, of a `TRANSACTION` header's or a
+/// `POSTING`'s flag token when that flag is a one-letter `CURRENCY` (`T`,
+/// `P`, ...); `None` for any other node, or when the flag is absent or of
+/// another kind.
+///
+/// Green mirror of red's `convert::is_flag_token`, which asks
+/// [`super::ast::Transaction::flag`] / [`super::ast::Posting::flag`] and so
+/// cannot read the flag differently from them. This copy follows those two
+/// accessors step for step:
+///
+/// - Transaction: the header is the direct-child tokens after the leading
+///   trivia, up to the first `NEWLINE`; the flag is the first flag-kind token
+///   before the first `STRING` / `TAG` / `LINK`.
+/// - Posting: the flag is the first direct-child token that is not
+///   whitespace, if it comes before the `ACCOUNT`.
+///
+/// Child nodes are skipped (but still counted), as the accessors skip them.
+/// If either accessor changes, change this with it; the
+/// `parse_green_eq_red_corpus` test and the `fuzz_green_eq_red` target compare
+/// the two walkers' `currency_occurrences`.
+fn flag_child_index(node: &rowan::GreenNodeData, kind: crate::SyntaxKind) -> Option<usize> {
+    use crate::SyntaxKind as K;
+    let is_flag_kind = |k: K, text: &str| {
+        matches!(k, K::STAR | K::PENDING_KW | K::FLAG | K::HASH)
+            || (k == K::TXN_KW && kind == K::TRANSACTION)
+            || (k == K::CURRENCY && text.len() == 1)
+    };
+    let mut tokens = node
+        .children()
+        .enumerate()
+        .filter_map(|(i, child)| match child {
+            NodeOrToken::Token(t) => Some((
+                i,
+                crate::BeancountLanguage::kind_from_raw(t.kind()),
+                t.text(),
+            )),
+            NodeOrToken::Node(_) => None,
+        });
+    let (index, flag_kind) = match kind {
+        K::TRANSACTION => {
+            let (i, k, _) = tokens
+                .skip_while(|(_, k, _)| {
+                    matches!(
+                        k,
+                        K::WHITESPACE
+                            | K::NEWLINE
+                            | K::COMMENT
+                            | K::PERCENT_COMMENT
+                            | K::SHEBANG
+                            | K::EMACS_DIRECTIVE
+                    )
+                })
+                .take_while(|(_, k, _)| !matches!(k, K::NEWLINE | K::STRING | K::TAG | K::LINK))
+                .find(|(_, k, text)| is_flag_kind(*k, text))?;
+            (i, k)
+        }
+        K::POSTING => {
+            let (i, k, text) = tokens.find(|(_, k, _)| *k != K::WHITESPACE)?;
+            if !is_flag_kind(k, text) {
+                return None;
+            }
+            (i, k)
+        }
+        _ => return None,
+    };
+    (flag_kind == K::CURRENCY).then_some(index)
 }
 
 struct DescendantsWalker<'a> {
@@ -606,9 +682,16 @@ struct DescendantsWalker<'a> {
 }
 
 impl DescendantsWalker<'_> {
-    fn walk(&mut self, node: &rowan::GreenNodeData, in_error_node: bool) {
+    /// `flag_child` is the index, among `node`'s children, of its flag token
+    /// (see [`flag_child_index`]), kept out of `currency_occurrences`.
+    fn walk(
+        &mut self,
+        node: &rowan::GreenNodeData,
+        in_error_node: bool,
+        flag_child: Option<usize>,
+    ) {
         use crate::SyntaxKind as K;
-        for child in node.children() {
+        for (index, child) in node.children().enumerate() {
             match child {
                 NodeOrToken::Node(n) => {
                     let kind = crate::BeancountLanguage::kind_from_raw(n.kind());
@@ -628,14 +711,26 @@ impl DescendantsWalker<'_> {
                     // these here would silently strip diagnostics from the loader
                     // and CLI, which take that path.
                     self.node_shape_errors(n, kind);
-                    self.walk(n, in_error_node || kind == K::ERROR_NODE);
+                    let flag_child = if self.collect_occurrences {
+                        flag_child_index(n, kind)
+                    } else {
+                        None
+                    };
+                    self.walk(n, in_error_node || kind == K::ERROR_NODE, flag_child);
                 }
                 NodeOrToken::Token(t) => {
                     let start = self.offset;
                     let len = u32::from(t.text_len()) as usize;
                     self.offset += len;
                     let kind = crate::BeancountLanguage::kind_from_raw(t.kind());
-                    self.token(kind, t.text(), start, len, in_error_node);
+                    self.token(
+                        kind,
+                        t.text(),
+                        start,
+                        len,
+                        in_error_node,
+                        flag_child == Some(index),
+                    );
                 }
             }
         }
@@ -805,6 +900,7 @@ impl DescendantsWalker<'_> {
         start: usize,
         len: usize,
         in_error_node: bool,
+        is_flag: bool,
     ) {
         use crate::SyntaxKind as K;
         // ---- column-0 comment state machine ----
@@ -837,7 +933,7 @@ impl DescendantsWalker<'_> {
             return;
         }
         let span = Span::new(start, start + len);
-        if self.collect_occurrences && kind == K::CURRENCY && !in_error_node {
+        if self.collect_occurrences && kind == K::CURRENCY && !in_error_node && !is_flag {
             self.result
                 .currency_occurrences
                 .push(Spanned::new(Currency::new(text), span));
@@ -1117,7 +1213,7 @@ fn tl_transaction_header_check(
         }
         offset += len;
     }
-    if let Some((defect, range)) = super::txn_header::first_header_defect(tokens) {
+    if let Some((defect, range)) = super::txn_header::first_header_defect_in(tokens, stripped) {
         out.push(super::convert::header_defect_error(
             defect, &range, stripped, bom_offset,
         ));
@@ -1656,6 +1752,15 @@ mod tests {
             "2020-01-01 * \"é payee\" X:*:Y\n  A 1 EUR\n  B\n",       // multi-byte + junk
             // Valid shapes that must stay clean on BOTH paths.
             "2012-12-17 P \"Payee\" \"Narration\"\n  A 1 USD\n  B\n", // 1-char CURRENCY flag
+            // One-letter CURRENCY flags stay out of `currency_occurrences` on
+            // both paths: header and posting flags, a flag after leading
+            // trivia, `txn` / `*` before a later one-letter token, and a stray
+            // one-letter currency after the narration (not a flag).
+            "2024-01-01 commodity T\n2024-01-16 T \"x\"\n  P A 1 T\n  B\n",
+            "2020-01-01 open A\n\n; c\n2020-01-02 T \"x\"\n  A 1 T\n  B\n",
+            "2020-01-01 txn T \"x\"\n  A 1 USD\n  B\n",
+            "2020-01-01 * \"x\" T\n  * A 1 USD\n  B\n",
+            "2020-01-01 T\n  T A 1 T\n  B\n",
             "2020-01-01 * \"p\" \"n\" ; trailing comment\n  A 1 USD\n  B\n",
             // #2628: leading trivia (a blank line, a comment line) sits inside
             // the transaction node once a directive precedes it. The header

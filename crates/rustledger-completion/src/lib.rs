@@ -16,20 +16,12 @@
 //! 2. **Candidate generation** — the `*_candidates` functions produce
 //!    neutral [`CompletionCandidate`] lists for each context.
 
-/// Standard Beancount account types.
-///
-/// A DELIBERATE copy of `rustledger_core::ACCOUNT_TYPES`, which names this one
-/// in return. This crate has no dependencies at all — that is what lets both
-/// the LSP and the WASM editor take it — so it cannot read core's.
-///
-/// Kept honest by `account_types_match_core` in `rustledger-lsp`, which is a
-/// crate that can see both. Without that guard the copy is the #1964 shape:
-/// two lists that agree until one of them does not, with each side's tests
-/// passing throughout.
+/// Standard Beancount account types: core's list, as a slice, so editor
+/// surfaces read the one canonical copy.
 ///
 /// Only the DEFAULT roots. Classification of a real account belongs to
 /// `rustledger_core::AccountTypes`, which honors the `name_*` renames.
-pub const ACCOUNT_TYPES: &[&str] = &["Assets", "Liabilities", "Equity", "Income", "Expenses"];
+pub const ACCOUNT_TYPES: &[&str] = &rustledger_core::ACCOUNT_TYPES;
 
 /// Standard Beancount directives.
 pub const DIRECTIVES: &[&str] = &[
@@ -273,12 +265,11 @@ pub fn classify_context(before_cursor: &str) -> CompletionContext {
         return CompletionContext::InsideString;
     }
 
-    // Check for date at line start (YYYY-MM-DD pattern). Guard the
-    // 10-byte split on a char boundary: a `YYYY-MM-DD` prefix is all
-    // ASCII, so if byte 10 lands mid-character the line can't be a
-    // date, and slicing there would panic on multi-byte input.
-    if trimmed.len() >= 10 && trimmed.is_char_boundary(10) && is_date_like(&trimmed[..10]) {
-        let after_date = trimmed[10..].trim_start();
+    // Check for a date at line start, by the parser's own `DATE` rule
+    // (`2024-1-5`, `2024/01/05` and `02024-01-01` are all dates). The
+    // date is ASCII, so its length is a char boundary.
+    if let Some(date_len) = rustledger_parser::leading_date_len(trimmed) {
+        let after_date = trimmed[date_len..].trim_start();
         if after_date.is_empty() {
             return CompletionContext::AfterDate;
         }
@@ -428,23 +419,6 @@ fn ends_in_open_string(before: &str) -> bool {
         }
     }
     in_string
-}
-
-/// Check if a string looks like a date (YYYY-MM-DD).
-fn is_date_like(s: &str) -> bool {
-    if s.len() != 10 {
-        return false;
-    }
-    let chars: Vec<char> = s.chars().collect();
-    chars[4] == '-'
-        && chars[7] == '-'
-        && chars.iter().enumerate().all(|(i, c)| {
-            if i == 4 || i == 7 {
-                *c == '-'
-            } else {
-                c.is_ascii_digit()
-            }
-        })
 }
 
 /// The detail string shown for a directive keyword.
@@ -656,13 +630,31 @@ mod tests {
         classify_context(before)
     }
 
+    /// A header date is any date the parser reads (#2808), not only
+    /// `YYYY-MM-DD`: completion after `2024-1-1` or `02024-01-01` was missing.
     #[test]
-    fn test_is_date_like() {
-        assert!(is_date_like("2024-01-15"));
-        assert!(is_date_like("2000-12-31"));
-        assert!(!is_date_like("2024/01/15"));
-        assert!(!is_date_like("24-01-15"));
-        assert!(!is_date_like("not-a-date"));
+    fn test_classify_after_date_in_every_shape_the_parser_reads() {
+        for date in ["2024-01-15", "2024-1-1", "2024/01/15", "02024-001-015"] {
+            assert_eq!(
+                ctx(&format!("{date} ")),
+                CompletionContext::AfterDate,
+                "{date}"
+            );
+            assert_eq!(
+                ctx(&format!("{date} open Assets:")),
+                CompletionContext::AccountSegment {
+                    prefix: "Assets:".to_string()
+                },
+                "{date}"
+            );
+        }
+        for not_a_date in ["24-01-15 ", "not-a-date ", "2024-01 "] {
+            assert_ne!(
+                ctx(not_a_date),
+                CompletionContext::AfterDate,
+                "{not_a_date}"
+            );
+        }
     }
 
     #[test]

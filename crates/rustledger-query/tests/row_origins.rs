@@ -77,7 +77,8 @@ fn a_column_repeated_under_one_name_answers_from_the_posting() {
     for inner in [
         "SELECT date, account, position, position",
         "SELECT date, account, units(position) AS position, position",
-        "SELECT *, position",
+        // The wildcard has no `account` (#2829): add it for the ORDER BY.
+        "SELECT *, account, position",
     ] {
         let bql = format!(
             "SELECT weight(position), cost(position) FROM ({inner}) ORDER BY date, account"

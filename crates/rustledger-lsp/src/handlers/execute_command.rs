@@ -328,7 +328,8 @@ fn handle_align_amounts(
 /// Rule: an indented line is a posting iff its first non-whitespace
 /// character is NOT
 ///
-/// - `;` or `%` (comment),
+/// - `;` (comment; an indented `%` is a posting flag, not a comment, as
+///   the lexer reads it and beancount does, #2802),
 /// - a lowercase letter (Beancount metadata keys are lowercase
 ///   identifiers).
 ///
@@ -363,7 +364,7 @@ fn edit_touches_posting_line(source: &str, edit: &TextEdit) -> bool {
     let Some(first) = trimmed.chars().next() else {
         return false;
     };
-    if first == ';' || first == '%' {
+    if first == ';' {
         return false;
     }
     !first.is_lowercase()
@@ -380,20 +381,17 @@ fn handle_show_account_balance(
         );
     };
 
-    let mut balances: HashMap<String, rustledger_core::Decimal> = HashMap::new();
-    for spanned in &parse_result.directives {
-        if let Directive::Transaction(txn) = &spanned.value {
-            for posting in &txn.postings {
-                if posting.account.as_ref() == account
-                    && let Some(units) = &posting.units
-                    && let Some(number) = units.number()
-                {
-                    let currency = units.currency().unwrap_or("???").to_string();
-                    *balances.entry(currency).or_default() += number;
-                }
-            }
-        }
-    }
+    let balances = super::utils::account_activity(
+        account,
+        parse_result
+            .directives
+            .iter()
+            .filter_map(|spanned| match &spanned.value {
+                Directive::Transaction(txn) => Some(txn),
+                _ => None,
+            }),
+    )
+    .balances;
 
     if balances.is_empty() {
         return ExecuteCommandResponse::warn(format!(
@@ -418,6 +416,28 @@ fn handle_show_account_balance(
 mod tests {
     use super::*;
     use rustledger_parser::parse;
+
+    /// An indented `%` starts a flagged posting, not a comment: the lexer reads
+    /// it as a FLAG, as beancount does (#2802), so `rledger.alignAmounts` must
+    /// align it like any other posting.
+    #[test]
+    fn test_edit_touches_posting_line_includes_a_percent_flagged_posting() {
+        let source = "2024-01-01 *\n  % Assets:A  1 USD\n  %Assets:B\n  ; note\n  kk: 1\n";
+        let edit_on = |line: u32| TextEdit {
+            range: lsp_types::Range::new(
+                lsp_types::Position::new(line, 0),
+                lsp_types::Position::new(line, 1),
+            ),
+            new_text: String::new(),
+        };
+        assert!(edit_touches_posting_line(source, &edit_on(1)));
+        assert!(edit_touches_posting_line(source, &edit_on(2)));
+        assert!(!edit_touches_posting_line(source, &edit_on(3)));
+        assert!(!edit_touches_posting_line(source, &edit_on(4)));
+        assert!(!edit_touches_posting_line(source, &edit_on(0)));
+        let r = parse(source);
+        assert!(r.errors.is_empty(), "{:?}", r.errors);
+    }
 
     #[test]
     fn test_insert_date() {

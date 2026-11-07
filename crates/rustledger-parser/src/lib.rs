@@ -50,7 +50,7 @@ pub mod logos_lexer;
 /// **Sole** import path for the formatter surface - `format_source`,
 /// `format_source_with_parsed`, `try_format_source`, `format_node`,
 /// `format_node_range`, `format_node_with_alignment`,
-/// `format_node_range_with_alignment`, `PostingAlignment`,
+/// `format_node_range_with_alignment`, `format_parsed_range`, `PostingAlignment`,
 /// `compute_alignment`, `canonicalize_directives`,
 /// `CanonicalizeError`, `lf_to_crlf_outside_strings`,
 /// `crlf_to_lf_outside_strings`, `cr_outside_strings_present`. The
@@ -61,11 +61,11 @@ pub mod logos_lexer;
 pub mod format {
     pub use crate::cst::format::{
         CanonicalizeError, GroupingStyle, PostingAlignment, canonicalize_directives,
-        compute_alignment, cr_outside_strings_present, crlf_to_lf_outside_strings, format_node,
-        format_node_grouped, format_node_range, format_node_range_grouped,
-        format_node_range_with_alignment, format_node_with_alignment, format_source,
-        format_source_grouped, format_source_with_parsed, lf_to_crlf_outside_strings,
-        try_format_source, try_format_source_grouped,
+        compute_alignment, cr_outside_strings_present, crlf_to_lf_outside_strings, display_width,
+        format_node, format_node_grouped, format_node_range, format_node_range_grouped,
+        format_node_range_with_alignment, format_node_with_alignment, format_parsed_range,
+        format_source, format_source_grouped, format_source_with_parsed,
+        lf_to_crlf_outside_strings, try_format_source, try_format_source_grouped,
     };
 }
 
@@ -95,8 +95,8 @@ pub use cst::{
 // crate, NOT with `rowan` directly. A rowan minor bump that
 // changes any of these will require a coordinated bump of this
 // crate so the re-export contract holds at THIS crate's semver.
-pub use error::{ParseError, ParseErrorKind};
-pub use logos_lexer::{is_valid_account_name, is_valid_currency};
+pub use error::{COST_PRICE_CURRENCY_MISMATCH, ParseError, ParseErrorKind};
+pub use logos_lexer::{is_valid_account_name, is_valid_currency, leading_date_len};
 pub use rowan::{Direction, NodeOrToken, TextRange, TextSize, TokenAtOffset, WalkEvent};
 pub use rustledger_core::{
     FIRST_PLACEHOLDER_FILE_ID, InternedStr, SYNTHESIZED_FILE_ID, Span, Spanned, is_source_file_id,
@@ -138,6 +138,12 @@ pub struct ParseResult {
     /// because the parser fills it as tokens are consumed (and the
     /// parser is strictly forward-advancing, including on error
     /// recovery).
+    ///
+    /// **Flags are not currencies.** A one-letter transaction or
+    /// posting flag (`T` in `2024-01-16 T "Transfer"`, `P` before a
+    /// posting's account) lexes as a `Currency` token too, but it is
+    /// left out of this list: it is the directive's flag, and a rename
+    /// or highlight of a currency `T` must not touch it.
     ///
     /// **Error-recovery contract.** Tokens consumed during a
     /// directive that ultimately fails to parse remain in this list.
@@ -334,6 +340,55 @@ pub struct ParseResult {
 }
 
 impl ParseResult {
+    /// The currency token at byte `offset`, if the lexer read one there.
+    ///
+    /// A cursor sitting at either end of the token counts, as it does for
+    /// an editor's word-at-cursor. Editor surfaces (the LSP and the WASM
+    /// editor) use this instead of a word-character scan, which splits
+    /// `/6J` at the `/` and `BRK.B` at the `.`: the token span is the
+    /// lexer's own classification, so it cannot drift from the parser.
+    #[must_use]
+    pub fn currency_at(&self, offset: usize) -> Option<&Spanned<rustledger_core::Currency>> {
+        self.currency_occurrences
+            .iter()
+            .find(|occ| occ.span.start <= offset && offset <= occ.span.end)
+    }
+
+    /// Whether a one-letter flag that lexes as a currency token starts
+    /// at byte `offset` (the `T` in `2024-01-16 T "Transfer"`, a `P`
+    /// before a posting's account).
+    ///
+    /// Such a flag is not a currency, so it is not in
+    /// [`Self::currency_occurrences`] and [`Self::currency_at`] does
+    /// not return it. Editor surfaces that fall back to a word scan use
+    /// this to keep the flag from being read as the currency of the
+    /// same name. Every other flag (`*`, `!`, `#`, a `FLAG` letter such
+    /// as `?`, and the `txn` keyword) is false here: none of them can be
+    /// read as a currency, and `txn` must stay a word so its keyword
+    /// hover still works. The flag is the one `Transaction::flag` /
+    /// `Posting::flag` read, so it cannot disagree with the parsed
+    /// directive.
+    #[must_use]
+    pub fn is_currency_flag_at(&self, offset: usize) -> bool {
+        let bom_offset = if self.has_leading_bom { 3 } else { 0 };
+        let Some(offset) = offset.checked_sub(bom_offset) else {
+            return false;
+        };
+        let root = self.syntax_node();
+        let Ok(offset) = u32::try_from(offset) else {
+            return false;
+        };
+        let offset = TextSize::from(offset);
+        if offset >= root.text_range().end() {
+            return false;
+        }
+        root.token_at_offset(offset).any(|t| {
+            t.kind() == SyntaxKind::CURRENCY
+                && t.text_range().start() == offset
+                && crate::cst::is_flag_token(&t)
+        })
+    }
+
     /// Cursor-API view of the lossless CST that produced this
     /// `ParseResult`. Equivalent to
     /// `SyntaxNode::new_root(self.syntax_root.clone())`.
@@ -443,6 +498,29 @@ impl ParseWarning {
 #[must_use]
 pub fn parse(source: &str) -> ParseResult {
     parse_via_cst(source)
+}
+
+/// Parse a date as the parser reads a `DATE` token.
+///
+/// The rule is beancount's: `text` must lex as one `DATE` token (a year of
+/// four or more ASCII digits, then a month and a day, joined by `-` or `/`;
+/// see [`leading_date_len`]), whose fields are read as integers (`2024-01-15`,
+/// `2024/1/15` and `02024-001-015` are all 2024-01-15), with a year from 1 to
+/// 9999 and a real month and day. `24-01-15` is refused, as the parser
+/// refuses it.
+///
+/// For callers that build directives from text outside the parser (embedder
+/// input), so a date they accept is one the parser accepts (#2856).
+///
+/// # Errors
+///
+/// Returns why `text` is not such a date (`day 30 out of range for 2024-02`,
+/// `year 0 out of range`), as the parser's `InvalidDateValue` error states it.
+pub fn parse_date(text: &str) -> Result<rustledger_core::NaiveDate, String> {
+    if leading_date_len(text) != Some(text.len()) {
+        return Err("not a date (a year of four or more digits, a month and a day)".to_string());
+    }
+    cst::parse_date_token(text).ok_or_else(|| diagnostics::describe_invalid_date(text))
 }
 
 /// Parse beancount source for the processing pipeline, **without** collecting
@@ -967,5 +1045,110 @@ mod parse_result_alignment_cache {
   Expenses:Food
 ",
         );
+    }
+}
+
+#[cfg(test)]
+mod currency_at {
+    //! [`ParseResult::currency_at`] returns the lexer's currency token at a
+    //! byte offset, ends inclusive, so editor surfaces see `/6J` and
+    //! `BRK.B` whole (#2807).
+
+    use super::parse;
+
+    #[test]
+    fn test_currency_at_returns_whole_token() {
+        let source = "2024-01-01 open Assets:Futures /6J,BRK.B\n";
+        let result = parse(source);
+        let at = |offset| {
+            result
+                .currency_at(offset)
+                .map(|o| (o.value.to_string(), o.span.start, o.span.end))
+        };
+        for offset in [31, 32, 34] {
+            assert_eq!(
+                at(offset),
+                Some(("/6J".to_string(), 31, 34)),
+                "offset {offset}"
+            );
+        }
+        assert_eq!(at(37), Some(("BRK.B".to_string(), 35, 40)));
+        assert_eq!(at(20), None, "inside an account");
+    }
+
+    #[test]
+    fn test_currency_occurrences_exclude_one_letter_flags() {
+        // A `T` header flag and a `P` posting flag, next to a real currency
+        // `T`: only the currency tokens are occurrences.
+        let source = "2024-01-01 commodity T\n\
+                      2024-01-16 T \"Transfer\"\n  \
+                      P Assets:Cash 1 T\n  \
+                      Assets:Bank\n";
+        let result = parse(source);
+        let texts: Vec<(String, usize)> = result
+            .currency_occurrences
+            .iter()
+            .map(|o| (o.value.to_string(), o.span.start))
+            .collect();
+        let currency_def = source.find("commodity T").unwrap() + "commodity ".len();
+        let currency_use = source.find("1 T").unwrap() + 2;
+        assert_eq!(
+            texts,
+            vec![
+                ("T".to_string(), currency_def),
+                ("T".to_string(), currency_use)
+            ]
+        );
+        let header_flag = source.find("16 T").unwrap() + 3;
+        assert_eq!(result.currency_at(header_flag), None, "header flag");
+        let posting_flag = source.find("P Assets").unwrap();
+        assert_eq!(result.currency_at(posting_flag), None, "posting flag");
+        // The red walker agrees.
+        let red = crate::cst::parse_red_only(source);
+        assert_eq!(
+            format!("{:?}", red.currency_occurrences),
+            format!("{:?}", result.currency_occurrences)
+        );
+    }
+
+    #[test]
+    fn test_is_currency_flag_at_reads_one_letter_flags_only() {
+        for bom in ["", "\u{feff}"] {
+            let source = format!(
+                "{bom}2024-01-01 commodity T\n2024-01-16 T \"Transfer\"\n  P Assets:Cash 1 T\n  Assets:Bank\n"
+            );
+            let result = parse(&source);
+            let header_flag = source.find("16 T").unwrap() + 3;
+            let posting_flag = source.find("P Assets").unwrap();
+            let currency = source.find("1 T").unwrap() + 2;
+            assert!(
+                result.is_currency_flag_at(header_flag),
+                "header flag, bom {bom:?}"
+            );
+            assert!(
+                result.is_currency_flag_at(posting_flag),
+                "posting flag, bom {bom:?}"
+            );
+            assert!(
+                !result.is_currency_flag_at(currency),
+                "currency, bom {bom:?}"
+            );
+            assert!(
+                !result.is_currency_flag_at(header_flag + 1),
+                "after the flag"
+            );
+            assert!(!result.is_currency_flag_at(source.len()), "end of source");
+            assert!(!result.is_currency_flag_at(usize::MAX), "past the end");
+        }
+        // Other flags are not currency-shaped, and `txn` must stay a word for
+        // its keyword hover: none of them counts.
+        let source = "2024-01-03 txn \"Broker\" \"Buy\"\n  ! Assets:A 1 USD\n  * Assets:B\n\
+                      2024-01-04 * \"x\"\n  Assets:A 1 USD\n  Assets:B\n\
+                      2024-01-05 ! \"x\"\n  Assets:A 1 USD\n  Assets:B\n";
+        let result = parse(source);
+        for needle in ["txn", "! Assets", "* Assets", "* \"x\"", "! \"x\""] {
+            let offset = source.find(needle).unwrap();
+            assert!(!result.is_currency_flag_at(offset), "{needle:?}");
+        }
     }
 }

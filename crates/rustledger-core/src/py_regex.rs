@@ -1536,6 +1536,16 @@ fn escape_class_char(c: char) -> String {
 mod tests {
     use super::*;
 
+    /// The rows a table-driven test checks: all of them natively, and every
+    /// fifth under Miri. Compiling a pattern costs seconds under Miri, so the
+    /// full tables ran the `rustledger-core` Miri job to within minutes of
+    /// its 40-minute cap; a sample still drives `regex`'s compile, match,
+    /// and replace paths (where its `unsafe` is), and the tables keep full
+    /// strength in the normal test suite.
+    fn rows<T>(table: impl IntoIterator<Item = T>) -> impl Iterator<Item = T> {
+        table.into_iter().step_by(if cfg!(miri) { 5 } else { 1 })
+    }
+
     /// Whether `pattern` matches `text` at its start, as Python's
     /// `re.match(pattern, text)` is truthy.
     fn py_match(pattern: &str, text: &str) -> bool {
@@ -1619,8 +1629,7 @@ mod tests {
             ("(a|b)+c", "abac", true),
             ("a*?b", "aab", true),
         ];
-        let wrong: Vec<_> = cases
-            .iter()
+        let wrong: Vec<_> = rows(cases)
             .filter(|(pattern, text, want)| py_match(pattern, text) != *want)
             .collect();
         assert!(wrong.is_empty(), "differ from Python: {wrong:?}");
@@ -1718,7 +1727,7 @@ mod tests {
     /// `re.sub` templates: Python 3.12's `re.sub(pattern, template, text)`.
     #[test]
     fn replacements_follow_python_re_sub() {
-        for (pattern, template, text, want) in [
+        for (pattern, template, text, want) in rows([
             (
                 "Expenses:Food:(.*)",
                 r"Expenses:Dining:\1",
@@ -1759,7 +1768,7 @@ mod tests {
             ("(?P<x>a){0}(?P<y>b)", r"[\g<x>\g<y>]", "xb", "x[b]"),
             // A repeated group that cannot match empty is fine.
             ("(a)+b", r"[\1]", "aab", "[a]"),
-        ] {
+        ]) {
             let re = compile_sub(pattern).unwrap();
             let rust = translate_replacement(template, &re).unwrap();
             assert_eq!(
@@ -1804,19 +1813,19 @@ mod tests {
     /// (Python's `re.sub('(a*)+b', r'[\1]', 'aab')` is `[]`).
     #[test]
     fn substitutions_python_makes_differently_are_refused() {
-        for pattern in ["x*", "(:Cash)?$", "|a", "^", "(a*)"] {
+        for pattern in rows(["x*", "(:Cash)?$", "|a", "^", "(a*)"]) {
             assert!(
                 matches!(compile_sub(pattern), Err(PyRegexError::Unsupported(ref w)) if w.contains("empty string")),
                 "{pattern:?}"
             );
         }
-        for pattern in [
+        for pattern in rows([
             "(a*)+b",
             "b(?:a?|c)*",
             "b(?:a*|c)+",
             "Assets:(?:\\w*|:)+",
             "x(a|)+",
-        ] {
+        ]) {
             assert!(
                 matches!(compile_sub(pattern), Err(PyRegexError::Unsupported(ref w)) if w.contains("repetition")),
                 "{pattern:?}: {:?}",
@@ -1825,7 +1834,7 @@ mod tests {
         }
         // A repetition whose body cannot match empty is fine, and so is a
         // repeated group inside one that can (every iteration sets it).
-        for pattern in ["(a)+b", "(?:(a*)b)+", "x(?:ab|a)*", "(\\w+):(\\w+)"] {
+        for pattern in rows(["(a)+b", "(?:(a*)b)+", "x(?:ab|a)*", "(\\w+):(\\w+)"]) {
             assert!(compile_sub(pattern).is_ok(), "{pattern:?}");
         }
     }
@@ -1834,7 +1843,7 @@ mod tests {
     /// against `CPython` 3.13: bean-query's `~` (#2656).
     #[test]
     fn search_ignoring_case_follows_python() {
-        for (pattern, text, expected) in [
+        for (pattern, text, expected) in rows([
             ("bank", "Assets:Bank", true),
             ("^bank", "Assets:Bank", false),
             ("BANK$", "Assets:Bank", true),
@@ -1845,7 +1854,7 @@ mod tests {
             (r"\u00fcber", "ÜBER", true),
             ("x{2,}", "aXXb", true),
             ("x{,2}y", "y", true),
-        ] {
+        ]) {
             let regex =
                 compile_search_ignore_case(pattern).unwrap_or_else(|e| panic!("{pattern:?}: {e}"));
             assert_eq!(
@@ -1951,6 +1960,10 @@ mod tests {
     /// 3.14. A code point it missed would let a word boundary answer
     /// differently from Python with no error.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "walks every code point through `regex`; far past the Miri job's 40-minute cap, and touches no unsafe code"
+    )]
     fn word_disagreement_table_is_exact() {
         assert_sorted_disjoint("PY_WORD", word_tables::PY_WORD);
         assert_sorted_disjoint("PY_WORD_VARIES", word_tables::PY_WORD_VARIES);
@@ -1973,6 +1986,10 @@ mod tests {
     /// The exhaustive comparison cannot pass vacuously: dropping one code
     /// point from the table, at either end of a range or alone, is found.
     #[test]
+    #[cfg_attr(
+        miri,
+        ignore = "walks every code point through `regex` three times; far past the Miri job's 40-minute cap, and touches no unsafe code"
+    )]
     fn word_disagreement_check_finds_a_missing_code_point() {
         let table = word_tables::WORD_DISAGREE;
         for index in [0, table.len() / 2, table.len() - 1] {
@@ -2015,7 +2032,7 @@ mod tests {
                 .unwrap_or_else(|e| panic!("{pattern:?}: {e}"))
                 .is_match(text)
         };
-        for (pattern, text, want) in [
+        for (pattern, text, want) in rows([
             (r"\bcoffee\b", "black coffee", true),
             (r"\bcoffee\b", "coffeehouse", false),
             // A precomposed `é` is a word character to both.
@@ -2048,7 +2065,7 @@ mod tests {
             (r"(?ai)[Z-a]", "A", true),
             (r"(?ai)\W", "\u{212a}", true),
             (r"(?a)(?i:K)", "k", true),
-        ] {
+        ]) {
             assert_eq!(search(pattern, text), Ok(want), "{pattern:?} on {text:?}");
         }
         // bean-query's `~` is a case-insensitive search.

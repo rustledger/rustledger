@@ -128,7 +128,7 @@ rledger query ledger.beancount "BALANCES" -f json \
            | map({key: .[0], value: .[1]}) | from_entries'
 
 # Export to file
-rledger query ledger.beancount "SELECT *" -f csv > transactions.csv
+rledger query ledger.beancount "SELECT date, flag, payee, narration, account, position" -f csv > transactions.csv
 ```
 
 ## BQL Reference

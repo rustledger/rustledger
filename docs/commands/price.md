@@ -80,6 +80,46 @@ Annotate a commodity with how to fetch its price. The format is `<quote-currency
 
 The first source in the chain is tried first; subsequent ones act as fallbacks. **Each spec carries its own ticker** — so `EUR:ecbrates/GBP-EUR,EUR:ecb/GBP` queries `ecbrates` with ticker `GBP-EUR` and, on failure, queries `ecb` with ticker `GBP`. (Issue #963: prior to this fix, all sources reused the first spec's ticker, which broke chains where sources expect different ticker shapes for the same underlying.)
 
+#### bean-price source specs
+
+A `price:` value written for bean-price works as it is. bean-price's grammar is `<quote-currency>:<source>/[^]<ticker>`, with sources chained by `,` and quote currencies separated by spaces or `;`. rledger also reads its own form, which repeats the currency on each entry (`USD:yahoo/AAPL,USD:google/AAPL`).
+
+In `price:` metadata, a leading `^` on the ticker inverts the quote on any source, as in bean-price. `price: "EUR:ratesapi/^EUR-GBP"` on `GBP` fetches the EUR-GBP rate (GBP per EUR) and writes its inverse, the GBP price in EUR.
+
+- **Scope.** The `^` inverts only in `price:` metadata, the one place bean-price's grammar applies. A `[price.mapping]` ticker, `--mapping SYMBOL:TICKER` and `--source` send the ticker exactly as written, so Yahoo index tickers such as `^GSPC`, `^DJI` and `^VIX` work there.
+- **Digits.** The inverse is computed exactly and rounded once, as bean-price's `ONE / price` is under Python's default decimal context. That means 28 significant digits, rounded half to even, and an exact quotient in its shortest form (`1 / 8` is `0.125`). Python writes `1E+2` for 100; rledger writes it out.
+  - `rust_decimal` holds at most 28 decimal places, so an inverse near 10^-k keeps k - 1 fewer significant digits. bean-price's `ecbrates` writes fewer still, about six, because it leaves Python's decimal precision set to its rate legs' after each fetch. rledger keeps 28 digits on every source.
+- **Refusals.** The inverse of a price of B in Q is a price of Q in B, so rledger writes it only when both of these hold:
+  - the currency of the quote the source returns is the commodity;
+  - the base of what the source fetches for the ticker is the declared currency. The source reads the base with the same code it builds the request with:
+    - `ratesapi`, `ecb` and `coinmarketcap`: `EUR-GBP`, or a bare `EUR` quoted in the requested currency, is based in `EUR`.
+    - `coinbase`: `BTC-USD` or `BTC` is based in `BTC`.
+    - `oanda`: `EUR_CHF`, a CFD such as `NAS100_USD`, or a bare `EUR` is based in the part before the last `_`.
+    - `alphavantage`: `fx:EUR:CHF` or `EUR/CHF` is based in `EUR`, `price:IBM:USD` or `IBM` in `IBM`, and `CRYPTO:BTC` in `BTC`.
+    - `yahoo`: `EURCHF=X` is based in `EUR`, `JPY=X` in `USD`, and a crypto `BTC-USD` in `BTC`, in any case. Other Yahoo tickers (`AAPL`, `BRK-B`) name no pair and are judged by the quote alone.
+    - `coincap`: every quote is in USD, so the ticker is the base (`BTC`).
+    - `quandl`, `tsp`, `eastmoneyfund`, command sources and Yahoo non-pair tickers: the source cannot read a base, so only the quote is checked.
+
+  So `EUR:oanda/^EUR_CHF` on `CHF` writes the CHF price in EUR, and `USD:oanda/^EUR_CHF` is refused, where bean-price writes the EUR-per-CHF inverse labeled USD. A refusal applies with or without `-b`. When an attempt was an inversion, a failed fetch ends with one note naming the `^` as bean-price's inversion. Inverting an equity ticker is refused when its base, the exchange-qualified symbol such as alphavantage's `VOD.LON`, differs from the declared currency, even when that currency names the same stock as a commodity such as `VOD`.
+  - A second `^` (`^^X`) is refused, as bean-price's grammar refuses it.
+  - A zero quote, or a quote at or above 2 * 10^28 whose inverse rounds to zero, fails that source, and the chain moves on to the next one. bean-price stops with a division-by-zero error instead.
+- **Migrating index tickers.** A `price:` spec written for rledger before this change, such as `price: "USD:yahoo/^GSPC"`, used to send `^GSPC` to Yahoo. It now reads as bean-price does: the inverse of `GSPC`. Move such index tickers to `[price.mapping]` (`ticker = "^GSPC"`) or `--mapping SPX:^GSPC`, which keep the `^`.
+
+Each source reads its ticker the way the matching beanprice module does. rledger's own ticker forms still work.
+
+| Source | bean-price ticker | rledger's own ticker |
+|--------|-------------------|----------------------|
+| `ratesapi` | `USD-EUR` (USD in EUR) | `USD`, quoted in the requested currency |
+| `ecb`, or `ecbrates` as bean-price names it | `GBP-EUR` | `GBP` |
+| `coinmarketcap` | `BTC-CHF` (BTC in CHF) | `BTC` |
+| `alphavantage` | `price:IBM:USD`, `fx:USD:CHF` | `IBM`, `USD/CHF`, `CRYPTO:BTC` |
+| `quandl` | `WIKI:AAPL` (`Adj. Close`, else `Close`), `LBMA:GOLD:USD_(PM)` (the named column, `_` read as a space) | `WIKI/AAPL` |
+| `coincap` | `BTC`, or an asset ID such as `bitcoin`. An upper-case symbol is looked up in CoinCap's asset list | the same |
+| `tsp` | `LInco`, `L2050`, `CFund` | `C`, `CFUND`, `LINCOME` |
+| `coinbase`, `oanda`, `yahoo`, `eastmoneyfund` | `BTC-USD`, `EUR_USD`, `AAPL`, `000001` | the same |
+
+A ticker that names its own quote currency is fetched in that currency. With `rledger price -b`, a quote whose currency differs from the declared one is refused rather than relabeled. bean-price writes `GBP:ratesapi/USD-EUR` as a GBP price; rledger names the mismatch instead.
+
 The quote currency in the metadata overrides the global `--currency` for that one symbol, so you can mix USD-quoted stocks and EUR-quoted bonds in the same run.
 
 `price: ""` (empty string, or whitespace-only) is an explicit **opt-out from `-f / --file` discovery**: the commodity is never picked up from the ledger, even with `--undeclared`. Useful for currency codes that happen to collide with stock tickers (e.g. `BAM`, `UKW`) — see issue #962.
@@ -219,8 +259,8 @@ Rustledger supports 11 built-in price sources and external commands.
 | `yahoo` (default) | Yahoo Finance — stocks, ETFs, crypto, forex |
 | `coinbase` | Coinbase — cryptocurrency spot prices |
 | `coincap` | CoinCap — cryptocurrency market data |
-| `ecb` | European Central Bank — EUR exchange rates |
-| `ratesapi` | Rates API — forex rates |
+| `ecb` | European Central Bank: EUR exchange rates (also registered as `ecbrates`, bean-price's name for it) |
+| `ratesapi` | Forex rates: ECB reference rates from Frankfurter (keyless), the provider bean-price's `ratesapi` uses. The ticker is bean-price's `EUR-USD`, or the base currency alone (`EUR` with `-c USD`) |
 | `tsp` | US Thrift Savings Plan fund prices |
 | `eastmoneyfund` | East Money Fund — Chinese fund prices |
 
@@ -311,7 +351,7 @@ Configure sources, mappings, and fallback chains in config:
 ```toml
 [price]
 default_source = "yahoo"
-timeout = 30
+timeout = 30          # seconds per request; 0 = no limit
 cache_ttl = 1800
 
 # Issue #966: by default, fetching a commodity that has no
@@ -342,7 +382,8 @@ source = ["yahoo", "alphavantage"]
 
 # Fallback chain with per-source tickers (issue #963).
 # Use this when sources expect different ticker shapes for the same
-# underlying instrument — e.g. ratesapi-style `GBP-EUR` vs ecb-style `GBP`.
+# underlying instrument, e.g. a `GBP-EUR` pair ticker vs ecb-style `GBP`
+# (`ecb` and `ratesapi` read both forms; see "bean-price source specs").
 [price.mapping.GBP]
 source = [
   { source = "ecbrates", ticker = "GBP-EUR" },

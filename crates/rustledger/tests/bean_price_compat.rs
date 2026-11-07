@@ -256,7 +256,12 @@ fn extract_bean_price_attempts(stdout: &str) -> Attempts {
                     return None;
                 }
                 let source = normalize_source(entry[..paren_open].trim());
-                let ticker = entry[paren_open + 1..paren_close].trim().to_string();
+                let ticker = entry[paren_open + 1..paren_close].trim();
+                // bean-price shows an inverted (`^`) source as `1/TICKER`;
+                // rledger shows the ticker as written (#2866).
+                let ticker = ticker
+                    .strip_prefix("1/")
+                    .map_or_else(|| ticker.to_string(), |rest| format!("^{rest}"));
                 Some((source, ticker))
             })
             .collect();
@@ -413,6 +418,38 @@ const FIXTURE_MULTI_CURRENCY: &str = "\
 #[test]
 fn rledger_and_bean_price_resolve_same_attempts_multi_currency() {
     assert_same_attempts(FIXTURE_MULTI_CURRENCY, "multi_currency");
+}
+
+// bean-price's source-spec grammar, `CURRENCY:module/[^]TICKER` (#2866):
+// `^` inverts on every source, and each source's ticker in the form its
+// beanprice module reads (ratesapi's and ecbrates' `BASE-SYMBOL`,
+// coinmarketcap's `SYMBOL-BASE`, alphavantage's `price:`/`fx:`, quandl's
+// `DB:DS[:COLUMN]`, tsp's `LInco`). Both binaries must plan the same
+// (symbol, currency, source, ticker) attempts, `^` included.
+const FIXTURE_SOURCE_SPECS: &str = "\
+2024-01-01 commodity USD
+  price: \"EUR:ratesapi/USD-EUR\"
+2024-01-01 commodity GBP
+  price: \"EUR:ratesapi/^EUR-GBP\"
+2024-01-01 commodity SEK
+  price: \"EUR:ecbrates/^EUR-SEK\"
+2024-01-01 commodity BTC
+  price: \"CHF:coinmarketcap/BTC-CHF USD:coinbase/BTC-USD,coincap/BTC\"
+2024-01-01 commodity IBM
+  price: \"USD:alphavantage/price:IBM:USD\"
+2024-01-01 commodity CHF
+  price: \"USD:alphavantage/^fx:USD:CHF,oanda/^USD_CHF\"
+2024-01-01 commodity GOLD
+  price: \"USD:quandl/LBMA:GOLD:USD_(PM)\"
+2024-01-01 commodity JPY
+  price: \"USD:yahoo/^USDJPY=X\"
+2024-01-01 commodity TSPL
+  price: \"USD:tsp/LInco\"
+";
+
+#[test]
+fn rledger_and_bean_price_resolve_same_attempts_source_specs() {
+    assert_same_attempts(FIXTURE_SOURCE_SPECS, "source_specs");
 }
 
 // Sanity check: when we're inside `nix develop`, `bean-price` must be on PATH —

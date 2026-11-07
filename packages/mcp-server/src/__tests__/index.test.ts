@@ -1066,6 +1066,19 @@ describe('collectLedgerFiles', () => {
     expect(result.errors[0].message).toContain('gone.beancount');
   });
 
+  it('refuses an include it cannot read, rather than calling it missing', () => {
+    // A directory (or a file without read permission) exists, so it is not a
+    // missing include: leaving it out would have the loader report "not
+    // found" and a query answer without it, where `rledger query` and
+    // bean-query refuse (#2861).
+    fs.mkdirSync(path.join(tempDir, 'isdir/sub'), { recursive: true });
+    const main = write(
+      'isdir/main.beancount',
+      'include "sub"\n2024-01-01 open Assets:Cash USD\n'
+    );
+    expect(() => collectLedgerFiles(main)).toThrow(/failed to read file .*sub: EISDIR$/);
+  });
+
   it('reports a file reached twice, once the wasm carries the loader fix', () => {
     const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'mcp-dupwasm-'));
     fs.mkdirSync(path.join(dir, 'sub'), { recursive: true });
@@ -1196,6 +1209,66 @@ include "transactions.beancount"
       expect(result.isError).toBeFalsy();
       // Should find 2 postings from the transaction in the included file
       expect(result.content[0].text).toContain('2');
+    });
+
+    // A failing balance assertion is a diagnostic, as in `rledger query`: the
+    // query still answers (#2823). Only a parse or booking failure stops it.
+    it('should answer a ledger with a failing balance assertion', () => {
+      const mainPath = path.join(tempDir, 'query-failing-balance.beancount');
+      fs.writeFileSync(mainPath, `2024-01-01 open Assets:Bank
+2024-01-01 open Equity:Opening
+2024-01-02 *
+  Assets:Bank     10 USD
+  Equity:Opening
+2024-01-05 balance Assets:Bank 999.00 USD
+`);
+
+      const result = handleToolCall('query_file', {
+        file_path: mainPath,
+        query: "SELECT account FROM postings WHERE account = 'Assets:Bank'",
+      });
+
+      expect(result.isError).toBeFalsy();
+      expect(result.content[0].text).toContain('Assets:Bank');
+    });
+
+    it('should refuse a ledger that does not parse', () => {
+      const mainPath = path.join(tempDir, 'query-parse-error.beancount');
+      fs.writeFileSync(mainPath, `2024-01-01 open Assets:Bank
+2024-01-02 * "x
+  Assets:Bank  1 USD junk junk
+`);
+
+      const result = handleToolCall('query_file', {
+        file_path: mainPath,
+        query: 'SELECT account',
+      });
+
+      expect(result.isError).toBeTruthy();
+    });
+
+    // An include naming a directory exists but cannot be read: `rledger
+    // query` and bean-query refuse (bean-query with an uncaught
+    // `IsADirectoryError`). It is not a missing file, which the query would
+    // answer over (#2861).
+    it('should refuse a ledger whose include cannot be read', () => {
+      fs.mkdirSync(path.join(tempDir, 'query-isdir'), { recursive: true });
+      const mainPath = path.join(tempDir, 'query-isdir-main.beancount');
+      fs.writeFileSync(mainPath, `include "query-isdir"
+2024-01-01 open Assets:Bank
+2024-01-02 *
+  Assets:Bank     10 USD
+  Equity:Opening
+`);
+
+      const result = handleToolCall('query_file', {
+        file_path: mainPath,
+        query: 'SELECT account',
+      });
+
+      expect(result.isError).toBe(true);
+      expect(result.content[0].text).toContain('EISDIR');
+      expect(result.content[0].text).not.toContain('Assets:Bank');
     });
   });
 

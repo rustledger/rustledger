@@ -3,7 +3,7 @@
 //! beancount's cost spec is a comma-separated component list:
 //!
 //! ```text
-//! cost_comp_list  : cost_comp | cost_comp_list COMMA cost_comp
+//! cost_comp_list  : %empty | cost_comp | cost_comp_list COMMA cost_comp
 //! cost_comp       : compound_amount | DATE | STRING | ASTERISK
 //! compound_amount : number_expr? (HASH number_expr?)? CURRENCY
 //! ```
@@ -13,6 +13,9 @@
 //!
 //! - **An empty component** — `{, 100.0 USD, , }`. beancount: `syntax error,
 //!   unexpected COMMA, expecting HASH or CAPITAL or CURRENCY`.
+//!   One LEADING comma is not one: reducing from `%empty` allows it when a
+//!   component follows (`{, 100.0 USD}`), so the first defect there is the
+//!   `, ,` (#2802).
 //! - **Trailing junk after a complete component** — `{45.23 USD / 2015-07-16
 //!   / "blabla"}`. beancount: `syntax error, unexpected SLASH, expecting RCURL
 //!   or COMMA`.
@@ -33,6 +36,16 @@
 //! BOTH paths because it sits outside the `use_green` branch. So there is one
 //! walker and nothing to drift. The rule is still expressed over
 //! `(SyntaxKind, Range<usize>)` so it stays testable without a tree.
+//!
+//! This rule is deliberately narrower than beancount's cost grammar: it
+//! also tells `convert::cost_spec_from_tokens` whether a spec's number can
+//! be trusted, so it only flags shapes where it cannot. The full grammar for
+//! a posting line, including what this lets through (`{2 & USD}`, `{2 0
+//! USD}`), is `directive_header::first_posting_defect` (#2802, stage 3),
+//! which checks a posting only when nothing here was reported on it. The
+//! stray-character matrix (`tests/stray_char_matrix.rs`) pins the two
+//! against beancount together. Revisit if this rule is ever widened: it
+//! should then call the full grammar instead.
 
 use crate::SyntaxKind;
 
@@ -105,8 +118,19 @@ where
             // syntax, which is common in real ledgers.
             SyntaxKind::COMMA | SyntaxKind::R_BRACE | SyntaxKind::R_DOUBLE_BRACE => {
                 let closing = kind != SyntaxKind::COMMA;
+                // `cost_comp_list : %empty | cost_comp | cost_comp_list COMMA
+                // cost_comp` reduces from `%empty`, so ONE leading comma is
+                // valid when a component follows it (`{, 2 USD}`), as one
+                // leading comma is in an `open` currency list (#2802). The
+                // comma still leaves a component pending, so `{,}` and
+                // `{,,2 USD}` are reported below.
+                let leading = !closing && !saw_comma && !pending_empty && !component_has_content;
                 if !closing {
                     saw_comma = true;
+                }
+                if leading {
+                    pending_empty = true;
+                    continue;
                 }
                 if !component_has_content && (saw_comma || pending_empty) {
                     // Report at the delimiter, as beancount does ("unexpected
@@ -283,22 +307,39 @@ mod tests {
     /// #2008 case 1 — `{, 100.0 USD, , }`.
     #[test]
     fn empty_components_are_rejected() {
-        // leading `{,`
-        let leading = toks(&[
+        // ONE leading comma is valid when a component follows it, as in
+        // beancount (`cost_comp_list` reduces from `%empty`, #2802)...
+        assert_eq!(
+            first_cost_spec_defect(toks(&[
+                LB,
+                (K::COMMA, ","),
+                WS,
+                (K::NUMBER, "100.0"),
+                WS,
+                (K::CURRENCY, "USD"),
+                RB,
+            ])),
+            None
+        );
+        // ...but `{,}` and `{,,1 USD}` are empty components, reported AT the
+        // comma or brace that ends them, as beancount does.
+        assert_eq!(
+            first_cost_spec_defect(toks(&[LB, (K::COMMA, ","), RB])),
+            Some((CostSpecDefect::EmptyComponent, 2..3))
+        );
+        let doubled = toks(&[
             LB,
             (K::COMMA, ","),
-            WS,
-            (K::NUMBER, "100.0"),
+            (K::COMMA, ","),
+            (K::NUMBER, "1"),
             WS,
             (K::CURRENCY, "USD"),
             RB,
         ]);
         assert_eq!(
-            first_cost_spec_defect(leading.clone()).map(|(d, _)| d),
-            Some(CostSpecDefect::EmptyComponent)
+            first_cost_spec_defect(doubled),
+            Some((CostSpecDefect::EmptyComponent, 2..3))
         );
-        // reported AT the comma, as beancount does
-        assert_eq!(first_cost_spec_defect(leading).map(|(_, r)| r), Some(1..2));
         // consecutive `,,`
         assert_eq!(
             first_cost_spec_defect(toks(&[

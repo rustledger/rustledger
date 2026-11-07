@@ -2,7 +2,7 @@
 //!
 //! Fetches cryptocurrency prices from Coinbase.
 
-use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, user_agent};
+use super::{DateWindow, HistoricalCoverage, PricePair, PricePoint, PriceSource, http_get_json};
 use crate::cmd::price::PriceResponse;
 use anyhow::{Context, Result};
 use rust_decimal::Decimal;
@@ -19,15 +19,26 @@ use std::time::Duration;
 /// - Cryptocurrencies: `BTC`, `ETH`, `SOL`, etc.
 /// - Format: Uses `{CRYPTO}-{CURRENCY}` pairs (e.g., `BTC-USD`)
 #[derive(Debug)]
-pub struct CoinbaseSource {}
+pub struct CoinbaseSource {
+    /// Whole-request timeout, applied to each request.
+    timeout: Duration,
+}
 
 impl CoinbaseSource {
     /// Create a new Coinbase source.
-    ///
-    /// The timeout parameter is accepted for API consistency but not
-    /// currently applied to HTTP requests.
-    pub const fn new(_timeout: Duration) -> Self {
-        Self {}
+    pub const fn new(timeout: Duration) -> Self {
+        Self { timeout }
+    }
+
+    /// The `BASE-QUOTE` pair the spot endpoint is asked for: a ticker with
+    /// a dash names its own (`BTC-USD`), and any other is quoted in the
+    /// requested currency (`BTC` is `BTC-<currency>`).
+    fn spot_pair(ticker: &str, currency: &str) -> String {
+        if ticker.contains('-') {
+            ticker.to_string()
+        } else {
+            format!("{ticker}-{currency}")
+        }
     }
 
     /// Build the Coinbase API URL. A date adds `?date=YYYY-MM-DD`,
@@ -38,13 +49,7 @@ impl CoinbaseSource {
         currency: &str,
         date: Option<rustledger_core::NaiveDate>,
     ) -> String {
-        // If the ticker already contains a dash, use it directly
-        // Otherwise, append the currency
-        let pair = if ticker.contains('-') {
-            ticker.to_string()
-        } else {
-            format!("{ticker}-{currency}")
-        };
+        let pair = Self::spot_pair(ticker, currency);
         match date {
             Some(d) => format!("https://api.coinbase.com/v2/prices/{pair}/spot?date={d}"),
             None => format!("https://api.coinbase.com/v2/prices/{pair}/spot"),
@@ -58,15 +63,13 @@ impl CoinbaseSource {
     /// request value (round-5 deep review of #1803: wrapping the raw
     /// fallback in `Some` shadowed the dispatch's normalization).
     fn fetch_spot(&self, url: &str, pair: &PricePair) -> Result<(Decimal, Option<String>)> {
-        let mut response = ureq::get(url)
-            .header("User-Agent", user_agent())
-            .call()
-            .with_context(|| format!("Failed to fetch price for {}", pair.ticker))?;
-
-        let json: serde_json::Value = response
-            .body_mut()
-            .read_json()
-            .with_context(|| format!("Failed to parse response for {}", pair.ticker))?;
+        let json = http_get_json(
+            url,
+            self.timeout,
+            &[],
+            &[],
+            &format!("Failed to fetch price for {}", pair.ticker),
+        )?;
 
         // Check for errors
         if let Some(errors) = json.get("errors")
@@ -107,6 +110,15 @@ impl PriceSource for CoinbaseSource {
 
     fn description(&self) -> &'static str {
         "Coinbase - cryptocurrency spot prices"
+    }
+
+    /// The base of the pair the spot endpoint is asked for (#2866), read by
+    /// the same `spot_pair` the fetch uses: `BTC-USD`, and a bare
+    /// `BTC` (`BTC-<currency>`), are based in `BTC`.
+    fn pair_base(&self, ticker: &str) -> Option<String> {
+        Self::spot_pair(ticker, "")
+            .split_once('-')
+            .map(|(base, _)| base.to_uppercase())
     }
 
     fn fetch_latest(&self, pair: &PricePair) -> Result<PriceResponse> {
@@ -165,6 +177,21 @@ impl PriceSource for CoinbaseSource {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The base of the pair a ticker names, which a `^` inversion must
+    /// be declared in (#2866).
+    #[test]
+    fn test_pair_base() {
+        let source = CoinbaseSource::new(Duration::from_secs(30));
+        for (ticker, base) in [
+            ("BTC-USD", Some("BTC")),
+            ("btc-usd", Some("BTC")),
+            // A bare symbol is quoted in the requested currency.
+            ("BTC", Some("BTC")),
+        ] {
+            assert_eq!(source.pair_base(ticker).as_deref(), base, "{ticker}");
+        }
+    }
 
     #[test]
     fn test_build_url() {

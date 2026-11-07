@@ -55,6 +55,11 @@ pub(super) enum HeaderDefect {
     TooManyStrings(usize),
     /// A token with no place in a transaction header at all.
     UnexpectedToken,
+    /// A one-letter flag (`P`) with something other than a space, a tab or a
+    /// `\n` right after it: beancount reads a lone capital as its `CAPITAL`
+    /// token only there, so `P"x"`, `P;c` and `P\r\n` are an invalid token
+    /// (#2802).
+    GluedLetterFlag,
 }
 
 /// Trivia and separators that may appear anywhere in a header.
@@ -87,10 +92,10 @@ const fn is_header_trivia(kind: SyntaxKind) -> bool {
 /// `STRING`/`TAG`/`LINK`. Mirrors `TransactionFlag::cast`, including its
 /// single-character rule for `CURRENCY` (a ticker letter used as a flag).
 ///
-/// Deliberately does NOT enforce *at most one* flag: `2014-01-01 * * "x"` is
-/// rejected by beancount but is outside #2008's seven cases, and widening a
-/// parser rejection beyond its evidence is how a compatibility fix starts
-/// breaking real files.
+/// beancount's `txn` is ONE token (`TXN | FLAG | ASTERISK | HASH | CAPITAL`),
+/// so a second flag (`2024-01-01 * * "x"`, `2024-01-01 !*`, `2024-01-01 * A
+/// "x"`) is a syntax error there. [`first_header_defect`] counts them (#2802,
+/// stage 3); this only says which tokens may stand in the flag position.
 fn is_flag_position_token(kind: SyntaxKind, range: &Range<usize>) -> bool {
     match kind {
         SyntaxKind::DATE
@@ -120,9 +125,34 @@ where
     let mut third_string: Option<Range<usize>> = None;
     let mut seen_tag_or_link = false;
     let mut seen_header_content = false;
+    let mut seen_token = false;
+    let mut flags: usize = 0;
 
     for (kind, range) in tokens {
+        // A `%`, `#!` or `#+` after the header's first token is not a comment
+        // in beancount: only `;` starts one mid-line, and these lex as a FLAG,
+        // or a HASH and a flag, so they are a syntax error there (#2802). Ours
+        // read them as a comment to the end of the line, so the rest of the
+        // header vanished in silence. Report the one or two characters
+        // beancount objects to. Before the first token they are leading
+        // trivia (a comment line above the transaction), as before.
+        if seen_token && matches!(kind, SyntaxKind::SHEBANG | SyntaxKind::EMACS_DIRECTIVE) {
+            // (A mid-line `%` is a FLAG token, not a comment, so it never
+            // reaches here.)
+            let end = (range.start + 2).min(range.end);
+            return Some((HeaderDefect::UnexpectedToken, range.start..end));
+        }
         if is_header_trivia(kind) {
+            continue;
+        }
+        seen_token = true;
+        // One flag only, as in beancount (see `is_flag_position_token`).
+        if kind != SyntaxKind::DATE && !seen_header_content && is_flag_position_token(kind, &range)
+        {
+            flags += 1;
+            if flags > 1 {
+                return Some((HeaderDefect::UnexpectedToken, range));
+            }
             continue;
         }
         match kind {
@@ -156,6 +186,32 @@ where
     third_string.map(|r| (HeaderDefect::TooManyStrings(strings), r))
 }
 
+/// [`first_header_defect`], plus the one check that needs the source text: a
+/// one-letter flag glued to what follows it ([`HeaderDefect::GluedLetterFlag`]).
+/// `src` is the text the ranges index. Like the one-letter-currency rule in
+/// `directive_header`, the end of the file counts as a separator, so that
+/// formatting, which adds the final newline, stays idempotent.
+pub(super) fn first_header_defect_in(
+    tokens: Vec<(SyntaxKind, Range<usize>)>,
+    src: &str,
+) -> Option<(HeaderDefect, Range<usize>)> {
+    let glued = tokens
+        .iter()
+        .filter(|(k, _)| !is_header_trivia(*k))
+        .take_while(|(k, _)| !matches!(k, SyntaxKind::STRING | SyntaxKind::TAG | SyntaxKind::LINK))
+        .find(|(k, r)| {
+            *k == SyntaxKind::CURRENCY
+                && r.len() == 1
+                && !matches!(src.as_bytes().get(r.end), None | Some(b' ' | b'\t' | b'\n'))
+        })
+        .map(|(_, r)| (HeaderDefect::GluedLetterFlag, r.clone()));
+    let grammar = first_header_defect(tokens);
+    match (glued, grammar) {
+        (Some(g), Some(d)) => Some(if g.1.start <= d.1.start { g } else { d }),
+        (g, d) => g.or(d),
+    }
+}
+
 /// Diagnostic text for a defect. `text` is the source slice of the reported
 /// range — the caller has the source, this module does not.
 ///
@@ -174,6 +230,10 @@ pub(super) fn defect_message(defect: HeaderDefect, text: &str) -> String {
         HeaderDefect::UnexpectedToken => {
             format!("unexpected {text:?} in transaction header")
         }
+        HeaderDefect::GluedLetterFlag => format!(
+            "unexpected {text:?} in transaction header: a one-letter flag must be \
+             followed by a space, as beancount reads it"
+        ),
     }
 }
 

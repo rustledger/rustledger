@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.15.0;
+package rustledger:ledger@3.17.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -558,12 +558,35 @@ interface ledger {
 
   /// Run a BQL query against source text.
   query: func(source: string, query: string) -> query-result;
-  /// Like `query`, but the ledger is loaded from a file path.
+  /// Like `query`, but the ledger is loaded from a file path, with its
+  /// includes, so the source columns name the real files (3.16.0, #2825;
+  /// before, the file's text was read and queried as an unnamed source,
+  /// its includes unread). Includes are confined to the entry file's
+  /// directory tree, as `load-file` confines them by default, with no
+  /// opt-out here (use `session.from-file` for one): an include outside it
+  /// is a load error. It refuses, with an empty result carrying the errors,
+  /// when a file failed to parse, a file that exists could not be read or
+  /// decrypted (an include naming a directory, a locked key), or a
+  /// transaction failed to book: the rule the file-based query surfaces
+  /// share, `rledger query` included (3.17.0, #2861). Every other error is
+  /// reported in `errors` beside the rows: an include of a file that does not
+  /// exist, an include cycle, a duplicate include and an include glob
+  /// matching nothing, over which `bean-query` answers too; an include
+  /// outside the tree, which is left unread (`bean-query` does not confine,
+  /// and reads it); and a plugin's error or warning. Before 3.17.0 every load
+  /// error but a duplicate include, an include cycle and an empty glob
+  /// refused, as did a plugin error or warning. A file that cannot be read
+  /// reports `Failed to load file: ...` (was `Failed to read file ...`).
   query-file: func(path: string, query: string) -> query-result;
 
   /// Load source once, then run several queries against it.
   batch: func(source: string, queries: list<string>) -> batch-result;
-  /// Like `batch`, but the ledger is loaded from a file path.
+  /// Like `batch`, but the ledger is loaded from a file path, as `query-file`
+  /// loads it, confinement and load-error rule included (3.16.0, #2825).
+  /// `load` has the `load-file` shape: entries carry their real files and
+  /// lines (a directive a plugin created, `<unknown>` and 0), and `includes`
+  /// lists the loaded files. Each query's `errors` repeats the load errors
+  /// (all of them when they make it refuse, else beside its rows), so every result stands alone.
   batch-file: func(path: string, queries: list<string>) -> batch-result;
 
   /// A loaded, booked ledger held inside the component (#1421).
@@ -584,7 +607,11 @@ interface ledger {
     constructor(source: string);
     /// Parse + book from a file path. Include-graph confinement and
     /// `allow-unrestricted-includes` / `plugins` semantics match `load-file`;
-    /// load failures are surfaced via `info().errors`, not a trap.
+    /// load failures are surfaced via `info().errors`, not a trap. Whether
+    /// the session's queries answer is decided by its load alone, by the
+    /// rule `query-file` follows (3.17.0, #2861): an error a `plugins` entry
+    /// raises (an unknown name among them) is reported in `errors` and does
+    /// not stop a query, as a file's own plugin's error does not.
     from-file: static func(path: string, allow-unrestricted-includes: bool, plugins: list<string>) -> session;
     /// Hold an already-loaded directive set (added in 3.4.0 for the
     /// rustfava filtered-query path — rustfava#173). The embedder pays the
@@ -632,6 +659,16 @@ interface ledger {
     /// two are drop-in interchangeable.
     account-type: func(account: string) -> string;
     /// Run a BQL query against the held ledger.
+    ///
+    /// A session from a file refuses, with no rows and the held errors, only
+    /// when its load reported a parse error, a file that could not be read or
+    /// decrypted, or a booking failure, the rule `query-file` follows (3.17.0,
+    /// #2861); every other error, a session plugin's included, is reported in
+    /// `errors` beside the rows. Before
+    /// 3.17.0 it refused on every load error but a duplicate include, an
+    /// include cycle and an empty glob (3.16.0), and on a plugin error or
+    /// warning. A session from source text refuses when its load left any
+    /// error.
     ///
     /// A table a `CREATE TABLE` makes stays for this session's later
     /// queries, and `INSERT INTO` adds to it (3.15.0, #2579); before, each

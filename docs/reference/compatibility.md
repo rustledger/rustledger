@@ -486,28 +486,33 @@ listed elsewhere on this page (decimal precision, booking, plugins), which
 
 ### 17. Cost Currencies Beancount Refuses to Categorize
 
-Both engines refuse a sale priced in another currency than its cost
-(`-2 HOOL {11.00 EUR} @ 14.50 USD`: `Cost and price currencies must match`),
-whether it reduces a lot, opens a short or sells under NONE, and both give a
-cost spec written without a currency (`{}`) the currency of beancount's
-`categorize_by_currency`, so `-1 HOOL {}` beside `Assets:Cash 13.00 USD`
-matches no EUR lot (issue #2571). Three cases differ:
+Both engines report a posting whose cost and price currencies are both written
+and differ (`2 HOOL {11.00 EUR} @ 14.50 USD`: `Cost and price currencies must
+match`), a purchase and a sale alike, at parse time. What follows differs for
+a sale: beancount books it, and rledger does not, whether it reduces a lot,
+opens a short or sells under NONE. The price says what the units fetched in one
+currency and the lot what they cost in another, so with no exchange rate the
+sale has no computable gain, and booking it put a gain in two currencies
+(#2571). rledger reports that it did not book the sale (`sale from ... not
+booked`), since a later balance assertion then sees the unsold units.
+
+Both engines give a cost spec written without a currency (`{}`) the currency
+of beancount's `categorize_by_currency`, so `-1 HOOL {}` beside
+`Assets:Cash 13.00 USD` matches no EUR lot (issue #2571). Two more cases
+differ:
 
 | Ledger | rustledger | Python beancount |
 |---|---|---|
-| A purchase priced in another currency than its cost, `2 HOOL {11.00 EUR} @ 14.50 USD` | books the lot | `Cost and price currencies must match` |
 | A `{}` sale whose only other postings are auto-postings, from an account holding lots in two cost currencies | sells by the account's booking method (FIFO: the oldest lot) | `Failed to categorize posting` |
 | A `{}` sale of X whose only other group is X itself (`10 X` moved in beside `-4 X {}`) | reads the cost currency from the account's lots, and sells | takes X as the cost currency, and `No position matches` |
 
-A purchase disposes of nothing, so no gain is computed from the two
-currencies; its price is recorded as a price. In the unresolved `{}` sale
-nothing names a currency: the account's method names the lot, as for any
-`{}` sale, and the auto-postings absorb whatever it cost. Beside a posting
-that does name one, rustledger refuses the sale too. And no lot of X is held
-at a cost in X, so the commodity's own postings say nothing about which lot a
-sale takes (a purchase there keeps beancount's cost in X). Each answer is
-well defined and is what rustledger booked before #2571, so it is kept;
-whether to refuse them as beancount does is an open decision.
+In the unresolved `{}` sale nothing names a currency: the account's method
+names the lot, as for any `{}` sale, and the auto-postings absorb whatever it
+cost. Beside a posting that does name one, rustledger refuses the sale too.
+And no lot of X is held at a cost in X, so the commodity's own postings say
+nothing about which lot a sale takes (a purchase there keeps beancount's cost
+in X). Each answer is well defined and is what rustledger booked before #2571,
+so it is kept; whether to refuse them as beancount does is an open decision.
 
 One more, older than #2571 and outside it: a cost spec with no currency on
 a posting that does not reduce a lot (a purchase, a sale under NONE, or one
@@ -516,10 +521,85 @@ still takes the currency rustledger infers from the other postings, where
 beancount refuses (`Failed to categorize posting`). No gain lands in two
 currencies there.
 
-Pinned by `crates/rustledger-booking/tests/cost_currency_2571.rs`
-(`an_augmentation_priced_in_another_currency_still_books`,
-`an_unresolved_empty_cost_sells_by_the_accounts_method`,
+Pinned by `test_parse_reports_a_cost_and_price_currency_mismatch`
+(`crates/rustledger-parser/tests/stray_char_matrix.rs`) and by
+`crates/rustledger-booking/tests/cost_currency_2571.rs`
+(`an_unresolved_empty_cost_sells_by_the_accounts_method`,
 `the_commoditys_own_postings_do_not_name_its_cost_currency`).
+
+### 18. Total Prices That Do Not Divide Evenly
+
+rustledger weighs a total price (`@@`) at the total as written. Beancount
+divides it into a per-unit price, rounded to 28 significant digits, and
+multiplies that back when it checks the balance. When the total does not
+divide evenly by the units, beancount is left with a tiny residual:
+
+```beancount
+2024-01-02 * "buy"
+  Assets:Stock  3 HOOL @@ 1000 USD
+  Assets:Bank  -1000 USD
+```
+
+The `@@` posting weighs `999.9999999999999999999999999 USD` in beancount, so
+with whole-number amounts (a zero tolerance) bean-check reports `Transaction
+does not balance: (-0.0000000000000000000000001 USD)`. rustledger weighs it
+at `1000 USD` and the transaction balances, as written. With a non-zero
+tolerance (`1000.00 USD`) both accept it.
+
+This is deliberate: the residual comes only from rounding the division, and
+refusing a transaction balanced to the cent would be wrong. A total that is
+really off (`-999.99 USD` here) is still refused. The BQL `weight` column
+uses the same written total (#2031). Pinned by
+`crates/rustledger-loader/tests/total_price_face_value_test.rs` (issue #2831).
+
+### 19. Amount Alignment With Wide Characters
+
+`rledger format` aligns amounts by display width: the number of cells an
+account name takes in a monospaced editor. East Asian Wide and Fullwidth
+characters take two cells, combining marks none, and ambiguous-width
+characters one (as most terminals render them). Emoji take the width
+`unicode-width` gives them (two cells for emoji-presentation characters).
+
+bean-format 3.2.3 handles such accounts in one of two ways, neither of which
+lines the amounts up:
+
+- **It leaves the line as written.** Its alignment regex,
+  `[\p{Lu}][\p{L}\p{Nd}\-]*(?::[\p{Lu}\p{Nd}][\p{L}\p{Nd}\-]*)+` followed by
+  whitespace, needs each component after the root to start with an uppercase
+  letter or a digit, and every character to be a letter, a digit or a hyphen.
+  So a posting to `Expenses:생활` or `Expenses:食品` (a component starting with
+  a letter that has no case) does not match, and neither does an account with
+  an emoji (`Assets:CORP✨`) or a combining mark anywhere in it (`Expenses:Cafe`
+  followed by U+0301 COMBINING ACUTE ACCENT, a decomposed `é`). bean-format
+  keeps whatever spacing such a line has, while still aligning every
+  matching line, in that transaction and elsewhere in the file, to its one
+  file-wide column. (A precomposed `Expenses:Café`, with U+00E9, matches;
+  `é` takes one cell, so both tools align it the same way.)
+- **It pads by code points.** When the account does match but contains a
+  wide character (`Expenses:X생활`, fullwidth `Expenses:Ｆｏｏｄ`), the line is
+  padded with Python's `len()`, so the wide character puts the amount further
+  right on screen. Emoji and combining marks never reach this case; they
+  always leave the line as written:
+
+```beancount
+2021-01-02 * "x"
+  Expenses:X생활   12345 KRW
+  Assets:Bank   -12345 KRW
+```
+
+That is bean-format's output: `Expenses:X생활` and `Assets:Bank` get the
+same padding, so the Korean amount starts two cells to the right. rustledger
+writes both kinds of line with the amounts ending in the same column on
+screen.
+
+This is deliberate: lining amounts up on screen is what alignment is for.
+Only files with wide or combining characters in an account name or posting
+flag are affected; for ASCII-only text, rledger's amount alignment is
+unchanged by this. (It still differs from bean-format's in other ways:
+bean-format also aligns dated `balance` and `price` lines, which widen the
+posting column, and leaves other spacing as written, such as the gaps inside
+`2021-01-01   open  Assets:Bank   USD`.) Pinned by
+`crates/rustledger-parser/tests/format_display_width.rs` (issue #2852).
 
 ## BQL Query Compatibility
 

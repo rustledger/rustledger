@@ -46,7 +46,9 @@ struct HostCallbacks {
     /// free to write `{ readFile(p) { return this.cache.get(p); } }`, and
     /// calling that with a null receiver breaks it at runtime.
     receiver: JsValue,
-    /// `(path: string) => string | null` — contents, or null if unreadable.
+    /// `(path: string) => string | null`: contents, or null if the file does
+    /// not exist. A throw is not-found too, unless it carries a `code` other
+    /// than `ENOENT` (`EACCES`, `EISDIR`, ...): a file that could not be read.
     read_file: js_sys::Function,
     /// `(pattern: string) => string[]` — optional; without it a glob include
     /// reports the same "does not match any files" the disk backend does.
@@ -160,8 +162,15 @@ impl FileSystem for HostFs {
                 .map(|host| (host.read_file.clone(), host.receiver.clone()))
         });
         let (f, receiver) = pair.ok_or_else(|| not_found(path, "no host filesystem installed"))?;
-        let value =
-            Self::call1(&f, &receiver, &display).map_err(|message| not_found(path, &message))?;
+        // A throw carrying an error `code` other than `ENOENT` (Node's `fs`
+        // sets `EACCES`, `EISDIR`, ...) is a file the host could not read, NOT a
+        // missing one: calling it missing let a query answer without the file
+        // (#2861), where `rledger query` and bean-query refuse an include they
+        // cannot read. A throw without a `code` stays "not found", the contract
+        // these entry points shipped with (v0.22.0).
+        let value = f
+            .call1(&receiver, &JsValue::from_str(&display))
+            .map_err(|thrown| read_failure(path, &thrown))?;
         value
             .as_string()
             .map(SourceText::from)
@@ -272,6 +281,39 @@ fn textual_normalize(path: &str) -> PathBuf {
     })
 }
 
+/// The load error for a `readFile` that threw `thrown`: an I/O error, which
+/// stops a query (`LoadError::blocks_queries`, #2861), when it carries an
+/// error `code` other than `ENOENT` (as Node's `fs` sets one), else
+/// not-found, as every throw was before.
+fn read_failure(path: &Path, thrown: &JsValue) -> LoadError {
+    let message = thrown
+        .as_string()
+        .or_else(|| {
+            js_sys::Reflect::get(thrown, &JsValue::from_str("message"))
+                .ok()
+                .and_then(|m| m.as_string())
+        })
+        .unwrap_or_else(|| "host callback threw".to_string());
+    let code = js_sys::Reflect::get(thrown, &JsValue::from_str("code"))
+        .ok()
+        .and_then(|c| c.as_string());
+    read_failure_from(path, code.as_deref(), &message)
+}
+
+/// [`read_failure`]'s decision, apart from the JS value so it is testable
+/// natively: no `code`, or `ENOENT`, is not-found; any other code an I/O
+/// error.
+fn read_failure_from(path: &Path, code: Option<&str>, message: &str) -> LoadError {
+    if matches!(code, None | Some("ENOENT")) {
+        return not_found(path, message);
+    }
+    LoadError::Io {
+        path: path.to_path_buf(),
+        error: std::io::Error::other(message.to_string()),
+        include_site: None,
+    }
+}
+
 fn not_found(path: &Path, message: &str) -> LoadError {
     LoadError::Io {
         path: path.to_path_buf(),
@@ -284,6 +326,22 @@ fn not_found(path: &Path, message: &str) -> LoadError {
 mod tests {
     use super::textual_normalize;
     use std::path::PathBuf;
+
+    /// A `readFile` that threw an error `code` other than `ENOENT` is a file
+    /// the host could not read, which stops a query (#2861). With no `code`
+    /// it stays not-found, which a query answers over, as the shipped
+    /// contract promised; so does `ENOENT`.
+    #[test]
+    fn test_read_failure_blocks_only_on_a_code_other_than_enoent() {
+        use std::path::Path;
+        let blocks = |code| {
+            super::read_failure_from(Path::new("x.beancount"), code, "boom").blocks_queries()
+        };
+        assert!(!blocks(Some("ENOENT")));
+        assert!(blocks(Some("EACCES")));
+        assert!(blocks(Some("EISDIR")));
+        assert!(!blocks(None));
+    }
 
     #[test]
     fn the_fallback_collapses_paths_that_name_one_file() {

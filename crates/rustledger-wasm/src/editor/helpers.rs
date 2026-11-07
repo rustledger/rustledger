@@ -10,13 +10,12 @@ pub fn get_line(source: &str, line_num: usize) -> &str {
     source.lines().nth(line_num).unwrap_or("")
 }
 
-/// Get the word at a given position in the source.
-pub fn get_word_at_position(source: &str, line: u32, character: u32) -> Option<String> {
-    let line_text = source.lines().nth(line as usize)?;
+/// The word around character offset `col` of `line_text`, as a half-open
+/// range of character indices; `None` when `col` touches no word character.
+fn word_char_range(line_text: &str, col: usize) -> Option<(usize, usize)> {
     let chars: Vec<char> = line_text.chars().collect();
-    let col = character as usize;
 
-    // `character` is a character offset and is used to index `chars`, so
+    // `col` is a character offset and is used to index `chars`, so
     // bound it by the character count, not the byte length (they differ
     // on multi-byte lines). Bounding by `line_text.len()` (bytes) would
     // accept an out-of-range char offset and then index incorrectly.
@@ -40,7 +39,47 @@ pub fn get_word_at_position(source: &str, line: u32, character: u32) -> Option<S
         return None;
     }
 
-    Some(chars[start..end].iter().collect())
+    Some((start, end))
+}
+
+/// Get the symbol at a given position: the currency token there if the
+/// lexer read one (via [`ParseResult::currency_at`]), else the word around
+/// the cursor, unless that word is a one-letter transaction or posting
+/// flag (via [`ParseResult::is_currency_flag_at`]).
+///
+/// The word scan splits `/6J` at the `/` and `BRK.B` at the `.`, so hover,
+/// definitions and references could not reach those currencies (#2807). A
+/// one-letter flag such as `T` lexes as a currency token but is not the
+/// currency `T`, so it is no symbol, as in the LSP.
+/// `character` is a character offset.
+pub fn get_symbol_at_position(
+    source: &str,
+    line: u32,
+    character: u32,
+    parse_result: &ParseResult,
+) -> Option<String> {
+    let line_start: usize = source
+        .split_inclusive('\n')
+        .take(line as usize)
+        .map(str::len)
+        .sum();
+    let line_text = source.lines().nth(line as usize)?;
+    let byte_of_char = |char_index: usize| {
+        line_text
+            .char_indices()
+            .nth(char_index)
+            .map_or(line_text.len(), |(byte, _)| byte)
+    };
+    if (character as usize) <= line_text.chars().count()
+        && let Some(occ) = parse_result.currency_at(line_start + byte_of_char(character as usize))
+    {
+        return Some(occ.value.to_string());
+    }
+    let (start, end) = word_char_range(line_text, character as usize)?;
+    if parse_result.is_currency_flag_at(line_start + byte_of_char(start)) {
+        return None;
+    }
+    Some(line_text.chars().skip(start).take(end - start).collect())
 }
 
 /// Check if a character is part of a word (including account separators).
@@ -48,12 +87,13 @@ pub fn is_word_char(c: char) -> bool {
     c.is_alphanumeric() || c == ':' || c == '_' || c == '-'
 }
 
-/// Check if a string looks like a currency (all uppercase, 2-5 chars).
+/// Check if a string is a valid currency name, by the parser's own rule.
+///
+/// Delegates to the lexer-backed canonical
+/// [`rustledger_parser::is_valid_currency`] (#2807), so `/6J`, `/ESM24` and
+/// `BRK.B` pass and `USD_` does not, exactly as the parser decides.
 pub fn is_currency_like(s: &str) -> bool {
-    s.len() >= 2
-        && s.len() <= 5
-        && s.chars()
-            .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit())
+    rustledger_parser::is_valid_currency(s)
 }
 
 /// Extract all account names from parse result.
@@ -182,6 +222,14 @@ mod tests {
     use super::*;
     use rustledger_parser::parse;
 
+    /// The word at a position, by the scan `get_symbol_at_position` falls
+    /// back to.
+    fn get_word_at_position(source: &str, line: u32, character: u32) -> Option<String> {
+        let line_text = source.lines().nth(line as usize)?;
+        let (start, end) = word_char_range(line_text, character as usize)?;
+        Some(line_text.chars().skip(start).take(end - start).collect())
+    }
+
     #[test]
     fn test_get_word_at_position() {
         let source = "2024-01-01 open Assets:Bank USD";
@@ -228,9 +276,51 @@ mod tests {
         assert!(is_currency_like("EUR"));
         assert!(is_currency_like("BTC"));
         assert!(is_currency_like("AAPL"));
-        assert!(!is_currency_like("U")); // Too short
-        assert!(!is_currency_like("VERYLONGCURRENCY")); // Too long
         assert!(!is_currency_like("usd")); // Lowercase
+        // The parser's own rule (#2807): single letters and `/` currencies
+        // are currencies; a trailing `_` or `-` is not.
+        assert!(is_currency_like("T"));
+        assert!(is_currency_like("/6J"));
+        assert!(is_currency_like("/ESM24"));
+        assert!(is_currency_like("BRK.B"));
+        assert!(!is_currency_like("USD_"));
+        assert!(!is_currency_like("USD-"));
+    }
+
+    #[test]
+    fn test_get_symbol_at_position_currency_token() {
+        let source = "2024-01-01 open Assets:Futures /6J,BRK.B\n";
+        let result = parse(source);
+        for col in [31, 32, 34] {
+            assert_eq!(
+                get_symbol_at_position(source, 0, col, &result).as_deref(),
+                Some("/6J"),
+                "col {col}"
+            );
+        }
+        assert_eq!(
+            get_symbol_at_position(source, 0, 37, &result).as_deref(),
+            Some("BRK.B")
+        );
+        assert_eq!(
+            get_symbol_at_position(source, 0, 20, &result).as_deref(),
+            Some("Assets:Futures")
+        );
+    }
+
+    /// A one-letter flag is no symbol, even next to a currency of the same
+    /// name; the currency itself still is.
+    #[test]
+    fn test_get_symbol_at_position_skips_one_letter_flags() {
+        let source = "2024-01-01 commodity T\n2024-01-16 T \"Transfer\"\n  P Assets:X  1 T\n";
+        let result = parse(source);
+        let at = |line, col| get_symbol_at_position(source, line, col, &result);
+        assert_eq!(at(1, 11), None, "header flag");
+        assert_eq!(at(1, 12), None, "just after the header flag");
+        assert_eq!(at(2, 2), None, "posting flag");
+        assert_eq!(at(2, 16).as_deref(), Some("T"));
+        assert_eq!(at(0, 21).as_deref(), Some("T"));
+        assert_eq!(at(2, 6).as_deref(), Some("Assets:X"));
     }
 
     #[test]

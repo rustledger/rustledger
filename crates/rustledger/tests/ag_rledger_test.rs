@@ -66,7 +66,8 @@ fn linked_transit_matches_cli_and_accepts_repeated_accounts() {
     let file = write_fixture(
         tmp.path(),
         "transfer.beancount",
-        "2024-01-01 * \"first\" ^xfer-demo\n  Assets:Transit 100 USD\n  Assets:Cash -100 USD\n\
+        "2000-01-01 open Assets:Transit\n2000-01-01 open Assets:Cash\n\
+         2024-01-01 * \"first\" ^xfer-demo\n  Assets:Transit 100 USD\n  Assets:Cash -100 USD\n\
          2024-01-02 * \"second\" ^xfer-demo\n  Assets:Transit -90 USD\n  Assets:Cash 90 USD\n",
     );
     let file = file.to_str().unwrap();
@@ -105,7 +106,8 @@ fn test_lint_linked_transit_reports_configuration_warnings() {
     let file = write_fixture(
         tmp.path(),
         "transfer.beancount",
-        "2024-01-01 * \"first\" ^xfer-demo\n  Assets:Transit 100 USD\n  Assets:Cash -100 USD\n",
+        "2000-01-01 open Assets:Transit\n2000-01-01 open Assets:Cash\n\
+         2024-01-01 * \"first\" ^xfer-demo\n  Assets:Transit 100 USD\n  Assets:Cash -100 USD\n",
     );
     let file = file.to_str().unwrap();
     let (code, envelope, _) = run_in(

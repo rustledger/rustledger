@@ -1,12 +1,26 @@
 //! Read-only inspection of explicitly linked transit postings.
 //!
-//! The lint reads the booked ledger: each input is loaded, refused if it has
-//! load errors (as `lint closed-nonempty` does), then run through
-//! [`rustledger_loader::process`] with plugins, so an elided transit amount
-//! is the amount booking computed and a `plugin` line runs as it does in
-//! `check`. A processing error refuses the input too: a transaction booking
-//! rejected is left out of the booked stream, and reporting its link as
-//! `missing` (or its partner as matched) would be a misleading answer.
+//! The lint reads the booked and validated ledger, as `rledger check` sees
+//! it: each input is loaded, refused if it has load errors (as
+//! `lint closed-nonempty` does), then run through
+//! [`rustledger_loader::process`] with plugins and validation. An elided
+//! transit amount is the amount booking computed, and a `plugin` line runs
+//! as it does in `check`.
+//!
+//! What processing reports is handled by what it can do to the answer:
+//!
+//! - An error that drops or alters transactions refuses the input: a
+//!   transaction booking rejected is left out of the booked stream, and a
+//!   plugin that failed (or whose output was discarded) left the directives
+//!   other than it would have. Reporting a link as `missing`, or its partner
+//!   as matched, over either would be a misleading answer.
+//! - Any other error located on a linked transaction (an unbalanced leg, an
+//!   unopened or closed account, a plugin's finding on that transaction)
+//!   makes the link `ambiguous`, with the error as the reason: a leg `check`
+//!   rejects is not a leg this lint can vouch for.
+//! - Everything else (errors elsewhere in the ledger, errors with no
+//!   transaction location such as `check_commodity`'s, and warnings) is
+//!   passed through as a warning and does not refuse the input.
 //!
 //! A configuration that cannot match anything is said so, not answered with
 //! an empty report: an `--account` that is not an account name is refused, a
@@ -19,8 +33,9 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use rustledger_core::{Amount, Directive, Link};
 use rustledger_loader::{ErrorSeverity, LedgerError, LoadOptions, Loader};
+use rustledger_validate::is_advisory_only_code;
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
@@ -68,19 +83,33 @@ struct Leg {
     location: Location,
     postings: Vec<(String, Option<Amount>)>,
     complex: bool,
+    /// Indices into the run's [`Reported`] list of the errors located on
+    /// this leg's transaction.
+    errors: BTreeSet<usize>,
 }
 
 #[derive(Serialize)]
 struct Finding {
     link: String,
     status: &'static str,
-    reason: &'static str,
+    reason: String,
     locations: Vec<Location>,
 }
 
 #[derive(Serialize)]
 struct Report {
     findings: Vec<Finding>,
+}
+
+/// A processing diagnostic this lint reports rather than refuses on: the
+/// reason of an `ambiguous` link when it is on a leg, else a warning.
+struct Reported {
+    /// `file:line: CODE: message`, as [`describe_error`] writes it.
+    described: String,
+    code: String,
+    message: String,
+    /// Whether a finding names it, so it is not repeated as a warning.
+    on_leg: bool,
 }
 
 /// Run the lint on stdout, its warnings on stderr.
@@ -96,30 +125,32 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     )
 }
 
-/// `file:line: CODE: message` for each error, joined for one refusal.
+/// `file:line: CODE: message`.
+fn describe_error(err: &LedgerError) -> String {
+    let at = err
+        .location
+        .as_ref()
+        .map(|l| format!("{}:{}: ", l.file.display(), l.line))
+        .unwrap_or_default();
+    format!("{at}{}: {}", err.code, err.message)
+}
+
+/// [`describe_error`] for each error, joined for one message.
 fn describe_errors<'a>(errors: impl Iterator<Item = &'a LedgerError>) -> String {
-    errors
-        .map(|err| {
-            let at = err
-                .location
-                .as_ref()
-                .map(|l| format!("{}:{}: ", l.file.display(), l.line))
-                .unwrap_or_default();
-            format!("{at}{}: {}", err.code, err.message)
-        })
-        .collect::<Vec<_>>()
-        .join("; ")
+    errors.map(describe_error).collect::<Vec<_>>().join("; ")
 }
 
 /// Inspect booked transactions and write an advisory report.
 ///
 /// The report goes to `out`. Warnings (a dropped `^`, an account or prefix
-/// the ledger never uses, a processing warning) go to `warnings` when given,
-/// else to `err` as `warning: ...` lines.
+/// the ledger never uses, a processing diagnostic not on a linked leg) go to
+/// `warnings` when given, else to `err` as `warning: ...` lines.
 ///
 /// # Errors
-/// Returns an error when the inputs cannot be safely inspected, when an
-/// `--account` is not a valid account name, or when output fails.
+/// Returns an error when the inputs cannot be safely inspected (load errors,
+/// a booking failure, a plugin failure), when an `--account` is not a valid
+/// account name, or when output fails.
+#[allow(clippy::too_many_lines)]
 pub fn run_with_writer<W: std::io::Write>(
     args: &Args,
     out: &mut W,
@@ -158,17 +189,18 @@ pub fn run_with_writer<W: std::io::Write>(
     let accounts: BTreeSet<&str> = args.account.iter().map(String::as_str).collect();
     let mut seen_accounts: BTreeSet<&str> = BTreeSet::new();
     let mut any_link_matches = false;
-    // Booking only: validation diagnostics (an unopened account, a failed
-    // balance assertion) do not change the amounts this lint compares, and
-    // `rledger check` is where they belong.
+    // Booking, plugins and validation, as `rledger check` runs them, so a
+    // leg `check` rejects is not reported as matched. See the module docs
+    // for what each kind of error does to the answer.
     let options = LoadOptions {
         run_plugins: true,
-        validate: false,
+        validate: true,
         plugin_max_time_secs: crate::plugin_budget::max_time_secs(),
         plugin_max_memory_mb: crate::plugin_budget::max_memory_mb(),
         ..Default::default()
     };
     let mut groups: BTreeMap<String, BTreeMap<(PathBuf, usize), Leg>> = BTreeMap::new();
+    let mut reported: Vec<Reported> = Vec::new();
     for path in &args.files {
         let result = Loader::new()
             .load(path)
@@ -186,30 +218,45 @@ pub fn run_with_writer<W: std::io::Write>(
         );
         let ledger = rustledger_loader::process(result, &options)
             .with_context(|| format!("failed to process {}", path.display()))?;
-        let mut errors = ledger
+        let mut refusals = ledger
             .errors
             .iter()
-            .filter(|e| e.severity == ErrorSeverity::Error)
+            .filter(|e| e.is_booking_failure() || e.is_plugin_failure())
             .peekable();
         anyhow::ensure!(
-            errors.peek().is_none(),
-            "{}: cannot inspect a ledger with processing errors: {}",
+            refusals.peek().is_none(),
+            "{}: cannot inspect a ledger whose processing failed: {}",
             path.display(),
-            describe_errors(errors)
+            describe_errors(refusals)
         );
-        for warning in ledger
-            .errors
-            .iter()
-            .filter(|e| e.severity == ErrorSeverity::Warning)
-        {
-            let line = format!("warning: {}", describe_errors(std::iter::once(warning)));
-            messages.emit_as(
-                Diagnostic {
-                    code: Some(warning.code.clone()),
-                    ..Diagnostic::message(warning.message.clone())
-                },
-                line,
-            );
+        // The other errors, by the transaction each is located on: a
+        // validator's by its span, a plugin's by its file and line.
+        let mut by_span: HashMap<(u16, usize), Vec<usize>> = HashMap::new();
+        let mut by_line: HashMap<(PathBuf, usize), Vec<usize>> = HashMap::new();
+        for error in &ledger.errors {
+            // `check` stays silent on these; `lint closed-nonempty` reports
+            // them.
+            if is_advisory_only_code(&error.code) {
+                continue;
+            }
+            let index = reported.len();
+            if error.severity == ErrorSeverity::Error {
+                if let (Some(file_id), Some((start, _))) = (error.file_id, error.source_span) {
+                    by_span.entry((file_id, start)).or_default().push(index);
+                }
+                if let Some(location) = &error.location {
+                    by_line
+                        .entry((location.file.clone(), location.line))
+                        .or_default()
+                        .push(index);
+                }
+            }
+            reported.push(Reported {
+                described: describe_error(error),
+                code: error.code.clone(),
+                message: error.message.clone(),
+                on_leg: false,
+            });
         }
         for directive in &ledger.directives {
             let txn = match &directive.value {
@@ -247,9 +294,16 @@ pub fn run_with_writer<W: std::io::Write>(
                 .with_context(|| format!("cannot identify source {}", source.path.display()))?;
             let key = (canonical.clone(), directive.span.start);
             let (line, _) = source.line_col(directive.span.start);
+            let errors: BTreeSet<usize> = by_span
+                .get(&(directive.file_id, directive.span.start))
+                .into_iter()
+                .chain(by_line.get(&(source.path.clone(), line)))
+                .flatten()
+                .copied()
+                .collect();
             let multiple_links = links.len() > 1;
             for link in links {
-                groups
+                let leg = groups
                     .entry(link.to_string())
                     .or_default()
                     .entry(key.clone())
@@ -275,11 +329,93 @@ pub fn run_with_writer<W: std::io::Write>(
                                 .postings
                                 .iter()
                                 .any(|p| p.cost.is_some() || p.price.is_some()),
+                        errors: BTreeSet::new(),
                     });
+                // The same transaction read again from another input: what
+                // either run reported on it counts.
+                leg.errors.extend(errors.iter().copied());
             }
         }
     }
 
+    let mut findings = Vec::new();
+    for (link, legs) in groups {
+        let legs: Vec<Leg> = legs.into_values().collect();
+        if legs.iter().all(|leg| leg.postings.is_empty()) {
+            continue;
+        }
+        let on_legs: BTreeSet<usize> = legs.iter().flat_map(|l| l.errors.iter().copied()).collect();
+        let (status, reason) = if !on_legs.is_empty() {
+            for &index in &on_legs {
+                reported[index].on_leg = true;
+            }
+            (
+                "ambiguous",
+                format!(
+                    "error on a linked transaction: {}",
+                    on_legs
+                        .iter()
+                        .map(|&i| reported[i].described.as_str())
+                        .collect::<BTreeSet<_>>()
+                        .into_iter()
+                        .collect::<Vec<_>>()
+                        .join("; ")
+                ),
+            )
+        } else if legs.len() > 2 || legs.iter().any(|l| l.postings.len() > 1) {
+            (
+                "ambiguous",
+                "multiple transactions or transit postings".to_string(),
+            )
+        } else if legs.iter().any(|l| l.complex) {
+            ("ambiguous", "unsupported complex transaction".to_string())
+        } else if legs.len() < 2 || legs.iter().any(|l| l.postings.is_empty()) {
+            ("missing", "a linked transit leg is missing".to_string())
+        } else {
+            let (account_a, amount_a) = &legs[0].postings[0];
+            let (account_b, amount_b) = &legs[1].postings[0];
+            match (amount_a, amount_b) {
+                (Some(a), Some(b))
+                    if account_a == account_b
+                        && a.currency == b.currency
+                        && !a.number.is_zero()
+                        && a.number == -b.number =>
+                {
+                    ("matched", "opposite equal transit amounts".to_string())
+                }
+                (Some(_), Some(_)) => (
+                    "mismatch",
+                    "transit account, currency, amount, or direction differs".to_string(),
+                ),
+                // Booking completes every posting it accepts; an amount it
+                // left incomplete is not one this lint can compare.
+                _ => ("ambiguous", "transit amount was not booked".to_string()),
+            }
+        };
+        findings.push(Finding {
+            link,
+            status,
+            reason,
+            locations: legs.into_iter().map(|l| l.location).collect(),
+        });
+    }
+
+    // What processing reported off the linked legs, once each (an included
+    // file given again as an input reports its errors twice).
+    let mut passed: BTreeSet<&str> = BTreeSet::new();
+    for item in reported.iter().filter(|r| !r.on_leg) {
+        let line = item.described.as_str();
+        if !passed.insert(line) {
+            continue;
+        }
+        messages.emit_as(
+            Diagnostic {
+                code: Some(item.code.clone()),
+                ..Diagnostic::message(item.message.clone())
+            },
+            format!("warning: {line}"),
+        );
+    }
     // A misspelled account or prefix matches nothing, which would otherwise
     // read as a clean "No linked transit transfers found."
     for account in &accounts {
@@ -306,46 +442,6 @@ pub fn run_with_writer<W: std::io::Write>(
         );
     }
 
-    let mut findings = Vec::new();
-    for (link, legs) in groups {
-        let legs: Vec<Leg> = legs.into_values().collect();
-        if legs.iter().all(|leg| leg.postings.is_empty()) {
-            continue;
-        }
-        let (status, reason) = if legs.len() > 2 || legs.iter().any(|l| l.postings.len() > 1) {
-            ("ambiguous", "multiple transactions or transit postings")
-        } else if legs.iter().any(|l| l.complex) {
-            ("ambiguous", "unsupported complex transaction")
-        } else if legs.len() < 2 || legs.iter().any(|l| l.postings.is_empty()) {
-            ("missing", "a linked transit leg is missing")
-        } else {
-            let (account_a, amount_a) = &legs[0].postings[0];
-            let (account_b, amount_b) = &legs[1].postings[0];
-            match (amount_a, amount_b) {
-                (Some(a), Some(b))
-                    if account_a == account_b
-                        && a.currency == b.currency
-                        && !a.number.is_zero()
-                        && a.number == -b.number =>
-                {
-                    ("matched", "opposite equal transit amounts")
-                }
-                (Some(_), Some(_)) => (
-                    "mismatch",
-                    "transit account, currency, amount, or direction differs",
-                ),
-                // Booking completes every posting it accepts; an amount it
-                // left incomplete is not one this lint can compare.
-                _ => ("ambiguous", "transit amount was not booked"),
-            }
-        };
-        findings.push(Finding {
-            link,
-            status,
-            reason,
-            locations: legs.into_iter().map(|l| l.location).collect(),
-        });
-    }
     match args.format {
         OutputFormat::Json => {
             writeln!(out, "{}", crate::cmd::to_json_pretty(&Report { findings })?)?;
@@ -401,6 +497,21 @@ mod tests {
 
     fn codes(warnings: &[Diagnostic]) -> Vec<&str> {
         warnings.iter().filter_map(|w| w.code.as_deref()).collect()
+    }
+
+    /// Opens for every account the tests post to, so validation passes on a
+    /// well-formed leg.
+    const OPENS: &str = "\
+        2000-01-01 open Assets:Transit\n\
+        2000-01-01 open Assets:OtherTransit\n\
+        2000-01-01 open Assets:Cash\n\
+        2000-01-01 open Assets:Bank\n\
+        2000-01-01 open Equity:Capital\n\
+        2000-01-01 open Expenses:Fee\n";
+
+    /// Write `body` after [`OPENS`].
+    fn write_ledger(path: &std::path::Path, body: impl AsRef<str>) -> std::io::Result<()> {
+        fs::write(path, format!("{OPENS}{}", body.as_ref()))
     }
 
     fn transaction(link: &str, transit: &str, other: &str) -> String {
@@ -494,7 +605,7 @@ mod tests {
             "Assets:Cash 2 USD",
             "Equity:Capital",
         ));
-        fs::write(&path, source).unwrap();
+        write_ledger(&path, source).unwrap();
         let report = inspect(vec![path], &["Assets:Transit", "Assets:OtherTransit"]).unwrap();
         let findings = report["findings"].as_array().unwrap();
         assert_eq!(findings.len(), pairs.len() + 2);
@@ -556,7 +667,7 @@ mod tests {
         source.push_str(
             "2024-01-01 * \"two links\" ^xfer-a ^xfer-b\n  Assets:Transit 2 USD\n  Assets:Cash\n",
         );
-        fs::write(&path, source).unwrap();
+        write_ledger(&path, source).unwrap();
         let report = inspect(vec![path], &["Assets:Transit"]).unwrap();
         for finding in report["findings"].as_array().unwrap() {
             assert_eq!(finding["status"], "ambiguous", "{finding}");
@@ -569,7 +680,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let child = dir.path().join("child.bean");
         let parent = dir.path().join("main.bean");
-        fs::write(
+        write_ledger(
             &child,
             transaction("xfer-shared", "Assets:Transit 3 USD", "Assets:Cash"),
         )
@@ -592,11 +703,11 @@ mod tests {
             report["findings"][0]["locations"].as_array().unwrap().len(),
             2
         );
-        fs::write(&child, "2024-01-01 * \"broken\"\n  not an account\n").unwrap();
+        write_ledger(&child, "2024-01-01 * \"broken\"\n  not an account\n").unwrap();
         assert!(inspect(vec![child.clone()], &["Assets:Transit"]).is_err());
         // An unknown plugin is a processing error: refused, not inspected
         // with the plugin silently skipped.
-        fs::write(&child, "plugin \"example\"\n").unwrap();
+        write_ledger(&child, "plugin \"example\"\n").unwrap();
         assert!(inspect(vec![child], &["Assets:Transit"]).is_err());
     }
 
@@ -604,7 +715,7 @@ mod tests {
     fn test_run_with_writer_matches_elided_transit_amount() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("main.bean");
-        fs::write(
+        write_ledger(
             &path,
             concat!(
                 "2026-01-02 * \"Send\" ^xfer-a\n",
@@ -625,7 +736,7 @@ mod tests {
     fn test_run_with_writer_runs_ledger_plugins() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("main.bean");
-        fs::write(
+        write_ledger(
             &path,
             concat!(
                 "plugin \"beancount.plugins.auto_accounts\"\n",
@@ -649,7 +760,7 @@ mod tests {
         // be misleading. The lint refuses instead.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("main.bean");
-        fs::write(
+        write_ledger(
             &path,
             concat!(
                 "2026-01-02 * \"Send\" ^xfer-a\n",
@@ -662,16 +773,16 @@ mod tests {
         )
         .unwrap();
         let err = inspect(vec![path], &["Assets:Transit"]).unwrap_err();
-        assert!(err.to_string().contains("processing errors"), "{err:#}");
+        assert!(err.to_string().contains("processing failed"), "{err:#}");
     }
 
     #[test]
     fn refuses_empty_scope_and_reports_missing_include() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("main.bean");
-        fs::write(&path, "include \"missing.bean\"\n").unwrap();
+        write_ledger(&path, "include \"missing.bean\"\n").unwrap();
         assert!(inspect(vec![path.clone()], &["Assets:Transit"]).is_err());
-        fs::write(&path, "").unwrap();
+        write_ledger(&path, "").unwrap();
         assert!(inspect(vec![path.clone()], &[]).is_err());
         let args = Args {
             files: vec![path],
@@ -685,7 +796,7 @@ mod tests {
     /// A matched pair on `Assets:Transit`, for the configuration tests.
     fn matched_pair(dir: &std::path::Path) -> PathBuf {
         let path = dir.join("main.bean");
-        fs::write(
+        write_ledger(
             &path,
             format!(
                 "{}{}",
@@ -778,6 +889,113 @@ mod tests {
             String::from_utf8(out)
                 .unwrap()
                 .starts_with("^xfer-a: matched"),
+        );
+    }
+
+    /// The status and reason of `link` in `report`.
+    fn finding<'a>(report: &'a serde_json::Value, link: &str) -> &'a serde_json::Value {
+        report["findings"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["link"] == link)
+            .unwrap_or_else(|| panic!("no finding for {link}: {report}"))
+    }
+
+    #[test]
+    fn test_run_with_writer_validation_error_on_a_leg_is_ambiguous() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.bean");
+        write_ledger(
+            &path,
+            concat!(
+                // Unbalanced: the transit amounts agree, the leg does not.
+                "2026-01-02 * \"Send\" ^xfer-unbalanced\n",
+                "  Assets:Cash     -100.00 USD\n",
+                "  Assets:Transit    90.00 USD\n",
+                "2026-01-03 * \"Receive\" ^xfer-unbalanced\n",
+                "  Assets:Transit   -90.00 USD\n",
+                "  Assets:Bank       90.00 USD\n",
+                // A leg on an account that was never opened.
+                "2026-01-02 * \"Send\" ^xfer-unopened\n",
+                "  Assets:Ghost    -5 USD\n",
+                "  Assets:Transit   5 USD\n",
+                "2026-01-03 * \"Receive\" ^xfer-unopened\n",
+                "  Assets:Transit  -5 USD\n",
+                "  Assets:Bank      5 USD\n",
+                // A leg on the transit account after it was closed.
+                "2026-02-01 close Assets:OtherTransit\n",
+                "2026-01-10 * \"Send\" ^xfer-closed\n",
+                "  Assets:Cash        -7 USD\n",
+                "  Assets:OtherTransit 7 USD\n",
+                "2026-03-01 * \"Receive\" ^xfer-closed\n",
+                "  Assets:OtherTransit -7 USD\n",
+                "  Assets:Bank          7 USD\n",
+                // Elsewhere: an error on an unlinked transaction.
+                "2026-04-01 * \"Unrelated\"\n",
+                "  Assets:Cash  -1 USD\n",
+                "  Assets:Bank   2 USD\n",
+            ),
+        )
+        .unwrap();
+        let (report, warnings) = inspect_with_warnings(
+            vec![path],
+            "xfer-",
+            &["Assets:Transit", "Assets:OtherTransit"],
+        )
+        .unwrap();
+        for (link, code) in [
+            ("xfer-unbalanced", "E3001"),
+            ("xfer-unopened", "E1001"),
+            ("xfer-closed", "E1003"),
+        ] {
+            let found = finding(&report, link);
+            assert_eq!(found["status"], "ambiguous", "{link}: {found}");
+            assert!(
+                found["reason"].as_str().unwrap().contains(code),
+                "{link}: {found}"
+            );
+        }
+        // The unlinked transaction's error is a warning, not a refusal and
+        // not a finding; the errors on the legs are not repeated.
+        assert_eq!(codes(&warnings), vec!["E3001"], "{warnings:?}");
+        assert!(
+            warnings[0].message.contains("residual 1 USD"),
+            "{warnings:?}"
+        );
+    }
+
+    #[test]
+    fn test_run_with_writer_plugin_findings_are_warnings() {
+        // check_commodity reports a currency per account, with no
+        // transaction location (as beancount's `<check_commodity>`), so it is
+        // a warning whether the undeclared currency is on a leg or elsewhere,
+        // and the file is still inspected.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("main.bean");
+        fs::write(
+            &path,
+            format!(
+                "plugin \"beancount.plugins.check_commodity\"\n\
+                 2000-01-01 commodity USD\n{OPENS}{}{}{}",
+                transaction("xfer-a", "Assets:Transit 5 CHF", "Assets:Cash"),
+                transaction("xfer-a", "Assets:Transit -5 CHF", "Assets:Cash"),
+                "2024-02-01 * \"Elsewhere\"\n  Assets:Cash  -1 EUR\n  Assets:Bank\n",
+            ),
+        )
+        .unwrap();
+        let (report, warnings) =
+            inspect_with_warnings(vec![path], "xfer-", &["Assets:Transit"]).unwrap();
+        assert_eq!(finding(&report, "xfer-a")["status"], "matched", "{report}");
+        let messages: Vec<&str> = warnings.iter().map(|w| w.message.as_str()).collect();
+        assert!(
+            messages
+                .iter()
+                .any(|m| m.contains("'CHF' in 'Assets:Cash'"))
+                && messages
+                    .iter()
+                    .any(|m| m.contains("'EUR' in 'Assets:Bank'")),
+            "{warnings:?}"
         );
     }
 }

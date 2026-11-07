@@ -64,10 +64,21 @@ envelope's `warnings`), so a typo does not pass as "No linked transit
 transfers found."
 
 The lint conservatively marks extra postings, multiple scoped links, prices,
-or costs as ambiguous. It reads the booked ledger: plugins run, and an elided
-transit amount is the amount booking computed. Files with load or processing
-errors (a plugin that fails, a transaction that cannot be booked) are refused
-rather than inspected. Validation is not run; use `rledger check` for that.
+or costs as ambiguous. It reads the ledger as `rledger check` does: booked,
+with plugins and validation run, so an elided transit amount is the amount
+booking computed. What processing reports is handled by what it does to the
+answer:
+
+- A file with load errors, a transaction that cannot be booked, or a plugin
+  that fails to run (or whose output is discarded) is refused: those drop or
+  alter transactions, so any answer could be wrong.
+- Any other error located on a linked transaction (an unbalanced leg, an
+  unopened or closed account, a plugin's finding on that transaction) makes
+  the link `ambiguous`, with the error as the reason.
+- Errors elsewhere in the ledger, errors with no transaction location (such
+  as `check_commodity`'s), and warnings are passed through as warnings and
+  do not stop the lint.
+
 Findings are advisory and do not change the exit status. A match is not
 evidence of external settlement, domain isolation, or a persistent transfer
 lifecycle.

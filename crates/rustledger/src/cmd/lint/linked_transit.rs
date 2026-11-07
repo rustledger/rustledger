@@ -245,6 +245,26 @@ struct Reported {
     on_leg: bool,
 }
 
+/// Errors by the file and line they are located at: indices into the run's
+/// [`Reported`] list.
+type ErrorsByLine = HashMap<PathBuf, BTreeMap<usize, Vec<usize>>>;
+
+/// The errors located on lines `first..=last` of `file`: a transaction's
+/// header line and its postings', so a plugin error located at a posting is
+/// the transaction's too.
+fn errors_within<'a>(
+    by_line: &'a ErrorsByLine,
+    file: &std::path::Path,
+    first: usize,
+    last: usize,
+) -> impl Iterator<Item = usize> + 'a {
+    by_line
+        .get(file)
+        .into_iter()
+        .flat_map(move |lines| lines.range(first..=last))
+        .flat_map(|(_, indices)| indices.iter().copied())
+}
+
 /// Run the lint on stdout, its warnings on stderr.
 ///
 /// # Errors
@@ -368,7 +388,7 @@ pub fn run_with_writer<W: std::io::Write>(
         // The other errors, by the transaction each is located on: a
         // validator's by its span, a plugin's by its file and line.
         let mut by_span: HashMap<(u16, usize), Vec<usize>> = HashMap::new();
-        let mut by_line: HashMap<(PathBuf, usize), Vec<usize>> = HashMap::new();
+        let mut by_line = ErrorsByLine::new();
         for error in &ledger.errors {
             // `check` stays silent on these; `lint closed-nonempty` reports
             // them.
@@ -382,7 +402,9 @@ pub fn run_with_writer<W: std::io::Write>(
                 }
                 if let Some(location) = &error.location {
                     by_line
-                        .entry((location.file.clone(), location.line))
+                        .entry(location.file.clone())
+                        .or_default()
+                        .entry(location.line)
                         .or_default()
                         .push(index);
                 }
@@ -446,13 +468,22 @@ pub fn run_with_writer<W: std::io::Write>(
                     // path for every include of it), and the path the other
                     // lints print.
                     let (line, _) = source.line_col(directive.span.start);
+                    // The last line of the transaction: a plugin can locate
+                    // an error at one of its postings.
+                    let (last, _) = source.line_col(
+                        directive
+                            .span
+                            .end
+                            .saturating_sub(1)
+                            .max(directive.span.start),
+                    );
                     let shared = located
                         .get(&(directive.file_id, directive.span.start))
                         .is_some_and(|&count| count > 1);
                     (
                         (source.path.clone(), directive.span.start),
                         (source.path.display().to_string(), line),
-                        Some((source.path.clone(), line)),
+                        Some((source.path.clone(), line, last)),
                         shared.then_some(
                             "several transactions share one source location \
                              (a plugin inserted one)",
@@ -474,13 +505,16 @@ pub fn run_with_writer<W: std::io::Write>(
                         Some("a plugin inserted this transaction, which has no source location"),
                     )
                 };
-            let errors: BTreeSet<usize> = by_span
-                .get(&(directive.file_id, directive.span.start))
-                .into_iter()
-                .chain(at.as_ref().and_then(|at| by_line.get(at)))
-                .flatten()
-                .copied()
-                .collect();
+            let errors: BTreeSet<usize> =
+                by_span
+                    .get(&(directive.file_id, directive.span.start))
+                    .into_iter()
+                    .flatten()
+                    .copied()
+                    .chain(at.iter().flat_map(|(file, first, last)| {
+                        errors_within(&by_line, file, *first, *last)
+                    }))
+                    .collect();
             let multiple_links = links.len() > 1;
             for link in links {
                 let leg = groups
@@ -1584,5 +1618,34 @@ mod tests {
         fs::write(&path, ledger("Assets:Cash")).unwrap();
         let report = inspect(vec![path], &["Assets:Transit"]).unwrap();
         assert_status(&report, "xfer-a", "ambiguous");
+    }
+
+    /// A plugin error at a posting line is the transaction's, as one at its
+    /// header is; one past its last posting, or in another file, is not.
+    #[test]
+    fn test_errors_within_takes_the_transactions_posting_lines() {
+        let file = PathBuf::from("/ledger/main.bean");
+        let mut by_line = ErrorsByLine::new();
+        for (line, index) in [(10, 0), (12, 1), (13, 2), (20, 3)] {
+            by_line
+                .entry(file.clone())
+                .or_default()
+                .entry(line)
+                .or_default()
+                .push(index);
+        }
+        by_line
+            .entry(PathBuf::from("/ledger/other.bean"))
+            .or_default()
+            .entry(11)
+            .or_default()
+            .push(4);
+        // A transaction on lines 10 to 12: its header and two postings.
+        let found: Vec<usize> = errors_within(&by_line, &file, 10, 12).collect();
+        assert_eq!(found, [0, 1]);
+        assert_eq!(
+            errors_within(&by_line, std::path::Path::new("/ledger/none.bean"), 1, 99).count(),
+            0
+        );
     }
 }

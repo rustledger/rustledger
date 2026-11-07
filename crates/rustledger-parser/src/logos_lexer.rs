@@ -236,15 +236,13 @@ pub enum Token<'src> {
     /// The `popmeta` directive keyword.
     #[token("popmeta")]
     Popmeta,
-    /// The `TRUE` boolean literal (also True, true).
+    /// The `TRUE` boolean literal. Only the upper-case spelling, as in
+    /// beancount (`TRUE` is its only rule): `True` and `true` are its
+    /// `Invalid token`, and were read as booleans here (#2813).
     #[token("TRUE")]
-    #[token("True")]
-    #[token("true")]
     True,
-    /// The `FALSE` boolean literal (also False, false).
+    /// The `FALSE` boolean literal, upper case only, as `TRUE` (#2813).
     #[token("FALSE")]
-    #[token("False")]
-    #[token("false")]
     False,
     /// The `NULL` literal.
     #[token("NULL")]

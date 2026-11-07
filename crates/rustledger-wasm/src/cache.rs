@@ -370,7 +370,18 @@ use crate::types::{Error, LedgerOptions};
 /// blocks queries (`LedgerError::blocks_queries`) stops them (#2861); the
 /// restored `errors` no longer carry that flag. Loader output is unchanged; a
 /// v74 blob has no such field and would not deserialize as this layout.
-pub const CACHE_VERSION: u32 = 75;
+/// v76: loader v59, PARSER OUTPUT changed (#2787). A line's overlapping
+/// errors are reported once, as in beancount; a v75 blob would keep serving
+/// such a file with its old errors.
+/// v77: loader v60, PARSER OUTPUT changed (#2813). `True`/`true` are not
+/// booleans, and indented lines after `option`-like directives and posting
+/// `filename:`/`lineno:` are errors, as in beancount; a v76 blob would keep
+/// serving such a file with its old values and no error.
+/// v78: the `ParsedLedger` payload gained `query_refused`, whether an error
+/// that blocks queries (`LedgerError::blocks_queries`) stops them (#2882); a
+/// restored ledger refused on any load error. Loader output is unchanged; a
+/// v77 blob has no such field and would not deserialize as this layout.
+pub const CACHE_VERSION: u32 = 78;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -402,7 +413,7 @@ pub const CACHE_VERSION: u32 = 75;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 58;
+const LOADER_CACHE_VERSION_PIN: u32 = 60;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";
@@ -434,6 +445,10 @@ pub struct ParsedLedgerPayload {
     /// a query over an invalid option.
     pub option_errors: Vec<Error>,
     pub validation_errors: Vec<Error>,
+    /// Whether a query over the ledger refuses (`LedgerError::blocks_queries`,
+    /// #2882: a parse error or a booking failure). The archived
+    /// `parse_errors` do not carry the flag, so it is archived beside them.
+    pub query_refused: bool,
 }
 
 /// Cache payload for a [`super::parsed_ledger::Ledger`].
@@ -866,6 +881,7 @@ option "operating_currency" "USD"
             parse_errors: Vec::new(),
             option_errors: Vec::new(),
             validation_errors: Vec::new(),
+            query_refused: false,
         };
 
         let bytes = serialize_parsed(&payload).expect("serialize");
@@ -968,6 +984,7 @@ option "operating_currency" "USD"
             parse_errors: Vec::new(),
             option_errors: Vec::new(),
             validation_errors: Vec::new(),
+            query_refused: false,
         })
         .unwrap();
         assert!(

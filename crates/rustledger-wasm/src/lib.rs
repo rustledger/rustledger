@@ -137,7 +137,13 @@ export class ParsedLedger {
     /** Get the number of directives. */
     directiveCount(): number;
 
-    /** Run a BQL query on this ledger. */
+    /**
+     * Run a BQL query on this ledger. Refuses (no columns, the load's errors)
+     * when the source failed to parse or a transaction failed to book; otherwise
+     * answers, `errors` leading with the load's other errors (a plugin's, an
+     * unresolved include's) and option diagnostics. Validation errors are in
+     * getErrors().
+     */
     query(queryStr: string): QueryResult;
 
     /** Get account balances (shorthand for query("BALANCES")). */
@@ -208,7 +214,12 @@ export class Ledger {
     /** Get the number of directives. */
     directiveCount(): number;
 
-    /** Run a BQL query on this ledger. */
+    /**
+     * Run a BQL query on this ledger. Refuses (no columns, the ledger's errors)
+     * when a file failed to parse, could not be read or decrypted, or a
+     * transaction failed to book; otherwise answers, `errors` leading with the
+     * ledger's other errors (a missing include, a plugin's, a failed assertion).
+     */
     query(queryStr: string): QueryResult;
 
     /** Get account balances (shorthand for query("BALANCES")). */
@@ -882,6 +893,7 @@ option "operating_currency" "USD"
             parse_errors: Vec::new(),
             option_errors: Vec::new(),
             validation_errors: Vec::new(),
+            query_refused: false,
         };
 
         let bytes = cache::serialize_parsed(&payload).expect("serialize");

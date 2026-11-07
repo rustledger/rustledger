@@ -14,7 +14,7 @@
 // `format` (source / file / entry / entries). All exports are implemented in
 // `crates/rustledger-ffi-component`.
 
-package rustledger:ledger@3.17.0;
+package rustledger:ledger@3.18.0;
 
 /// Shared data types, translated 1:1 from `types/output.rs`.
 interface types {
@@ -557,6 +557,14 @@ interface ledger {
   validate-file: func(path: string) -> validate-result;
 
   /// Run a BQL query against source text.
+  ///
+  /// It refuses, with an empty result carrying the load errors, when the
+  /// source failed to parse or a transaction failed to book, the rule
+  /// `query-file` follows (3.18.0, #2882). Every other load error, a
+  /// plugin's error or warning among them, is reported in `errors` ahead of
+  /// the rows, as `bean-query` answers over it. Before 3.18.0 any load error
+  /// refused, a plugin's warning included. An `include` in source text is
+  /// listed but not resolved, and reports no error.
   query: func(source: string, query: string) -> query-result;
   /// Like `query`, but the ledger is loaded from a file path, with its
   /// includes, so the source columns name the real files (3.16.0, #2825;
@@ -579,7 +587,16 @@ interface ledger {
   /// reports `Failed to load file: ...` (was `Failed to read file ...`).
   query-file: func(path: string, query: string) -> query-result;
 
-  /// Load source once, then run several queries against it.
+  /// Load source once, then run several queries against it, by `query`'s
+  /// rule (3.18.0, #2882). When the load refuses, every query's `errors`
+  /// holds one error saying so, and `load.errors` holds the cause (before
+  /// 3.18.0 that one error read `parse errors exist`, whatever the cause,
+  /// and any load error refused). When it answers, each query's `errors`
+  /// repeats the load's parse, booking and plugin errors ahead of its own,
+  /// as `query` reports them. The semantic validation errors `load.errors`
+  /// also lists (a failed balance assertion, an unopened account) are in
+  /// `load.errors` only: a query neither checks for them nor refuses over
+  /// them.
   batch: func(source: string, queries: list<string>) -> batch-result;
   /// Like `batch`, but the ledger is loaded from a file path, as `query-file`
   /// loads it, confinement and load-error rule included (3.16.0, #2825).
@@ -603,7 +620,8 @@ interface ledger {
   /// so they never round-trip through the host's directive representation —
   /// removing a whole class of shape-translation bugs (#1421).
   resource session {
-    /// Parse + book a ledger from source text.
+    /// Parse + book a ledger from source text. Its queries answer by
+    /// `query`'s rule (3.18.0, #2882).
     constructor(source: string);
     /// Parse + book from a file path. Include-graph confinement and
     /// `allow-unrestricted-includes` / `plugins` semantics match `load-file`;
@@ -667,8 +685,9 @@ interface ledger {
     /// `errors` beside the rows. Before
     /// 3.17.0 it refused on every load error but a duplicate include, an
     /// include cycle and an empty glob (3.16.0), and on a plugin error or
-    /// warning. A session from source text refuses when its load left any
-    /// error.
+    /// warning. A session from source text follows the same rule, a
+    /// parse error or a booking failure (3.18.0, #2882); before 3.18.0 it
+    /// refused when its load left any error.
     ///
     /// A table a `CREATE TABLE` makes stays for this session's later
     /// queries, and `INSERT INTO` adds to it (3.15.0, #2579); before, each

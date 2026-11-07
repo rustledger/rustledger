@@ -106,6 +106,38 @@ pub fn require_account_open(
     false
 }
 
+/// Report each account-valued metadata entry in `meta` whose name is invalid
+/// under this ledger's roots (`E1005`), as beancount does (#2813): it checks
+/// every account token against the configured roots when it reads it, a
+/// metadata value included, so `kk: Foo:Bar` is `Invalid account name`
+/// there. rledger kept such a value as an account. The check is
+/// [`validate_account_name`] with the ledger's `account_types`, so a root
+/// renamed by `option "name_assets"` counts. Entries are visited in key
+/// order, so the errors come out in a stable order.
+pub fn push_invalid_meta_accounts(
+    state: &LedgerState,
+    meta: &rustledger_core::Metadata,
+    date: NaiveDate,
+    errors: &mut Vec<ValidationError>,
+) {
+    let mut accounts: Vec<(&String, &Account)> = meta
+        .iter()
+        .filter_map(|(key, value)| match value {
+            rustledger_core::MetaValue::Account(account) => Some((key, account)),
+            _ => None,
+        })
+        .collect();
+    if accounts.is_empty() {
+        return;
+    }
+    accounts.sort_by(|a, b| a.0.cmp(b.0));
+    for (_, account) in accounts {
+        if let Some(reason) = validate_account_name(account, &state.options.account_types) {
+            errors.push(invalid_account_name_error(account, &reason, date));
+        }
+    }
+}
+
 /// Validate an account name according to beancount rules.
 /// Returns None if valid, or Some(reason) if invalid.
 ///

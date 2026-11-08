@@ -23,8 +23,10 @@
 //! ```
 
 use rust_decimal::Decimal;
+use rustc_hash::{FxHashMap, FxHashSet};
 use rustledger_core::{
-    Amount, Currency, Directive, Inventory, NaiveDate, Pad, Position, Posting, Spanned, Transaction,
+    Account, Amount, Currency, Directive, Inventory, NaiveDate, Position, Posting, Spanned,
+    Transaction,
 };
 use std::collections::HashMap;
 use std::ops::Neg;
@@ -115,26 +117,189 @@ impl PadError {
     }
 }
 
-/// Pending pad information.
+/// The pad rule: which `pad` a `balance` uses, and whether that pad is used
+/// at all. Beancount's `pad` plugin (`beancount/ops/pad.py`), per target
+/// account:
+///
+/// - The pad a balance can use is the latest one dated strictly before it
+///   (its `active_pad`). An earlier pad that a later one superseded is never
+///   used again, and comes out unused if it never padded.
+/// - A balance in a currency uses up that currency for the pads before it,
+///   whatever its difference (its `padded_lots`, reset by each new pad): a
+///   later balance in the same currency is compared, not padded, until
+///   another `pad` comes. So `pad`, `balance 0`, `balance 10` pads nothing
+///   and fails the second balance.
+/// - A pad is used only when it inserts padding, a non-zero difference.
+///   Otherwise it is an `Unused Pad entry`, even if a balance reached it.
+///
+/// This is the one implementation of that rule, shared by [`process_pads`]
+/// (the synthesized padding transactions the loader's balance view, BQL and
+/// the reports read) and `rustledger-validate`'s balance check, which pads
+/// its own booked inventories inline in its walk
+/// (`validators::balance::validate_balance_late`). Each keeps its own
+/// inventories and hands [`Self::balance`] the target's current amount, so
+/// what the rule decides cannot differ between them; the
+/// `pad_parity_test` drift guard in `rustledger-validate` compares the two
+/// end to end.
+///
+/// The payload `P` is what the caller needs back about a pad: its index in
+/// the input for [`process_pads`], its source location for the validator.
 #[derive(Debug, Clone)]
-struct PendingPad {
-    /// The pad directive.
-    pad: Pad,
-    /// Its index in the input slice.
-    index: usize,
-    /// Whether this pad has been used (has at least one balance assertion).
+pub struct PadTracker<P> {
+    targets: FxHashMap<Account, Vec<TrackedPad<P>>>,
+}
+
+impl<P> Default for PadTracker<P> {
+    fn default() -> Self {
+        Self {
+            targets: FxHashMap::default(),
+        }
+    }
+}
+
+/// A `pad` known to a [`PadTracker`].
+#[derive(Debug, Clone)]
+pub struct TrackedPad<P> {
+    /// The pad's date.
+    pub date: NaiveDate,
+    /// The account the padding is taken from.
+    pub source_account: Account,
+    /// The caller's data for this pad.
+    pub payload: P,
+    /// Whether this pad inserted padding for at least one balance.
     used: bool,
-    /// Currencies that have already been padded (each currency can only be padded once per pad).
-    padded_currencies: std::collections::HashSet<Currency>,
+    /// Currencies a balance after this pad has asserted (beancount's
+    /// `padded_lots`): this pad pads none of them again.
+    reached: FxHashSet<Currency>,
+}
+
+impl<P> TrackedPad<P> {
+    /// Whether this pad inserted padding for at least one balance. A pad that
+    /// never did is an `Unused Pad entry`.
+    #[must_use]
+    pub const fn is_used(&self) -> bool {
+        self.used
+    }
+}
+
+/// What a balance does with its account's pad, from [`PadTracker::balance`].
+#[derive(Debug)]
+pub struct PadStep<'a, P> {
+    /// The dates of the pads this balance is the first in its currency to
+    /// reach, oldest first. More than one means two pads stand before the
+    /// balance; it uses only the last, and the others are unused.
+    pub contenders: Vec<NaiveDate>,
+    /// The pad the balance uses: the latest of the contenders.
+    pub pad: &'a TrackedPad<P>,
+    /// What the pad does.
+    pub action: PadAction,
+}
+
+/// What a pad does for a balance (see [`PadStep`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PadAction {
+    /// The account already holds the asserted amount: nothing is padded, and
+    /// the currency is used up all the same.
+    Satisfied,
+    /// Pad this amount into the target, and its negation out of the source.
+    Pad(Decimal),
+    /// The target's amount, or the difference, cannot be represented: nothing
+    /// is padded, and the caller reports it (#1863).
+    Unrepresentable,
+}
+
+impl<P> PadTracker<P> {
+    /// Register a `pad` into `target` from `source_account`.
+    pub fn add(&mut self, target: &Account, date: NaiveDate, source_account: Account, payload: P) {
+        let pads = self.targets.entry(target.clone()).or_default();
+        // Kept in date order, so the last pad dated before a balance is its
+        // active pad whatever order the caller registers them in. Equal dates
+        // keep registration order.
+        let at = pads.partition_point(|p| p.date <= date);
+        pads.insert(
+            at,
+            TrackedPad {
+                date,
+                source_account,
+                payload,
+                used: false,
+                reached: FxHashSet::default(),
+            },
+        );
+    }
+
+    /// Apply the rule to a `balance` of `asserted` `currency` on `account`
+    /// dated `date`.
+    ///
+    /// `current` gives the account's amount of the currency, its
+    /// sub-accounts included, as the balance check sums it (`None` when it
+    /// cannot be represented). It is called only when a pad applies.
+    ///
+    /// Returns `None` when no pad applies, and the balance is compared
+    /// against the inventory as it stands. Otherwise the balance has been
+    /// recorded against the pads (the currency is used up for every
+    /// contender, and the pad is marked used if it pads), and the caller
+    /// applies [`PadStep::action`] and does not compare.
+    pub fn balance(
+        &mut self,
+        account: &Account,
+        date: NaiveDate,
+        asserted: &Amount,
+        current: impl FnOnce() -> Option<Decimal>,
+    ) -> Option<PadStep<'_, P>> {
+        let pads = self.targets.get_mut(account)?;
+        let before = pads.partition_point(|p| p.date < date);
+        let active = before.checked_sub(1)?;
+        if pads[active].reached.contains(&asserted.currency) {
+            // The active pad already served this currency: compare.
+            return None;
+        }
+        // Every balance marks all the pads before it, so in a walk in date
+        // order (both callers walk in booking order) the pads that have
+        // reached the currency are a prefix: walk back from the active pad to
+        // the first one that has, rather than over every pad.
+        let mut contenders = Vec::new();
+        for pad in pads[..before].iter_mut().rev() {
+            if pad.reached.contains(&asserted.currency) {
+                break;
+            }
+            pad.reached.insert(asserted.currency.clone());
+            contenders.push(pad.date);
+        }
+        contenders.reverse();
+        let action = match current().and_then(|c| asserted.number.checked_sub(c)) {
+            None => PadAction::Unrepresentable,
+            Some(difference) if difference.is_zero() => PadAction::Satisfied,
+            Some(difference) => {
+                pads[active].used = true;
+                PadAction::Pad(difference)
+            }
+        };
+        Some(PadStep {
+            contenders,
+            pad: &pads[active],
+            action,
+        })
+    }
+
+    /// The pads that never padded (`Unused Pad entry`), with their target.
+    pub fn unused(&self) -> impl Iterator<Item = (&Account, &TrackedPad<P>)> {
+        self.targets
+            .iter()
+            .flat_map(|(target, pads)| pads.iter().map(move |pad| (target, pad)))
+            .filter(|(_, pad)| !pad.used)
+    }
 }
 
 /// Process pad directives and generate synthetic transactions.
 ///
 /// This function:
-/// 1. Tracks account inventories
-/// 2. When a pad is encountered, stores it as pending
-/// 3. When a balance assertion is encountered for an account with a pending pad,
-///    generates a synthetic transaction to make the balance match
+/// 1. Tracks account inventories: every account a posting names, opened or
+///    not, as beancount's padding reads every posting
+/// 2. When a pad is encountered, registers it with the [`PadTracker`]
+/// 3. When a balance assertion is encountered for an account with a pad,
+///    applies the tracker's rule, and generates a synthetic transaction to
+///    make the balance match when it pads
 ///
 /// # Arguments
 ///
@@ -152,21 +317,14 @@ struct PendingPad {
 /// already owns them. To get the source merged with the synth
 /// transactions, use [`merge_with_padding`].
 ///
-/// `rustledger-validate` does not call this: its balance check pads inline
-/// in its own walk (`validators::balance::effective_pads` and
-/// `validate_balance_late`), a second implementation of which pad a balance
-/// uses. Both take a strictly earlier pad, once per currency, and apply the
-/// latest of the ones still pending; `effective_pads` documents the same
-/// pairing back to here. The validator does not yet drop an earlier pad that
-/// a later one superseded (it stays usable for a later balance there, where
-/// beancount keeps only the latest), which #2896 fixes; keep the two in step
-/// when it does.
-/// Revisit if the validator is ever handed this function's output.
+/// `rustledger-validate` pads its own booked inventories inline in its
+/// walk rather than calling this, but through the same [`PadTracker`], so
+/// the two cannot disagree on which pad a balance uses or by how much.
 pub fn process_pads(directives: &[Directive]) -> PadResult {
     let num_directives = directives.len();
     let mut inventories: HashMap<rustledger_core::Account, Inventory> =
         HashMap::with_capacity(num_directives.min(16));
-    let mut pending_pads: HashMap<rustledger_core::Account, PendingPad> = HashMap::with_capacity(4);
+    let mut pads: PadTracker<usize> = PadTracker::default();
     let mut padding_transactions = Vec::with_capacity(num_directives.min(16));
     let mut padding_origins = Vec::with_capacity(num_directives.min(16));
     let mut errors = Vec::with_capacity(4);
@@ -182,16 +340,14 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
 
     for (index, directive) in sorted {
         match directive {
-            Directive::Open(open) => {
-                inventories.insert(open.account.clone(), Inventory::new());
-            }
-
             Directive::Transaction(txn) => {
-                // Update inventories
+                // Update inventories. Every account counts, opened or not:
+                // beancount's padding sums every posting to the target, so
+                // tracking only opened accounts dropped an unopened target's
+                // own postings and padded it by the wrong amount (#2896).
                 for posting in &txn.postings {
-                    if let Some(units) = posting.amount()
-                        && let Some(inv) = inventories.get_mut(&posting.account)
-                    {
+                    if let Some(units) = posting.amount() {
+                        let inv = account_inventory(&mut inventories, &posting.account);
                         let position =
                             Position::from_posting(units, posting.cost.as_deref(), txn.date);
                         // A running balance that leaves range makes every pad
@@ -208,47 +364,29 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
             }
 
             Directive::Pad(pad) => {
-                // Store pending pad (replaces any existing pad for this account)
-                // Reset padded_currencies when a new pad is encountered
-                pending_pads.insert(
-                    pad.account.clone(),
-                    PendingPad {
-                        pad: pad.clone(),
-                        index,
-                        used: false,
-                        padded_currencies: std::collections::HashSet::new(),
-                    },
-                );
+                pads.add(&pad.account, pad.date, pad.source_account.clone(), index);
             }
 
             Directive::Balance(bal) => {
-                // Check if there's a pending pad for this account
-                // Use get_mut instead of remove - a pad can apply to multiple currencies
-                if let Some(pending) = pending_pads.get_mut(&bal.account) {
-                    // Only pad if this currency hasn't been padded yet for this pad directive
-                    // (each currency can only be padded once per pad)
-                    if pending.padded_currencies.contains(&bal.amount.currency) {
-                        continue;
-                    }
-
-                    // Calculate padding amount. The balance assertion this pad
-                    // targets sums the account AND its sub-accounts (beancount
-                    // semantic, verified against bean-check), so the pad
-                    // difference must be measured the same way — using only the
-                    // leaf account here under-/over-padded a non-leaf target and
-                    // then tripped the (sub-account-summing) Late validator.
-                    let current = rustledger_core::sum_account_and_subaccounts(
+                // The balance assertion this pad targets sums the account AND
+                // its sub-accounts (beancount semantic, verified against
+                // bean-check), so the pad difference is measured the same way.
+                let Some(step) = pads.balance(&bal.account, bal.date, &bal.amount, || {
+                    rustledger_core::sum_account_and_subaccounts(
                         inventories.iter(),
                         bal.account.as_str(),
                         &bal.amount.currency,
-                    );
-
+                    )
+                }) else {
+                    continue;
+                };
+                let difference = match step.action {
+                    PadAction::Satisfied => continue,
                     // A pad amount that cannot be represented must not be
                     // clamped — the synthetic transaction it produces is
                     // written into the ledger as if the user had entered it
                     // (#1863).
-                    let Some(difference) = current.and_then(|c| bal.amount.number.checked_sub(c))
-                    else {
+                    PadAction::Unrepresentable => {
                         errors.push(PadError::new(
                             bal.date,
                             format!(
@@ -258,64 +396,55 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
                             ),
                         ));
                         continue;
-                    };
-
-                    if difference != Decimal::ZERO {
-                        // Generate synthetic transaction
-                        let pad_txn = create_padding_transaction(
-                            pending.pad.date,
-                            &pending.pad.account,
-                            &pending.pad.source_account,
-                            Amount::new(difference, &bal.amount.currency),
-                            &bal.amount, // target balance for narration
-                        );
-
-                        // Apply to inventories. `difference` was just derived
-                        // from these same balances, so an overflow here means
-                        // the pad target itself is out of range — report it
-                        // rather than pad to a clamped figure.
-                        //
-                        // A pad is two halves of one entry, so it applies as a
-                        // unit: if the source overflows after the target
-                        // succeeded, the target is UNDONE. Leaving it applied
-                        // would credit the target without debiting the source
-                        // while emitting no synthetic transaction, so the
-                        // inventories and the directive list would disagree —
-                        // and a later assertion on the target could pass off a
-                        // pad that never happened. The undo is always
-                        // representable: it restores a total that existed a
-                        // moment ago.
-                        let currency = &bal.amount.currency;
-                        let mut apply = |account, number| {
-                            inventories
-                                .get_mut(account)
-                                .map(|inv| inv.add(Position::simple(Amount::new(number, currency))))
-                                .transpose()
-                        };
-                        if let Err(e) = apply(&pending.pad.account, difference) {
-                            errors.push(PadError::new(bal.date, e.to_string()));
-                            continue;
-                        }
-                        if let Err(e) = apply(&pending.pad.source_account, -difference) {
-                            drop(apply(&pending.pad.account, -difference));
-                            errors.push(PadError::new(bal.date, e.to_string()));
-                            continue;
-                        }
-
-                        padding_transactions.push(pad_txn);
-                        padding_origins.push(PadOrigin {
-                            pad: pending.index,
-                            balance: index,
-                        });
                     }
+                    PadAction::Pad(difference) => difference,
+                };
+                let pad = step.pad;
 
-                    // Mark the pad as used and track that this currency has been padded
-                    pending.used = true;
-                    pending
-                        .padded_currencies
-                        .insert(bal.amount.currency.clone());
+                // Generate synthetic transaction
+                let pad_txn = create_padding_transaction(
+                    pad.date,
+                    &bal.account,
+                    &pad.source_account,
+                    Amount::new(difference, &bal.amount.currency),
+                    &bal.amount, // target balance for narration
+                );
+
+                // Apply to inventories. `difference` was just derived from
+                // these same balances, so an overflow here means the pad
+                // target itself is out of range, so report it rather than pad
+                // to a clamped figure.
+                //
+                // A pad is two halves of one entry, so it applies as a unit:
+                // if the source overflows after the target succeeded, the
+                // target is UNDONE. Leaving it applied would credit the
+                // target without debiting the source while emitting no
+                // synthetic transaction, so the inventories and the directive
+                // list would disagree, and a later assertion on the target
+                // could pass off a pad that never happened. The undo is always
+                // representable: it restores a total that existed a moment
+                // ago. Both halves land whatever the accounts' state, as
+                // beancount's padding entry posts to both.
+                let currency = &bal.amount.currency;
+                let mut apply = |account, number| {
+                    account_inventory(&mut inventories, account)
+                        .add(Position::simple(Amount::new(number, currency)))
+                };
+                if let Err(e) = apply(&bal.account, difference) {
+                    errors.push(PadError::new(bal.date, e.to_string()));
+                    continue;
                 }
-                // If no pending pad, nothing to do (balance will be checked normally)
+                if let Err(e) = apply(&pad.source_account, -difference) {
+                    drop(apply(&bal.account, -difference));
+                    errors.push(PadError::new(bal.date, e.to_string()));
+                    continue;
+                }
+
+                padding_transactions.push(pad_txn);
+                padding_origins.push(PadOrigin {
+                    pad: pad.payload,
+                    balance: index,
+                });
             }
 
             _ => {}
@@ -323,18 +452,16 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
     }
 
     // Check for unused pads (pad without corresponding balance)
-    for (account, pending) in pending_pads {
-        if !pending.used {
-            errors.push(
-                PadError::new(
-                    pending.pad.date,
-                    format!(
-                        "Pad directive for account {account} has no corresponding balance assertion"
-                    ),
-                )
-                .with_account(account),
-            );
-        }
+    for (account, pad) in pads.unused() {
+        errors.push(
+            PadError::new(
+                pad.date,
+                format!(
+                    "Pad directive for account {account} has no corresponding balance assertion"
+                ),
+            )
+            .with_account(account.clone()),
+        );
     }
 
     PadResult {
@@ -342,6 +469,20 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
         padding_origins,
         errors,
     }
+}
+
+/// The inventory of `account`, created empty on first use. Looks up before
+/// inserting so the common case clones no account name.
+fn account_inventory<'a>(
+    inventories: &'a mut HashMap<Account, Inventory>,
+    account: &Account,
+) -> &'a mut Inventory {
+    if !inventories.contains_key(account) {
+        inventories.insert(account.clone(), Inventory::new());
+    }
+    inventories
+        .get_mut(account)
+        .expect("the inventory was inserted just above")
 }
 
 /// Create a synthetic padding transaction.
@@ -585,7 +726,7 @@ pub fn merge_with_padding_spanned(directives: &[Spanned<Directive>]) -> Vec<Span
 mod tests {
     use super::*;
     use rust_decimal_macros::dec;
-    use rustledger_core::{Balance, Open};
+    use rustledger_core::{Balance, Open, Pad};
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         rustledger_core::naive_date(year, month, day).unwrap()
@@ -775,9 +916,15 @@ mod tests {
 
         let result = process_pads(&directives);
 
-        assert!(result.errors.is_empty());
-        // No padding transaction needed when balance already matches
+        // No padding transaction needed when balance already matches, so the
+        // pad is unused, as bean-check reports it (`Unused Pad entry`).
         assert!(result.padding_transactions.is_empty());
+        assert_eq!(result.errors.len(), 1, "{:?}", result.errors);
+        assert!(
+            result.errors[0]
+                .message
+                .contains("no corresponding balance")
+        );
     }
 
     #[test]
@@ -797,6 +944,111 @@ mod tests {
                 .message
                 .contains("no corresponding balance")
         );
+    }
+
+    /// A transaction moving `number` USD from `Assets:B` into `account`.
+    fn transfer(on: NaiveDate, account: &str, number: Decimal) -> Directive {
+        Directive::Transaction(
+            Transaction::new(on, "t")
+                .with_synthesized_posting(Posting::new(account, Amount::new(number, "USD")))
+                .with_synthesized_posting(Posting::new("Assets:B", Amount::new(-number, "USD"))),
+        )
+    }
+
+    fn balance(on: NaiveDate, account: &str, number: Decimal) -> Directive {
+        Directive::Balance(Balance::new(on, account, Amount::new(number, "USD")))
+    }
+
+    /// The padding amounts `process_pads` synthesizes into `Assets:A`, and its
+    /// unused-pad count.
+    fn padding_and_unused(directives: &[Directive]) -> (Vec<Decimal>, usize) {
+        let result = process_pads(directives);
+        let amounts = result
+            .padding_transactions
+            .iter()
+            .map(|t| {
+                let p = &t.postings[0];
+                assert_eq!(p.account.as_str(), "Assets:A");
+                p.amount().expect("padding has units").number
+            })
+            .collect();
+        let unused = result
+            .errors
+            .iter()
+            .filter(|e| e.message.contains("no corresponding balance"))
+            .count();
+        assert_eq!(unused, result.errors.len(), "{:?}", result.errors);
+        (amounts, unused)
+    }
+
+    /// An unopened target's own postings count, as beancount's padding reads
+    /// every posting: bean-query 3.2.3 shows target 100, source -130 (#2896).
+    /// Opened later or never, the same.
+    #[test]
+    fn test_process_pads_counts_an_unopened_targets_postings() {
+        for open in [None, Some(date(2024, 2, 1))] {
+            let mut directives = vec![
+                Directive::Open(Open::new(date(2024, 1, 1), "Equity:O")),
+                Directive::Open(Open::new(date(2024, 1, 1), "Assets:B")),
+                Directive::Pad(Pad::new(date(2024, 1, 2), "Assets:A", "Equity:O")),
+                transfer(date(2024, 1, 3), "Assets:A", dec!(-30)),
+                balance(date(2024, 1, 5), "Assets:A", dec!(100)),
+            ];
+            directives.extend(open.map(|d| Directive::Open(Open::new(d, "Assets:A"))));
+            assert_eq!(
+                padding_and_unused(&directives),
+                (vec![dec!(130)], 0),
+                "{open:?}"
+            );
+        }
+    }
+
+    /// An unopened target whose postings already reach the balance is not
+    /// padded, and the pad is unused, as bean-check 3.2.3 reports (#2896).
+    #[test]
+    fn test_process_pads_does_not_pad_a_satisfied_unopened_target() {
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:O")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:B")),
+            Directive::Pad(Pad::new(date(2024, 1, 2), "Assets:A", "Equity:O")),
+            transfer(date(2024, 1, 3), "Assets:A", dec!(100)),
+            balance(date(2024, 1, 5), "Assets:A", dec!(100)),
+        ];
+        assert_eq!(padding_and_unused(&directives), (vec![], 1));
+    }
+
+    /// A balance with a zero difference uses up the pad's currency: the next
+    /// balance in it is not padded, and the pad is unused (bean-check 3.2.3:
+    /// `Unused Pad entry`, then `Balance failed` on the second balance).
+    #[test]
+    fn test_process_pads_zero_difference_uses_up_the_currency() {
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:O")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:A")),
+            Directive::Pad(Pad::new(date(2024, 1, 2), "Assets:A", "Equity:O")),
+            balance(date(2024, 1, 3), "Assets:A", dec!(0)),
+            balance(date(2024, 1, 5), "Assets:A", dec!(10)),
+        ];
+        assert_eq!(padding_and_unused(&directives), (vec![], 1));
+    }
+
+    /// A pad superseded by a later one is never used, and is unused; the
+    /// later one pads once (bean-check 3.2.3: `Unused Pad entry` on the first
+    /// pad, `Balance failed` on the second balance).
+    #[test]
+    fn test_process_pads_superseded_pad_is_unused() {
+        let directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:O")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:A")),
+            Directive::Pad(Pad::new(date(2024, 1, 9), "Assets:A", "Equity:O")),
+            Directive::Pad(Pad::new(date(2024, 1, 10), "Assets:A", "Equity:O")),
+            balance(date(2024, 1, 11), "Assets:A", dec!(100)),
+            balance(date(2024, 1, 12), "Assets:A", dec!(200)),
+        ];
+        let result = process_pads(&directives);
+        assert_eq!(result.padding_origins.len(), 1);
+        assert_eq!(result.padding_origins[0].pad, 3, "the later pad pads");
+        assert_eq!(padding_and_unused(&directives), (vec![dec!(100)], 1));
     }
 
     #[test]

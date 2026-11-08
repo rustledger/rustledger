@@ -122,13 +122,13 @@ Or use `rledger doctor missing-open` to generate them.
 
 ### E2003: Pad Without Balance Assertion
 
-**Cause**: A `pad` directive has no subsequent `balance` assertion.
+**Cause**: A `pad` directive never inserted padding (beancount's `Unused Pad entry`): no `balance` assertion follows it, the account already held the asserted amount, or a later `pad` on the same account superseded it. A balance uses only the latest pad before it, once per currency.
 
-**Fix**: Add a balance assertion after the pad.
+**Fix**: Add a balance assertion after the pad, or remove the pad.
 
 ### E2004: Multiple Pads for Same Balance
 
-**Cause**: Multiple pad directives for the same balance assertion.
+**Cause**: Multiple pad directives for the same balance assertion. The balance uses only the latest; the earlier ones are also reported as `E2003`.
 
 **Fix**: Remove duplicate pad directives.
 

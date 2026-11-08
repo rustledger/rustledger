@@ -393,7 +393,13 @@ use crate::types::{Error, LedgerOptions};
 /// account's close is `E1003`, and a pad with an unopened account still pads,
 /// so it no longer adds an `E2001` balance failure or loses its `Unused Pad
 /// entry`. A v80 blob would keep serving the old errors.
-pub const CACHE_VERSION: u32 = 81;
+/// v83: loader v61, unchanged (v82 is #2893's). `Ledger`'s error list moves
+/// (#2896): a balance on an unopened account is compared (`E2001`), a pad
+/// whose balance already held or that a later pad superseded is an
+/// `Unused Pad entry` and pads nothing later, and a pad or balance before
+/// its account's later `open` names an inactive account. A v81 blob would
+/// keep serving the old errors.
+pub const CACHE_VERSION: u32 = 83;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

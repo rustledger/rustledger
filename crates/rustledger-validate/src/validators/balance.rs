@@ -5,8 +5,9 @@ use rust_decimal::{Decimal, MathematicalOps};
 use rustledger_core::{Amount, Balance, Pad, Position};
 
 use super::helpers::require_account_open;
+use crate::LedgerState;
 use crate::error::{ErrorCode, ValidationError};
-use crate::{LedgerState, PendingPad};
+use rustledger_booking::PadAction;
 
 /// Multiplier for balance assertion tolerance (matches Python beancount).
 /// Balance assertions use 2x the `tolerance_multiplier` option.
@@ -105,23 +106,12 @@ pub fn validate_pad(
     // before it validates anything, so a balance after the pad is checked
     // against the padded amount, and an unopened or closed account in the
     // pad is reported above but adds no balance failure. Skipping the pad
-    // here added a spurious E2001 on top of the account error. The half of
-    // the padding whose account was never opened has no inventory to land in
-    // (`validate_balance_late`'s `pad_into`), as beancount's padding entry
-    // posts to an account with no `open`.
-    //
-    // Add to pending pads list for this account
-    let pending_pad = PendingPad {
-        source_account: pad.source_account.clone(),
-        date: pad.date,
-        padded_currencies: rustc_hash::FxHashSet::default(),
-        location,
-    };
+    // here added a spurious E2001 on top of the account error. Both halves of
+    // the padding land whatever the accounts' state, as beancount's padding
+    // entry posts to both (`validate_balance_late`).
     state
-        .pending_pads
-        .entry(pad.account.clone())
-        .or_default()
-        .push(pending_pad);
+        .pads
+        .add(&pad.account, pad.date, pad.source_account.clone(), location);
 }
 
 /// Balance account checks — account presence (E1001) and the open's
@@ -177,131 +167,70 @@ pub fn validate_balance_late(
     bal: &Balance,
     errors: &mut Vec<ValidationError>,
 ) {
-    // `validate_balance_account`, called just before this, already
-    // reported an unopened account. One never opened has no inventory to
-    // compare against; one opened LATER is still compared, as beancount
-    // compares it (it reports both the inactive account and the failure).
+    // `validate_balance_account`, called just before this, already reported
+    // an account that is not open. The balance is still padded and compared
+    // whatever the account's state, as beancount pads and compares it (it
+    // reports both the account and a `Balance failed`): an unopened
+    // account's postings are in its inventory (`crate::account_inventory`).
     //
-    // A pad into such an account is still used by this balance, as in
-    // beancount, which inserts the padding whatever the account's state: it
-    // would otherwise come out as an `Unused Pad entry` beancount does not
-    // report. There is no inventory to pad, and the comparison is skipped as
-    // before.
-    // A zero amount uses no pad, as on an opened account with a zero
-    // difference, so that pad stays unused.
-    if !state.accounts.contains_key(&bal.account) {
-        if let Some(pending_pads) = state.pending_pads.get_mut(&bal.account) {
-            let effective_idx = effective_pads(pending_pads, bal);
-            push_multiple_pads_error(pending_pads, &effective_idx, bal, errors);
-            if bal.amount.number != Decimal::ZERO
-                && let Some(&i) = effective_idx.last()
-            {
-                pending_pads[i]
-                    .padded_currencies
-                    .insert(bal.amount.currency.clone());
+    // Which pad this balance uses, and whether it pads, is the rule
+    // `rustledger_booking::process_pads` applies (`PadTracker`): the latest
+    // pad dated strictly before the balance, once per currency, a zero
+    // difference using the currency up without using the pad. Only the
+    // inventories differ: these are the validator's booked ones. The
+    // `pad_parity_test` drift guard compares the two end to end.
+    let LedgerState {
+        pads,
+        inventories,
+        inventory_accounts,
+        ..
+    } = state;
+    if let Some(step) = pads.balance(&bal.account, bal.date, &bal.amount, || {
+        // Balance assertions include sub-accounts; the prefix index answers
+        // this without scanning every account.
+        Some(crate::sum_account_subtree(
+            inventories,
+            inventory_accounts,
+            &bal.account,
+            &bal.amount.currency,
+        ))
+    }) {
+        push_multiple_pads_error(&step.contenders, bal, errors);
+        if let PadAction::Pad(difference) = step.action {
+            let source = step.pad.source_account.clone();
+            // A pad amount that cannot be represented is reported, not
+            // clamped: padding to a clamped figure would silently satisfy
+            // the very assertion being checked (#1863).
+            let mut pad_into = |account, number| {
+                crate::account_inventory(inventories, inventory_accounts, account)
+                    .add(Position::simple(Amount::new(number, &bal.amount.currency)))
+                    .err()
+            };
+            // Add to the target account, subtract from the source. A pad is
+            // two halves of one entry, so if the source half overflows the
+            // target half is UNDONE; otherwise the target carries a credit
+            // with no matching debit, and a later assertion on it could pass
+            // off a pad that never happened. The undo restores a total that
+            // existed a moment ago, so it cannot itself overflow.
+            let overflow = pad_into(&bal.account, difference).or_else(|| {
+                pad_into(&source, -difference).inspect(|_| {
+                    drop(pad_into(&bal.account, -difference));
+                })
+            });
+
+            if let Some(e) = overflow {
+                errors.push(
+                    ValidationError::new(ErrorCode::ArithmeticOverflow, e.to_string(), bal.date)
+                        .with_context(format!("account: {}", bal.account)),
+                );
             }
         }
+        // The pad applied (or the account already held the amount); either
+        // way, the regular balance check below would be redundant.
         return;
     }
-
-    // Check if there are pending pads for this account
-    // Use get_mut instead of remove - a pad can apply to multiple currencies
-    if let Some(pending_pads) = state.pending_pads.get_mut(&bal.account) {
-        // Drop pads that have already served a balance in THIS specific
-        // currency. A single Pad can still serve multiple
-        // currency-specific Balance assertions on the same target —
-        // we only remove pads that have nothing left to offer for the
-        // currency being asserted right now. Without this, the vec grows
-        // for the lifetime of the session and E2003 / E2004 detection
-        // fires against pads that already served their purpose.
-        // (`effective_pads` does both.)
-        //
-        // A Pad on date D is effective for the NEXT Balance on the
-        // target account dated strictly after D (Python beancount
-        // semantics — Pad creates an entry "between" D and the next
-        // balance). Filter `pending_pads` to those whose date precedes
-        // this balance; later-dated pads are still pending for some
-        // future balance and must not be considered here. (The walk
-        // registers pads in date order, so a later-dated pad is not
-        // normally here yet; the filter keeps this independent of that.)
-        //
-        // The late-phase walk visits pads in date order (see
-        // `validate_phase_inner`), so `pending_pads` is itself in
-        // date-sorted push order — `effective_idx.last()` is therefore
-        // the most recent effective pad (Python's `active_pad`).
-        let effective_idx = effective_pads(pending_pads, bal);
-
-        push_multiple_pads_error(pending_pads, &effective_idx, bal, errors);
-
-        // Use the most recent effective pad
-        if let Some(pending_pad) = effective_idx.last().and_then(|&i| pending_pads.get_mut(i)) {
-            // Apply padding: calculate difference and add to both accounts
-            // Balance assertions include sub-accounts; the prefix index answers
-            // this without scanning every account (disjoint borrow from the
-            // `pending_pad` mutable borrow held here).
-            let actual = crate::sum_account_subtree(
-                &state.inventories,
-                &state.inventory_accounts,
-                &bal.account,
-                &bal.amount.currency,
-            );
-            {
-                let expected = bal.amount.number;
-                let difference = expected - actual;
-
-                if difference != Decimal::ZERO {
-                    // A pad amount that cannot be represented is reported, not
-                    // clamped — padding to a clamped figure would silently
-                    // satisfy the very assertion being checked (#1863).
-                    let mut pad_into = |account, number| {
-                        state
-                            .inventories
-                            .get_mut(account)
-                            .map(|inv| {
-                                inv.add(Position::simple(Amount::new(number, &bal.amount.currency)))
-                            })
-                            .transpose()
-                            .err()
-                    };
-                    // Add to the target account, subtract from the source. A
-                    // pad is two halves of one entry, so if the source half
-                    // overflows the target half is UNDONE — otherwise the
-                    // target carries a credit with no matching debit, and a
-                    // later assertion on it could pass off a pad that never
-                    // happened. The undo restores a total that existed a
-                    // moment ago, so it cannot itself overflow.
-                    let overflow = pad_into(&bal.account, difference).or_else(|| {
-                        pad_into(&pending_pad.source_account, -difference).inspect(|_| {
-                            drop(pad_into(&bal.account, -difference));
-                        })
-                    });
-
-                    if let Some(e) = overflow {
-                        errors.push(
-                            ValidationError::new(
-                                ErrorCode::ArithmeticOverflow,
-                                e.to_string(),
-                                bal.date,
-                            )
-                            .with_context(format!("account: {}", bal.account)),
-                        );
-                    }
-
-                    // Record that this pad covered the asserted currency.
-                    pending_pad
-                        .padded_currencies
-                        .insert(bal.amount.currency.clone());
-                }
-            }
-            // An effective pad applied (or matched a zero difference);
-            // either way, the regular balance check below would be
-            // redundant.
-            return;
-        }
-        // No effective pad for this balance — fall through to the
-        // regular balance check so the user gets a real assertion
-        // result instead of silent skip.
-    }
+    // No pad applies to this balance: fall through to the regular balance
+    // check so the user gets a real assertion result instead of silent skip.
 
     // Get inventory and check balance (no padding case).
     // In beancount, balance assertions include sub-accounts
@@ -377,44 +306,17 @@ pub fn validate_balance_late(
     }
 }
 
-/// The pads on `bal`'s account that this balance can use, oldest first:
-/// those that have not yet served a balance in its currency (the others are
-/// dropped from `pads`), dated strictly before it. The last one is the one
-/// beancount applies (its `active_pad`). Shared by the padding below and the
-/// unopened-account case in `validate_balance_late`.
-///
-/// The validator pads inline, in its own walk, rather than through
-/// `rustledger_booking::process_pads`, which builds beancount's synthesized
-/// padding transactions for the loader and the query engine: a second
-/// implementation of which pad a balance uses. Both take a strictly earlier
-/// pad, once per currency, and apply the latest of the ones still pending;
-/// `process_pads` documents the same pairing back to here. They do not yet
-/// agree on a superseded pad: beancount keeps only the latest pad before a
-/// balance (its `active_pad`), but here an earlier pad that a later one
-/// superseded stays usable for a later balance, a bug on main that #2896
-/// fixes. Keep the two in step when it does. Revisit, and drop this in favor of the
-/// synthesized transactions, if the validator is ever handed
-/// `process_pads`'s output.
-fn effective_pads(pads: &mut Vec<PendingPad>, bal: &Balance) -> Vec<usize> {
-    pads.retain(|p| !p.padded_currencies.contains(&bal.amount.currency));
-    pads.iter()
-        .enumerate()
-        .filter(|(_, p)| p.date < bal.date)
-        .map(|(i, _)| i)
-        .collect()
-}
-
-/// Report a balance with more than one usable pad (E2004), the same on the
-/// opened-account and unopened-account paths of `validate_balance_late`.
-/// Every pad in `effective_idx` is unused (`effective_pads` dropped the used
-/// ones), so it is a count.
+/// Report a balance with more than one pad before it (E2004): `contenders`
+/// are the dates of the pads that no balance in its currency had reached yet
+/// (`rustledger_booking::PadStep::contenders`). The balance uses only the
+/// latest; the earlier ones are superseded, and also come out unused (E2003),
+/// as beancount reports them.
 fn push_multiple_pads_error(
-    pads: &[PendingPad],
-    effective_idx: &[usize],
+    contenders: &[rustledger_core::NaiveDate],
     bal: &Balance,
     errors: &mut Vec<ValidationError>,
 ) {
-    if effective_idx.len() > 1 {
+    if contenders.len() > 1 {
         errors.push(
             ValidationError::new(
                 ErrorCode::MultiplePadForBalance,
@@ -426,9 +328,9 @@ fn push_multiple_pads_error(
             )
             .with_context(format!(
                 "pad dates: {}",
-                effective_idx
+                contenders
                     .iter()
-                    .map(|&i| pads[i].date.to_string())
+                    .map(ToString::to_string)
                     .collect::<Vec<_>>()
                     .join(", ")
             )),

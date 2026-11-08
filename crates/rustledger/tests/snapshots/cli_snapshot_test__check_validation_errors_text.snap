@@ -37,4 +37,13 @@ E1001
     : ^^^^^^^^^^^^^^^^^^^|^^^^^^^^^^^^^^^^^^^
     :                    `-- here
     `----
-✗ 3 errors
+E2001
+
+  x Balance failed for Assets:Cash: expected 100 USD, got -10 USD
+    ,-[<fixtures>/validation-errors.beancount:10:1]
+  9 | ; Balance assertion that will fail (no opens, so balance is 0)
+ 10 | 2024-01-16 balance Assets:Cash 100 USD
+    : ^^^^^^^^^^^^^^^^^^^|^^^^^^^^^^^^^^^^^^^
+    :                    `-- here
+    `----
+✗ 4 errors

@@ -108,10 +108,9 @@ fn replay_every_pad_behavior() {
     let behaviors = corpus["behaviors"].as_array().expect("behaviors");
 
     for (bi, behavior) in behaviors.iter().enumerate() {
-        // process_pads only tracks inventories for accounts an Open directive
-        // created (postings to unopened accounts are silently ignored — the
-        // validator owns that error class), so open every account first, as
-        // any real ledger would.
+        // Open every account first, as any real ledger would (process_pads
+        // counts an unopened account's postings too, as beancount does; the
+        // validator owns that error class).
         let mut directives: Vec<Directive> = [ACCOUNT, SOURCE, "Equity:Aux"]
             .iter()
             .map(|account| {
@@ -127,6 +126,10 @@ fn replay_every_pad_behavior() {
         // Model-side bookkeeping to derive the expected synthesized pads.
         let mut actual: i64 = 0;
         let mut pad_pending = false;
+        // Pads that never insert padding, each an `Unused Pad entry` as in
+        // beancount: one superseded by a later pad, one whose balance already
+        // held (a zero difference), and one still armed at the end.
+        let mut unused_pads = 0usize;
         let mut expected_pads: Vec<i64> = Vec::new();
         let mut txn_sum: i64 = 0;
 
@@ -147,6 +150,9 @@ fn replay_every_pad_behavior() {
                         source_account: SOURCE.into(),
                         meta: Default::default(),
                     }));
+                    if pad_pending {
+                        unused_pads += 1;
+                    }
                     pad_pending = true;
                 }
                 "AddBalance" => {
@@ -159,6 +165,9 @@ fn replay_every_pad_behavior() {
                         meta: Default::default(),
                     }));
                     if pad_pending {
+                        if asserted == actual {
+                            unused_pads += 1;
+                        }
                         expected_pads.push(asserted - actual);
                         actual = asserted;
                         pad_pending = false;
@@ -176,27 +185,22 @@ fn replay_every_pad_behavior() {
         }
 
         let result = process_pads(&directives);
-        // A behavior may END with an armed pad; the implementation
-        // (beancount-aligned) reports an unused pad as an error. Assert
-        // EXACTLY that error in exactly that case — any other error, or a
-        // missing unused-pad error, is a divergence.
+        // The implementation (beancount-aligned) reports each pad that never
+        // padded as an error. Assert EXACTLY those errors: any other error,
+        // or a missing or extra unused-pad error, is a divergence.
         if pad_pending {
-            assert!(
-                result.errors.len() == 1
-                    && result.errors[0]
-                        .message
-                        .contains("no corresponding balance"),
-                "PadCorrect behavior {bi}: expected exactly the unused-pad error, \
-                 got: {:?}",
-                result.errors
-            );
-        } else {
-            assert!(
-                result.errors.is_empty(),
-                "PadCorrect behavior {bi}: model-legal pad sequence errored: {:?}",
-                result.errors
-            );
+            unused_pads += 1;
         }
+        assert!(
+            result.errors.len() == unused_pads
+                && result
+                    .errors
+                    .iter()
+                    .all(|e| e.message.contains("no corresponding balance")),
+            "PadCorrect behavior {bi}: expected exactly {unused_pads} unused-pad \
+             errors, got: {:?}",
+            result.errors
+        );
 
         // Zero-difference pads may or may not synthesize a transaction; only
         // nonzero expected pads are structural.

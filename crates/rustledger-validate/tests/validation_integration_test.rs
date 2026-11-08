@@ -1319,3 +1319,49 @@ fn test_validate_multiple_pads_are_reported_on_an_unopened_target_too() {
         );
     }
 }
+
+/// A `pad` or `balance` dated before its account's later `open` names an
+/// inactive account, as bean-check 3.2.3 reports it (`Invalid reference to
+/// inactive account`), not one that was never opened (#2896).
+#[test]
+fn test_validate_pad_and_balance_before_a_later_open_are_inactive() {
+    let source = "2024-01-01 open Equity:O\n2024-02-01 open Assets:A\n\
+                  2024-01-02 pad Assets:A Equity:O\n2024-01-05 balance Assets:A 100 USD\n";
+    let parsed = rustledger_parser::parse(source);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    let directives: Vec<Directive> = parsed.directives.into_iter().map(|d| d.value).collect();
+    let messages: Vec<String> = validate(&directives)
+        .into_iter()
+        .map(|e| format!("{}: {}", e.code.code(), e.message))
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "E1001: Pad target account Assets:A is inactive on 2024-01-02 \
+             (not opened until 2024-02-01)",
+            "E1001: Account Assets:A is inactive on 2024-01-05 (not opened until 2024-02-01)",
+        ],
+    );
+}
+
+/// Two pads before a balance: the balance uses only the later one, and the
+/// earlier one is unused and never pads a later balance, as in beancount
+/// (bean-check 3.2.3: `Unused Pad entry` on the 01-09 pad, `Balance failed`
+/// on 01-12). The earlier pad padded the 01-12 balance, hiding the failure
+/// (#2896). `E2004` still flags the two pads.
+#[test]
+fn test_validate_superseded_pad_is_unused_and_pads_nothing_later() {
+    let codes = codes_of(
+        "2024-01-01 open Assets:A\n2024-01-01 open Equity:O\n\
+         2024-01-09 pad Assets:A Equity:O\n2024-01-10 pad Assets:A Equity:O\n\
+         2024-01-11 balance Assets:A 100 USD\n2024-01-12 balance Assets:A 200 USD\n",
+    );
+    assert_eq!(
+        codes,
+        [
+            ErrorCode::MultiplePadForBalance,
+            ErrorCode::BalanceAssertionFailed,
+            ErrorCode::PadWithoutBalance,
+        ]
+    );
+}

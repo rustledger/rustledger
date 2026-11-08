@@ -315,25 +315,13 @@ impl ValidationOptions {
     }
 }
 
-/// Pending pad directive info.
-#[derive(Debug, Clone)]
-struct PendingPad {
-    /// Source account for padding.
-    source_account: rustledger_core::Account,
-    /// Date of the pad directive.
-    date: NaiveDate,
-    /// Currencies for which this pad has already inserted padding.
-    /// A single Pad can serve multiple currency-specific Balance
-    /// assertions on the same target account (e.g. `pad → balance USD
-    /// → balance EUR`), so we track per-currency rather than a single
-    /// `used` flag. Empty set = no balance has consumed this pad yet
-    /// (drives E2003 in `check_unused_pads`).
-    padded_currencies: FxHashSet<rustledger_core::Currency>,
-    /// Source span + file id of the `pad` directive, when validating
-    /// `Spanned` directives. Carried so `check_unused_pads` can anchor the
-    /// deferred E2003 to the pad's own line instead of `<unknown>`.
-    location: Option<(rustledger_parser::Span, u16)>,
-}
+/// What the validator keeps about a `pad` in its [`PadTracker`]: the source
+/// span and file id of the directive, when validating `Spanned` directives.
+/// Carried so `check_unused_pads` can anchor the deferred E2003 to the pad's
+/// own line instead of `<unknown>`.
+///
+/// [`PadTracker`]: rustledger_booking::PadTracker
+type PadLocation = Option<(rustledger_parser::Span, u16)>;
 
 /// One posting account error held by the early phase until late decides
 /// whether it still applies (see [`LedgerState::pending_posting_errors`]).
@@ -396,16 +384,18 @@ pub struct LedgerState {
     /// Account inventories.
     inventories: FxHashMap<rustledger_core::Account, Inventory>,
     /// Lexically-sorted view of the `inventories` keys — the sub-account prefix
-    /// index. Kept in lockstep with `inventories` (both gain a key only in
-    /// `validate_open`; keys are never removed). Lets
+    /// index. Kept in lockstep with `inventories` (both gain a key in
+    /// `validate_open`, or through [`account_inventory`] when a posting or
+    /// padding reaches an account with no `open`; keys are never removed). Lets
     /// [`sum_account_subtree`] answer a balance assertion with a range query over
     /// just the target's subtree, instead of an O(all-accounts) scan per
     /// assertion (`Account`'s `Ord`/`Borrow<str>` are lexical).
     inventory_accounts: BTreeSet<Account>,
     /// Declared commodities.
     commodities: FxHashSet<rustledger_core::Currency>,
-    /// Pending pad directives (account -> list of pads).
-    pending_pads: FxHashMap<rustledger_core::Account, Vec<PendingPad>>,
+    /// The `pad` directives seen so far, under the one pad rule shared with
+    /// `rustledger_booking::process_pads`.
+    pads: rustledger_booking::PadTracker<PadLocation>,
     /// Validation options.
     options: ValidationOptions,
     /// `(account, close_date)` pairs whose late-phase Close check has
@@ -596,7 +586,7 @@ impl ValidatableDirective for Spanned<Directive> {
 /// query in O(log A + subtree) rather than O(A) per assertion. Equivalence to
 /// the unindexed [`rustledger_core::sum_account_and_subaccounts`] is pinned by a
 /// parity test. Takes the two fields directly (not `&self`) so callers can hold
-/// a disjoint `&mut` borrow of another `LedgerState` field (e.g. `pending_pads`)
+/// a disjoint `&mut` borrow of another `LedgerState` field (e.g. `pads`)
 /// at the same time.
 fn sum_account_subtree(
     inventories: &FxHashMap<Account, Inventory>,
@@ -629,6 +619,29 @@ fn sum_account_subtree(
         }
     }
     total
+}
+
+/// The inventory of `account`, created empty (and added to the prefix
+/// `index`) on first use.
+///
+/// An account with no `open` gets one too. Beancount books and sums every
+/// posting whatever the account's state, so its balance check and its
+/// padding see an unopened account's postings: a `balance` on it is still
+/// compared (`Balance failed`), and a pad into it is measured from what it
+/// holds (#2896). The `E1001` for the account is reported separately.
+/// Takes the two fields directly, as [`sum_account_subtree`] does.
+fn account_inventory<'a>(
+    inventories: &'a mut FxHashMap<Account, Inventory>,
+    index: &mut BTreeSet<Account>,
+    account: &Account,
+) -> &'a mut Inventory {
+    if !inventories.contains_key(account) {
+        inventories.insert(account.clone(), Inventory::new());
+        index.insert(account.clone());
+    }
+    inventories
+        .get_mut(account)
+        .expect("the inventory was inserted just above")
 }
 
 /// Internal: run ONE validation phase over a sorted view of `directives`,
@@ -846,33 +859,32 @@ const SYNTHESIZED_DIRECTIVE_NOTE: &str = "directive was synthesized by a plugin 
 /// run, from [`ValidationSession::finalize`].
 fn check_unused_pads(state: &LedgerState) -> Vec<ValidationError> {
     let mut errors = Vec::new();
-    for (target_account, pads) in &state.pending_pads {
-        for pad in pads {
-            if pad.padded_currencies.is_empty() {
-                let mut error = ValidationError::new(
-                    ErrorCode::PadWithoutBalance,
-                    "Unused Pad entry".to_string(),
-                    pad.date,
-                )
-                .with_context(format!(
-                    "   {} pad {} {}",
-                    pad.date, target_account, pad.source_account
-                ));
-                // Anchor the deferred error to the pad's own line (when known)
-                // so it renders with a location instead of `<unknown>:`. A pad
-                // synthesized by a plugin gets the same advisory note the
-                // per-directive patching loop attaches to in-phase errors, so
-                // deferred and in-phase errors stay consistent.
-                if let Some((span, file_id)) = pad.location {
-                    error.span = Some(span);
-                    error.file_id = Some(file_id);
-                    if file_id == SYNTHESIZED_FILE_ID {
-                        error.note = Some(SYNTHESIZED_DIRECTIVE_NOTE.to_string());
-                    }
-                }
-                errors.push(error);
+    // A pad is unused when it never inserted padding: no balance after it, a
+    // balance it already held (a zero difference), or a later pad
+    // superseded it (`rustledger_booking::PadTracker`, beancount's rule).
+    for (target_account, pad) in state.pads.unused() {
+        let mut error = ValidationError::new(
+            ErrorCode::PadWithoutBalance,
+            "Unused Pad entry".to_string(),
+            pad.date,
+        )
+        .with_context(format!(
+            "   {} pad {} {}",
+            pad.date, target_account, pad.source_account
+        ));
+        // Anchor the deferred error to the pad's own line (when known)
+        // so it renders with a location instead of `<unknown>:`. A pad
+        // synthesized by a plugin gets the same advisory note the
+        // per-directive patching loop attaches to in-phase errors, so
+        // deferred and in-phase errors stay consistent.
+        if let Some((span, file_id)) = pad.payload {
+            error.span = Some(span);
+            error.file_id = Some(file_id);
+            if file_id == SYNTHESIZED_FILE_ID {
+                error.note = Some(SYNTHESIZED_DIRECTIVE_NOTE.to_string());
             }
         }
+        errors.push(error);
     }
     errors
 }

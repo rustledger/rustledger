@@ -55,7 +55,10 @@ pub fn push_unknown_account(
 /// `E1005` for an invalid name, see [`push_unknown_account`]). `subject`
 /// names the account's role in the message — `"Account"`, `"Pad target
 /// account"`, `"Pad source account"` — producing
-/// `"<subject> <account> was never opened"`. This is the single definition of
+/// `"<subject> <account> was never opened"`, or, for an account opened only
+/// after `date`, `"<subject> <account> is inactive on <date> (not opened until
+/// <open date>)"`: beancount calls that an `inactive account`, as it does a
+/// closed one, not an unknown one (#2896). This is the single definition of
 /// the E1001 message and code, shared by every directive validator that reports
 /// an unopened account.
 pub fn push_account_not_open(
@@ -69,7 +72,13 @@ pub fn push_account_not_open(
         state,
         account,
         date,
-        || format!("{subject} {account} was never opened"),
+        || match state.accounts.get(account) {
+            Some(later) if later.opened > date => format!(
+                "{subject} {account} is inactive on {date} (not opened until {})",
+                later.opened
+            ),
+            _ => format!("{subject} {account} was never opened"),
+        },
         errors,
     );
 }

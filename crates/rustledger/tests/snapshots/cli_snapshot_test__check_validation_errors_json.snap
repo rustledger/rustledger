@@ -36,10 +36,21 @@ expression: pretty
       "message": "Account Assets:Cash was never opened",
       "phase": "validate",
       "severity": "error"
+    },
+    {
+      "code": "E2001",
+      "column": 1,
+      "end_column": 1,
+      "end_line": 11,
+      "file": "<fixtures>/validation-errors.beancount",
+      "line": 10,
+      "message": "Balance failed for Assets:Cash: expected 100 USD, got -10 USD",
+      "phase": "validate",
+      "severity": "error"
     }
   ],
-  "error_count": 3,
+  "error_count": 4,
   "parse_error_count": 0,
-  "validate_error_count": 3,
+  "validate_error_count": 4,
   "warning_count": 0
 }

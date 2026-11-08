@@ -432,6 +432,7 @@ pub fn lf_to_crlf_outside_strings(s: &str) -> String {
     let mut state = SourceState::Code;
     let mut prev_was_backslash = false;
     let mut at_line_start = true;
+    let mut lbrace_odd = false;
     let mut unclosed_until = 0;
     while let Some((i, ch)) = chars.next() {
         let peek = chars.peek().map(|&(_, c)| c);
@@ -445,11 +446,20 @@ pub fn lf_to_crlf_outside_strings(s: &str) -> String {
                 }
             }
         }
+        let after_lbrace = lbrace_odd;
+        lbrace_odd = next_lbrace_odd(ch, state, lbrace_odd);
         state = lexer_source_state(
             body,
             i,
             state,
-            advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash),
+            advance_source_state(
+                ch,
+                peek,
+                at_line_start,
+                after_lbrace,
+                state,
+                &mut prev_was_backslash,
+            ),
             &mut unclosed_until,
         );
         at_line_start = next_at_line_start(ch, at_line_start);
@@ -648,6 +658,7 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
     let mut state = SourceState::Code;
     let mut prev_was_backslash = false;
     let mut at_line_start = true;
+    let mut lbrace_odd = false;
     // The `[ \t\r]` run that starts at the last bare `\r` seen outside a
     // string: where it ends, and whether it reaches the line ending or the
     // end of the source (see `stray_cr_run`). Cached so a long run is
@@ -703,11 +714,20 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
                 }
             }
         }
+        let after_lbrace = lbrace_odd;
+        lbrace_odd = next_lbrace_odd(ch, state, lbrace_odd);
         state = lexer_source_state(
             body,
             i,
             state,
-            advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash),
+            advance_source_state(
+                ch,
+                peek,
+                at_line_start,
+                after_lbrace,
+                state,
+                &mut prev_was_backslash,
+            ),
             &mut unclosed_until,
         );
         at_line_start = ate_lf || next_at_line_start(ch, at_line_start);
@@ -784,6 +804,7 @@ pub fn cr_outside_strings_present(src: &str) -> bool {
     let mut state = SourceState::Code;
     let mut prev_was_backslash = false;
     let mut at_line_start = true;
+    let mut lbrace_odd = false;
     let mut unclosed_until = 0;
     while let Some((i, ch)) = chars.next() {
         let peek = chars.peek().map(|&(_, c)| c);
@@ -791,11 +812,20 @@ pub fn cr_outside_strings_present(src: &str) -> bool {
             return true;
         }
         // The same quote rule as the two helpers it mirrors (#2803).
+        let after_lbrace = lbrace_odd;
+        lbrace_odd = next_lbrace_odd(ch, state, lbrace_odd);
         state = lexer_source_state(
             body,
             i,
             state,
-            advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash),
+            advance_source_state(
+                ch,
+                peek,
+                at_line_start,
+                after_lbrace,
+                state,
+                &mut prev_was_backslash,
+            ),
             &mut unclosed_until,
         );
         at_line_start = next_at_line_start(ch, at_line_start);
@@ -857,6 +887,7 @@ const fn advance_source_state(
     ch: char,
     peek: Option<char>,
     at_line_start: bool,
+    after_lbrace: bool,
     state: SourceState,
     prev_was_backslash: &mut bool,
 ) -> SourceState {
@@ -878,7 +909,12 @@ const fn advance_source_state(
             }
         }
         SourceState::Code => {
+            // The `#` of a `{#` token (`after_lbrace`, see
+            // `next_lbrace_odd`) opens nothing: the lexer reads `{#` as one
+            // `LBraceHash` before its `#!` / `#+` rules can see the `#`
+            // (#2780).
             let is_hash_line_comment = ch == '#'
+                && !after_lbrace
                 && (matches!(peek, Some('!' | '+'))
                     || (at_line_start && !matches!(peek, Some(c) if is_tag_char(c))));
             let is_org_heading = ch == '*' && at_line_start;
@@ -980,6 +1016,16 @@ const fn is_tag_char(c: char) -> bool {
 /// a `#` after a mid-file or second BOM is still a column-0 comment.
 const fn next_at_line_start(ch: char, at_line_start: bool) -> bool {
     ch == '\n' || (at_line_start && ch == '\u{FEFF}')
+}
+
+/// Whether the character after `ch` follows a `{` that starts a token, so a
+/// `#` there is the second half of the lexer's `{#` (`LBraceHash`), not a
+/// `#!` / `#+` comment opener (#2780). The lexer pairs `{` greedily from the
+/// left (`{{` is one token, `{{{#` is `{{` then `{#`), so it is an odd run of
+/// `{` in code that does. `odd` is the value for `ch`'s own position and
+/// `state` the state `ch` is read in.
+const fn next_lbrace_odd(ch: char, state: SourceState, odd: bool) -> bool {
+    matches!(state, SourceState::Code) && ch == '{' && !odd
 }
 
 /// Format a `SOURCE_FILE` syntax node in opinionated canonical form.
@@ -5413,73 +5459,142 @@ mod tests {
     /// line-ending round-trip.
     #[test]
     fn source_state_classification_agrees_with_lexer() {
-        use crate::logos_lexer::{Token, tokenize_lossless};
+        for (name, src) in IDEMPOTENCE_MATRIX.iter().chain(SOURCE_STATE_EXTRA) {
+            assert_source_state_agrees_with_lexer(name, src);
+        }
+    }
 
-        for (name, src) in IDEMPOTENCE_MATRIX {
-            // Run the lexer to get authoritative classification of
-            // each token. Build a per-byte map of expected state.
-            let tokens = tokenize_lossless(src);
-            let mut expected = vec![SourceState::Code; src.len()];
-            // A column-0 `*` (an org-mode heading) is followed by the
-            // rest of its line as ONE `Error` token that the lexer never
-            // tokenized (#2778): heading text, so comment-like. Requiring
-            // the `*` to sit at line start (after a `\n`, or only BOMs)
-            // keeps a mid-line `*@` (a flag next to junk) out of it.
-            let at_line_start = |pos: usize| {
-                let before = src[..pos].trim_end_matches('\u{FEFF}');
-                before.is_empty() || before.ends_with('\n')
-            };
-            let mut prev: Option<(&Token<'_>, &crate::logos_lexer::Span)> = None;
-            for (token, span) in &tokens {
-                let heading_text = matches!(token, Token::Error(_))
-                    && matches!(prev, Some((Token::Star, star))
-                        if star.end == span.start && at_line_start(star.start));
-                prev = Some((token, span));
-                let classify = match token {
-                    Token::String(_) => Some(SourceState::InString),
-                    Token::Comment(_)
-                    | Token::PercentComment(_)
-                    | Token::Shebang(_)
-                    | Token::EmacsDirective(_) => Some(SourceState::InComment),
-                    Token::Error(_) if heading_text => Some(SourceState::InComment),
-                    // An unterminated quote: one error token from the `"` to
-                    // the end of its line (#2788), opaque like a comment.
-                    Token::Error(text) if text.starts_with('"') => Some(SourceState::InComment),
-                    _ => None,
-                };
-                if let Some(state) = classify {
-                    for byte in &mut expected[span.start..span.end] {
-                        *byte = state;
+    /// Inputs for the classifier property that are not formatter fixtures:
+    /// shapes the line-ending pass must classify as the lexer does even
+    /// though they are not valid ledgers (#2780). `{#` is one `LBraceHash`
+    /// token, so its `#!` / `#+` opens no comment; `{{` is one token, so after
+    /// it a `#!` does.
+    const SOURCE_STATE_EXTRA: &[(&str, &str)] = &[
+        ("lbrace_hash_bang", "\n{#! \n"),
+        ("lbrace_hash_bang_quote", "{#!#\"2\u{feff}\n%\""),
+        (
+            "lbrace_hash_plus",
+            "2024-01-01 *\n  Assets:A  1 X {#+ \"q\n  Assets:B\n",
+        ),
+        (
+            "double_lbrace_shebang",
+            "x {{#! \"q\n2024-01-01 note Assets:A \"x\"\n",
+        ),
+        ("triple_lbrace_hash", "x {{{#! \"q\"\n"),
+        (
+            "percent_comment_quote",
+            "% a \"q\n2024-01-01 note Assets:A \"x\"\n",
+        ),
+    ];
+
+    /// The classifier property on generated inputs: every string of up to
+    /// five characters over an alphabet of the characters the two
+    /// classifiers treat specially (#2780; the gap above was found this way).
+    /// An input with a `\r` that has more of its line after it is skipped: such
+    /// a `\r` closes a comment here and stays in it for the lexer, a documented
+    /// difference (see `advance_source_state`). A `\r` before its line ending
+    /// is trivia to both and is checked.
+    #[test]
+    fn source_state_classification_agrees_with_lexer_on_generated_inputs() {
+        const ALPHABET: [char; 13] = [
+            '\r', '{', '#', '!', '+', '%', ';', '"', '\n', ' ', 'a', '*', '\\',
+        ];
+        let mut frontier = vec![String::new()];
+        let mut checked = 0usize;
+        for _ in 0..5 {
+            let mut next = Vec::with_capacity(frontier.len() * ALPHABET.len());
+            for prefix in &frontier {
+                for c in ALPHABET {
+                    let mut src = prefix.clone();
+                    src.push(c);
+                    if !has_mid_line_cr(&src) {
+                        assert_source_state_agrees_with_lexer("generated", &src);
+                        checked += 1;
                     }
+                    next.push(src);
                 }
             }
+            frontier = next;
+        }
+        assert!(checked > 300_000, "only {checked} inputs");
+    }
 
-            // Run the state-machine classifier and compare per
-            // byte. We skip ONLY the exact bytes where a
-            // transition fires — the lexer includes those bytes
-            // inside the resulting token while the state machine
-            // tags them with the PRE-transition state (the
-            // 'opener' is still Code, the closing LF is still
-            // InComment). Tracking the transition indices
-            // explicitly (rather than skipping every `"`/`;`/`%`
-            // / newline byte) means a state-machine bug at any
-            // non-transition `"`/`;`/`%` byte — e.g. inside a
-            // comment or string — surfaces as a real failure
-            // instead of being silently masked.
-            let (actual, transitions) = classify_source_bytes_with_transitions(src);
+    /// Whether `src` has a `\r` with more of its line (anything but spaces,
+    /// tabs and `\r`s) after it.
+    fn has_mid_line_cr(src: &str) -> bool {
+        src.split('\n').any(|line| {
+            line.find('\r')
+                .is_some_and(|i| !line[i..].trim_start_matches([' ', '\t', '\r']).is_empty())
+        })
+    }
 
-            for (i, (&want, &got)) in expected.iter().zip(actual.iter()).enumerate() {
-                if transitions.contains(&i) {
-                    continue;
+    /// The per-byte comparison behind the classifier properties: panics at
+    /// the first byte where the state machine and the lexer disagree.
+    fn assert_source_state_agrees_with_lexer(name: &str, src: &str) {
+        use crate::logos_lexer::{Token, tokenize_lossless};
+        // Run the lexer to get authoritative classification of
+        // each token. Build a per-byte map of expected state.
+        let tokens = tokenize_lossless(src);
+        let mut expected = vec![SourceState::Code; src.len()];
+        // A column-0 `*` (an org-mode heading) is followed by the
+        // rest of its line as ONE `Error` token that the lexer never
+        // tokenized (#2778): heading text, so comment-like. Requiring
+        // the `*` to sit at line start (after a `\n`, or only BOMs)
+        // keeps a mid-line `*@` (a flag next to junk) out of it.
+        let at_line_start = |pos: usize| {
+            let before = src[..pos].trim_end_matches('\u{FEFF}');
+            before.is_empty() || before.ends_with('\n')
+        };
+        let mut prev: Option<(&Token<'_>, &crate::logos_lexer::Span)> = None;
+        for (token, span) in &tokens {
+            let heading_text = matches!(token, Token::Error(_))
+                && matches!(prev, Some((Token::Star, star))
+                    if star.end == span.start && at_line_start(star.start));
+            prev = Some((token, span));
+            let classify = match token {
+                Token::String(_) => Some(SourceState::InString),
+                Token::Comment(_)
+                | Token::PercentComment(_)
+                | Token::Shebang(_)
+                | Token::EmacsDirective(_) => Some(SourceState::InComment),
+                Token::Error(_) if heading_text => Some(SourceState::InComment),
+                // An unterminated quote: one error token from the `"` to
+                // the end of its line (#2788), opaque like a comment.
+                Token::Error(text) if text.starts_with('"') => Some(SourceState::InComment),
+                _ => None,
+            };
+            if let Some(state) = classify {
+                for byte in &mut expected[span.start..span.end] {
+                    *byte = state;
                 }
-                assert_eq!(
-                    want,
-                    got,
-                    "state-machine / lexer disagreement on fixture `{name}` \
-                     at byte {i} ({:?}): lexer said {want:?}, state machine said {got:?}",
-                    src.as_bytes()[i] as char
-                );
             }
+        }
+
+        // Run the state-machine classifier and compare per
+        // byte. We skip ONLY the exact bytes where a
+        // transition fires; the lexer includes those bytes
+        // inside the resulting token while the state machine
+        // tags them with the PRE-transition state (the
+        // 'opener' is still Code, the closing LF is still
+        // InComment). Tracking the transition indices
+        // explicitly (rather than skipping every `"`/`;`/`%`
+        // / newline byte) means a state-machine bug at any
+        // non-transition `"`/`;`/`%` byte (inside a
+        // comment or string, say) surfaces as a real failure
+        // instead of being silently masked.
+        let (actual, transitions) = classify_source_bytes_with_transitions(src);
+
+        for (i, (&want, &got)) in expected.iter().zip(actual.iter()).enumerate() {
+            if transitions.contains(&i) {
+                continue;
+            }
+            assert_eq!(
+                want,
+                got,
+                "state-machine / lexer disagreement on fixture `{name}` \
+                 at byte {i} ({:?}): lexer said {want:?}, state machine said {got:?}",
+                src.as_bytes()[i] as char
+            );
         }
     }
 
@@ -5663,6 +5778,7 @@ mod tests {
         let mut state = SourceState::Code;
         let mut prev_was_backslash = false;
         let mut at_line_start = true;
+        let mut lbrace_odd = false;
         let mut unclosed_until = 0;
         while let Some((rel_i, ch)) = chars.next() {
             let i = bom_len + rel_i;
@@ -5672,11 +5788,20 @@ mod tests {
                 *byte = state;
             }
             let prev_state = state;
+            let after_lbrace = lbrace_odd;
+            lbrace_odd = next_lbrace_odd(ch, state, lbrace_odd);
             let next_state = lexer_source_state(
                 body,
                 rel_i,
                 state,
-                advance_source_state(ch, peek, at_line_start, state, &mut prev_was_backslash),
+                advance_source_state(
+                    ch,
+                    peek,
+                    at_line_start,
+                    after_lbrace,
+                    state,
+                    &mut prev_was_backslash,
+                ),
                 &mut unclosed_until,
             );
             at_line_start = next_at_line_start(ch, at_line_start);

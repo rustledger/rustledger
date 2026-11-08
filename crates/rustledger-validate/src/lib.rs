@@ -4510,9 +4510,11 @@ mod tests {
         // Late registers every `open` before its walk, so a presence check
         // must also compare dates: a `pad`, `balance` or `note` dated before
         // its account's `open` refers to an account not yet open (E1001), as
-        // when opens were registered as the walk reached them. The pad is
-        // not registered and the balance is not currency-checked (no E5002);
-        // the balance IS still compared (E2001), as beancount compares it.
+        // when opens were registered as the walk reached them. The pad still
+        // pads, as beancount inserts the padding whatever the account's
+        // state, so the balance after it does not fail (bean-check 3.2.3
+        // reports the inactive account, not a balance failure); the balance
+        // is not currency-checked (no E5002).
         let mut open = Open::new(date(2020, 2, 1), "Assets:Bank");
         open.currencies = vec!["USD".into()];
         let directives = vec![
@@ -4533,7 +4535,6 @@ mod tests {
             [
                 ErrorCode::AccountNotOpen,
                 ErrorCode::AccountNotOpen,
-                ErrorCode::BalanceAssertionFailed,
                 ErrorCode::AccountNotOpen
             ],
             "{errors:?}"

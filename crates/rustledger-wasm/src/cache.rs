@@ -386,7 +386,12 @@ use crate::types::{Error, LedgerOptions};
 /// `pad` reports an unopened or invalid source behind an unopened target
 /// (#2809). `fromCache` restores the errors verbatim, so a v78 blob would keep
 /// serving such a ledger without them.
-pub const CACHE_VERSION: u32 = 79;
+/// v81: loader v60, unchanged (v80 is #2891's). `Ledger`'s error list moves
+/// again: a `pad` after its account's close is `E1003`, and a pad with an
+/// unopened account still pads, so it no longer adds an `E2001` balance
+/// failure or loses its `Unused Pad entry`. A v79 blob would keep serving the
+/// old errors.
+pub const CACHE_VERSION: u32 = 81;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

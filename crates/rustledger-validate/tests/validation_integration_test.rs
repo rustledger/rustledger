@@ -1177,3 +1177,70 @@ fn test_validate_reports_every_account_name_row_the_stray_char_matrix_excludes()
         unreported[..unreported.len().min(10)].join("\n")
     );
 }
+
+// ============================================================================
+// Pads with a closed or unopened account
+// ============================================================================
+
+/// The error codes `source` validates to, in order.
+fn codes_of(source: &str) -> Vec<ErrorCode> {
+    let parsed = rustledger_parser::parse(source);
+    assert!(parsed.errors.is_empty(), "{source:?}: {:?}", parsed.errors);
+    let directives: Vec<Directive> = parsed.directives.into_iter().map(|d| d.value).collect();
+    validate(&directives).into_iter().map(|e| e.code).collect()
+}
+
+/// A pad dated after one of its accounts was closed references an inactive
+/// account, as bean-check 3.2.3 reports (`Invalid reference to inactive
+/// account`), and the padding still applies: no balance failure follows.
+/// On the close date itself the account is still active.
+#[test]
+fn test_validate_pad_reports_a_closed_account() {
+    let head = "2024-01-01 open Assets:A\n2024-01-01 open Equity:O\n";
+    for close in ["Equity:O", "Assets:A"] {
+        let source = format!(
+            "{head}2024-01-05 close {close}\n2024-01-10 pad Assets:A Equity:O\n\
+             2024-01-11 balance Assets:A 100 USD\n"
+        );
+        assert_eq!(codes_of(&source), [ErrorCode::AccountClosed], "{source:?}");
+    }
+    // Unused (a zero difference), as there: inactive, then unused.
+    let source = format!(
+        "{head}2024-01-05 close Equity:O\n2024-01-10 pad Assets:A Equity:O\n\
+         2024-01-11 balance Assets:A 0 USD\n"
+    );
+    assert_eq!(
+        codes_of(&source),
+        [ErrorCode::AccountClosed, ErrorCode::PadWithoutBalance],
+        "{source:?}"
+    );
+    let source = format!(
+        "{head}2024-01-10 close Equity:O\n2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n"
+    );
+    assert_eq!(codes_of(&source), Vec::<ErrorCode>::new(), "{source:?}");
+}
+
+/// beancount inserts the padding whatever the accounts' state, so an
+/// unopened account in a pad is reported (`E1001`) but adds no balance
+/// failure (`E2001`) and no `Unused Pad entry` (`E2003`). bean-check 3.2.3
+/// reports only the unknown accounts on each of these.
+#[test]
+fn test_validate_pad_with_an_unopened_account_still_pads() {
+    for source in [
+        // Unopened source.
+        "2024-01-01 open Assets:A\n2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n",
+        // Source opened only after the pad.
+        "2024-01-01 open Assets:A\n2024-01-20 open Equity:O\n2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n",
+        // Unopened target.
+        "2024-01-01 open Equity:O\n2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n",
+        // Both unopened.
+        "2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n",
+    ] {
+        let codes = codes_of(source);
+        assert!(!codes.is_empty(), "{source:?}");
+        assert!(
+            codes.iter().all(|c| *c == ErrorCode::AccountNotOpen),
+            "{source:?}: {codes:?}"
+        );
+    }
+}

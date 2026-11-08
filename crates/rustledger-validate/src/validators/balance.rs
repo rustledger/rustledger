@@ -61,19 +61,46 @@ pub fn validate_pad(
     // the pad, as beancount reports each (`Invalid account name` or `unknown
     // account`): stopping at an unopened target hid an invalid source name
     // (#2809).
-    let target_open =
-        require_account_open(state, &pad.account, pad.date, "Pad target account", errors);
-    let source_open = require_account_open(
+    require_account_open(state, &pad.account, pad.date, "Pad target account", errors);
+    require_account_open(
         state,
         &pad.source_account,
         pad.date,
         "Pad source account",
         errors,
     );
-    if !(target_open && source_open) {
-        return;
+    // A pad dated after an account's close references an inactive account,
+    // as beancount reports it (`Invalid reference to inactive account`). On
+    // the close date itself the account is still active: a `close` sorts
+    // after the other entries of its day, as for a posting
+    // (`lifecycle_errors`).
+    for (account, subject) in [
+        (&pad.account, "Pad target account"),
+        (&pad.source_account, "Pad source account"),
+    ] {
+        if let Some(closed) = state.accounts.get(account).and_then(|a| a.closed)
+            && pad.date > closed
+        {
+            errors.push(ValidationError::new(
+                ErrorCode::AccountClosed,
+                format!(
+                    "{subject} {account} is inactive on {} (closed on {closed})",
+                    pad.date
+                ),
+                pad.date,
+            ));
+        }
     }
 
+    // Registered whatever the accounts' state: beancount inserts the padding
+    // before it validates anything, so a balance after the pad is checked
+    // against the padded amount, and an unopened or closed account in the
+    // pad is reported above but adds no balance failure. Skipping the pad
+    // here added a spurious E2001 on top of the account error. The half of
+    // the padding whose account was never opened has no inventory to land in
+    // (`validate_balance_late`'s `pad_into`), as beancount's padding entry
+    // posts to an account with no `open`.
+    //
     // Add to pending pads list for this account
     let pending_pad = PendingPad {
         source_account: pad.source_account.clone(),
@@ -145,7 +172,21 @@ pub fn validate_balance_late(
     // reported an unopened account. One never opened has no inventory to
     // compare against; one opened LATER is still compared, as beancount
     // compares it (it reports both the inactive account and the failure).
+    //
+    // A pad into such an account is still used by this balance, as in
+    // beancount, which inserts the padding whatever the account's state: it
+    // would otherwise come out as an `Unused Pad entry` beancount does not
+    // report. There is no inventory to pad, and the comparison is skipped as
+    // before.
     if !state.accounts.contains_key(&bal.account) {
+        if bal.amount.number != Decimal::ZERO
+            && let Some(pending_pads) = state.pending_pads.get_mut(&bal.account)
+            && let Some(&i) = effective_pads(pending_pads, bal).last()
+        {
+            pending_pads[i]
+                .padded_currencies
+                .insert(bal.amount.currency.clone());
+        }
         return;
     }
 
@@ -159,8 +200,8 @@ pub fn validate_balance_late(
         // currency being asserted right now. Without this, the vec grows
         // for the lifetime of the session and E2003 / E2004 detection
         // fires against pads that already served their purpose.
-        pending_pads.retain(|p| !p.padded_currencies.contains(&bal.amount.currency));
-
+        // (`effective_pads` does both.)
+        //
         // A Pad on date D is effective for the NEXT Balance on the
         // target account dated strictly after D (Python beancount
         // semantics — Pad creates an entry "between" D and the next
@@ -174,15 +215,11 @@ pub fn validate_balance_late(
         // `validate_phase_inner`), so `pending_pads` is itself in
         // date-sorted push order — `effective_idx.last()` is therefore
         // the most recent effective pad (Python's `active_pad`).
-        let effective_idx: Vec<usize> = pending_pads
-            .iter()
-            .enumerate()
-            .filter(|(_, p)| p.date < bal.date)
-            .map(|(i, _)| i)
-            .collect();
+        let effective_idx = effective_pads(pending_pads, bal);
 
         // Check for multiple effective pads (E2004) — every effective
-        // pad is unused (retain ran above), so we just need to count.
+        // pad is unused (`effective_pads` dropped the used ones), so we just
+        // need to count.
         if effective_idx.len() > 1 {
             errors.push(
                 ValidationError::new(
@@ -346,6 +383,20 @@ pub fn validate_balance_late(
                 .with_context(format!("difference: {difference}, tolerance: {tolerance}")),
         );
     }
+}
+
+/// The pads on `bal`'s account that this balance can use, oldest first:
+/// those that have not yet served a balance in its currency (the others are
+/// dropped from `pads`), dated strictly before it. The last one is the one
+/// beancount applies (its `active_pad`). Shared by the padding below and the
+/// unopened-account case in `validate_balance_late`.
+fn effective_pads(pads: &mut Vec<PendingPad>, bal: &Balance) -> Vec<usize> {
+    pads.retain(|p| !p.padded_currencies.contains(&bal.amount.currency));
+    pads.iter()
+        .enumerate()
+        .filter(|(_, p)| p.date < bal.date)
+        .map(|(i, _)| i)
+        .collect()
 }
 
 #[cfg(test)]

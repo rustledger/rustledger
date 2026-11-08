@@ -37,9 +37,11 @@
 //!
 //! ## Fingerprint stability
 //!
-//! `Directive` (in `rustledger-core::directive`) carries a
-//! `meta: FxHashMap<String, MetaValue>` field, and `FxHashMap`'s
-//! `Debug` iterates in hashbrown bucket order. That's deterministic
+//! `Directive` (in `rustledger-core::directive`) carried a
+//! `meta: FxHashMap<String, MetaValue>` field until #2835, and `FxHashMap`'s
+//! `Debug` iterates in hashbrown bucket order. (`Metadata` is insertion-ordered
+//! now; the sorted canonicalization below is kept so the fingerprint does not
+//! depend on the order a map was built in either.) That's deterministic
 //! for a given hashbrown version but NOT stable across versions, so
 //! a naive `format!("{:#?}", result)` hash would generate spurious
 //! cross-file drift on every hashbrown bump.

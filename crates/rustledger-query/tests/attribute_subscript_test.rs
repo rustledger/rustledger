@@ -25,8 +25,7 @@ fn ledger() -> Vec<Directive> {
         .with_synthesized_posting(Posting::new("Assets:Cash", Amount::new(dec!(-1), "USD")))
         .with_synthesized_posting(Posting::new("Expenses:X", Amount::new(dec!(1), "USD")));
     txn.payee = Some("Shop".into());
-    txn.meta
-        .insert("note".into(), MetaValue::String("hello".into()));
+    txn.meta.insert("note", MetaValue::String("hello".into()));
     vec![
         Directive::Open(Open::new(date(2026, 7, 1), "Assets:Cash")),
         Directive::Open(Open::new(date(2026, 7, 1), "Expenses:X")),

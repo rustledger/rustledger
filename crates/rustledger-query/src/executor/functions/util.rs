@@ -136,18 +136,27 @@ impl Executor<'_> {
     /// Return `raw` extended with beanquery's synthetic `filename`/`lineno`
     /// metadata keys resolved from `loc` (existing user keys win). Used to
     /// materialize the full `meta` column value.
+    ///
+    /// The location keys come FIRST, then the directive's own keys in source
+    /// order: that is beancount's order, whose parser builds every `meta` dict
+    /// from `filename` and `lineno` before adding the written keys. Since
+    /// #2835 `Metadata` keeps insertion order, so this order is what a `meta`
+    /// cell renders (it was the hash map's order before). A key the directive
+    /// writes itself, a `lineno` say, keeps the location key's place and its
+    /// own value, as the dict update in beancount does.
     pub(crate) fn augmented_meta(raw: &Metadata, loc: Option<&SourceLocation>) -> Metadata {
         if loc.is_none() {
             return raw.clone();
         }
-        let mut meta = raw.clone();
-        for key in ["filename", "lineno"] {
-            if !meta.contains_key(key)
-                && let Some(value) = Self::source_location_meta_key(loc, key)
-            {
-                meta.insert(key.to_string(), value);
-            }
-        }
+        // Extend, not a loop of inserts, so a directive with many keys stays
+        // near-linear; a repeated key keeps its first place and last value.
+        let mut meta = Metadata::with_capacity(raw.len() + 2);
+        meta.extend(
+            ["filename", "lineno"]
+                .into_iter()
+                .filter_map(|key| Some((key, Self::source_location_meta_key(loc, key)?))),
+        );
+        meta.extend(raw.iter().map(|(key, value)| (key.clone(), value.clone())));
         meta
     }
 
@@ -334,5 +343,35 @@ mod tests {
         );
         assert_eq!(Executor::source_filename_value(None), Value::Null);
         assert_eq!(Executor::source_location_value(None), Value::Null);
+    }
+
+    #[test]
+    fn test_augmented_meta_location_keys_first_then_source_order() {
+        // beancount builds every `meta` dict from `filename` and `lineno` and
+        // then adds the written keys, so a `meta` cell lists them in that
+        // order. `Metadata` keeps insertion order since #2835, so this order
+        // is what renders; a hash map gave an arbitrary one.
+        use rustledger_core::{MetaValue, Metadata};
+        let mut raw = Metadata::new();
+        raw.insert("zeta", MetaValue::Int(1));
+        raw.insert("alpha", MetaValue::Int(2));
+        let meta = Executor::augmented_meta(&raw, Some(&loc(7)));
+        let keys: Vec<&str> = meta
+            .keys()
+            .map(rustledger_core::InternedStr::as_str)
+            .collect();
+        assert_eq!(keys, ["filename", "lineno", "zeta", "alpha"]);
+
+        // A written `lineno` wins with its own value, in the place beancount
+        // gives it: its dict starts with `lineno`, and updating a key keeps
+        // its position.
+        raw.insert("lineno", MetaValue::Int(99));
+        let meta = Executor::augmented_meta(&raw, Some(&loc(7)));
+        let keys: Vec<&str> = meta
+            .keys()
+            .map(rustledger_core::InternedStr::as_str)
+            .collect();
+        assert_eq!(keys, ["filename", "lineno", "zeta", "alpha"]);
+        assert_eq!(meta.get("lineno"), Some(&MetaValue::Int(99)));
     }
 }

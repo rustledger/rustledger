@@ -24,13 +24,15 @@ pub(super) fn metadata_lines(
     config: &FormatConfig,
     out: &mut Vec<FormatLine>,
 ) {
-    let mut keys: Vec<_> = meta.keys().collect();
-    keys.sort();
-    for key in keys {
+    // Sort the entries, not the keys: looking each key up again would be
+    // quadratic in the entry count.
+    let mut entries: Vec<_> = meta.iter().collect();
+    entries.sort_by(|a, b| a.0.cmp(b.0));
+    for (key, value) in entries {
         out.push(FormatLine::Plain(format!(
             "{indent}{}: {}",
             key,
-            format_meta_value(&meta[key], config)
+            format_meta_value(value, config)
         )));
     }
 }

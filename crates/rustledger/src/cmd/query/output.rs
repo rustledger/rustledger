@@ -686,7 +686,7 @@ fn value_to_json(value: &Value) -> serde_json::Value {
         Value::Metadata(meta) => {
             let obj: serde_json::Map<String, serde_json::Value> = meta
                 .iter()
-                .map(|(k, v)| (k.clone(), meta_value_to_json(v)))
+                .map(|(k, v)| (k.to_string(), meta_value_to_json(v)))
                 .collect();
             serde_json::Value::Object(obj)
         }

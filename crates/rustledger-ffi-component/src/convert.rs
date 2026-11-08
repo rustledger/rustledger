@@ -91,7 +91,7 @@ fn meta_value_from_core(v: &MetaValue) -> wit::MetaValue {
 fn meta_entries_from_core(m: &Metadata) -> Vec<(String, wit::MetaValue)> {
     let mut entries: Vec<(String, wit::MetaValue)> = m
         .iter()
-        .map(|(k, v)| (k.clone(), meta_value_from_core(v)))
+        .map(|(k, v)| (k.to_string(), meta_value_from_core(v)))
         .collect();
     entries.sort_by(|a, b| a.0.cmp(&b.0));
     entries
@@ -561,7 +561,7 @@ fn query_value(v: &Value) -> wit::QueryValue {
             // `Display`, matching the canonical CLI, not `Debug` (which leaked
             // the Rust wrapper, e.g. `String("foo")`).
             m.iter()
-                .map(|(k, val)| (k.clone(), format!("{val}")))
+                .map(|(k, val)| (k.to_string(), format!("{val}")))
                 .collect(),
         ),
         Value::Interval(iv) => Q::Interval(wit::Interval {
@@ -611,7 +611,7 @@ fn value_to_json(value: &Value) -> Json {
             // `Display`, matching the canonical CLI, not `Debug`.
             let obj: serde_json::Map<String, Json> = m
                 .iter()
-                .map(|(k, v)| (k.clone(), serde_json::json!(format!("{v}"))))
+                .map(|(k, v)| (k.to_string(), serde_json::json!(format!("{v}"))))
                 .collect();
             Json::Object(obj)
         }

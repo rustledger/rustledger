@@ -74,7 +74,7 @@ fn meta_value_to_json(value: &MetaValue) -> MetaValueJson {
 /// Build the wire `meta` map from a host [`Metadata`].
 fn metadata_to_json(meta: &Metadata) -> HashMap<String, MetaValueJson> {
     meta.iter()
-        .map(|(k, v)| (k.clone(), meta_value_to_json(v)))
+        .map(|(k, v)| (k.to_string(), meta_value_to_json(v)))
         .collect()
 }
 

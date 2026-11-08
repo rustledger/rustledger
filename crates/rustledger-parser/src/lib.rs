@@ -556,7 +556,8 @@ pub fn parse_directives(source: &str) -> (Vec<Spanned<Directive>>, Vec<ParseErro
 ///
 /// Returns a byte string that uniquely identifies the `ParseResult`'s
 /// observable content. Directives route through `serde_json::to_value`
-/// to normalize the `FxHashMap` iteration order in metadata; all
+/// to normalize metadata order (an `FxHashMap` order until #2835, the
+/// map's insertion order since); all
 /// other fields use `Debug` formatting, which is deterministic for
 /// `Vec`-based types.
 ///

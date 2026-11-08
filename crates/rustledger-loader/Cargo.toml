@@ -55,6 +55,8 @@ rustledger-validate = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
+# The parse-error parity example (`examples/parse_error_lines.rs`) prints JSON.
+serde_json.workspace = true
 rust_decimal_macros.workspace = true
 jiff.workspace = true
 

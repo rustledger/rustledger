@@ -125,6 +125,47 @@ git commit -m 'chore(baselines): regenerate corpus manifests'
 The regen script gates on a populated corpus and runs the parser test
 and the CST test with `BASELINE_UPDATE=1`.
 
+## Parse-error parity (`parse-error-parity.manifest`)
+
+A different kind of baseline: not rledger's output against itself, but
+rledger's parse errors against beancount 3.2.3's, input by input (#2872).
+For each input both parsers run, and each side's errors are reduced to the
+lines they land on and how many each line carries. The harness,
+`scripts/compat-parse-error-parity.py`, documents the inputs, the
+normalization (BOM, CRLF, line-0 errors) and the mismatch categories.
+
+The manifest pins the current result: one row per tracked or downloaded
+ledger (matches included), then, for the stray-character matrix and the
+fuzz corpora, the ids of the inputs that do not match, grouped by
+category. Its `#@fuzz-commit` line pins the `fuzz-corpus` commit the fuzz
+inputs come from, so the input set only changes when the pin does.
+
+The `Parse-error parity` job in `.github/workflows/compat.yml` runs it on
+every PR with `--check`:
+
+- An input pinned as matching that now mismatches is a **regression** and
+  fails the job.
+- A pinned mismatch that now matches, or changes category, is reported as
+  a notice and does not fail: update the pin.
+- A tracked ledger with no row (new or edited) fails: pin it. A downloaded
+  one with no row only warns: upstream changed it.
+
+To update the pin (after a parser change that improves parity, or to move
+to a newer `fuzz-corpus` commit):
+
+```bash
+git fetch origin fuzz-corpus
+commit=$(git rev-parse FETCH_HEAD)   # or keep the pinned one
+mkdir -p /tmp/fuzz && git archive "$commit" fuzz_parse fuzz_green_eq_red | tar -x -C /tmp/fuzz
+cargo build --release -p rustledger-loader --no-default-features --example parse_error_lines
+# With beancount 3.2.3 importable (`nix develop .#bench`, or pip):
+python3 -I scripts/compat-parse-error-parity.py \
+    --rledger target/release/examples/parse_error_lines \
+    --fuzz-dir /tmp/fuzz --fuzz-commit "$commit" \
+    --compat-dir tests/compatibility/files --update
+git diff --stat tests/baselines/parse-error-parity.manifest
+```
+
 ## Phase-3-of-#1262 staleness
 
 When `rustledger-cst::parse` becomes the production parser (phase 3.2

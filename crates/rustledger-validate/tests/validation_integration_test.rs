@@ -1192,3 +1192,130 @@ fn test_validate_reports_every_account_name_row_the_stray_char_matrix_excludes()
         unreported[..unreported.len().min(10)].join("\n")
     );
 }
+
+// ============================================================================
+// Pads with a closed or unopened account
+// ============================================================================
+
+/// The error codes `source` validates to, in order.
+fn codes_of(source: &str) -> Vec<ErrorCode> {
+    let parsed = rustledger_parser::parse(source);
+    assert!(parsed.errors.is_empty(), "{source:?}: {:?}", parsed.errors);
+    let directives: Vec<Directive> = parsed.directives.into_iter().map(|d| d.value).collect();
+    validate(&directives).into_iter().map(|e| e.code).collect()
+}
+
+/// A pad dated after one of its accounts was closed references an inactive
+/// account, as bean-check 3.2.3 reports (`Invalid reference to inactive
+/// account`), and the padding still applies: no balance failure follows.
+/// On the close date itself the account is still active.
+#[test]
+fn test_validate_pad_reports_a_closed_account() {
+    let head = "2024-01-01 open Assets:A\n2024-01-01 open Equity:O\n";
+    for close in ["Equity:O", "Assets:A"] {
+        let source = format!(
+            "{head}2024-01-05 close {close}\n2024-01-10 pad Assets:A Equity:O\n\
+             2024-01-11 balance Assets:A 100 USD\n"
+        );
+        assert_eq!(codes_of(&source), [ErrorCode::AccountClosed], "{source:?}");
+    }
+    // Unused (a zero difference), as there: inactive, then unused.
+    let source = format!(
+        "{head}2024-01-05 close Equity:O\n2024-01-10 pad Assets:A Equity:O\n\
+         2024-01-11 balance Assets:A 0 USD\n"
+    );
+    assert_eq!(
+        codes_of(&source),
+        [ErrorCode::AccountClosed, ErrorCode::PadWithoutBalance],
+        "{source:?}"
+    );
+    let source = format!(
+        "{head}2024-01-10 close Equity:O\n2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n"
+    );
+    assert_eq!(codes_of(&source), Vec::<ErrorCode>::new(), "{source:?}");
+}
+
+/// beancount inserts the padding whatever the accounts' state, so an
+/// unopened account in a pad is reported (`E1001`) but adds no balance
+/// failure (`E2001`) and no `Unused Pad entry` (`E2003`). bean-check 3.2.3
+/// reports only the unknown accounts on each of these.
+#[test]
+fn test_validate_pad_with_an_unopened_account_still_pads() {
+    // One E1001 per unopened account at the pad (the known count divergence:
+    // bean-check reports each a second time against its padding transaction),
+    // plus the balance's own E1001 on an unopened target.
+    for (source, count) in [
+        // Unopened source.
+        (
+            "2024-01-01 open Assets:A\n2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n",
+            1,
+        ),
+        // Source opened only after the pad.
+        (
+            "2024-01-01 open Assets:A\n2024-01-20 open Equity:O\n2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n",
+            1,
+        ),
+        // Unopened target.
+        (
+            "2024-01-01 open Equity:O\n2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n",
+            2,
+        ),
+        // Both unopened.
+        (
+            "2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n",
+            3,
+        ),
+    ] {
+        assert_eq!(
+            codes_of(source),
+            vec![ErrorCode::AccountNotOpen; count],
+            "{source:?}"
+        );
+    }
+}
+
+/// A zero balance on an unopened target uses no pad, just as a zero
+/// difference on an opened one uses none, so the pad is unused; and a pad with an
+/// unopened account and no balance after it is unused too. bean-check 3.2.3
+/// reports `Unused Pad entry` and the unknown accounts on both.
+#[test]
+fn test_validate_unopened_pad_without_a_padding_balance_is_unused() {
+    assert_eq!(
+        codes_of(
+            "2024-01-01 open Equity:O\n2024-01-10 pad Assets:A Equity:O\n\
+             2024-01-11 balance Assets:A 0 USD\n"
+        ),
+        [
+            ErrorCode::AccountNotOpen,
+            ErrorCode::AccountNotOpen,
+            ErrorCode::PadWithoutBalance
+        ]
+    );
+    assert_eq!(
+        codes_of("2024-01-01 open Assets:A\n2024-01-10 pad Assets:A Equity:O\n"),
+        [ErrorCode::AccountNotOpen, ErrorCode::PadWithoutBalance]
+    );
+}
+
+/// Two pads before one balance are `E2004` whether or not the target is
+/// open: the two paths of the balance check share the count.
+#[test]
+fn test_validate_multiple_pads_are_reported_on_an_unopened_target_too() {
+    let two_pads = |open: &str| {
+        format!(
+            "{open}2024-01-01 open Equity:O\n2024-01-09 pad Assets:A Equity:O\n\
+             2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n"
+        )
+    };
+    for source in [two_pads("2024-01-01 open Assets:A\n"), two_pads("")] {
+        let codes = codes_of(&source);
+        assert_eq!(
+            codes
+                .iter()
+                .filter(|c| **c == ErrorCode::MultiplePadForBalance)
+                .count(),
+            1,
+            "{source:?}: {codes:?}"
+        );
+    }
+}

@@ -389,9 +389,13 @@ use crate::types::{Error, LedgerOptions};
 /// v80: loader v61, ARCHIVED LAYOUT moved (#2835). `Metadata` is a vector of
 /// entries with interned keys, in source order, where it was a hash map; a v79
 /// blob would be read at the wrong offsets.
+/// v81: loader v61, unchanged. `Ledger`'s error list moves: a `pad` after its
+/// account's close is `E1003`, and a pad with an unopened account still pads,
+/// so it no longer adds an `E2001` balance failure or loses its `Unused Pad
+/// entry`. A v80 blob would keep serving the old errors.
 /// v82: loader v62, PARSER OUTPUT changed (#2893). A metadata key repeated on
 /// a transaction or a posting keeps its first value and is a parse error, as
-/// in beancount; a v80 or v81 blob would keep serving the last value.
+/// in beancount; a v81 blob would keep serving the last value.
 pub const CACHE_VERSION: u32 = 82;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.

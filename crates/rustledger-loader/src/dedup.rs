@@ -107,7 +107,7 @@ fn intern_typed_set<T: Ord>(
     });
 }
 
-/// Re-intern the typed identifier payloads in a [`MetaMap`]. Visits only
+/// Re-intern the keys and the typed identifier payloads in a [`MetaMap`]. Visits only
 /// an attached map, so an empty one stays unallocated.
 ///
 /// `MetaValue::{Account, Currency, Tag, Link}` payloads went unwalked
@@ -120,6 +120,13 @@ fn intern_meta(meta: &mut MetaMap, interner: &mut StringInterner, dedup_count: &
     let Some(meta) = meta.as_map_mut() else {
         return;
     };
+    // Keys repeat on every directive (`uuid`, `source`, ...); after this
+    // walk equal keys share one `Arc` (#2835).
+    meta.for_each_key_mut(|key| {
+        if do_intern(key, interner) {
+            *dedup_count += 1;
+        }
+    });
     for value in meta.values_mut() {
         match value {
             MetaValue::Account(a) => {

@@ -43,17 +43,19 @@ use crate::{Amount, IncompleteAmount, InternedStr, ShiftSpans, Span};
 // orphan rule allows the impl because rustledger-core owns the
 // `ShiftSpans` trait — the type can be foreign. The `S` type
 // parameter covers both `std::collections::HashMap`'s default
-// `RandomState` and `rustc_hash::FxHashMap`'s `FxBuildHasher`, so
-// `Metadata = FxHashMap<String, MetaValue>` is covered without a
-// separate impl.
-//
-// Keys are not visited today (`Metadata`'s key is `String`, span-
-// free). If a future Metadata changes its key type to something
-// span-bearing, extend this impl to also dispatch on keys via
-// `keys_mut()` — but that doesn't exist on HashMap; the impl would
-// need to rebuild via `drain()`+`insert()`.
+// `RandomState` and `rustc_hash::FxHashMap`'s `FxBuildHasher`.
+// `Metadata` is not a hash map since #2835 and has its own impl below.
 
 impl<K, V: ShiftSpans, S> ShiftSpans for std::collections::HashMap<K, V, S> {
+    fn shift_spans<F: Fn(&mut Span)>(&mut self, shift: &F) {
+        for value in self.values_mut() {
+            value.shift_spans(shift);
+        }
+    }
+}
+
+// Keys are not visited: a metadata key is an interned string, span-free.
+impl ShiftSpans for crate::Metadata {
     fn shift_spans<F: Fn(&mut Span)>(&mut self, shift: &F) {
         for value in self.values_mut() {
             value.shift_spans(shift);

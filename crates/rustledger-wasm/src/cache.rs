@@ -386,11 +386,13 @@ use crate::types::{Error, LedgerOptions};
 /// `pad` reports an unopened or invalid source behind an unopened target
 /// (#2809). `fromCache` restores the errors verbatim, so a v78 blob would keep
 /// serving such a ledger without them.
-/// v81: loader v60, unchanged (v80 is #2891's). `Ledger`'s error list moves
-/// again: a `pad` after its account's close is `E1003`, and a pad with an
-/// unopened account still pads, so it no longer adds an `E2001` balance
-/// failure or loses its `Unused Pad entry`. A v79 blob would keep serving the
-/// old errors.
+/// v80: loader v61, ARCHIVED LAYOUT moved (#2835). `Metadata` is a vector of
+/// entries with interned keys, in source order, where it was a hash map; a v79
+/// blob would be read at the wrong offsets.
+/// v81: loader v61, unchanged. `Ledger`'s error list moves: a `pad` after its
+/// account's close is `E1003`, and a pad with an unopened account still pads,
+/// so it no longer adds an `E2001` balance failure or loses its `Unused Pad
+/// entry`. A v80 blob would keep serving the old errors.
 pub const CACHE_VERSION: u32 = 81;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
@@ -423,7 +425,7 @@ pub const CACHE_VERSION: u32 = 81;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 60;
+const LOADER_CACHE_VERSION_PIN: u32 = 61;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";
@@ -626,10 +628,12 @@ mod tests {
     /// directive that follows another one directly never hit that bug. Written
     /// without them, it passed while the defect was reintroduced.
     ///
-    /// No metadata in the fixture: `Metadata` is an `FxHashMap`, and a hash
-    /// over its archived bytes would pin an iteration order rather than a
-    /// layout. Directives are archived one at a time for the same reason a
-    /// `Vec` is not used -- nothing here depends on the collection encoding.
+    /// The transaction and its first posting carry metadata. Before #2835
+    /// `Metadata` was an `FxHashMap`, and a hash over its archived bytes would
+    /// have pinned an iteration order rather than a layout, so the fixture had
+    /// none; it is an insertion-ordered vector now, so its layout is pinned
+    /// here like every other field. Directives are archived one at a time, so
+    /// nothing here depends on the encoding of the outer `Vec`.
     #[test]
     fn directive_archived_form_is_pinned() {
         // Moved for the `MetaMap`/`CommentList` boxing: `Posting` and
@@ -641,12 +645,18 @@ mod tests {
         // Moved again for the variant `MetaMap`/`SortedSet` boxing (loader
         // v43): same shape move on the other directives' meta maps and on
         // every tag/link set.
-        const DIRECTIVE_LAYOUT_HASH: u64 = 0x9e33_32f4_02ec_1492;
+        //
+        // Moved for #2835 (loader v61): `Metadata` is an ordered vector with
+        // interned keys, and the fixture gained metadata to pin it.
+        const DIRECTIVE_LAYOUT_HASH: u64 = 0x2e4f_9512_8c52_9246;
 
         // One of every `Directive` variant, in declaration order.
         let src = "\
 2024-01-05 * \"payee\" \"narration\" #t ^l\n\
+\x20\x20source: \"bank\"\n\
+\x20\x20ref: 42\n\
 \x20\x20Assets:Bank  10.00 USD {2.00 USD} @ 3.00 USD\n\
+\x20\x20\x20\x20memo: \"in\"\n\
 \x20\x20Equity:Opening-Balances\n\
 2024-01-06 balance Assets:Bank  10.00 ~ 0.01 USD\n\
 2024-01-01 open Assets:Bank USD,EUR \"STRICT\"\n\

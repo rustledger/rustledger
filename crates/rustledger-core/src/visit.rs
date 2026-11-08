@@ -56,8 +56,8 @@ use crate::{Directive, IncompleteAmount, MetaValue, Metadata, PriceAnnotation};
 ///   `MetaValue::Amount`
 ///
 /// The visit order within a directive is the order tokens appear in
-/// source for the parser-generated AST, except for metadata (which
-/// is a `HashMap` and has unspecified iteration order).
+/// source for the parser-generated AST; metadata is visited in its
+/// insertion order, which for a parsed directive is source order.
 pub fn visit_currencies<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a str)) {
     match directive {
         Directive::Open(open) => {
@@ -126,7 +126,7 @@ pub fn visit_currencies<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a
 /// - `Custom.values` entries that are `MetaValue::Account`
 ///
 /// Visit order matches the source order of the parser-generated
-/// AST, except for metadata (unspecified iteration order).
+/// AST; metadata is visited in its insertion (source) order.
 pub fn visit_accounts<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a str)) {
     match directive {
         Directive::Open(open) => {
@@ -193,8 +193,8 @@ pub fn visit_accounts<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a s
 ///   plugin can supply one -- `from_wrapper` maps `MetaValueData::Tag` onto
 ///   this variant -- so the arm collects plugin output, not parser output.
 ///
-/// Visit order matches the source order of the parser-generated AST,
-/// except for metadata (unspecified iteration order).
+/// Visit order matches the source order of the parser-generated AST;
+/// metadata is visited in its insertion (source) order.
 pub fn visit_tags<'a>(directive: &'a Directive, visit: &mut impl FnMut(&'a str)) {
     match directive {
         Directive::Transaction(txn) => {
@@ -462,13 +462,10 @@ mod tests {
     #[test]
     fn test_visit_currencies_reaches_every_position() {
         let mut commodity_meta: Metadata = Default::default();
-        commodity_meta.insert("note".into(), MetaValue::Currency("USD".into()));
+        commodity_meta.insert("note", MetaValue::Currency("USD".into()));
 
         let mut txn_meta: Metadata = Default::default();
-        txn_meta.insert(
-            "settled".into(),
-            MetaValue::Amount(Amount::new(dec!(1), "USD")),
-        );
+        txn_meta.insert("settled", MetaValue::Amount(Amount::new(dec!(1), "USD")));
 
         let directives = vec![
             // Open.currencies + meta
@@ -569,7 +566,7 @@ mod tests {
     #[test]
     fn test_visit_accounts_reaches_every_position() {
         let mut meta_with_account: Metadata = Default::default();
-        meta_with_account.insert("see_also".into(), MetaValue::Account("Assets:X".into()));
+        meta_with_account.insert("see_also", MetaValue::Account("Assets:X".into()));
 
         let directives = vec![
             Directive::Open(Open {
@@ -661,8 +658,8 @@ mod tests {
         use crate::{Link, Tag};
 
         let mut txn_meta: Metadata = Default::default();
-        txn_meta.insert("ref".into(), MetaValue::Tag(Tag::new("proj")));
-        txn_meta.insert("see".into(), MetaValue::Link(Link::new("inv-1")));
+        txn_meta.insert("ref", MetaValue::Tag(Tag::new("proj")));
+        txn_meta.insert("see", MetaValue::Link(Link::new("inv-1")));
 
         let directives = vec![
             // Transaction.tags / Transaction.links + metadata.

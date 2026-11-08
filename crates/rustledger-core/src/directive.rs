@@ -17,7 +17,6 @@
 
 use crate::NaiveDate;
 use rust_decimal::Decimal;
-use rustc_hash::FxHashMap;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -79,16 +78,15 @@ impl fmt::Display for MetaValue {
     }
 }
 
-/// Metadata is a key-value map attached to directives and postings.
-pub type Metadata = FxHashMap<String, MetaValue>;
+pub use crate::metadata::Metadata;
 
 /// [`Metadata`] stored only while non-empty: 8 bytes on the directive,
 /// no allocation for the overwhelming majority of postings that carry
 /// none.
 ///
-/// A plain `Metadata` field costs 32 bytes inline and this crate's
+/// A plain `Metadata` field costs 24 bytes inline and this crate's
 /// directive structs are copied by the million (the loader keeps several
-/// `Vec<Spanned<Directive>>` at once), so 24 bytes of empty map per entry
+/// `Vec<Spanned<Directive>>` at once), so 16 bytes of empty map per entry
 /// is the difference between a ~192-byte and a ~160-byte directive.
 /// rkyv mirrors the in-memory layout, so that padding was also written to
 /// and validated from the parse cache. Same reasoning as
@@ -145,7 +143,7 @@ impl MetaMap {
     }
 
     /// Insert one entry, allocating the map on first write.
-    pub fn insert(&mut self, key: String, value: MetaValue) -> Option<MetaValue> {
+    pub fn insert(&mut self, key: impl Into<InternedStr>, value: MetaValue) -> Option<MetaValue> {
         self.get_or_create_mut().insert(key, value)
     }
 
@@ -160,7 +158,7 @@ impl MetaMap {
 
     /// Keep only the entries `keep` accepts. Never allocates; frees the
     /// map when nothing is kept.
-    pub fn retain(&mut self, keep: impl FnMut(&String, &mut MetaValue) -> bool) {
+    pub fn retain(&mut self, keep: impl FnMut(&InternedStr, &mut MetaValue) -> bool) {
         if let Some(m) = self.0.as_deref_mut() {
             m.retain(keep);
             self.drop_if_empty();
@@ -176,7 +174,7 @@ impl MetaMap {
 
 /// The map every unattached [`MetaMap`] derefs to. A `const`
 /// initializer, so reading an empty attachment has no lazy-init check.
-static EMPTY_METADATA: Metadata = Metadata::with_hasher(rustc_hash::FxBuildHasher);
+static EMPTY_METADATA: Metadata = Metadata::new();
 
 impl std::ops::Deref for MetaMap {
     type Target = Metadata;
@@ -192,24 +190,29 @@ impl std::ops::Deref for MetaMap {
 // `as_map_mut` (never allocates) or `get_or_create_mut` (adds data).
 
 impl From<Metadata> for MetaMap {
-    fn from(map: Metadata) -> Self {
+    /// Normalizes an empty map to `None`, and trims a non-empty one to its
+    /// entries: a map built up by `insert` (a `Vec` grows to four slots on
+    /// the first push) would otherwise keep the spare slots for the life
+    /// of the ledger.
+    fn from(mut map: Metadata) -> Self {
         if map.is_empty() {
             Self(None)
         } else {
+            map.shrink_to_fit();
             Self(Some(Box::new(map)))
         }
     }
 }
 
-impl FromIterator<(String, MetaValue)> for MetaMap {
-    fn from_iter<I: IntoIterator<Item = (String, MetaValue)>>(iter: I) -> Self {
+impl<K: Into<InternedStr>> FromIterator<(K, MetaValue)> for MetaMap {
+    fn from_iter<I: IntoIterator<Item = (K, MetaValue)>>(iter: I) -> Self {
         Self::from(iter.into_iter().collect::<Metadata>())
     }
 }
 
 impl<'a> IntoIterator for &'a MetaMap {
-    type Item = (&'a String, &'a MetaValue);
-    type IntoIter = std::collections::hash_map::Iter<'a, String, MetaValue>;
+    type Item = (&'a InternedStr, &'a MetaValue);
+    type IntoIter = crate::metadata::Iter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
         self.as_map().iter()
@@ -2087,15 +2090,15 @@ mod tests {
     #[test]
     fn test_meta_map_insert_allocates_and_last_removal_frees() {
         let mut meta = MetaMap::default();
-        assert_eq!(meta.insert("k".into(), MetaValue::Bool(true)), None);
+        assert_eq!(meta.insert("k", MetaValue::Bool(true)), None);
         assert!(!meta.is_empty());
         assert_eq!(meta.get("k"), Some(&MetaValue::Bool(true)));
         assert_eq!(meta.remove("k"), Some(MetaValue::Bool(true)));
         assert!(meta.as_map_mut().is_none(), "the empty box was kept");
         assert_eq!(meta, MetaMap::default());
 
-        meta.insert("a".into(), MetaValue::Int(1));
-        meta.insert("b".into(), MetaValue::Int(2));
+        meta.insert("a", MetaValue::Int(1));
+        meta.insert("b", MetaValue::Int(2));
         meta.retain(|k, _| k == "a");
         assert_eq!(meta.len(), 1);
         meta.retain(|_, _| false);

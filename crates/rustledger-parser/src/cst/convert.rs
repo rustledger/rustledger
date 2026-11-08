@@ -39,7 +39,7 @@ use rustledger_core::cost::{CostNumber, CostSpec};
 use rustledger_core::directive::{PriceAnnotation, PriceKind};
 use rustledger_core::{
     Account, Amount, Currency, Directive, IncompleteAmount, InternedStr, Link, LinkSet, MetaValue,
-    Metadata, NaiveDate, Posting, Span, Spanned, Tag, TagSet, naive_date,
+    Metadata, MetadataBuilder, NaiveDate, Posting, Span, Spanned, Tag, TagSet, naive_date,
 };
 
 use crate::ParseResult;
@@ -2531,17 +2531,20 @@ fn convert_price_annotation(
 /// `META_ENTRY` sub-line children. Matches the legacy parser's
 /// behavior: each entry's key (with trailing `:` stripped) maps
 /// to a typed [`MetaValue`] derived from the value tokens.
+///
+/// Built through [`MetadataBuilder`], not repeated inserts: a directive can
+/// carry any number of metadata lines, and this must stay near-linear in
+/// them (#2835 review).
 fn convert_meta_entries(node: &crate::SyntaxNode) -> Metadata {
-    let mut meta = Metadata::default();
+    let mut meta = MetadataBuilder::new();
     for entry in node.children().filter_map(MetaEntry::cast) {
         let Some(key_token) = entry.key() else {
             continue;
         };
-        let key = key_token.text_without_colon().to_string();
         let value = meta_value_from_entry(&entry);
-        meta.insert(key, value);
+        meta.push(key_token.text_without_colon(), value);
     }
-    meta
+    meta.build()
 }
 
 /// The span of flat `POSTING` tokens sitting between the account and the
@@ -3125,15 +3128,20 @@ fn apply_inherited_state(
     let Directive::Transaction(txn) = value else {
         return;
     };
-    let explicit = txn.meta.as_map();
-    let pushed: Vec<(String, MetaValue)> = meta_stack
-        .iter()
-        .filter(|(k, _, _)| !explicit.contains_key(k))
-        .map(|(k, v, _)| (k.clone(), v.clone()))
-        .collect();
-    for (k, v) in pushed {
-        txn.meta.insert(k, v);
+    // beancount's order: the pushed keys first (each where it was first
+    // pushed, holding its latest value), then the written ones; a key the
+    // transaction writes itself keeps the pushed position and the written
+    // value. A builder resolves exactly that, since a repeated key keeps its
+    // first position and its last value, and it keeps a long stack or a long
+    // transaction from going quadratic.
+    let mut meta = MetadataBuilder::new();
+    for (k, v, _) in meta_stack {
+        meta.push(k.as_str(), v.clone());
     }
+    for (k, v) in std::mem::take(&mut txn.meta).into_inner() {
+        meta.push(k, v);
+    }
+    txn.meta = meta.build().into();
 }
 
 /// The value a `pushmeta` directive pushes, or `None` when it pushes nothing.

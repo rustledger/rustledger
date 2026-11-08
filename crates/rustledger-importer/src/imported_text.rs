@@ -48,10 +48,10 @@ fn neutralize_meta(meta: &mut MetaMap, prefix: &str, changed: &mut Vec<String>) 
             && let Some(clean) = neutralize(s)
         {
             *s = clean;
-            keys.push(key.clone());
+            keys.push(key.to_string());
         }
     }
-    // The map's order is a hash order; the warning names keys in a stable one.
+    // The warning names keys in sorted order, not the map's insertion order.
     keys.sort();
     changed.extend(
         keys.into_iter()

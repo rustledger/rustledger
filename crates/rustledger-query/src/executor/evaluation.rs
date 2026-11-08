@@ -244,7 +244,7 @@ impl Executor<'_> {
         let augmented = Self::augmented_meta(&txn.meta, entry_loc);
         let mut meta_obj = BTreeMap::new();
         for (k, v) in &augmented {
-            meta_obj.insert(k.clone(), Self::meta_value_to_value(Some(v)));
+            meta_obj.insert(k.to_string(), Self::meta_value_to_value(Some(v)));
         }
         obj.insert("meta".to_string(), Value::Object(Box::new(meta_obj)));
         // bean-query's `Transaction` structure adds `accounts`, the set of

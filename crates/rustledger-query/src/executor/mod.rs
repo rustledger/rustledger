@@ -3393,15 +3393,15 @@ impl<'a> Executor<'a> {
         //
         // `meta.hash` is NOT at risk, contrary to an earlier draft of this
         // comment: `rustledger-ffi-wasi::hash` sorts the keys itself before
-        // hashing, precisely because `Metadata` is a hash map, so the digest
-        // is already independent of iteration order.
+        // hashing, so the digest is already independent of the order the
+        // map was built in.
         //
-        // The sort is also what makes `SELECT meta` deterministic at all,
-        // given the hash-map source. Same shape as the `#prices` ordering
+        // The sort also keeps `SELECT meta` independent of the order the
+        // map was built in. Same shape as the `#prices` ordering
         // in #2163.
         let map: std::collections::BTreeMap<String, Value> = meta
             .iter()
-            .map(|(k, v)| (k.clone(), Self::meta_value_to_value(Some(v))))
+            .map(|(k, v)| (k.to_string(), Self::meta_value_to_value(Some(v))))
             .collect();
         Value::Object(Box::new(map))
     }

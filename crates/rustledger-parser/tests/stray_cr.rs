@@ -17,7 +17,7 @@
 //!
 //! Every expected outcome below was checked against `bean-check` 3.2.3.
 
-use rustledger_core::Directive;
+use rustledger_core::{Directive, InternedStr};
 use rustledger_parser::cst::parse_red_only;
 use rustledger_parser::format::try_format_source;
 use rustledger_parser::logos_lexer::{Token, tokenize_lossless};
@@ -39,7 +39,7 @@ fn summary(result: &ParseResult) -> Vec<String> {
         .iter()
         .map(|d| match &d.value {
             Directive::Open(o) => {
-                let keys: Vec<&str> = o.meta.keys().map(String::as_str).collect();
+                let keys: Vec<&str> = o.meta.keys().map(InternedStr::as_str).collect();
                 format!("{} open {} {keys:?}", o.date, o.account)
             }
             Directive::Transaction(t) => {
@@ -47,7 +47,7 @@ fn summary(result: &ParseResult) -> Vec<String> {
                     .postings
                     .iter()
                     .map(|p| {
-                        let keys: Vec<&str> = p.meta.keys().map(String::as_str).collect();
+                        let keys: Vec<&str> = p.meta.keys().map(InternedStr::as_str).collect();
                         format!("{} {keys:?}", p.account)
                     })
                     .collect();

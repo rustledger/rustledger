@@ -477,7 +477,8 @@ pub(super) fn convert_simple_posting(
             cost: cost.map(Box::new),
             price: price.map(Box::new),
             flag,
-            meta: meta.build().into(),
+            // A repeated key keeps its first value, as in beancount (#2893).
+            meta: meta.build_keeping_first().into(),
             comments: Default::default(),
             trailing_comments: trailing_comments.into(),
             booking: Default::default(),
@@ -556,7 +557,8 @@ pub(super) fn convert_transaction(
         offset += len;
     }
     txn.postings = postings;
-    txn.meta = meta.build().into();
+    // A repeated key keeps its first value, as in beancount (#2893).
+    txn.meta = meta.build_keeping_first().into();
     Some(Spanned::new(
         rustledger_core::Directive::Transaction(txn),
         span,

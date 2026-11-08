@@ -111,17 +111,6 @@ option "operating_currency" "USD"
 2020-07-01 open Assets:Bank:Checking  ; Already opened on 2020-01-01
 
 ; =============================================================================
-; WARNING: Duplicate metadata key
-; Expected: E6001 - Duplicate metadata key
-; =============================================================================
-
-2020-08-01 * "Duplicate metadata"
-  note: "First note"
-  note: "Second note"
-  Assets:Bank:Checking  100 USD
-  Income:Salary
-
-; =============================================================================
 ; ERROR: Pad without balance
 ; Expected: E2003 - Pad without subsequent balance
 ; =============================================================================

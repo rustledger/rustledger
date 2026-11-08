@@ -169,3 +169,64 @@ fn test_parse_names_a_misspelled_boolean() {
         "{src:?}: {messages:?}"
     );
 }
+
+/// A repeated metadata key on a transaction or a posting is reported as
+/// beancount reports it, at the transaction's line, and the FIRST value
+/// stands; on any other directive the last value stands with no error, as
+/// there. A `pushmeta` key the transaction writes twice is one repeat, and
+/// the first written value wins over the pushed one (bean-check 3.2.3, #2893).
+#[test]
+fn test_parse_reports_a_repeated_metadata_key_as_beancount() {
+    use rustledger_core::{Directive, MetaValue};
+    let src = "2024-01-01 open Assets:A\n2024-01-02 * \"x\"\n  kk: \"first\"\n  kk: \"second\"\n\
+               \x20 Assets:A  1 USD\n    pk: 1\n    pk: 2\n  Assets:A  -1 USD\n";
+    let result = parse(src);
+    let messages: Vec<String> = result.errors.iter().map(ToString::to_string).collect();
+    assert_eq!(error_lines(src), [2, 2], "{messages:?}");
+    assert!(
+        messages[0].contains("duplicate metadata field on entry: `kk`"),
+        "{messages:?}"
+    );
+    assert!(
+        messages[1].contains("duplicate posting metadata field: `pk`"),
+        "{messages:?}"
+    );
+    let Directive::Transaction(txn) = &result.directives[1].value else {
+        panic!("not a transaction");
+    };
+    assert_eq!(txn.meta.get("kk"), Some(&MetaValue::String("first".into())));
+    assert_eq!(txn.meta.len(), 1);
+    assert_eq!(txn.postings[0].meta.get("pk"), Some(&MetaValue::Int(1)));
+    // The green and red conversions agree.
+    assert_eq!(
+        format!("{:?}", result.directives),
+        format!(
+            "{:?}",
+            rustledger_parser::cst::parse_red_only(src).directives
+        )
+    );
+
+    // Any other directive: the last value, no error.
+    let src = "2024-01-01 open Assets:A\n  kk: 1\n  jj: 2\n  kk: 3\n  kk: 4\n";
+    let result = parse(src);
+    assert!(result.errors.is_empty(), "{:?}", result.errors);
+    let Directive::Open(open) = &result.directives[0].value else {
+        panic!("not an open");
+    };
+    assert_eq!(open.meta.get("kk"), Some(&MetaValue::Int(4)));
+
+    // A pushed key the transaction writes twice.
+    let src = "2024-01-01 open Assets:A\npushmeta kk: \"p\"\n2024-01-02 * \"x\"\n  kk: \"a\"\n  kk: \"b\"\n\
+               \x20 Assets:A  1 USD\n  Assets:A  -1 USD\npopmeta kk:\n";
+    let result = parse(src);
+    assert_eq!(error_lines(src), [3], "{:?}", result.errors);
+    let Directive::Transaction(txn) = &result.directives[1].value else {
+        panic!("not a transaction");
+    };
+    assert_eq!(txn.meta.get("kk"), Some(&MetaValue::String("a".into())));
+
+    // A key on the transaction and on a posting is no repeat.
+    let src = "2024-01-01 open Assets:A\n2024-01-02 * \"x\"\n  kk: \"a\"\n  Assets:A  1 USD\n    kk: \"b\"\n\
+               \x20 Assets:A  -1 USD\n";
+    assert_eq!(error_lines(src), Vec::<usize>::new());
+}

@@ -389,7 +389,10 @@ use crate::types::{Error, LedgerOptions};
 /// v80: loader v61, ARCHIVED LAYOUT moved (#2835). `Metadata` is a vector of
 /// entries with interned keys, in source order, where it was a hash map; a v79
 /// blob would be read at the wrong offsets.
-pub const CACHE_VERSION: u32 = 80;
+/// v82: loader v62, PARSER OUTPUT changed (#2893). A metadata key repeated on
+/// a transaction or a posting keeps its first value and is a parse error, as
+/// in beancount; a v80 or v81 blob would keep serving the last value.
+pub const CACHE_VERSION: u32 = 82;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -421,7 +424,7 @@ pub const CACHE_VERSION: u32 = 80;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 61;
+const LOADER_CACHE_VERSION_PIN: u32 = 62;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

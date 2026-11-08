@@ -1,0 +1,3 @@
+SELECT
+(GCT(
+*W.T

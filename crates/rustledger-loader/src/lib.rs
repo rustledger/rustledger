@@ -56,9 +56,10 @@ pub use phase::{
 
 #[cfg(feature = "cache")]
 pub use cache::{
-    CACHE_FILENAME_ENV, CacheEntry, CachedOptions, CachedPlugin, DISABLE_CACHE_ENV,
-    cache_disabled_by_env, cache_path, default_cache_path, invalidate_cache, load_cache_entry,
-    save_cache_entry,
+    CACHE_FILENAME_ENV, CacheEntry, CacheEnv, CachedOptions, CachedPlugin, DISABLE_CACHE_ENV,
+    cache_disabled_by_env, cache_path, cache_path_in, default_cache_path, invalidate_cache,
+    invalidate_cache_in, load_cache_entry, load_cache_entry_in, save_cache_entry,
+    save_cache_entry_in,
 };
 pub use dedup::{reintern_directives, reintern_plain_directives};
 pub use discover::{

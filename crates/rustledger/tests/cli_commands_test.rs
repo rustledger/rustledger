@@ -118,7 +118,10 @@ fn test_check_json_output() {
 #[test]
 fn test_check_invalid_account_root_is_parse_phase() {
     let rledger = require_rledger!();
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    // In its own directory, so the cache `rledger` writes next to the
+    // ledger goes when the directory does.
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let tmp = tempfile::NamedTempFile::new_in(tmp_dir.path()).expect("tempfile");
     std::fs::write(tmp.path(), "2024-01-01 open Savings:Emergency\n").expect("write");
 
     let output = Command::new(&rledger)
@@ -172,7 +175,10 @@ fn test_check_invalid_account_root_is_parse_phase() {
 #[test]
 fn test_check_ambiguous_lot_match_reports_once() {
     let rledger = require_rledger!();
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    // In its own directory, so the cache `rledger` writes next to the
+    // ledger goes when the directory does.
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let tmp = tempfile::NamedTempFile::new_in(tmp_dir.path()).expect("tempfile");
     std::fs::write(
         tmp.path(),
         "\
@@ -851,8 +857,8 @@ fn test_error_message_includes_line_number() {
   Assets:Bank   -5.00 USD
 "#;
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("error-line-test.beancount");
+    let temp_dir = tempfile::tempdir().expect("create a temp dir");
+    let temp_file = temp_dir.path().join("error-line-test.beancount");
     std::fs::write(&temp_file, content).expect("Failed to write temp file");
 
     let output = Command::new(require_rledger!())
@@ -872,8 +878,6 @@ fn test_error_message_includes_line_number() {
         combined.contains(':') && combined.chars().any(|c| c.is_ascii_digit()),
         "Error should include line number reference"
     );
-
-    std::fs::remove_file(&temp_file).ok();
 }
 
 #[test]
@@ -883,8 +887,8 @@ fn test_error_message_includes_file_path() {
 2024-01-01 open Assets:Bank USD  ; Duplicate!
 ";
 
-    let temp_dir = std::env::temp_dir();
-    let temp_file = temp_dir.join("error-path-test.beancount");
+    let temp_dir = tempfile::tempdir().expect("create a temp dir");
+    let temp_file = temp_dir.path().join("error-path-test.beancount");
     std::fs::write(&temp_file, content).expect("Failed to write temp file");
 
     let output = Command::new(require_rledger!())
@@ -904,8 +908,6 @@ fn test_error_message_includes_file_path() {
         combined.contains("error-path-test.beancount") || combined.contains(".beancount"),
         "Error should reference file path"
     );
-
-    std::fs::remove_file(&temp_file).ok();
 }
 
 // =============================================================================
@@ -1028,7 +1030,10 @@ fn test_query_stdin_input() {
 /// Helper: run `rledger check --format json --no-cache` on inline content,
 /// return parsed JSON. Skips the test if the binary doesn't support the flags.
 fn check_json(rledger: &std::path::Path, content: &str) -> Option<serde_json::Value> {
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    // In its own directory, so the cache `rledger` writes next to the
+    // ledger goes when the directory does.
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let tmp = tempfile::NamedTempFile::new_in(tmp_dir.path()).expect("tempfile");
     std::fs::write(tmp.path(), content).expect("write");
 
     let output = Command::new(rledger)
@@ -1241,7 +1246,10 @@ fn python_plugins_dir() -> PathBuf {
 #[test]
 fn test_native_plugin_runs_in_check_path() {
     let rledger = require_rledger!();
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    // In its own directory, so the cache `rledger` writes next to the
+    // ledger goes when the directory does.
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let tmp = tempfile::NamedTempFile::new_in(tmp_dir.path()).expect("tempfile");
     // auto_accounts should create opens for implicitly-used accounts,
     // making this file pass validation without explicit opens.
     std::fs::write(
@@ -1283,7 +1291,10 @@ plugin \"auto_accounts\"
 #[test]
 fn test_native_plugin_runs_in_query_path() {
     let rledger = require_rledger!();
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    // In its own directory, so the cache `rledger` writes next to the
+    // ledger goes when the directory does.
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let tmp = tempfile::NamedTempFile::new_in(tmp_dir.path()).expect("tempfile");
     std::fs::write(
         tmp.path(),
         "\
@@ -1389,7 +1400,10 @@ plugin \"./error_plugin.py\"
 #[test]
 fn test_python_module_plugin_error_code() {
     let rledger = require_rledger!();
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    // In its own directory, so the cache `rledger` writes next to the
+    // ledger goes when the directory does.
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let tmp = tempfile::NamedTempFile::new_in(tmp_dir.path()).expect("tempfile");
     std::fs::write(
         tmp.path(),
         "\
@@ -1443,7 +1457,10 @@ fn test_wasm_plugin_cli_flag_dispatch() {
         return;
     }
 
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    // In its own directory, so the cache `rledger` writes next to the
+    // ledger goes when the directory does.
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let tmp = tempfile::NamedTempFile::new_in(tmp_dir.path()).expect("tempfile");
     std::fs::write(tmp.path(), "2020-01-01 open Assets:Cash USD\n").expect("write");
 
     let output = Command::new(&rledger)
@@ -1512,7 +1529,10 @@ plugin \"./passthrough.wasm\"
 #[test]
 fn test_wasm_plugin_missing_file_error() {
     let rledger = require_rledger!();
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    // In its own directory, so the cache `rledger` writes next to the
+    // ledger goes when the directory does.
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let tmp = tempfile::NamedTempFile::new_in(tmp_dir.path()).expect("tempfile");
     std::fs::write(tmp.path(), "2020-01-01 open Assets:Cash USD\n").expect("write");
 
     let output = Command::new(&rledger)
@@ -1622,7 +1642,10 @@ fn test_query_and_format_handle_broken_pipe() {
             i % 100
         ));
     }
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    // In its own directory, so the cache `rledger` writes next to the
+    // ledger goes when the directory does.
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let tmp = tempfile::NamedTempFile::new_in(tmp_dir.path()).expect("tempfile");
     std::fs::write(tmp.path(), &ledger).expect("write ledger");
     let path = tmp.path().to_str().expect("path");
 
@@ -1654,7 +1677,10 @@ fn test_query_and_format_handle_broken_pipe() {
     for i in 0..2000 {
         errs.push_str(&format!("2020-01-01 balance Assets:Cash {i}.00 USD\n"));
     }
-    let errtmp = tempfile::NamedTempFile::new().expect("tempfile");
+    // In its own directory, so the cache `rledger` writes next to the
+    // ledger goes when the directory does.
+    let errtmp_dir = tempfile::tempdir().expect("tempdir");
+    let errtmp = tempfile::NamedTempFile::new_in(errtmp_dir.path()).expect("tempfile");
     std::fs::write(errtmp.path(), &errs).expect("write errors ledger");
     let errpath = errtmp.path().to_str().expect("path");
 
@@ -1691,7 +1717,10 @@ fn test_query_and_format_handle_broken_pipe() {
 #[test]
 fn test_price_no_self_quote_directive() {
     let rledger = require_rledger!();
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    // In its own directory, so the cache `rledger` writes next to the
+    // ledger goes when the directory does.
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let tmp = tempfile::NamedTempFile::new_in(tmp_dir.path()).expect("tempfile");
     std::fs::write(
         tmp.path(),
         "option \"operating_currency\" \"USD\"\n\
@@ -1755,7 +1784,10 @@ fn test_price_no_self_quote_directive() {
 #[test]
 fn test_check_duplicate_option_warns() {
     let rledger = require_rledger!();
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    // In its own directory, so the cache `rledger` writes next to the
+    // ledger goes when the directory does.
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let tmp = tempfile::NamedTempFile::new_in(tmp_dir.path()).expect("tempfile");
     std::fs::write(
         tmp.path(),
         "option \"title\" \"First\"\noption \"title\" \"Second\"\n2024-01-01 open Assets:Cash\n",
@@ -1846,7 +1878,10 @@ fn test_check_multi_entity_include_duplicate_option_ok() {
 #[test]
 fn test_check_single_option_ok() {
     let rledger = require_rledger!();
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    // In its own directory, so the cache `rledger` writes next to the
+    // ledger goes when the directory does.
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let tmp = tempfile::NamedTempFile::new_in(tmp_dir.path()).expect("tempfile");
     std::fs::write(
         tmp.path(),
         "option \"title\" \"Only Once\"\n2024-01-01 open Assets:Cash\n",
@@ -1872,7 +1907,10 @@ fn test_check_single_option_ok() {
 #[test]
 fn test_format_accepts_invalid_utf8() {
     let rledger = require_rledger!();
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    // In its own directory, so the cache `rledger` writes next to the
+    // ledger goes when the directory does.
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let tmp = tempfile::NamedTempFile::new_in(tmp_dir.path()).expect("tempfile");
     // Valid ledger plus a comment containing invalid UTF-8 (lone 0xC2 bytes).
     let mut bytes = b"2024-01-01 open Assets:Cash\n;".to_vec();
     bytes.push(0xC2);
@@ -1904,7 +1942,10 @@ fn test_format_accepts_invalid_utf8() {
 #[test]
 fn test_format_check_flags_invalid_utf8() {
     let rledger = require_rledger!();
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    // In its own directory, so the cache `rledger` writes next to the
+    // ledger goes when the directory does.
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let tmp = tempfile::NamedTempFile::new_in(tmp_dir.path()).expect("tempfile");
     let mut bytes = b"2024-01-01 open Assets:Cash\n;".to_vec();
     bytes.push(0xC2);
     bytes.push(0xC2);
@@ -1942,7 +1983,10 @@ fn test_format_check_flags_invalid_utf8() {
 #[test]
 fn test_journal_limit_preserves_report_order() {
     let rledger = require_rledger!();
-    let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+    // In its own directory, so the cache `rledger` writes next to the
+    // ledger goes when the directory does.
+    let tmp_dir = tempfile::tempdir().expect("tempdir");
+    let tmp = tempfile::NamedTempFile::new_in(tmp_dir.path()).expect("tempfile");
     std::fs::write(
         tmp.path(),
         "2020-01-01 open Assets:Cash   USD\n\

@@ -74,29 +74,13 @@ fn shapes() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// Fail fast if the cache env vars are set.
-///
-/// `save_cache_entry` / `load_cache_entry` read process env, so an inherited
-/// `BEANCOUNT_LOAD_CACHE_FILENAME` would redirect these writes out of the
-/// fixture — silently making the round-trip assert nothing, or clobbering a
-/// developer's real cache file. The unit tests in `cache.rs` guard themselves
-/// the same way (`assert_clean_cache_env`); this is that check, for a test
-/// binary that cannot see it.
-///
-/// AGENTS.md warns against asserting environment as a precondition (#1729).
-/// The exception earns itself here: the alternative is not a hermetic test but
-/// a test that writes somewhere unexpected, and failing loudly beats that.
-fn assert_clean_cache_env() {
-    for var in [
-        rustledger_loader::CACHE_FILENAME_ENV,
-        rustledger_loader::DISABLE_CACHE_ENV,
-    ] {
-        assert!(
-            std::env::var_os(var).is_none(),
-            "unset {var} before running this test - it redirects or disables \
-             the cache these properties are about",
-        );
-    }
+/// The cache settings these properties run under: none, whatever the
+/// developer's environment holds. The `*_in` functions take the settings
+/// instead of reading process env, so an inherited
+/// `BEANCOUNT_LOAD_CACHE_FILENAME` cannot redirect these writes out of the
+/// fixture, and the tests need no precondition on the environment (#1729).
+fn no_env() -> rustledger_loader::CacheEnv {
+    rustledger_loader::CacheEnv::default()
 }
 
 /// A fixture directory unique to this process and call.
@@ -119,7 +103,6 @@ fn fixture_dir() -> tempfile::TempDir {
 /// field that fails to survive shows up, including ones no accessor exposes.
 #[test]
 fn cache_roundtrip_preserves_parsed_directives() {
-    assert_clean_cache_env();
     for (name, source) in shapes() {
         let dir = fixture_dir();
         let file = dir.path().join("main.beancount");
@@ -147,15 +130,15 @@ fn cache_roundtrip_preserves_parsed_directives() {
             plugins: Vec::new(),
             files: vec![file.to_string_lossy().into_owned()],
         };
-        rustledger_loader::save_cache_entry(&file, &entry).expect("save");
-        let back = rustledger_loader::load_cache_entry(&file).expect("load cache");
+        rustledger_loader::save_cache_entry_in(&file, &entry, &no_env()).expect("save");
+        let back = rustledger_loader::load_cache_entry_in(&file, &no_env()).expect("load cache");
 
         assert_eq!(
             format!("{:?}", back.directives),
             format!("{:?}", entry.directives),
             "{name}: directives did not survive the cache round-trip",
         );
-        rustledger_loader::invalidate_cache(&file);
+        rustledger_loader::invalidate_cache_in(&file, &no_env());
     }
 }
 
@@ -168,7 +151,6 @@ fn cache_roundtrip_preserves_parsed_directives() {
 /// number on screen.
 #[test]
 fn a_stale_version_is_refused_rather_than_reinterpreted() {
-    assert_clean_cache_env();
     let dir = fixture_dir();
     let file = dir.path().join("main.beancount");
     let mut f = fs::File::create(&file).expect("create");
@@ -183,10 +165,10 @@ fn a_stale_version_is_refused_rather_than_reinterpreted() {
         plugins: Vec::new(),
         files: vec![file.to_string_lossy().into_owned()],
     };
-    rustledger_loader::save_cache_entry(&file, &entry).expect("save");
+    rustledger_loader::save_cache_entry_in(&file, &entry, &no_env()).expect("save");
 
     // Rewrite the version word in the header to the previous version.
-    let path = rustledger_loader::cache_path(&file);
+    let path = rustledger_loader::cache_path_in(&file, &no_env());
     let mut bytes = fs::read(&path).expect("read cache");
     let stale = rustledger_loader::cache::CACHE_VERSION
         .checked_sub(1)
@@ -195,8 +177,8 @@ fn a_stale_version_is_refused_rather_than_reinterpreted() {
     fs::write(&path, &bytes).expect("write cache");
 
     assert!(
-        rustledger_loader::load_cache_entry(&file).is_none(),
+        rustledger_loader::load_cache_entry_in(&file, &no_env()).is_none(),
         "a cache blob one version behind must be refused, not reinterpreted",
     );
-    rustledger_loader::invalidate_cache(&file);
+    rustledger_loader::invalidate_cache_in(&file, &no_env());
 }

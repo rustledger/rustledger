@@ -477,7 +477,10 @@ def read_baseline(path):
             continue
         elif line.startswith("@ "):
             section = line[2:].split(" ")
-        elif section == ["ledgers"]:
+        elif "\t" in line:
+            # A ledger row; accepted in any section, so rows appended at the
+            # end (copied `pin-row` lines) read as pins until --update sorts
+            # them into place.
             source, cid, category, label = line.split("\t")
             pins[cid] = (source, category, label)
         elif section and len(section) == 2:
@@ -487,7 +490,7 @@ def read_baseline(path):
     return meta, pins
 
 
-def write_baseline(path, inputs, results, fuzz_commit):
+def write_baseline(path, inputs, results, fuzz_commit, previous=None):
     """Write the manifest: every ledger in full, then mismatches by section.
 
     `tracked` and `compat` files get one row each, matches included, with
@@ -495,8 +498,16 @@ def write_baseline(path, inputs, results, fuzz_commit):
     match, as bare ids under a `@ <source> <category>` header: there are tens
     of thousands, and a path or label per row would make the file several
     megabytes.
+
+    `previous` (the old pins) keeps every `compat` row whose content this run
+    did not see. The downloaded corpus is not the same everywhere (CI replays
+    a cached copy, a local fetch is fresher), so a pin written on one machine
+    must not drop the rows another machine's corpus needs.
     """
     ledgers, sections = [], collections.defaultdict(list)
+    for cid, (source, category, label) in (previous or {}).items():
+        if source == "compat" and cid not in results:
+            ledgers.append((source, label, cid, category))
     for cid, (category, _, _) in results.items():
         source, label, _ = inputs.items[cid]
         if source in LEDGER_SOURCES:
@@ -540,7 +551,7 @@ def check_against_baseline(inputs, results, pins):
         pin = pins.get(cid)
         if pin is None:
             if source in LEDGER_SOURCES:
-                unpinned.append((label, category, source == "tracked"))
+                unpinned.append((label, category, source == "tracked", cid))
                 continue
             pinned = "match"
         else:
@@ -721,8 +732,24 @@ def self_test():
     del pins[ids["tests/x.beancount"]]
     reg, _, _, unp = check_against_baseline(inputs, later, pins)
     assert reg == [("f2", "off-by-one")] and unp == [
-        ("tests/x.beancount", "rl-extra", True)
+        ("tests/x.beancount", "rl-extra", True, ids["tests/x.beancount"])
     ], (reg, unp)
+    # --update keeps a compat row whose content this run did not see.
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "m"
+        old = {"aaaaaaaaaaaa": ("compat", "rl-only", "tests/compatibility/files/y")}
+        write_baseline(path, inputs, results, "abc", previous=old)
+        _, kept = read_baseline(path)
+    assert kept["aaaaaaaaaaaa"] == old["aaaaaaaaaaaa"], kept
+    # A copied `pin-row` appended after a fuzz section still reads as a pin.
+    with tempfile.TemporaryDirectory() as d:
+        path = Path(d) / "m"
+        path.write_text("@ fuzz rl-only\nbbbbbbbbbbbb\ncompat\tcccccccccccc\tmatch\tz\n")
+        _, appended = read_baseline(path)
+    assert appended == {
+        "bbbbbbbbbbbb": ("fuzz", "rl-only", ""),
+        "cccccccccccc": ("compat", "match", "z"),
+    }, appended
     assert strip_bom("\ufeffx") == "x" and strip_bom("x\ufeff") == "x\ufeff"
     assert rl_lines([[5, "P0021", ""], [5, "P0003", ""]]) == [0, 5]
     print("self-test: ok")
@@ -807,7 +834,7 @@ def main():
                 )
 
     if args.update:
-        write_baseline(args.baseline, inputs, results, args.fuzz_commit)
+        write_baseline(args.baseline, inputs, results, args.fuzz_commit, pins)
         print(f"wrote {args.baseline}")
         return 0
     if not args.check:
@@ -820,9 +847,13 @@ def main():
         print(f"::notice::now matches beancount (pinned {pinned}): {label}")
     for label, pinned, category in changed:
         print(f"::notice::mismatch changed shape {pinned} -> {category}: {label}")
-    for label, category, tracked in unpinned:
+    for label, category, tracked, cid in unpinned:
         level = "error" if tracked else "warning"
+        source = "tracked" if tracked else "compat"
         print(f"::{level}::no pin for this content ({category}): {label}")
+        # The row that pins it, on a line of its own so the pins for CI's
+        # corpus can be copied out of the log (see tests/baselines/README.md).
+        print(f"pin-row\t{source}\t{cid}\t{category}\t{label}")
     for label, category in regressions:
         print(f"::error::regression, matched beancount and now {category}: {label}")
     stale = improvements or changed

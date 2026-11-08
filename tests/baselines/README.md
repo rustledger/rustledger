@@ -166,6 +166,18 @@ python3 -I scripts/compat-parse-error-parity.py \
 git diff --stat tests/baselines/parse-error-parity.manifest
 ```
 
+`--update` keeps the `compat` rows of contents the run did not see, because
+the downloaded corpus differs between machines: CI replays a cached copy,
+and a local fetch is usually newer. To pin the files CI sees but your copy
+does not, take the `pin-row` lines its log prints for them:
+
+```bash
+gh run view <run-id> --log --job <job-id> \
+  | grep -oP 'pin-row\t\K.*' >> tests/baselines/parse-error-parity.manifest
+```
+
+Then run `--update` once more so the rows are sorted into place.
+
 ## Phase-3-of-#1262 staleness
 
 When `rustledger-cst::parse` becomes the production parser (phase 3.2

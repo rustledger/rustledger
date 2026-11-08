@@ -151,6 +151,13 @@ struct PendingPad {
 /// The input directives are NOT echoed back in the result; the caller
 /// already owns them. To get the source merged with the synth
 /// transactions, use [`merge_with_padding`].
+///
+/// `rustledger-validate` does not call this: its balance check pads inline
+/// in its own walk (`validators::balance::effective_pads` and
+/// `validate_balance_late`), a second implementation of which pad a balance
+/// uses. The two must agree (a strictly earlier pad, the latest one, once per
+/// currency); `effective_pads` documents the same pairing back to here.
+/// Revisit if the validator is ever handed this function's output.
 pub fn process_pads(directives: &[Directive]) -> PadResult {
     let num_directives = directives.len();
     let mut inventories: HashMap<rustledger_core::Account, Inventory> =

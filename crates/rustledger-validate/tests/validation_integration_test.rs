@@ -1259,3 +1259,49 @@ fn test_validate_pad_with_an_unopened_account_still_pads() {
         );
     }
 }
+
+/// A zero balance on an unopened target uses no pad, as a zero difference
+/// on an opened one does not, so the pad is unused; and a pad with an
+/// unopened account and no balance after it is unused too. bean-check 3.2.3
+/// reports `Unused Pad entry` and the unknown accounts on both.
+#[test]
+fn test_validate_unopened_pad_without_a_padding_balance_is_unused() {
+    assert_eq!(
+        codes_of(
+            "2024-01-01 open Equity:O\n2024-01-10 pad Assets:A Equity:O\n\
+             2024-01-11 balance Assets:A 0 USD\n"
+        ),
+        [
+            ErrorCode::AccountNotOpen,
+            ErrorCode::AccountNotOpen,
+            ErrorCode::PadWithoutBalance
+        ]
+    );
+    assert_eq!(
+        codes_of("2024-01-01 open Assets:A\n2024-01-10 pad Assets:A Equity:O\n"),
+        [ErrorCode::AccountNotOpen, ErrorCode::PadWithoutBalance]
+    );
+}
+
+/// Two pads before one balance are `E2004` whether or not the target is
+/// open: the two paths of the balance check share the count.
+#[test]
+fn test_validate_multiple_pads_are_reported_on_an_unopened_target_too() {
+    let two_pads = |open: &str| {
+        format!(
+            "{open}2024-01-01 open Equity:O\n2024-01-09 pad Assets:A Equity:O\n\
+             2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n"
+        )
+    };
+    for source in [two_pads("2024-01-01 open Assets:A\n"), two_pads("")] {
+        let codes = codes_of(&source);
+        assert_eq!(
+            codes
+                .iter()
+                .filter(|c| **c == ErrorCode::MultiplePadForBalance)
+                .count(),
+            1,
+            "{source:?}: {codes:?}"
+        );
+    }
+}

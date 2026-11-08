@@ -230,3 +230,110 @@ fn test_parse_reports_a_repeated_metadata_key_as_beancount() {
                \x20 Assets:A  -1 USD\n";
     assert_eq!(error_lines(src), Vec::<usize>::new());
 }
+
+/// Every repeat is reported, whatever its value. Stricter than Python:
+/// beancount checks `if value is not posting_or_kv.value` (object identity),
+/// so it misses a repeat whose value is the identical interned object
+/// (`TRUE`, `""`, one-character strings, accounts, tags) and reports only the
+/// `"ab"` here. A fixable quirk, not a rule (maintainer's decision, #2897).
+#[test]
+fn test_parse_reports_a_repeat_with_an_identical_value_unlike_python() {
+    let mut src = String::from("2024-01-01 open Assets:A\n2024-01-02 * \"x\"\n");
+    for (key, value) in [
+        ("kk", "TRUE"),
+        ("jj", "\"\""),
+        ("ii", "\"x\""),
+        ("hh", "Assets:A"),
+        ("gg", "#t"),
+        ("ff", "\"ab\""),
+    ] {
+        src.push_str(&format!("  {key}: {value}\n  {key}: {value}\n"));
+    }
+    src.push_str("  Assets:A  1 USD\n  Assets:A  -1 USD\n");
+    let messages: Vec<String> = parse(&src).errors.iter().map(ToString::to_string).collect();
+    for key in ["kk", "jj", "ii", "hh", "gg", "ff"] {
+        let want = format!("duplicate metadata field on entry: `{key}`");
+        assert!(
+            messages.iter().any(|m| m.contains(&want)),
+            "{key}: {messages:?}"
+        );
+    }
+    assert_eq!(messages.len(), 6, "{messages:?}");
+}
+
+/// A metadata line with an error of its own is no repeat: beancount drops it
+/// while it reports that error, so only that error is reported, and the
+/// other line's value stands, either way round. Both conversion paths agree.
+#[test]
+fn test_parse_a_broken_metadata_line_is_no_repeat() {
+    use rustledger_core::{Directive, MetaValue};
+    for (first, second) in [
+        ("\"a\"", "(bad"),
+        ("(bad", "\"a\""),
+        ("\"a\"", "2024-02-30"),
+        ("\"a\"", "1 2"),
+        ("\"a\"", "Assets:a"),
+    ] {
+        let src = format!(
+            "2024-01-01 open Assets:A\n2024-01-02 * \"x\"\n  kk: {first}\n  kk: {second}\n\
+             \x20 Assets:A  1 USD\n  Assets:A  -1 USD\n"
+        );
+        let result = parse(&src);
+        let messages: Vec<String> = result.errors.iter().map(ToString::to_string).collect();
+        assert!(!messages.is_empty(), "{src:?}");
+        assert!(
+            !messages
+                .iter()
+                .any(|m| m.contains("duplicate metadata field")),
+            "{src:?}: {messages:?}"
+        );
+        let red = rustledger_parser::cst::parse_red_only(&src);
+        assert_eq!(
+            format!("{:?}", result.directives),
+            format!("{:?}", red.directives),
+            "{src:?}"
+        );
+        assert_eq!(
+            format!("{:?}", result.errors),
+            format!("{:?}", red.errors),
+            "{src:?}"
+        );
+        if let Some(Directive::Transaction(txn)) = result.directives.get(1).map(|d| &d.value)
+            && first == "\"a\""
+        {
+            assert_eq!(
+                txn.meta.get("kk"),
+                Some(&MetaValue::String("a".into())),
+                "{src:?}"
+            );
+        }
+    }
+}
+
+/// A posting's written `filename:` / `lineno:` repeats the location beancount
+/// sets first, so the real location stands there (bean-query shows the real
+/// path and line): the written value is dropped from the posting's metadata.
+#[test]
+fn test_parse_drops_a_posting_written_location() {
+    use rustledger_core::Directive;
+    let src = "2024-01-01 open Assets:A\n2024-01-02 * \"x\"\n  Assets:A  1 USD\n    filename: \"x\"\n\
+               \x20   lineno: 9\n    pk: 1\n  Assets:A  -1 USD\n";
+    let result = parse(src);
+    assert_eq!(error_lines(src), [2, 2], "{:?}", result.errors);
+    let Directive::Transaction(txn) = &result.directives[1].value else {
+        panic!("not a transaction");
+    };
+    let keys: Vec<&str> = txn.postings[0]
+        .meta
+        .keys()
+        .map(rustledger_parser::InternedStr::as_str)
+        .collect();
+    assert_eq!(keys, ["pk"]);
+    assert_eq!(
+        format!("{:?}", result.directives),
+        format!(
+            "{:?}",
+            rustledger_parser::cst::parse_red_only(src).directives
+        )
+    );
+}

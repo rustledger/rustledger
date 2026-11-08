@@ -487,6 +487,9 @@ for i, match in enumerate(matches):
 - [ ] Costs ({}, {{total}}, with date/label)
 - [ ] Tags and links
 - [ ] Metadata (all value types)
+- [ ] Duplicate metadata key on a transaction or a posting: a parse error at the
+      transaction's line, first value kept (other directives: last value, no
+      error)
 - [ ] Options
 - [ ] Includes (relative, absolute, cycle detection)
 - [ ] Push/pop tag and meta
@@ -520,7 +523,6 @@ for i, match in enumerate(matches):
 - [ ] Balance assertion failed
 - [ ] Transaction not balanced
 - [ ] Currency constraint violation
-- [ ] Duplicate metadata key
 
 ### Integration Tests
 

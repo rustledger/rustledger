@@ -2565,8 +2565,13 @@ fn convert_meta_entries_keeping_first(node: &crate::SyntaxNode) -> Metadata {
 /// written value leaves the real one in force (#2893). Shared by the red and
 /// green posting converters.
 pub(super) fn drop_posting_location_keys(meta: &mut Metadata) {
-    meta.retain(|key, _| !matches!(key.as_str(), "filename" | "lineno"));
+    meta.retain(|key, _| !POSTING_LOCATION_KEYS.contains(&key.as_str()));
 }
+
+/// The metadata keys beancount sets on every posting itself, before its
+/// written keys: shared by `drop_posting_location_keys` and the posting
+/// preset in `report_duplicate_metadata`.
+const POSTING_LOCATION_KEYS: [&str; 2] = ["filename", "lineno"];
 
 /// The `META_ENTRY` children of `node`, unresolved.
 fn meta_entries_builder(node: &crate::SyntaxNode) -> MetadataBuilder {
@@ -9069,8 +9074,9 @@ fn report_no_metadata_continuations(
 /// `filename:` / `lineno:`.
 ///
 /// A metadata line with an error of its own (`kk: (bad`, `kk: 2024-02-30`,
-/// `kk: 1 2`) is no repeat: beancount drops it while it reports that error,
-/// so it never reaches the check. `error_starts` (sorted, BOM frame) holds
+/// `kk: 1 2`) is no repeat: beancount reports that error and drops the
+/// whole entry, so the line never reaches the check. rledger keeps the
+/// entry under its error-recovery policy, so only that error is reported. `error_starts` (sorted, BOM frame) holds
 /// the errors reported so far; a line holding one is skipped.
 ///
 /// Stricter than Python: beancount checks a repeat with `if value is not
@@ -9199,7 +9205,7 @@ fn report_duplicate_metadata(
                         if crate::BeancountLanguage::kind_from_raw(posting.kind())
                             == K::POSTING =>
                     {
-                        for key in repeats(posting, at, &["filename", "lineno"], &has_error) {
+                        for key in repeats(posting, at, &POSTING_LOCATION_KEYS, &has_error) {
                             messages.push(if matches!(key, "filename" | "lineno") {
                                 format!(
                                     "duplicate posting metadata field `{key}`: beancount \

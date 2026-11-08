@@ -261,9 +261,11 @@ fn test_parse_reports_a_repeat_with_an_identical_value_unlike_python() {
     assert_eq!(messages.len(), 6, "{messages:?}");
 }
 
-/// A metadata line with an error of its own is no repeat: beancount drops it
-/// while it reports that error, so only that error is reported, and the
-/// other line's value stands, either way round. Both conversion paths agree.
+/// A metadata line with an error of its own is no repeat: beancount reports
+/// that error and drops the whole transaction, so the line never reaches the
+/// repeat check. rledger keeps the transaction under its error-recovery
+/// policy and reports only that error, either way round. Both conversion
+/// paths agree.
 #[test]
 fn test_parse_a_broken_metadata_line_is_no_repeat() {
     use rustledger_core::{Directive, MetaValue};

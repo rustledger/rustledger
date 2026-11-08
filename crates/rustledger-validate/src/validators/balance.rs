@@ -386,9 +386,13 @@ pub fn validate_balance_late(
 /// The validator pads inline, in its own walk, rather than through
 /// `rustledger_booking::process_pads`, which builds beancount's synthesized
 /// padding transactions for the loader and the query engine: a second
-/// implementation of which pad a balance uses. The two must agree (strictly
-/// earlier pad, the latest one, once per currency); `process_pads` documents
-/// the same pairing back to here. Revisit, and drop this in favor of the
+/// implementation of which pad a balance uses. Both take a strictly earlier
+/// pad, once per currency, and apply the latest of the ones still pending;
+/// `process_pads` documents the same pairing back to here. They do not yet
+/// agree on a superseded pad: beancount keeps only the latest pad before a
+/// balance (its `active_pad`), but here an earlier pad that a later one
+/// superseded stays usable for a later balance, a bug on main that #2896
+/// fixes. Keep the two in step when it does. Revisit, and drop this in favor of the
 /// synthesized transactions, if the validator is ever handed
 /// `process_pads`'s output.
 fn effective_pads(pads: &mut Vec<PendingPad>, bal: &Balance) -> Vec<usize> {

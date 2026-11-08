@@ -1241,27 +1241,41 @@ fn test_validate_pad_reports_a_closed_account() {
 /// reports only the unknown accounts on each of these.
 #[test]
 fn test_validate_pad_with_an_unopened_account_still_pads() {
-    for source in [
+    // One E1001 per unopened account at the pad (the known count divergence:
+    // bean-check reports each a second time against its padding transaction),
+    // plus the balance's own E1001 on an unopened target.
+    for (source, count) in [
         // Unopened source.
-        "2024-01-01 open Assets:A\n2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n",
+        (
+            "2024-01-01 open Assets:A\n2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n",
+            1,
+        ),
         // Source opened only after the pad.
-        "2024-01-01 open Assets:A\n2024-01-20 open Equity:O\n2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n",
+        (
+            "2024-01-01 open Assets:A\n2024-01-20 open Equity:O\n2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n",
+            1,
+        ),
         // Unopened target.
-        "2024-01-01 open Equity:O\n2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n",
+        (
+            "2024-01-01 open Equity:O\n2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n",
+            2,
+        ),
         // Both unopened.
-        "2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n",
+        (
+            "2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n",
+            3,
+        ),
     ] {
-        let codes = codes_of(source);
-        assert!(!codes.is_empty(), "{source:?}");
-        assert!(
-            codes.iter().all(|c| *c == ErrorCode::AccountNotOpen),
-            "{source:?}: {codes:?}"
+        assert_eq!(
+            codes_of(source),
+            vec![ErrorCode::AccountNotOpen; count],
+            "{source:?}"
         );
     }
 }
 
-/// A zero balance on an unopened target uses no pad, as a zero difference
-/// on an opened one does not, so the pad is unused; and a pad with an
+/// A zero balance on an unopened target uses no pad, just as a zero
+/// difference on an opened one uses none, so the pad is unused; and a pad with an
 /// unopened account and no balance after it is unused too. bean-check 3.2.3
 /// reports `Unused Pad entry` and the unknown accounts on both.
 #[test]

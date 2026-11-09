@@ -384,7 +384,7 @@ compat	d8fdb06cb306	match	tests/compatibility/files/double-entry-generator/examp
 compat	3d8605de1957	match	tests/compatibility/files/double-entry-generator/example_icbc_debit-v1_example-icbc-debit-v1-output.beancount
 compat	ec9e704870be	match	tests/compatibility/files/double-entry-generator/example_icbc_debit-v2_example-icbc-debit-v2-output.beancount
 compat	14d4aca7aa35	match	tests/compatibility/files/double-entry-generator/example_jd_example-jd-output.beancount
-compat	0f70e7780250	lexer-tokens-merged	tests/compatibility/files/double-entry-generator/example_mt_example-mt-output.beancount
+compat	0f70e7780250	match	tests/compatibility/files/double-entry-generator/example_mt_example-mt-output.beancount
 compat	d5bfd0dd43e8	match	tests/compatibility/files/double-entry-generator/example_mt_example-mt-output.beancount
 compat	848812ae9735	lexer-token-split	tests/compatibility/files/double-entry-generator/example_oklink_example-oklink-output.beancount
 compat	bcf05ee4ae41	match	tests/compatibility/files/double-entry-generator/example_spdb_debit_example-spdb_debit-output.beancount

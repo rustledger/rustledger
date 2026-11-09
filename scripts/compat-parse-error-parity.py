@@ -118,6 +118,9 @@ LEDGER_SOURCES = ("tracked", "compat")
 # Sources whose input set the manifest fixes: the fuzz corpus at the pinned
 # commit, and the matrix this checkout generates. Their counts are pinned.
 FIXED_SOURCES = ("fuzz", "matrix")
+# Where `fetch-compat-test-files.sh` puts the downloaded corpus: the prefix of
+# every compat label, whatever `--compat-dir` is.
+COMPAT_LABEL_ROOT = Path("tests/compatibility/files")
 # rledger's file-level errors: beancount reports these at line 0.
 RLEDGER_EOF_CODES = {"P0021", "P0023"}  # UnclosedPushtag, UnclosedPushmeta
 # A single beancount parse that runs longer than this is recorded as a crash.
@@ -220,7 +223,10 @@ def collect(args):
                 f"least {args.min_compat}; the corpus fetch likely failed"
             )
         for p in found:
-            rel = os.path.relpath(p, REPO) if p.is_relative_to(REPO) else str(p)
+            # Labelled by the corpus's place in the repo, wherever this copy
+            # of it lives, so a pin written from another directory keeps the
+            # same labels.
+            rel = (COMPAT_LABEL_ROOT / p.relative_to(compat)).as_posix()
             inputs.add("compat", rel, p.read_bytes())
     if args.fuzz_dir:
         root = Path(args.fuzz_dir)
@@ -656,9 +662,9 @@ def run_check(inputs, results, meta, pins, out=print):
             f"FAILED: {len(regressions)} regression(s), {stale} stale pin(s), "
             f"{len(coverage)} coverage error(s)"
         )
-        if stale and not regressions:
+        if (stale or coverage) and not regressions:
             out(
-                "Parity changed for the better or in shape: run this script with "
+                "Parity or the input set changed: run this script with "
                 "--update (see tests/baselines/README.md) and commit "
                 "tests/baselines/parse-error-parity.manifest."
             )
@@ -898,6 +904,10 @@ def self_test():
     no_row = {ids["f1"]: ("fuzz", "rl-only", "")}
     assert code(results, pins=no_row) == 0  # unpinned tracked ledger: warns
     assert code(results, meta={"inputs": {"fuzz": 9, "matrix": 0}}) == 1  # count
+    # A coverage failure (a matrix base added, say) says how to fix it.
+    said = []
+    run_check(inputs, results, {"inputs": {"fuzz": 3, "matrix": 7}}, pins, out=said.append)
+    assert any("--update" in line for line in said), said
     assert code(results, meta={"inputs": {"matrix": 0}}) == 1  # no count pinned
     ghost = {**pins, "dddddddddddd": ("fuzz", "rl-only", "")}
     assert code(results, pins=ghost) == 1  # a pinned id that did not run
@@ -957,6 +967,10 @@ def main():
     inputs = collect(args)
     items = sorted((cid, text) for cid, (_, _, text) in inputs.items.items())
     log(f"collected {len(items)} inputs in {time.monotonic() - started:.1f}s")
+    if args.update and inputs.seen["fuzz"] == 0:
+        # Pinning `#@inputs fuzz 0` would make every later run "cover" an
+        # empty corpus and drop every fuzz pin.
+        sys.exit(f"error: no fuzz inputs under {args.fuzz_dir}; extract the commit there")
     with tempfile.TemporaryDirectory(prefix="parse-error-parity-") as work:
         rl_results = run_rledger(args.rledger, items, work)
     log(f"rledger done at {time.monotonic() - started:.1f}s")

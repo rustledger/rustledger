@@ -166,16 +166,21 @@ To update the pin (after a parser change that improves parity, or to move
 to a newer `fuzz-corpus` commit):
 
 ```bash
-git fetch origin fuzz-corpus
-commit=$(git rev-parse FETCH_HEAD)   # or keep the pinned one
-mkdir -p /tmp/fuzz && git archive "$commit" fuzz_parse fuzz_green_eq_red | tar -x -C /tmp/fuzz
+# The pinned commit, as CI reads it:
+commit=$(sed -n 's/^#@fuzz-commit //p' tests/baselines/parse-error-parity.manifest)
+git fetch origin "$commit"
+# Or move the pin to the branch tip instead:
+#   git fetch origin fuzz-corpus && commit=$(git rev-parse FETCH_HEAD)
+fuzz=$(mktemp -d)   # fresh, so no stale inputs from an earlier extraction
+git archive "$commit" fuzz_parse fuzz_green_eq_red | tar -x -C "$fuzz"
 cargo build --release -p rustledger-loader --no-default-features --example parse_error_lines
 # With beancount 3.2.3 importable (`nix develop .#bench`, or pip):
 python3 -I scripts/compat-parse-error-parity.py \
     --rledger target/release/examples/parse_error_lines \
-    --fuzz-dir /tmp/fuzz --fuzz-commit "$commit" \
+    --fuzz-dir "$fuzz" --fuzz-commit "$commit" \
     --compat-dir tests/compatibility/files --update
 git diff --stat tests/baselines/parse-error-parity.manifest
+rm -rf "$fuzz"
 ```
 
 `--update` needs `--fuzz-dir`, `--fuzz-commit` and `--compat-dir`; without

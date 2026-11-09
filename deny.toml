@@ -85,6 +85,7 @@ skip = [
   { crate = "addr2line" },        # gimli's, vs backtrace's
   { crate = "bitflags" },         # 1.x via wasmtime stack, 2.x elsewhere
   { crate = "block-buffer" },     # digest 0.9 vs 0.10
+  { crate = "constant_time_eq" }, # blake3 0.4 vs zip 0.6 (zip bump in #2918)
   { crate = "cpufeatures" },      # transitive sha2 skew
   { crate = "crypto-common" },    # digest 0.9 vs 0.10
   { crate = "digest" },           # 0.9 vs 0.10 in the tree

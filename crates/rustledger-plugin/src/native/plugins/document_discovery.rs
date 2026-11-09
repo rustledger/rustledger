@@ -1,6 +1,7 @@
 //! Auto-discover documents from directories.
 
 use serde::Deserialize;
+use unicode_normalization::UnicodeNormalization;
 
 use crate::types::{
     DirectiveData, DirectiveWrapper, DocumentData, PluginError, PluginInput, PluginOp, PluginOutput,
@@ -464,11 +465,18 @@ fn scan_documents(
                     if let Ok(rel_path) = entry_path.strip_prefix(base_dir)
                         && let Some(parent) = rel_path.parent()
                     {
-                        let account = parent
+                        // NFKC-normalized, as beancount's `account.walk`
+                        // does, for filesystems that store names decomposed
+                        // (macOS): a decomposed `Liabilities/Ünï` is
+                        // `Liabilities:Ünï`, and a fullwidth `Expenses/Ｏｋ` is
+                        // `Expenses:Ok`, there and here.
+                        let account: String = parent
                             .components()
                             .map(|c| c.as_os_str().to_string_lossy().to_string())
                             .collect::<Vec<_>>()
-                            .join(":");
+                            .join(":")
+                            .nfkc()
+                            .collect();
 
                         // beancount's `find_documents` walks the tree with
                         // `account.walk`, which yields only directories whose
@@ -477,10 +485,10 @@ fn scan_documents(
                         // one in silence: no document, no warning. Since
                         // #2906 a ledger can open `Assets:A:éclair`, so the
                         // strict check, not the ledger rule, decides here.
-                        // Not mirrored: `walk` NFKC-normalizes the path first
-                        // (for filesystems that store decomposed names), so a
-                        // decomposed `Assets/Ünï` is `Assets:Ünï` there and
-                        // does not match an open here. That predates #2906.
+                        // The strict rule keeps the `\p{Lo}` start of #816, so
+                        // `Assets/日本` is discovered here and skipped by
+                        // beancount, as `Assets:日本` is a valid account here
+                        // and an invalid one there.
                         if rustledger_parser::is_valid_account_name_strict(&account) {
                             let full_path = entry_path.to_string_lossy().to_string();
 

@@ -529,28 +529,43 @@ pub fn get_symbol_at_position(
     parse_result: &ParseResult,
     position: Position,
 ) -> Option<(String, usize, usize)> {
-    if let Some(offset) = index.position_to_offset(position.line, position.character) {
-        let token = parse_result
+    // The account or currency token at `offset`, as a symbol on this line.
+    let token_at = |offset: usize| {
+        let (value, span) = parse_result
             .account_at(offset)
             .map(|occ| (occ.value.to_string(), occ.span))
             .or_else(|| {
                 parse_result
                     .currency_at(offset)
                     .map(|occ| (occ.value.to_string(), occ.span))
-            });
-        if let Some((value, span)) = token {
-            let (start_line, start_col) = index.offset_to_position(span.start);
-            let (end_line, end_col) = index.offset_to_position(span.end);
-            if start_line == position.line && end_line == position.line {
-                return Some((value, start_col as usize, end_col as usize));
-            }
-        }
+            })?;
+        let (start_line, start_col) = index.offset_to_position(span.start);
+        let (end_line, end_col) = index.offset_to_position(span.end);
+        (start_line == position.line && end_line == position.line).then_some((
+            value,
+            start_col as usize,
+            end_col as usize,
+        ))
+    };
+    if let Some(offset) = index.position_to_offset(position.line, position.character)
+        && let Some(symbol) = token_at(offset)
+    {
+        return Some(symbol);
     }
     let line = index.line_text(position.line)?;
     let (word, start, end) =
         get_word_at_position(line, position.character as usize, index.encoding())?;
     let start_col = u32::try_from(start).ok()?;
     let word_start = index.position_to_offset(position.line, start_col)?;
+    // A word that starts on an account is that account: past a trailing
+    // `:` (`open Assets:Bank:`), the scan takes the colon too, but the
+    // symbol is the account the lexer read, as it is with the cursor on it.
+    if let Some(occ) = parse_result.account_at(word_start)
+        && occ.span.start == word_start
+        && let Some(symbol) = token_at(word_start)
+    {
+        return Some(symbol);
+    }
     if parse_result.is_currency_flag_at(word_start) {
         return None;
     }
@@ -1154,6 +1169,25 @@ mod tests {
         // 16 columns before it; `Assets:A` 8, the emoji 2 UTF-16 units, the
         // mark 1, `B` 1.
         assert_eq!((start, end), (16, 28));
+    }
+
+    /// #2906 review: past a trailing `:` (`open Assets:Bank:`) the symbol is
+    /// the account the lexer read, as it is with the cursor on the account,
+    /// not the word scan's `Assets:Bank:`.
+    #[test]
+    fn test_get_symbol_at_position_after_trailing_colon() {
+        let source = "2024-01-01 open Assets:Bank:\n";
+        let parsed = rustledger_parser::parse(source);
+        let index = LineIndex::new(source, PositionEncoding::Utf16);
+        for col in [16, 27, 28] {
+            let (word, start, end) =
+                get_symbol_at_position(&index, &parsed, Position::new(0, col)).unwrap();
+            assert_eq!(
+                (word.as_str(), start, end),
+                ("Assets:Bank", 16, 27),
+                "col {col}"
+            );
+        }
     }
 
     /// #2906 review: in prose the word stops at `、`. A narration `"昼食、渋谷"`

@@ -366,9 +366,14 @@ impl ParseResult {
     /// token span is the lexer's own, so neither happens.
     #[must_use]
     pub fn account_at(&self, offset: usize) -> Option<&Spanned<rustledger_core::Account>> {
+        // Occurrences are in source order and do not overlap, so the first
+        // one ending at or after `offset` is the only candidate.
+        let i = self
+            .account_occurrences
+            .partition_point(|occ| occ.span.end < offset);
         self.account_occurrences
-            .iter()
-            .find(|occ| occ.span.start <= offset && offset <= occ.span.end)
+            .get(i)
+            .filter(|occ| occ.span.start <= offset)
     }
 
     /// Whether a one-letter flag that lexes as a currency token starts

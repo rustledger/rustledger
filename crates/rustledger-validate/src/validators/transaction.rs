@@ -347,10 +347,7 @@ fn lifecycle_errors(
     if txn.date < opened {
         errors.push(ValidationError::new(
             ErrorCode::AccountNotOpen,
-            format!(
-                "Account {} used on {} but not opened until {}",
-                posting.account, txn.date, opened
-            ),
+            super::helpers::not_yet_open_message("Account", &posting.account, txn.date, opened),
             txn.date,
         ));
     }

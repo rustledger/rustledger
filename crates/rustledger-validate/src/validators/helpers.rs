@@ -56,9 +56,7 @@ pub fn push_unknown_account(
 /// names the account's role in the message — `"Account"`, `"Pad target
 /// account"`, `"Pad source account"` — producing
 /// `"<subject> <account> was never opened"`, or, for an account opened only
-/// after `date`, `"<subject> <account> is inactive on <date> (not opened until
-/// <open date>)"`: beancount calls that an `inactive account`, as it does a
-/// closed one, not an unknown one (#2896). This is the single definition of
+/// after `date`, [`not_yet_open_message`]. This is the single definition of
 /// the E1001 message and code, shared by every directive validator that reports
 /// an unopened account.
 pub fn push_account_not_open(
@@ -73,14 +71,27 @@ pub fn push_account_not_open(
         account,
         date,
         || match state.accounts.get(account) {
-            Some(later) if later.opened > date => format!(
-                "{subject} {account} is inactive on {date} (not opened until {})",
-                later.opened
-            ),
+            Some(later) if later.opened > date => {
+                not_yet_open_message(subject, account, date, later.opened)
+            }
             _ => format!("{subject} {account} was never opened"),
         },
         errors,
     );
+}
+
+/// The `E1001` message for `account` referenced on `date`, before its
+/// `open` on `opened`: `"<subject> <account> is inactive on <date> (not
+/// opened until <opened>)"`. Beancount calls that an `inactive account`, as
+/// it does a closed one, not an unknown one (#2896). The one wording for a
+/// posting, a `pad`, a `balance` or any other directive.
+pub fn not_yet_open_message(
+    subject: &str,
+    account: &Account,
+    date: NaiveDate,
+    opened: NaiveDate,
+) -> String {
+    format!("{subject} {account} is inactive on {date} (not opened until {opened})")
 }
 
 /// Whether `account` has been opened on or before `date`.

@@ -396,8 +396,9 @@ use crate::types::{Error, LedgerOptions};
 /// v83: loader v61, unchanged (v82 is #2893's). `Ledger`'s error list moves
 /// (#2896): a balance on an unopened account is compared (`E2001`), a pad
 /// whose balance already held or that a later pad superseded is an
-/// `Unused Pad entry` and pads nothing later, and a pad or balance before
-/// its account's later `open` names an inactive account. A v81 blob would
+/// `Unused Pad entry` and pads nothing later, `E2004` is no longer reported,
+/// a balance on a pad's source sees the padding from the pad's date, and an
+/// account referenced before its later `open` is inactive. A v81 blob would
 /// keep serving the old errors.
 pub const CACHE_VERSION: u32 = 83;
 

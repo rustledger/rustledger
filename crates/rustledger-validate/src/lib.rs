@@ -22,7 +22,7 @@
 //! | E2001 | Balance assertion failed |
 //! | E2002 | Balance exceeds explicit tolerance |
 //! | E2003 | Pad without subsequent balance |
-//! | E2004 | Multiple pads for same balance |
+//! | E2004 | Retired in 0.25.0 (was: multiple pads for one balance) |
 //! | E3001 | Transaction does not balance |
 //! | E3002 | Multiple missing amounts in transaction |
 //! | E3003 | Transaction has no postings |
@@ -315,13 +315,73 @@ impl ValidationOptions {
     }
 }
 
-/// What the validator keeps about a `pad` in its [`PadTracker`]: the source
-/// span and file id of the directive, when validating `Spanned` directives.
-/// Carried so `check_unused_pads` can anchor the deferred E2003 to the pad's
-/// own line instead of `<unknown>`.
+/// The padding the late walk applies: `rustledger_booking::plan_pads` over
+/// the late stream, by the index of the `pad` each entry belongs to.
 ///
-/// [`PadTracker`]: rustledger_booking::PadTracker
-type PadLocation = Option<(rustledger_parser::Span, u16)>;
+/// The validator does not decide padding itself. It once did, a second copy
+/// of `process_pads`' rule over its own inventories, and the two drifted
+/// (#2896). Now both read one plan: `process_pads` writes it out as the
+/// padding transactions the loader's balance view, BQL and the reports
+/// read, and the walk adds it to the validator's booked inventories at each
+/// `pad`, where beancount inserts its padding entry. The `pad_parity_test`
+/// drift guard compares the two end to end; what can still differ is only
+/// the inventories each one sums.
+#[derive(Debug, Default)]
+pub(crate) struct PadState {
+    /// The padding entries of each `pad`, by its index in the late stream.
+    padding: FxHashMap<usize, Vec<rustledger_booking::PlannedPadding>>,
+    /// The `pad`s that insert no padding, by index.
+    unused: FxHashSet<usize>,
+    /// Pad amounts that could not be computed or applied, by the index of
+    /// the `balance` they were for.
+    failed: FxHashMap<usize, rustledger_booking::PadError>,
+    /// The unused `pad`s the walk has reached, for `check_unused_pads`.
+    pub(crate) unused_found: Vec<UnusedPadFound>,
+}
+
+/// An unused `pad` the late walk reached (E2003).
+#[derive(Debug)]
+pub(crate) struct UnusedPadFound {
+    pub(crate) date: NaiveDate,
+    pub(crate) target: Account,
+    pub(crate) source: Account,
+    /// Source span + file id of the `pad` directive, when validating
+    /// `Spanned` directives. Carried so `check_unused_pads` can anchor the
+    /// deferred E2003 to the pad's own line instead of `<unknown>`.
+    pub(crate) location: Option<(rustledger_parser::Span, u16)>,
+}
+
+impl PadState {
+    /// Load `plan`. Its running-balance errors are dropped: the walk reports
+    /// those from the validator's own inventories.
+    fn load(&mut self, plan: rustledger_booking::PadPlan) {
+        self.padding.clear();
+        for padding in plan.paddings {
+            self.padding
+                .entry(padding.origin.pad)
+                .or_default()
+                .push(padding);
+        }
+        self.unused = plan.unused.iter().map(|u| u.pad).collect();
+        self.failed = plan.failed.into_iter().collect();
+    }
+
+    /// The pad amount that could not be computed or applied for the
+    /// `balance` at `index` (#1863), if any.
+    pub(crate) fn failure_of(&self, index: usize) -> Option<&rustledger_booking::PadError> {
+        self.failed.get(&index)
+    }
+
+    /// The padding entries of the `pad` at `index`.
+    pub(crate) fn padding_of(&self, index: usize) -> &[rustledger_booking::PlannedPadding] {
+        self.padding.get(&index).map_or(&[], Vec::as_slice)
+    }
+
+    /// Whether the `pad` at `index` inserts no padding.
+    pub(crate) fn is_unused(&self, index: usize) -> bool {
+        self.unused.contains(&index)
+    }
+}
 
 /// One posting account error held by the early phase until late decides
 /// whether it still applies (see [`LedgerState::pending_posting_errors`]).
@@ -393,9 +453,8 @@ pub struct LedgerState {
     inventory_accounts: BTreeSet<Account>,
     /// Declared commodities.
     commodities: FxHashSet<rustledger_core::Currency>,
-    /// The `pad` directives seen so far, under the one pad rule shared with
-    /// `rustledger_booking::process_pads`.
-    pads: rustledger_booking::PadTracker<PadLocation>,
+    /// The padding the late walk applies, and the unused pads it reached.
+    pads: PadState,
     /// Validation options.
     options: ValidationOptions,
     /// `(account, close_date)` pairs whose late-phase Close check has
@@ -635,13 +694,15 @@ fn account_inventory<'a>(
     index: &mut BTreeSet<Account>,
     account: &Account,
 ) -> &'a mut Inventory {
-    if !inventories.contains_key(account) {
-        inventories.insert(account.clone(), Inventory::new());
-        index.insert(account.clone());
+    // One lookup; the key clone is a reference-count bump (`Account` is
+    // interned).
+    match inventories.entry(account.clone()) {
+        std::collections::hash_map::Entry::Occupied(inv) => inv.into_mut(),
+        std::collections::hash_map::Entry::Vacant(slot) => {
+            index.insert(account.clone());
+            slot.insert(Inventory::new())
+        }
     }
-    inventories
-        .get_mut(account)
-        .expect("the inventory was inserted just above")
 }
 
 /// Internal: run ONE validation phase over a sorted view of `directives`,
@@ -683,9 +744,12 @@ fn validate_phase_inner<D: ValidatableDirective>(
     // serial paths keyed identically. Both sorts are stable, so equal-key
     // directives keep source order — which since #2093 is also the order
     // they book in.
-    let mut keyed: Vec<(_, &D)> = directives
+    // Each directive carries its index in `directives`, the index
+    // `rustledger_booking::plan_pads` reports its padding by.
+    let mut keyed: Vec<(_, usize, &D)> = directives
         .iter()
-        .map(|d| (rustledger_core::booking_sort_key(d.directive()), d))
+        .enumerate()
+        .map(|(i, d)| (rustledger_core::booking_sort_key(d.directive()), i, d))
         .collect();
     if keyed.len() >= PARALLEL_SORT_THRESHOLD {
         keyed.par_sort_by_key(|k| k.0);
@@ -695,7 +759,7 @@ fn validate_phase_inner<D: ValidatableDirective>(
 
     // Register every `open`, `close` and `commodity` before the
     // date-ordered walk, so the walk judges a posting's dates against the
-    // whole ledger's opens and closes ("used on D but not opened until O",
+    // whole ledger's opens and closes ("inactive on D (not opened until O)",
     // not "never opened"), and the commodity check sees every declaration.
     // These are a small fraction of the directives, and the loop reads only
     // the enum tag of the rest, so this costs far less than the walk.
@@ -706,7 +770,7 @@ fn validate_phase_inner<D: ValidatableDirective>(
     // renamed `open`/`close` under its old name and never saw a
     // plugin-inserted one (#2648). Early now builds only the provisional
     // table its held posting judgments use, silently.
-    for (_, d) in &keyed {
+    for (_, _, d) in &keyed {
         let error_count_before = errors.len();
         match (phase, d.directive()) {
             (Phase::Early, Directive::Open(open)) => {
@@ -731,7 +795,23 @@ fn validate_phase_inner<D: ValidatableDirective>(
         anchor_errors(&mut errors, error_count_before, d.span_info());
     }
 
-    for (_, d) in keyed {
+    // The padding beancount inserts, computed by the one pad computation
+    // (`rustledger_booking::plan_pads`, which `process_pads` builds the
+    // balance view's padding transactions from) over this same stream in
+    // this same order. The walk applies each padding entry at its `pad`,
+    // where beancount inserts it, so a balance on the source account between
+    // the pad and the balance it satisfies sees it too, as in beancount. Only
+    // when the stream has a pad: the plan is a second pass over it.
+    if phase == Phase::Late
+        && keyed
+            .iter()
+            .any(|(_, _, d)| matches!(d.directive(), Directive::Pad(_)))
+    {
+        let plan = rustledger_booking::plan_pads(keyed.iter().map(|(_, i, d)| (*i, d.directive())));
+        state.pads.load(plan);
+    }
+
+    for (_, index, d) in keyed {
         let directive = d.directive();
         let date = directive.date();
 
@@ -771,7 +851,7 @@ fn validate_phase_inner<D: ValidatableDirective>(
                 validate_close_late(state, close, &mut errors);
             }
             (Phase::Late, Directive::Pad(pad)) => {
-                validate_pad(state, pad, d.span_info(), &mut errors);
+                validate_pad(state, pad, index, d.span_info(), &mut errors);
             }
             (Phase::Late, Directive::Document(doc)) => {
                 let file_id = d.span_info().map(|(_, fid)| fid);
@@ -789,7 +869,7 @@ fn validate_phase_inner<D: ValidatableDirective>(
             }
             (Phase::Late, Directive::Balance(bal)) => {
                 validate_balance_account(state, bal, &mut errors);
-                validate_balance_late(state, bal, &mut errors);
+                validate_balance_late(state, bal, index, &mut errors);
             }
             // ── Everything else: skipped in this phase ──
             _ => {}
@@ -861,23 +941,20 @@ fn check_unused_pads(state: &LedgerState) -> Vec<ValidationError> {
     let mut errors = Vec::new();
     // A pad is unused when it never inserted padding: no balance after it, a
     // balance it already held (a zero difference), or a later pad
-    // superseded it (`rustledger_booking::PadTracker`, beancount's rule).
-    for (target_account, pad) in state.pads.unused() {
+    // superseded it (`rustledger_booking::plan_pads`, beancount's rule).
+    for pad in &state.pads.unused_found {
         let mut error = ValidationError::new(
             ErrorCode::PadWithoutBalance,
             "Unused Pad entry".to_string(),
             pad.date,
         )
-        .with_context(format!(
-            "   {} pad {} {}",
-            pad.date, target_account, pad.source_account
-        ));
+        .with_context(format!("   {} pad {} {}", pad.date, pad.target, pad.source));
         // Anchor the deferred error to the pad's own line (when known)
         // so it renders with a location instead of `<unknown>:`. A pad
         // synthesized by a plugin gets the same advisory note the
         // per-directive patching loop attaches to in-phase errors, so
         // deferred and in-phase errors stay consistent.
-        if let Some((span, file_id)) = pad.payload {
+        if let Some((span, file_id)) = pad.location {
             error.span = Some(span);
             error.file_id = Some(file_id);
             if file_id == SYNTHESIZED_FILE_ID {
@@ -2796,8 +2873,20 @@ mod tests {
         );
     }
 
+    /// The dates of the unused pads (E2003) in `errors`.
+    fn unused_pad_dates(errors: &[ValidationError]) -> Vec<NaiveDate> {
+        errors
+            .iter()
+            .filter(|e| e.code == ErrorCode::PadWithoutBalance)
+            .map(|e| e.date)
+            .collect()
+    }
+
     #[test]
     fn test_validate_multiple_pads_for_balance() {
+        // Two pads before one balance: the balance uses the later one, and
+        // the earlier one is an unused pad, as beancount reports it (E2004,
+        // which flagged the pair, was removed in 0.25.0, #2896).
         let directives = vec![
             Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
             Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
@@ -2811,33 +2900,23 @@ mod tests {
         ];
 
         let errors = validate(&directives);
-        assert!(
-            errors
-                .iter()
-                .any(|e| e.code == ErrorCode::MultiplePadForBalance),
-            "Should error for multiple pads before balance: {errors:?}"
-        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(unused_pad_dates(&errors), [date(2024, 1, 1)], "{errors:?}");
     }
 
     #[test]
-    fn test_e2004_fires_after_prior_balance_consumed_a_pad() {
-        // Pinning the post-#1116-self-review semantics: a successfully
-        // applied pad gets drained from `pending_pads`, so a later
-        // sequence of two unused pads correctly triggers E2004 even
-        // when an earlier pad already served a previous balance.
-        // Pre-#1116 the `!any(used)` clause suppressed this case.
+    fn test_superseded_pad_after_prior_balance_consumed_a_pad() {
+        // A pad that served an earlier balance is not unused; of the two
+        // later pads before the next balance, only the earlier is.
         let directives = vec![
             Directive::Open(Open::new(date(2024, 1, 1), "Assets:Bank")),
             Directive::Open(Open::new(date(2024, 1, 1), "Equity:Opening")),
-            // First Pad → Balance pair: pad gets used, then drained.
             Directive::Pad(Pad::new(date(2024, 1, 1), "Assets:Bank", "Equity:Opening")),
             Directive::Balance(Balance::new(
                 date(2024, 1, 2),
                 "Assets:Bank",
                 Amount::new(dec!(100.00), "USD"),
             )),
-            // Two more unused pads, then a balance — this is the
-            // ambiguous case E2004 is meant to flag.
             Directive::Pad(Pad::new(date(2024, 2, 1), "Assets:Bank", "Equity:Opening")),
             Directive::Pad(Pad::new(date(2024, 2, 2), "Assets:Bank", "Equity:Opening")),
             Directive::Balance(Balance::new(
@@ -2848,14 +2927,8 @@ mod tests {
         ];
 
         let errors = validate(&directives);
-        let multi_pad_count = errors
-            .iter()
-            .filter(|e| e.code == ErrorCode::MultiplePadForBalance)
-            .count();
-        assert_eq!(
-            multi_pad_count, 1,
-            "E2004 must fire exactly once on the second balance; got {errors:?}"
-        );
+        assert_eq!(errors.len(), 1, "{errors:?}");
+        assert_eq!(unused_pad_dates(&errors), [date(2024, 2, 1)], "{errors:?}");
     }
 
     #[test]
@@ -3912,7 +3985,7 @@ mod tests {
             count(
                 &errors,
                 ErrorCode::AccountNotOpen,
-                "Account Assets:Later used on 2024-01-15 but not opened until 2024-02-01"
+                "Account Assets:Later is inactive on 2024-01-15 (not opened until 2024-02-01)"
             ),
             1,
             "{errors:?}"

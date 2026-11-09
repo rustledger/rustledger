@@ -126,11 +126,9 @@ Or use `rledger doctor missing-open` to generate them.
 
 **Fix**: Add a balance assertion after the pad, or remove the pad.
 
-### E2004: Multiple Pads for Same Balance
+### E2004 (removed in 0.25.0)
 
-**Cause**: Multiple pad directives for the same balance assertion. The balance uses only the latest; the earlier ones are also reported as `E2003`.
-
-**Fix**: Remove duplicate pad directives.
+Formerly "Multiple Pads for Same Balance". It is no longer reported: as in beancount, a balance uses only the latest pad before it, and a pad superseded by a later one is an unused pad (`E2003`). The code is retired and will not be reused.
 
 ## Transaction Errors (E3xxx)
 

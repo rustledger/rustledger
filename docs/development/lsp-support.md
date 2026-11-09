@@ -19,7 +19,7 @@ diagnostic vector for the file — and renders one of:
   anchors on the balance directive's line.
 - `⚠ Balance: X USD (see diagnostic)` when an ERROR diagnostic with a
   balance-arithmetic error code (`E2001` BalanceAssertionFailed,
-  `E2002` BalanceToleranceExceeded, `E2004` MultiplePadForBalance)
+  `E2002` BalanceToleranceExceeded)
   anchors on the line. "see diagnostic" is a true link by construction:
   the diagnostic the lens points at is the diagnostic the lens
   consulted. See `BALANCE_ERROR_CODES` in `handlers/code_lens.rs` for

@@ -1,21 +1,23 @@
-//! Drift guard: the validator's inline padding agrees with
+//! Drift guard: the validator's padding agrees with
 //! `rustledger_booking::process_pads`.
 //!
-//! The balance check pads its own booked inventories in its walk
-//! (`validate_balance_late`), while the loader's balance view, BQL and the
-//! reports read the padding transactions `process_pads` synthesizes. Both go
-//! through `rustledger_booking::PadTracker`, the one pad rule, but each sums
-//! its own inventories, which is where #2896 came from: `process_pads`
-//! ignored an unopened target's postings, and the validator ignored an
-//! unopened target's balance and let a zero difference or a superseded pad
-//! leave a pad usable.
+//! Both take their padding from one computation,
+//! `rustledger_booking::plan_pads`: `process_pads` writes it out as the
+//! padding transactions the loader's balance view, BQL and the reports read,
+//! and the validator adds it to its own booked inventories as its walk
+//! reaches each `pad`. What can still differ is the inventories each one
+//! sums, and the two used to be separate implementations, which is where
+//! #2896 came from: `process_pads` ignored an unopened target's postings, and
+//! the validator ignored an unopened target's balance, let a zero difference
+//! or a superseded pad leave a pad usable, and padded at the balance rather
+//! than at the pad.
 //!
 //! So this compares the two end to end on exactly those shapes, each checked
 //! against bean-check / bean-query 3.2.3:
 //!
 //! - the validator's balance failures on the ledger must be the failures of
 //!   the same ledger with every `pad` replaced by the padding `process_pads`
-//!   synthesizes (validated with no pads left, so nothing is padded inline),
+//!   synthesizes (validated with no pads left, so nothing is padded),
 //! - the pads the validator calls unused must be the ones `process_pads` does,
 //! - and both must be what beancount reports.
 
@@ -115,6 +117,31 @@ fn shapes() -> Vec<Shape> {
         padding: vec![dec!(100)],
         failed: vec!["2024-01-12"],
         unused: vec!["2024-01-09"],
+    });
+    // The padding is dated at the pad, so a balance on the source between
+    // the pad and the balance it satisfies sees it (bean-check: clean).
+    out.push(Shape {
+        name: "balance on the source between the pad and its balance".into(),
+        source: format!(
+            "{HEAD}{open}2024-01-03 pad Assets:A Equity:O\n\
+             2024-01-05 balance Equity:O -100 USD\n2024-01-10 balance Assets:A 100 USD\n"
+        ),
+        padding: vec![dec!(100)],
+        failed: vec![],
+        unused: vec![],
+    });
+    // A pad that padded USD is no contender for EUR after a later pad: each
+    // balance uses the latest pad (bean-check: clean).
+    out.push(Shape {
+        name: "a later pad for another currency".into(),
+        source: format!(
+            "{HEAD}{open}2024-01-02 pad Assets:A Equity:O\n2024-01-03 balance Assets:A 100 USD\n\
+             2024-01-04 pad Assets:A Equity:O\n2024-01-05 balance Assets:A 10 EUR\n\
+             2024-01-06 balance Assets:A 50 USD\n"
+        ),
+        padding: vec![dec!(100), dec!(10), dec!(-50)],
+        failed: vec![],
+        unused: vec![],
     });
     // The ordinary case, as a control.
     out.push(Shape {

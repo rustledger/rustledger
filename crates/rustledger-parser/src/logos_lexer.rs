@@ -87,7 +87,12 @@ pub enum Token<'src> {
     /// to allow subtraction expressions like `3-2` to parse correctly.
     /// Python beancount v3 requires an integer part before the decimal point.
     /// Leading decimals like `.50` are rejected per the beancount v3 spec.
-    #[regex(r"(\d{1,3}(,\d{3})*|\d+)(\.\d*)?")]
+    ///
+    /// ASCII digits only, as beancount's `[0-9]`: the regex `\d` is any
+    /// Unicode digit, so `५` (Devanagari five) lexed as a number here, a
+    /// metadata value `kk: ५` was dropped with no error, and `५$५` was
+    /// three tokens where beancount reads one invalid token.
+    #[regex(r"([0-9]{1,3}(,[0-9]{3})*|[0-9]+)(\.[0-9]*)?")]
     Number(&'src str),
 
     /// A double-quoted string (handles escape sequences).
@@ -713,6 +718,12 @@ pub(crate) struct TokenIter<'src> {
     /// byte and fail too; skipping it keeps a long run linear instead of
     /// rescanning the rest of the run for each of its `\r` bytes.
     stray_cr_failed_until: usize,
+    /// End of the last run of non-blank characters that `error_later_in_run`
+    /// lexed after a lone capital and found free of errors. A lone capital
+    /// before it is in that run, so its own lookahead would find no error
+    /// either; skipping it keeps a long run of glued one-letter tokens
+    /// (`V,V,V,...`) linear.
+    capital_run_clean_until: usize,
     pending: Option<(Token<'src>, Span)>,
 }
 
@@ -732,6 +743,7 @@ impl<'src> TokenIter<'src> {
             at_line_start: true,
             last_newline_end: 0,
             stray_cr_failed_until: 0,
+            capital_run_clean_until: 0,
             pending: None,
         }
     }
@@ -746,6 +758,44 @@ impl<'src> TokenIter<'src> {
         let mut lexer = Token::lexer(&self.source[..self.lex_end]);
         lexer.bump(from);
         self.lexer = lexer;
+    }
+
+    /// The first lexer error in the run of non-blank characters that goes on
+    /// at `from`, right after a lone capital: its start, and a lexer that has
+    /// just produced it. `None`, and the run remembered as clean, when every
+    /// token that starts in the run lexes, or the first error is a `\r` or a
+    /// mid-file BOM (which keep their own extent; see the `Err` arm).
+    ///
+    /// Lexes on a clone of the lexer, dropped unless it is returned. Linear:
+    /// a run with an error becomes one error token, so it is not lexed again,
+    /// and a clean run is skipped by every later lone capital in it.
+    fn error_later_in_run(
+        &mut self,
+        from: usize,
+    ) -> Option<(usize, logos::Lexer<'src, Token<'src>>)> {
+        let rest = &self.source.as_bytes()[from..self.lex_end];
+        let run_end = from
+            + rest
+                .iter()
+                .position(|b| matches!(b, b' ' | b'\t' | b'\r' | b'\n'))
+                .unwrap_or(rest.len());
+        #[cfg(test)]
+        test_counters::CAPITAL_RUN_SCANNED_BYTES.with(|c| c.set(c.get() + (run_end - from)));
+        let mut peek = self.lexer.clone();
+        while let Some(result) = peek.next() {
+            let at = peek.span().start;
+            if at >= run_end {
+                break;
+            }
+            if result.is_err() {
+                if self.source[at..].starts_with(['\r', crate::bom::BOM_CHAR]) {
+                    break;
+                }
+                return Some((at, peek));
+            }
+        }
+        self.capital_run_clean_until = run_end;
+        None
     }
 }
 
@@ -839,6 +889,10 @@ pub(crate) mod test_counters {
         /// Bytes `TokenIter::stray_cr_trivia_end` stepped over on this thread.
         pub(crate) static STRAY_CR_SCANNED_BYTES: std::cell::Cell<usize> =
             const { std::cell::Cell::new(0) };
+        /// Bytes `TokenIter::error_later_in_run` scanned for the end of a run
+        /// after a lone capital, on this thread.
+        pub(crate) static CAPITAL_RUN_SCANNED_BYTES: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
     }
 }
 
@@ -873,6 +927,32 @@ impl<'src> Iterator for TokenIter<'src> {
                 self.lexer.bump(end - span.end);
                 span.end = end;
                 result = Ok(Token::Whitespace(&source[span.clone()]));
+            }
+            // Where the lexer's own error starts, when `result` is one. Past
+            // `span.start` only for a lone capital merged into the error
+            // after it (below).
+            let mut error_start = span.start;
+            // beancount lexes a lone capital letter (its `CAPITAL`) only
+            // before a space, tab or `\n` (`[A-Z]/[ \t\n]`). Glued to anything
+            // else, no rule takes it, so it starts an invalid token there that
+            // runs to the next space: `R\x04` is `Invalid token: 'R\x04'` and
+            // `Assets:a` is `Invalid token: 'Assets:a'`. Here a lone capital is
+            // a `Currency` (or a `Flag`) wherever it stands, and what follows
+            // lexes on its own (`Assets:a` is `A`, the key `ssets:` and an
+            // error `a`). So when the rest of its run of non-blank characters
+            // holds an error, the run from the capital on is one error, as
+            // there. Only then: a capital glued to tokens that all lex
+            // (`{1 V, 2024-01-01}`, `T#!`) is still a token here, and the
+            // parser's glued one-letter rules report it (`directive_header`,
+            // `txn_header`).
+            if is_lone_capital(&result)
+                && span.end >= self.capital_run_clean_until
+                && let Some((at, lexer)) = self.error_later_in_run(span.end)
+            {
+                error_start = at;
+                span.end = lexer.span().end;
+                self.lexer = lexer;
+                result = Err(());
             }
             // A `%` that is not at column 0 is a FLAG in beancount (`[!&#?%]`),
             // never a comment: `  % Assets:A  1 USD` is a flagged posting and
@@ -1036,21 +1116,47 @@ impl<'src> Iterator for TokenIter<'src> {
                 Err(()) => {
                     // Lexer error - produce an Error token with the invalid source text.
                     let mut span = span;
+                    // beancount's invalid token (its `INVALID` state): from the
+                    // first character no rule takes, everything up to the next
+                    // space, tab, `\r` or `\n` (`[^ \t\n\r]+`) is ONE token and
+                    // one `Invalid token` error. logos ends its error where its
+                    // own scan stopped, often after one character, so
+                    // `Ass'ets:A` came out as several error tokens and the
+                    // tokens between them, each reported. The run takes in
+                    // everything glued to the bad character, a `"` or a `;`
+                    // too, so that quote opens no string and that `;` no
+                    // comment, as there.
+                    //
+                    // Two errors keep their own extent. A `\r` with more of
+                    // its line after it (beancount reads it as a space; see
+                    // `stray_cr_trivia_end`). And a mid-file BOM at the start
+                    // of the error, which is layout-transparent here
+                    // (`apply_err_layout_transparency`) so that the directive
+                    // of a concatenated file after it still parses, under its
+                    // own `BomInDirectiveBody` diagnostic: deliberately not
+                    // beancount's `Invalid token: '\ufeff2024-01-01'`.
+                    let text = &source[span.start..];
+                    let end = if text.starts_with(['\r', crate::bom::BOM_CHAR]) {
+                        span.end
+                    } else {
+                        span.start + text.find([' ', '\t', '\r', '\n']).unwrap_or(text.len())
+                    };
+                    let mut restart = end < span.end;
                     // A failed `String` scan. logos reports everything the
                     // `"([^"\\]|\\.)*"` regex scanned as ONE error, so a
                     // stray quote hid every directive after it behind a
-                    // single error (#2784); beancount reports the quote and
-                    // carries on. The scan fails in one of two ways: it
-                    // reaches the end of the input without a closing `"`, or
-                    // it stops at a `\` before a line break (`\\.` does not
-                    // match a newline). Either way, end the error at its own
-                    // line and resume lexing there. This cannot change which
-                    // quotes pair up: every `"` inside the scanned region was
-                    // escaped from the scan's point of view, so re-lexing
-                    // from the line end meets the same `\`-before-newline
-                    // stop, or the same end of input.
-                    if source[span.clone()].starts_with('"') {
-                        let line_end = line_end_before_newline(source, span.start);
+                    // single error (#2784); beancount reports the quote's
+                    // run and carries on. The scan fails in one of two ways:
+                    // it reaches the end of the input without a closing `"`,
+                    // or it stops at a `\` before a line break (`\\.` does
+                    // not match a newline). Either way the error ends at its
+                    // run, above, and lexing resumes there. This cannot
+                    // change which quotes pair up: every `"` inside the
+                    // scanned region was escaped from the scan's point of
+                    // view, so it is glued to the `\` before it, and the
+                    // invalid run that takes that `\` takes the quote too.
+                    if source[error_start..span.end].starts_with('"') {
+                        let line_end = line_end_before_newline(source, error_start);
                         if line_end < span.end {
                             // Every `"` up to where this scan stopped is
                             // escaped in its alignment, so any later scan
@@ -1063,10 +1169,15 @@ impl<'src> Iterator for TokenIter<'src> {
                             // stopped.
                             self.chunk_until = self.chunk_until.max(span.end);
                             self.lex_end = line_chunk_end(source, line_end);
-                            span.end = line_end;
-                            self.restart_lexer(line_end);
+                            restart = true;
                         }
                     }
+                    if restart {
+                        self.restart_lexer(end);
+                    } else if end > span.end {
+                        self.lexer.bump(end - span.end);
+                    }
+                    span.end = end;
                     let invalid_text = &source[span.clone()];
                     apply_err_layout_transparency(
                         invalid_text,
@@ -1079,6 +1190,14 @@ impl<'src> Iterator for TokenIter<'src> {
             }
         }
     }
+}
+
+/// Whether `result` is a lone ASCII capital letter, which lexes as a one-letter
+/// `Currency` (or `Flag`) here and is beancount's `CAPITAL` only before a
+/// space, tab or `\n`. See the lookahead in `TokenIter::next`.
+const fn is_lone_capital(result: &Result<Token<'_>, ()>) -> bool {
+    matches!(result, Ok(Token::Currency(s) | Token::Flag(s))
+        if s.len() == 1 && s.as_bytes()[0].is_ascii_uppercase())
 }
 
 /// Whether beancount ignores the whole line starting at column 0 with `line`.
@@ -1098,16 +1217,8 @@ impl<'src> Iterator for TokenIter<'src> {
 /// for `convert`'s `previous_line_is_a_gap` and `is_section_marker` (the
 /// `*` heading), of the formatter's `emit_error_node`, and of the LSP's
 /// parse-error surface cleanup (`clean_line` in `rustledger-lsp`), which is
-/// why it is public.
-///
-/// One deliberate mirror: `format::advance_source_state`, the formatter's
-/// char-at-a-time line-ending state machine, cannot call this (it is a
-/// `const fn` over one char and a peek), so it opens a comment at any
-/// column-0 `!`, `&`, `?`, `:`, `%`, `*` or non-tag `#`. It may treat a bare
-/// marker as a comment, which is harmless there (the comment closes at the
-/// line ending right after it). Agreement on the lines that matter is pinned
-/// by `source_state_classification_agrees_with_lexer`; revisit if the state
-/// machine ever needs the bare-marker distinction.
+/// why it is public. The formatter's line-ending helpers follow it through
+/// the lexer itself (`format::StringLiterals`).
 #[must_use]
 pub fn beancount_ignores_line(line: &str) -> bool {
     match line.as_bytes() {
@@ -1404,19 +1515,42 @@ mod tests {
                 "{label}: restarted lexers saw {visible} bytes of a {}-byte input",
                 src.len()
             );
-            // And each `\"` line still comes out as `\`, the quote, its newline.
+            // And each `\"` line still comes out as one invalid token, as in
+            // beancount, then its newline.
             assert!(
-                tokens[..3 * LINES].chunks(3).all(|t| matches!(
-                    t,
-                    [
-                        (Token::Error("\\"), _),
-                        (Token::Error("\""), _),
-                        (Token::Newline, _)
-                    ]
-                )),
+                tokens[..2 * LINES]
+                    .chunks(2)
+                    .all(|t| matches!(t, [(Token::Error("\\\""), _), (Token::Newline, _)])),
                 "{label}: {:?}",
                 &tokens[..6]
             );
+        }
+    }
+
+    /// The lookahead after a lone capital (`error_later_in_run`) stays linear
+    /// (#2872). Each lone capital in a run of glued one-letter tokens would
+    /// rescan the rest of the run for an error; a clean run is remembered, and
+    /// a run with an error becomes one token, so neither is scanned again.
+    #[test]
+    fn test_tokenize_lossless_lone_capital_lookahead_is_linear() {
+        const N: usize = 20_000;
+        for (label, src, errors) in [
+            ("clean run", "{1 ".to_string() + &"V,".repeat(N) + "}\n", 0),
+            ("error at its end", "V,".repeat(N) + "$\n", 1),
+        ] {
+            test_counters::CAPITAL_RUN_SCANNED_BYTES.with(|c| c.set(0));
+            let tokens = tokenize_lossless(&src);
+            let scanned = test_counters::CAPITAL_RUN_SCANNED_BYTES.with(std::cell::Cell::get);
+            assert!(
+                scanned <= 2 * src.len(),
+                "{label}: scanned {scanned} bytes of a {}-byte input",
+                src.len()
+            );
+            let found = tokens
+                .iter()
+                .filter(|(t, _)| matches!(t, Token::Error(_)))
+                .count();
+            assert_eq!(found, errors, "{label}");
         }
     }
 

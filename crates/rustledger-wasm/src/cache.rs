@@ -396,7 +396,10 @@ use crate::types::{Error, LedgerOptions};
 /// v82: loader v62, PARSER OUTPUT changed (#2893). A metadata key repeated on
 /// a transaction or a posting keeps its first value and is a parse error, as
 /// in beancount; a v81 blob would keep serving the last value.
-pub const CACHE_VERSION: u32 = 82;
+/// v84: loader v63, PARSER OUTPUT changed (#2872). An invalid token runs to the
+/// next blank, as in beancount, and each one on a line is reported; an older
+/// blob would keep serving such a file with its old errors and values.
+pub const CACHE_VERSION: u32 = 84;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -428,7 +431,7 @@ pub const CACHE_VERSION: u32 = 82;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 62;
+const LOADER_CACHE_VERSION_PIN: u32 = 63;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

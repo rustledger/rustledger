@@ -136,7 +136,6 @@ fn test_parse_names_a_misspelled_boolean() {
     for src in [
         "2024-01-01 open Assets:A\n  kk: true",
         "2024-01-01 open Assets:A\n  kk: true ; c\n",
-        "2024-01-01 open Assets:A\n  kk: true;c\n",
     ] {
         let messages: Vec<String> = parse(src).errors.iter().map(ToString::to_string).collect();
         assert!(
@@ -145,8 +144,10 @@ fn test_parse_names_a_misspelled_boolean() {
         );
     }
     // Part of a longer token, which beancount names whole: not taken for one.
+    // A glued `;` is in the invalid token too (`Invalid token: 'true;c'`).
     for value in [
         "Truex",
+        "true;c",
         "Assets:true",
         "trueé",
         "true.",

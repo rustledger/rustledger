@@ -714,8 +714,8 @@ pub fn merge_with_padding_owned(directives: Vec<Directive>) -> Vec<Directive> {
 ///
 /// # No same-date-Balance special case
 ///
-/// This used to return the index of the first same-date `Balance`, to put a
-/// synth ahead of a balance sharing the pad's date. Such a pad no longer
+/// The placement rule used to put a synth at the index of the first same-date
+/// `Balance`, ahead of a balance sharing the pad's date. Such a pad no longer
 /// synthesizes at all -- the balance is checked first, so the pad is unused
 /// (#2150) -- which left the arm firing only for an UNRELATED same-date
 /// balance, where it put the synth ahead of the whole date group and
@@ -763,7 +763,8 @@ pub fn merge_with_padding_owned(directives: Vec<Directive>) -> Vec<Directive> {
 /// # Cost
 ///
 /// One pass over `sorted` plus an `O(k log k)` stable sort of the k synths by
-/// date; `date_of` is called at most twice per element. This replaced a
+/// date; `date_of` is called at most 2(n + k) times in total (a debug build
+/// adds the `is_sorted_by_key` check on `sorted`). This replaced a
 /// one-at-a-time insert of each synth at a scanned index, `O(n x k)`, which
 /// made `report balances` and BQL quadratic on a ledger with a pad per
 /// account: 40,000 padded accounts took about 35 s (#2904).

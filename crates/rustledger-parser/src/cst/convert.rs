@@ -4529,21 +4529,14 @@ fn indented_comment_check(
     }
     // A header with no flag (#2905) fails beancount's grammar at its first
     // string, and bison discards the rest of that line in silence, so a `#!`
-    // or `#+` later on it is not reported there. Up to where that line ends.
-    header_line_tokens(node, tokens);
-    let no_flag_line_end = tokens.first().and_then(|(_, first)| {
-        let defect = super::txn_header::first_header_defect(tokens.iter().cloned());
-        matches!(
-            defect,
-            Some((super::txn_header::HeaderDefect::MissingFlag, _))
-        )
-        .then(|| {
-            stripped
-                .get(first.start..)
-                .and_then(|rest| rest.find('\n'))
-                .map_or(stripped.len(), |n| first.start + n)
-        })
-    });
+    // or `#+` later on it is not reported there. Up to the `NEWLINE` token that
+    // ends the header, not the first `\n` byte, which may be inside a string.
+    let header_end = header_line_tokens(node, tokens);
+    let no_flag_line_end = matches!(
+        super::txn_header::first_header_defect(tokens.iter().cloned()),
+        Some((super::txn_header::HeaderDefect::MissingFlag, _))
+    )
+    .then_some(header_end);
     tokens.clear();
     let mut at = usize::from(node.text_range().start());
     flatten_green_matching(node.green(), &mut at, tokens, |k| {

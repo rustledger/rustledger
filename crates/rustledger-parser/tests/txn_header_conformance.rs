@@ -160,6 +160,9 @@ fn nothing_after_a_missing_flag_is_reported_on_the_line() {
         "2024-01-02 \"p\" | \"x\"",
         "2024-01-02 \"x\" #!",
         "2024-01-02 \"x\" #+ y",
+        // The first string spans two lines: the header line ends at the
+        // NEWLINE token after it, not at the `\n` inside the string.
+        "2024-01-02 \"a\nb\" #!",
     ] {
         let src = format!("{header}\n{bodies}");
         for (name, result) in [("parse", parse(&src)), ("red", parse_red_only(&src))] {

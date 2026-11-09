@@ -690,18 +690,20 @@ pub fn merge_with_padding_owned(directives: Vec<Directive>) -> Vec<Directive> {
     let mut merged: Vec<Directive> = directives;
     merged.sort_by_key(rustledger_core::Directive::date);
 
-    for txn in result.padding_transactions {
-        let insert_at = pad_insertion_index(merged.iter(), txn.date);
-        merged.insert(insert_at, Directive::Transaction(txn));
-    }
-
-    merged
+    let synths = result
+        .padding_transactions
+        .into_iter()
+        .map(Directive::Transaction)
+        .collect();
+    merge_padding_into_sorted(merged, synths, Directive::date)
 }
 
-/// Where a synthesized padding transaction dated `date` belongs in an
-/// already date-sorted directive stream.
+/// Merge synthesized padding transactions into an already date-sorted
+/// directive stream, placing each one where it belongs.
 ///
-/// The rule: at the END of its date group.
+/// The rule: each synth goes at the END of its date group -- after every
+/// element of `sorted` dated on or before it, and before every element dated
+/// after it. Synths sharing a date keep their relative order from `synths`.
 ///
 /// That is what stops the synth displacing UNRELATED same-date directives.
 /// Prepending it to the whole date group did that: on
@@ -749,33 +751,58 @@ pub fn merge_with_padding_owned(directives: Vec<Directive>) -> Vec<Directive> {
 /// transaction and shift every running balance after it, which is exactly the
 /// regression described above.
 ///
-/// This is the single source of truth for pad placement. It is `pub` because
-/// the rule has three consumers with three different element types —
-/// [`merge_with_padding_owned`] over `Directive`,
+/// This is the single source of truth for pad placement. It is `pub` and
+/// generic because the rule has three consumers with three different element
+/// types: [`merge_with_padding_owned`] over `Directive`,
 /// [`merge_with_padding_spanned`] over [`Spanned<Directive>`], and
 /// `rustledger-ffi-wasi`'s `expand_pads` over `(Directive, tag)` pairs, which
 /// carries parallel provenance tags and so cannot call either merge. All three
-/// once open-coded the rule; two of the copies were still prepending when this
-/// one changed. Compute the index here rather than re-deriving it.
+/// once open-coded the rule; two of the copies were still prepending when it
+/// last changed. Merge here rather than re-deriving it.
 ///
-/// Cost: one insert per synth into an already-sorted vector, so O(n x k) for
-/// k pads rather than a single O(n log n) pass. `pad` is used sparingly by
-/// construction — one per account per period — and callers early-return on a
-/// ledger with none; the heaviest file in the compat corpus carries 12. If a
-/// ledger ever arrives with pads in the thousands, merge the (date-sorted)
-/// synths in one pass instead.
+/// # Cost
+///
+/// One pass over `sorted` plus an `O(k log k)` stable sort of the k synths by
+/// date; `date_of` is called at most twice per element. This replaced a
+/// one-at-a-time insert of each synth at a scanned index, `O(n x k)`, which
+/// made `report balances` and BQL quadratic on a ledger with a pad per
+/// account: 40,000 padded accounts took about 35 s (#2904).
+///
+/// The result is the order that one-at-a-time insertion produced. A synth
+/// inserted at the end of its date group lands after every original and every
+/// earlier-inserted synth dated on or before it, and ahead of everything
+/// later. That is the stable date order of the synths, each emitted just
+/// before the first original dated strictly after it. The test
+/// `test_merge_padding_into_sorted_matches_one_by_one_insert` pins the
+/// equivalence against the old algorithm.
 #[must_use]
-pub fn pad_insertion_index<'a, I>(sorted: I, date: NaiveDate) -> usize
+pub fn merge_padding_into_sorted<T, F>(sorted: Vec<T>, mut synths: Vec<T>, date_of: F) -> Vec<T>
 where
-    I: IntoIterator<Item = &'a Directive>,
+    F: Fn(&T) -> NaiveDate,
 {
-    let mut end_of_group = 0;
-    for (index, directive) in sorted.into_iter().enumerate() {
-        if directive.date() <= date {
-            end_of_group = index + 1;
-        }
+    debug_assert!(
+        sorted.is_sorted_by_key(&date_of),
+        "merge_padding_into_sorted requires a date-sorted stream",
+    );
+    if synths.is_empty() {
+        return sorted;
     }
-    end_of_group
+    // Stable (ties keep their order from `synths`), one key call per synth.
+    synths.sort_by_cached_key(&date_of);
+
+    let mut merged = Vec::with_capacity(sorted.len() + synths.len());
+    let mut synths = synths.into_iter().peekable();
+    for item in sorted {
+        let date = date_of(&item);
+        // Strictly earlier: on a date tie the original comes first, which is
+        // what puts the synth at the END of its date group.
+        while let Some(synth) = synths.next_if(|s| date_of(s) < date) {
+            merged.push(synth);
+        }
+        merged.push(item);
+    }
+    merged.extend(synths);
+    merged
 }
 
 /// Span-preserving variant of [`merge_with_padding`].
@@ -806,34 +833,30 @@ pub fn merge_with_padding_spanned(directives: &[Spanned<Directive>]) -> Vec<Span
 
     let result = process_pads(&plain);
 
-    // Placement via the shared [`pad_insertion_index`]; located at the pad and
-    // the balance it came from, as beancount locates them.
+    // Placement via the shared [`merge_padding_into_sorted`]; located at the
+    // pad and the balance it came from, as beancount locates them.
     let mut merged: Vec<Spanned<Directive>> = directives.to_vec();
     merged.sort_by_key(|s| s.value.date());
 
-    for (mut txn, origin) in result
+    let synths = result
         .padding_transactions
         .into_iter()
         .zip(result.padding_origins)
-    {
-        let pad = &directives[origin.pad];
-        let balance = &directives[origin.balance];
-        for posting in &mut txn.postings {
-            posting.span = balance.span;
-            posting.file_id = balance.file_id;
-        }
-        let insert_at = pad_insertion_index(merged.iter().map(|s| &s.value), txn.date);
-        merged.insert(
-            insert_at,
+        .map(|(mut txn, origin)| {
+            let pad = &directives[origin.pad];
+            let balance = &directives[origin.balance];
+            for posting in &mut txn.postings {
+                posting.span = balance.span;
+                posting.file_id = balance.file_id;
+            }
             Spanned {
                 value: Directive::Transaction(txn),
                 span: pad.span,
                 file_id: pad.file_id,
-            },
-        );
-    }
-
-    merged
+            }
+        })
+        .collect();
+    merge_padding_into_sorted(merged, synths, |s| s.value.date())
 }
 
 #[cfg(test)]
@@ -1325,8 +1348,9 @@ mod tests {
 
     #[test]
     fn test_merge_with_padding_synth_follows_an_unrelated_same_date_balance() {
-        // The case #2188 was filed for. `pad_insertion_index` used to return
-        // the index of the first same-date `Balance`, which put the synth at
+        // The case #2188 was filed for. The placement rule (then
+        // `pad_insertion_index`) used to return the index of the first
+        // same-date `Balance`, which put the synth at
         // the FRONT of the date group whenever any unrelated balance shared
         // the pad's date -- ahead of the balance, the pad, and everything
         // else.
@@ -1388,8 +1412,9 @@ mod tests {
 
     #[test]
     fn test_merge_with_padding_spanned_places_the_synth_like_the_plain_merge() {
-        // The THIRD consumer of `pad_insertion_index`, and the one with no
-        // test of its own until #2188. The rule's own docs record that two of
+        // The THIRD consumer of the placement rule
+        // (`merge_padding_into_sorted`), and the one with no test of its own
+        // until #2188. The rule's own docs record that two of
         // its three copies were still prepending the last time it changed, so
         // each consumer is pinned separately rather than trusting that they
         // share a function today.
@@ -1691,6 +1716,151 @@ mod tests {
                 .and_then(|p| p.amount())
                 .map(|a| a.number),
             Some(dec!(1000))
+        );
+    }
+
+    /// The algorithm `merge_padding_into_sorted` replaced (#2904): insert each
+    /// synth, in turn, at the end of its date group in the growing stream.
+    /// Kept only as the reference the linear merge must agree with.
+    fn one_by_one_insert_reference<T, F>(mut sorted: Vec<T>, synths: Vec<T>, date_of: F) -> Vec<T>
+    where
+        F: Fn(&T) -> NaiveDate,
+    {
+        for synth in synths {
+            let synth_date = date_of(&synth);
+            let mut end_of_group = 0;
+            for (index, item) in sorted.iter().enumerate() {
+                if date_of(item) <= synth_date {
+                    end_of_group = index + 1;
+                }
+            }
+            sorted.insert(end_of_group, synth);
+        }
+        sorted
+    }
+
+    /// The `n`th of a run of distinct, increasing dates (300 per year).
+    fn nth_date(n: u64) -> NaiveDate {
+        let n = u32::try_from(n % 1_500).expect("bounded");
+        date(2020 + (n / 300) as i32, 1 + (n / 25) % 12, 1 + n % 25)
+    }
+
+    /// Deterministic xorshift, so the shapes below are reproducible.
+    fn next_rand(state: &mut u64) -> u64 {
+        *state ^= *state << 13;
+        *state ^= *state >> 7;
+        *state ^= *state << 17;
+        *state
+    }
+
+    #[test]
+    fn test_merge_padding_into_sorted_matches_one_by_one_insert() {
+        // Elements are (date, id); the id makes every element distinct, so
+        // equality of the outputs pins ORDER, including among date ties.
+        // Few distinct dates force heavy ties between originals and synths,
+        // between synths, and synths dated before, inside and after the
+        // stream; synths arrive in no particular date order.
+        let day = nth_date;
+        let mut state = 0x2904_u64;
+        for round in 0..200 {
+            let n = (next_rand(&mut state) % 40) as usize;
+            let k = (next_rand(&mut state) % 12) as usize;
+            let span = 1 + next_rand(&mut state) % 8;
+            let mut sorted: Vec<(NaiveDate, usize)> = (0..n)
+                .map(|id| (day(1 + next_rand(&mut state) % span), id))
+                .collect();
+            sorted.sort_by_key(|(d, _)| *d);
+            // Synth dates may fall before the first or after the last original.
+            let synths: Vec<(NaiveDate, usize)> = (0..k)
+                .map(|id| (day(next_rand(&mut state) % (span + 2)), 1000 + id))
+                .collect();
+
+            let expected = one_by_one_insert_reference(sorted.clone(), synths.clone(), |e| e.0);
+            let merged = merge_padding_into_sorted(sorted, synths, |e| e.0);
+            assert_eq!(merged, expected, "round {round}");
+        }
+    }
+
+    #[test]
+    fn test_merge_with_padding_matches_one_by_one_insert_on_a_padded_ledger() {
+        // End to end through `merge_with_padding`: many padded accounts whose
+        // pads share dates with each other, with unrelated transactions and
+        // with unrelated balances, in the order the loader feeds the merge.
+        let mut directives = vec![Directive::Open(Open::new(
+            date(2024, 1, 1),
+            "Equity:Opening",
+        ))];
+        for i in 0..60u32 {
+            let account = format!("Assets:A{i:02}");
+            let pad_day = date(2024, 2, 1 + i % 5);
+            directives.push(Directive::Open(Open::new(date(2024, 1, 1), &account)));
+            directives.push(Directive::Transaction(
+                Transaction::new(pad_day, "unrelated")
+                    .with_synthesized_posting(Posting::new(
+                        &account,
+                        Amount::new(Decimal::from(i), "USD"),
+                    ))
+                    .with_synthesized_posting(Posting::new(
+                        "Equity:Opening",
+                        Amount::new(-Decimal::from(i), "USD"),
+                    )),
+            ));
+            directives.push(Directive::Pad(Pad::new(
+                pad_day,
+                &account,
+                "Equity:Opening",
+            )));
+            directives.push(Directive::Balance(Balance::new(
+                date(2024, 2, 3 + i % 7),
+                &account,
+                Amount::new(Decimal::from(100 + i), "USD"),
+            )));
+        }
+        rustledger_core::sort_directives(&mut directives);
+
+        let mut sorted = directives.clone();
+        sorted.sort_by_key(Directive::date);
+        let synths: Vec<Directive> = process_pads(&directives)
+            .padding_transactions
+            .into_iter()
+            .map(Directive::Transaction)
+            .collect();
+        assert!(synths.len() > 30, "the shape must actually pad");
+        let expected = one_by_one_insert_reference(sorted, synths, Directive::date);
+
+        assert_eq!(merge_with_padding(&directives), expected);
+    }
+
+    #[test]
+    fn test_merge_padding_into_sorted_is_linear() {
+        // #2904: one-at-a-time insertion scanned the whole stream per synth,
+        // O(n x k), which made 40,000 padded accounts take ~35 s in BQL.
+        // Count calls to the date accessor: the linear merge makes at most
+        // two per element; the old insert made about n x k (25,000,000 here).
+        let n = 5_000;
+        let k = 5_000;
+        let day = |n: usize| nth_date(n as u64);
+        let mut sorted: Vec<NaiveDate> = (0..n).map(day).collect();
+        sorted.sort();
+        // Reverse date order, the worst case for a naive placement.
+        let synths: Vec<NaiveDate> = (0..k).rev().map(day).collect();
+
+        let calls = std::cell::Cell::new(0_usize);
+        let merged = merge_padding_into_sorted(sorted, synths, |d| {
+            calls.set(calls.get() + 1);
+            *d
+        });
+
+        assert_eq!(merged.len(), n + k);
+        assert!(merged.is_sorted());
+        // `debug_assert!(is_sorted_by_key)` adds up to 2n more calls in a
+        // debug build; it is not part of the merge's cost.
+        let bound = 2 * (n + k) + if cfg!(debug_assertions) { 2 * n } else { 0 };
+        assert!(
+            calls.get() <= bound,
+            "merge made {} date lookups for n = {n}, k = {k}; a linear merge \
+             makes at most {bound}",
+            calls.get(),
         );
     }
 }

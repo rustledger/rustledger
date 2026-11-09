@@ -647,12 +647,20 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     interned keys, in source order, where it was a hash map with `String`
 ///     keys. A v60 blob would be read at the wrong offsets.
 ///
+/// v63: PARSER OUTPUT changed, no archived layout moved (#2872). An invalid
+///     token runs to the next space, tab or line end, as beancount's does, and
+///     is one error; each invalid token on a line is reported, with the
+///     grammar's error only when it fails first; a `"` or `;` glued into one
+///     opens no string or comment; a Unicode digit is no number; and a
+///     `pushtag`-like header with an invalid token changes no state. A v61
+///     blob would keep serving such a file with its old errors and values.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 61;
+pub const CACHE_VERSION: u32 = 63;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1469,7 +1477,7 @@ mod tests {
         // v51 (#2802) reports a stray metadata token; likewise.
         // v61 (#2835) moves `Metadata`'s archived layout. No `CostNumber` is
         // in it, so the arrays still hold.
-        const FIXTURE_VERSION: u32 = 61;
+        const FIXTURE_VERSION: u32 = 63;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1614,7 +1622,7 @@ mod tests {
         // v51 (#2802) reports a stray metadata token; likewise.
         // v61 (#2835) moves the map that holds metadata values, not
         // `MetaValue` itself; the hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 61;
+        const FIXTURE_VERSION: u32 = 63;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

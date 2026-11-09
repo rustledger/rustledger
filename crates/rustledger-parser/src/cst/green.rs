@@ -1309,6 +1309,7 @@ fn emit_error_node_line(
     is_section: bool,
     line_start: Option<usize>,
     end: usize,
+    invalid: &[std::ops::Range<usize>],
     bom_offset: u32,
     stripped: &str,
     out: &mut Vec<crate::ParseError>,
@@ -1329,6 +1330,7 @@ fn emit_error_node_line(
                 .with_hint(crate::diagnostics::BOM_REMOVAL_HINT),
         );
     }
+    super::convert::report_invalid_tokens_of_error_line(ls, invalid, stripped, bom_offset, out);
 }
 
 /// `error_node_check` on green: each `ERROR_NODE` line that is neither a section
@@ -1353,6 +1355,7 @@ fn tl_error_node_check(
     let mut first_non_trivia: Option<crate::SyntaxKind> = None;
     let mut section = false;
     let mut offset = base;
+    let mut invalid: Vec<std::ops::Range<usize>> = Vec::new();
     for child in node.children() {
         let len = child_len(child);
         if let NodeOrToken::Token(t) = &child {
@@ -1367,16 +1370,21 @@ fn tl_error_node_check(
                     section,
                     line_start,
                     end,
+                    &invalid,
                     bom_offset,
                     stripped,
                     out,
                 );
                 line_start = None;
+                invalid.clear();
                 first_non_trivia = None;
                 section = false;
             } else if first_non_trivia.is_none() && !is_trivia_kind(kind) {
                 first_non_trivia = Some(kind);
                 section = is_section_marker(kind, stripped, start);
+            }
+            if kind == K::ERROR_TOKEN {
+                invalid.push(start..end);
             }
         }
         offset += len;
@@ -1387,6 +1395,7 @@ fn tl_error_node_check(
         section,
         line_start,
         offset,
+        &invalid,
         bom_offset,
         stripped,
         out,

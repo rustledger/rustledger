@@ -58,12 +58,13 @@ fn test_tokenize_lossless_string_of_multibyte_chars_on_a_small_stack() {
 }
 
 /// The issue's reproducer: a stray quote, then escapes alternating with
-/// line breaks. It is reported as an error and no byte is lost.
+/// line breaks. It is reported as an error and no byte is lost. Each `\"` is
+/// one invalid token, as in beancount, then its line's `Newline`.
 #[test]
 fn test_parse_issue_2789_reproducer_on_a_small_stack() {
     let src = "\\\"\n".repeat(50_000) + "\\\n";
     let (_, count, (errors, directives)) = run(src);
-    assert_eq!(count, 3 * 50_000 + 2);
+    assert_eq!(count, 2 * 50_000 + 2);
     assert_eq!(directives, 0);
     assert!(errors > 0);
 }

@@ -446,10 +446,6 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
         }
     }
 
-    if stripped.contains("filename:") || stripped.contains("lineno:") {
-        report_posting_filename_lineno(source_file.syntax(), bom_offset, &mut errors);
-    }
-
     // Unclosed pushtag/pushmeta at EOF - legacy emits one error
     // per leftover stack entry, pointing at the originating push
     // directive's span.
@@ -475,6 +471,9 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     // After `report_invalid_dates`, so an invalid date on a header is among
     // the errors that swallow the indented line after it.
     report_no_metadata_continuations(source_file.syntax(), stripped, bom_offset, &mut errors);
+    // After `report_invalid_dates` too: a metadata line with an error of its
+    // own (an invalid date included) is no repeat.
+    report_duplicate_metadata(source_file.syntax(), bom_offset, &mut errors);
     errors.sort_by_key(|e| e.span.start);
     drop_errors_inside_a_line_error(&mut errors, stripped, bom_offset);
     name_misspelled_booleans(&mut errors, stripped, bom_offset);
@@ -1404,8 +1403,9 @@ fn convert_transaction(
     }
 
     // Transaction-level metadata (META_ENTRY children directly on
-    // the TRANSACTION node, NOT on POSTING children).
-    let meta = convert_meta_entries(node.syntax());
+    // the TRANSACTION node, NOT on POSTING children). A repeated key keeps
+    // its first value, as in beancount (#2893).
+    let meta = convert_meta_entries_keeping_first(node.syntax());
 
     // Postings + pre-posting comments. The CST puts inter-
     // posting trivia (including `; comment` lines) as flat
@@ -1672,7 +1672,12 @@ fn convert_posting(
     let price = node
         .price_annotation()
         .map(|pa| convert_price_annotation(&pa, errors, bom_offset));
-    let meta = convert_meta_entries(node.syntax());
+    // A repeated key keeps its first value, as in beancount (#2893). A
+    // posting's written `filename:` / `lineno:` repeats the location beancount
+    // sets first, so the real location stands and the written one is dropped
+    // (`drop_posting_location_keys`).
+    let mut meta = convert_meta_entries_keeping_first(node.syntax());
+    drop_posting_location_keys(&mut meta);
 
     // Trailing comments on the posting line: COMMENT direct-
     // child tokens BEFORE the terminator NEWLINE. The legacy
@@ -2535,7 +2540,41 @@ fn convert_price_annotation(
 /// Built through [`MetadataBuilder`], not repeated inserts: a directive can
 /// carry any number of metadata lines, and this must stay near-linear in
 /// them (#2835 review).
+///
+/// A repeated key keeps its first position and its last value, as beancount
+/// builds a directive's metadata (`new_metadata` over the key-value list): it
+/// reports no error there. A transaction and a posting are the exception,
+/// read by [`convert_meta_entries_keeping_first`].
 fn convert_meta_entries(node: &crate::SyntaxNode) -> Metadata {
+    meta_entries_builder(node).build()
+}
+
+/// [`convert_meta_entries`] for a transaction or a posting: a repeated key
+/// keeps its FIRST value, as beancount keeps it there while it reports the
+/// repeat (`Duplicate metadata field on entry` / `Duplicate posting metadata
+/// field`, reported by `report_duplicate_metadata`) (#2893). The green
+/// converters build theirs the same way.
+fn convert_meta_entries_keeping_first(node: &crate::SyntaxNode) -> Metadata {
+    meta_entries_builder(node).build_keeping_first()
+}
+
+/// Drop a posting's written `filename` and `lineno` metadata. Beancount sets
+/// both on every posting before its written keys, so a written one is a
+/// repeat (`report_duplicate_metadata`) and the first, real location stands;
+/// rledger keeps a posting's location out of its metadata, so dropping the
+/// written value leaves the real one in force (#2893). Shared by the red and
+/// green posting converters.
+pub(super) fn drop_posting_location_keys(meta: &mut Metadata) {
+    meta.retain(|key, _| !POSTING_LOCATION_KEYS.contains(&key.as_str()));
+}
+
+/// The metadata keys beancount sets on every posting itself, before its
+/// written keys: shared by `drop_posting_location_keys` and the posting
+/// preset in `report_duplicate_metadata`.
+const POSTING_LOCATION_KEYS: [&str; 2] = ["filename", "lineno"];
+
+/// The `META_ENTRY` children of `node`, unresolved.
+fn meta_entries_builder(node: &crate::SyntaxNode) -> MetadataBuilder {
     let mut meta = MetadataBuilder::new();
     for entry in node.children().filter_map(MetaEntry::cast) {
         let Some(key_token) = entry.key() else {
@@ -2544,7 +2583,7 @@ fn convert_meta_entries(node: &crate::SyntaxNode) -> Metadata {
         let value = meta_value_from_entry(&entry);
         meta.push(key_token.text_without_colon(), value);
     }
-    meta.build()
+    meta
 }
 
 /// The span of flat `POSTING` tokens sitting between the account and the
@@ -5422,6 +5461,8 @@ pub mod test_counters {
         /// Work `report_no_metadata_continuations` did: header tokens and
         /// line bytes stepped over, and errors visited (#2813).
         pub static NO_META_SCANNED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+        /// Keys `report_duplicate_metadata` compared pairwise (#2893).
+        pub static DUP_META_COMPARED: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     }
 }
 
@@ -5801,6 +5842,33 @@ mod tests {
             .filter(|e| e.to_string().contains("takes no metadata"))
             .count();
         assert_eq!(indented, N);
+    }
+
+    /// `report_duplicate_metadata` (#2893) compares a key pairwise only while
+    /// its owner has a handful, then through a set, so a transaction with
+    /// many keys, repeated or not, stays linear.
+    #[test]
+    fn test_report_duplicate_metadata_is_linear_in_the_keys() {
+        const N: usize = 20_000;
+        let mut keys = String::new();
+        for i in 0..N {
+            keys.push_str(&format!("  k{i}: 1\n"));
+        }
+        let src = format!(
+            "2024-01-01 *\n{keys}{keys}  Assets:A  1 USD\n{}  Assets:B  -1 USD\n",
+            keys.replace("  k", "    k")
+        );
+        test_counters::DUP_META_COMPARED.with(|c| c.set(0));
+        let result = crate::parse(&src);
+        let compared = test_counters::DUP_META_COMPARED.with(std::cell::Cell::get);
+        // At most 16 keys per owner are compared pairwise, whatever N is.
+        assert!(compared <= 1_000, "compared {compared} keys pairwise");
+        let repeats = result
+            .errors
+            .iter()
+            .filter(|e| e.to_string().contains("duplicate metadata field on entry"))
+            .count();
+        assert_eq!(repeats, N);
     }
 
     #[test]
@@ -8992,16 +9060,41 @@ fn report_no_metadata_continuations(
     }
 }
 
-/// Report a posting's `filename:` or `lineno:` metadata, as beancount does
-/// (#2813): it sets both on every posting itself, so one written in the
-/// file is `Duplicate posting metadata field`, reported at the transaction's
-/// line. rledger accepted it, so the written value stood in for the real
-/// location. A directive's own `filename:` / `lineno:` is accepted by
-/// beancount and is left alone here.
+/// Report a repeated metadata key on a transaction or a posting, as
+/// beancount does (#2893, #2813). Its grammar builds a transaction's and a
+/// posting's metadata checking each key against the ones before, and reports
+/// a repeat at the transaction's line: `Duplicate metadata field on entry` on
+/// the transaction, `Duplicate posting metadata field` on a posting, where
+/// `filename` and `lineno` are already set before any written key, so writing
+/// either is a repeat too. The first value stands, as the converters keep it
+/// (`convert_meta_entries_keeping_first`; a posting's written `filename:` /
+/// `lineno:` is dropped there, so its real location stands, as in beancount).
+/// Every other directive's metadata takes the last value of a repeated key
+/// with no error there, and is left alone; so is a transaction's own
+/// `filename:` / `lineno:`.
 ///
-/// Called only when the source holds `filename:` or `lineno:` at all, and
-/// walks the green tree, so it costs no red nodes.
-fn report_posting_filename_lineno(
+/// A metadata line with an error of its own (`kk: (bad`, `kk: 2024-02-30`,
+/// `kk: 1 2`) is no repeat: beancount reports that error and drops the
+/// whole entry, so the line never reaches the check. rledger keeps the
+/// entry under its error-recovery policy, so only that error is reported. `error_starts` (sorted, BOM frame) holds
+/// the errors reported so far; a line holding one is skipped.
+///
+/// Stricter than Python: beancount checks a repeat with `if value is not
+/// posting_or_kv.value` (`grammar.py`, the transaction and posting
+/// builders), an OBJECT IDENTITY test, so it stays silent when the repeated
+/// value is the identical object: interned values such as `TRUE` / `TRUE`,
+/// `""` / `""`, one-character strings, accounts and tags. That is a quirk,
+/// not a rule, so every repeat is reported here, whatever its value
+/// (maintainer's decision on #2897; pinned by
+/// `test_parse_reports_a_repeat_with_an_identical_value_unlike_python`).
+///
+/// rledger accepted a repeat silently and kept the last value, and a
+/// posting's written `filename:` / `lineno:` stood in for its real location.
+///
+/// Walks the green tree, only the transactions' children, so it costs no red
+/// nodes; each key is looked up in the keys before it on its owner, pairwise
+/// for a handful and through a set past that, so it stays near-linear.
+fn report_duplicate_metadata(
     root: &crate::SyntaxNode,
     bom_offset: u32,
     errors: &mut Vec<crate::ParseError>,
@@ -9015,7 +9108,73 @@ fn report_posting_filename_lineno(
             NodeOrToken::Token(t) => u32::from(t.text_len()) as usize,
         }
     }
+    /// The key of a `META_ENTRY` node, without its colon.
+    fn meta_key(meta: &rowan::GreenNodeData) -> Option<&str> {
+        meta.children().find_map(|t| match t {
+            NodeOrToken::Token(t)
+                if crate::BeancountLanguage::kind_from_raw(t.kind()) == K::META_KEY =>
+            {
+                Some(t.text().trim_end_matches(':'))
+            }
+            _ => None,
+        })
+    }
+    /// The repeated keys among the `META_ENTRY` children of `owner` (which
+    /// starts at `base`, stripped frame), in order, counting `preset` as
+    /// written before them and skipping a line `has_error` reports.
+    fn repeats<'a>(
+        owner: &'a rowan::GreenNodeData,
+        base: usize,
+        preset: &[&'a str],
+        has_error: &dyn Fn(usize, usize) -> bool,
+    ) -> Vec<&'a str> {
+        const PAIRWISE: usize = 16;
+        let mut seen: Vec<&str> = preset.to_vec();
+        let mut index: Option<std::collections::HashSet<&str>> = None;
+        let mut out = Vec::new();
+        let mut at = base;
+        for child in owner.children() {
+            let start = at;
+            at += len_of(child);
+            let NodeOrToken::Node(meta) = child else {
+                continue;
+            };
+            if crate::BeancountLanguage::kind_from_raw(meta.kind()) != K::META_ENTRY
+                || has_error(start, at)
+            {
+                continue;
+            }
+            let Some(key) = meta_key(meta) else {
+                continue;
+            };
+            let repeated = if let Some(set) = &mut index {
+                !set.insert(key)
+            } else {
+                #[cfg(test)]
+                test_counters::DUP_META_COMPARED.with(|c| c.set(c.get() + seen.len()));
+                let repeated = seen.contains(&key);
+                if !repeated {
+                    seen.push(key);
+                    if seen.len() > PAIRWISE {
+                        index = Some(std::mem::take(&mut seen).into_iter().collect());
+                    }
+                }
+                repeated
+            };
+            if repeated {
+                out.push(key);
+            }
+        }
+        out
+    }
     let bom = bom_offset as usize;
+    let mut starts: Vec<usize> = errors.iter().map(|e| e.span.start).collect();
+    starts.sort_unstable();
+    let has_error = |from: usize, to: usize| {
+        let i = starts.partition_point(|&s| s < from + bom);
+        starts.get(i).is_some_and(|&s| s < to + bom)
+    };
+    let mut found: Vec<(usize, usize, String)> = Vec::new();
     let mut offset = 0usize;
     for child in root.green().children() {
         let len = len_of(child);
@@ -9026,7 +9185,10 @@ fn report_posting_filename_lineno(
             // its NEWLINE.
             let mut header: Option<usize> = None;
             let mut header_end: Option<usize> = None;
-            let mut keys: Vec<&str> = Vec::new();
+            let mut messages: Vec<String> = repeats(txn, offset, &[], &has_error)
+                .into_iter()
+                .map(|key| format!("duplicate metadata field on entry: `{key}`"))
+                .collect();
             let mut at = offset;
             for part in txn.children() {
                 let part_len = len_of(part);
@@ -9043,45 +9205,35 @@ fn report_posting_filename_lineno(
                         if crate::BeancountLanguage::kind_from_raw(posting.kind())
                             == K::POSTING =>
                     {
-                        for meta in posting.children() {
-                            let NodeOrToken::Node(meta) = meta else {
-                                continue;
-                            };
-                            if crate::BeancountLanguage::kind_from_raw(meta.kind()) != K::META_ENTRY
-                            {
-                                continue;
-                            }
-                            for t in meta.children() {
-                                if let NodeOrToken::Token(t) = t
-                                    && crate::BeancountLanguage::kind_from_raw(t.kind())
-                                        == K::META_KEY
-                                {
-                                    let key = t.text().trim_end_matches(':');
-                                    if matches!(key, "filename" | "lineno") {
-                                        keys.push(key);
-                                    }
-                                }
-                            }
+                        for key in repeats(posting, at, &POSTING_LOCATION_KEYS, &has_error) {
+                            messages.push(if matches!(key, "filename" | "lineno") {
+                                format!(
+                                    "duplicate posting metadata field `{key}`: beancount \
+                                     sets `filename` and `lineno` on every posting itself"
+                                )
+                            } else {
+                                format!("duplicate posting metadata field: `{key}`")
+                            });
                         }
                     }
                     NodeOrToken::Node(_) => {}
                 }
                 at += part_len;
             }
-            if let (Some(start), false) = (header, keys.is_empty()) {
+            if let (Some(start), false) = (header, messages.is_empty()) {
                 let end = header_end.unwrap_or(offset + len);
-                for key in keys {
-                    errors.push(crate::ParseError::new(
-                        crate::ParseErrorKind::SyntaxError(format!(
-                            "duplicate posting metadata field `{key}`: beancount sets \
-                             `filename` and `lineno` on every posting itself"
-                        )),
-                        Span::new(start + bom, end + bom),
-                    ));
+                for message in messages {
+                    found.push((start, end, message));
                 }
             }
         }
         offset += len;
+    }
+    for (start, end, message) in found {
+        errors.push(crate::ParseError::new(
+            crate::ParseErrorKind::SyntaxError(message),
+            Span::new(start + bom, end + bom),
+        ));
     }
 }
 

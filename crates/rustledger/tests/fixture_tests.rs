@@ -231,6 +231,9 @@ fn lima_test_expects_parse_error(name: &str) -> bool {
         // A tag line after the first posting: beancount reports "Tags or links
         // not allowed after first Posting" (#2575).
         || name.contains("TagsAfterFirstPosting")
+        // A metadata key repeated on a transaction or a posting: beancount
+        // reports `Duplicate metadata field on entry` (#2893).
+        || name.contains("MetadataTransactionRepeated")
         // What beancount's grammar builder rejects in a posting (#2802): a
         // negative price, `@@` with no number for the units.
         || name.contains("TotalPriceInverted")

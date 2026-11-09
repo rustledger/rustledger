@@ -647,12 +647,17 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     interned keys, in source order, where it was a hash map with `String`
 ///     keys. A v60 blob would be read at the wrong offsets.
 ///
+/// v62: PARSER OUTPUT changed, no archived layout moved (#2893). A metadata
+///     key repeated on a transaction or a posting keeps its first value, as in
+///     beancount, and is a parse error; it kept the last value with no error.
+///     A v61 blob would keep serving the last value.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 61;
+pub const CACHE_VERSION: u32 = 62;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1469,7 +1474,7 @@ mod tests {
         // v51 (#2802) reports a stray metadata token; likewise.
         // v61 (#2835) moves `Metadata`'s archived layout. No `CostNumber` is
         // in it, so the arrays still hold.
-        const FIXTURE_VERSION: u32 = 61;
+        const FIXTURE_VERSION: u32 = 62;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1614,7 +1619,7 @@ mod tests {
         // v51 (#2802) reports a stray metadata token; likewise.
         // v61 (#2835) moves the map that holds metadata values, not
         // `MetaValue` itself; the hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 61;
+        const FIXTURE_VERSION: u32 = 62;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

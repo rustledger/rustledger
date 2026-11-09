@@ -22,7 +22,8 @@ fn ledger() -> String {
     for i in 0..KEYS {
         src.push_str(&format!("  key-{i}: {i}\n"));
     }
-    // A repeated key keeps its first place and its last value.
+    // A repeated key on a transaction keeps its first place and its first
+    // value, as in beancount, and is reported (#2893).
     src.push_str("  key-0: \"last\"\n");
     src
 }
@@ -34,7 +35,7 @@ fn check(path: &str, directives: &[rustledger_core::Spanned<Directive>]) {
     assert_eq!(t.meta.len(), KEYS, "{path}");
     let (first, value) = t.meta.iter().next().expect("a key");
     assert_eq!(first.as_str(), "key-0", "{path}");
-    assert_eq!(value.to_string(), "\"last\"", "{path}");
+    assert_eq!(value.to_string(), "0", "{path}");
 }
 
 #[test]

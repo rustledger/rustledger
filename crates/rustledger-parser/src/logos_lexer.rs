@@ -598,12 +598,16 @@ fn apply_err_layout_transparency(
     }
 }
 
-/// Whether `name` is a valid beancount account name.
+/// Whether `name` is a valid beancount account name, as an account token in
+/// a ledger is judged.
 ///
-/// This is the CANONICAL account-name rule, shared by every surface that
-/// admits account names (the validator's Open and account-reference checks,
-/// which report `E1005`; the loader's `account_*`/`name_*` option guards; the
-/// FFI directive builder).
+/// This is the CANONICAL rule for an account a ledger can hold, shared by
+/// every surface that admits one from ledger text or as ledger text: the
+/// validator's Open and account-reference checks, which report `E1005`; the
+/// FFI directive builder; a budget's quoted account; the CLI's `--account`.
+/// Configuration values that beancount validates with its STRICTER
+/// `account.is_valid` family (a plugin's base account, the `account_*` and
+/// `name_*` options) use [`is_valid_account_name_strict`] instead.
 ///
 /// Two parts, both needed, as in beancount (#2906):
 ///
@@ -630,58 +634,122 @@ fn apply_err_layout_transparency(
 /// account but are invalid names, as in bean-check.
 ///
 /// Deliberately broader than beancount in one place, kept from #816 (PR
-/// #817): the root and the first sub-component may also start with a
-/// caseless letter (`\p{Lo}`: CJK, Arabic, Hebrew, ...) or a titlecase
-/// letter (`\p{Lt}`), so `資産:現金` and `Assets:日本` are valid here and
-/// `Invalid account name` in beancount. Its `\p{Lu}` start is an artifact of
-/// scripts with case; rejecting every caseless script would break the
-/// non-Latin ledgers #816 was fixed for (beancount/beancount#161, #398,
-/// #733). Pinned by `is_valid_account_name_matches_beancount` below.
+/// #817): a component may also start with a caseless letter (`\p{Lo}`: CJK,
+/// Arabic, Hebrew, ...) or a titlecase letter (`\p{Lt}`), so `資産:現金` and
+/// `Assets:日本` are valid here and `Invalid account name` in beancount. Its
+/// `\p{Lu}` start is an artifact of scripts with case; rejecting every
+/// caseless script would break the non-Latin ledgers #816 was fixed for
+/// (beancount/beancount#161, #398, #733). [`is_valid_account_name_strict`]
+/// keeps the same extension. Pinned by `is_valid_account_name_matches_beancount`
+/// below.
 #[must_use]
 pub fn is_valid_account_name(name: &str) -> bool {
-    let mut lexer = Token::lexer(name);
-    let Some(Ok(Token::Account(_))) = lexer.next() else {
-        return false;
-    };
-    if lexer.span() != (0..name.len()) || lexer.next().is_some() {
+    if !lexes_as_one_account(name) {
         return false;
     }
     // A lexed account has a root and at least one sub-component, each
     // non-empty, so both starts exist.
     let mut components = name.split(':');
-    let starts_with = |component: Option<&str>, digit_ok: bool| {
+    let starts_validly = |component: Option<&str>, is_root: bool| {
         component
             .and_then(|c| c.chars().next())
-            .is_some_and(|c| match account_start_class(c) {
-                Some(AccountStart::Uppercase | AccountStart::CaselessOrTitlecase) => true,
-                Some(AccountStart::Digit) => digit_ok,
-                None => false,
-            })
+            .is_some_and(|c| is_valid_component_start(c, is_root))
     };
-    starts_with(components.next(), false) && starts_with(components.next(), true)
+    starts_validly(components.next(), true) && starts_validly(components.next(), false)
 }
 
-/// The classes of character an account component can validly start with:
-/// see [`is_valid_account_name`].
+/// Whether `name` is a valid account name by beancount's STRICT check,
+/// `account.is_valid`: a full match of `ACCOUNT_RE`, so EVERY component
+/// starts with `\p{Lu}` (or, after the root, `\p{Nd}`) and holds only
+/// letters, decimal digits and `-` (`[\p{L}\p{Nd}\-]`).
+///
+/// beancount applies it where a value is configuration rather than ledger
+/// text: the `currency_accounts` plugin's base account (`account.is_valid`,
+/// falling back to `Equity:CurrencyAccounts`), the `account_*` options
+/// (`is_valid_leaf`, every component a full `ACC_COMP_NAME_RE` match) and
+/// the `name_*` options (`is_valid_root`, a full `ACC_COMP_TYPE_RE` match).
+/// Those callers check `Assets:<leaf>` and `<root>:X` through this function.
+/// So `Equity:CA:é`, `Conv:😀` and `A😀` are rejected here although
+/// [`is_valid_account_name`] accepts the first two as ledger accounts.
+///
+/// Keeps the `\p{Lo}`/`\p{Lt}` start of [`is_valid_account_name`] (#816), on
+/// every component, so a CJK root or leaf configured by option stays usable
+/// (`option "name_liabilities" "負債"`), as it was before #2906.
+///
+/// Implies [`is_valid_account_name`], which it runs first, so a name that
+/// passes still round-trips through the lexer.
+#[must_use]
+pub fn is_valid_account_name_strict(name: &str) -> bool {
+    is_valid_account_name(name)
+        && name.split(':').enumerate().all(|(i, component)| {
+            let mut chars = component.chars();
+            chars
+                .next()
+                .is_some_and(|c| is_valid_component_start(c, i == 0))
+                && chars.all(|c| account_char_class(c).is_some())
+        })
+}
+
+/// Whether `c` can continue an account component as the lexer reads one:
+/// an ASCII letter, digit or `-`, or any non-ASCII character. Implemented
+/// by running the lexer on an account ending in `c`, so it is the `Account`
+/// token's own rule; for editor word boundaries (the LSP's `is_word_char`).
+#[must_use]
+pub fn is_account_name_char(c: char) -> bool {
+    let mut buf = [0u8; 8];
+    buf[..4].copy_from_slice(b"A:AA");
+    let len = 4 + c.encode_utf8(&mut buf[4..]).len();
+    // `buf[..len]` is `A:AA` followed by one encoded char: valid UTF-8.
+    std::str::from_utf8(&buf[..len]).is_ok_and(lexes_as_one_account)
+}
+
+/// Whether `name` lexes to exactly one [`Token::Account`] spanning it.
+fn lexes_as_one_account(name: &str) -> bool {
+    let mut lexer = Token::lexer(name);
+    let Some(Ok(Token::Account(_))) = lexer.next() else {
+        return false;
+    };
+    lexer.span() == (0..name.len()) && lexer.next().is_none()
+}
+
+/// Whether `c` validly starts an account component (the root when
+/// `is_root`): `\p{Lu}`, a decimal digit after the root, or the `\p{Lo}` /
+/// `\p{Lt}` extension (#816). See [`is_valid_account_name`].
+fn is_valid_component_start(c: char, is_root: bool) -> bool {
+    match account_char_class(c) {
+        Some(AccountChar::Uppercase | AccountChar::CaselessOrTitlecase) => true,
+        Some(AccountChar::Digit) => !is_root,
+        Some(AccountChar::OtherLetterOrHyphen) | None => false,
+    }
+}
+
+/// The characters beancount allows in an account component
+/// (`[\p{L}\p{Nd}\-]`), by the class that decides where they may stand:
+/// see [`is_valid_account_name`] and [`is_valid_account_name_strict`].
 #[derive(Logos, Debug, Clone, Copy, PartialEq, Eq)]
-enum AccountStart {
+enum AccountChar {
     /// `\p{Lu}`, a valid start in beancount for the root and a sub-component.
     #[regex(r"\p{Lu}")]
     Uppercase,
     /// `\p{Nd}`, a valid sub-component start in beancount (not a root start).
     #[regex(r"\p{Nd}")]
     Digit,
-    /// `\p{Lo}` or `\p{Lt}`: rledger's deliberate extension (#816).
+    /// `\p{Lo}` or `\p{Lt}`: a start only by rledger's deliberate extension
+    /// (#816).
     #[regex(r"[\p{Lo}\p{Lt}]")]
     CaselessOrTitlecase,
+    /// The rest of `[\p{L}\p{Nd}\-]`: `\p{Ll}`, `\p{Lm}` and `-`, never a
+    /// start.
+    #[regex(r"[\p{Ll}\p{Lm}\-]")]
+    OtherLetterOrHyphen,
 }
 
-/// The [`AccountStart`] class of `c`, if it has one. Classified by logos, so
+/// The [`AccountChar`] class of `c`, if it has one. Classified by logos, so
 /// the Unicode categories are the same tables the lexer uses.
-fn account_start_class(c: char) -> Option<AccountStart> {
+fn account_char_class(c: char) -> Option<AccountChar> {
     let mut buf = [0u8; 4];
     let text = c.encode_utf8(&mut buf);
-    let mut lexer = AccountStart::lexer(text);
+    let mut lexer = AccountChar::lexer(text);
     match lexer.next() {
         Some(Ok(class)) if lexer.span().end == text.len() => Some(class),
         _ => None,
@@ -2346,5 +2414,68 @@ mod tests {
         // A BOM never starts an account (it stays its own error token).
         assert!(!lexes_whole("\u{feff}Assets:A"));
         assert!(lexes_whole("Assets:A\u{feff}"));
+    }
+
+    /// #2906: the strict check is beancount's `account.is_valid` (a full
+    /// match of `ACCOUNT_RE`), plus the `\p{Lo}`/`\p{Lt}` start (#816).
+    /// Verdicts checked against beancount 3.2.3 through the plugin and
+    /// option sites that use it.
+    #[test]
+    fn is_valid_account_name_strict_matches_beancount_is_valid() {
+        use super::{is_valid_account_name as ledger_ok, is_valid_account_name_strict as ok};
+        for name in [
+            "Assets:Cash",
+            "Equity:\u{663}",       // ٣
+            "Equity:CA:\u{663}x",   // ٣x
+            "Assets:\u{dc}n\u{ef}", // Ünï
+            "\u{c9}quit\u{e9}:A",   // Équité root
+            "Assets:A-b:C",
+            "\u{8cc7}\u{7522}:\u{73fe}\u{91d1}", // 資産:現金 (#816)
+            "Equity:CA:\u{65e5}\u{672c}",        // 日本 (#816)
+        ] {
+            assert!(ok(name), "{name}");
+            assert!(ledger_ok(name), "{name}: strict implies the ledger rule");
+        }
+        // Valid ledger accounts that beancount's `account.is_valid` rejects.
+        for name in [
+            "Equity:CA:\u{e9}",    // é starts a later component
+            "Equity:CA:\u{1F600}", // emoji starts a later component
+            "Equity:C\u{1F600}",   // emoji inside
+            "Assets:Conv:\u{1F600}",
+            "Assets:Rounding:\u{e9}clair",
+            "A\u{1F600}:X", // a root outside [\p{L}\p{Nd}-]
+        ] {
+            assert!(ledger_ok(name), "{name} is a valid ledger account");
+            assert!(!ok(name), "{name} fails account.is_valid");
+        }
+        for name in ["Assets:\u{e9}clair", "Assets:A_b", "Assets", "1A:B"] {
+            assert!(!ok(name), "{name}");
+        }
+    }
+
+    /// `is_account_name_char` is the `Account` token's continuation rule:
+    /// an ASCII letter, digit or `-`, or any non-ASCII character. Checked
+    /// over every ASCII character and a spread of non-ASCII ones.
+    #[test]
+    fn is_account_name_char_is_the_lexer_rule() {
+        for b in 0u8..128 {
+            let c = char::from(b);
+            assert_eq!(
+                super::is_account_name_char(c),
+                c.is_ascii_alphanumeric() || c == '-',
+                "{c:?}"
+            );
+        }
+        for c in [
+            '\u{e9}',
+            '\u{663}',
+            '\u{1F600}',
+            '\u{308}',
+            '\u{a0}',
+            '\u{feff}',
+            '\u{65e5}',
+        ] {
+            assert!(super::is_account_name_char(c), "{c:?}");
+        }
     }
 }

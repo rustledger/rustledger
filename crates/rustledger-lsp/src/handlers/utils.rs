@@ -546,8 +546,15 @@ pub fn get_symbol_at_position(
 }
 
 /// Check if a character is part of a word (for Beancount identifiers).
+///
+/// Every character the lexer's `Account` token takes
+/// ([`rustledger_parser::is_account_name_char`]: an ASCII letter, digit or
+/// `-`, or any non-ASCII character), plus `:` and `_`. So the word under the
+/// cursor is the whole account even when it holds a character outside
+/// `char::is_alphanumeric`, such as `Assets:A😀` or a combining mark (#2906),
+/// which call and type hierarchy read through this.
 pub fn is_word_char(c: char) -> bool {
-    c.is_alphanumeric() || c == ':' || c == '-' || c == '_'
+    c == ':' || c == '_' || rustledger_parser::is_account_name_char(c)
 }
 
 /// Check if a string looks like an account name.
@@ -1112,6 +1119,20 @@ mod tests {
         assert!(is_word_char('_'));
         assert!(!is_word_char(' '));
         assert!(!is_word_char('"'));
+        // Every character of an account token (#2906).
+        assert!(is_word_char('\u{1F600}'));
+        assert!(is_word_char('\u{308}'));
+        assert!(is_word_char('\u{663}'));
+    }
+
+    /// #2906: the word under the cursor is the whole account token, even
+    /// across characters outside `char::is_alphanumeric` (an emoji, a
+    /// combining mark), so call and type hierarchy see the full name.
+    #[test]
+    fn test_get_word_at_position_whole_non_ascii_account() {
+        let line = "  Assets:A\u{1F600}\u{308}B  -5.00 USD";
+        let (word, _, _) = get_word_at_position(line, 4, PositionEncoding::Utf8).unwrap();
+        assert_eq!(word, "Assets:A\u{1F600}\u{308}B");
     }
 
     /// `account_declaration_spans` includes both `Open` and `Close`

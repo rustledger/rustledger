@@ -96,7 +96,10 @@ pub use cst::{
 // changes any of these will require a coordinated bump of this
 // crate so the re-export contract holds at THIS crate's semver.
 pub use error::{COST_PRICE_CURRENCY_MISMATCH, ParseError, ParseErrorKind};
-pub use logos_lexer::{is_valid_account_name, is_valid_currency, leading_date_len};
+pub use logos_lexer::{
+    is_account_name_char, is_valid_account_name, is_valid_account_name_strict, is_valid_currency,
+    leading_date_len,
+};
 pub use rowan::{Direction, NodeOrToken, TextRange, TextSize, TokenAtOffset, WalkEvent};
 pub use rustledger_core::{
     FIRST_PLACEHOLDER_FILE_ID, InternedStr, SYNTHESIZED_FILE_ID, Span, Spanned, is_source_file_id,

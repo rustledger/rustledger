@@ -3414,12 +3414,15 @@ where
 ///
 /// The one implementation of that range query, shared by the validator's
 /// balance check and booking's pad computation (`plan_pads`). The account
-/// itself is the caller's to add.
-pub fn for_each_strict_subaccount(
-    index: &std::collections::BTreeSet<Account>,
+/// itself is the caller's to add. Generic over the key only so a test can
+/// count how many keys a query reads; callers pass `BTreeSet<Account>`.
+pub fn for_each_strict_subaccount<K>(
+    index: &std::collections::BTreeSet<K>,
     account: &str,
-    mut visit: impl FnMut(&Account),
-) {
+    mut visit: impl FnMut(&K),
+) where
+    K: Ord + std::borrow::Borrow<str>,
+{
     // The explicit `Bound` tuple gives `RangeBounds<str>` (a `&str..&str`
     // range would be `RangeBounds<&str>`, which `range::<str>` doesn't
     // accept). The two bound strings are built without `format!`: this runs
@@ -6248,6 +6251,84 @@ mod tests {
         assert!(!inv.is_booking_reduction(&sell, None, BookingMethod::Strict));
         // Same sign as the held lot -> augmentation.
         assert!(!inv.is_booking_reduction(&buy, Some(&spec), BookingMethod::Strict));
+    }
+
+    /// An account name whose `Borrow<str>` counts its calls: a `BTreeSet`
+    /// query reaches a key's name only through it, so the count is how many
+    /// keys a query read.
+    #[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+    struct CountedName(String);
+
+    std::thread_local! {
+        static NAMES_READ: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    }
+
+    impl std::borrow::Borrow<str> for CountedName {
+        fn borrow(&self) -> &str {
+            NAMES_READ.with(|n| n.set(n.get() + 1));
+            &self.0
+        }
+    }
+
+    /// `for_each_strict_subaccount` visits exactly the strict sub-accounts,
+    /// in order, on a large generated set (deep trees, Unicode segments,
+    /// prefix siblings such as `Assets:A` / `Assets:AB` / `Assets:A-B`, and
+    /// the same paths under several roots), and reads only a few keys per
+    /// query: a filtered scan of every key, correct or not, fails the bound.
+    #[test]
+    fn for_each_strict_subaccount_visits_exactly_the_strict_subtree() {
+        let roots = ["Assets", "Assets2", "Assets-X", "Liabilities", "Équité"];
+        let segments = [
+            "A", "AB", "A-B", "A_B", "A0", "Ab", "Café", "日本", "Ünï", "Z",
+        ];
+        let mut names = std::collections::BTreeSet::new();
+        for root in roots {
+            names.insert(root.to_string());
+            let mut frontier = vec![root.to_string()];
+            for _depth in 0..4 {
+                let mut next = Vec::new();
+                for (i, parent) in frontier.iter().enumerate() {
+                    // Keep the tree large but bounded: every segment under
+                    // the first parents, fewer further along.
+                    let take = if i < 12 { segments.len() } else { 3 };
+                    for segment in &segments[..take] {
+                        let child = format!("{parent}:{segment}");
+                        names.insert(child.clone());
+                        next.push(child);
+                    }
+                }
+                frontier = next;
+            }
+        }
+        let index: std::collections::BTreeSet<CountedName> =
+            names.iter().cloned().map(CountedName).collect();
+        assert!(index.len() > 5_000, "{}", index.len());
+
+        // Every name in the set, and names that are not in it.
+        let mut queries: Vec<String> = names.iter().step_by(7).cloned().collect();
+        queries.extend(["Assets:A:Missing", "Assets:Ä", "Nope", "Assets:"].map(String::from));
+
+        let mut reads = 0;
+        for query in &queries {
+            let prefix = format!("{query}:");
+            let expected: Vec<&str> = names
+                .iter()
+                .filter(|n| n.starts_with(&prefix))
+                .map(String::as_str)
+                .collect();
+            let mut visited = Vec::new();
+            NAMES_READ.with(|n| n.set(0));
+            for_each_strict_subaccount(&index, query, |k| visited.push(k.0.clone()));
+            reads += NAMES_READ.with(std::cell::Cell::get);
+            assert_eq!(visited, expected, "{query}");
+        }
+        // Two O(log n) searches per query; a scan reads every key per query.
+        let per_query = reads / queries.len();
+        assert!(
+            per_query < 200,
+            "{per_query} keys read per query, of {}",
+            index.len()
+        );
     }
 
     #[test]

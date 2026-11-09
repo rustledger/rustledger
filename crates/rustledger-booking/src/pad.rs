@@ -491,21 +491,61 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
 /// a posting or a padding entry names, its units per currency, with the
 /// lexical prefix index a subtree sum needs.
 ///
-/// Units only, not an [`Inventory`]: a pad reads nothing but the units of one
-/// currency, and booking lots here was most of the cost of the pass the
-/// validator now runs on every ledger with a pad.
+/// Units only, not an [`rustledger_core::Inventory`]: a pad reads nothing but
+/// the units of one currency. Units alone cannot answer beancount's "Attempt
+/// to pad an entry with cost" check (`ops/pad.py`, any remaining lot at cost
+/// in the padded currency), so #2901 needs a per-(account, currency) count of
+/// open cost lots here, or that check in the validator.
 #[derive(Debug, Default)]
 struct PadInventories {
-    by_account: FxHashMap<Account, smallvec::SmallVec<[(Currency, Decimal); 2]>>,
+    by_account: AccountTotals,
     /// The keys of `by_account`, sorted, kept in lockstep (keys are never
     /// removed), for [`rustledger_core::for_each_strict_subaccount`].
     index: std::collections::BTreeSet<Account>,
+}
+
+/// One account's units per currency.
+type Totals = smallvec::SmallVec<[(Currency, Decimal); 2]>;
+
+/// The totals of each account. A newtype so that every read goes through
+/// [`Self::get`] or iteration (`for (account, totals) in &by_account`), both
+/// of which a test counts: whatever walk a subtree sum does, each account it
+/// reads is counted where it is read
+/// (`test_plan_pads_sums_each_balance_over_its_subtree_only`).
+#[derive(Debug, Default)]
+struct AccountTotals(FxHashMap<Account, Totals>);
+
+impl AccountTotals {
+    /// The totals of `account`, counted as one account read.
+    fn get(&self, account: &Account) -> Option<&Totals> {
+        #[cfg(test)]
+        tests::ACCOUNTS_READ.with(|n| n.set(n.get() + 1));
+        self.0.get(account)
+    }
+}
+
+/// Iterating reads every account, each counted. Nothing here iterates: this
+/// is what a scan would go through, so the test sees one.
+impl<'a> IntoIterator for &'a AccountTotals {
+    type Item = (&'a Account, &'a Totals);
+    type IntoIter = Box<dyn Iterator<Item = Self::Item> + 'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        Box::new(self.0.iter().inspect(|_| {
+            #[cfg(test)]
+            tests::ACCOUNTS_READ.with(|n| n.set(n.get() + 1));
+        }))
+    }
 }
 
 impl PadInventories {
     /// Add `number` `currency` to `account`, created on first use. A total
     /// that would leave the representable range is left as it was and
     /// reported (#1863).
+    ///
+    /// This is a plain `checked_add` on the running total. It does not apply
+    /// `Inventory::add`'s near-ceiling check (#2554), so a total the
+    /// validator's booked inventory refuses can still be accepted here.
     fn add(
         &mut self,
         account: &Account,
@@ -514,11 +554,11 @@ impl PadInventories {
     ) -> Result<(), rustledger_core::OverflowError> {
         // One lookup; the key clone is a reference-count bump (`Account` is
         // interned).
-        let totals = match self.by_account.entry(account.clone()) {
+        let totals = match self.by_account.0.entry(account.clone()) {
             std::collections::hash_map::Entry::Occupied(totals) => totals.into_mut(),
             std::collections::hash_map::Entry::Vacant(slot) => {
                 self.index.insert(account.clone());
-                slot.insert(smallvec::SmallVec::new())
+                slot.insert(Totals::new())
             }
         };
         let overflow = || rustledger_core::OverflowError {
@@ -542,9 +582,7 @@ impl PadInventories {
     /// padded balances.
     fn subtree_units(&self, account: &Account, currency: &Currency) -> Option<Decimal> {
         let mut total = Some(Decimal::ZERO);
-        let mut add = |totals: &smallvec::SmallVec<[(Currency, Decimal); 2]>| {
-            #[cfg(test)]
-            tests::INVENTORIES_SUMMED.with(|n| n.set(n.get() + 1));
+        let mut add = |totals: &Totals| {
             if let Some((_, units)) = totals.iter().find(|(c, _)| c == currency) {
                 total = total.and_then(|t| t.checked_add(*units));
             }
@@ -805,17 +843,21 @@ mod tests {
     use rustledger_core::{Balance, Open, Pad};
 
     std::thread_local! {
-        /// Inventories `PadInventories::subtree_units` has read on this
+        /// Accounts `PadInventories` has read (`AccountTotals`) on this
         /// thread, for `test_plan_pads_sums_each_balance_over_its_subtree_only`.
-        pub(super) static INVENTORIES_SUMMED: std::cell::Cell<usize> =
+        pub(super) static ACCOUNTS_READ: std::cell::Cell<usize> =
             const { std::cell::Cell::new(0) };
     }
 
     /// Each padded balance is measured over its own subtree, not over every
     /// account: with `n` accounts each holding a transaction, a pad and a
-    /// balance, the pad computation reads `n` inventories, where a scan per
-    /// balance read `n * n` and made `rledger check` quadratic (40k such
-    /// accounts took 46 s). Verified to fail with `subtree_units` scanning.
+    /// balance, the pad computation reads `n` accounts, where a scan per
+    /// balance reads `n * n` and made `rledger check` quadratic (40k such
+    /// accounts took 46 s). Accounts are counted where they are read
+    /// (`AccountTotals`), not where they match, so a scan that adds only the
+    /// matching accounts fails too: verified with `subtree_units` rewritten
+    /// as `for (a, totals) in &self.by_account { if is_subaccount_or_equal(..)
+    /// { add(totals) } }`.
     #[test]
     fn test_plan_pads_sums_each_balance_over_its_subtree_only() {
         let n = 2_000;
@@ -834,9 +876,9 @@ mod tests {
             )));
             directives.push(balance(date(2024, 1, 5), &account, dec!(10)));
         }
-        INVENTORIES_SUMMED.with(|c| c.set(0));
+        ACCOUNTS_READ.with(|c| c.set(0));
         let result = process_pads(&directives);
-        let summed = INVENTORIES_SUMMED.with(std::cell::Cell::get);
+        let summed = ACCOUNTS_READ.with(std::cell::Cell::get);
         assert_eq!(result.padding_transactions.len(), n);
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(summed, n, "each balance reads only its own account");

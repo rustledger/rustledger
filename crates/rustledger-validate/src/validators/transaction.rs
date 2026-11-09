@@ -347,10 +347,7 @@ fn lifecycle_errors(
     if txn.date < opened {
         errors.push(ValidationError::new(
             ErrorCode::AccountNotOpen,
-            format!(
-                "Account {} used on {} but not opened until {}",
-                posting.account, txn.date, opened
-            ),
+            super::helpers::not_yet_open_message("Account", &posting.account, txn.date, opened),
             txn.date,
         ));
     }
@@ -550,15 +547,19 @@ pub fn update_inventories(
         let Some(units) = posting.amount() else {
             continue;
         };
-        let Some(inv) = state.inventories.get_mut(&posting.account) else {
-            continue;
-        };
-
+        // An account with no `open` (reported as E1001) is booked under the
+        // file's default method, as the booking engine books it.
         let booking_method = state
             .accounts
             .get(&posting.account)
-            .map(|a| a.booking)
-            .unwrap_or_default();
+            .map_or(state.options.default_booking_method, |a| a.booking);
+        // Every account is tracked, opened or not, as beancount sums every
+        // posting: a balance or a pad on an unopened account reads it (#2896).
+        let inv = crate::account_inventory(
+            &mut state.inventories,
+            &mut state.inventory_accounts,
+            &posting.account,
+        );
 
         // Reduction vs augmentation — booking's decision, recorded on the
         // posting (#2390), exactly as `BookingEngine::apply` reads it. Asking
@@ -584,9 +585,12 @@ pub fn update_inventories(
     }
 
     for (posting, units) in deferred {
-        if let Some(inv) = state.inventories.get_mut(&posting.account) {
-            add_posting(inv, posting, units, txn, errors);
-        }
+        let inv = crate::account_inventory(
+            &mut state.inventories,
+            &mut state.inventory_accounts,
+            &posting.account,
+        );
+        add_posting(inv, posting, units, txn, errors);
     }
 }
 

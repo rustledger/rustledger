@@ -44,4 +44,9 @@ Nd = "Nd"
 [files]
 # Generated test data: Python-literal configs whose strings are split and
 # mutated at random (`'l' 'ater'`), so fragments of words are expected.
-extend-exclude = ["crates/rustledger-plugin/tests/fixtures/effective_date/configs.json"]
+# The parse-error parity manifest: generated, mostly short hex content ids,
+# which split into letter runs that read as misspellings (`ba`, `caf`).
+extend-exclude = [
+  "crates/rustledger-plugin/tests/fixtures/effective_date/configs.json",
+  "tests/baselines/parse-error-parity.manifest",
+]

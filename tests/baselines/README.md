@@ -125,6 +125,79 @@ git commit -m 'chore(baselines): regenerate corpus manifests'
 The regen script gates on a populated corpus and runs the parser test
 and the CST test with `BASELINE_UPDATE=1`.
 
+## Parse-error parity (`parse-error-parity.manifest`)
+
+A different kind of baseline: not rledger's output against itself, but
+rledger's parse errors against beancount 3.2.3's, input by input (#2872).
+For each input both parsers run, and each side's errors are reduced to the
+lines they land on and how many each line carries. The harness,
+`scripts/compat-parse-error-parity.py`, documents the inputs, the
+normalization (BOM, CRLF, line-0 errors) and the mismatch categories.
+
+The manifest pins the current result: one row per tracked or downloaded
+ledger (matches included), then, for the stray-character matrix and the
+fuzz corpora, the ids of the inputs that do not match, grouped by
+category. Its `#@fuzz-commit` line pins the `fuzz-corpus` commit the fuzz
+inputs come from, so the input set only changes when the pin does.
+
+The `Parse-error parity` job in `.github/workflows/compat.yml` runs it on
+every PR with `--check`:
+
+- An input pinned as matching that now mismatches is a **regression** and
+  fails the job.
+- A pinned mismatch that now matches, or changes category, is a **stale
+  pin** and also fails, the way the corpus baselines force
+  `BASELINE_UPDATE`: run `--update` (below) and commit the manifest. Left
+  unpinned, the improvement could be lost by a later PR without anything
+  failing.
+- A run that does not cover the pinned inputs fails: a `fuzz` or `matrix`
+  count that differs from the manifest's `#@inputs` line, or a pinned
+  `fuzz` / `matrix` id that is not among the inputs (an empty or partial
+  fuzz directory would otherwise read as "no regressions").
+- A tracked ledger with no row (a test `.beancount` added or edited by the
+  PR) or a downloaded one (upstream changed it) only warns, and the log
+  prints the `pin-row` line that pins it. Pin it with the steps below, or
+  copy the row.
+
+The job is advisory until a maintainer adds it to the branch's required
+checks.
+
+To update the pin (after a parser change that improves parity, or to move
+to a newer `fuzz-corpus` commit):
+
+```bash
+# The pinned commit, as CI reads it:
+commit=$(sed -n 's/^#@fuzz-commit //p' tests/baselines/parse-error-parity.manifest)
+git fetch origin "$commit"
+# Or move the pin to the branch tip instead:
+#   git fetch origin fuzz-corpus && commit=$(git rev-parse FETCH_HEAD)
+fuzz=$(mktemp -d)   # fresh, so no stale inputs from an earlier extraction
+git archive "$commit" fuzz_parse fuzz_green_eq_red | tar -x -C "$fuzz"
+cargo build --release -p rustledger-loader --no-default-features --example parse_error_lines
+# With beancount 3.2.3 importable (`nix develop .#bench`, or pip):
+python3 -I scripts/compat-parse-error-parity.py \
+    --rledger target/release/examples/parse_error_lines \
+    --fuzz-dir "$fuzz" --fuzz-commit "$commit" \
+    --compat-dir tests/compatibility/files --update
+git diff --stat tests/baselines/parse-error-parity.manifest
+rm -rf "$fuzz"
+```
+
+`--update` needs `--fuzz-dir`, `--fuzz-commit` and `--compat-dir`; without
+the fuzz corpus it would drop every fuzz pin. It keeps the `compat` rows of
+contents the run did not see, because
+the downloaded corpus differs between machines: CI replays a cached copy,
+and a local fetch is usually newer. To pin the files CI sees but your copy
+does not (or a tracked ledger the warning names), take the `pin-row` lines
+its log prints for them:
+
+```bash
+gh run view <run-id> --log --job <job-id> \
+  | grep -oP 'pin-row\t\K.*' >> tests/baselines/parse-error-parity.manifest
+```
+
+Then run `--update` once more so the rows are sorted into place.
+
 ## Phase-3-of-#1262 staleness
 
 When `rustledger-cst::parse` becomes the production parser (phase 3.2

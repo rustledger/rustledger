@@ -168,6 +168,10 @@ criteria = "safe-to-deploy"
 version = "0.4.2"
 criteria = "safe-to-deploy"
 
+[[exemptions.constant_time_eq]]
+version = "0.6.1"
+criteria = "safe-to-deploy"
+
 [[exemptions.cookie]]
 version = "0.18.2"
 criteria = "safe-to-deploy"
@@ -206,18 +210,6 @@ criteria = "safe-to-deploy"
 
 [[exemptions.crypto-common]]
 version = "0.2.2"
-criteria = "safe-to-deploy"
-
-[[exemptions.defmt]]
-version = "1.1.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.defmt-macros]]
-version = "1.1.1"
-criteria = "safe-to-deploy"
-
-[[exemptions.defmt-parser]]
-version = "1.0.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.dhat]]
@@ -266,6 +258,10 @@ criteria = "safe-to-deploy"
 
 [[exemptions.error-code]]
 version = "3.4.0"
+criteria = "safe-to-deploy"
+
+[[exemptions.flate2]]
+version = "1.1.11"
 criteria = "safe-to-deploy"
 
 [[exemptions.fluent-uri]]
@@ -340,8 +336,16 @@ criteria = "safe-to-deploy"
 version = "0.14.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.jiff]]
+version = "0.2.41"
+criteria = "safe-to-deploy"
+
 [[exemptions.jiff-core]]
-version = "0.1.1"
+version = "0.1.4"
+criteria = "safe-to-deploy"
+
+[[exemptions.jiff-static]]
+version = "0.2.41"
 criteria = "safe-to-deploy"
 
 [[exemptions.js-sys]]
@@ -792,12 +796,16 @@ criteria = "safe-to-deploy"
 version = "1.20.1"
 criteria = "safe-to-deploy"
 
+[[exemptions.unicode-width]]
+version = "0.2.3"
+criteria = "safe-to-deploy"
+
 [[exemptions.ureq]]
-version = "3.5.0"
+version = "3.5.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.ureq-proto]]
-version = "0.6.5"
+version = "0.7.1"
 criteria = "safe-to-deploy"
 
 [[exemptions.utf8-zero]]
@@ -888,8 +896,12 @@ criteria = "safe-to-deploy"
 version = "1.9.0"
 criteria = "safe-to-deploy"
 
+[[exemptions.zeroize_derive]]
+version = "1.5.0"
+criteria = "safe-to-deploy"
+
 [[exemptions.zip]]
-version = "9.2.2"
+version = "9.5.0"
 criteria = "safe-to-deploy"
 
 [[exemptions.zlib-rs]]

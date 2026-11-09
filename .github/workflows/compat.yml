@@ -1709,3 +1709,100 @@ jobs:
             echo "::error::python-gated tests skipped despite the tools being installed — availability probe drifted"
             exit 1
           fi
+  # Parse-error parity (#2872): for every input, do rledger's parse errors land
+  # on the same lines, as many per line, as beancount 3.2.3's? The harness,
+  # its normalization and its categories are documented in
+  # scripts/compat-parse-error-parity.py. Its own job, beside the
+  # python-gated suites, on the same pattern: the tool is asserted present and
+  # every input is compared or the job fails; nothing is skipped quietly.
+  #
+  # Inputs: the stray-character matrix, every tracked ledger, the downloaded
+  # compat corpus, and the parser fuzz corpora at the `fuzz-corpus` commit
+  # tests/baselines/parse-error-parity.manifest pins (so the input set is
+  # fixed; bumping the pin is a manifest update).
+  #
+  # Every run, pull requests included, compares ALL of it (~111k inputs, the
+  # fuzz corpus in full). No sample is needed: with an optimized build,
+  # rledger's side takes well under a minute, and beancount's C parser, in
+  # one forked worker per core, about as long. Most of the job is the build.
+  parse-error-parity:
+    name: Parse-error parity (beancount 3.2.3)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # stable
+        with:
+          toolchain: 1.98.1 # pinned stable; bump deliberately, IN LOCKSTEP with rust-toolchain.toml (see #1745, #1750)
+      # rust-cache intentionally omitted; see the note on the
+      # compatibility-test job (LGPL-3.0 license-check interaction).
+      - name: Set up Python
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.11'
+      - name: Install beancount 3.2.3
+        # Pinned: the manifest records 3.2.3's verdicts, and a newer parser
+        # would show up as rledger regressions.
+        run: pip install beancount==3.2.3
+      - name: Assert beancount's parser is importable (no silent skips)
+        run: |
+          python -I -c "import beancount, beancount.parser.parser; print(beancount.__version__); assert beancount.__version__ == '3.2.3'"
+      # Same cache, key and fetch as parser-baselines.yml.
+      - name: Cache compatibility test files
+        id: cache-compat-files
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: tests/compatibility/files
+          key: compat-files-v3-${{ hashFiles('scripts/fetch-compat-test-files.sh') }}
+          restore-keys: |
+            compat-files-v3-
+      - name: Fetch compatibility test files
+        if: steps.cache-compat-files.outputs.cache-hit != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: ./scripts/fetch-compat-test-files.sh
+      - name: Fetch the pinned fuzz corpus
+        id: fuzz
+        run: |
+          set -euo pipefail
+          commit=$(sed -n 's/^#@fuzz-commit //p' tests/baselines/parse-error-parity.manifest)
+          if [ -z "$commit" ]; then
+            echo "::error::no #@fuzz-commit line in tests/baselines/parse-error-parity.manifest"
+            exit 1
+          fi
+          # A pinned commit, not the branch tip: the nightly fuzz run adds
+          # inputs every day, and an unpinned set would turn each new
+          # mismatching input into a "regression" on an unrelated PR.
+          git fetch --depth=1 origin "$commit"
+          mkdir -p "$RUNNER_TEMP/fuzz"
+          git archive "$commit" fuzz_parse fuzz_green_eq_red | tar -x -C "$RUNNER_TEMP/fuzz"
+          echo "commit=$commit" >> "$GITHUB_OUTPUT"
+      # Runs first and can fail the job: a classifier bug that called every
+      # input a match would otherwise read as perfect parity.
+      - name: Self-test the harness
+        run: python -I scripts/compat-parse-error-parity.py --self-test
+      - name: Build rledger's side
+        # Optimized: unoptimized, rledger's side took ten times as long as
+        # the rest of the job. LTO is off because it buys little here and
+        # costs most of the build.
+        env:
+          CARGO_PROFILE_RELEASE_LTO: 'false'
+          CARGO_PROFILE_RELEASE_CODEGEN_UNITS: '16'
+        run: cargo build --release -p rustledger-loader --no-default-features --example parse_error_lines
+      - name: Compare against beancount and the pinned baseline
+        run: |
+          python -I scripts/compat-parse-error-parity.py \
+            --rledger target/release/examples/parse_error_lines \
+            --fuzz-dir "$RUNNER_TEMP/fuzz" \
+            --fuzz-commit "${{ steps.fuzz.outputs.commit }}" \
+            --compat-dir tests/compatibility/files \
+            --report "$RUNNER_TEMP/parity.md" \
+            --check
+      - name: Report to the job summary
+        if: always()
+        run: |
+          if [ -f "$RUNNER_TEMP/parity.md" ]; then
+            cat "$RUNNER_TEMP/parity.md" >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "no report: the comparison did not get that far" >> "$GITHUB_STEP_SUMMARY"
+          fi

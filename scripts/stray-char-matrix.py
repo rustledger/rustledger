@@ -138,15 +138,24 @@ def cases(base):
     return out
 
 
+# Errors beancount's parser reports that rledger reports when it loads the
+# file (the option table, the account-name rules) rather than when it parses.
+# Shared with `scripts/compat-parse-error-parity.py`, which drops them for the
+# same reason.
+NOT_SYNTAX = ("Invalid option", "Invalid account name")
+
+
+def is_not_syntax(error):
+    """Whether a beancount parser error is one rledger reports at load time."""
+    return any(marker in str(error.message) for marker in NOT_SYNTAX)
+
+
 def verdict_in_process(src):
     try:
         _, errors, _ = parser.parse_string(src)
     except Exception:  # beancount raised: no verdict to match
         return "x"
-    if any(
-        "Invalid option" in str(e.message) or "Invalid account name" in str(e.message)
-        for e in errors
-    ):
+    if any(is_not_syntax(e) for e in errors):
         return "x"
     return "1" if errors else "0"
 

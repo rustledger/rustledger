@@ -1220,8 +1220,8 @@ fn is_indented_directive_continuation(
 ///   2.1a) + CUSTOM (PR 2.3)
 /// - `DATE WHITESPACE <txn-trigger> ...`: TRANSACTION (PR 2.1b),
 ///   where `<txn-trigger>` is one of `STAR` / `PENDING_KW` (`!`)
-///   / `FLAG` / `HASH` / `TXN_KW` / `STRING` ("implied" txn form
-///   with no explicit flag) / single-char `CURRENCY` (ticker
+///   / `FLAG` / `HASH` / `TXN_KW` / `STRING` / `TAG` / `LINK` (no
+///   flag: a syntax error, reported by the converter, #2905) / single-char `CURRENCY` (ticker
 ///   letters). Mirrors `parse_dated_directive` in the legacy AST
 ///   parser at parser.rs:1707-1715.
 /// - `<KEYWORD> ...` (no leading date): PUSHTAG / POPTAG /
@@ -1292,18 +1292,20 @@ fn identify_directive(tokens: &[(SyntaxKind, Range<usize>)], i: usize) -> Option
                 //   (cf. `Token::is_txn_flag` and the AST parser's
                 //   `parse_flag` accepting Hash)
                 // - the explicit `txn` keyword (TXN_KW)
-                // - a bare STRING ("implied transaction": the AST
-                //   parser at parser.rs:1713 dispatches
-                //   `Token::String(_)` to `parse_transaction_directive`
-                //   with an implied `*` flag; common shorthand
-                //   form in real ledgers like
-                //   `2024-01-15 "Coffee"`)
+                // - a bare STRING, TAG or LINK, with no flag
+                //   (`2024-01-15 "Coffee"`, `2024-01-15 #trip`).
+                //   beancount refuses these (its `txn` is required) and
+                //   the converter reports one error at that token
+                //   (#2905); they are still a TRANSACTION here so their
+                //   postings are not orphaned, each its own error.
                 SyntaxKind::STAR
                 | SyntaxKind::PENDING_KW
                 | SyntaxKind::FLAG
                 | SyntaxKind::HASH
                 | SyntaxKind::TXN_KW
-                | SyntaxKind::STRING => Some(SyntaxKind::TRANSACTION),
+                | SyntaxKind::STRING
+                | SyntaxKind::TAG
+                | SyntaxKind::LINK => Some(SyntaxKind::TRANSACTION),
                 // Single-character CURRENCY: NYSE/NASDAQ-style
                 // ticker letters (T, V, F, X, ...) double as
                 // transaction flags. The lexer prioritizes

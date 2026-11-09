@@ -1,54 +1,12 @@
 //! Balance and pad validation.
 
 // ratchet: fxhash-only — hot path; use FxHashMap/FxHashSet, not std SipHash collections (#1237).
-use rust_decimal::{Decimal, MathematicalOps};
-use rustledger_core::{Amount, Balance, Pad, Position};
+use rustledger_booking::balance_tolerance;
+use rustledger_core::{Amount, Balance, Inventory, OverflowError, Pad, Position};
 
 use super::helpers::require_account_open;
 use crate::LedgerState;
 use crate::error::{ErrorCode, ValidationError};
-
-/// Multiplier for balance assertion tolerance (matches Python beancount).
-/// Balance assertions use 2x the `tolerance_multiplier` option.
-const BALANCE_TOLERANCE_MULTIPLIER: Decimal = Decimal::TWO;
-
-/// Compute the tolerance to apply when comparing a balance assertion's
-/// expected amount against the booked actual.
-///
-/// - `expected`: the asserted amount from the balance directive.
-/// - `explicit`: the `~ tolerance` from the directive, if any (always
-///   wins).
-/// - `tolerance_multiplier`: the active `inferred_tolerance_multiplier`
-///   option (default 0.5; overridable via `option
-///   "inferred_tolerance_multiplier" "..."`).
-///
-/// Mirrors the inline logic in `validate_balance_late` (private) so
-/// out-of-pipeline consumers (currently the LSP code-lens path)
-/// produce the same verdict as the validator without re-deriving the
-/// rule from the Beancount spec.
-///
-/// Matches Python beancount:
-/// <https://github.com/beancount/beancount/blob/master/beancount/ops/balance.py>
-#[must_use]
-pub fn balance_tolerance(
-    expected: Decimal,
-    explicit: Option<Decimal>,
-    tolerance_multiplier: Decimal,
-) -> Decimal {
-    if let Some(t) = explicit {
-        return t;
-    }
-    let scale = expected.scale();
-    if scale > 0 {
-        let quantum = DECIMAL_TEN.powi(-i64::from(scale));
-        tolerance_multiplier * BALANCE_TOLERANCE_MULTIPLIER * quantum
-    } else {
-        Decimal::ZERO
-    }
-}
-
-/// Base 10 for tolerance scale calculation.
-const DECIMAL_TEN: Decimal = Decimal::TEN;
 
 /// Validate a Pad directive, and apply its padding (the late stream's
 /// [`crate::PadState`] plan; `index` is the pad's index in that stream).
@@ -236,6 +194,8 @@ pub fn validate_balance_late(
         return;
     }
 
+    check_padding_at_cost(state, bal, index, errors);
+
     // Get inventory and check balance (no padding case).
     // In beancount, balance assertions include sub-accounts
     // e.g., balance Assets:Checking includes Assets:Checking:Sub1, etc.
@@ -310,92 +270,69 @@ pub fn validate_balance_late(
     }
 }
 
-#[cfg(test)]
-mod tolerance_tests {
-    use super::*;
-    use rust_decimal_macros::dec;
-
-    /// Default `tolerance_multiplier` from `ValidationOptions::default()`
-    /// (also the loader's default via `Options::new()`).
-    fn default_mul() -> Decimal {
-        dec!(0.5)
-    }
-
-    #[test]
-    fn explicit_tolerance_always_wins() {
-        // Even an absurdly-small / absurdly-large explicit tolerance
-        // overrides the scale-derived default. This is the
-        // contract `~ tolerance` on a Balance directive provides.
-        assert_eq!(
-            balance_tolerance(dec!(100.00), Some(dec!(0.001)), default_mul()),
-            dec!(0.001)
+/// Beancount's "Attempt to pad an entry with cost" (`beancount/ops/pad.py`):
+/// when padding is inserted for the `balance` at `index`, every lot of the
+/// padded currency that the padded account and its sub-accounts hold at cost
+/// is an error, once per lot, as beancount reports it. The padding still
+/// applies (it was added at the pad), as beancount still inserts it.
+///
+/// The padding plan has units only (`rustledger_booking::plan_pads`), so the
+/// lots are read here, from the booked inventories, which hold the same lots
+/// beancount's `pad_balance` does: padding adds no lot at cost. The message
+/// shows those inventories without this padding, as beancount checks before
+/// it pads.
+fn check_padding_at_cost(
+    state: &LedgerState,
+    bal: &Balance,
+    index: usize,
+    errors: &mut Vec<ValidationError>,
+) {
+    for (target, units) in state.pads.padded_for(index) {
+        // The key clones are reference-count bumps (`Account` is interned).
+        let mut subtree = vec![target.clone()];
+        rustledger_core::for_each_strict_subaccount(
+            &state.inventory_accounts,
+            target.as_str(),
+            |sub| subtree.push(sub.clone()),
         );
-        assert_eq!(
-            balance_tolerance(dec!(100.00), Some(dec!(50)), default_mul()),
-            dec!(50)
-        );
+        let inventories = subtree
+            .iter()
+            .filter_map(|account| state.inventories.get(account));
+        let lots_at_cost = inventories
+            .clone()
+            .flat_map(Inventory::positions)
+            .filter(|p| p.units.currency == units.currency && p.cost.is_some())
+            .count();
+        if lots_at_cost == 0 {
+            continue;
+        }
+        let message = match held_before_padding(inventories, units) {
+            // Beancount prints the inventory in parentheses.
+            Ok(held) => format!("Attempt to pad an entry with cost for balance: ({held})"),
+            Err(e) => format!("Attempt to pad an entry with cost ({e})"),
+        };
+        for _ in 0..lots_at_cost {
+            errors.push(
+                ValidationError::new(ErrorCode::PadWithCost, message.clone(), bal.date)
+                    .with_context(format!("account: {target}")),
+            );
+        }
     }
+}
 
-    #[test]
-    fn integer_amount_requires_exact_match() {
-        // scale == 0 means the asserted amount has no decimal places.
-        // Python beancount requires an exact match in that case; the
-        // helper returns ZERO to make `difference > 0` strict.
-        assert_eq!(
-            balance_tolerance(dec!(100), None, default_mul()),
-            Decimal::ZERO
-        );
+/// What `inventories` hold together, without the `padding` just applied to
+/// them.
+fn held_before_padding<'a>(
+    inventories: impl Iterator<Item = &'a Inventory>,
+    padding: &Amount,
+) -> Result<Inventory, OverflowError> {
+    let mut held = Inventory::new();
+    for inventory in inventories {
+        held.merge(inventory)?;
     }
-
-    #[test]
-    fn two_decimal_amount_uses_default_quantum() {
-        // For `100.00 USD` with the default multiplier 0.5:
-        //   tolerance = 0.5 * 2 * 0.01 = 0.01
-        // This is the Beancount-spec rule the LSP and the validator
-        // both depend on; if this changes, every balance assertion
-        // shifts pass/fail.
-        assert_eq!(
-            balance_tolerance(dec!(100.00), None, default_mul()),
-            dec!(0.01)
-        );
-    }
-
-    #[test]
-    fn higher_precision_scales_down() {
-        // 4 decimal places: tolerance = 0.5 * 2 * 0.0001 = 0.0001
-        assert_eq!(
-            balance_tolerance(dec!(100.0000), None, default_mul()),
-            dec!(0.0001)
-        );
-    }
-
-    #[test]
-    fn multiplier_one_doubles_default() {
-        // File overrides `option "inferred_tolerance_multiplier" "1.0"`:
-        //   tolerance = 1.0 * 2 * 0.01 = 0.02
-        assert_eq!(balance_tolerance(dec!(100.00), None, dec!(1.0)), dec!(0.02));
-    }
-
-    #[test]
-    fn multiplier_zero_forces_strict_match() {
-        // `option "inferred_tolerance_multiplier" "0.0"` is the
-        // canonical way to force strict equality on a decimal
-        // amount. The helper must yield zero so the validator emits
-        // a diagnostic on any rounding drift.
-        assert_eq!(
-            balance_tolerance(dec!(100.00), None, dec!(0.0)),
-            Decimal::ZERO
-        );
-    }
-
-    #[test]
-    fn negative_amount_uses_same_scale_logic() {
-        // Tolerance is sign-independent (the validator applies it
-        // against `(actual - expected).abs()`), but the helper does
-        // not flip sign on negative expected — scale() is unsigned.
-        assert_eq!(
-            balance_tolerance(dec!(-100.00), None, default_mul()),
-            dec!(0.01)
-        );
-    }
+    held.add(Position::simple(Amount::new(
+        -padding.number,
+        &padding.currency,
+    )))?;
+    Ok(held)
 }

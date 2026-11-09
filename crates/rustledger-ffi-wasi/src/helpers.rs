@@ -50,6 +50,10 @@ pub struct LoadResult {
     /// the rows.
     pub error_blocks_queries: Vec<bool>,
     pub options: LedgerOptions,
+    /// The ledger's `tolerance_multiplier` option, for the padding
+    /// [`expand_pads`] inserts (a difference within a balance's tolerance is
+    /// not padded, #2901).
+    pub tolerance_multiplier: rustledger_core::Decimal,
     pub plugins: Vec<Plugin>,
     pub includes: Vec<Include>,
 }
@@ -120,6 +124,7 @@ pub fn load_source(source: &str) -> LoadResult {
                 // Nothing was loaded, so a query has nothing to answer from.
                 error_blocks_queries: vec![true],
                 options: LedgerOptions::default(),
+                tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
                 plugins: Vec::new(),
                 includes,
             };
@@ -228,6 +233,7 @@ pub fn load_source(source: &str) -> LoadResult {
         errors,
         error_blocks_queries,
         options,
+        tolerance_multiplier: ledger.options.inferred_tolerance_multiplier,
         plugins,
         includes,
     }
@@ -326,6 +332,8 @@ pub struct FileLoad {
     /// ([`rustledger_loader::LedgerError::blocks_queries`], #2861).
     pub error_blocks_queries: Vec<bool>,
     pub options: LedgerOptions,
+    /// See [`LoadResult::tolerance_multiplier`].
+    pub tolerance_multiplier: rustledger_core::Decimal,
     pub plugins: Vec<Plugin>,
     pub loaded_files: Vec<String>,
 }
@@ -351,8 +359,10 @@ pub fn expand_pads<T: Clone>(
     directives: Vec<Directive>,
     tags: Vec<T>,
     synth_tag: &T,
+    tolerance_multiplier: rustledger_core::Decimal,
 ) -> (Vec<Directive>, Vec<T>) {
-    let pads = rustledger_booking::process_pads(&directives).padding_transactions;
+    let pads =
+        rustledger_booking::process_pads(&directives, tolerance_multiplier).padding_transactions;
     let mut pairs: Vec<(Directive, T)> = Vec::with_capacity(directives.len() + pads.len());
     pairs.extend(directives.into_iter().zip(tags));
     pairs.sort_by_key(|(d, _)| d.date());
@@ -473,6 +483,7 @@ pub fn load_file_with_fs(
         errors,
         error_blocks_queries,
         options,
+        tolerance_multiplier: ledger.options.inferred_tolerance_multiplier,
         plugins,
         loaded_files,
     })
@@ -670,7 +681,12 @@ option \"operating_currency\" \"USD\"
         )));
         let raw_len = load.directives.len();
 
-        let (expanded, lines) = expand_pads(load.directives, load.directive_lines, &0u32);
+        let (expanded, lines) = expand_pads(
+            load.directives,
+            load.directive_lines,
+            &0u32,
+            load.tolerance_multiplier,
+        );
         // Exactly one synthesized Padding transaction is inserted, tags aligned.
         assert_eq!(expanded.len(), raw_len + 1);
         assert_eq!(expanded.len(), lines.len());
@@ -738,7 +754,12 @@ option \"operating_currency\" \"USD\"
         // agree with the CLI here: before #2150 both padded, leaving the
         // account 60.00 richer than beancount reports.
         let load = load_source(SAME_DATE_PAD_BALANCE_LEDGER);
-        let (expanded, _lines) = expand_pads(load.directives, load.directive_lines, &0u32);
+        let (expanded, _lines) = expand_pads(
+            load.directives,
+            load.directive_lines,
+            &0u32,
+            load.tolerance_multiplier,
+        );
 
         let synths = expanded
             .iter()
@@ -763,7 +784,12 @@ option \"operating_currency\" \"USD\"
         //
         // bean-query reports this date group as `balance pad transaction`.
         let load = load_source(UNRELATED_SAME_DATE_BALANCE_LEDGER);
-        let (expanded, lines) = expand_pads(load.directives, load.directive_lines, &0u32);
+        let (expanded, lines) = expand_pads(
+            load.directives,
+            load.directive_lines,
+            &0u32,
+            load.tolerance_multiplier,
+        );
 
         let group: Vec<&str> = expanded
             .iter()
@@ -793,7 +819,12 @@ option \"operating_currency\" \"USD\"
     #[test]
     fn expand_pads_does_not_displace_unrelated_same_date_directives() {
         let load = load_source(SAME_DATE_LEDGER);
-        let (expanded, lines) = expand_pads(load.directives, load.directive_lines, &0u32);
+        let (expanded, lines) = expand_pads(
+            load.directives,
+            load.directive_lines,
+            &0u32,
+            load.tolerance_multiplier,
+        );
 
         let synth_at = expanded
             .iter()

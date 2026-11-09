@@ -127,7 +127,7 @@ This document catalogs all validation errors and warnings with their trigger con
 
 **Code:** `E2003`
 
-**Condition:** `pad` directive that inserts no padding (beancount's `Unused Pad entry`): no subsequent `balance` on its account, every balance it reaches already holds, or a later `pad` on the account supersedes it.
+**Condition:** `pad` directive that inserts no padding (beancount's `Unused Pad entry`): no subsequent `balance` on its account, every balance it reaches already holds (within that balance's tolerance), or a later `pad` on the account supersedes it.
 
 **Message:** `Pad directive for {account} has no subsequent balance assertion for {currency}`
 
@@ -136,6 +136,16 @@ This document catalogs all validation errors and warnings with their trigger con
 ### MULTIPLE_PAD_FOR_BALANCE (removed in 0.25.0)
 
 **Code:** `E2004`, retired: not reported since 0.25.0, and not to be reused. A pad superseded by a later one before the balance is a `PAD_WITHOUT_BALANCE` (`E2003`), as in beancount.
+
+### PAD_WITH_COST
+
+**Code:** `E2005`
+
+**Condition:** A `pad` inserts padding for a `balance` in a currency that the padded account or one of its sub-accounts holds at cost (beancount's `Attempt to pad an entry with cost`). Reported once for each lot held at cost in that currency; the padding, which has no cost, is still inserted.
+
+**Message:** `Attempt to pad an entry with cost for balance: {inventory}`
+
+**Severity:** Error
 
 ## Transaction Errors
 

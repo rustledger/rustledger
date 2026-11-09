@@ -328,7 +328,10 @@ impl Ledger {
             !booked.iter().any(|d| matches!(d, Directive::Transaction(t) if rustledger_booking::is_synthesized_pad(t))),
             "balance_view called on a Ledger whose directives already contain synth pad transactions",
         );
-        rustledger_booking::merge_with_padding_owned(booked)
+        rustledger_booking::merge_with_padding_owned(
+            booked,
+            self.options.inferred_tolerance_multiplier,
+        )
     }
 }
 

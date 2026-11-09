@@ -205,7 +205,10 @@ pub fn query(source: &str, query_str: &str) -> Result<JsValue, JsError> {
     // (#2823). The same constructor as the CLI and the FFI component.
     let source_map = &load.source_map;
     let spanned = crate::helpers::spanned_directives(&load.directives, &load.directive_spans);
-    let directives = merge_with_padding_spanned(&spanned);
+    let directives = merge_with_padding_spanned(
+        &spanned,
+        crate::helpers::tolerance_multiplier_from_raw(&load.parse_result.options),
+    );
     let options = &load.parse_result.options;
     let memo = std::sync::OnceLock::new();
     let mut executor = Executor::for_ledger(
@@ -314,7 +317,10 @@ pub fn expand_pads(source: &str) -> Result<JsValue, JsError> {
     let mut errors = load.reported_errors();
 
     // Process pads
-    let pad_result = process_pads(&load.directives);
+    let pad_result = process_pads(
+        &load.directives,
+        crate::helpers::tolerance_multiplier_from_raw(&load.parse_result.options),
+    );
     errors.extend(
         pad_result
             .errors
@@ -889,7 +895,10 @@ fn query_with_filesystem(
     // Pad-expanded and spanned, so the source columns resolve (#2825); the
     // context carries the validating load's discrepancies (#2823). The same
     // constructor as the CLI and the FFI component.
-    let directives = merge_with_padding_spanned(&ledger.directives);
+    let directives = merge_with_padding_spanned(
+        &ledger.directives,
+        ledger.options.inferred_tolerance_multiplier,
+    );
     let mut executor = Executor::for_ledger(
         &directives,
         &ledger.source_map,

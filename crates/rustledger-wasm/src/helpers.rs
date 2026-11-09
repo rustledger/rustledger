@@ -424,6 +424,16 @@ pub fn summary_accounts_from_raw(
     rustledger_query::executor::SummaryAccounts::from_options(&options_from_raw(options))
 }
 
+/// The `tolerance_multiplier` a single-source ledger's raw option tuples
+/// set, which the padding a query inserts measures a balance's tolerance with
+/// (#2901). Read through the loader's [`rustledger_loader::Options`], like
+/// [`booking_method_from_raw`].
+pub fn tolerance_multiplier_from_raw(
+    options: &[(String, String, rustledger_parser::Span)],
+) -> rustledger_core::Decimal {
+    options_from_raw(options).inferred_tolerance_multiplier
+}
+
 /// The loader's [`rustledger_loader::Options`] for raw option tuples, applied
 /// in order through [`rustledger_loader::Options::set`] so its parse and
 /// last-wins rules hold.

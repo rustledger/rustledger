@@ -37,8 +37,8 @@ pub use interpolate::{
 };
 pub use pad::{
     PadError, PadOrigin, PadPlan, PadResult, PlannedPadding, SYNTH_PAD_NARRATION_PREFIX, UnusedPad,
-    is_synthesized_pad, merge_with_padding, merge_with_padding_owned, merge_with_padding_spanned,
-    pad_insertion_index, plan_pads, process_pads,
+    balance_tolerance, is_synthesized_pad, merge_with_padding, merge_with_padding_owned,
+    merge_with_padding_spanned, pad_insertion_index, plan_pads, process_pads,
 };
 
 use bigdecimal::BigDecimal;
@@ -46,6 +46,10 @@ use rust_decimal::Decimal;
 use rust_decimal::prelude::Signed;
 use rustc_hash::FxHashMap;
 use rustledger_core::{Amount, Currency, IncompleteAmount, Transaction};
+
+/// Beancount's default `tolerance_multiplier` option, 0.5: for a caller that
+/// has no ledger options, such as a WIT call that carries none.
+pub const DEFAULT_TOLERANCE_MULTIPLIER: Decimal = Decimal::from_parts(5, 0, 0, false, 1);
 
 /// Option knobs for [`transaction_tolerances`], mirroring the ledger options
 /// that drive tolerance inference (`tolerance_multiplier`,
@@ -90,7 +94,7 @@ impl Default for TolerancePolicy {
     /// check's slack and interpolation's quantization.
     fn default() -> Self {
         Self {
-            multiplier: Decimal::new(5, 1),
+            multiplier: DEFAULT_TOLERANCE_MULTIPLIER,
             infer_from_cost: false,
             defaults: FxHashMap::default(),
         }

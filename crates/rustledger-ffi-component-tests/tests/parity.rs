@@ -796,7 +796,8 @@ option \"operating_currency\" \"USD\"
         "fixture must load without errors ({} found)",
         native.errors.len()
     );
-    let padded = rustledger_booking::merge_with_padding(&native.directives);
+    let padded =
+        rustledger_booking::merge_with_padding(&native.directives, native.tolerance_multiplier);
     let scope = rustledger_returns::Scope::new(investments.clone(), income.clone());
     let end = "2021-01-01".parse().expect("date");
     let direct = rustledger_query::scope_returns(&padded, &scope, "USD", end)
@@ -1403,7 +1404,8 @@ option \"operating_currency\" \"USD\"
 
         // Native reference: the same crate the CLI report runs.
         let native = rustledger_ffi_wasi::helpers::load_source(LEDGER);
-        let padded = rustledger_booking::merge_with_padding(&native.directives);
+        let padded =
+            rustledger_booking::merge_with_padding(&native.directives, native.tolerance_multiplier);
         let types = rustledger_core::AccountTypes::default();
         let budgets = rustledger_budget::Budgets::from_directives(&padded);
         let want = budgets.compare(

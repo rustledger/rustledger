@@ -24,16 +24,19 @@ use crate::types::{Error, FormatResult, LedgerOptions, PadResult, QueryResult};
 // =============================================================================
 
 /// The pad-expanded, spanned directives a ledger's queries run on, built
-/// once per ledger from its plain directives and kept spans (#2825).
+/// once per ledger from its plain directives and kept spans (#2825), padded
+/// with the ledger's `tolerance_multiplier` (#2901).
 fn query_directives<'c>(
     cache: &'c std::cell::OnceCell<Vec<rustledger_core::Spanned<Directive>>>,
     directives: &[Directive],
     spans: &[crate::helpers::DirectiveSpan],
+    tolerance_multiplier: rustledger_core::Decimal,
 ) -> &'c [rustledger_core::Spanned<Directive>] {
     cache.get_or_init(|| {
-        rustledger_booking::merge_with_padding_spanned(&crate::helpers::spanned_directives(
-            directives, spans,
-        ))
+        rustledger_booking::merge_with_padding_spanned(
+            &crate::helpers::spanned_directives(directives, spans),
+            tolerance_multiplier,
+        )
     })
 }
 
@@ -113,10 +116,13 @@ fn execute_query(
     }
 }
 
-fn execute_expand_pads(directives: &[Directive]) -> Result<JsValue, JsError> {
+fn execute_expand_pads(
+    directives: &[Directive],
+    tolerance_multiplier: rustledger_core::Decimal,
+) -> Result<JsValue, JsError> {
     use rustledger_booking::process_pads;
 
-    let pad_result = process_pads(directives);
+    let pad_result = process_pads(directives, tolerance_multiplier);
 
     let result = PadResult {
         // The source stream, verbatim — `process_pads` no longer
@@ -391,6 +397,7 @@ impl ParsedLedger {
             &self.query_directives,
             &self.directives,
             &self.directive_spans,
+            crate::helpers::tolerance_multiplier_from_raw(&self.parse_result.options),
         );
         let options = &self.parse_result.options;
         execute_query(
@@ -461,7 +468,10 @@ impl ParsedLedger {
             };
             return to_js(&result);
         }
-        execute_expand_pads(&self.directives)
+        execute_expand_pads(
+            &self.directives,
+            crate::helpers::tolerance_multiplier_from_raw(&self.parse_result.options),
+        )
     }
 
     /// Run a native plugin on this ledger.
@@ -660,6 +670,10 @@ pub struct Ledger {
     /// The `account_previous_*` accounts `FROM ... OPEN ON` summarizes into
     /// (#2401). Persisted in the cache payload, like `account_types`.
     summary_accounts: rustledger_query::executor::SummaryAccounts,
+    /// The `tolerance_multiplier` option, which the padding a query inserts
+    /// measures a balance's tolerance with (#2901). Persisted in the cache
+    /// payload, like `account_types`.
+    tolerance_multiplier: rustledger_core::Decimal,
     /// Processing errors (load, booking, validation).
     errors: Vec<Error>,
     /// Whether `errors` holds one that stops a query from answering
@@ -723,6 +737,7 @@ impl Ledger {
                     account_types: rustledger_core::AccountTypes::default(),
                     booking_method: LoadOptions::default().booking_method,
                     summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
+                    tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
                     errors: vec![Error::new(format!("Load error: {e}"))],
                     editor_cache: editor::EditorCache::from_directives(&[]),
                     query_refused: true,
@@ -738,6 +753,7 @@ impl Ledger {
         let account_types = load_result.options.to_account_types();
         let summary_accounts =
             rustledger_query::executor::SummaryAccounts::from_options(&load_result.options);
+        let tolerance_multiplier = load_result.options.inferred_tolerance_multiplier;
 
         let load_options = LoadOptions {
             validate: true,
@@ -780,6 +796,7 @@ impl Ledger {
                     account_types,
                     booking_method,
                     summary_accounts,
+                    tolerance_multiplier,
                     errors,
                     editor_cache,
                     query_refused,
@@ -797,6 +814,7 @@ impl Ledger {
                 account_types,
                 booking_method,
                 summary_accounts,
+                tolerance_multiplier,
                 errors: vec![Error::new(format!("Processing error: {e}"))],
                 editor_cache: editor::EditorCache::from_directives(&[]),
                 query_refused: true,
@@ -865,6 +883,7 @@ impl Ledger {
             &self.query_directives,
             &self.directives,
             &self.directive_spans,
+            self.tolerance_multiplier,
         );
         execute_query(
             expanded,
@@ -892,7 +911,7 @@ impl Ledger {
     /// Expand pad directives.
     #[wasm_bindgen(js_name = "expandPads")]
     pub fn expand_pads(&self) -> Result<JsValue, JsError> {
-        execute_expand_pads(&self.directives)
+        execute_expand_pads(&self.directives, self.tolerance_multiplier)
     }
 
     /// Run a native plugin on this ledger.
@@ -938,6 +957,7 @@ impl Ledger {
                 self.account_types.expenses.clone(),
             ],
             booking_method: self.booking_method.to_string(),
+            tolerance_multiplier: self.tolerance_multiplier.to_string(),
             summary_account_names: vec![
                 self.summary_accounts.previous_balances.clone(),
                 self.summary_accounts.previous_earnings.clone(),
@@ -987,6 +1007,12 @@ impl Ledger {
             .booking_method
             .parse()
             .unwrap_or(rustledger_core::BookingMethod::Strict);
+        // Written by `serialize` from the loaded option, so it parses back; the
+        // fallback, beancount's default, only covers a hand-built blob.
+        let tolerance_multiplier = payload
+            .tolerance_multiplier
+            .parse()
+            .unwrap_or(rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER);
         let summary_accounts = match <[String; 6]>::try_from(payload.summary_account_names) {
             Ok(
                 [
@@ -1021,6 +1047,7 @@ impl Ledger {
             account_types,
             booking_method,
             summary_accounts,
+            tolerance_multiplier,
             errors: payload.errors,
             editor_cache,
             query_refused: payload.query_refused,
@@ -1116,6 +1143,7 @@ mod option_warning_severity_tests {
             options: LedgerOptions::default(),
             account_types: rustledger_core::AccountTypes::default(),
             booking_method: rustledger_core::BookingMethod::Strict,
+            tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
             summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
             errors: option_warnings_to_errors(&[warn("E7009")]),
             editor_cache: editor::EditorCache::from_directives(&[]),
@@ -1142,6 +1170,7 @@ mod option_warning_severity_tests {
             options: LedgerOptions::default(),
             account_types: rustledger_core::AccountTypes::default(),
             booking_method: rustledger_core::BookingMethod::Strict,
+            tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
             summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
             errors: option_warnings_to_errors(&[warn("E7001")]),
             editor_cache: editor::EditorCache::from_directives(&[]),
@@ -1184,6 +1213,7 @@ mod option_warning_severity_tests {
                 options: LedgerOptions::default(),
                 account_types: rustledger_core::AccountTypes::default(),
                 booking_method: rustledger_core::BookingMethod::Strict,
+                tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
                 summary_accounts: rustledger_query::executor::SummaryAccounts::default(),
                 errors,
                 editor_cache: editor::EditorCache::from_directives(&[]),

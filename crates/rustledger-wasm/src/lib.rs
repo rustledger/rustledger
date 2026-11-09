@@ -848,8 +848,9 @@ include "accounts.beancount"
         let cli = cli_process(source);
         let wasm = wasm_process(source);
 
-        let cli_merged = merge_with_padding(&cli);
-        let wasm_merged = merge_with_padding(&wasm);
+        let cli_merged = merge_with_padding(&cli, rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER);
+        let wasm_merged =
+            merge_with_padding(&wasm, rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER);
 
         assert_eq!(
             cli_merged, wasm_merged,
@@ -947,6 +948,7 @@ option "operating_currency" "EUR"
             options: processed.options.clone(),
             account_type_names: Vec::new(),
             booking_method: "STRICT".to_string(),
+            tolerance_multiplier: "0.5".to_string(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
             query_refused: false,

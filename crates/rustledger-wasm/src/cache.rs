@@ -406,7 +406,14 @@ use crate::types::{Error, LedgerOptions};
 /// sees the padding from the pad's date, and an account referenced before its
 /// later `open` is inactive. A v84 blob would keep serving the old errors.
 /// (v83 was never released: #2896 held it before #2872 took v84.)
-pub const CACHE_VERSION: u32 = 85;
+/// v86: loader v63, unchanged. ARCHIVED LAYOUT moved: the `Ledger` payload
+/// gained `tolerance_multiplier`, which the padding a query inserts measures a
+/// balance's tolerance with (#2901); a v85 blob has no such field. And
+/// `Ledger`'s error list moves: a pad pads for a balance on a sub-account and
+/// counts only its own padding, a difference within the balance's tolerance
+/// is not padded (an `Unused Pad entry`), and padding a currency held at cost
+/// is `E2005`.
+pub const CACHE_VERSION: u32 = 86;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -492,6 +499,10 @@ pub struct LedgerPayload {
     /// under `option "booking_method" "NONE"` would replay as STRICT and
     /// refuse `BALANCES` (#2386). A string for the same reason as above.
     pub booking_method: String,
+    /// The `tolerance_multiplier` option (`Decimal`'s `Display` form), which
+    /// the padding a query inserts measures a balance's tolerance with
+    /// (#2901). A string for the same reason as above.
+    pub tolerance_multiplier: String,
     /// `[previous_balances, previous_earnings, previous_conversions,
     /// current_earnings, current_conversions, conversion_currency]`, what
     /// `FROM ... OPEN ON / CLOSE / CLEAR` summarize into (#2401, #2406). Plain
@@ -852,6 +863,7 @@ mod tests {
                 "Expenses".to_string(),
             ],
             booking_method: "NONE".to_string(),
+            tolerance_multiplier: "0.25".to_string(),
             summary_account_names: vec![
                 "Eigenkapital:Anfang".to_string(),
                 "Eigenkapital:Vorjahr".to_string(),
@@ -870,6 +882,7 @@ mod tests {
         assert_eq!(restored.options.operating_currencies, ["USD"]);
         assert_eq!(restored.options.title.as_deref(), Some("Test"));
         assert_eq!(restored.booking_method, "NONE");
+        assert_eq!(restored.tolerance_multiplier, "0.25");
         assert_eq!(
             restored.summary_account_names,
             [
@@ -930,6 +943,7 @@ option "operating_currency" "USD"
             options: LedgerOptions::default(),
             account_type_names: Vec::new(),
             booking_method: "STRICT".to_string(),
+            tolerance_multiplier: "0.5".to_string(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
             query_refused: false,
@@ -955,6 +969,7 @@ option "operating_currency" "USD"
             options: LedgerOptions::default(),
             account_type_names: Vec::new(),
             booking_method: "STRICT".to_string(),
+            tolerance_multiplier: "0.5".to_string(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
             query_refused: false,
@@ -998,6 +1013,7 @@ option "operating_currency" "USD"
             options: LedgerOptions::default(),
             account_type_names: Vec::new(),
             booking_method: "STRICT".to_string(),
+            tolerance_multiplier: "0.5".to_string(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
             query_refused: false,

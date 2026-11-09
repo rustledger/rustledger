@@ -23,6 +23,7 @@
 //! | E2002 | Balance exceeds explicit tolerance |
 //! | E2003 | Pad without subsequent balance |
 //! | E2004 | Retired in 0.25.0 (was: multiple pads for one balance) |
+//! | E2005 | Pad of a currency held at cost |
 //! | E3001 | Transaction does not balance |
 //! | E3002 | Multiple missing amounts in transaction |
 //! | E3003 | Transaction has no postings |
@@ -50,7 +51,6 @@ mod validators;
 mod booking_record_tests;
 
 pub use error::{ErrorCode, Severity, ValidationError, is_advisory_only_code};
-pub use validators::balance::balance_tolerance;
 
 /// Which phase of two-phase validation to run.
 ///
@@ -332,6 +332,10 @@ pub(crate) struct PadState {
     padding: FxHashMap<usize, Vec<rustledger_booking::PlannedPadding>>,
     /// The `pad`s that insert no padding, by index.
     unused: FxHashSet<usize>,
+    /// The padding inserted for each `balance` (the padded account and the
+    /// units), by the balance's index in the late stream, for the "pad an
+    /// entry with cost" check (`validators::balance::check_padding_at_cost`).
+    padded_for: FxHashMap<usize, Vec<(Account, rustledger_core::Amount)>>,
     /// Pad amounts that could not be computed or applied, by the index of
     /// the `balance` they were for.
     failed: FxHashMap<usize, rustledger_booking::PadError>,
@@ -356,7 +360,12 @@ impl PadState {
     /// those from the validator's own inventories.
     fn load(&mut self, plan: rustledger_booking::PadPlan) {
         self.padding.clear();
+        self.padded_for.clear();
         for padding in plan.paddings {
+            self.padded_for
+                .entry(padding.origin.balance)
+                .or_default()
+                .push((padding.target.clone(), padding.units.clone()));
             self.padding
                 .entry(padding.origin.pad)
                 .or_default()
@@ -370,6 +379,12 @@ impl PadState {
     /// `balance` at `index` (#1863), if any.
     pub(crate) fn failure_of(&self, index: usize) -> Option<&rustledger_booking::PadError> {
         self.failed.get(&index)
+    }
+
+    /// The padding inserted for the `balance` at `index`: the padded account
+    /// and the units, one entry per pad group that padded for it.
+    pub(crate) fn padded_for(&self, index: usize) -> &[(Account, rustledger_core::Amount)] {
+        self.padded_for.get(&index).map_or(&[], Vec::as_slice)
     }
 
     /// The padding entries of the `pad` at `index`.
@@ -793,7 +808,10 @@ fn validate_phase_inner<D: ValidatableDirective>(
             .iter()
             .any(|(_, _, d)| matches!(d.directive(), Directive::Pad(_)))
     {
-        let plan = rustledger_booking::plan_pads(keyed.iter().map(|(_, i, d)| (*i, d.directive())));
+        let plan = rustledger_booking::plan_pads(
+            keyed.iter().map(|(_, i, d)| (*i, d.directive())),
+            state.options.tolerance_multiplier,
+        );
         state.pads.load(plan);
     }
 

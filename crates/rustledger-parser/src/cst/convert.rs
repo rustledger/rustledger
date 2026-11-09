@@ -310,15 +310,23 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
             }
             // State-only side effects: mutate the inherited
             // tag/meta sets that apply to subsequent directives.
+            // A header with an invalid token on it is never reduced by
+            // beancount's grammar, so it pushes or pops nothing there: a later
+            // `poptag` of the tag is reported as absent, an earlier push stays
+            // unbalanced (`header_has_invalid_token`).
             ast::Directive::Pushtag(node) => {
-                if let Some(tag_token) = node.tag() {
+                if !header_has_invalid_token(node.syntax())
+                    && let Some(tag_token) = node.tag()
+                {
                     let span = node_span(node.syntax(), bom_offset);
                     tag_stack.push((Tag::new(tag_token.text().trim_start_matches('#')), span));
                 }
                 None
             }
             ast::Directive::Poptag(node) => {
-                if let Some(tag_token) = node.tag() {
+                if !header_has_invalid_token(node.syntax())
+                    && let Some(tag_token) = node.tag()
+                {
                     let name = tag_token.text().trim_start_matches('#');
                     if let Some(pos) = tag_stack.iter().rposition(|(t, _)| t.as_str() == name) {
                         tag_stack.remove(pos);
@@ -332,7 +340,8 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
                 None
             }
             ast::Directive::Pushmeta(node) => {
-                if let Some(key_token) = node.key()
+                if !header_has_invalid_token(node.syntax())
+                    && let Some(key_token) = node.key()
                     && let Some(value) = pushmeta_value(node.syntax())
                 {
                     let key = key_token.text_without_colon().to_string();
@@ -342,7 +351,9 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
                 None
             }
             ast::Directive::Popmeta(node) => {
-                if let Some(key_token) = node.key() {
+                if !header_has_invalid_token(node.syntax())
+                    && let Some(key_token) = node.key()
+                {
                     let key = key_token.text_without_colon().to_string();
                     if let Some(pos) = meta_stack.iter().rposition(|(k, _, _)| k == &key) {
                         meta_stack.remove(pos);
@@ -475,7 +486,8 @@ fn parse_via_cst_inner(source: &str, collect_occurrences: bool, use_green: bool)
     // own (an invalid date included) is no repeat.
     report_duplicate_metadata(source_file.syntax(), bom_offset, &mut errors);
     errors.sort_by_key(|e| e.span.start);
-    drop_errors_inside_a_line_error(&mut errors, stripped, bom_offset);
+    quiet_after_invalid_tokens(&mut errors, source_file.syntax(), stripped, bom_offset);
+    drop_errors_inside_a_line_error(&mut errors, stripped, bom_offset, &grammar_failures);
     name_misspelled_booleans(&mut errors, stripped, bom_offset);
 
     // Post-pass: align directive spans with the legacy parser's
@@ -619,16 +631,22 @@ fn convert_open(
     reject_tags_and_links(node.syntax(), "open", bom_offset, errors);
     let account = Account::new(node.account()?.text());
     let currencies: Vec<Currency> = node.currencies().map(|c| Currency::new(c.text())).collect();
-    let booking = node.booking_method().and_then(|s| s.text_decoded());
+    let mut booking = node.booking_method().and_then(|s| s.text_decoded());
     let span = node_span(node.syntax(), bom_offset);
-    if let Some(b) = &booking
-        && !VALID_BOOKING_METHODS.contains(&b.as_str())
-    {
-        errors.push(crate::ParseError::new(
-            crate::ParseErrorKind::InvalidBookingMethod(b.clone()),
-            span,
-        ));
-        return None;
+    if let Some(b) = booking.take_if(|b| !VALID_BOOKING_METHODS.contains(&b.as_str())) {
+        // beancount checks the booking method when it builds the directive,
+        // which it never does for a statement with an invalid token in it, on
+        // its header or a metadata line: the token is its only error there
+        // (`open Assets:C$;c "x"`, #2872). Here the directive is kept, as
+        // one with an invalid token is, without the booking method, and the
+        // token's own error is the one reported.
+        if !holds_an_invalid_token(node.syntax().green()) {
+            errors.push(crate::ParseError::new(
+                crate::ParseErrorKind::InvalidBookingMethod(b),
+                span,
+            ));
+            return None;
+        }
     }
     let meta = convert_meta_entries(node.syntax());
 
@@ -1120,6 +1138,14 @@ fn check_balance_tolerance(
     // the tilde -- the same erase-the-difference behavior as the mismatched
     // currency. beancount calls it a syntax error.
     if numbers == 0 {
+        // An invalid token right after the `~` is the line's error, the
+        // lexer's own: beancount's grammar never sees a missing tolerance.
+        if tail
+            .first()
+            .is_some_and(|t| t.kind() == crate::SyntaxKind::ERROR_TOKEN)
+        {
+            return None;
+        }
         let range = toks[tilde].text_range();
         let start: u32 = range.start().into();
         let end: u32 = range.end().into();
@@ -3840,6 +3866,22 @@ fn transaction_header_check(
     }
 }
 
+/// Whether `node`'s header line holds an invalid token (`ERROR_TOKEN`). The
+/// line is read by `header_line_tokens`, the header walk the header check
+/// uses: past the blank and comment lines stored at the start of the node,
+/// up to the `NEWLINE` that ends the header. beancount's grammar never reduces
+/// such a line to its directive, so a `pushtag`, `poptag`, `pushmeta` or
+/// `popmeta` with one changes no state there (`pushtag" #t`, `pushtag #t $x`).
+/// An `open` asks `holds_an_invalid_token` instead, as its metadata lines
+/// belong to the same statement. Walks GREEN children only.
+fn header_has_invalid_token(node: &crate::SyntaxNode) -> bool {
+    let mut tokens = Vec::new();
+    header_line_tokens(node, &mut tokens);
+    tokens
+        .iter()
+        .any(|(kind, _)| *kind == crate::SyntaxKind::ERROR_TOKEN)
+}
+
 /// A directive's header-line tokens into `tokens` (cleared first): its direct
 /// tokens from the first content token (past leading trivia) up to the
 /// `NEWLINE` that ends the line. Returns where the line's content ends.
@@ -3881,7 +3923,9 @@ fn header_line_tokens(
 /// already reported. A directive with one of them anywhere on its header line
 /// (an `ERROR_TOKEN`, a mid-line BOM, an indented directive, a bare currency
 /// in a custom value, ...) is not checked again, so a problem is reported
-/// once.
+/// once, with one exception (`report_defects_before`): when that first error
+/// is an invalid token's, a defect BEFORE it is still reported, as beancount
+/// reports its grammar error there and the lexer's on top.
 ///
 /// Walks the GREEN children (kind and length, no red-node allocation) into
 /// `tokens`, a buffer the caller reuses across directives, so the check costs
@@ -3898,21 +3942,21 @@ fn directive_header_check(
     let off = bom_offset as usize;
     let from = usize::from(node.text_range().start()) + off;
     let first_after = prior_error_starts.partition_point(|&s| s < from);
-    if prior_error_starts
+    let first_prior = prior_error_starts
         .get(first_after)
-        .is_some_and(|&s| s <= end + off)
-    {
-        return None;
-    }
+        .copied()
+        .filter(|&s| s <= end + off);
+    let before = report_defects_before(first_prior, tokens, off)?;
     let Some(defect) =
         super::directive_header::first_header_defect(node.kind(), tokens, end, stripped)
+            .filter(|d| d.range.start + off < before)
     else {
         // A value date that is not a real calendar date (`custom "x"
         // 2024-02-30`) is reported by `report_invalid_dates`, for every line.
         // A grammatical `pushmeta` value can still be an expression with no
         // value (`pushmeta kk: 1/0`): the same check, and the same error, as a
         // metadata line (#2812).
-        if node.kind() != crate::SyntaxKind::PUSHMETA_DIRECTIVE {
+        if node.kind() != crate::SyntaxKind::PUSHMETA_DIRECTIVE || first_prior.is_some() {
             return None;
         }
         let range = unevaluable_meta_value(tokens, stripped)?;
@@ -3930,6 +3974,31 @@ fn directive_header_check(
         )),
         Span::new(defect.range.start + off, defect.range.end + off),
     ))
+}
+
+/// How far a line check may still report the defect it finds, given
+/// `first_prior`, the first error the tree walks already reported on the line
+/// (BOM frame), and the line's `tokens` (CST frame, `off` the BOM offset).
+///
+/// No prior error: anywhere (`usize::MAX`). A prior error at one of the line's
+/// `ERROR_TOKEN`s, the lexer's own `Invalid token` error: only before it.
+/// beancount's lexer reports every invalid token whatever its grammar does, so
+/// when its grammar fails at a readable token first (`pushtag #$t`, where it
+/// expects a tag at the `#`), both are reported; when the invalid token comes
+/// first, the grammar never reaches the rest of the line. Any other prior
+/// error: `None`, the line is not checked again.
+fn report_defects_before(
+    first_prior: Option<usize>,
+    tokens: &[(crate::SyntaxKind, std::ops::Range<usize>)],
+    off: usize,
+) -> Option<usize> {
+    let Some(at) = first_prior else {
+        return Some(usize::MAX);
+    };
+    tokens
+        .iter()
+        .any(|(k, r)| *k == crate::SyntaxKind::ERROR_TOKEN && r.start + off == at)
+        .then_some(at)
 }
 
 /// Reject a metadata line that beancount's grammar refuses (#2802, stage 2):
@@ -4037,24 +4106,31 @@ impl MetaCheck<'_> {
         let off = self.off;
         let (from, to) = (start + off, end + off);
         let first_after = self.prior_error_starts.partition_point(|&s| s < from);
-        let reported = self
+        let first_prior = self
             .prior_error_starts
             .get(first_after)
-            .is_some_and(|&s| s <= to)
-            || self.errors[self.errors_before..]
-                .iter()
-                .any(|e| (from..=to).contains(&e.span.start));
-        if reported {
+            .copied()
+            .filter(|&s| s <= to);
+        if self.errors[self.errors_before..]
+            .iter()
+            .any(|e| (from..=to).contains(&e.span.start))
+        {
             return;
         }
+        let Some(before) = report_defects_before(first_prior, self.tokens, off) else {
+            return;
+        };
         let Some(defect) =
             super::directive_header::first_meta_defect(self.tokens, end, self.stripped)
+                .filter(|d| d.range.start + off < before)
         else {
             // A date that is not a real calendar date (`kk: 2024-02-30`) is
             // reported by `report_invalid_dates`, for every line.
             // Grammatical, but an expression with no value (`kk: 1/0`) is
             // still an error, from the check `pushmeta` uses too.
-            if let Some(range) = unevaluable_meta_value(self.tokens, self.stripped) {
+            if first_prior.is_none()
+                && let Some(range) = unevaluable_meta_value(self.tokens, self.stripped)
+            {
                 self.errors.push(unevaluable_value_error(
                     "metadata",
                     Span::new(range.start + off, range.end + off),
@@ -4150,19 +4226,28 @@ fn posting_line_check(
         }
         let (from, to) = (posting_start + off, end + off);
         let first_after = prior_error_starts.partition_point(|&s| s < from);
-        let reported = prior_error_starts.get(first_after).is_some_and(|&s| s < to)
-            || errors[errors_before..]
-                .iter()
-                .any(|e| (from..to).contains(&e.span.start));
-        if reported {
+        let first_prior = prior_error_starts
+            .get(first_after)
+            .copied()
+            .filter(|&s| s < to);
+        if errors[errors_before..]
+            .iter()
+            .any(|e| (from..to).contains(&e.span.start))
+        {
             continue;
         }
+        let Some(before) = report_defects_before(first_prior, tokens, off) else {
+            continue;
+        };
         let Some(defect) = super::directive_header::first_posting_defect(tokens, end, stripped)
+            .filter(|d| d.range.start + off < before)
         else {
             // A cost date that is not a real calendar date (`{1 USD,
             // 2024-02-30}`) is reported by `report_invalid_dates`.
             // Grammatical; beancount's builder still rejects some postings.
-            if let Some((range, message)) = posting_builder_error(tokens, stripped) {
+            if first_prior.is_none()
+                && let Some((range, message)) = posting_builder_error(tokens, stripped)
+            {
                 errors.push(crate::ParseError::new(
                     crate::ParseErrorKind::SyntaxError(message),
                     Span::new(range.start + off, range.end + off),
@@ -4651,6 +4736,7 @@ fn emit_error_node_line(
     is_section: bool,
     line_start: Option<u32>,
     end: u32,
+    invalid: &[std::ops::Range<usize>],
     bom_offset: u32,
     stripped: &str,
     out: &mut Vec<crate::ParseError>,
@@ -4678,6 +4764,7 @@ fn emit_error_node_line(
                 .with_hint(crate::diagnostics::BOM_REMOVAL_HINT),
         );
     }
+    report_invalid_tokens_of_error_line(ls as usize, invalid, stripped, bom_offset, out);
 }
 
 fn error_node_check(
@@ -4691,6 +4778,7 @@ fn error_node_check(
         let mut line_start: Option<u32> = None;
         let mut first_non_trivia: Option<crate::SyntaxKind> = None;
         let mut section = false;
+        let mut invalid: Vec<std::ops::Range<usize>> = Vec::new();
         for el in child.children_with_tokens() {
             let rowan::NodeOrToken::Token(t) = el else {
                 continue;
@@ -4707,14 +4795,19 @@ fn error_node_check(
                     section,
                     line_start,
                     end,
+                    &invalid,
                     bom_offset,
                     stripped,
                     out,
                 );
                 line_start = None;
+                invalid.clear();
                 first_non_trivia = None;
                 section = false;
                 continue;
+            }
+            if t.kind() == crate::SyntaxKind::ERROR_TOKEN {
+                invalid.push(start as usize..end as usize);
             }
             if first_non_trivia.is_none() && !is_trivia_kind(t.kind()) {
                 first_non_trivia = Some(t.kind());
@@ -4731,6 +4824,7 @@ fn error_node_check(
             section,
             line_start,
             end,
+            &invalid,
             bom_offset,
             stripped,
             out,
@@ -5242,8 +5336,9 @@ fn report_invalid_dates(
         }
         // beancount's lexer takes everything from an invalid character up to
         // the next space, tab or line end as ONE invalid token, so a date
-        // inside that run is never read, and never named. Here the error token
-        // is the character alone, and the date after it lexes on its own.
+        // inside that run is never read, and never named. The lexer forms the
+        // same run (#2872), except after a mid-file BOM, which keeps its own
+        // extent there, so a date glued to one still lexes on its own.
         let between = &stripped[prev_end..range.start];
         #[cfg(test)]
         test_counters::DATE_LINE_SCANNED_BYTES.with(|c| c.set(c.get() + between.len()));
@@ -8785,6 +8880,9 @@ mod custom_rejected_values {
 /// and the line error already stands for it: it is dropped, and a generic
 /// line error takes over its name (`unexpected input: invalid token 'h'`,
 /// as bean-check's `Invalid token: 'h'`), so the editor still names it.
+/// The same holds on a header line the converter dropped with a whole-node
+/// error, when the header grammar (`grammar_failures`) first fails at that
+/// very token (`2024-01-01 open Ass'ets:A`, #2872).
 /// Every later `ERROR_TOKEN` keeps its error, as each is one more `Invalid
 /// token` there. The line error is the one kept, not the inline one,
 /// because the formatter's verbatim-copy ranges are read from the outer
@@ -8801,6 +8899,7 @@ fn drop_errors_inside_a_line_error(
     errors: &mut Vec<crate::ParseError>,
     stripped: &str,
     bom_offset: u32,
+    grammar_failures: &[(usize, usize, usize)],
 ) {
     use crate::logos_lexer::Token;
     let is_generic = |e: &crate::ParseError| match &e.kind {
@@ -8898,7 +8997,14 @@ fn drop_errors_inside_a_line_error(
                 let prefix = stripped
                     .get(line_start - bom..span.start - bom)
                     .unwrap_or_default();
-                if prefix.starts_with([' ', '\t']) && readable_start(prefix) {
+                // A directive the converter dropped, whose header grammar
+                // first fails at this very token: the whole-node error stands
+                // for the token's own (`2024-01-01 open Ass'ets:A`).
+                let header_fails_here = grammar_failures
+                    .binary_search_by_key(&errors[*outer].span.start, |&(s, _, _)| s)
+                    .is_ok_and(|j| grammar_failures[j].2 == span.start);
+                if header_fails_here || (prefix.starts_with([' ', '\t']) && readable_start(prefix))
+                {
                     dropped[i] = true;
                     renamed.push((*outer, i));
                 }
@@ -8928,6 +9034,215 @@ fn drop_errors_inside_a_line_error(
         index += 1;
         keep
     });
+}
+
+/// The `Invalid token` errors of one `ERROR_NODE` line, after its line error
+/// (`emit_error_node_line`, which both parse paths run this from).
+///
+/// beancount's lexer reports every token it cannot read, whatever its
+/// grammar does with the line: `foo bar$ baz` is three `Invalid token`
+/// errors there, `"plugin "p" "c"` a syntax error at the first string and
+/// `Invalid token: 'p"'`. The line error stands for the first of them when
+/// what comes before it is a start beancount's grammar reads
+/// (`readable_start_of_an_error_line`: `foo`, `2024-01-01 commodi*ty`), and
+/// is the grammar error otherwise; each other invalid token on the line gets
+/// its own error. One that holds a mid-file BOM is left to the line's BOM
+/// diagnostic. `invalid` holds the
+/// line's `ERROR_TOKEN` ranges (stripped frame) and `line_start` where its
+/// first token starts.
+pub(super) fn report_invalid_tokens_of_error_line(
+    line_start: usize,
+    invalid: &[std::ops::Range<usize>],
+    stripped: &str,
+    bom_offset: u32,
+    out: &mut Vec<crate::ParseError>,
+) {
+    let off = bom_offset as usize;
+    for (k, range) in invalid.iter().enumerate() {
+        let text = stripped.get(range.clone()).unwrap_or_default();
+        let starts_the_line = k == 0
+            && stripped
+                .get(line_start..range.start)
+                .is_some_and(readable_start_of_an_error_line);
+        // A run that starts with a blank is not an invalid token but the rest
+        // of a heading line after its `*`, which the lexer skips unread.
+        if starts_the_line || text.starts_with([' ', '\t']) || text.contains(crate::bom::BOM_CHAR) {
+            continue;
+        }
+        out.push(crate::ParseError::new(
+            crate::ParseErrorKind::SyntaxError(format!(
+                "unexpected input: invalid token '{}'",
+                invalid_token_name(text)
+            )),
+            Span::new(range.start + off, range.end + off),
+        ));
+    }
+}
+
+/// Whether `prefix`, the text of an `ERROR_NODE` line before its first invalid
+/// token, is one beancount's grammar reads without failing: nothing (past the
+/// indentation), or a date (`2024-01-01 commodi*ty USD`, where a directive
+/// keyword or flag is expected next). Then the invalid token is the line's
+/// first error and its line error stands for it. Any other prefix (a string,
+/// a number, an orphan indented account) is where the grammar fails first.
+fn readable_start_of_an_error_line(prefix: &str) -> bool {
+    let rest = prefix.trim_start_matches([' ', '\t']);
+    rest.is_empty()
+        || crate::logos_lexer::leading_date_len(rest)
+            .is_some_and(|n| rest[n..].trim_matches([' ', '\t']).is_empty())
+}
+
+/// Drop every error that starts on a line after its first invalid token,
+/// other than the lexer's own errors there (#2872).
+///
+/// beancount's lexer reports each token it cannot read, and its grammar never
+/// sees one: the statement fails at it, and bison's recovery discards the rest
+/// of the line in silence, reporting nothing more for it. So
+/// `custom "b" $10 /6J` is `Invalid token: '$10'` alone there, never also a
+/// complaint about the bare `/6J` after it. Our per-construct checks each ran
+/// on whatever followed. Kept after the invalid token: another invalid
+/// token's error (an error starting at an `ERROR_TOKEN`), an invalid date
+/// (beancount builds dates in its lexer, so it reports them wherever they
+/// stand) and a mid-file BOM. An invalid token that starts with a BOM does
+/// not count, as it is layout-transparent here (see the lexer's `Err` arm).
+///
+/// `errors` is sorted by start and stays so. Walks the green tree for the
+/// `ERROR_TOKEN`s, only when there are errors at all, and steps over each
+/// byte of the source at most once looking for line ends.
+fn quiet_after_invalid_tokens(
+    errors: &mut Vec<crate::ParseError>,
+    root: &crate::SyntaxNode,
+    stripped: &str,
+    bom_offset: u32,
+) {
+    use crate::SyntaxKind as K;
+    if errors.is_empty() {
+        return;
+    }
+    let off = bom_offset as usize;
+    let mut invalid: Vec<usize> = Vec::new();
+    let mut stack = vec![(
+        root.green().to_owned(),
+        usize::from(root.text_range().start()),
+    )];
+    while let Some((node, start)) = stack.pop() {
+        let mut at = start;
+        for child in node.children() {
+            match child {
+                rowan::NodeOrToken::Node(n) => {
+                    let len = usize::from(n.text_len());
+                    stack.push((n.to_owned(), at));
+                    at += len;
+                }
+                rowan::NodeOrToken::Token(t) => {
+                    if <crate::BeancountLanguage as rowan::Language>::kind_from_raw(t.kind())
+                        == K::ERROR_TOKEN
+                        && !t.text().starts_with(crate::bom::BOM_CHAR)
+                    {
+                        invalid.push(at);
+                    }
+                    at += t.text().len();
+                }
+            }
+        }
+    }
+    if invalid.is_empty() {
+        return;
+    }
+    invalid.sort_unstable();
+    let mut dropped = vec![false; errors.len()];
+    // The end (its `\n`, or the end of the source) of the last line handled.
+    let mut line_end = 0;
+    for &first in &invalid {
+        if first < line_end {
+            continue;
+        }
+        let line_start = stripped[line_end..first]
+            .rfind('\n')
+            .map_or(line_end, |i| line_end + i + 1);
+        let indented = &stripped[line_start..first];
+        let content = line_start + indented.len() - indented.trim_start_matches([' ', '\t']).len();
+        line_end = stripped[first..]
+            .find('\n')
+            .map_or(stripped.len(), |i| first + i);
+        let (at, to) = (first + off, line_end + off);
+        // Whether the line's grammar gets as far as the invalid token, asked
+        // at most once per line and only when an error contains the token.
+        let mut reaches: Option<bool> = None;
+        let mut i = errors.partition_point(|e| e.span.start <= content + off);
+        while let Some(e) = errors.get(i) {
+            if e.span.start > to {
+                break;
+            }
+            dropped[i] = if e.span.start < at {
+                // On an indented line, a check of a construct the invalid
+                // token sits inside (a cost spec, an amount expression, a
+                // posting's trailing tokens), when the line's grammar fails at
+                // that token, not before it: `{{2 .USD}}` is the invalid
+                // token alone in beancount, `{}{$` an `unexpected LCURL` at
+                // the second `{` and the token. Not a line error, which
+                // starts where the line's content does.
+                // On a header line such an error is where its grammar fails
+                // first (`price /6"E_X`: the price expects a currency at the
+                // `/`), and is kept.
+                content > line_start
+                    && e.span.end > at
+                    && matches!(e.kind, crate::ParseErrorKind::SyntaxError(_))
+                    && *reaches.get_or_insert_with(|| {
+                        indented_grammar_reaches(stripped, line_start, line_end, first)
+                    })
+            } else {
+                e.span.start > at
+                    && invalid.binary_search(&(e.span.start - off)).is_err()
+                    && !matches!(
+                        e.kind,
+                        crate::ParseErrorKind::InvalidDateValue(_)
+                            | crate::ParseErrorKind::BomInDirectiveBody
+                    )
+            };
+            i += 1;
+        }
+    }
+    let mut index = 0;
+    errors.retain(|_| {
+        let keep = !dropped[index];
+        index += 1;
+        keep
+    });
+}
+
+/// Whether beancount's grammar for the indented line `stripped[line_start..
+/// line_end]` (a posting, or a metadata line when it starts with a key) gets
+/// as far as the invalid token at `first` before it fails, so that token is
+/// the line's first error (`quiet_after_invalid_tokens`). The line is lexed
+/// alone and its tokens up to that one are run through the posting or
+/// metadata rule, the same rules `posting_line_check` and `meta_entry_check`
+/// apply. Linear in the line.
+fn indented_grammar_reaches(
+    stripped: &str,
+    line_start: usize,
+    line_end: usize,
+    first: usize,
+) -> bool {
+    use crate::SyntaxKind as K;
+    let line = &stripped[line_start..line_end];
+    let tokens: Vec<(K, std::ops::Range<usize>)> =
+        super::lossless_tokens::lossless_kind_tokens(line)
+            .into_iter()
+            .map(|(k, r)| (k, r.start + line_start..r.end + line_start))
+            .take_while(|(_, r)| r.start <= first)
+            .collect();
+    let end = tokens.last().map_or(first, |(_, r)| r.end);
+    let is_meta = tokens
+        .iter()
+        .find(|(k, _)| !matches!(k, K::WHITESPACE | K::COMMENT | K::BOM))
+        .is_some_and(|(k, _)| *k == K::META_KEY);
+    let defect = if is_meta {
+        super::directive_header::first_meta_defect(&tokens, end, stripped)
+    } else {
+        super::directive_header::first_posting_defect(&tokens, end, stripped)
+    };
+    defect.is_none_or(|d| d.range.start >= first)
 }
 
 /// An unreadable token's text as an error message names it: escaped (so a
@@ -9060,6 +9375,30 @@ fn report_no_metadata_continuations(
     }
 }
 
+/// Whether `node`'s subtree holds an invalid token (`ERROR_TOKEN`), other than
+/// one that starts with a mid-file BOM, which is layout-transparent here (see
+/// the lexer's `Err` arm). Walks green nodes only.
+fn holds_an_invalid_token(node: &rowan::GreenNodeData) -> bool {
+    use rowan::Language as _;
+    let mut stack = vec![node];
+    while let Some(n) = stack.pop() {
+        for child in n.children() {
+            match child {
+                rowan::NodeOrToken::Node(inner) => stack.push(inner),
+                rowan::NodeOrToken::Token(t) => {
+                    if crate::BeancountLanguage::kind_from_raw(t.kind())
+                        == crate::SyntaxKind::ERROR_TOKEN
+                        && !t.text().starts_with(crate::bom::BOM_CHAR)
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
+}
+
 /// Report a repeated metadata key on a transaction or a posting, as
 /// beancount does (#2893, #2813). Its grammar builds a transaction's and a
 /// posting's metadata checking each key against the ones before, and reports
@@ -9090,6 +9429,10 @@ fn report_no_metadata_continuations(
 ///
 /// rledger accepted a repeat silently and kept the last value, and a
 /// posting's written `filename:` / `lineno:` stood in for its real location.
+///
+/// A transaction with an invalid token anywhere in it is not checked at all:
+/// beancount's grammar never builds it (its recovery discards the whole
+/// statement), so the token is its only error there (#2872).
 ///
 /// Walks the green tree, only the transactions' children, so it costs no red
 /// nodes; each key is looked up in the keys before it on its owner, pairwise
@@ -9180,6 +9523,7 @@ fn report_duplicate_metadata(
         let len = len_of(child);
         if let NodeOrToken::Node(txn) = child
             && crate::BeancountLanguage::kind_from_raw(txn.kind()) == K::TRANSACTION
+            && !holds_an_invalid_token(txn)
         {
             // The header line: from the first non-trivia token to the end of
             // its NEWLINE.
@@ -9243,12 +9587,12 @@ fn report_duplicate_metadata(
 /// on such a word becomes `invalid token 'true' (booleans are written TRUE or
 /// FALSE)`, so the fix is in the message.
 ///
-/// The word is read from the source around the error (`True` lexes as the
-/// currency `T` and an error token `rue`): the ASCII letters on both sides,
-/// at most one more than the five of `false`, so `Truex` is left alone and a
-/// long word costs nothing. It is renamed only when it stands alone as a
-/// value: a line start or whitespace before it, and whitespace, a line end, a
-/// comment's `;` or the end of the source after it. Anything else around it
+/// The word is read from the source around the error: the ASCII letters on
+/// both sides, at most one more than the five of `false`, so `Truex` is left
+/// alone and a long word costs nothing. It is renamed only when it stands alone as a
+/// value: a line start or whitespace before it, and whitespace, a line end or
+/// the end of the source after it (a glued `;` is part of the invalid token,
+/// as in beancount: `true;c` is named whole). Anything else around it
 /// (`Assets:true`, `true.`, `True'`, `trueé`) makes it part of a longer token,
 /// which beancount names whole, so the generic message stays.
 fn name_misspelled_booleans(errors: &mut [crate::ParseError], stripped: &str, bom_offset: u32) {

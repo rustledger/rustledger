@@ -205,11 +205,23 @@ pub(super) fn first_header_defect_in(
                 && !matches!(src.as_bytes().get(r.end), None | Some(b' ' | b'\t' | b'\n'))
         })
         .map(|(_, r)| (HeaderDefect::GluedLetterFlag, r.clone()));
+    let first_invalid = tokens
+        .iter()
+        .find(|(k, _)| *k == SyntaxKind::ERROR_TOKEN)
+        .map(|(_, r)| r.start);
     let grammar = first_header_defect(tokens);
-    match (glued, grammar) {
+    let defect = match (glued, grammar) {
         (Some(g), Some(d)) => Some(if g.1.start <= d.1.start { g } else { d }),
         (g, d) => g.or(d),
+    }?;
+    // An invalid token (`ERROR_TOKEN`) at or before the defect is the
+    // header's first error, and the lexer reports it as its own: beancount's
+    // grammar never sees that token, so it reports no syntax error for the
+    // line on top of the `Invalid token`, and its builder does not run.
+    if first_invalid.is_some_and(|at| at <= defect.1.start) {
+        return None;
     }
+    Some(defect)
 }
 
 /// Diagnostic text for a defect. `text` is the source slice of the reported

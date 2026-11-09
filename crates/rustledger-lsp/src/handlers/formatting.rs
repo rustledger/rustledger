@@ -444,7 +444,7 @@ mod tests {
             for ws in [" ", "\t"] {
                 let source = format!("\u{FEFF}{marker}{ws}\n2024-01-01 open Assets:A\n@@@ junk\n");
                 let result = parse(&source);
-                assert_eq!(result.errors.len(), 1, "{source:?}: {:?}", result.errors);
+                assert_eq!(result.errors.len(), 2, "{source:?}: {:?}", result.errors);
                 let edits = handle_formatting(
                     &params(),
                     &source,
@@ -457,7 +457,7 @@ mod tests {
                     after.starts_with(&format!("\u{FEFF}{marker} \n")),
                     "{source:?} became {after:?}"
                 );
-                assert_eq!(parse(&after).errors.len(), 1, "{after:?}");
+                assert_eq!(parse(&after).errors.len(), 2, "{after:?}");
             }
         }
     }
@@ -465,7 +465,9 @@ mod tests {
     /// Surface cleanup (the parse-error fallback) keeps a line beancount
     /// ignores ignored: a lone column-0 marker with whitespace after it
     /// keeps one space, since a bare marker is an error (#2779). A bare
-    /// marker that already was an error is left alone.
+    /// marker that already was an error is left alone. The `@@@ junk` line is two
+    /// errors, as in beancount: the grammar fails at the `@@`, and `junk` is an
+    /// invalid token.
     #[test]
     fn surface_cleanup_keeps_whitespace_marker_lines_ignored() {
         for marker in ['#', '!', '&', '?', ':', '%', '*'] {
@@ -477,7 +479,7 @@ mod tests {
                     );
                     let result = parse(&source);
                     let before = result.errors.len();
-                    assert_eq!(before, 1, "{source:?}: {:?}", result.errors);
+                    assert_eq!(before, 2, "{source:?}: {:?}", result.errors);
                     let edits = handle_formatting(
                         &params(),
                         &source,
@@ -495,7 +497,7 @@ mod tests {
             }
             let source = format!("2024-01-01 open Assets:A\n{marker}\n@@@ junk\n");
             assert_eq!(clean_line(&marker.to_string()), marker.to_string());
-            assert_eq!(parse(&source).errors.len(), 2, "{source:?}");
+            assert_eq!(parse(&source).errors.len(), 3, "{source:?}");
         }
     }
 

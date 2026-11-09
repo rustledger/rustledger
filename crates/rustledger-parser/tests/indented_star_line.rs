@@ -68,7 +68,9 @@ fn assert_green_eq_red(src: &str) {
 
 const UNEXPECTED: &str = "parse error: unexpected input";
 
-/// One input: its exact errors (as spans of `unexpected input`), exact
+/// One input: its exact errors (as spans of `unexpected input`, or of
+/// `unexpected input: invalid token ...` for an invalid token after the first
+/// on its line, which beancount reports too), exact
 /// section-marker comments (as spans), and the opens that survive.
 struct Case {
     src: &'static str,
@@ -79,12 +81,14 @@ struct Case {
 
 fn check(case: &Case) {
     let result = parse(case.src);
-    let expected_errors: Vec<(String, usize, usize)> = case
-        .errors
-        .iter()
-        .map(|&(s, e)| (UNEXPECTED.to_string(), s, e))
-        .collect();
-    assert_eq!(errors(&result), expected_errors, "{:?}", case.src);
+    let got = errors(&result);
+    assert!(
+        got.iter().all(|(m, _, _)| m.starts_with(UNEXPECTED)),
+        "{:?}: {got:?}",
+        case.src
+    );
+    let spans: Vec<(usize, usize)> = got.iter().map(|&(_, s, e)| (s, e)).collect();
+    assert_eq!(spans, case.errors, "{:?}: {got:?}", case.src);
     let expected_comments: Vec<(String, usize, usize)> = case
         .comments
         .iter()
@@ -106,25 +110,25 @@ fn test_parse_indented_star_line_is_reported() {
         // the line start, as for any indented junk line (`  @@ x`).
         Case {
             src: "  * h x\n2024-01-02 open Assets:B\n",
-            errors: &[(2, 8)],
+            errors: &[(2, 8), (4, 5), (6, 7)],
             comments: &[],
             opens: &[B],
         },
         Case {
             src: "\t* h x\n2024-01-02 open Assets:B\n",
-            errors: &[(1, 7)],
+            errors: &[(1, 7), (3, 4), (5, 6)],
             comments: &[],
             opens: &[B],
         },
         Case {
             src: "2024-01-01 open Assets:A\n  * h x\n2024-01-02 open Assets:B\n",
-            errors: &[(25, 33)],
+            errors: &[(25, 33), (29, 30), (31, 32)],
             comments: &[],
             opens: &[A, B],
         },
         Case {
             src: "2024-01-01 open Assets:A\n  ** h x\n2024-01-02 open Assets:B\n",
-            errors: &[(25, 34)],
+            errors: &[(25, 34), (30, 31), (32, 33)],
             comments: &[],
             opens: &[A, B],
         },
@@ -138,19 +142,19 @@ fn test_parse_indented_star_line_is_reported() {
         },
         Case {
             src: "2024-01-01 open Assets:A\n  * h x\r\n2024-01-02 open Assets:B\r\n",
-            errors: &[(25, 34)],
+            errors: &[(25, 34), (29, 30), (31, 32)],
             comments: &[],
             opens: &[A, B],
         },
         Case {
             src: "2024-01-01 open Assets:A\n  * h x",
-            errors: &[(25, 32)],
+            errors: &[(25, 32), (29, 30), (31, 32)],
             comments: &[],
             opens: &[A],
         },
         Case {
             src: "2024-01-01 open Assets:A\n  ; c\n  * h x\n2024-01-02 open Assets:B\n",
-            errors: &[(31, 39)],
+            errors: &[(31, 39), (35, 36), (37, 38)],
             comments: &[],
             opens: &[A, B],
         },
@@ -168,13 +172,13 @@ fn test_parse_indented_star_line_with_quote_is_not_silent() {
     for case in [
         Case {
             src: "  * h \"x\n2024-01-02 open Assets:B\n2024-01-03 open Assets:C\n",
-            errors: &[(2, 9)],
+            errors: &[(2, 9), (4, 5), (6, 8)],
             comments: &[],
             opens: &[B, "2024-01-03 Assets:C"],
         },
         Case {
             src: "2024-01-01 open Assets:A\n  * h \"x\n2024-01-02 open Assets:B\n",
-            errors: &[(25, 34)],
+            errors: &[(25, 34), (29, 30), (31, 33)],
             comments: &[],
             opens: &[A, B],
         },
@@ -198,7 +202,7 @@ fn test_parse_star_after_bom_is_reported() {
         },
         Case {
             src: "\u{feff}  * h x\n2024-01-02 open Assets:B\n",
-            errors: &[(5, 11)],
+            errors: &[(5, 11), (7, 8), (9, 10)],
             comments: &[],
             opens: &[B],
         },
@@ -210,7 +214,10 @@ fn test_parse_star_after_bom_is_reported() {
 /// Column-0 headings are unchanged: no error, one section-marker comment
 /// spanning exactly the heading line, the directives around it kept. In a
 /// multi-line error node the column-0 heading stays silenced while an
-/// indented `*` line in the same node is reported.
+/// indented `*` line in the same node is reported. Each invalid token
+/// (`junk`, `ind`) is reported too, as beancount reports it; beancount's
+/// recovery from the `@@` line is still quiet at `  * ind`, so it reports only
+/// the invalid token there, which is recovery work (#2872), not the lexer's.
 #[test]
 fn test_parse_column0_heading_is_still_silenced() {
     for case in [
@@ -228,7 +235,7 @@ fn test_parse_column0_heading_is_still_silenced() {
         },
         Case {
             src: "2024-01-01 open Assets:A\n@@ junk\n* heading\n  * ind\n2024-01-02 open Assets:B\n",
-            errors: &[(25, 33), (43, 51)],
+            errors: &[(25, 33), (28, 32), (43, 51), (47, 50)],
             comments: &[(33, 43)],
             opens: &[A, B],
         },

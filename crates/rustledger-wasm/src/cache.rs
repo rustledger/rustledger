@@ -396,13 +396,17 @@ use crate::types::{Error, LedgerOptions};
 /// v82: loader v62, PARSER OUTPUT changed (#2893). A metadata key repeated on
 /// a transaction or a posting keeps its first value and is a parse error, as
 /// in beancount; a v81 blob would keep serving the last value.
-/// v83: loader v62, unchanged. `Ledger`'s error list moves (#2896): a balance
+/// v84: loader v63, PARSER OUTPUT changed (#2872). An invalid token runs to the
+/// next blank, as in beancount, and each one on a line is reported; an older
+/// blob would keep serving such a file with its old errors and values.
+/// v85: loader v63, unchanged. `Ledger`'s error list moves (#2896): a balance
 /// on an unopened account is compared (`E2001`), a pad whose balance already
 /// held or that a later pad superseded is an `Unused Pad entry` and pads
 /// nothing later, `E2004` is no longer reported, a balance on a pad's source
 /// sees the padding from the pad's date, and an account referenced before its
-/// later `open` is inactive. A v82 blob would keep serving the old errors.
-pub const CACHE_VERSION: u32 = 83;
+/// later `open` is inactive. A v84 blob would keep serving the old errors.
+/// (v83 was never released: #2896 held it before #2872 took v84.)
+pub const CACHE_VERSION: u32 = 85;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -434,7 +438,7 @@ pub const CACHE_VERSION: u32 = 83;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 62;
+const LOADER_CACHE_VERSION_PIN: u32 = 63;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

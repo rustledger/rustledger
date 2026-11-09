@@ -4,9 +4,10 @@
 //! the end of the file, logos reports everything it scanned as ONE error
 //! token, so a single typo (`2024-01-01 * "Lunch`) took every later directive
 //! with it behind one error that ran to the end of the file. Beancount
-//! reports the stray quote and carries on with the next line. The error now
-//! ends at its own line and lexing resumes there. A terminated string may
-//! still span lines.
+//! reports the stray quote and carries on. The error now ends where
+//! beancount's invalid token does, at the next space, tab or line end after
+//! the quote, and lexing resumes there. A terminated string may still span
+//! lines.
 
 use rustledger_core::Directive;
 use rustledger_parser::cst::parse_red_only;
@@ -60,6 +61,24 @@ fn assert_invariants(src: &str) {
 
 const UNEXPECTED: &str = "parse error: unexpected input";
 
+/// The errors `spans` stand for: the line error first, then each invalid token
+/// after the first on the line, named, as beancount reports each one.
+fn expected_errors(src: &str, spans: &[(usize, usize)]) -> Vec<(String, usize, usize)> {
+    spans
+        .iter()
+        .enumerate()
+        .map(|(k, &(s, e))| {
+            let message = if k == 0 {
+                UNEXPECTED.to_string()
+            } else {
+                let name: String = src[s..e].chars().flat_map(char::escape_debug).collect();
+                format!("{UNEXPECTED}: invalid token '{name}'")
+            };
+            (message, s, e)
+        })
+        .collect()
+}
+
 #[test]
 fn test_parse_unterminated_quote_keeps_the_following_directives() {
     let cases: [(&str, &[(usize, usize)], &[&str]); 4] = [
@@ -88,36 +107,23 @@ fn test_parse_unterminated_quote_keeps_the_following_directives() {
     ];
     for (src, spans, expected) in cases {
         let result = parse(src);
-        let expected_errors: Vec<(String, usize, usize)> = spans
-            .iter()
-            .map(|&(s, e)| (UNEXPECTED.to_string(), s, e))
-            .collect();
-        assert_eq!(errors(&result), expected_errors, "{src:?}");
+        assert_eq!(errors(&result), expected_errors(src, spans), "{src:?}");
         assert_eq!(summary(&result), expected, "{src:?}");
         assert_invariants(src);
     }
 }
 
 /// The reported shape: a narration typo. Everything after it is kept, as in
-/// beancount. The transaction itself is kept too, with its header error
-/// reported; beancount drops it. Keeping it is a deliberate divergence
+/// beancount. The transaction itself is kept too, with the invalid token
+/// `"Lunch` (beancount's `Invalid token: '"Lunch'`, its only error there)
+/// reported once; beancount drops it. Keeping it is a deliberate divergence
 /// (Python Compatibility Policy): its postings still get checked, and the
 /// error already marks it.
 #[test]
 fn test_parse_unterminated_narration_keeps_the_rest_of_the_ledger() {
     let src = "2024-01-01 * \"Lunch\n  Assets:A  1 USD\n  Assets:B\n2024-01-02 open Assets:B\n";
     let result = parse(src);
-    assert_eq!(
-        errors(&result),
-        [
-            (
-                "parse error: unexpected \"\\\"Lunch\" in transaction header".to_string(),
-                13,
-                19
-            ),
-            (UNEXPECTED.to_string(), 13, 19),
-        ]
-    );
+    assert_eq!(errors(&result), [(UNEXPECTED.to_string(), 13, 19)]);
     assert_eq!(
         summary(&result),
         ["2024-01-01 txn 2 postings", "2024-01-02 open Assets:B"]
@@ -127,10 +133,12 @@ fn test_parse_unterminated_narration_keeps_the_rest_of_the_ledger() {
 
 /// The other way a string scan fails: a `\` right before a line break
 /// (`\\.` does not match a newline) inside an otherwise closed multi-line
-/// string. The scan stops there, not at the end of the file, and the cut
-/// re-lexes from the first line's end: every quote in the scanned region
-/// was escaped, so re-lexing meets the same stop and the quotes pair up as
-/// before. Pinned here because the cut's comment reasons about this case.
+/// string. The scan stops there, not at the end of the file, and lexing
+/// resumes after the quote's invalid run: every quote in the scanned region
+/// was escaped, so it is glued to its `\` and lies inside an invalid run too.
+/// Each line of the region is its own invalid token (`"ab`, `cd\`, `ef"`),
+/// and the directives after it parse, as in beancount. Pinned here because
+/// the lexer's comment reasons about this case.
 #[test]
 fn test_parse_backslash_before_newline_in_a_string_keeps_its_pairing() {
     let src = "2024-01-01 note Assets:A \"ab\ncd\\\nef\"\n\
@@ -141,18 +149,28 @@ fn test_parse_backslash_before_newline_in_a_string_keeps_its_pairing() {
     assert_eq!(
         errors(&result),
         [
-            (UNEXPECTED.to_string(), 0, 29),
-            (UNEXPECTED.to_string(), 25, 28),
+            (
+                "parse error: unexpected input: invalid token '\\\"ab'".to_string(),
+                0,
+                29
+            ),
             (UNEXPECTED.to_string(), 29, 33),
-            (UNEXPECTED.to_string(), 33, 91),
+            (UNEXPECTED.to_string(), 33, 37),
         ]
     );
-    assert_eq!(summary(&result), ["2024-01-04 open Assets:C"]);
+    assert_eq!(
+        summary(&result),
+        [
+            "2024-01-02 open Assets:B",
+            "2024-01-03 note Assets:A \"z\"",
+            "2024-01-04 open Assets:C"
+        ]
+    );
     assert_invariants(src);
 }
 
-/// The error token is the quote and the rest of its line, ending before the
-/// line's `\r\n`; lexing resumes with the `Newline`.
+/// The error token is the quote's run of non-blank characters, ending before
+/// the line's `\r\n`; lexing resumes with the `Newline`.
 #[test]
 fn test_tokenize_lossless_unterminated_quote_ends_at_its_line() {
     let tokens = tokenize_lossless("\"ab\r\nx");
@@ -194,7 +212,9 @@ fn test_parse_terminated_multiline_strings_are_unchanged() {
 /// A column-0 tag followed by a stray quote (#2781). `#TODO` lexes as a
 /// tag, as in beancount, and the line is an error; the quote no longer
 /// swallows the directives after it. Each case matches beancount 3.2.3: the
-/// error is on the tag's line and the same directives survive. When a later
+/// errors are on the tag's line, one for the line (beancount's `unexpected
+/// TAG`) and one for each invalid token on it (`buy`, the quote, `monitor`),
+/// and the same directives survive. When a later
 /// quote closes the string, the string legitimately spans lines and the
 /// lines inside it are lost in beancount too.
 #[test]
@@ -203,46 +223,42 @@ fn test_parse_tag_line_with_a_stray_quote_keeps_the_following_directives() {
         // The reported shape.
         (
             "#TODO buy 27\" monitor\n2024-01-02 open Assets:B\n2024-01-03 open Assets:C\n",
-            &[(0, 22)],
+            &[(0, 22), (6, 9), (12, 13), (14, 21)],
             &["2024-01-02 open Assets:B", "2024-01-03 open Assets:C"],
         ),
         (
             "#TODO buy 27\" monitor\r\n2024-01-02 open Assets:B\r\n2024-01-03 open Assets:C\r\n",
-            &[(0, 23)],
+            &[(0, 23), (6, 9), (12, 13), (14, 21)],
             &["2024-01-02 open Assets:B", "2024-01-03 open Assets:C"],
         ),
         (
             "#TODO \"x\n2024-01-02 open Assets:B\n",
-            &[(0, 9)],
+            &[(0, 9), (6, 8)],
             &["2024-01-02 open Assets:B"],
         ),
         // A directive-looking line after the tag.
         (
             "#TODO 2024-01-01 open Assets:A \"x\n2024-01-02 open Assets:B\n2024-01-03 open Assets:C\n",
-            &[(0, 34)],
+            &[(0, 34), (31, 33)],
             &["2024-01-02 open Assets:B", "2024-01-03 open Assets:C"],
         ),
         // The last line: nothing follows.
         (
             "2024-01-01 open Assets:A\n#TODO \"x",
-            &[(25, 33)],
+            &[(25, 33), (31, 33)],
             &["2024-01-01 open Assets:A"],
         ),
         // A later quote closes the string, so it spans lines 1 to 4.
         (
             "#TODO buy 27\" monitor\n2024-01-02 open Assets:B\n2024-01-03 open Assets:C\n\
              2024-01-04 note Assets:B \"hello\"\n2024-01-05 open Assets:D\n",
-            &[(0, 105)],
+            &[(0, 105), (6, 9), (98, 104)],
             &["2024-01-05 open Assets:D"],
         ),
     ];
     for (src, spans, expected) in cases {
         let result = parse(src);
-        let expected_errors: Vec<(String, usize, usize)> = spans
-            .iter()
-            .map(|&(s, e)| (UNEXPECTED.to_string(), s, e))
-            .collect();
-        assert_eq!(errors(&result), expected_errors, "{src:?}");
+        assert_eq!(errors(&result), expected_errors(src, spans), "{src:?}");
         assert_eq!(summary(&result), expected, "{src:?}");
         assert_invariants(src);
     }

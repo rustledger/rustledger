@@ -386,31 +386,18 @@ pub fn try_format_source_grouped(
     }
     Ok(format_source_with_parsed(&result, source))
 }
-
 /// Convert every `\n` line terminator OUTSIDE string literals back
-/// to `\r\n`, leaving `\n` characters inside strings (and inside
-/// comments… see below) untouched.
+/// to `\r\n`, leaving `\n` characters inside strings untouched.
 ///
 /// The canonical form emitted by [`format_source`] is LF-only.
 /// Editors that round-trip Windows-authored files want to see CRLF
-/// echoed back on every line. This helper bridges the two by
-/// walking the canonical output with the shared `SourceState`
-/// state machine. The walker respects:
-///
-/// - String literals: bytes pass through verbatim. The user's
-///   original line endings inside a multi-line narration / note /
-///   document string are preserved.
-/// - Line comments (`;`, `%`, `#!`, `#+`, a column-0 `#`, and an
-///   org-mode `*` heading): the
-///   comment's terminating newline IS a real structural line
-///   terminator, so it gets converted to CRLF; bytes inside the
-///   comment region (which can include arbitrary characters,
-///   notably stray `"`) pass through without flipping the in-string
-///   state. `#!` and `#+` open a comment at any column: the lexer's
-///   `SHEBANG` / `EMACS_DIRECTIVE` regexes carry no line-start
-///   anchor, and the state machine matches that classification. A
-///   bare `#` or a `*` opens one only at line start (see
-///   `advance_source_state`).
+/// echoed back on every line. This helper bridges the two: a `\n`
+/// inside a string literal (the user's original line ending inside a
+/// multi-line narration / note / document string) passes through
+/// verbatim, and every other one becomes `\r\n`, a comment's
+/// terminating newline included. What is a string literal is what the
+/// lexer reads as one (`StringLiterals`), so a `"` inside a comment,
+/// a heading or an invalid token opens none here either.
 ///
 /// The helper lives in this module rather than the LSP crate
 /// because its correctness depends on the lexer's `STRING` and
@@ -420,7 +407,7 @@ pub fn try_format_source_grouped(
 pub fn lf_to_crlf_outside_strings(s: &str) -> String {
     let mut out = String::with_capacity(s.len() + s.matches('\n').count());
     // BOM is data, not classification input. We re-prepend it
-    // verbatim and let the body start fresh in Code state. The
+    // verbatim and lex the body after it, as the parser does. The
     // sibling crlf_to_lf_outside_strings does the same so the two
     // walkers handle a leading-BOM file identically.
     let (body, bom) = match s.strip_prefix('\u{FEFF}') {
@@ -428,41 +415,13 @@ pub fn lf_to_crlf_outside_strings(s: &str) -> String {
         None => (s, ""),
     };
     out.push_str(bom);
-    let mut chars = body.char_indices().peekable();
-    let mut state = SourceState::Code;
-    let mut prev_was_backslash = false;
-    let mut at_line_start = true;
-    let mut lbrace_odd = false;
-    let mut unclosed_until = 0;
-    while let Some((i, ch)) = chars.next() {
-        let peek = chars.peek().map(|&(_, c)| c);
-        match state {
-            SourceState::InString => out.push(ch),
-            SourceState::InComment | SourceState::Code => {
-                if ch == '\n' {
-                    out.push_str("\r\n");
-                } else {
-                    out.push(ch);
-                }
-            }
+    let mut strings = StringLiterals::new(body);
+    for (i, ch) in body.char_indices() {
+        if ch == '\n' && !strings.contains(i) {
+            out.push_str("\r\n");
+        } else {
+            out.push(ch);
         }
-        let after_lbrace = lbrace_odd;
-        lbrace_odd = next_lbrace_odd(ch, state, lbrace_odd);
-        state = lexer_source_state(
-            body,
-            i,
-            state,
-            advance_source_state(
-                ch,
-                peek,
-                at_line_start,
-                after_lbrace,
-                state,
-                &mut prev_was_backslash,
-            ),
-            &mut unclosed_until,
-        );
-        at_line_start = next_at_line_start(ch, at_line_start);
     }
     out
 }
@@ -623,8 +582,8 @@ impl std::error::Error for CanonicalizeError {}
 ///
 /// String literals (`"…"`) can contain raw `\r` and `\n` per the
 /// lexer's `STRING` rule; folding CR inside a string would mutate
-/// the user's data. Uses the shared `SourceState` state machine
-/// to track string / comment boundaries.
+/// the user's data. What is a string literal is what the lexer reads
+/// as one (`StringLiterals`).
 ///
 /// One change besides the line endings: a line that is one column-0 marker
 /// followed by a `\r` (`#\r\n`, `*\r\n`) gets a space after the marker. Such
@@ -643,11 +602,8 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
     if !src.contains('\r') {
         return std::borrow::Cow::Borrowed(src);
     }
-    // Re-prepend the BOM verbatim and let the body start fresh in
-    // Code state, at line start. `#!`/`#+` open a comment at any
-    // column (the lexer's `SHEBANG` / `EMACS_DIRECTIVE` regexes have
-    // no line-start anchor); a column-0 `#` comment needs the
-    // line-start flag, which `advance_source_state` takes (#2775).
+    // Re-prepend the BOM verbatim and lex the body after it, as the
+    // parser does.
     let (body, bom) = match src.strip_prefix('\u{FEFF}') {
         Some(rest) => (rest, "\u{FEFF}"),
         None => (src, ""),
@@ -655,17 +611,13 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
     let mut out = String::with_capacity(src.len());
     out.push_str(bom);
     let mut chars = body.char_indices().peekable();
-    let mut state = SourceState::Code;
-    let mut prev_was_backslash = false;
-    let mut at_line_start = true;
-    let mut lbrace_odd = false;
+    let mut strings = StringLiterals::new(body);
     // The `[ \t\r]` run that starts at the last bare `\r` seen outside a
     // string: where it ends, and whether it reaches the line ending or the
     // end of the source (see `stray_cr_run`). Cached so a long run is
     // scanned once, not once per `\r`.
     let mut run_end = 0;
     let mut run_is_stray = false;
-    let mut unclosed_until = 0;
     // Where the current output line starts, found by `out_line_start` from
     // where its last scan stopped, so the lone-marker check below steps over
     // each output byte once in all (an `rfind` over `out` for every `\r` made
@@ -676,61 +628,38 @@ pub fn crlf_to_lf_outside_strings(src: &str) -> std::borrow::Cow<'_, str> {
     };
     while let Some((i, ch)) = chars.next() {
         let peek = chars.peek().map(|&(_, c)| c);
-        // A CRLF pair outside a string is consumed whole here, so the
-        // `\n` never reaches `next_at_line_start`; it still ends the line.
-        let mut ate_lf = false;
+        let in_string = strings.contains(i);
         // A lone column-0 marker followed by a `\r` is a line beancount
         // ignores (flex's `.` takes the `\r`); without the `\r` it is a
         // bare-marker error. Outside a string, every branch below drops or
         // folds the `\r`, so a space stands in for it (#2779).
-        if ch == '\r' && state != SourceState::InString {
+        if ch == '\r' && !in_string {
             let text = &out[line.start_in(&out)..];
             if is_lone_marker(text.strip_prefix('\u{FEFF}').unwrap_or(text)) {
                 out.push(' ');
             }
         }
-        match state {
-            SourceState::InString => out.push(ch),
-            _ => {
-                if ch == '\r' && peek == Some('\n') {
-                    out.push('\n');
-                    chars.next();
-                    ate_lf = true;
-                } else if matches!(ch, '\r' | ' ' | '\t') && i < run_end && run_is_stray {
-                    // The rest of a stray run: dropped with its `\r`.
-                } else if ch == '\r' {
-                    if i >= run_end {
-                        (run_end, run_is_stray) = stray_cr_run(body, i);
-                    }
-                    // A stray `\r` is trivia to the lexer (#2774); folding
-                    // it into a line break would add a blank line, which
-                    // ends a transaction. Any other bare `\r` is a
-                    // classic-Mac line terminator.
-                    if !run_is_stray {
-                        out.push('\n');
-                    }
-                } else {
-                    out.push(ch);
-                }
+        if in_string {
+            out.push(ch);
+        } else if ch == '\r' && peek == Some('\n') {
+            out.push('\n');
+            chars.next();
+        } else if matches!(ch, '\r' | ' ' | '\t') && i < run_end && run_is_stray {
+            // The rest of a stray run: dropped with its `\r`.
+        } else if ch == '\r' {
+            if i >= run_end {
+                (run_end, run_is_stray) = stray_cr_run(body, i);
             }
+            // A stray `\r` is trivia to the lexer (#2774); folding
+            // it into a line break would add a blank line, which
+            // ends a transaction. Any other bare `\r` is a
+            // classic-Mac line terminator.
+            if !run_is_stray {
+                out.push('\n');
+            }
+        } else {
+            out.push(ch);
         }
-        let after_lbrace = lbrace_odd;
-        lbrace_odd = next_lbrace_odd(ch, state, lbrace_odd);
-        state = lexer_source_state(
-            body,
-            i,
-            state,
-            advance_source_state(
-                ch,
-                peek,
-                at_line_start,
-                after_lbrace,
-                state,
-                &mut prev_was_backslash,
-            ),
-            &mut unclosed_until,
-        );
-        at_line_start = ate_lf || next_at_line_start(ch, at_line_start);
     }
     std::borrow::Cow::Owned(out)
 }
@@ -800,232 +729,61 @@ pub fn cr_outside_strings_present(src: &str) -> bool {
         return false;
     }
     let body = src.strip_prefix('\u{FEFF}').unwrap_or(src);
-    let mut chars = body.char_indices().peekable();
-    let mut state = SourceState::Code;
-    let mut prev_was_backslash = false;
-    let mut at_line_start = true;
-    let mut lbrace_odd = false;
-    let mut unclosed_until = 0;
-    while let Some((i, ch)) = chars.next() {
-        let peek = chars.peek().map(|&(_, c)| c);
-        if matches!(state, SourceState::Code | SourceState::InComment) && ch == '\r' {
-            return true;
-        }
-        // The same quote rule as the two helpers it mirrors (#2803).
-        let after_lbrace = lbrace_odd;
-        lbrace_odd = next_lbrace_odd(ch, state, lbrace_odd);
-        state = lexer_source_state(
-            body,
-            i,
-            state,
-            advance_source_state(
-                ch,
-                peek,
-                at_line_start,
-                after_lbrace,
-                state,
-                &mut prev_was_backslash,
-            ),
-            &mut unclosed_until,
+    // Stops at the first `\r` outside a string, and `StringLiterals` lexes
+    // only that far, so a CRLF file is decided at its first line ending.
+    let mut strings = StringLiterals::new(body);
+    body.match_indices('\r')
+        .any(|(at, _)| !strings.contains(at))
+}
+
+/// The string literals of a source, as the lexer reads them: the spans of its
+/// `String` tokens, for the line-ending helpers ([`crlf_to_lf_outside_strings`],
+/// [`lf_to_crlf_outside_strings`], [`cr_outside_strings_present`]), which
+/// leave the line endings inside a string alone.
+///
+/// Read from the lexer itself, not from a character-level mirror of it: every
+/// rule that decides whether a `"` opens a string (comments, the column-0
+/// lines beancount ignores, headings, `{#`, a quote that never closes, and
+/// beancount's invalid token, which takes a glued `"` in with the rest of its
+/// run, #2872) is the lexer's, and a character-level walk cannot follow the
+/// last without lexing.
+///
+/// Lexes the source lazily, as far as the bytes asked about, so a caller that
+/// stops early (`cr_outside_strings_present` at the first `\r` outside a
+/// string) does not lex the rest of the file.
+struct StringLiterals<'src> {
+    /// The string spans after `current`, in order.
+    spans: Box<dyn Iterator<Item = std::ops::Range<usize>> + 'src>,
+    /// The first span that may still contain a later byte.
+    current: Option<std::ops::Range<usize>>,
+}
+
+impl<'src> StringLiterals<'src> {
+    fn new(body: &'src str) -> Self {
+        let mut spans: Box<dyn Iterator<Item = std::ops::Range<usize>> + 'src> = Box::new(
+            crate::logos_lexer::TokenIter::new(body, true)
+                .filter(|(token, _)| matches!(token, crate::logos_lexer::Token::String(_)))
+                .map(|(_, span)| span.start..span.end),
         );
-        at_line_start = next_at_line_start(ch, at_line_start);
+        let current = spans.next();
+        Self { spans, current }
     }
-    false
-}
 
-/// Per-character walker state for line-ending normalization passes
-/// that must respect string-literal and comment boundaries.
-///
-/// Used by both line-ending helpers: a flat `is_in_string` boolean
-/// is not enough because a quote character inside a `;`/`%` /
-/// `#!` / `#+` comment is data, not a string delimiter.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SourceState {
-    /// In normal code. `"` opens a string; `;` / `%` / `#!` /
-    /// `#+`, a column-0 `#`, `!`, `&`, `?` or `:`, or a column-0 `*`
-    /// (an org-mode heading) opens a comment; everything else is just bytes.
-    Code,
-    /// Inside `"…"`. Bytes pass through; an unescaped `"` exits.
-    InString,
-    /// Inside `;…\n`, `%…\n`, `#!…\n`, `#+…\n`, a column-0 `#…\n`,
-    /// or a heading `*…\n`. Bytes pass through until LF/CR.
-    InComment,
-}
-
-/// One-step state transition shared by both line-ending helpers.
-///
-/// Returns the state AFTER consuming `ch`. The string-escape
-/// bookkeeping (`prev_was_backslash`) updates in place. Comment
-/// opener detection covers every line-comment lexeme: `;` and
-/// `%` open a comment unconditionally; `#!` and `#+` open one at
-/// any column — the lexer's `#![^\n\r]*` / `#\+[^\n\r]*` regexes
-/// have NO line-start anchor, so a mid-line `#!` or `#+` is still
-/// a `SHEBANG` / `EMACS_DIRECTIVE` token. Any other `#` at the very
-/// start of a line (`at_line_start`: first char of the body, right
-/// after a `\n`, or after a BOM at line start; see
-/// `next_at_line_start`) is a column-0 `#` comment, the lexer's
-/// `Token::Hash` arm in `TokenIter`, unless a tag character follows,
-/// which makes it a `TAG` token instead (#2775). A `#` anywhere else
-/// is a `TAG` / `HASH` token, not a comment. A `*` at line start is
-/// an org-mode heading: the lexer's `Token::Star` arm emits the rest
-/// of the line as one token without lexing it, so a `"` there is
-/// heading text, and the line is treated as a comment here (#2778).
-/// A `!`, `&`, `?` or `:` at line start opens a comment too: beancount
-/// ignores such a line, and the lexer's column-0 comment arm in
-/// `TokenIter` makes it one comment token (#2779). A bare marker (its
-/// line ending right after it) is a token of its own there, but has
-/// nothing after it to misread, so it needs no case here.
-///
-/// The column-0 `#` comment and the heading close on the first `\n`
-/// or `\r`, like the others. A run of stray `\r` bytes before the
-/// line ending (or the end of the source) is `Whitespace` trivia after
-/// the comment in the lexer, so the two agree there (#2774; the
-/// `stray_cr_before_line_ending` fixture). The lexer keeps a `\r` with
-/// more of the line after it inside either line, where this closes
-/// the comment; no fixture here has one.
-const fn advance_source_state(
-    ch: char,
-    peek: Option<char>,
-    at_line_start: bool,
-    after_lbrace: bool,
-    state: SourceState,
-    prev_was_backslash: &mut bool,
-) -> SourceState {
-    match state {
-        SourceState::InString => {
-            let is_close = ch == '"' && !*prev_was_backslash;
-            *prev_was_backslash = ch == '\\' && !*prev_was_backslash;
-            if is_close {
-                SourceState::Code
-            } else {
-                SourceState::InString
-            }
+    /// Whether the byte at `at` is inside a string literal, past its opening
+    /// quote. `at` must not decrease from one call to the next.
+    fn contains(&mut self, at: usize) -> bool {
+        while self.current.as_ref().is_some_and(|s| s.end <= at) {
+            self.current = self.spans.next();
         }
-        SourceState::InComment => {
-            if matches!(ch, '\n' | '\r') {
-                SourceState::Code
-            } else {
-                SourceState::InComment
-            }
-        }
-        SourceState::Code => {
-            // The `#` of a `{#` token (`after_lbrace`, see
-            // `next_lbrace_odd`) opens nothing: the lexer reads `{#` as one
-            // `LBraceHash` before its `#!` / `#+` rules can see the `#`
-            // (#2780).
-            let is_hash_line_comment = ch == '#'
-                && !after_lbrace
-                && (matches!(peek, Some('!' | '+'))
-                    || (at_line_start && !matches!(peek, Some(c) if is_tag_char(c))));
-            let is_org_heading = ch == '*' && at_line_start;
-            // A `%` is a comment only at column 0; elsewhere the lexer reads a
-            // flag, as beancount does (#2802).
-            let is_percent_line_comment = ch == '%' && at_line_start;
-            // A column-0 `!`, `&`, `?` or `:` line is ignored, as in beancount
-            // (#2779). A char-level mirror of
-            // `logos_lexer::beancount_ignores_line`, which documents why it
-            // is not called here; it also takes a bare marker as a comment,
-            // which is harmless (the comment closes right after it).
-            let is_flag_line_comment = matches!(ch, '!' | '&' | '?' | ':') && at_line_start;
-            if ch == '"' {
-                *prev_was_backslash = false;
-                SourceState::InString
-            } else if ch == ';'
-                || is_percent_line_comment
-                || is_hash_line_comment
-                || is_org_heading
-                || is_flag_line_comment
-            {
-                SourceState::InComment
-            } else {
-                SourceState::Code
-            }
-        }
+        self.current.as_ref().is_some_and(|s| s.start < at)
     }
-}
-
-/// The state after the character at `body[at]`, given the state `before` it
-/// and the state `advance_source_state` proposes `after` it, corrected for
-/// a quote the lexer does not read as a string.
-///
-/// `advance_source_state` opens a string at every `"` in code. The lexer's
-/// `STRING` (`"([^"\\]|\\.)*"`) only matches a quote that closes; one that
-/// does not (no later unescaped `"`, or a `\` before a line break first) is
-/// an error token cut at the end of its own line, and lexing resumes there
-/// (#2788). So such a quote makes the rest of its line opaque, like a
-/// comment, instead of swallowing every later line ending (#2803: a stray
-/// `"` copied verbatim into a CRLF edit left the following lines LF).
-///
-/// `unclosed_until` remembers where the last failed scan stopped: every `"`
-/// before it is escaped in that scan's alignment, so a scan from it stops
-/// there too, and is skipped. That keeps many stray quotes linear, as the
-/// lexer's own `chunk_until` does.
-fn lexer_source_state(
-    body: &str,
-    at: usize,
-    before: SourceState,
-    after: SourceState,
-    unclosed_until: &mut usize,
-) -> SourceState {
-    if before != SourceState::Code || after != SourceState::InString {
-        return after;
-    }
-    if at < *unclosed_until {
-        return SourceState::InComment;
-    }
-    let bytes = body.as_bytes();
-    let mut i = at + 1;
-    while i < bytes.len() {
-        #[cfg(test)]
-        QUOTE_SCAN_BYTES.with(|c| c.set(c.get() + 1));
-        match bytes[i] {
-            b'"' => return SourceState::InString,
-            // `\\.`: an escape takes the next character, but `.` does not
-            // match a line break, so `\` before `\n` ends the scan. Skipping
-            // one byte of a multibyte character is harmless: continuation
-            // bytes are never `"` or `\`.
-            b'\\' if bytes.get(i + 1).is_some_and(|&b| b != b'\n') => i += 2,
-            b'\\' => break,
-            _ => i += 1,
-        }
-    }
-    *unclosed_until = i;
-    SourceState::InComment
 }
 
 #[cfg(test)]
 thread_local! {
-    /// Bytes `lexer_source_state` has scanned looking for a closing quote,
-    /// for the linear-cost test.
-    static QUOTE_SCAN_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
     /// Bytes `crlf_to_lf_outside_strings` has stepped over tracking where
     /// its current output line starts, for the linear-cost test (#2779).
     static CR_FOLD_LINE_SCAN_BYTES: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
-
-/// A character the lexer's `Tag` regex (`#[a-zA-Z0-9-_/.]+`) accepts
-/// after the `#`. A column-0 `#` followed by one is a tag, not a comment.
-const fn is_tag_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.')
-}
-
-/// Whether the character after `ch` is at line start, as the lexer sees
-/// it: a `\n` ends the line (the lexer's `Newline` is `\r?\n`; a lone `\r`
-/// does not), and a BOM at line start keeps it there, because the lexer
-/// treats a BOM as layout-transparent (`apply_err_layout_transparency`), so
-/// a `#` after a mid-file or second BOM is still a column-0 comment.
-const fn next_at_line_start(ch: char, at_line_start: bool) -> bool {
-    ch == '\n' || (at_line_start && ch == '\u{FEFF}')
-}
-
-/// Whether the character after `ch` follows a `{` that starts a token, so a
-/// `#` there is the second half of the lexer's `{#` (`LBraceHash`), not a
-/// `#!` / `#+` comment opener (#2780). The lexer pairs `{` greedily from the
-/// left (`{{` is one token, `{{{#` is `{{` then `{#`), so it is an odd run of
-/// `{` in code that does. `odd` is the value for `ch`'s own position and
-/// `state` the state `ch` is read in.
-const fn next_lbrace_odd(ch: char, state: SourceState, odd: bool) -> bool {
-    matches!(state, SourceState::Code) && ch == '{' && !odd
 }
 
 /// Format a `SOURCE_FILE` syntax node in opinionated canonical form.
@@ -5443,178 +5201,52 @@ mod tests {
         );
     }
 
-    /// Property test: the `SourceState` classification used by the
-    /// line-ending helpers must agree with the lexer's
-    /// classification on every byte of a corpus of fixtures.
-    ///
-    /// Concretely: for every byte offset in every fixture, the
-    /// state machine's `InString` periods MUST line up with the
-    /// lexer's STRING token spans, and its `InComment` periods MUST
-    /// line up with the union of COMMENT / SHEBANG /
-    /// `EMACS_DIRECTIVE` token spans, plus the one `ERROR_TOKEN` that
-    /// holds an org-mode heading's text after its column-0 `STAR`. A
-    /// divergence (e.g. the lexer gains a new comment lexeme that the
-    /// state machine treats as code) fails this test instead of
-    /// silently mutating user bytes inside the new lexeme on a
-    /// line-ending round-trip.
+    /// The line-ending helpers leave alone exactly the line endings inside
+    /// what the lexer reads as a string literal (`StringLiterals`). A quote
+    /// glued into an invalid token (`x"a`, beancount's `Invalid token:
+    /// 'x"a'`, #2872) opens no string, so the line endings after it are
+    /// folded, as are those after a quote that never closes; a real
+    /// multi-line string keeps its own, as does a string after an invalid
+    /// token that stands apart from it.
     #[test]
-    fn source_state_classification_agrees_with_lexer() {
-        for (name, src) in IDEMPOTENCE_MATRIX.iter().chain(SOURCE_STATE_EXTRA) {
-            assert_source_state_agrees_with_lexer(name, src);
-        }
-    }
-
-    /// Inputs for the classifier property that are not formatter fixtures:
-    /// shapes the line-ending pass must classify as the lexer does even
-    /// though they are not valid ledgers (#2780). `{#` is one `LBraceHash`
-    /// token, so its `#!` / `#+` opens no comment; `{{` is one token, so after
-    /// it a `#!` does.
-    const SOURCE_STATE_EXTRA: &[(&str, &str)] = &[
-        ("lbrace_hash_bang", "\n{#! \n"),
-        ("lbrace_hash_bang_quote", "{#!#\"2\u{feff}\n%\""),
-        (
-            "lbrace_hash_plus",
-            "2024-01-01 *\n  Assets:A  1 X {#+ \"q\n  Assets:B\n",
-        ),
-        (
-            "double_lbrace_shebang",
-            "x {{#! \"q\n2024-01-01 note Assets:A \"x\"\n",
-        ),
-        ("triple_lbrace_hash", "x {{{#! \"q\"\n"),
-        (
-            "percent_comment_quote",
-            "% a \"q\n2024-01-01 note Assets:A \"x\"\n",
-        ),
-    ];
-
-    /// The classifier property on generated inputs: every string of up to
-    /// five characters over an alphabet of the characters the two
-    /// classifiers treat specially (#2780; the gap above was found this way).
-    /// An input with a `\r` that has more of its line after it is skipped: such
-    /// a `\r` closes a comment here and stays in it for the lexer, a documented
-    /// difference (see `advance_source_state`). A `\r` before its line ending
-    /// is trivia to both and is checked.
-    #[test]
-    fn source_state_classification_agrees_with_lexer_on_generated_inputs() {
-        const ALPHABET: [char; 13] = [
-            '\r', '{', '#', '!', '+', '%', ';', '"', '\n', ' ', 'a', '*', '\\',
-        ];
-        let mut frontier = vec![String::new()];
-        let mut checked = 0usize;
-        for _ in 0..5 {
-            let mut next = Vec::with_capacity(frontier.len() * ALPHABET.len());
-            for prefix in &frontier {
-                for c in ALPHABET {
-                    let mut src = prefix.clone();
-                    src.push(c);
-                    if !has_mid_line_cr(&src) {
-                        assert_source_state_agrees_with_lexer("generated", &src);
-                        checked += 1;
+    fn line_ending_helpers_follow_the_lexers_strings() {
+        for (src, folded) in [
+            ("x\"a\r\nb\"\r\n", "x\"a\nb\"\n"),
+            (
+                "2024-01-01 open Assets:A \"\r\nb\r\n",
+                "2024-01-01 open Assets:A \"\nb\n",
+            ),
+            (
+                "2024-01-01 note Assets:A \"a\r\nb\"\r\n",
+                "2024-01-01 note Assets:A \"a\r\nb\"\n",
+            ),
+            ("x$ \"a\r\nb\"\r\n", "x$ \"a\r\nb\"\n"),
+            ("; \"a\r\nb\"\r\n", "; \"a\nb\"\n"),
+        ] {
+            assert_eq!(crlf_to_lf_outside_strings(src), folded, "{src:?}");
+            assert!(cr_outside_strings_present(src), "{src:?}");
+            let lf = src.replace("\r\n", "\n");
+            let back = lf_to_crlf_outside_strings(&lf);
+            let strings: Vec<_> = crate::logos_lexer::tokenize_lossless(&lf)
+                .into_iter()
+                .filter(|(t, _)| matches!(t, crate::logos_lexer::Token::String(_)))
+                .map(|(_, s)| s.start..s.end)
+                .collect();
+            let expected: String = lf
+                .char_indices()
+                .map(|(i, c)| {
+                    if c == '\n' && !strings.iter().any(|s| s.start < i && i < s.end) {
+                        "\r\n".to_string()
+                    } else {
+                        c.to_string()
                     }
-                    next.push(src);
-                }
-            }
-            frontier = next;
+                })
+                .collect();
+            assert_eq!(back, expected, "{lf:?}");
         }
-        assert!(checked > 300_000, "only {checked} inputs");
-    }
-
-    /// Whether `src` has a `\r` with more of its line (anything but spaces,
-    /// tabs and `\r`s) after it.
-    fn has_mid_line_cr(src: &str) -> bool {
-        src.split('\n').any(|line| {
-            line.find('\r')
-                .is_some_and(|i| !line[i..].trim_start_matches([' ', '\t', '\r']).is_empty())
-        })
-    }
-
-    /// The per-byte comparison behind the classifier properties: panics at
-    /// the first byte where the state machine and the lexer disagree.
-    fn assert_source_state_agrees_with_lexer(name: &str, src: &str) {
-        use crate::logos_lexer::{Token, tokenize_lossless};
-        // Run the lexer to get authoritative classification of
-        // each token. Build a per-byte map of expected state.
-        let tokens = tokenize_lossless(src);
-        let mut expected = vec![SourceState::Code; src.len()];
-        // A column-0 `*` (an org-mode heading) is followed by the
-        // rest of its line as ONE `Error` token that the lexer never
-        // tokenized (#2778): heading text, so comment-like. Requiring
-        // the `*` to sit at line start (after a `\n`, or only BOMs)
-        // keeps a mid-line `*@` (a flag next to junk) out of it.
-        let at_line_start = |pos: usize| {
-            let before = src[..pos].trim_end_matches('\u{FEFF}');
-            before.is_empty() || before.ends_with('\n')
-        };
-        let mut prev: Option<(&Token<'_>, &crate::logos_lexer::Span)> = None;
-        for (token, span) in &tokens {
-            let heading_text = matches!(token, Token::Error(_))
-                && matches!(prev, Some((Token::Star, star))
-                    if star.end == span.start && at_line_start(star.start));
-            prev = Some((token, span));
-            let classify = match token {
-                Token::String(_) => Some(SourceState::InString),
-                Token::Comment(_)
-                | Token::PercentComment(_)
-                | Token::Shebang(_)
-                | Token::EmacsDirective(_) => Some(SourceState::InComment),
-                Token::Error(_) if heading_text => Some(SourceState::InComment),
-                // An unterminated quote: one error token from the `"` to
-                // the end of its line (#2788), opaque like a comment.
-                Token::Error(text) if text.starts_with('"') => Some(SourceState::InComment),
-                _ => None,
-            };
-            if let Some(state) = classify {
-                for byte in &mut expected[span.start..span.end] {
-                    *byte = state;
-                }
-            }
-        }
-
-        // Run the state-machine classifier and compare per
-        // byte. We skip ONLY the exact bytes where a
-        // transition fires; the lexer includes those bytes
-        // inside the resulting token while the state machine
-        // tags them with the PRE-transition state (the
-        // 'opener' is still Code, the closing LF is still
-        // InComment). Tracking the transition indices
-        // explicitly (rather than skipping every `"`/`;`/`%`
-        // / newline byte) means a state-machine bug at any
-        // non-transition `"`/`;`/`%` byte (inside a
-        // comment or string, say) surfaces as a real failure
-        // instead of being silently masked.
-        let (actual, transitions) = classify_source_bytes_with_transitions(src);
-
-        for (i, (&want, &got)) in expected.iter().zip(actual.iter()).enumerate() {
-            if transitions.contains(&i) {
-                continue;
-            }
-            assert_eq!(
-                want,
-                got,
-                "state-machine / lexer disagreement on fixture `{name}` \
-                 at byte {i} ({:?}): lexer said {want:?}, state machine said {got:?}",
-                src.as_bytes()[i] as char
-            );
-        }
-    }
-
-    /// Looking for a quote's close stays linear: a failed scan is
-    /// remembered, so a quote it already passed is not scanned again. One
-    /// stray quote followed by many `\"` lines (escaped from its scan's
-    /// point of view, so none closes it) would rescan to the end once per
-    /// line without the memo.
-    #[test]
-    fn lexer_source_state_scans_each_byte_once() {
-        let src = format!("2024-01-01 open Assets:A \"\n{}", "\\\"\n".repeat(20_000));
-        QUOTE_SCAN_BYTES.with(|c| c.set(0));
-        let crlf = lf_to_crlf_outside_strings(&src);
-        let scanned = QUOTE_SCAN_BYTES.with(std::cell::Cell::get);
-        assert!(
-            scanned <= 2 * src.len(),
-            "quote scans stepped over {scanned} bytes of a {}-byte input",
-            src.len()
-        );
-        assert_eq!(crlf, src.replace('\n', "\r\n"));
+        assert!(!cr_outside_strings_present(
+            "2024-01-01 note Assets:A \"a\rb\"\n"
+        ));
     }
 
     /// The lone-marker check in `crlf_to_lf_outside_strings` (#2779) finds
@@ -5755,93 +5387,6 @@ mod tests {
             assert_eq!(values(&parsed), values(&refolded), "{src:?}");
             assert_eq!(try_format_source(src), Ok(format_source(src)), "{src:?}");
         }
-    }
-
-    /// Walk `s` through the same state-machine logic the
-    /// line-ending helpers use, returning a per-byte classification
-    /// AND the set of byte indices where a state transition
-    /// fired. The transition indices are the ONLY bytes where the
-    /// state machine and the lexer can legitimately disagree (the
-    /// off-by-one at opener / closer / terminator); callers
-    /// comparing against the lexer should skip exactly those
-    /// indices and assert agreement everywhere else.
-    fn classify_source_bytes_with_transitions(
-        s: &str,
-    ) -> (Vec<SourceState>, std::collections::HashSet<usize>) {
-        let (body, bom_len) = match s.strip_prefix('\u{FEFF}') {
-            Some(rest) => (rest, '\u{FEFF}'.len_utf8()),
-            None => (s, 0),
-        };
-        let mut out: Vec<SourceState> = vec![SourceState::Code; s.len()];
-        let mut transitions = std::collections::HashSet::new();
-        let mut chars = body.char_indices().peekable();
-        let mut state = SourceState::Code;
-        let mut prev_was_backslash = false;
-        let mut at_line_start = true;
-        let mut lbrace_odd = false;
-        let mut unclosed_until = 0;
-        while let Some((rel_i, ch)) = chars.next() {
-            let i = bom_len + rel_i;
-            let peek = chars.peek().map(|&(_, c)| c);
-            // Classify THIS byte under the state BEFORE advancing.
-            for byte in &mut out[i..i + ch.len_utf8()] {
-                *byte = state;
-            }
-            let prev_state = state;
-            let after_lbrace = lbrace_odd;
-            lbrace_odd = next_lbrace_odd(ch, state, lbrace_odd);
-            let next_state = lexer_source_state(
-                body,
-                rel_i,
-                state,
-                advance_source_state(
-                    ch,
-                    peek,
-                    at_line_start,
-                    after_lbrace,
-                    state,
-                    &mut prev_was_backslash,
-                ),
-                &mut unclosed_until,
-            );
-            at_line_start = next_at_line_start(ch, at_line_start);
-            // Record only OPENING transitions and the comment-
-            // closing newline, where the state machine and lexer
-            // legitimately disagree on this single byte:
-            //   - Code → InString : opening `"` is Code-side but
-            //     the lexer puts it inside the STRING token.
-            //   - Code → InComment: opening `;` / `%` / `#!` /
-            //     `#+` is Code-side but the lexer puts it inside
-            //     the COMMENT / SHEBANG / EMACS_DIRECTIVE token.
-            //   - InComment → Code: the `\n` ending the comment is
-            //     classified InComment by the state machine but
-            //     sits OUTSIDE the comment token (the lexer's
-            //     `[^\n\r]*` excludes it).
-            // The InString → Code transition (closing `"`) is NOT
-            // a disagreement: the state machine still tags that
-            // byte as InString (pre-transition), and the lexer
-            // includes the closing `"` inside the STRING token.
-            // Skipping it would silently mask a real bug.
-            if next_state != state {
-                let opening = matches!(prev_state, SourceState::Code)
-                    && matches!(next_state, SourceState::InString | SourceState::InComment);
-                let comment_close = matches!(prev_state, SourceState::InComment)
-                    && matches!(next_state, SourceState::Code);
-                if opening || comment_close {
-                    transitions.insert(i);
-                    // For a `#!` or `#+` opener the lexer's token
-                    // span begins at the `#`, so the second byte
-                    // (`!` / `+`) is also a "before the lexer's
-                    // token start" byte the state machine tags as
-                    // Code. Record it too.
-                    if matches!(ch, '#') && matches!(peek, Some('!' | '+')) {
-                        transitions.insert(i + 1);
-                    }
-                }
-            }
-            state = next_state;
-        }
-        (out, transitions)
     }
 
     #[test]

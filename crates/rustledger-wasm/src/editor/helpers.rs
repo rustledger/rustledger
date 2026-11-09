@@ -88,10 +88,20 @@ pub fn get_symbol_at_position(
             .filter(|(_, span)| span.start >= line_start && span.end <= line_end)
             .map(|(value, _)| value)
     };
-    if (character as usize) <= line_text.chars().count()
-        && let Some(symbol) = token_at(line_start + byte_of_char(character as usize))
-    {
-        return Some(symbol);
+    if (character as usize) <= line_text.chars().count() {
+        let in_line = byte_of_char(character as usize);
+        if let Some(symbol) = token_at(line_start + in_line) {
+            return Some(symbol);
+        }
+        // Right after a `:` that follows an account (`open Assets:A😀B:`),
+        // the symbol is that account, whose span ends at the colon. The word
+        // scan below would stop at the emoji and give `B:`.
+        if line_text[..in_line].ends_with(':')
+            && parse_result.account_at(line_start + in_line - 1).is_some()
+            && let Some(symbol) = token_at(line_start + in_line - 1)
+        {
+            return Some(symbol);
+        }
     }
     let (start, end) = word_char_range(line_text, character as usize)?;
     let word_start = line_start + byte_of_char(start);
@@ -354,6 +364,18 @@ mod tests {
             assert_eq!(
                 get_symbol_at_position(source, 1, col, &result).as_deref(),
                 Some("Assets:Bank"),
+                "col {col}"
+            );
+        }
+        // Right after the trailing colon of an account the backward word scan
+        // cannot cross (the emoji), the symbol is still the whole account, not
+        // `B:`. Character offsets: the account is 16..26, the colon 26.
+        let source = "2024-01-01 open Assets:A\u{1F600}B:\n";
+        let result = parse(source);
+        for col in [16, 26, 27] {
+            assert_eq!(
+                get_symbol_at_position(source, 0, col, &result).as_deref(),
+                Some("Assets:A\u{1F600}B"),
                 "col {col}"
             );
         }

@@ -547,12 +547,24 @@ pub fn get_symbol_at_position(
             end_col as usize,
         ))
     };
-    if let Some(offset) = index.position_to_offset(position.line, position.character)
-        && let Some(symbol) = token_at(offset)
-    {
-        return Some(symbol);
-    }
     let line = index.line_text(position.line)?;
+    if let Some(offset) = index.position_to_offset(position.line, position.character) {
+        if let Some(symbol) = token_at(offset) {
+            return Some(symbol);
+        }
+        // Right after a `:` that follows an account (`open Assets:A😀B:`),
+        // the symbol is that account, whose span ends at the colon. The word
+        // scan below would stop at the emoji and give `B:`.
+        let line_start = index.line_start_byte(position.line)?;
+        if line
+            .get(..offset.checked_sub(line_start)?)
+            .is_some_and(|before| before.ends_with(':'))
+            && parse_result.account_at(offset - 1).is_some()
+            && let Some(symbol) = token_at(offset - 1)
+        {
+            return Some(symbol);
+        }
+    }
     let (word, start, end) =
         get_word_at_position(line, position.character as usize, index.encoding())?;
     let start_col = u32::try_from(start).ok()?;
@@ -1185,6 +1197,21 @@ mod tests {
             assert_eq!(
                 (word.as_str(), start, end),
                 ("Assets:Bank", 16, 27),
+                "col {col}"
+            );
+        }
+        // An account the backward word scan cannot cross (the emoji): right
+        // after its trailing colon the symbol is still the whole account, not
+        // the scan's `B:`. `Assets:A😀B` is 16..27 in UTF-16 columns.
+        let source = "2024-01-01 open Assets:A\u{1F600}B:\n";
+        let parsed = rustledger_parser::parse(source);
+        let index = LineIndex::new(source, PositionEncoding::Utf16);
+        for col in [16, 27, 28] {
+            let (word, start, end) =
+                get_symbol_at_position(&index, &parsed, Position::new(0, col)).unwrap();
+            assert_eq!(
+                (word.as_str(), start, end),
+                ("Assets:A\u{1F600}B", 16, 27),
                 "col {col}"
             );
         }

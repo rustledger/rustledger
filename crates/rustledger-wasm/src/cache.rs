@@ -399,7 +399,10 @@ use crate::types::{Error, LedgerOptions};
 /// v84: loader v63, PARSER OUTPUT changed (#2872). An invalid token runs to the
 /// next blank, as in beancount, and each one on a line is reported; an older
 /// blob would keep serving such a file with its old errors and values.
-pub const CACHE_VERSION: u32 = 84;
+/// v85: loader v64, PARSER OUTPUT changed (#2906). Any non-ASCII character
+/// starts an account component, as in beancount, so `Assets:٣Foo` is one
+/// account; an older blob would keep serving such a file with its old errors.
+pub const CACHE_VERSION: u32 = 85;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -431,7 +434,7 @@ pub const CACHE_VERSION: u32 = 84;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 63;
+const LOADER_CACHE_VERSION_PIN: u32 = 64;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

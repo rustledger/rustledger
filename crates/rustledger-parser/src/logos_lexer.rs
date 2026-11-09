@@ -103,51 +103,55 @@ pub enum Token<'src> {
     /// An account name like Assets:Bank:Checking, Капитал:Retained-Earnings,
     /// or 资产:银行:支票.
     ///
-    /// The first component starts with an uppercase letter (`\p{Lu}`), a
-    /// letter without case like CJK ideographs (`\p{Lo}`), or a titlecase
-    /// letter (`\p{Lt}`). Sub-components may also start with a digit.
-    /// Subsequent characters can be any Unicode letter, digit, hyphen, or ANY
-    /// non-ASCII character.
+    /// This is beancount 3.2.3's lexer rule (`lexer.l`, #2906):
     ///
-    /// The non-ASCII allowance (#1930) matches what beancount actually accepts,
-    /// which is broader than letters: `Assets:CORP✨` (`So`), `Assets:CORP½`
-    /// (`No`) and `Assets:CORP→` all load there, and a committed fixture in
-    /// fava-portfolio-returns uses one — so rejecting them meant refusing real
-    /// files. Determined by probing beancount rather than reading its grammar.
+    /// ```text
+    /// ACCOUNTTYPE  ([A-Z]|{UTF-8-ONLY})([A-Za-z0-9\-]|{UTF-8-ONLY})*
+    /// ACCOUNTNAME  ([A-Z0-9]|{UTF-8-ONLY})([A-Za-z0-9\-]|{UTF-8-ONLY})*
+    /// ACCOUNT      {ACCOUNTTYPE}(:{ACCOUNTNAME})+
+    /// ```
     ///
-    /// Restricted to NON-ASCII on purpose, and that is the safety argument:
-    /// every character with syntactic meaning in beancount (`@ # ^ { } " ; , *
-    /// ! ~ ( ) :`) is ASCII, so widening here cannot let an account name
-    /// swallow a price annotation, tag or cost brace. beancount agrees on that
-    /// boundary — it rejects `Assets:CORP@x`, `CORP#x`, `CORP_x` and `CORP.x`.
+    /// so ANY non-ASCII character can start or continue a component:
+    /// `Assets:٣` (an Arabic-Indic digit), `Assets:éclair` and `Assets:😀` are
+    /// each one account token. Which of them is a valid account NAME is decided
+    /// after lexing, as beancount decides it (its grammar checks every account
+    /// token against a regex and reports `Invalid account name`): see
+    /// [`is_valid_account_name`], whose verdict the validator reports as
+    /// `E1005`. A component used to have to START with `\p{Lu}`, `\p{Lo}`,
+    /// `\p{Lt}` or a digit here, which split `Assets:٣Foo` into stray tokens,
+    /// so ledgers beancount loads failed to parse.
     ///
-    /// The COMPONENT START is deliberately untouched by #1930 — but note we do
-    /// NOT match beancount there. It requires ASCII uppercase or a digit; we
-    /// also allow `\p{Lo}`/`\p{Lt}`, so `Assets:日本` loads here and is
-    /// rejected by beancount. That divergence predates #1930 and is left alone
-    /// on purpose: tightening it would break CJK ledgers that work today. We
-    /// do agree on rejecting a lowercase or symbol start (`Assets:corp✨`,
-    /// `Assets:✨x`).
+    /// The non-ASCII allowance inside a component (#1930) matches what
+    /// beancount accepts, which is broader than letters: `Assets:CORP✨`
+    /// (`So`), `Assets:CORP½` (`No`) and `Assets:CORP→` all load there.
+    ///
+    /// Restricted to NON-ASCII beyond `[A-Za-z0-9-]` on purpose, and that is
+    /// the safety argument: every character with syntactic meaning in beancount
+    /// (`@ # ^ { } " ; , * ! ~ ( ) :`) is ASCII, so an account name cannot
+    /// swallow a price annotation, tag or cost brace. And no other token
+    /// (currency, number, date, keyword, tag, link, key) starts with a
+    /// non-ASCII character, so a non-ASCII start is never ambiguous.
+    ///
+    /// One deliberate difference: a BOM (U+FEFF) does not START an account
+    /// here (it may continue one). beancount lexes `\u{feff}Assets:A` as one
+    /// account and rejects the name; here the BOM stays its own
+    /// layout-transparent error token (`apply_err_layout_transparency`), so
+    /// the directive of a concatenated file after it still parses, under the
+    /// `BomInDirectiveBody` diagnostic. Both reject the line.
     ///
     /// KNOWN SHARP EDGE: the non-ASCII range includes Unicode whitespace,
-    /// control and line-separator characters — NBSP (U+00A0), LINE SEPARATOR
-    /// (U+2028), NEL (U+0085), ZWSP (U+200B) and friends — so `Assets:A<NBSP>B`
+    /// control and line-separator characters (NBSP U+00A0, LINE SEPARATOR
+    /// U+2028, NEL U+0085, ZWSP U+200B and friends), so `Assets:A<NBSP>B`
     /// lexes as ONE account whose name is visually indistinguishable from
-    /// `Assets:A B`. That is worth knowing about, and it is deliberate:
-    /// beancount accepts every one of those inside an account name (verified
-    /// individually), so excluding them would trade a visual-ambiguity hazard
-    /// for the concrete bug #1930 exists to fix — rejecting files beancount
-    /// loads. If this is ever revisited it should be as a lint over account
-    /// names, not a lexer restriction, so the file still parses.
-    ///
-    /// Note: The beancount v3 spec restricts the first character to ASCII
-    /// `[A-Z]`, but this is an artifact of the C flex lexer's poor Unicode
-    /// support, not a meaningful language design choice (see
-    /// beancount/beancount#161, #398, #733).
+    /// `Assets:A B`. That is deliberate: beancount accepts every one of those
+    /// inside an account name (verified individually), so excluding them would
+    /// reject files beancount loads. If this is ever revisited it should be as
+    /// a lint over account names, not a lexer restriction, so the file still
+    /// parses.
     ///
     /// The account type prefix is validated later against options (`name_assets`, etc.).
     #[regex(
-        r"[\p{Lu}\p{Lo}\p{Lt}][\p{L}0-9\-\x{80}-\x{10FFFF}]*(:([\p{Lu}\p{Lo}\p{Lt}0-9][\p{L}0-9\-\x{80}-\x{10FFFF}]*)+)+"
+        r"([A-Z]|[\x{80}-\x{FEFE}\x{FF00}-\x{10FFFF}])([A-Za-z0-9\-]|[\x{80}-\x{10FFFF}])*(:([A-Z0-9]|[\x{80}-\x{10FFFF}])([A-Za-z0-9\-]|[\x{80}-\x{10FFFF}])*)+"
     )]
     Account(&'src str),
 
@@ -597,29 +601,91 @@ fn apply_err_layout_transparency(
 /// Whether `name` is a valid beancount account name.
 ///
 /// This is the CANONICAL account-name rule, shared by every surface that
-/// admits account names (the validator's Open check, the loader's
-/// `account_*`/`name_*` option guards, the FFI directive builder).
+/// admits account names (the validator's Open and account-reference checks,
+/// which report `E1005`; the loader's `account_*`/`name_*` option guards; the
+/// FFI directive builder).
 ///
-/// Implemented by running the actual lexer and requiring that `name` lex
-/// to exactly one [`Token::Account`] spanning the whole input, so this
-/// predicate CANNOT drift from what the parser accepts: an account name
-/// is valid if and only if it round-trips through the language. (Before
-/// this existed, the validator and loader each hand-implemented the rule
-/// with different accepted character sets, and accounts that could never
-/// be parsed back could enter through synthesized-directive surfaces.)
+/// Two parts, both needed, as in beancount (#2906):
 ///
-/// The rule, per the `Account` token regex: two or more `:`-separated
-/// components; the root starts with an uppercase (`\p{Lu}`), caseless
-/// (`\p{Lo}`), or titlecase (`\p{Lt}`) letter; sub-components may also
-/// start with an ASCII digit; remaining characters are Unicode letters,
-/// ASCII digits, or `-`.
+/// 1. `name` lexes to exactly one [`Token::Account`] spanning the whole
+///    input. Implemented by running the actual lexer, so this predicate
+///    CANNOT drift from what the parser accepts, and a valid name always
+///    round-trips through the language. (Before this existed, the validator
+///    and loader each hand-implemented the rule with different accepted
+///    character sets, and accounts that could never be parsed back could
+///    enter through synthesized-directive surfaces.)
+/// 2. The name check beancount's grammar applies to every account token it
+///    lexed (`valid_account_regexp` in `beancount/parser/grammar.py`, a
+///    `regex.match`, so anchored at the start only): the root is one of the
+///    configured roots, and the FIRST sub-component starts with `\p{Lu}` or
+///    `\p{Nd}` (`ACC_COMP_NAME_RE`). Because the match is a prefix match,
+///    later sub-components take anything the lexer takes: `Assets:A:éclair`
+///    is valid there and here. The root list is ledger configuration, so it
+///    is checked by the caller (the validator, against `name_*`); here the
+///    root must start with `\p{Lu}`, which is what beancount requires of a
+///    root name (`is_valid_root`, `ACC_COMP_TYPE_RE`).
+///
+/// So `Assets:٣` (`\p{Nd}`) is valid, while `Assets:éclair` (lowercase),
+/// `Assets:😀`, `Assets:²` (`\p{No}`) and a combining-mark start lex as an
+/// account but are invalid names, as in bean-check.
+///
+/// Deliberately broader than beancount in one place, kept from #816 (PR
+/// #817): the root and the first sub-component may also start with a
+/// caseless letter (`\p{Lo}`: CJK, Arabic, Hebrew, ...) or a titlecase
+/// letter (`\p{Lt}`), so `資産:現金` and `Assets:日本` are valid here and
+/// `Invalid account name` in beancount. Its `\p{Lu}` start is an artifact of
+/// scripts with case; rejecting every caseless script would break the
+/// non-Latin ledgers #816 was fixed for (beancount/beancount#161, #398,
+/// #733). Pinned by `is_valid_account_name_matches_beancount` below.
 #[must_use]
 pub fn is_valid_account_name(name: &str) -> bool {
     let mut lexer = Token::lexer(name);
     let Some(Ok(Token::Account(_))) = lexer.next() else {
         return false;
     };
-    lexer.span() == (0..name.len()) && lexer.next().is_none()
+    if lexer.span() != (0..name.len()) || lexer.next().is_some() {
+        return false;
+    }
+    // A lexed account has a root and at least one sub-component, each
+    // non-empty, so both starts exist.
+    let mut components = name.split(':');
+    let starts_with = |component: Option<&str>, digit_ok: bool| {
+        component
+            .and_then(|c| c.chars().next())
+            .is_some_and(|c| match account_start_class(c) {
+                Some(AccountStart::Uppercase | AccountStart::CaselessOrTitlecase) => true,
+                Some(AccountStart::Digit) => digit_ok,
+                None => false,
+            })
+    };
+    starts_with(components.next(), false) && starts_with(components.next(), true)
+}
+
+/// The classes of character an account component can validly start with:
+/// see [`is_valid_account_name`].
+#[derive(Logos, Debug, Clone, Copy, PartialEq, Eq)]
+enum AccountStart {
+    /// `\p{Lu}`, a valid start in beancount for the root and a sub-component.
+    #[regex(r"\p{Lu}")]
+    Uppercase,
+    /// `\p{Nd}`, a valid sub-component start in beancount (not a root start).
+    #[regex(r"\p{Nd}")]
+    Digit,
+    /// `\p{Lo}` or `\p{Lt}`: rledger's deliberate extension (#816).
+    #[regex(r"[\p{Lo}\p{Lt}]")]
+    CaselessOrTitlecase,
+}
+
+/// The [`AccountStart`] class of `c`, if it has one. Classified by logos, so
+/// the Unicode categories are the same tables the lexer uses.
+fn account_start_class(c: char) -> Option<AccountStart> {
+    let mut buf = [0u8; 4];
+    let text = c.encode_utf8(&mut buf);
+    let mut lexer = AccountStart::lexer(text);
+    match lexer.next() {
+        Some(Ok(class)) if lexer.span().end == text.len() => Some(class),
+        _ => None,
+    }
 }
 
 /// The byte length of the date `text` starts with, or `None` if it does not
@@ -2226,5 +2292,59 @@ mod tests {
         assert!(!ok(" Assets:Cash"));
         assert!(!ok("Assets:Cash "));
         assert!(!ok("Assets:Cash\nAssets:Two"));
+    }
+
+    /// #2906: an account is lexed as beancount 3.2.3 lexes it (any non-ASCII
+    /// character starts a component), and its name is then judged as
+    /// beancount's grammar judges it. Each verdict below was checked with
+    /// bean-check 3.2.3 (`2024-01-01 open <name>`), except the two marked as
+    /// rledger's deliberate `\p{Lo}`/`\p{Lt}` extension (#816).
+    #[test]
+    fn is_valid_account_name_matches_beancount() {
+        use super::is_valid_account_name as ok;
+        let lexes_whole = |name: &str| {
+            let tokens = tokenize(name);
+            tokens.len() == 1 && tokens[0].0 == Token::Account(name)
+        };
+        // Valid in beancount: a `\p{Nd}` or `\p{Lu}` first sub-component
+        // start, and anything the lexer takes after it.
+        for name in [
+            "Assets:\u{663}",            // ٣, Arabic-Indic digit three (Nd)
+            "Assets:\u{663}Foo",         // ٣Foo
+            "Assets:A\u{663}",           // A٣
+            "Assets:\u{dc}n\u{ef}",      // Ünï
+            "Assets:\u{c4}",             // Ä
+            "Assets:3",                  // ASCII digit
+            "Assets:A\u{1F600}",         // A😀
+            "Assets:A:\u{65e5}\u{672c}", // later component: 日本
+            "Assets:A:\u{e9}clair",      // later component: lowercase start
+            "Assets:A:\u{1F600}",        // later component: emoji start
+            "Assets:\u{663}:\u{e9}",     // ٣:é
+        ] {
+            assert!(lexes_whole(name), "{name} lexes as one account");
+            assert!(ok(name), "{name} is valid in beancount");
+        }
+        // Lexed as one account by both, but `Invalid account name` in
+        // beancount: the first sub-component start is not `\p{Lu}`/`\p{Nd}`.
+        for name in [
+            "Assets:\u{e9}clair", // éclair: lowercase (Ll)
+            "Assets:\u{1F600}",   // emoji (So)
+            "Assets:\u{1F600}A",
+            "Assets:\u{308}A", // combining diaeresis (Mn)
+            "Assets:\u{b2}",   // superscript two (No)
+            "Assets:\u{2160}", // Roman numeral one (Nl)
+            "\u{e9}clair:A",   // lowercase root start
+            "\u{663}ssets:A",  // digit root start
+        ] {
+            assert!(lexes_whole(name), "{name} lexes as one account");
+            assert!(!ok(name), "{name} is an invalid account name");
+        }
+        // rledger's deliberate extension (#816): caseless and titlecase
+        // starts, which beancount rejects.
+        assert!(ok("Assets:\u{65e5}\u{672c}")); // 日本 (Lo)
+        assert!(ok("Assets:\u{1c5}")); // ǅ (Lt)
+        // A BOM never starts an account (it stays its own error token).
+        assert!(!lexes_whole("\u{feff}Assets:A"));
+        assert!(lexes_whole("Assets:A\u{feff}"));
     }
 }

@@ -289,6 +289,41 @@ mod tests {
     use super::*;
     use rustledger_parser::parse;
 
+    /// #2906: an account whose first sub-component starts with a non-ASCII
+    /// digit (`٣`, valid in beancount) is one account token, so references
+    /// find every use of the whole name. Before, it lexed as stray tokens and
+    /// there was no account to find.
+    #[test]
+    fn test_find_account_references_non_ascii_digit_start() {
+        let source = "2024-01-01 open Assets:\u{663}Foo USD
+2024-01-15 * \"Coffee\"
+  Assets:\u{663}Foo  -5.00 USD
+  Expenses:Food
+2024-01-31 balance Assets:\u{663}Foo 100 USD
+";
+        let result = parse(source);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        let uri: Uri = "file:///test.beancount".parse().unwrap();
+        let params = ReferenceParams {
+            text_document_position: lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                position: Position::new(0, 23), // On the `٣`
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+            context: lsp_types::ReferenceContext {
+                include_declaration: true,
+            },
+        };
+        let refs = handle_references(&params, source, &result, &[], &uri, PositionEncoding::Utf16)
+            .expect("references");
+        assert_eq!(refs.len(), 3);
+        // Each range covers `Assets:٣Foo`: 11 UTF-16 units.
+        for r in &refs {
+            assert_eq!(r.range.end.character - r.range.start.character, 11, "{r:?}");
+        }
+    }
+
     #[test]
     fn test_find_account_references() {
         let source = r#"2024-01-01 open Assets:Bank USD

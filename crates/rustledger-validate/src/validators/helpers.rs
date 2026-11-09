@@ -167,12 +167,12 @@ pub fn push_invalid_custom_accounts(
 /// Equity, Income, Expenses.
 ///
 /// The character-level rule delegates to the canonical
-/// [`rustledger_parser::is_valid_account_name`] (the lexer itself), so the
-/// validator accepts exactly the set of names that can round-trip through
-/// the parser — no more (the old hand-written check here admitted digit-start
-/// roots and arbitrary non-ASCII characters mid-component, which the parser
-/// rejects), and no less. The root-type membership check on top is ledger
-/// semantics, not lexing, and stays here.
+/// [`rustledger_parser::is_valid_account_name`]: the lexer itself, plus the
+/// name check beancount's grammar applies to every account it lexed, so the
+/// validator accepts only names that round-trip through the parser and that
+/// beancount accepts (save the documented `\p{Lo}`/`\p{Lt}` start, #816).
+/// The root-type membership check on top is ledger semantics, not lexing,
+/// and stays here.
 pub fn validate_account_name(account: &str, account_types: &[String]) -> Option<String> {
     if account.is_empty() {
         return Some("account name is empty".to_string());
@@ -192,9 +192,9 @@ pub fn validate_account_name(account: &str, account_types: &[String]) -> Option<
     if !rustledger_parser::is_valid_account_name(account) {
         return Some(format!(
             "'{account}' is not a valid account name: expected two or more \
-             colon-separated components, each starting with an uppercase or \
-             caseless letter (sub-components may start with a digit), \
-             containing only letters, digits, and hyphens"
+             colon-separated components, the first after the root starting \
+             with an uppercase letter, a digit or a caseless letter, and \
+             containing only letters, digits, hyphens and non-ASCII characters"
         ));
     }
 

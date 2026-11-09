@@ -329,6 +329,37 @@ mod tests {
         assert_eq!(end, 13);
     }
 
+    /// #2906: renaming an account whose sub-component starts with a non-ASCII
+    /// digit (valid in beancount) edits the whole name at each use.
+    #[test]
+    #[allow(clippy::mutable_key_type)] // Uri in HashMap is required by LSP API
+    fn test_rename_account_non_ascii_digit_start() {
+        let source = "2024-01-01 open Assets:\u{663}Foo USD
+2024-01-15 * \"Coffee\"
+  Assets:\u{663}Foo  -5.00 USD
+  Expenses:Food
+";
+        let result = parse(source);
+        let uri: lsp_types::Uri = "file:///test.beancount".parse().unwrap();
+        let params = RenameParams {
+            text_document_position: TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri },
+                position: Position::new(0, 23), // On the `٣`
+            },
+            new_name: "Assets:Checking".to_string(),
+            work_done_progress_params: Default::default(),
+        };
+        let edit =
+            handle_rename(&params, source, &result, &[], PositionEncoding::Utf16).expect("rename");
+        let changes = edit.changes.expect("changes");
+        let edits = changes.values().next().expect("one file");
+        assert_eq!(edits.len(), 2);
+        for e in edits {
+            assert_eq!(e.range.end.character - e.range.start.character, 11, "{e:?}");
+            assert_eq!(e.new_text, "Assets:Checking");
+        }
+    }
+
     #[test]
     fn test_is_account_like() {
         assert!(is_account_like("Assets:Bank"));

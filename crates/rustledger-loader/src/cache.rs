@@ -647,12 +647,17 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     interned keys, in source order, where it was a hash map with `String`
 ///     keys. A v60 blob would be read at the wrong offsets.
 ///
+/// v62: PARSER OUTPUT changed, no archived layout moved (#2893). A metadata
+///     key repeated on a transaction or a posting keeps its first value, as in
+///     beancount, and is a parse error; it kept the last value with no error.
+///     A v61 blob would keep serving the last value.
+///
 /// v63: PARSER OUTPUT changed, no archived layout moved (#2872). An invalid
 ///     token runs to the next space, tab or line end, as beancount's does, and
 ///     is one error; each invalid token on a line is reported, with the
 ///     grammar's error only when it fails first; a `"` or `;` glued into one
 ///     opens no string or comment; a Unicode digit is no number; and a
-///     `pushtag`-like header with an invalid token changes no state. A v61
+///     `pushtag`-like header with an invalid token changes no state. A v62
 ///     blob would keep serving such a file with its old errors and values.
 ///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.

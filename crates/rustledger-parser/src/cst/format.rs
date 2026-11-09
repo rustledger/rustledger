@@ -729,9 +729,15 @@ pub fn cr_outside_strings_present(src: &str) -> bool {
         return false;
     }
     let body = src.strip_prefix('\u{FEFF}').unwrap_or(src);
-    let mut strings = StringLiterals::new(body);
-    body.char_indices()
-        .any(|(i, ch)| ch == '\r' && !strings.contains(i))
+    // Streams the lexer and stops at the first `\r` outside a string, so a
+    // CRLF file is decided at its first line ending, not after lexing it all.
+    let mut tokens = crate::logos_lexer::TokenIter::new(body, true).peekable();
+    body.match_indices('\r').any(|(at, _)| {
+        while tokens.next_if(|(_, span)| span.end <= at).is_some() {}
+        !tokens.peek().is_some_and(|(token, span)| {
+            matches!(token, crate::logos_lexer::Token::String(_)) && span.start < at
+        })
+    })
 }
 
 /// The string literals of a source, as the lexer reads them: the spans of its

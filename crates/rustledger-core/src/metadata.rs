@@ -188,6 +188,32 @@ impl Metadata {
         self.entries.push(MetaEntry { key, value });
     }
 
+    /// Make keys unique after [`Self::push_entry`], keeping each key's FIRST
+    /// entry and dropping the later ones, as beancount builds a transaction's
+    /// and a posting's metadata (a repeated key there is an error and the
+    /// first value stands). Near-linear at any size, like [`Self::dedup_keys`].
+    fn dedup_keys_keep_first(&mut self) {
+        let n = self.entries.len();
+        if n < 2 {
+            return;
+        }
+        if n <= INDEX_THRESHOLD {
+            let mut i = 1;
+            while i < self.entries.len() {
+                let (seen, rest) = self.entries.split_at(i);
+                if seen.iter().any(|e| key_eq(&e.key, &rest[0].key)) {
+                    self.entries.remove(i);
+                } else {
+                    i += 1;
+                }
+            }
+            return;
+        }
+        let mut seen: rustc_hash::FxHashSet<InternedStr> =
+            rustc_hash::FxHashSet::with_capacity_and_hasher(n, rustc_hash::FxBuildHasher);
+        self.entries.retain(|e| seen.insert(e.key.clone()));
+    }
+
     /// Make keys unique again after [`Self::push_entry`]: a repeated key
     /// keeps its FIRST position and its LAST value, exactly what a run of
     /// [`Self::insert`] calls gives. Pairwise up to [`INDEX_THRESHOLD`]
@@ -413,10 +439,22 @@ impl MetadataBuilder {
         self.map.is_empty()
     }
 
-    /// The finished map, keys unique.
+    /// The finished map, keys unique: a repeated key keeps its first
+    /// position and its last value, as a run of [`Metadata::insert`] calls.
     #[must_use]
     pub fn build(mut self) -> Metadata {
         self.map.dedup_keys();
+        self.map
+    }
+
+    /// The finished map, keys unique: a repeated key keeps its FIRST entry,
+    /// position and value, and the later ones are dropped. Beancount builds a
+    /// transaction's and a posting's metadata this way (it reports the
+    /// repeat as `Duplicate metadata field on entry` / `Duplicate posting
+    /// metadata field`); every other directive's is [`Self::build`].
+    #[must_use]
+    pub fn build_keeping_first(mut self) -> Metadata {
+        self.map.dedup_keys_keep_first();
         self.map
     }
 }
@@ -754,5 +792,42 @@ mod tests {
         assert!(n < 10 * N as u64, "PartialEq made {n} key comparisons");
         reversed.insert("key-0", s("changed"));
         assert_ne!(collected, reversed);
+    }
+
+    #[test]
+    fn test_build_keeping_first_keeps_each_keys_first_entry() {
+        const N: usize = 50_000;
+        // Both sides of the threshold: a repeated key keeps its first
+        // position AND its first value (#2893), and it stays near-linear.
+        for n in [3, INDEX_THRESHOLD, INDEX_THRESHOLD + 1, 200] {
+            let pairs: Vec<(String, MetaValue)> = (0..n)
+                .map(|i| (format!("k{}", i % (n / 3 + 1)), MetaValue::Int(i as i64)))
+                .collect();
+            let mut want: Vec<(String, MetaValue)> = Vec::new();
+            for (k, v) in &pairs {
+                if !want.iter().any(|(seen, _)| seen == k) {
+                    want.push((k.clone(), v.clone()));
+                }
+            }
+            let mut b = MetadataBuilder::new();
+            for (k, v) in &pairs {
+                b.push(k.as_str(), v.clone());
+            }
+            assert_eq!(pairs_of(&b.build_keeping_first()), want, "n={n}");
+        }
+        let n = comparisons_during(|| {
+            let mut b = MetadataBuilder::new();
+            for i in 0..N {
+                b.push(
+                    format!("key-{}", i % (N / 2)).as_str(),
+                    MetaValue::Int(i as i64),
+                );
+            }
+            assert_eq!(b.build_keeping_first().len(), N / 2);
+        });
+        assert!(
+            n < 10 * N as u64,
+            "build_keeping_first made {n} key comparisons"
+        );
     }
 }

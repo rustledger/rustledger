@@ -165,3 +165,70 @@ fn test_parse_directive_with_an_invalid_token_changes_no_tag_state() {
         result.errors
     );
 }
+
+#[test]
+fn test_parse_keeps_a_construct_error_where_the_grammar_fails_before_the_token() {
+    for (src, lines) in [
+        // `unexpected LCURL` at the second `{`, then `Invalid token: '$'`.
+        (
+            "2024-01-01 *\n  Assets:A  1 VV {}{$\n  Assets:B\n",
+            &[2, 2][..],
+        ),
+        // `unexpected HASH` inside the cost spec, then the NUL.
+        ("2024-01-01 *\n  Assets:A  1 VV {(7# \u{0}\n", &[2, 2][..]),
+        // `unexpected LCURL, expecting RCURL or COMMA`, then the NUL.
+        (
+            "2024-01-01 *\n  Assets:A  1 VV {+5/50+82333333{\u{0}\n",
+            &[2, 2][..],
+        ),
+        // Where the grammar reaches the token, it is the line's only error.
+        (
+            "2024-01-01 *\n  Assets:A  1 HOOL {2 .USD}\n  Assets:B\n",
+            &[2][..],
+        ),
+    ] {
+        check(src, lines);
+    }
+}
+
+#[test]
+fn test_parse_reports_no_booking_method_on_a_header_with_an_invalid_token() {
+    // beancount checks the booking method when it builds the directive, which
+    // it never does here: `Invalid token: '$;comment'` alone.
+    check("2024-01-02 open Assets:C$;comment \"x\"\n", &[1]);
+    let result = parse("2024-01-02 open Assets:C$;comment \"x\"\n");
+    assert!(
+        result.errors.iter().all(|e| e.kind_code() != 25),
+        "{:?}",
+        result.errors
+    );
+    // Without the invalid token the booking method is still checked.
+    let result = parse("2024-01-02 open Assets:C \"x\"\n");
+    assert!(
+        result.errors.iter().any(|e| e.kind_code() == 25),
+        "{:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn test_parse_reports_no_repeated_key_in_a_transaction_with_an_invalid_token() {
+    // beancount never builds a transaction with an invalid token in it, so
+    // the token is its only error, wherever it stands.
+    for (src, lines) in [
+        (
+            "2024-01-01 * $\n  xn: 1\n  xn: 2\n  Assets:A 1 USD\n  Assets:B\n",
+            &[1][..],
+        ),
+        (
+            "2024-01-01 *\n  xn: 1\n  xn: 2\n  Assets:A 1 U$D\n  Assets:B\n",
+            &[4][..],
+        ),
+        (
+            "2024-01-01 *\n  xn: 1\n  xn: 2 $\n  xn: 3\n  Assets:A 1 USD\n  Assets:B\n",
+            &[3][..],
+        ),
+    ] {
+        check(src, lines);
+    }
+}

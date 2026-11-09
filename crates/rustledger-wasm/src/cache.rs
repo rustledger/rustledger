@@ -393,8 +393,11 @@ use crate::types::{Error, LedgerOptions};
 /// account's close is `E1003`, and a pad with an unopened account still pads,
 /// so it no longer adds an `E2001` balance failure or loses its `Unused Pad
 /// entry`. A v80 blob would keep serving the old errors.
+/// v82: loader v62, PARSER OUTPUT changed (#2893). A metadata key repeated on
+/// a transaction or a posting keeps its first value and is a parse error, as
+/// in beancount; a v81 blob would keep serving the last value.
 /// v84: loader v63, PARSER OUTPUT changed (#2872). An invalid token runs to the
-/// next blank, as in beancount, and each one on a line is reported; a v81 blob
+/// next blank, as in beancount, and each one on a line is reported; a v83 blob
 /// would keep serving such a file with its old errors and values.
 pub const CACHE_VERSION: u32 = 84;
 

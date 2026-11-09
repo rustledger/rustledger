@@ -729,15 +729,11 @@ pub fn cr_outside_strings_present(src: &str) -> bool {
         return false;
     }
     let body = src.strip_prefix('\u{FEFF}').unwrap_or(src);
-    // Streams the lexer and stops at the first `\r` outside a string, so a
-    // CRLF file is decided at its first line ending, not after lexing it all.
-    let mut tokens = crate::logos_lexer::TokenIter::new(body, true).peekable();
-    body.match_indices('\r').any(|(at, _)| {
-        while tokens.next_if(|(_, span)| span.end <= at).is_some() {}
-        !tokens.peek().is_some_and(|(token, span)| {
-            matches!(token, crate::logos_lexer::Token::String(_)) && span.start < at
-        })
-    })
+    // Stops at the first `\r` outside a string, and `StringLiterals` lexes
+    // only that far, so a CRLF file is decided at its first line ending.
+    let mut strings = StringLiterals::new(body);
+    body.match_indices('\r')
+        .any(|(at, _)| !strings.contains(at))
 }
 
 /// The string literals of a source, as the lexer reads them: the spans of its
@@ -752,29 +748,34 @@ pub fn cr_outside_strings_present(src: &str) -> bool {
 /// run, #2872) is the lexer's, and a character-level walk cannot follow the
 /// last without lexing.
 ///
-/// Lexes the source once, streaming, and keeps only the string spans.
-struct StringLiterals {
-    spans: Vec<std::ops::Range<usize>>,
+/// Lexes the source lazily, as far as the bytes asked about, so a caller that
+/// stops early (`cr_outside_strings_present` at the first `\r` outside a
+/// string) does not lex the rest of the file.
+struct StringLiterals<'src> {
+    /// The string spans after `current`, in order.
+    spans: Box<dyn Iterator<Item = std::ops::Range<usize>> + 'src>,
     /// The first span that may still contain a later byte.
-    next: usize,
+    current: Option<std::ops::Range<usize>>,
 }
 
-impl StringLiterals {
-    fn new(body: &str) -> Self {
-        let spans = crate::logos_lexer::TokenIter::new(body, true)
-            .filter(|(token, _)| matches!(token, crate::logos_lexer::Token::String(_)))
-            .map(|(_, span)| span.start..span.end)
-            .collect();
-        Self { spans, next: 0 }
+impl<'src> StringLiterals<'src> {
+    fn new(body: &'src str) -> Self {
+        let mut spans: Box<dyn Iterator<Item = std::ops::Range<usize>> + 'src> = Box::new(
+            crate::logos_lexer::TokenIter::new(body, true)
+                .filter(|(token, _)| matches!(token, crate::logos_lexer::Token::String(_)))
+                .map(|(_, span)| span.start..span.end),
+        );
+        let current = spans.next();
+        Self { spans, current }
     }
 
     /// Whether the byte at `at` is inside a string literal, past its opening
     /// quote. `at` must not decrease from one call to the next.
     fn contains(&mut self, at: usize) -> bool {
-        while self.spans.get(self.next).is_some_and(|s| s.end <= at) {
-            self.next += 1;
+        while self.current.as_ref().is_some_and(|s| s.end <= at) {
+            self.current = self.spans.next();
         }
-        self.spans.get(self.next).is_some_and(|s| s.start < at)
+        self.current.as_ref().is_some_and(|s| s.start < at)
     }
 }
 

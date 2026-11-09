@@ -631,24 +631,22 @@ fn convert_open(
     reject_tags_and_links(node.syntax(), "open", bom_offset, errors);
     let account = Account::new(node.account()?.text());
     let currencies: Vec<Currency> = node.currencies().map(|c| Currency::new(c.text())).collect();
-    let booking = node.booking_method().and_then(|s| s.text_decoded());
+    let mut booking = node.booking_method().and_then(|s| s.text_decoded());
     let span = node_span(node.syntax(), bom_offset);
-    if let Some(b) = &booking
-        && !VALID_BOOKING_METHODS.contains(&b.as_str())
-    {
+    if let Some(b) = booking.take_if(|b| !VALID_BOOKING_METHODS.contains(&b.as_str())) {
         // beancount checks the booking method when it builds the directive,
-        // which it never does for a header with an invalid token on it: the
-        // token is the line's only error there (`open Assets:C$;c "x"`,
-        // #2872). Dropped in silence here, the directive gets the whole-node
-        // error that stands for that token.
-        if header_has_invalid_token(node.syntax()) {
+        // which it never does for a statement with an invalid token in it, on
+        // its header or a metadata line: the token is its only error there
+        // (`open Assets:C$;c "x"`, #2872). Here the directive is kept, as
+        // one with an invalid token is, without the booking method, and the
+        // token's own error is the one reported.
+        if !holds_an_invalid_token(node.syntax().green()) {
+            errors.push(crate::ParseError::new(
+                crate::ParseErrorKind::InvalidBookingMethod(b),
+                span,
+            ));
             return None;
         }
-        errors.push(crate::ParseError::new(
-            crate::ParseErrorKind::InvalidBookingMethod(b.clone()),
-            span,
-        ));
-        return None;
     }
     let meta = convert_meta_entries(node.syntax());
 
@@ -3868,26 +3866,20 @@ fn transaction_header_check(
     }
 }
 
-/// Whether `node`'s header line (its direct tokens up to the first
-/// `NEWLINE`) holds an invalid token (`ERROR_TOKEN`). beancount's grammar
-/// never reduces such a line to its directive, so a `pushtag`, `poptag`,
-/// `pushmeta` or `popmeta` with one changes no state there (`pushtag" #t`,
-/// `pushtag #t $x`), and an `open` with one gets no booking-method check
-/// (beancount checks that when it builds the directive). Walks GREEN
-/// children only.
+/// Whether `node`'s header line holds an invalid token (`ERROR_TOKEN`). The
+/// line is read by `header_line_tokens`, the header walk the header check
+/// uses: past the blank and comment lines stored at the start of the node,
+/// up to the `NEWLINE` that ends the header. beancount's grammar never reduces
+/// such a line to its directive, so a `pushtag`, `poptag`, `pushmeta` or
+/// `popmeta` with one changes no state there (`pushtag" #t`, `pushtag #t $x`).
+/// An `open` asks `holds_an_invalid_token` instead, as its metadata lines
+/// belong to the same statement. Walks GREEN children only.
 fn header_has_invalid_token(node: &crate::SyntaxNode) -> bool {
-    use crate::SyntaxKind as K;
-    for child in node.green().children() {
-        let rowan::NodeOrToken::Token(t) = child else {
-            return false;
-        };
-        match <crate::BeancountLanguage as rowan::Language>::kind_from_raw(t.kind()) {
-            K::ERROR_TOKEN => return true,
-            K::NEWLINE => return false,
-            _ => {}
-        }
-    }
-    false
+    let mut tokens = Vec::new();
+    header_line_tokens(node, &mut tokens);
+    tokens
+        .iter()
+        .any(|(kind, _)| *kind == crate::SyntaxKind::ERROR_TOKEN)
 }
 
 /// A directive's header-line tokens into `tokens` (cleared first): its direct

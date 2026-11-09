@@ -232,3 +232,78 @@ fn test_parse_reports_no_repeated_key_in_a_transaction_with_an_invalid_token() {
         check(src, lines);
     }
 }
+
+/// The lines of `src`'s errors, sorted, with an unclosed `pushtag` /
+/// `pushmeta` (P0021 / P0023) on line 0, where beancount reports it.
+fn sorted_lines_eof_at_0(src: &str) -> Vec<usize> {
+    let result = parse(src);
+    let mut lines: Vec<usize> = result
+        .errors
+        .iter()
+        .map(|e| {
+            if matches!(e.kind_code(), 21 | 23) {
+                0
+            } else {
+                src[..e.span.start].matches('\n').count() + 1
+            }
+        })
+        .collect();
+    lines.sort_unstable();
+    let red = parse_red_only(src);
+    assert_eq!(
+        format!("{:?}", result.errors),
+        format!("{:?}", red.errors),
+        "{src:?}"
+    );
+    lines
+}
+
+#[test]
+fn test_parse_a_header_after_a_blank_or_comment_line_is_read_for_invalid_tokens() {
+    // A blank or comment line before a directive belongs to its node; the
+    // header with the invalid token is the line after it. Each expectation is
+    // bean-check's.
+    for gap in ["\n", "; c\n"] {
+        let head = "2024-01-01 open Assets:A\n";
+        for (src, lines) in [
+            // No booking-method error (P0025).
+            (
+                format!("{head}{gap}2024-01-02 open Assets:C$;comment \"x\"\n"),
+                vec![3],
+            ),
+            // The push does not happen, so the pop is of an absent tag.
+            (format!("{head}{gap}pushtag #t $x\npoptag #t\n"), vec![3, 4]),
+            // The pop does not happen, so the push stays open.
+            (format!("{head}pushtag #t\n{gap}poptag #t $x\n"), vec![0, 4]),
+            (
+                format!("{head}{gap}pushmeta kk: \"v\" $x\npopmeta kk:\n"),
+                vec![3, 4],
+            ),
+            (
+                format!("{head}pushmeta kk: \"v\"\n{gap}popmeta kk: $x\n"),
+                vec![0, 4],
+            ),
+        ] {
+            assert_eq!(sorted_lines_eof_at_0(&src), lines, "{src:?}");
+            assert!(
+                parse(&src).errors.iter().all(|e| e.kind_code() != 25),
+                "{src:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_parse_reports_no_booking_method_with_an_invalid_token_on_a_metadata_line() {
+    // beancount never builds the `open`, so the invalid token is its only
+    // error. The directive is kept here, without the booking method.
+    let src = "2024-01-01 open Assets:C USD \"BAD\"\n  kk: $x\n";
+    check(src, &[2]);
+    let result = parse(src);
+    assert!(
+        result.errors.iter().all(|e| e.kind_code() != 25),
+        "{:?}",
+        result.errors
+    );
+    assert_eq!(result.directives.len(), 1);
+}

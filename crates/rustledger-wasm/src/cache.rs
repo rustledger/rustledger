@@ -397,8 +397,8 @@ use crate::types::{Error, LedgerOptions};
 /// a transaction or a posting keeps its first value and is a parse error, as
 /// in beancount; a v81 blob would keep serving the last value.
 /// v84: loader v63, PARSER OUTPUT changed (#2872). An invalid token runs to the
-/// next blank, as in beancount, and each one on a line is reported; a v83 blob
-/// would keep serving such a file with its old errors and values.
+/// next blank, as in beancount, and each one on a line is reported; an older
+/// blob would keep serving such a file with its old errors and values.
 pub const CACHE_VERSION: u32 = 84;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.

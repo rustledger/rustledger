@@ -1232,7 +1232,16 @@ fn test_validate_pad_reports_a_closed_account() {
     let source = format!(
         "{head}2024-01-10 close Equity:O\n2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n"
     );
-    assert_eq!(codes_of(&source), Vec::<ErrorCode>::new(), "{source:?}");
+    // bean-check is clean. The padding is dated at the pad, as beancount
+    // dates it, so the source holds it when it closes later that day: only
+    // the advisory `E1004`, which `check` does not report (`rledger lint
+    // closed-nonempty` does), as for any posting before a close.
+    assert_eq!(
+        codes_of(&source),
+        [ErrorCode::AccountCloseNotEmpty],
+        "{source:?}"
+    );
+    assert!(ErrorCode::AccountCloseNotEmpty.is_advisory_only());
 }
 
 /// beancount inserts the padding whatever the accounts' state, so an
@@ -1297,26 +1306,24 @@ fn test_validate_unopened_pad_without_a_padding_balance_is_unused() {
     );
 }
 
-/// Two pads before one balance are `E2004` whether or not the target is
-/// open: the two paths of the balance check share the count.
+/// Two pads before one balance: the earlier is an unused pad (E2003) whether
+/// or not the target is open, as beancount reports it, and nothing else.
 #[test]
-fn test_validate_multiple_pads_are_reported_on_an_unopened_target_too() {
+fn test_validate_two_pads_before_a_balance_leave_the_earlier_unused() {
     let two_pads = |open: &str| {
         format!(
             "{open}2024-01-01 open Equity:O\n2024-01-09 pad Assets:A Equity:O\n\
              2024-01-10 pad Assets:A Equity:O\n2024-01-11 balance Assets:A 100 USD\n"
         )
     };
-    for source in [two_pads("2024-01-01 open Assets:A\n"), two_pads("")] {
+    for (source, unopened) in [
+        (two_pads("2024-01-01 open Assets:A\n"), 0),
+        (two_pads(""), 3),
+    ] {
         let codes = codes_of(&source);
-        assert_eq!(
-            codes
-                .iter()
-                .filter(|c| **c == ErrorCode::MultiplePadForBalance)
-                .count(),
-            1,
-            "{source:?}: {codes:?}"
-        );
+        let mut expected = vec![ErrorCode::AccountNotOpen; unopened];
+        expected.push(ErrorCode::PadWithoutBalance);
+        assert_eq!(codes, expected, "{source:?}");
     }
 }
 
@@ -1374,4 +1381,64 @@ fn test_e1005_matches_beancount_on_non_ascii_component_starts() {
     check("\u{c9}quit\u{e9}:\u{e9}", &renamed, false);
     // rledger's deliberate extension (#816): beancount rejects these.
     check("Assets:\u{65e5}\u{672c}", &roots, true); // 日本
+}
+
+/// A pad that already padded one currency, a later pad, and balances in
+/// another currency and then the first: each balance uses its own pad, so
+/// nothing is reported, as bean-check 3.2.3 reports nothing. The removed
+/// `E2004` counted the first pad as a second contender for the EUR balance.
+#[test]
+fn test_validate_pad_for_one_currency_is_no_contender_for_another() {
+    let codes = codes_of(
+        "2024-01-01 open Assets:A\n2024-01-01 open Equity:O\n\
+         2024-01-02 pad Assets:A Equity:O\n2024-01-03 balance Assets:A 100 USD\n\
+         2024-01-04 pad Assets:A Equity:O\n2024-01-05 balance Assets:A 10 EUR\n\
+         2024-01-06 balance Assets:A 50 USD\n",
+    );
+    assert_eq!(codes, Vec::<ErrorCode>::new());
+}
+
+/// A `pad` or `balance` dated before its account's later `open` names an
+/// inactive account, as bean-check 3.2.3 reports it (`Invalid reference to
+/// inactive account`), not one that was never opened (#2896).
+#[test]
+fn test_validate_pad_and_balance_before_a_later_open_are_inactive() {
+    let source = "2024-01-01 open Equity:O\n2024-02-01 open Assets:A\n\
+                  2024-01-02 pad Assets:A Equity:O\n2024-01-05 balance Assets:A 100 USD\n";
+    let parsed = rustledger_parser::parse(source);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    let directives: Vec<Directive> = parsed.directives.into_iter().map(|d| d.value).collect();
+    let messages: Vec<String> = validate(&directives)
+        .into_iter()
+        .map(|e| format!("{}: {}", e.code.code(), e.message))
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "E1001: Pad target account Assets:A is inactive on 2024-01-02 \
+             (not opened until 2024-02-01)",
+            "E1001: Account Assets:A is inactive on 2024-01-05 (not opened until 2024-02-01)",
+        ],
+    );
+}
+
+/// Two pads before a balance: the balance uses only the later one, and the
+/// earlier one is unused and never pads a later balance, as in beancount
+/// (bean-check 3.2.3: `Unused Pad entry` on the 01-09 pad, `Balance failed`
+/// on 01-12). The earlier pad padded the 01-12 balance, hiding the failure
+/// (#2896).
+#[test]
+fn test_validate_superseded_pad_is_unused_and_pads_nothing_later() {
+    let codes = codes_of(
+        "2024-01-01 open Assets:A\n2024-01-01 open Equity:O\n\
+         2024-01-09 pad Assets:A Equity:O\n2024-01-10 pad Assets:A Equity:O\n\
+         2024-01-11 balance Assets:A 100 USD\n2024-01-12 balance Assets:A 200 USD\n",
+    );
+    assert_eq!(
+        codes,
+        [
+            ErrorCode::BalanceAssertionFailed,
+            ErrorCode::PadWithoutBalance,
+        ]
+    );
 }

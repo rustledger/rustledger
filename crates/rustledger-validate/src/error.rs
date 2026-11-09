@@ -30,8 +30,9 @@ pub enum ErrorCode {
     BalanceToleranceExceeded,
     /// E2003: Pad without subsequent balance assertion.
     PadWithoutBalance,
-    /// E2004: Multiple pads for same balance assertion.
-    MultiplePadForBalance,
+    // E2004 (multiple pads for one balance) was removed in 0.25.0: a pad
+    // superseded by a later one is an unused pad (E2003), as in beancount
+    // (#2896). The code is retired, not free for reuse.
 
     // === Transaction Errors (E3xxx) ===
     /// E3001: Transaction does not balance.
@@ -200,7 +201,6 @@ impl ErrorCode {
         Self::BalanceAssertionFailed,
         Self::BalanceToleranceExceeded,
         Self::PadWithoutBalance,
-        Self::MultiplePadForBalance,
         Self::TransactionUnbalanced,
         Self::MultipleInterpolation,
         Self::NoPostings,
@@ -235,7 +235,6 @@ impl ErrorCode {
             Self::BalanceAssertionFailed => "E2001",
             Self::BalanceToleranceExceeded => "E2002",
             Self::PadWithoutBalance => "E2003",
-            Self::MultiplePadForBalance => "E2004",
             // Transaction errors
             Self::TransactionUnbalanced => "E3001",
             Self::MultipleInterpolation => "E3002",
@@ -314,7 +313,6 @@ impl ErrorCode {
             Self::BalanceAssertionFailed => "Balance assertion failed",
             Self::BalanceToleranceExceeded => "Balance exceeds explicit tolerance",
             Self::PadWithoutBalance => "Pad without a subsequent balance assertion",
-            Self::MultiplePadForBalance => "Multiple pads for the same balance assertion",
             Self::TransactionUnbalanced => "Transaction does not balance",
             Self::MultipleInterpolation => "Multiple postings missing amounts for one currency",
             Self::NoPostings => "Transaction has no postings",
@@ -401,12 +399,6 @@ impl ErrorCode {
                  amount makes the NEXT balance assertion true\" — without that \
                  balance it does nothing.\n\nFix: add the `balance` assertion after \
                  the pad, or delete the pad."
-            }
-            Self::MultiplePadForBalance => {
-                "More than one `pad` directive is pending for the same account and \
-                 currency before a single `balance` assertion — it is ambiguous which \
-                 pad should absorb the difference.\n\nFix: keep one pad per \
-                 account/currency between consecutive balance assertions."
             }
             Self::TransactionUnbalanced => {
                 "The weights of a transaction's postings do not sum to zero per \

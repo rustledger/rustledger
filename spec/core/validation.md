@@ -127,21 +127,15 @@ This document catalogs all validation errors and warnings with their trigger con
 
 **Code:** `E2003`
 
-**Condition:** `pad` directive without subsequent `balance` for same account/currency.
+**Condition:** `pad` directive that inserts no padding (beancount's `Unused Pad entry`): no subsequent `balance` on its account, every balance it reaches already holds, or a later `pad` on the account supersedes it.
 
 **Message:** `Pad directive for {account} has no subsequent balance assertion for {currency}`
 
 **Severity:** Error
 
-### MULTIPLE_PAD_FOR_BALANCE
+### MULTIPLE_PAD_FOR_BALANCE (removed in 0.25.0)
 
-**Code:** `E2004`
-
-**Condition:** Multiple `pad` directives between balance assertions for same account/currency.
-
-**Message:** `Multiple pad directives for {account} {currency} before balance assertion`
-
-**Severity:** Error
+**Code:** `E2004`, retired: not reported since 0.25.0, and not to be reused. A pad superseded by a later one before the balance is a `PAD_WITHOUT_BALANCE` (`E2003`), as in beancount.
 
 ## Transaction Errors
 

@@ -6,7 +6,8 @@
  * assertion on that account absorbs the difference by synthesizing a
  * padding transaction, so the assertion holds exactly:
  *
- *   pad amount = asserted - actual   (inserted just before the balance)
+ *   pad amount = asserted - actual   (dated at the pad, as beancount dates
+ *                                     its padding entry)
  *
  * Modeled per the implementation in `rustledger-booking/src/pad.rs`:
  * - a newer pad REPLACES a still-pending one;

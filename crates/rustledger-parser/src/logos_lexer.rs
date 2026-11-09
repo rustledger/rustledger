@@ -658,9 +658,10 @@ pub fn is_valid_account_name(name: &str) -> bool {
     starts_validly(components.next(), true) && starts_validly(components.next(), false)
 }
 
-/// Whether `name` is a valid account name by beancount's STRICT check,
-/// `account.is_valid`: a full match of `ACCOUNT_RE`, so EVERY component
-/// starts with `\p{Lu}` (or, after the root, `\p{Nd}`) and holds only
+/// Whether `name` is a valid account name by beancount's STRICT check.
+///
+/// That check is `account.is_valid`: a full match of `ACCOUNT_RE`, so EVERY
+/// component starts with `\p{Lu}` (or, after the root, `\p{Nd}`) and holds only
 /// letters, decimal digits and `-` (`[\p{L}\p{Nd}\-]`).
 ///
 /// beancount applies it where a value is configuration rather than ledger
@@ -690,8 +691,9 @@ pub fn is_valid_account_name_strict(name: &str) -> bool {
         })
 }
 
-/// Whether `c` can continue an account component as the lexer reads one:
-/// an ASCII letter, digit or `-`, or any non-ASCII character. Implemented
+/// Whether `c` can continue an account component as the lexer reads one.
+///
+/// That is an ASCII letter, digit or `-`, or any non-ASCII character. Implemented
 /// by running the lexer on an account ending in `c`, so it is the `Account`
 /// token's own rule; for editor word boundaries (the LSP's `is_word_char`).
 #[must_use]

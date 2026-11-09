@@ -145,10 +145,22 @@ every PR with `--check`:
 
 - An input pinned as matching that now mismatches is a **regression** and
   fails the job.
-- A pinned mismatch that now matches, or changes category, is reported as
-  a notice and does not fail: update the pin.
-- A tracked ledger with no row (new or edited) fails: pin it. A downloaded
-  one with no row only warns: upstream changed it.
+- A pinned mismatch that now matches, or changes category, is a **stale
+  pin** and also fails, the way the corpus baselines force
+  `BASELINE_UPDATE`: run `--update` (below) and commit the manifest. Left
+  unpinned, the improvement could be lost by a later PR without anything
+  failing.
+- A run that does not cover the pinned inputs fails: a `fuzz` or `matrix`
+  count that differs from the manifest's `#@inputs` line, or a pinned
+  `fuzz` / `matrix` id that is not among the inputs (an empty or partial
+  fuzz directory would otherwise read as "no regressions").
+- A tracked ledger with no row (a test `.beancount` added or edited by the
+  PR) or a downloaded one (upstream changed it) only warns, and the log
+  prints the `pin-row` line that pins it. Pin it with the steps below, or
+  copy the row.
+
+The job is advisory until a maintainer adds it to the branch's required
+checks.
 
 To update the pin (after a parser change that improves parity, or to move
 to a newer `fuzz-corpus` commit):
@@ -166,10 +178,13 @@ python3 -I scripts/compat-parse-error-parity.py \
 git diff --stat tests/baselines/parse-error-parity.manifest
 ```
 
-`--update` keeps the `compat` rows of contents the run did not see, because
+`--update` needs `--fuzz-dir`, `--fuzz-commit` and `--compat-dir`; without
+the fuzz corpus it would drop every fuzz pin. It keeps the `compat` rows of
+contents the run did not see, because
 the downloaded corpus differs between machines: CI replays a cached copy,
 and a local fetch is usually newer. To pin the files CI sees but your copy
-does not, take the `pin-row` lines its log prints for them:
+does not (or a tracked ledger the warning names), take the `pin-row` lines
+its log prints for them:
 
 ```bash
 gh run view <run-id> --log --job <job-id> \

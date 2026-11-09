@@ -9,6 +9,8 @@
 # match, one id per line. An unlisted fuzz or matrix input is pinned
 # as matching.
 #@fuzz-commit 9bc79f4f35f52c50813164f43307e7d151d70d8c
+#@inputs fuzz 44589
+#@inputs matrix 66816
 @ ledgers
 compat	8a31f73f5560	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-01.beancount
 compat	92780edc8620	match	tests/compatibility/files/apyb-financeiro/financeiro_2020-02.beancount

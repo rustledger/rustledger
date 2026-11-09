@@ -16,7 +16,7 @@ jobs:
         run: |
           BRANCH="${{ github.head_ref }}"
 
-          PATTERN="^(feat|feature|fix|docs|chore|refactor|release|hotfix|claude|dependabot|copilot|perf)/[a-zA-Z0-9][a-zA-Z0-9/_.-]*$"
+          PATTERN="^(feat|feature|fix|docs|chore|refactor|release|hotfix|claude|dependabot|copilot|perf|test|ci)/[a-zA-Z0-9][a-zA-Z0-9/_.-]*$"
 
           if [[ "$BRANCH" =~ $PATTERN ]]; then
             echo "✅ Branch name '$BRANCH' is valid"
@@ -24,7 +24,7 @@ jobs:
             echo "❌ Branch name '$BRANCH' does not match pattern"
             echo ""
             echo "Branch names must follow: <type>/<description>"
-            echo "  Types: feat, feature, fix, docs, chore, refactor, release, hotfix, claude, dependabot, copilot, perf"
+            echo "  Types: feat, feature, fix, docs, chore, refactor, release, hotfix, claude, dependabot, copilot, perf, test, ci"
             echo "  Description: letters, numbers, hyphens, underscores, slashes, dots"
             echo ""
             echo "Examples:"

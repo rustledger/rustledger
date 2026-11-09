@@ -53,21 +53,32 @@ Normalization, applied identically to both sides:
     the predicate that excludes them there, plus `NOT_PARSE_ERRORS`).
 
 beancount can crash on some inputs (`1./00` in an amount segfaults its C
-parser; some `pushmeta` / `popmeta` values make its builder raise). Each beancount parse runs in a forked worker; a worker
-that dies takes only the input it was on, which is recorded as `crash`, never
-skipped. A Python exception from the parser is recorded the same way.
+parser; some `pushmeta` / `popmeta` values make its builder raise). Each
+beancount parse runs in a forked worker; a worker that dies takes only the
+input it was on, which is recorded as `crash`, never skipped. A Python
+exception from the parser is recorded the same way. A crashed input has no
+verdict, so rledger is not compared on it; the report counts them apart.
 
 Baseline (`tests/baselines/parse-error-parity.manifest`): every mismatching
 or crashing input with its category, plus every `tracked` and `compat` file
 with its status, matches included. A `fuzz` or `matrix` input that is absent
 from the manifest is pinned as matching: the fuzz inputs come from the commit
 the manifest pins (`#@fuzz-commit`), and the matrix from this checkout, so
-both sets are fixed. A `tracked` or `compat` input with no row is new content:
-with `--check` it fails for a tracked file (pin it) and warns for a
-downloaded one (upstream changed it).
-With `--check`, the run FAILS when a pinned match now mismatches (a
-regression), and REPORTS without failing when a pinned mismatch now matches or
-changes category (update the pin with `--update`).
+both sets are fixed, and `#@inputs <source> <n>` records how many each has.
+
+With `--check`, the run FAILS when:
+
+  * a pinned match now mismatches (a regression);
+  * a pinned mismatch now matches or changes category (a stale pin: run
+    `--update` and commit the manifest, so a later PR cannot regress it
+    unnoticed);
+  * a `fuzz` or `matrix` input count differs from `#@inputs`, or a pinned
+    `fuzz` / `matrix` id is not among the inputs (the run did not compare
+    what the pin covers, e.g. an empty fuzz directory).
+
+A `tracked` or `compat` input with no row is new content (a test ledger was
+added or edited, or upstream changed a downloaded file). It only warns, and
+prints the `pin-row` line that pins it.
 
 Usage (build rledger's side first with `cargo build --release -p
 rustledger-loader --no-default-features --example parse_error_lines`):
@@ -104,6 +115,9 @@ FUZZ_REGRESSIONS = [
 # change (a tracked file is edited, a downloaded one changes upstream), so an
 # unlisted one is new, not a pinned match.
 LEDGER_SOURCES = ("tracked", "compat")
+# Sources whose input set the manifest fixes: the fuzz corpus at the pinned
+# commit, and the matrix this checkout generates. Their counts are pinned.
+FIXED_SOURCES = ("fuzz", "matrix")
 # rledger's file-level errors: beancount reports these at line 0.
 RLEDGER_EOF_CODES = {"P0021", "P0023"}  # UnclosedPushtag, UnclosedPushmeta
 # A single beancount parse that runs longer than this is recorded as a crash.
@@ -155,6 +169,10 @@ class Inputs:
     def __init__(self):
         self.items = {}  # id -> (source, label, text)
         self.non_utf8 = collections.Counter()
+        # UTF-8 inputs read per source, duplicates included: what `#@inputs`
+        # pins. Counted before deduplication, so it does not depend on what
+        # other sources (a machine's downloaded corpus) happen to hold.
+        self.seen = collections.Counter()
         self.duplicates = 0
 
     def add(self, source, label, data):
@@ -163,6 +181,7 @@ class Inputs:
         except UnicodeDecodeError:
             self.non_utf8[source] += 1
             return
+        self.seen[source] += 1
         cid = content_id(data)
         if cid in self.items:
             self.duplicates += 1
@@ -241,6 +260,11 @@ NOT_PARSE_ERRORS = (
 def beancount_errors(parser, is_not_syntax, text):
     """beancount's parse errors for `text` as `[line, type, message]`."""
     _, errors, _ = parser.parse_string(strip_bom(text))
+    return keep_parse_errors(errors, is_not_syntax)
+
+
+def keep_parse_errors(errors, is_not_syntax):
+    """beancount `errors` minus the ones that are not parse errors in rledger."""
     out = []
     for e in errors:
         if is_not_syntax(e) or any(m in str(e.message) for m in NOT_PARSE_ERRORS):
@@ -470,7 +494,10 @@ def read_baseline(path):
         return meta, pins
     section = None
     for line in path.read_text().splitlines():
-        if line.startswith("#@"):
+        if line.startswith("#@inputs "):
+            source, n = line[len("#@inputs ") :].split(" ")
+            meta.setdefault("inputs", {})[source] = int(n)
+        elif line.startswith("#@"):
             key, _, value = line[2:].partition(" ")
             meta[key] = value
         elif not line or line.startswith("#"):
@@ -528,6 +555,8 @@ def write_baseline(path, inputs, results, fuzz_commit, previous=None):
             "# as matching.\n"
         )
         f.write(f"#@fuzz-commit {fuzz_commit}\n")
+        for source in FIXED_SOURCES:
+            f.write(f"#@inputs {source} {inputs.seen[source]}\n")
         f.write("@ ledgers\n")
         for source, label, cid, category in sorted(ledgers):
             f.write(f"{source}\t{cid}\t{category}\t{label}\n")
@@ -567,6 +596,77 @@ def check_against_baseline(inputs, results, pins):
     return regressions, improvements, changed, unpinned
 
 
+def coverage_errors(inputs, meta, pins):
+    """Why this run does not cover what the manifest pins, if it does not.
+
+    The fuzz and matrix sets are fixed by the manifest, so a different count,
+    or a pinned id that is not among the inputs, means the run compared
+    something else (an empty or partial fuzz directory, a changed matrix):
+    its "no regressions" would not be about the pinned inputs.
+    """
+    errors = []
+    pinned = meta.get("inputs", {})
+    for source in FIXED_SOURCES:
+        if source not in pinned:
+            errors.append(f"the manifest has no `#@inputs {source}` count")
+        elif inputs.seen[source] != pinned[source]:
+            errors.append(
+                f"{inputs.seen[source]} {source} inputs, the manifest pins "
+                f"{pinned[source]}"
+            )
+    missing = collections.Counter(
+        source
+        for cid, (source, _, _) in pins.items()
+        if source in FIXED_SOURCES and cid not in inputs.items
+    )
+    for source, n in sorted(missing.items()):
+        errors.append(f"{n} pinned {source} id(s) are not among the inputs")
+    return errors
+
+
+def run_check(inputs, results, meta, pins, out=print):
+    """`--check`: print every finding, return the exit code.
+
+    Fails on a regression, a stale pin (an improvement or a changed
+    category: `--update` and commit, as the corpus baselines force
+    `BASELINE_UPDATE`), and a run that does not cover the pinned inputs.
+    An unpinned tracked or downloaded ledger only warns, with its pin row.
+    """
+    coverage = coverage_errors(inputs, meta, pins)
+    regressions, improvements, changed, unpinned = check_against_baseline(
+        inputs, results, pins
+    )
+    for message in coverage:
+        out(f"::error::the run does not cover the pinned inputs: {message}")
+    for label, category, tracked, cid in unpinned:
+        source = "tracked" if tracked else "compat"
+        out(f"::warning::no pin for this content ({category}): {label}")
+        # The row that pins it, on a line of its own so it can be copied out
+        # of a log (see tests/baselines/README.md).
+        out(f"pin-row\t{source}\t{cid}\t{category}\t{label}")
+    for label, pinned in improvements:
+        out(f"::error::stale pin, now matches beancount (pinned {pinned}): {label}")
+    for label, pinned, category in changed:
+        out(f"::error::stale pin, mismatch changed {pinned} -> {category}: {label}")
+    for label, category in regressions:
+        out(f"::error::regression, matched beancount and now {category}: {label}")
+    stale = len(improvements) + len(changed)
+    if coverage or regressions or stale:
+        out(
+            f"FAILED: {len(regressions)} regression(s), {stale} stale pin(s), "
+            f"{len(coverage)} coverage error(s)"
+        )
+        if stale and not regressions:
+            out(
+                "Parity changed for the better or in shape: run this script with "
+                "--update (see tests/baselines/README.md) and commit "
+                "tests/baselines/parse-error-parity.manifest."
+            )
+        return 1
+    out(f"no regressions ({len(unpinned)} unpinned ledger(s))")
+    return 0
+
+
 # --------------------------------------------------------------------------
 # Report
 
@@ -603,7 +703,7 @@ def render_report(inputs, results, examples=1):
     lines.append("")
     lines.append(
         "| Source | Inputs | Match | Only the count differs | Lines differ "
-        "| beancount crashed |"
+        "| beancount crashed (not compared) |"
     )
     lines.append("|---|---|---|---|---|---|")
     for source in sorted(by_source) + ["all"]:
@@ -613,6 +713,12 @@ def render_report(inputs, results, examples=1):
             f"| {source} | {n} | {c['match']} ({100 * c['match'] / max(n, 1):.1f}%) "
             f"| {c['count']} | {c['lines']} | {c['crash']} |"
         )
+    lines.append("")
+    lines.append(
+        f"{by_bucket['crash']} inputs crashed beancount (or made it raise): "
+        "they have no beancount verdict, so rledger is not compared on them, "
+        "and they count in neither the matches nor the mismatches."
+    )
     lines.append("")
     lines.append("## Mismatch categories")
     lines.append("")
@@ -716,7 +822,7 @@ def self_test():
         path = Path(d) / "m"
         write_baseline(path, inputs, results, "abc")
         meta, pins = read_baseline(path)
-    assert meta == {"fuzz-commit": "abc"}, meta
+    assert meta == {"fuzz-commit": "abc", "inputs": {"fuzz": 3, "matrix": 0}}, meta
     assert set(pins) == {ids["f1"], ids["tests/x.beancount"]}, pins
     assert check_against_baseline(inputs, results, pins) == ([], [], [], [])
     # f2 regresses, f1 starts matching, the ledger changes category.
@@ -751,6 +857,50 @@ def self_test():
         "cccccccccccc": ("compat", "match", "z"),
     }, appended
     assert strip_bom("\ufeffx") == "x" and strip_bom("x\ufeff") == "x\ufeff"
+
+    # beancount's errors: option, account-name and cost-merge errors dropped,
+    # a missing line read as 0.
+    class Err:
+        def __init__(self, line, message):
+            self.source = {"filename": "<string>", "lineno": line}
+            self.message = message
+
+    class LexerError(Err):
+        pass
+
+    errs = [
+        Err(1, "Invalid option: 'x'"),
+        Err(2, "Invalid account name: 'a'"),
+        Err(3, "Error for option 'booking_method': Invalid value"),
+        Err(4, "Option 'filename' may not be set"),
+        Err(5, "Cost merging is not supported yet"),
+        LexerError(6, "Invalid token: 'q'"),
+        Err(None, "Unbalanced pushed tag: 't'"),
+    ]
+    is_not_syntax = load_matrix_module().is_not_syntax  # imports beancount
+    assert keep_parse_errors(errs, is_not_syntax) == [
+        [6, "LexerError", "Invalid token: 'q'"],
+        [0, "Err", "Unbalanced pushed tag: 't'"],
+    ], keep_parse_errors(errs, is_not_syntax)
+
+    # --check's exit code. `inputs` holds 3 fuzz inputs (f1 pinned rl-only,
+    # f2 a pinned match) and a pinned tracked ledger.
+    meta = {"fuzz-commit": "abc", "inputs": {"fuzz": 3, "matrix": 0}}
+    pins = {ids["f1"]: ("fuzz", "rl-only", ""), ids["tests/x.beancount"]: ("tracked", "match", "x")}
+
+    def code(results, meta=meta, pins=pins):
+        return run_check(inputs, results, meta, pins, out=lambda _: None)
+
+    assert code(results) == 0
+    assert code({**results, ids["f2"]: ("off-by-one", [], [])}) == 1  # regression
+    assert code({**results, ids["f1"]: ("match", [], [])}) == 1  # stale: improved
+    assert code({**results, ids["f1"]: ("off-by-one", [], [])}) == 1  # stale: shape
+    no_row = {ids["f1"]: ("fuzz", "rl-only", "")}
+    assert code(results, pins=no_row) == 0  # unpinned tracked ledger: warns
+    assert code(results, meta={"inputs": {"fuzz": 9, "matrix": 0}}) == 1  # count
+    assert code(results, meta={"inputs": {"matrix": 0}}) == 1  # no count pinned
+    ghost = {**pins, "dddddddddddd": ("fuzz", "rl-only", "")}
+    assert code(results, pins=ghost) == 1  # a pinned id that did not run
     assert rl_lines([[5, "P0021", ""], [5, "P0003", ""]]) == [0, 5]
     print("self-test: ok")
 
@@ -790,8 +940,12 @@ def main():
                 f"error: --fuzz-commit {args.fuzz_commit!r} is not the pinned "
                 f"{meta.get('fuzz-commit')!r}"
             )
-        if not args.fuzz_dir or not args.compat_dir:
-            sys.exit("error: --check needs --fuzz-dir and --compat-dir")
+    if (args.check or args.update) and not (args.fuzz_dir and args.compat_dir):
+        # Without them --update would drop every fuzz pin, and --check
+        # would compare less than the manifest covers.
+        sys.exit("error: --check and --update need --fuzz-dir and --compat-dir")
+    if args.update and not args.fuzz_commit:
+        sys.exit("error: --update needs --fuzz-commit (the commit --fuzz-dir holds)")
 
     import beancount
 
@@ -840,37 +994,7 @@ def main():
     if not args.check:
         return 0
 
-    regressions, improvements, changed, unpinned = check_against_baseline(
-        inputs, results, pins
-    )
-    for label, pinned in improvements:
-        print(f"::notice::now matches beancount (pinned {pinned}): {label}")
-    for label, pinned, category in changed:
-        print(f"::notice::mismatch changed shape {pinned} -> {category}: {label}")
-    for label, category, tracked, cid in unpinned:
-        level = "error" if tracked else "warning"
-        source = "tracked" if tracked else "compat"
-        print(f"::{level}::no pin for this content ({category}): {label}")
-        # The row that pins it, on a line of its own so the pins for CI's
-        # corpus can be copied out of the log (see tests/baselines/README.md).
-        print(f"pin-row\t{source}\t{cid}\t{category}\t{label}")
-    for label, category in regressions:
-        print(f"::error::regression, matched beancount and now {category}: {label}")
-    stale = improvements or changed
-    if stale:
-        print(
-            f"{len(improvements)} improvement(s), {len(changed)} changed shape(s): "
-            "update the pin with --update"
-        )
-    tracked_unpinned = [u for u in unpinned if u[2]]
-    if regressions or tracked_unpinned:
-        print(
-            f"FAILED: {len(regressions)} regression(s), "
-            f"{len(tracked_unpinned)} tracked file(s) without a pin"
-        )
-        return 1
-    print("no regressions")
-    return 0
+    return run_check(inputs, results, meta, pins)
 
 
 if __name__ == "__main__":

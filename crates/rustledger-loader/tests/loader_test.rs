@@ -3698,3 +3698,45 @@ fn test_is_plugin_failure_marks_a_plugin_that_fails_to_run() {
     assert!(!failed.is_empty(), "{:?}", ledger.errors);
     assert!(failed.iter().all(|e| e.is_plugin_failure()), "{failed:?}");
 }
+
+/// #2906: document discovery takes a directory only when its path is a valid
+/// account by beancount's STRICT rule (`account.walk` checks
+/// `account.is_valid`), and skips every other one in silence. bean-check
+/// 3.2.3 on this ledger: no errors or warnings, and one Document, for
+/// `Assets:Ok`, although the ledger opens all four accounts (each a valid
+/// ledger account) and `Assets/misc` holds a dated file too.
+#[test]
+fn document_discovery_takes_only_strictly_valid_account_directories() {
+    use rustledger_loader::{LoadOptions, load};
+    let dir = tempfile::tempdir().unwrap();
+    for account_dir in [
+        "Assets/A/\u{e9}clair",
+        "Assets/A/B\u{1F600}",
+        "Assets/\u{663}/\u{e9}",
+        "Assets/Ok",
+        "Assets/misc",
+    ] {
+        let p = dir.path().join("docs").join(account_dir);
+        std::fs::create_dir_all(&p).unwrap();
+        std::fs::write(p.join("2024-01-02.stmt.pdf"), "x").unwrap();
+    }
+    let path = dir.path().join("main.beancount");
+    std::fs::write(
+        &path,
+        "option \"documents\" \"docs\"\n\
+         2024-01-01 open Assets:A:\u{e9}clair\n\
+         2024-01-01 open Assets:A:B\u{1F600}\n\
+         2024-01-01 open Assets:\u{663}:\u{e9}\n\
+         2024-01-01 open Assets:Ok\n",
+    )
+    .unwrap();
+    let ledger = load(&path, &LoadOptions::default()).expect("load");
+    let documents: Vec<String> = opens_and_documents(&ledger)
+        .into_iter()
+        .filter(|(_, kind, _)| *kind == "document")
+        .map(|(_, _, account)| account)
+        .collect();
+    assert_eq!(documents, ["Assets:Ok"]);
+    let diagnostics: Vec<_> = ledger.errors.iter().map(|e| &e.message).collect();
+    assert!(diagnostics.is_empty(), "{diagnostics:?}");
+}

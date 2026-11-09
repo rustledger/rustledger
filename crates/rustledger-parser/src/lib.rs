@@ -97,8 +97,7 @@ pub use cst::{
 // crate so the re-export contract holds at THIS crate's semver.
 pub use error::{COST_PRICE_CURRENCY_MISMATCH, ParseError, ParseErrorKind};
 pub use logos_lexer::{
-    is_account_name_char, is_valid_account_name, is_valid_account_name_strict, is_valid_currency,
-    leading_date_len,
+    is_valid_account_name, is_valid_account_name_strict, is_valid_currency, leading_date_len,
 };
 pub use rowan::{Direction, NodeOrToken, TextRange, TextSize, TokenAtOffset, WalkEvent};
 pub use rustledger_core::{
@@ -353,6 +352,21 @@ impl ParseResult {
     #[must_use]
     pub fn currency_at(&self, offset: usize) -> Option<&Spanned<rustledger_core::Currency>> {
         self.currency_occurrences
+            .iter()
+            .find(|occ| occ.span.start <= offset && offset <= occ.span.end)
+    }
+
+    /// The account token at byte `offset`, if the parser read one there.
+    ///
+    /// The account counterpart of [`Self::currency_at`], with the same
+    /// end-inclusive rule. An account may hold any non-ASCII character
+    /// (`Assets:A😀`, a combining mark, #2906), which a word-character scan
+    /// over prose would either split the name at or, if it took every
+    /// non-ASCII character, run across `、` and `。` in a narration; the
+    /// token span is the lexer's own, so neither happens.
+    #[must_use]
+    pub fn account_at(&self, offset: usize) -> Option<&Spanned<rustledger_core::Account>> {
+        self.account_occurrences
             .iter()
             .find(|occ| occ.span.start <= offset && offset <= occ.span.end)
     }

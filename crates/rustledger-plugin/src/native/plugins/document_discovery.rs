@@ -470,7 +470,18 @@ fn scan_documents(
                             .collect::<Vec<_>>()
                             .join(":");
 
-                        if !account.is_empty() {
+                        // beancount's `find_documents` walks the tree with
+                        // `account.walk`, which yields only directories whose
+                        // path is a valid account by `account.is_valid` (a
+                        // full match, the strict rule) and skips every other
+                        // one in silence: no document, no warning. Since
+                        // #2906 a ledger can open `Assets:A:éclair`, so the
+                        // strict check, not the ledger rule, decides here.
+                        // Not mirrored: `walk` NFKC-normalizes the path first
+                        // (for filesystems that store decomposed names), so a
+                        // decomposed `Assets/Ünï` is `Assets:Ünï` there and
+                        // does not match an open here. That predates #2906.
+                        if rustledger_parser::is_valid_account_name_strict(&account) {
                             let full_path = entry_path.to_string_lossy().to_string();
 
                             // Canonicalize for consistent comparison with existing docs

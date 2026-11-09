@@ -845,4 +845,29 @@ mod tests {
              would land somewhere wrong.",
         );
     }
+
+    /// #2906 review: the innermost selection inside a narration stops at
+    /// prose punctuation. With the cursor on `昼` in `"昼食、渋谷"` the first
+    /// range is `昼食` (UTF-16 columns 14..16), not the whole run.
+    #[test]
+    fn word_in_narration_stops_at_ideographic_comma() {
+        let source = "2024-01-15 * \"\u{663c}\u{98df}\u{3001}\u{6e0b}\u{8c37}\"\n  Assets:A  1 USD\n  Assets:B\n";
+        let params = SelectionRangeParams {
+            text_document: TextDocumentIdentifier {
+                uri: "file:///prose.beancount".parse().unwrap(),
+            },
+            positions: vec![Position::new(0, 14)],
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let parse_result = rustledger_parser::parse(source);
+        let result =
+            handle_selection_range(&params, source, &parse_result, PositionEncoding::Utf16)
+                .expect("Some");
+        let first = result[0].range;
+        assert_eq!(
+            (first.start, first.end),
+            (Position::new(0, 14), Position::new(0, 16))
+        );
+    }
 }

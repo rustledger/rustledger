@@ -691,20 +691,6 @@ pub fn is_valid_account_name_strict(name: &str) -> bool {
         })
 }
 
-/// Whether `c` can continue an account component as the lexer reads one.
-///
-/// That is an ASCII letter, digit or `-`, or any non-ASCII character. Implemented
-/// by running the lexer on an account ending in `c`, so it is the `Account`
-/// token's own rule; for editor word boundaries (the LSP's `is_word_char`).
-#[must_use]
-pub fn is_account_name_char(c: char) -> bool {
-    let mut buf = [0u8; 8];
-    buf[..4].copy_from_slice(b"A:AA");
-    let len = 4 + c.encode_utf8(&mut buf[4..]).len();
-    // `buf[..len]` is `A:AA` followed by one encoded char: valid UTF-8.
-    std::str::from_utf8(&buf[..len]).is_ok_and(lexes_as_one_account)
-}
-
 /// Whether `name` lexes to exactly one [`Token::Account`] spanning it.
 fn lexes_as_one_account(name: &str) -> bool {
     let mut lexer = Token::lexer(name);
@@ -2452,32 +2438,6 @@ mod tests {
         }
         for name in ["Assets:\u{e9}clair", "Assets:A_b", "Assets", "1A:B"] {
             assert!(!ok(name), "{name}");
-        }
-    }
-
-    /// `is_account_name_char` is the `Account` token's continuation rule:
-    /// an ASCII letter, digit or `-`, or any non-ASCII character. Checked
-    /// over every ASCII character and a spread of non-ASCII ones.
-    #[test]
-    fn is_account_name_char_is_the_lexer_rule() {
-        for b in 0u8..128 {
-            let c = char::from(b);
-            assert_eq!(
-                super::is_account_name_char(c),
-                c.is_ascii_alphanumeric() || c == '-',
-                "{c:?}"
-            );
-        }
-        for c in [
-            '\u{e9}',
-            '\u{663}',
-            '\u{1F600}',
-            '\u{308}',
-            '\u{a0}',
-            '\u{feff}',
-            '\u{65e5}',
-        ] {
-            assert!(super::is_account_name_char(c), "{c:?}");
         }
     }
 }

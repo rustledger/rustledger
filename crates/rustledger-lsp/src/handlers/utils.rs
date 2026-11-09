@@ -507,11 +507,15 @@ pub fn get_word_at_position(
 /// index's negotiated encoding (the same contract as
 /// [`get_word_at_position`]).
 ///
-/// When the lexer read a currency token at the cursor, that token is the
-/// symbol (via [`ParseResult::currency_at`]): the word-character scan of
-/// [`get_word_at_position`] splits `/6J` at the `/` and `BRK.B` at the
-/// `.`, so rename, references and linked editing could not reach those
-/// currencies (#2807). Otherwise this is [`get_word_at_position`] on the
+/// When the parser read an account or currency token at the cursor, that
+/// token is the symbol (via [`ParseResult::account_at`] and
+/// [`ParseResult::currency_at`]). The word-character scan of
+/// [`get_word_at_position`] splits `/6J` at the `/` and `BRK.B` at the `.`,
+/// so rename, references and linked editing could not reach those
+/// currencies (#2807); and an account may hold any non-ASCII character
+/// (`Assets:A😀`, a combining mark, #2906), which the scan stops at, while
+/// widening the scan to every non-ASCII character would run words across
+/// `、` and `。` in prose. Otherwise this is [`get_word_at_position`] on the
 /// addressed line, except that a one-letter transaction or posting flag is
 /// no symbol: a flag such as `T` is not the currency `T`, and
 /// reading it as one let references, highlight, rename, linked editing,
@@ -525,13 +529,21 @@ pub fn get_symbol_at_position(
     parse_result: &ParseResult,
     position: Position,
 ) -> Option<(String, usize, usize)> {
-    if let Some(offset) = index.position_to_offset(position.line, position.character)
-        && let Some(occ) = parse_result.currency_at(offset)
-    {
-        let (start_line, start_col) = index.offset_to_position(occ.span.start);
-        let (end_line, end_col) = index.offset_to_position(occ.span.end);
-        if start_line == position.line && end_line == position.line {
-            return Some((occ.value.to_string(), start_col as usize, end_col as usize));
+    if let Some(offset) = index.position_to_offset(position.line, position.character) {
+        let token = parse_result
+            .account_at(offset)
+            .map(|occ| (occ.value.to_string(), occ.span))
+            .or_else(|| {
+                parse_result
+                    .currency_at(offset)
+                    .map(|occ| (occ.value.to_string(), occ.span))
+            });
+        if let Some((value, span)) = token {
+            let (start_line, start_col) = index.offset_to_position(span.start);
+            let (end_line, end_col) = index.offset_to_position(span.end);
+            if start_line == position.line && end_line == position.line {
+                return Some((value, start_col as usize, end_col as usize));
+            }
         }
     }
     let line = index.line_text(position.line)?;
@@ -547,14 +559,13 @@ pub fn get_symbol_at_position(
 
 /// Check if a character is part of a word (for Beancount identifiers).
 ///
-/// Every character the lexer's `Account` token takes
-/// ([`rustledger_parser::is_account_name_char`]: an ASCII letter, digit or
-/// `-`, or any non-ASCII character), plus `:` and `_`. So the word under the
-/// cursor is the whole account even when it holds a character outside
-/// `char::is_alphanumeric`, such as `Assets:A😀` or a combining mark (#2906),
-/// which call and type hierarchy read through this.
+/// Letters and digits (`char::is_alphanumeric`), `:`, `-` and `_`: the word
+/// scan also runs over prose (strings, comments), where `、`, `。`, NBSP and
+/// curly quotes must still end a word. An account token holding other
+/// characters (`Assets:A😀`) is found whole by [`get_symbol_at_position`]
+/// through the parser's own token span instead (#2906).
 pub fn is_word_char(c: char) -> bool {
-    c == ':' || c == '_' || rustledger_parser::is_account_name_char(c)
+    c.is_alphanumeric() || c == ':' || c == '-' || c == '_'
 }
 
 /// Check if a string looks like an account name.
@@ -1119,20 +1130,45 @@ mod tests {
         assert!(is_word_char('_'));
         assert!(!is_word_char(' '));
         assert!(!is_word_char('"'));
-        // Every character of an account token (#2906).
-        assert!(is_word_char('\u{1F600}'));
-        assert!(is_word_char('\u{308}'));
+        // Prose punctuation and spaces end a word, so a word in a narration
+        // or comment stops at them (#2906 review).
         assert!(is_word_char('\u{663}'));
+        assert!(!is_word_char('\u{3001}')); // 、
+        assert!(!is_word_char('\u{3002}')); // 。
+        assert!(!is_word_char('\u{a0}')); // NBSP
+        assert!(!is_word_char('\u{201c}')); // “
     }
 
-    /// #2906: the word under the cursor is the whole account token, even
+    /// #2906: the symbol under the cursor is the whole account token, even
     /// across characters outside `char::is_alphanumeric` (an emoji, a
-    /// combining mark), so call and type hierarchy see the full name.
+    /// combining mark), through the parser's token span, so hover, rename,
+    /// references and call/type hierarchy see the full name.
     #[test]
-    fn test_get_word_at_position_whole_non_ascii_account() {
-        let line = "  Assets:A\u{1F600}\u{308}B  -5.00 USD";
-        let (word, _, _) = get_word_at_position(line, 4, PositionEncoding::Utf8).unwrap();
+    fn test_get_symbol_at_position_whole_non_ascii_account() {
+        let source = "2024-01-01 open Assets:A\u{1F600}\u{308}B\n";
+        let parsed = rustledger_parser::parse(source);
+        let index = LineIndex::new(source, PositionEncoding::Utf16);
+        let (word, start, end) =
+            get_symbol_at_position(&index, &parsed, Position::new(0, 18)).unwrap();
         assert_eq!(word, "Assets:A\u{1F600}\u{308}B");
+        // 16 columns before it; `Assets:A` 8, the emoji 2 UTF-16 units, the
+        // mark 1, `B` 1.
+        assert_eq!((start, end), (16, 28));
+    }
+
+    /// #2906 review: in prose the word stops at `、`. A narration `"昼食、渋谷"`
+    /// gives `昼食`, and an account named in a comment
+    /// (`; from Assets:Cash、Assets:Bank`) is `Assets:Cash`, not the run.
+    #[test]
+    fn test_get_symbol_at_position_stops_at_prose_punctuation() {
+        let source = "2024-01-01 * \"\u{663c}\u{98df}\u{3001}\u{6e0b}\u{8c37}\"\n\
+                      ; from Assets:Cash\u{3001}Assets:Bank\n";
+        let parsed = rustledger_parser::parse(source);
+        let index = LineIndex::new(source, PositionEncoding::Utf16);
+        let (word, _, _) = get_symbol_at_position(&index, &parsed, Position::new(0, 14)).unwrap();
+        assert_eq!(word, "\u{663c}\u{98df}");
+        let (word, _, _) = get_symbol_at_position(&index, &parsed, Position::new(1, 9)).unwrap();
+        assert_eq!(word, "Assets:Cash");
     }
 
     /// `account_declaration_spans` includes both `Open` and `Close`

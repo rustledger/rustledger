@@ -1012,7 +1012,7 @@ impl Options {
     /// `Invalid root account name` and keeps the default root): a digit
     /// start, whose accounts fail at parse time in both tools, or a
     /// character outside `[\p{L}\p{Nd}-]` such as `A😀` (#2906). Accepted
-    /// anyway for option-handling parity — the warning
+    /// anyway for option-handling parity; the warning
     /// makes the failure mode visible at the option site instead of at
     /// every account mention. The `account_*` options get the analogous
     /// E7002 guard; `name_*` used to be the unguarded exception.

@@ -3400,6 +3400,45 @@ where
         })
 }
 
+/// Visit each strict sub-account of `account` that `index` holds, by a range
+/// query rather than a scan.
+///
+/// `index` is a lexically sorted set of accounts (`Account`'s `Ord` and
+/// `Borrow<str>` are lexical). The sub-accounts of `Assets:Bank` are exactly
+/// the keys in the half-open range `["Assets:Bank:", "Assets:Bank;")` (`;` is
+/// the byte after `:`), which captures every `Assets:Bank:*` and nothing else
+/// (`Assets:Bank-Old` and `Assets:BankAlias` sort outside it), the
+/// sub-account half of [`is_subaccount_or_equal`]. O(log A + subtree), where
+/// [`sum_account_and_subaccounts`] scans every account: a subtree sum per
+/// `balance` over a scan made a ledger with many padded balances quadratic.
+///
+/// The one implementation of that range query, shared by the validator's
+/// balance check and booking's pad computation (`plan_pads`). The account
+/// itself is the caller's to add.
+pub fn for_each_strict_subaccount(
+    index: &std::collections::BTreeSet<Account>,
+    account: &str,
+    mut visit: impl FnMut(&Account),
+) {
+    // The explicit `Bound` tuple gives `RangeBounds<str>` (a `&str..&str`
+    // range would be `RangeBounds<&str>`, which `range::<str>` doesn't
+    // accept). The two bound strings are built without `format!`: this runs
+    // per balance assertion.
+    let mut lower = String::with_capacity(account.len() + 1);
+    lower.push_str(account);
+    lower.push(':');
+    let mut upper = String::with_capacity(account.len() + 1);
+    upper.push_str(account);
+    upper.push(';');
+    let bounds = (
+        std::ops::Bound::Included(lower.as_str()),
+        std::ops::Bound::Excluded(upper.as_str()),
+    );
+    for sub in index.range::<str, _>(bounds) {
+        visit(sub);
+    }
+}
+
 impl fmt::Display for Inventory {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if self.is_empty() {

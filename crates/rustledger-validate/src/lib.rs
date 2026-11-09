@@ -653,30 +653,16 @@ fn sum_account_subtree(
     account: &Account,
     currency: &Currency,
 ) -> Decimal {
-    let acct = account.as_str();
     // The account itself (the `== A` arm of `is_subaccount_or_equal`).
     let mut total = inventories
         .get(account)
         .map_or(Decimal::ZERO, |inv| inv.units(currency));
-    // Its sub-accounts: the contiguous `["A:", "A;")` range. The explicit
-    // `Bound` tuple gives `RangeBounds<str>` (a `&str..&str` range would be
-    // `RangeBounds<&str>`, which `range::<str>` doesn't accept). Build the two
-    // bound strings without `format!` — this runs per balance assertion.
-    let mut lower = String::with_capacity(acct.len() + 1);
-    lower.push_str(acct);
-    lower.push(':');
-    let mut upper = String::with_capacity(acct.len() + 1);
-    upper.push_str(acct);
-    upper.push(';');
-    let bounds = (
-        std::ops::Bound::Included(lower.as_str()),
-        std::ops::Bound::Excluded(upper.as_str()),
-    );
-    for sub in index.range::<str, _>(bounds) {
+    // Its sub-accounts, by the shared range query.
+    rustledger_core::for_each_strict_subaccount(index, account.as_str(), |sub| {
         if let Some(inv) = inventories.get(sub) {
             total += inv.units(currency);
         }
-    }
+    });
     total
 }
 

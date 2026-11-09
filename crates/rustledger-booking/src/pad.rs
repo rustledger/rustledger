@@ -25,10 +25,8 @@
 use rust_decimal::Decimal;
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustledger_core::{
-    Account, Amount, Currency, Directive, Inventory, NaiveDate, Position, Posting, Spanned,
-    Transaction,
+    Account, Amount, Currency, Directive, NaiveDate, Posting, Spanned, Transaction,
 };
-use std::collections::HashMap;
 use std::ops::Neg;
 
 /// Prefix of the narration carried by every synth pad transaction
@@ -299,7 +297,7 @@ pub fn plan_pads<'a, I>(sorted: I) -> PadPlan
 where
     I: IntoIterator<Item = (usize, &'a Directive)>,
 {
-    let mut inventories: HashMap<Account, Inventory> = HashMap::new();
+    let mut inventories = PadInventories::default();
     let mut pads = PadTracker::default();
     let mut plan = PadPlan::default();
 
@@ -308,13 +306,12 @@ where
             Directive::Transaction(txn) => {
                 for posting in &txn.postings {
                     if let Some(units) = posting.amount() {
-                        let inv = account_inventory(&mut inventories, &posting.account);
-                        let position =
-                            Position::from_posting(units, posting.cost.as_deref(), txn.date);
                         // A running balance that leaves range makes every pad
                         // measured against it wrong, so report it here rather
                         // than pad from a clamped total (#1863).
-                        if let Err(e) = inv.add(position) {
+                        if let Err(e) =
+                            inventories.add(&posting.account, &units.currency, units.number)
+                        {
                             plan.inventory_errors.push(
                                 PadError::new(txn.date, e.to_string())
                                     .with_account(posting.account.clone()),
@@ -333,11 +330,7 @@ where
                 // its sub-accounts (beancount semantic, verified against
                 // bean-check), so the pad difference is measured the same way.
                 let Some((pad, action)) = pads.balance(&bal.account, bal.date, &bal.amount, || {
-                    rustledger_core::sum_account_and_subaccounts(
-                        inventories.iter(),
-                        bal.account.as_str(),
-                        &bal.amount.currency,
-                    )
+                    inventories.subtree_units(&bal.account, &bal.amount.currency)
                 }) else {
                     continue;
                 };
@@ -378,10 +371,7 @@ where
                 // whatever the accounts' state, as beancount's padding entry
                 // posts to both.
                 let currency = &bal.amount.currency;
-                let mut apply = |account, number| {
-                    account_inventory(&mut inventories, account)
-                        .add(Position::simple(Amount::new(number, currency)))
-                };
+                let mut apply = |account, number| inventories.add(account, currency, number);
                 if let Err(e) = apply(&bal.account, difference) {
                     plan.failed
                         .push((index, PadError::new(bal.date, e.to_string())));
@@ -497,13 +487,78 @@ pub fn process_pads(directives: &[Directive]) -> PadResult {
     }
 }
 
-/// The inventory of `account`, created empty on first use. One lookup; the
-/// key clone is a reference-count bump (`Account` is interned).
-fn account_inventory<'a>(
-    inventories: &'a mut HashMap<Account, Inventory>,
-    account: &Account,
-) -> &'a mut Inventory {
-    inventories.entry(account.clone()).or_default()
+/// The running totals [`plan_pads`] measures pads against: for every account
+/// a posting or a padding entry names, its units per currency, with the
+/// lexical prefix index a subtree sum needs.
+///
+/// Units only, not an [`Inventory`]: a pad reads nothing but the units of one
+/// currency, and booking lots here was most of the cost of the pass the
+/// validator now runs on every ledger with a pad.
+#[derive(Debug, Default)]
+struct PadInventories {
+    by_account: FxHashMap<Account, smallvec::SmallVec<[(Currency, Decimal); 2]>>,
+    /// The keys of `by_account`, sorted, kept in lockstep (keys are never
+    /// removed), for [`rustledger_core::for_each_strict_subaccount`].
+    index: std::collections::BTreeSet<Account>,
+}
+
+impl PadInventories {
+    /// Add `number` `currency` to `account`, created on first use. A total
+    /// that would leave the representable range is left as it was and
+    /// reported (#1863).
+    fn add(
+        &mut self,
+        account: &Account,
+        currency: &Currency,
+        number: Decimal,
+    ) -> Result<(), rustledger_core::OverflowError> {
+        // One lookup; the key clone is a reference-count bump (`Account` is
+        // interned).
+        let totals = match self.by_account.entry(account.clone()) {
+            std::collections::hash_map::Entry::Occupied(totals) => totals.into_mut(),
+            std::collections::hash_map::Entry::Vacant(slot) => {
+                self.index.insert(account.clone());
+                slot.insert(smallvec::SmallVec::new())
+            }
+        };
+        let overflow = || rustledger_core::OverflowError {
+            currency: currency.clone(),
+        };
+        if let Some((_, total)) = totals.iter_mut().find(|(c, _)| c == currency) {
+            *total = total.checked_add(number).ok_or_else(overflow)?;
+        } else {
+            totals.push((currency.clone(), number));
+        }
+        Ok(())
+    }
+
+    /// The units of `currency` in `account` and its sub-accounts, as a
+    /// `balance` assertion sums them (beancount includes sub-accounts), or
+    /// `None` when the sum leaves the representable range (#1863).
+    ///
+    /// O(log A + subtree) through the prefix index. Summing over a scan of
+    /// every account ([`rustledger_core::sum_account_and_subaccounts`]) made
+    /// `rledger check`, BQL and the reports quadratic in a ledger with many
+    /// padded balances.
+    fn subtree_units(&self, account: &Account, currency: &Currency) -> Option<Decimal> {
+        let mut total = Some(Decimal::ZERO);
+        let mut add = |totals: &smallvec::SmallVec<[(Currency, Decimal); 2]>| {
+            #[cfg(test)]
+            tests::INVENTORIES_SUMMED.with(|n| n.set(n.get() + 1));
+            if let Some((_, units)) = totals.iter().find(|(c, _)| c == currency) {
+                total = total.and_then(|t| t.checked_add(*units));
+            }
+        };
+        if let Some(totals) = self.by_account.get(account) {
+            add(totals);
+        }
+        rustledger_core::for_each_strict_subaccount(&self.index, account.as_str(), |sub| {
+            if let Some(totals) = self.by_account.get(sub) {
+                add(totals);
+            }
+        });
+        total
+    }
 }
 
 /// Create a synthetic padding transaction.
@@ -748,6 +803,44 @@ mod tests {
     use super::*;
     use rust_decimal_macros::dec;
     use rustledger_core::{Balance, Open, Pad};
+
+    std::thread_local! {
+        /// Inventories `PadInventories::subtree_units` has read on this
+        /// thread, for `test_plan_pads_sums_each_balance_over_its_subtree_only`.
+        pub(super) static INVENTORIES_SUMMED: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
+    }
+
+    /// Each padded balance is measured over its own subtree, not over every
+    /// account: with `n` accounts each holding a transaction, a pad and a
+    /// balance, the pad computation reads `n` inventories, where a scan per
+    /// balance read `n * n` and made `rledger check` quadratic (40k such
+    /// accounts took 46 s). Verified to fail with `subtree_units` scanning.
+    #[test]
+    fn test_plan_pads_sums_each_balance_over_its_subtree_only() {
+        let n = 2_000;
+        let mut directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:B")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:O")),
+        ];
+        for i in 0..n {
+            let account = format!("Assets:A{i:05}");
+            directives.push(Directive::Open(Open::new(date(2024, 1, 1), &account)));
+            directives.push(transfer(date(2024, 1, 2), &account, dec!(1)));
+            directives.push(Directive::Pad(Pad::new(
+                date(2024, 1, 3),
+                &account,
+                "Equity:O",
+            )));
+            directives.push(balance(date(2024, 1, 5), &account, dec!(10)));
+        }
+        INVENTORIES_SUMMED.with(|c| c.set(0));
+        let result = process_pads(&directives);
+        let summed = INVENTORIES_SUMMED.with(std::cell::Cell::get);
+        assert_eq!(result.padding_transactions.len(), n);
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(summed, n, "each balance reads only its own account");
+    }
 
     fn date(year: i32, month: u32, day: u32) -> NaiveDate {
         rustledger_core::naive_date(year, month, day).unwrap()

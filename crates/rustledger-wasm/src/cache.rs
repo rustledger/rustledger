@@ -399,7 +399,14 @@ use crate::types::{Error, LedgerOptions};
 /// v84: loader v63, PARSER OUTPUT changed (#2872). An invalid token runs to the
 /// next blank, as in beancount, and each one on a line is reported; an older
 /// blob would keep serving such a file with its old errors and values.
-pub const CACHE_VERSION: u32 = 84;
+/// v85: loader v63, unchanged. `Ledger`'s error list moves (#2896): a balance
+/// on an unopened account is compared (`E2001`), a pad whose balance already
+/// held or that a later pad superseded is an `Unused Pad entry` and pads
+/// nothing later, `E2004` is no longer reported, a balance on a pad's source
+/// sees the padding from the pad's date, and an account referenced before its
+/// later `open` is inactive. A v84 blob would keep serving the old errors.
+/// (v83 was never released: #2896 held it before #2872 took v84.)
+pub const CACHE_VERSION: u32 = 85;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///

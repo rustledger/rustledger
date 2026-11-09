@@ -220,7 +220,7 @@ pub fn handle_code_lens(
 ///   new string, so the runtime match against the validator's
 ///   emitted code stays in sync without any manual update.
 ///
-/// Hardcoding `&["E2001", "E2002", "E2004"]` would have given the
+/// Hardcoding `&["E2001", "E2002"]` would have given the
 /// opposite property: renaming would have compiled silently, and only
 /// renumbering at the validator side (without a corresponding lens
 /// update) would have produced runtime drift. The const-fn bridge
@@ -232,12 +232,9 @@ pub fn handle_code_lens(
 ///   != actual.
 /// - `E2002` ([`ErrorCode::BalanceToleranceExceeded`]): difference is
 ///   beyond the explicit `~` tolerance.
-/// - `E2004` ([`ErrorCode::MultiplePadForBalance`]): two effective
-///   pads before the assertion. The validator's lib.rs:548-562 patches
-///   the balance directive's span onto this error (it's constructed
-///   with `bal.date` and no span of its own), so the diagnostic anchors
-///   on the balance line — same as E2001/E2002. The user-facing failure
-///   IS that the asserted balance can't be unambiguously verified.
+///
+/// (`E2004`, two pads before one balance, was in this list until it was
+/// removed in 0.25.0: the superseded pad is an `E2003` on the pad.)
 ///
 /// Codes that may land at the balance line but describe a different
 /// problem (`E1001 AccountNotOpen`, parse errors, plugin errors
@@ -252,7 +249,6 @@ pub fn handle_code_lens(
 const BALANCE_ERROR_CODES: &[&str] = &[
     ErrorCode::BalanceAssertionFailed.code(),
     ErrorCode::BalanceToleranceExceeded.code(),
-    ErrorCode::MultiplePadForBalance.code(),
 ];
 
 /// Render the balance lens title for a balance directive on `line`.

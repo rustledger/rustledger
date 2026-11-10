@@ -143,9 +143,13 @@ pub struct RejectedOption {
 }
 
 impl RejectedOption {
-    /// Why a query over the ledger refuses to answer: the option, its bad
-    /// value and where it is, and the method the figures would be booked
-    /// with instead. One text for every surface that refuses on it.
+    /// Why a query over the ledger refuses to answer: the option and where
+    /// it is, that its value is not a booking method, and the method the
+    /// figures would be booked with. One text for every surface that refuses
+    /// on it.
+    ///
+    /// It names only the rejected value as wrong, never `booked_with`: the
+    /// refusal is made only when the two differ ([`Options::query_refusal`]).
     #[must_use]
     pub fn query_refusal_message(&self, booked_with: &str) -> String {
         let site = self
@@ -154,8 +158,8 @@ impl RejectedOption {
             .map(|s| format!(" at {}:{}", s.file, s.line))
             .unwrap_or_default();
         format!(
-            "option \"{}\" \"{}\"{site} is invalid (E7002); refusing to derive figures, \
-             which would be booked with {booked_with} rather than the method the ledger asks for",
+            "option \"{}\"{site}: \"{}\" is not a booking method (E7002); refusing to \
+             derive figures, which would be booked with {booked_with}",
             self.key, self.value,
         )
     }
@@ -598,32 +602,53 @@ impl Options {
         top_level: bool,
         site: Option<OptionSite>,
     ) {
-        let had_rejection = self.rejected_booking_method.is_some();
         self.set_scoped_inner(key, value, top_level);
-        if !had_rejection && let Some(rejected) = &mut self.rejected_booking_method {
+        // A new rejection starts with no site (see the `booking_method` arm);
+        // this is where it was written.
+        if key == "booking_method"
+            && let Some(rejected) = &mut self.rejected_booking_method
+            && rejected.site.is_none()
+        {
             rejected.site = site;
         }
     }
 
     /// The rejected option that stops a query over this ledger from
-    /// answering, if any: an invalid `booking_method` (#2911).
+    /// answering, if any (#2911): the last `booking_method` value, when it
+    /// was rejected and the ledger is booked with `booked_with`
+    /// (`Ledger::booking_method`), a method other than the one it asked for.
     ///
     /// The option keeps its previous method, as in beancount, so `check`
     /// reports the E7002 and books as before. A query or report does not
     /// answer, though: every lot reduction would be booked with a method the
-    /// user did not ask for (`fifo` was meant as FIFO and is booked STRICT),
-    /// and the figures would look right.
+    /// user did not ask for (`fifo` alone was meant as FIFO and is booked
+    /// STRICT), and the figures would look right.
+    ///
+    /// Only then. A later accepted value clears the rejection (the last
+    /// value wins), so `fifo` then `FIFO` books FIFO and answers. A rejected
+    /// value whose case-insensitive reading names the method booked does not
+    /// refuse either: `FIFO` then `fifo` books FIFO, which is what both lines
+    /// ask for. Anything else refuses: `fifo` alone, `bogus`, `FIFO` then
+    /// `bogus`.
     ///
     /// Stricter than Python: bean-query answers here, with the figures
-    /// booked under the default STRICT method. We refuse because those
-    /// figures silently use a booking method the ledger did not ask for.
-    /// The other rejected options keep their default and answer: none of
-    /// them changes which lots a sale consumes.
+    /// booked under the kept method. We refuse because those figures
+    /// silently use a booking method the ledger did not ask for. The other
+    /// rejected options keep their default and answer: none of them changes
+    /// which lots a sale consumes.
     ///
     /// Part of the query rule `Ledger::blocks_queries` applies.
     #[must_use]
-    pub const fn query_refusal(&self) -> Option<&RejectedOption> {
-        self.rejected_booking_method.as_ref()
+    pub fn query_refusal(
+        &self,
+        booked_with: rustledger_core::BookingMethod,
+    ) -> Option<&RejectedOption> {
+        let rejected = self.rejected_booking_method.as_ref()?;
+        let asked = rejected
+            .value
+            .parse::<rustledger_core::BookingMethod>()
+            .ok();
+        (asked != Some(booked_with)).then_some(rejected)
     }
 
     fn set_scoped_inner(&mut self, key: &str, value: &str, top_level: bool) {
@@ -884,13 +909,14 @@ impl Options {
                     "NONE",
                 ];
                 if !valid_methods.contains(&value) {
-                    if self.rejected_booking_method.is_none() {
-                        self.rejected_booking_method = Some(RejectedOption {
-                            key: key.to_string(),
-                            value: value.to_string(),
-                            site: None,
-                        });
-                    }
+                    // The latest rejection, since the last value is the one
+                    // the ledger asks for; its site is filled in by
+                    // `set_scoped_at`.
+                    self.rejected_booking_method = Some(RejectedOption {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                        site: None,
+                    });
                     return self.reject(
                         "E7002",
                         key,
@@ -904,6 +930,9 @@ impl Options {
                     );
                 }
                 self.booking_method = value.to_string();
+                // Last wins: an accepted method is what the ledger asks for,
+                // so an earlier rejection no longer refuses queries.
+                self.rejected_booking_method = None;
             }
             "render_commas" => {
                 // Accept TRUE/FALSE, true/false, 1/0 (Python beancount
@@ -2159,10 +2188,42 @@ mod tests {
         assert_eq!(opts.display_precision.get("USD"), Some(&2));
     }
 
-    /// #2911: only a rejected `booking_method` refuses queries, and the
-    /// refusal names the option, its value and its line.
+    /// #2911: only a rejected `booking_method` refuses queries, only when
+    /// the ledger is booked with a method other than the one its last value
+    /// asks for, and the refusal names the option, its value and its line.
     #[test]
-    fn test_query_refusal_only_for_rejected_booking_method() {
+    fn test_query_refusal_only_when_booking_differs_from_the_request() {
+        use rustledger_core::BookingMethod;
+        let booked = |opts: &Options| opts.effective_booking_method(BookingMethod::Strict);
+        let refuses = |values: &[&str]| {
+            let mut opts = Options::new();
+            for value in values {
+                opts.set("booking_method", value);
+            }
+            opts.query_refusal(booked(&opts))
+                .map(|r| (r.value.clone(), booked(&opts)))
+        };
+
+        // Refuses: the booking is not what the last value asks for.
+        assert_eq!(
+            refuses(&["fifo"]),
+            Some(("fifo".to_string(), BookingMethod::Strict))
+        );
+        assert_eq!(
+            refuses(&["bogus"]),
+            Some(("bogus".to_string(), BookingMethod::Strict))
+        );
+        assert_eq!(
+            refuses(&["FIFO", "bogus"]),
+            Some(("bogus".to_string(), BookingMethod::Fifo))
+        );
+        // Answers: a later accepted value wins, and a rejected value that
+        // reads as the method booked asks for what is booked.
+        assert_eq!(refuses(&["fifo", "FIFO"]), None);
+        assert_eq!(refuses(&["FIFO", "fifo"]), None);
+        assert_eq!(refuses(&["FIFO"]), None);
+
+        // The message, at the option's line, names only the value as wrong.
         let mut opts = Options::new();
         opts.set_scoped_at(
             "booking_method",
@@ -2173,26 +2234,22 @@ mod tests {
                 line: 3,
             }),
         );
-        let refusal = opts
-            .query_refusal()
-            .expect("a rejected booking_method refuses");
-        let message = refusal.query_refusal_message("STRICT");
-        assert!(
-            message.contains("\"booking_method\" \"fifo\" at main.beancount:3"),
-            "{message}"
+        let message = opts
+            .query_refusal(BookingMethod::Strict)
+            .expect("refuses")
+            .query_refusal_message("STRICT");
+        assert_eq!(
+            message,
+            "option \"booking_method\" at main.beancount:3: \"fifo\" is not a booking \
+             method (E7002); refusing to derive figures, which would be booked with STRICT"
         );
-        assert!(message.contains("booked with STRICT"), "{message}");
-
-        let mut opts = Options::new();
-        opts.set("booking_method", "FIFO");
-        assert!(opts.query_refusal().is_none(), "a valid method answers");
 
         let mut opts = Options::new();
         opts.set("account_rounding", "bad:leaf");
         opts.set("name_equity", "capital");
         opts.set("plugin_processing_mode", "bogus");
         assert!(
-            opts.query_refusal().is_none(),
+            opts.query_refusal(BookingMethod::Strict).is_none(),
             "other rejected options keep their default and answer"
         );
 
@@ -2200,6 +2257,6 @@ mod tests {
         // so it does not refuse either.
         let mut opts = Options::new();
         opts.set_scoped("booking_method", "fifo", false);
-        assert!(opts.query_refusal().is_none());
+        assert!(opts.query_refusal(BookingMethod::Strict).is_none());
     }
 }

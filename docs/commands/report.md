@@ -45,8 +45,9 @@ A report subcommand (e.g. `balances`, `journal`) is required — running `rledge
 
 `rledger report` refuses, as [`rledger query`](query.md#when-it-refuses-to-answer)
 does, on a file that did not parse or could not be read, a transaction that
-could not be booked, and an invalid `option "booking_method"` (`E7002`), whose
-figures would be booked with a method the ledger did not ask for.
+could not be booked, and an invalid last `option "booking_method"` (`E7002`)
+whose ledger is booked with a method other than the one it asks for (a later
+valid value, or a rejected one that reads as the method kept, still answers).
 
 ## Date Windows
 

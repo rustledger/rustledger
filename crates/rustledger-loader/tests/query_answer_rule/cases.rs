@@ -355,4 +355,48 @@ pub const QUERY_RULE_CASES: &[QueryRuleCase] = &[
         disk_only: false,
         source_text: true,
     },
+    // The last value wins: the accepted `FIFO` clears the rejected `fifo`, the
+    // ledger books FIFO as it asks, and every surface answers, as bean-query does.
+    QueryRuleCase {
+        name: "booking_method fifo then FIFO",
+        entry: "main.beancount",
+        files: &[(
+            "main.beancount",
+            concat!("option \"booking_method\" \"fifo\"\noption \"booking_method\" \"FIFO\"\n", base_ledger!()),
+        )],
+        rows: Some(&["pay"]),
+        error: None,
+        confinement: Confinement::Any,
+        disk_only: false,
+        source_text: true,
+    },
+    // `fifo` is rejected and `FIFO` kept, which is what `fifo` asks for read
+    // case-insensitively: the booking is what the ledger asks, so it answers.
+    QueryRuleCase {
+        name: "booking_method FIFO then fifo",
+        entry: "main.beancount",
+        files: &[(
+            "main.beancount",
+            concat!("option \"booking_method\" \"FIFO\"\noption \"booking_method\" \"fifo\"\n", base_ledger!()),
+        )],
+        rows: Some(&["pay"]),
+        error: None,
+        confinement: Confinement::Any,
+        disk_only: false,
+        source_text: true,
+    },
+    // `bogus` asks for no method, and the ledger books FIFO: it refuses.
+    QueryRuleCase {
+        name: "booking_method FIFO then bogus",
+        entry: "main.beancount",
+        files: &[(
+            "main.beancount",
+            concat!("option \"booking_method\" \"FIFO\"\noption \"booking_method\" \"bogus\"\n", base_ledger!()),
+        )],
+        rows: None,
+        error: Some("booking_method"),
+        confinement: Confinement::Any,
+        disk_only: false,
+        source_text: true,
+    },
 ];

@@ -70,7 +70,7 @@ Values:
 | `AVERAGE` | Average cost |
 | `NONE` | No booking |
 
-The values are case-sensitive, as in beancount and as an `open` directive's booking method is (P0025): `"fifo"` is `E7002`, the option keeps its previous method, and `rledger query` and `rledger report` refuse to answer (see [rledger query](../commands/query.md#when-it-refuses-to-answer)).
+The values are case-sensitive, as in beancount and as an `open` directive's booking method is (P0025): `"fifo"` is `E7002`, the option keeps its previous method, and `rledger query` and `rledger report` refuse to answer when that method is not the one the ledger asks for (see [rledger query](../commands/query.md#when-it-refuses-to-answer)).
 
 ### Account-name options
 

@@ -100,7 +100,9 @@ fn test_load_lowercase_booking_method_books_strict() {
     assert_eq!(codes, ["E7002", "E4003"]);
     assert_eq!(options.booking_method, "STRICT");
     assert_eq!(
-        options.query_refusal().map(|r| r.value.as_str()),
+        options
+            .query_refusal(rustledger_core::BookingMethod::Strict)
+            .map(|r| r.value.as_str()),
         Some("fifo")
     );
 }

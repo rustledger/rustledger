@@ -265,7 +265,8 @@ impl Ledger {
     /// its errors blocks queries ([`LedgerError::blocks_queries`]: a parse
     /// error, a file that could not be read or decrypted, a booking failure)
     /// or a rejected option would change its figures
-    /// ([`Options::query_refusal`]: an invalid `booking_method`, #2911).
+    /// ([`Options::query_refusal`]: an invalid `booking_method` whose ledger
+    /// is booked with a method other than the one it asked for, #2911).
     ///
     /// The whole rule, for every surface that answers queries over a loaded
     /// ledger, so none of them can apply half of it.
@@ -285,7 +286,7 @@ impl Ledger {
     /// not list this as well.
     #[must_use]
     pub fn query_refusal(&self) -> Option<LedgerError> {
-        let rejected = self.options.query_refusal()?;
+        let rejected = self.options.query_refusal(self.booking_method)?;
         let mut err = LedgerError::error(
             "E7002",
             rejected.query_refusal_message(&self.booking_method.to_string()),

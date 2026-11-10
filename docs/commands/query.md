@@ -165,11 +165,18 @@ and exits non-zero when:
 
 - a file did not parse, or could not be read or decrypted;
 - a transaction could not be booked (its lots did not resolve);
-- `option "booking_method"` has an invalid value (`E7002`, for example the
-  lowercase `"fifo"`). The option keeps its previous method, as in beancount,
-  so every lot reduction would be booked with a method the ledger did not ask
-  for. `bean-query` answers here with the STRICT figures; rledger refuses and
-  names the option, its value and its line.
+- the last `option "booking_method"` has an invalid value (`E7002`, for
+  example the lowercase `"fifo"`) and the ledger is booked with a method other
+  than the one it asks for. The option keeps its previous method, as in
+  beancount, so every lot reduction would be booked with a method the ledger
+  did not ask for. `bean-query` answers here with the figures of the kept
+  method; rledger refuses, naming the option, its line, the value that is not
+  a booking method, and the method the figures would be booked with.
+
+  The last value wins, so `"fifo"` followed by a valid `"FIFO"` answers. A
+  rejected value that reads as the method kept answers too: `"FIFO"` then
+  `"fifo"` books FIFO, which both lines ask for. `"fifo"` alone, `"bogus"`,
+  and `"FIFO"` then `"bogus"` refuse.
 
 Any other error, including another rejected option (which keeps its default),
 is reported beside the rows. Run [`rledger check`](check.md) to see them all.

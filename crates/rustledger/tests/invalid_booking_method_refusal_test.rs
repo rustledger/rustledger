@@ -64,7 +64,7 @@ fn assert_refused(out: &Output, path: &str, surface: &str) {
     assert_eq!(out.status.code(), Some(1), "{context}");
     assert!(
         stderr.contains(&format!(
-            "option \"booking_method\" \"fifo\" at {path}:1 is invalid (E7002)"
+            "option \"booking_method\" at {path}:1: \"fifo\" is not a booking method (E7002)"
         )),
         "{context}"
     );

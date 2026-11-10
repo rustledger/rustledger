@@ -1007,11 +1007,12 @@ impl Options {
         ]
     }
 
-    /// Warn (E7008) when a `name_*` account-type rename is not a lexable
-    /// account root: every account under such a root is unparsable (both
-    /// rledger and Python beancount fail at parse time with "unexpected
-    /// NUMBER"-style errors), so the rename can only produce a broken
-    /// ledger. Accepted anyway for option-handling parity — the warning
+    /// Warn (E7008) when a `name_*` account-type rename is not a valid
+    /// account root by beancount's `is_valid_root` (which rejects it with
+    /// `Invalid root account name` and keeps the default root): a digit
+    /// start, whose accounts fail at parse time in both tools, or a
+    /// character outside `[\p{L}\p{Nd}-]` such as `A😀` (#2906). Accepted
+    /// anyway for option-handling parity; the warning
     /// makes the failure mode visible at the option site instead of at
     /// every account mention. The `account_*` options get the analogous
     /// E7002 guard; `name_*` used to be the unguarded exception.
@@ -1020,8 +1021,8 @@ impl Options {
             self.warnings.push(OptionWarning {
                 code: "E7008",
                 message: format!(
-                    "Invalid account type name: '{value}' cannot begin an \
-                     account name (accounts under it will never parse)"
+                    "Invalid account type name: '{value}' is not a valid \
+                     root account name (accounts under it are invalid)"
                 ),
                 option: key.to_string(),
                 value: value.to_string(),
@@ -1029,27 +1030,27 @@ impl Options {
         }
     }
 
-    /// Check if a value looks like a valid account name.
-    ///
-    /// Delegates to the canonical [`rustledger_parser::is_valid_account_name`]
-    /// (the lexer itself), so option values are held to exactly the rule the
-    /// parser applies to account tokens. The old hand-written check here was a
-    /// third, divergent variant (it accepted lowercase-adjacent first chars the
-    /// lexer rejects and had no per-character rule at all).
     /// beancount's `is_valid_leaf`: one or more account components, with no
-    /// root required, as the account-name options take them (#2408).
-    /// Checked by running the canonical account predicate on `Assets:<leaf>`,
-    /// so a leaf is valid exactly when it can extend a real account.
+    /// root required, as the account-name options take them (#2408), EVERY
+    /// component a full match of `ACC_COMP_NAME_RE` (so `Conv:😀` and
+    /// `Rounding:éclair` are rejected, as there, #2906).
+    ///
+    /// Checked by running the canonical strict predicate,
+    /// [`rustledger_parser::is_valid_account_name_strict`], on
+    /// `Assets:<leaf>`, so a leaf is valid exactly when it can extend a real
+    /// account under beancount's `account.is_valid` (with the `\p{Lo}` /
+    /// `\p{Lt}` start of #816).
     fn is_valid_leaf(value: &str) -> bool {
-        rustledger_parser::is_valid_account_name(&format!("Assets:{value}"))
+        rustledger_parser::is_valid_account_name_strict(&format!("Assets:{value}"))
     }
 
-    /// Check if a value is usable as an account TYPE root (a `name_*` option
-    /// value): a single component (no `:`) such that accounts under it are
-    /// lexable. Checked by running the canonical account predicate on
-    /// `value:X` — a root is valid exactly when it can head a real account.
+    /// beancount's `is_valid_root`, for a `name_*` option value: a single
+    /// component that fully matches `ACC_COMP_TYPE_RE` (so `A😀` is rejected,
+    /// as there). Checked by running the canonical strict predicate on
+    /// `value:X`: a root is valid exactly when it can head a real account.
     fn is_valid_account_root(value: &str) -> bool {
-        !value.contains(':') && rustledger_parser::is_valid_account_name(&format!("{value}:X"))
+        !value.contains(':')
+            && rustledger_parser::is_valid_account_name_strict(&format!("{value}:X"))
     }
 }
 
@@ -1684,6 +1685,16 @@ mod tests {
         assert!(!Options::is_valid_leaf("Anfang:")); // Empty component
         assert!(!Options::is_valid_leaf(":Anfang")); // Empty first component
         assert!(!Options::is_valid_leaf("")); // Nothing
+        // Every component is a full `ACC_COMP_NAME_RE` match in beancount
+        // (#2906): bean-check reports `Invalid leaf account name` for these.
+        assert!(!Options::is_valid_leaf("Conv:\u{1F600}"));
+        assert!(!Options::is_valid_leaf("Rounding:\u{e9}clair"));
+        assert!(!Options::is_valid_leaf("Conv\u{1F600}"));
+        assert!(!Options::is_valid_leaf("Conv:A_b"));
+        // ...and accepts these.
+        assert!(Options::is_valid_leaf("\u{663}"));
+        assert!(Options::is_valid_leaf("Conv:\u{663}"));
+        assert!(Options::is_valid_leaf("Conv:A-b"));
     }
 
     #[test]
@@ -1801,6 +1812,13 @@ mod tests {
         opts.set("name_income", "In:Come");
         assert_eq!(opts.warnings.len(), 1);
         assert_eq!(opts.warnings[0].code, "E7008");
+
+        // A character outside `[\p{L}\p{Nd}-]` (#2906): bean-check reports
+        // `Invalid root account name: 'A😀'`, although `A😀:X` lexes.
+        let mut opts = Options::new();
+        opts.set("name_equity", "A\u{1F600}");
+        assert_eq!(opts.warnings.len(), 1);
+        assert_eq!(opts.warnings[0].code, "E7008");
     }
 
     #[test]
@@ -1810,6 +1828,8 @@ mod tests {
         opts.set("name_assets", "Activa");
         opts.set("name_expenses", "Ausgaben");
         opts.set("name_liabilities", "負債"); // caseless (\p{Lo}) root
+        // Non-ASCII roots bean-check accepts (#2906).
+        opts.set("name_equity", "\u{c9}quit\u{e9}"); // Équité
         assert!(
             opts.warnings.is_empty(),
             "lexable renames must not warn: {:?}",

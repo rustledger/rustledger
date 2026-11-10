@@ -42,15 +42,19 @@ fn word_char_range(line_text: &str, col: usize) -> Option<(usize, usize)> {
     Some((start, end))
 }
 
-/// Get the symbol at a given position: the currency token there if the
-/// lexer read one (via [`ParseResult::currency_at`]), else the word around
-/// the cursor, unless that word is a one-letter transaction or posting
-/// flag (via [`ParseResult::is_currency_flag_at`]).
+/// Get the symbol at a given position: the account or currency token there
+/// if the parser read one (via [`ParseResult::account_at`] and
+/// [`ParseResult::currency_at`]), else the word around the cursor, unless
+/// that word is a one-letter transaction or posting flag (via
+/// [`ParseResult::is_currency_flag_at`]). A word that starts on an account
+/// is that account (past a trailing `:` the scan takes the colon too).
 ///
 /// The word scan splits `/6J` at the `/` and `BRK.B` at the `.`, so hover,
-/// definitions and references could not reach those currencies (#2807). A
-/// one-letter flag such as `T` lexes as a currency token but is not the
-/// currency `T`, so it is no symbol, as in the LSP.
+/// definitions and references could not reach those currencies (#2807);
+/// it also stops at an emoji or a combining mark inside an account
+/// (`Assets:A😀B`, #2906). A one-letter flag such as `T` lexes as a
+/// currency token but is not the currency `T`, so it is no symbol, as in
+/// the LSP, whose `get_symbol_at_position` this mirrors.
 /// `character` is a character offset.
 pub fn get_symbol_at_position(
     source: &str,
@@ -70,13 +74,45 @@ pub fn get_symbol_at_position(
             .nth(char_index)
             .map_or(line_text.len(), |(byte, _)| byte)
     };
-    if (character as usize) <= line_text.chars().count()
-        && let Some(occ) = parse_result.currency_at(line_start + byte_of_char(character as usize))
-    {
-        return Some(occ.value.to_string());
+    let line_end = line_start + line_text.len();
+    // The account or currency token at `offset`, if it lies on this line.
+    let token_at = |offset: usize| {
+        parse_result
+            .account_at(offset)
+            .map(|occ| (occ.value.to_string(), occ.span))
+            .or_else(|| {
+                parse_result
+                    .currency_at(offset)
+                    .map(|occ| (occ.value.to_string(), occ.span))
+            })
+            .filter(|(_, span)| span.start >= line_start && span.end <= line_end)
+            .map(|(value, _)| value)
+    };
+    if (character as usize) <= line_text.chars().count() {
+        let in_line = byte_of_char(character as usize);
+        if let Some(symbol) = token_at(line_start + in_line) {
+            return Some(symbol);
+        }
+        // Right after a `:` that follows an account (`open Assets:A😀B:`),
+        // the symbol is that account, whose span ends at the colon. The word
+        // scan below would stop at the emoji and give `B:`.
+        if line_text[..in_line].ends_with(':')
+            && parse_result.account_at(line_start + in_line - 1).is_some()
+            && let Some(symbol) = token_at(line_start + in_line - 1)
+        {
+            return Some(symbol);
+        }
     }
     let (start, end) = word_char_range(line_text, character as usize)?;
-    if parse_result.is_currency_flag_at(line_start + byte_of_char(start)) {
+    let word_start = line_start + byte_of_char(start);
+    if parse_result
+        .account_at(word_start)
+        .is_some_and(|occ| occ.span.start == word_start)
+        && let Some(symbol) = token_at(word_start)
+    {
+        return Some(symbol);
+    }
+    if parse_result.is_currency_flag_at(word_start) {
         return None;
     }
     Some(line_text.chars().skip(start).take(end - start).collect())
@@ -306,6 +342,43 @@ mod tests {
             get_symbol_at_position(source, 0, 20, &result).as_deref(),
             Some("Assets:Futures")
         );
+    }
+
+    /// #2906: an account holding an emoji or a combining mark is one symbol,
+    /// read from the parser's token, wherever the cursor sits in it; and past
+    /// a trailing `:` the symbol is still the account the lexer read.
+    #[test]
+    fn test_get_symbol_at_position_account_token() {
+        let source = "2024-01-01 open Assets:A\u{1F600}\u{308}B\n2024-01-02 open Assets:Bank:\n";
+        let result = parse(source);
+        // Character offsets: the account is 16..27 (the emoji and the mark
+        // are one character each).
+        for col in [16, 23, 24, 25, 26, 27] {
+            assert_eq!(
+                get_symbol_at_position(source, 0, col, &result).as_deref(),
+                Some("Assets:A\u{1F600}\u{308}B"),
+                "col {col}"
+            );
+        }
+        for col in [16, 27, 28] {
+            assert_eq!(
+                get_symbol_at_position(source, 1, col, &result).as_deref(),
+                Some("Assets:Bank"),
+                "col {col}"
+            );
+        }
+        // Right after the trailing colon of an account the backward word scan
+        // cannot cross (the emoji), the symbol is still the whole account, not
+        // `B:`. Character offsets: the account is 16..26, the colon 26.
+        let source = "2024-01-01 open Assets:A\u{1F600}B:\n";
+        let result = parse(source);
+        for col in [16, 26, 27] {
+            assert_eq!(
+                get_symbol_at_position(source, 0, col, &result).as_deref(),
+                Some("Assets:A\u{1F600}B"),
+                "col {col}"
+            );
+        }
     }
 
     /// A one-letter flag is no symbol, even next to a currency of the same

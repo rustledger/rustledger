@@ -346,10 +346,10 @@ pub struct FileLoad {
 /// [`rustledger_booking::merge_with_padding_owned`]. This cannot call that
 /// directly: it carries a parallel tag per directive (line, or line+file), and
 /// a synth has no source location so it takes `synth_tag`. It therefore sorts
-/// the tagged pairs itself and places each synth at
-/// [`rustledger_booking::pad_insertion_index`] — the shared rule, not a second
-/// copy of it. An earlier copy here prepended the synths instead, and silently
-/// kept doing so after the shared rule changed.
+/// the tagged pairs itself and places the synths with
+/// [`rustledger_booking::merge_padding_into_sorted`], the shared rule, not a
+/// second copy of it. An earlier copy here prepended the synths instead, and
+/// silently kept doing so after the shared rule changed.
 ///
 /// Source-faithful callers skip this; only the `load`/`load-file` consumers
 /// that opt in (#1628) expand. The input must not already contain synth pad
@@ -363,15 +363,14 @@ pub fn expand_pads<T: Clone>(
 ) -> (Vec<Directive>, Vec<T>) {
     let pads =
         rustledger_booking::process_pads(&directives, tolerance_multiplier).padding_transactions;
-    let mut pairs: Vec<(Directive, T)> = Vec::with_capacity(directives.len() + pads.len());
-    pairs.extend(directives.into_iter().zip(tags));
+    let mut pairs: Vec<(Directive, T)> = directives.into_iter().zip(tags).collect();
     pairs.sort_by_key(|(d, _)| d.date());
 
-    for txn in pads {
-        let insert_at =
-            rustledger_booking::pad_insertion_index(pairs.iter().map(|(d, _)| d), txn.date);
-        pairs.insert(insert_at, (Directive::Transaction(txn), synth_tag.clone()));
-    }
+    let synths = pads
+        .into_iter()
+        .map(|txn| (Directive::Transaction(txn), synth_tag.clone()))
+        .collect();
+    let pairs = rustledger_booking::merge_padding_into_sorted(pairs, synths, |(d, _)| d.date());
 
     pairs.into_iter().unzip()
 }
@@ -776,7 +775,7 @@ option \"operating_currency\" \"USD\"
     #[test]
     fn expand_pads_puts_the_synth_after_an_unrelated_same_date_balance() {
         // The FFI copy of the placement rule (#2188). `expand_pads` shares
-        // `pad_insertion_index` with the CLI merge, but reaches it by a
+        // `merge_padding_into_sorted` with the CLI merge, but reaches it by a
         // different route -- it carries parallel provenance tags and so cannot
         // call either merge -- and two of the three consumers were still
         // prepending the last time this rule changed. Pinned per consumer for

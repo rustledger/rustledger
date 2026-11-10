@@ -71,7 +71,10 @@ impl NativePlugin for CurrencyAccountsPlugin {
         use std::str::FromStr;
 
         // The base account from the config, when it is a valid account
-        // name; the default otherwise, as beancount's plugin falls back.
+        // name by beancount's plugin check, `account.is_valid` (a full
+        // match, so `Equity:CA:é` falls back, #2906: the strict predicate,
+        // not the ledger-token one); the default otherwise, as beancount's
+        // plugin falls back.
         // With no config at all beancount 3's plugin fails (its `config`
         // argument is required); the default is used here. Any
         // non-empty text was used before, so `"not an account"` made accounts
@@ -80,7 +83,7 @@ impl NativePlugin for CurrencyAccountsPlugin {
             .config
             .as_ref()
             .map(|c| c.trim().to_string())
-            .filter(|s| rustledger_parser::is_valid_account_name(s))
+            .filter(|s| rustledger_parser::is_valid_account_name_strict(s))
             .unwrap_or_else(|| self.base_account.clone());
 
         // Find earliest date and collect existing Open accounts in one pass.
@@ -696,6 +699,70 @@ mod currency_accounts_tests {
                 false
             }
         }));
+    }
+
+    /// The base account is checked as beancount's plugin checks it,
+    /// `account.is_valid` (a FULL match: every component starts with `\p{Lu}`
+    /// or `\p{Nd}` and holds only `[\p{L}\p{Nd}-]`), falling back to
+    /// `Equity:CurrencyAccounts` (#2906). Each verdict is bean-query's on a
+    /// ledger with `plugin "beancount.plugins.currency_accounts" "<config>"`,
+    /// except `Equity:CA:日本`, kept by the `\p{Lo}` extension (#816).
+    #[test]
+    fn test_base_account_checked_as_beancount_account_is_valid() {
+        let opened = |config: &str| {
+            let plugin = CurrencyAccountsPlugin::new();
+            let mut p1 = posting("Assets:Bank:EUR", "-100", "EUR");
+            p1.price = Some(price_usd("1.10"));
+            let input = PluginInput {
+                directives: vec![txn_wrapper(
+                    "2024-01-15",
+                    "Exchange",
+                    vec![p1, posting("Assets:Bank:USD", "110", "USD")],
+                )],
+                options: default_options(),
+                config: Some(config.to_string()),
+            };
+            let input_dirs = input.directives.clone();
+            let output = plugin.process(input);
+            let mut opens: Vec<String> = materialize_ops(&input_dirs, &output)
+                .into_iter()
+                .filter_map(|d| match d.data {
+                    DirectiveData::Open(o) => Some(o.account),
+                    _ => None,
+                })
+                .collect();
+            opens.sort();
+            opens
+        };
+        // Rejected by beancount, so the default is used.
+        for config in [
+            "Equity:CA:\u{e9}",    // é: a lowercase start, later component
+            "Equity:CA:\u{1F600}", // emoji start
+            "Equity:C\u{1F600}",   // emoji inside
+        ] {
+            assert_eq!(
+                opened(config),
+                ["Equity:CurrencyAccounts:EUR", "Equity:CurrencyAccounts:USD"],
+                "{config}"
+            );
+        }
+        // Accepted by beancount.
+        assert_eq!(
+            opened("Equity:\u{663}"),
+            ["Equity:\u{663}:EUR", "Equity:\u{663}:USD"]
+        );
+        assert_eq!(
+            opened("Equity:CA:\u{663}x"),
+            ["Equity:CA:\u{663}x:EUR", "Equity:CA:\u{663}x:USD"]
+        );
+        // The #816 extension (beancount falls back here).
+        assert_eq!(
+            opened("Equity:CA:\u{65e5}\u{672c}"),
+            [
+                "Equity:CA:\u{65e5}\u{672c}:EUR",
+                "Equity:CA:\u{65e5}\u{672c}:USD"
+            ]
+        );
     }
 
     /// Pre-existing Open for a currency account should not be duplicated

@@ -65,7 +65,7 @@ mod txn_header;
 pub(crate) fn is_flag_token(token: &crate::SyntaxToken) -> bool {
     convert::is_flag_token(token)
 }
-pub(crate) use convert::parse_date_token;
+pub(crate) use convert::{parse_date_token, token_has_stray_bom};
 pub use convert::{parse_red_only, parse_via_cst, parse_via_cst_opts};
 // Formatter exports do NOT re-export through `cst` — the sole
 // import path for the formatter is `rustledger_parser::format`

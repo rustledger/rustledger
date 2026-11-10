@@ -389,6 +389,40 @@ impl ParseResult {
         })
     }
 
+    /// Whether the U+FEFF at byte `offset` is a stray mid-file BOM: one the
+    /// lexer could not place in a token, which `BomInDirectiveBody` reports.
+    ///
+    /// A BOM inside a string literal is string content (beancount keeps it,
+    /// #2910) and one inside a comment is part of the comment, so both are
+    /// false here, as is the leading BOM the parser strips and any offset
+    /// that does not start a U+FEFF. Editor surfaces that remove stray BOMs
+    /// (the LSP's "Remove BOM" quick fix) use this rather than every U+FEFF
+    /// in a diagnostic's span: a line-wide span can hold a string's BOM too.
+    /// It is the same per-token rule the parser's diagnostics use, so the
+    /// two cannot disagree.
+    #[must_use]
+    pub fn is_stray_bom_at(&self, offset: usize) -> bool {
+        let bom_offset = if self.has_leading_bom { 3 } else { 0 };
+        let Some(offset) = offset.checked_sub(bom_offset) else {
+            return false;
+        };
+        let root = self.syntax_node();
+        let Ok(offset) = u32::try_from(offset) else {
+            return false;
+        };
+        let offset = TextSize::from(offset);
+        if offset >= root.text_range().end() {
+            return false;
+        }
+        root.token_at_offset(offset).any(|t| {
+            t.text_range().contains(offset)
+                && crate::cst::token_has_stray_bom(t.kind(), t.text())
+                && t.text()
+                    .get(usize::from(offset - t.text_range().start())..)
+                    .is_some_and(|rest| rest.starts_with(crate::bom::BOM_CHAR))
+        })
+    }
+
     /// Cursor-API view of the lossless CST that produced this
     /// `ParseResult`. Equivalent to
     /// `SyntaxNode::new_root(self.syntax_root.clone())`.

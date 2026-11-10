@@ -4783,15 +4783,16 @@ fn emit_error_node_line(
     // before span_from is called); at EOF the terminator is the node end.
     let span = Span::new((ls + bom_offset) as usize, (end + bom_offset) as usize);
     let line_text = stripped.get(ls as usize..end as usize).unwrap_or("");
-    let primary = classify_recovery_error(line_text, span);
+    let stray_bom = has_stray_bom(invalid, stripped);
+    let primary = classify_recovery_error(line_text, stray_bom, span);
     let primary_is_bom = matches!(primary.kind, crate::ParseErrorKind::BomInDirectiveBody);
     out.push(primary);
     // Additive secondary `BomInDirectiveBody` when a different primary
-    // diagnostic already fired AND the line ALSO contains a BOM byte. Matches
+    // diagnostic already fired AND the line ALSO has a stray BOM byte. Matches
     // legacy `parser.rs:2258-2263`: without it, a Windows-exported line with
     // both problems surfaces only the actionable root cause and the user has no
     // clue the invisible BOM byte is also corrupting the line.
-    if !primary_is_bom && line_text.contains(crate::bom::BOM_CHAR) {
+    if !primary_is_bom && stray_bom {
         out.push(
             crate::ParseError::new(crate::ParseErrorKind::BomInDirectiveBody, span)
                 .with_hint(crate::diagnostics::BOM_REMOVAL_HINT),
@@ -4865,26 +4866,61 @@ fn error_node_check(
     }
 }
 
+/// Whether one of a line's invalid tokens (`invalid`, ranges into
+/// `stripped`) holds a U+FEFF: a stray mid-file BOM.
+///
+/// The line's raw text is not the thing to search. A BOM inside a string
+/// literal, a comment or an account token is content, not a stray byte; see
+/// [`token_has_stray_bom`], the same rule for a single token. Shared by the
+/// red and green recovery walks (this file's and `green`'s
+/// `emit_error_node_line`).
+pub(super) fn has_stray_bom(invalid: &[std::ops::Range<usize>], stripped: &str) -> bool {
+    invalid.iter().any(|r| {
+        stripped
+            .get(r.clone())
+            .is_some_and(|t| t.contains(crate::bom::BOM_CHAR))
+    })
+}
+
+/// Whether a token of `kind` with `text` carries a stray mid-file BOM.
+///
+/// Only an invalid token can. A BOM the lexer placed inside a `STRING` is
+/// string content, and beancount 3.2.3 keeps it byte-for-byte in the value
+/// (#2910); one inside a comment is ignored with the comment, as there; and
+/// one glued into an account is part of the `ACCOUNT` token, which beancount's
+/// lexer reads the same way (`open Assets:Ca\u{FEFF}sh` loads there). The
+/// single rule behind the inline `BomInDirectiveBody` check of both walks
+/// (red `walk_descendants_once` and `green`'s fold); [`has_stray_bom`] applies
+/// it to an `ERROR_NODE` line.
+pub fn token_has_stray_bom(kind: crate::SyntaxKind, text: &str) -> bool {
+    kind == crate::SyntaxKind::ERROR_TOKEN && text.contains(crate::bom::BOM_CHAR)
+}
+
 /// Pick the most specific `ParseError` variant for an
 /// error-recovery line, mirroring the legacy parser's classifier
 /// at `parser.rs:2186-2249`:
 /// 1. A Unicode-character account (`Assets:Café:…`) → primary
 ///    `InvalidAccount` - it's the actionable root cause.
-/// 2. A mid-file BOM byte (`U+FEFF`) → `BomInDirectiveBody` with
-///    `BOM_REMOVAL_HINT` so miette surfaces the remediation step.
+/// 2. A stray mid-file BOM byte (`U+FEFF`; `stray_bom`, see
+///    [`has_stray_bom`]) → `BomInDirectiveBody` with `BOM_REMOVAL_HINT`
+///    so miette surfaces the remediation step.
 /// 3. Anything else → `SyntaxError("unexpected input")`.
 ///
 /// Order matters: a Windows-exported file with a Unicode account
 /// AND an internal BOM gets the Unicode-account diagnostic
 /// (the BOM is usually a side effect, not the root cause).
-pub(super) fn classify_recovery_error(line_text: &str, span: Span) -> crate::ParseError {
+pub(super) fn classify_recovery_error(
+    line_text: &str,
+    stray_bom: bool,
+    span: Span,
+) -> crate::ParseError {
     if let Some(account) = crate::diagnostics::find_unicode_account(line_text) {
         return crate::ParseError::new(
             crate::ParseErrorKind::InvalidAccount(account.to_string()),
             span,
         );
     }
-    if line_text.contains(crate::bom::BOM_CHAR) {
+    if stray_bom {
         return crate::ParseError::new(crate::ParseErrorKind::BomInDirectiveBody, span)
             .with_hint(crate::diagnostics::BOM_REMOVAL_HINT);
     }
@@ -4895,7 +4931,7 @@ pub(super) fn classify_recovery_error(line_text: &str, span: Span) -> crate::Par
 }
 
 /// Walk every descendant token and emit a `ParseError` for each
-/// `ERROR_TOKEN` (or BOM-containing token) that lands inside an
+/// `ERROR_TOKEN` (a stray-BOM one included) that lands inside an
 /// otherwise-valid directive node - i.e., NOT inside an
 /// `ERROR_NODE` ancestor. Catches lexer-reject bytes the
 /// outer recovery path misses:
@@ -5026,7 +5062,7 @@ fn walk_descendants_once(
         // saves an O(depth) probe per WHITESPACE/NEWLINE/comment
         // token, which dominates token counts in real ledgers.
         let kind = t.kind();
-        let has_bom = t.text().contains(crate::bom::BOM_CHAR);
+        let has_bom = token_has_stray_bom(kind, t.text());
         let is_error_token = kind == crate::SyntaxKind::ERROR_TOKEN;
         // CURRENCY/ACCOUNT need the in-ERROR_NODE probe only to decide whether
         // to record an occurrence; skip it entirely when not collecting.
@@ -5078,7 +5114,7 @@ fn walk_descendants_once(
             account_occurrences.push(Spanned::new(rustledger_core::Account::new(t.text()), span));
         }
 
-        // Inline errors: BOM byte in a recognized directive
+        // Inline errors: stray BOM byte in a recognized directive
         // (-> BomInDirectiveBody + hint) or ERROR_TOKEN inside a
         // recognized directive (-> SyntaxError). Both skip when
         // already inside an ERROR_NODE (handled by the recovery
@@ -6762,8 +6798,10 @@ mod tests {
         // contains a BOM byte and the primary diagnostic isn't
         // BOM itself. Without this, a Windows-exported file with
         // a Unicode account AND an internal BOM loses the BOM
-        // hint entirely.
-        let src = "garbage Assets:Café\u{FEFF}content\n";
+        // hint entirely. The BOM stands alone after a space: glued to the
+        // account it would be part of the account token, as in beancount
+        // (#2910), and no stray BOM.
+        let src = "garbage Assets:Café \u{FEFF}content\n";
         let result = parse_via_cst(src);
         let invalid_account_count = result
             .errors

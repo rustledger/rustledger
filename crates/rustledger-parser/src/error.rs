@@ -266,7 +266,8 @@ pub enum ParseErrorKind {
     /// UTF-8 byte-order mark detected in a directive body (mid-file
     /// BOM that survived the leading-BOM strip at the parser's
     /// public entry — typically a concatenation accident or an
-    /// embedded-BOM payload).
+    /// embedded-BOM payload). Only a stray BOM, one no token takes: one
+    /// inside a string literal is content, as in beancount (#2910).
     ///
     /// A dedicated variant rather than `SyntaxError(String)` so that:
     ///

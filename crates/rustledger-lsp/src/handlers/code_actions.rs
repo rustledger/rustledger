@@ -136,9 +136,14 @@ fn bom_removal_actions(
         // Walk EVERY U+FEFF in the diagnostic span. A span like
         // `\u{FEFF}foo\u{FEFF}` (non-adjacent BOMs) contributes two
         // distinct byte offsets; the BTreeSet collapses duplicates
-        // across errors that overlap.
+        // across errors that overlap. Only STRAY ones, though: a line-wide
+        // span can also hold a BOM inside a string literal, which is string
+        // content (beancount keeps it, #2910) and must survive the fix.
         for (offset_in_span, _) in span_text.match_indices('\u{FEFF}') {
-            bom_offsets.insert(err.span.start + offset_in_span);
+            let offset = err.span.start + offset_in_span;
+            if parse_result.is_stray_bom_at(offset) {
+                bom_offsets.insert(offset);
+            }
         }
     }
 
@@ -744,6 +749,71 @@ mod tests {
             text_edits[0].range,
             Range::new(Position::new(1, 0), Position::new(1, 3)),
             "UTF-8 encoding must emit byte columns: BOM is 3 bytes wide"
+        );
+    }
+
+    /// A BOM inside a string literal is string content (#2910): no "Remove
+    /// BOM" action for a string's BOM alone, and on a line that also has a
+    /// stray BOM (so a `BomInDirectiveBody` span covers both), the action
+    /// deletes only the stray one.
+    #[test]
+    #[allow(clippy::mutable_key_type)]
+    fn test_bom_removal_actions_skip_bom_in_string() {
+        use lsp_types::{
+            CodeActionContext, PartialResultParams, TextDocumentIdentifier, Uri,
+            WorkDoneProgressParams,
+        };
+        let uri: Uri = "file:///test.bean".parse().unwrap();
+        let params = CodeActionParams {
+            text_document: TextDocumentIdentifier { uri: uri.clone() },
+            range: Range::new(Position::new(0, 0), Position::new(100, 0)),
+            context: CodeActionContext::default(),
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+        };
+        let bom_edits = |source: &str| -> Vec<TextEdit> {
+            let result = parse(source);
+            let mut edits = Vec::new();
+            for action in handle_code_actions(&params, source, &result, PositionEncoding::Utf8)
+                .unwrap_or_default()
+            {
+                if let lsp_types::CodeActionOrCommand::CodeAction(action) = action
+                    && action.title.contains("BOM")
+                {
+                    let changes = action.edit.and_then(|e| e.changes).expect("changes");
+                    edits.extend(changes[&uri].iter().cloned());
+                }
+            }
+            edits
+        };
+
+        // Only a string's BOM: nothing to remove.
+        let clean = "2024-01-01 note Assets:A \"a\u{FEFF}b\"\n";
+        assert!(bom_edits(clean).is_empty(), "{:?}", bom_edits(clean));
+
+        // A string's BOM and a stray one on the same unreadable line, whose
+        // `BomInDirectiveBody` spans the whole line.
+        let source = "garbage \"a\u{FEFF}b\" \u{FEFF}x\n";
+        let result = parse(source);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e.kind, ParseErrorKind::BomInDirectiveBody)
+                    && source[e.span.start..e.span.end].contains("a\u{FEFF}b")),
+            "expected a BomInDirectiveBody span covering the string: {:?}",
+            result.errors
+        );
+        let edits = bom_edits(source);
+        let stray = source.rfind('\u{FEFF}').expect("stray BOM");
+        let stray = u32::try_from(stray).expect("small");
+        assert_eq!(
+            edits.iter().map(|e| e.range).collect::<Vec<_>>(),
+            vec![Range::new(
+                Position::new(0, stray),
+                Position::new(0, stray + 3)
+            )],
+            "only the stray BOM is removed"
         );
     }
 

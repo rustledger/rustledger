@@ -39,7 +39,7 @@ pub use pad::{
     PadError, PadOrigin, PadPlan, PadResult, PaddedAtCost, PlannedPadding,
     SYNTH_PAD_NARRATION_PREFIX, SourcePosition, UnusedPad, balance_tolerance, is_synthesized_pad,
     merge_padding_into_sorted, merge_with_padding, merge_with_padding_owned,
-    merge_with_padding_spanned, plan_pads, process_pads, process_pads_at,
+    merge_with_padding_spanned, pad_plan_reads_positions, plan_pads, process_pads, process_pads_at,
 };
 
 use bigdecimal::BigDecimal;

@@ -199,6 +199,14 @@ struct PadTracker {
     /// postings share a line, so they enter `pad_balance` in account rank
     /// order, not as written ([`Self::post_transaction`]).
     ranks: FxHashMap<Account, usize>,
+    /// Whether an account falls in some group (is a group's account or under
+    /// one), by account, so a posting outside every group costs one lookup.
+    covered: FxHashMap<Account, bool>,
+    /// Whether the order postings enter a group can show: only in an
+    /// "Attempt to pad an entry with cost" message, so only when a posting
+    /// under some group carries a cost. Without one, the ranks are not
+    /// built and a transaction's postings are not sorted.
+    ordered: bool,
 }
 
 /// One account's pads (one of beancount's per-account walks).
@@ -406,11 +414,38 @@ impl PadTracker {
         !self.groups.is_empty()
     }
 
-    /// Rank `account` if the walk has not met it yet.
+    /// Whether `account` falls in some group: it is a group's account or
+    /// under one. Answered once per account.
+    fn covers(&mut self, account: &Account) -> bool {
+        if let Some(&covered) = self.covered.get(account) {
+            return covered;
+        }
+        let covered = prefixes(account.as_str()).any(|prefix| self.groups.contains_key(prefix));
+        self.covered.insert(account.clone(), covered);
+        covered
+    }
+
+    /// Decide [`Self::ordered`] from `directives`: whether a posting under
+    /// some group carries a cost, so a group can hold a lot at cost and
+    /// report its inventory.
+    fn order_if_costs<'a>(&mut self, directives: impl IntoIterator<Item = &'a Directive>) {
+        self.ordered = self.tracks()
+            && directives.into_iter().any(|d| match d {
+                Directive::Transaction(txn) => txn
+                    .postings
+                    .iter()
+                    .any(|p| p.cost.is_some() && self.covers(&p.account)),
+                _ => false,
+            });
+    }
+
+    /// Rank `account` if the walk has not met it yet. Only an account in a
+    /// group is ranked: ranks are only compared within one group, and
+    /// leaving the others out keeps the order of the rest.
     fn see(&mut self, account: &Account) {
         // A lookup first: most calls meet an account already ranked, and the
         // key clone is only for a new one.
-        if !self.ranks.contains_key(account) {
+        if !self.ranks.contains_key(account) && self.covers(account) {
             let next = self.ranks.len();
             self.ranks.insert(account.clone(), next);
         }
@@ -420,10 +455,10 @@ impl PadTracker {
     /// `realization.postings_by_account` registers them: an `open`,
     /// `close`, `balance`, `note` or `document` its account, a `pad` its
     /// account then its source, a `custom` its account values, and a
-    /// transaction its postings' accounts as written. Only when a group can
-    /// read the ranks.
+    /// transaction its postings' accounts as written. Only when the order
+    /// can show ([`Self::ordered`]).
     fn see_directive(&mut self, directive: &Directive) {
-        if self.groups.is_empty() {
+        if !self.ordered {
             return;
         }
         match directive {
@@ -452,17 +487,36 @@ impl PadTracker {
         }
     }
 
-    /// A transaction's real postings, `(account, units, cost)`, entering the
-    /// groups in account rank order, written order within an account, as
-    /// beancount's stable sort leaves them (see [`Self::ranks`]).
+    /// A transaction's real postings in some group, `(account, units,
+    /// cost)`, entering the groups in account rank order, written order
+    /// within an account, as beancount's stable sort leaves them (see
+    /// [`Self::ranks`]). Sorted only when the order can show and two of
+    /// them fall in one group: the order is only seen within a group.
     fn post_transaction(&mut self, postings: &mut [(&Account, &Amount, Option<Cost>)]) {
         if self.groups.is_empty() {
             return;
         }
-        postings.sort_by_key(|(account, _, _)| self.ranks.get(*account).copied());
+        if self.ordered && postings.len() > 1 && self.share_a_group(postings) {
+            postings.sort_by_key(|(account, _, _)| self.ranks.get(*account).copied());
+        }
         for (account, units, cost) in postings.iter() {
             self.post(account, units, cost.as_ref());
         }
+    }
+
+    /// Whether two of `postings` fall in one group.
+    fn share_a_group(&self, postings: &[(&Account, &Amount, Option<Cost>)]) -> bool {
+        let mut seen: FxHashSet<&str> = FxHashSet::default();
+        for (account, _, _) in postings {
+            let groups =
+                prefixes(account.as_str()).filter(|prefix| self.groups.contains_key(*prefix));
+            for group in groups {
+                if !seen.insert(group) {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     /// A real posting of `units` (at `cost`, if any) to `account`: every
@@ -747,6 +801,27 @@ impl SourcePosition {
     }
 }
 
+/// Whether [`plan_pads`] reads the [`SourcePosition`]s it is given for
+/// `directives`.
+///
+/// Only when a posting under a pad group carries a cost, so a group can
+/// hold a lot at cost and an "Attempt to pad an entry with cost" can print
+/// the entry order. Otherwise any positions do, and a caller can skip
+/// looking them up (`SourcePosition::at_index`).
+pub fn pad_plan_reads_positions<'a, I>(directives: I) -> bool
+where
+    I: IntoIterator<Item = &'a Directive>,
+    I::IntoIter: Clone,
+{
+    let directives = directives.into_iter();
+    let mut tracker = PadTracker::new(directives.clone().filter_map(|d| match d {
+        Directive::Pad(pad) => Some(&pad.account),
+        _ => None,
+    }));
+    tracker.order_if_costs(directives);
+    tracker.ordered
+}
+
 /// Compute the padding for `sorted`, beancount's rule.
 ///
 /// `sorted` must be in booking order ([`rustledger_core::booking_sort_key`]),
@@ -779,8 +854,11 @@ where
         Directive::Pad(pad) => Some(&pad.account),
         _ => None,
     }));
-    // Rank the accounts in beancount's entry order, once, before the walk.
-    if pads.tracks() {
+    // Rank the accounts in beancount's entry order, once, before the walk,
+    // when the order can show: a group holds a lot at cost only if a posting
+    // under it carries a cost, and only that lot's message prints the order.
+    pads.order_if_costs(sorted.iter().map(|(_, d, _)| *d));
+    if pads.ordered {
         let mut entry_order: Vec<&(usize, &Directive, SourcePosition)> = sorted.iter().collect();
         entry_order.sort_by_key(|(_, d, position)| {
             (
@@ -805,9 +883,9 @@ where
                         // than pad from a clamped total (#1863).
                         match inventories.add(&posting.account, &units.currency, units.number) {
                             // The lot as booking resolved it, the canonical
-                            // way (`Position::from_posting`), when a group can
-                            // read it.
-                            Ok(()) if pads.tracks() => {
+                            // way (`Position::from_posting`), when the posting
+                            // falls in a group that can read it.
+                            Ok(()) if pads.covers(&posting.account) => {
                                 let position = Position::from_posting(
                                     units,
                                     posting.cost.as_deref(),
@@ -1467,6 +1545,44 @@ mod tests {
             )));
         }
         directives
+    }
+
+    /// The entry order is built only where it can show (#2901): with no
+    /// posting at cost under a group, no account is ranked; with one, only
+    /// the accounts in a group are, in the order they were met.
+    #[test]
+    fn test_pad_tracker_ranks_only_when_a_group_holds_a_cost() {
+        let target = Account::from("Assets:A");
+        let plain = [
+            moved("Assets:A:X", dec!(1), "XXX", None),
+            moved("Assets:Z", dec!(1), "ZZZ", Some(dec!(2))),
+        ];
+        let mut tracker = PadTracker::new([&target]);
+        tracker.order_if_costs(&plain);
+        for d in &plain {
+            tracker.see_directive(d);
+        }
+        assert!(!tracker.ordered, "a cost outside every group cannot show");
+        assert!(tracker.ranks.is_empty());
+
+        let costed = [
+            moved("Assets:Z", dec!(1), "ZZZ", None),
+            moved("Assets:A:Y", dec!(1), "YYY", Some(dec!(2))),
+            moved("Assets:A:X", dec!(1), "XXX", None),
+        ];
+        let mut tracker = PadTracker::new([&target]);
+        tracker.order_if_costs(&costed);
+        for d in &costed {
+            tracker.see_directive(d);
+        }
+        assert!(tracker.ordered);
+        let mut ranked: Vec<(&str, usize)> = tracker
+            .ranks
+            .iter()
+            .map(|(a, r)| (a.as_str(), *r))
+            .collect();
+        ranked.sort_by_key(|(_, r)| *r);
+        assert_eq!(ranked, [("Assets:A:Y", 0), ("Assets:A:X", 1)]);
     }
 
     /// A transaction moving `units` of `currency` into `account`, at a

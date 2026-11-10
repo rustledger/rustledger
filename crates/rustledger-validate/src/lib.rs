@@ -870,10 +870,22 @@ fn validate_phase_inner<D: ValidatableDirective>(
         // positions, a source directive's byte offset stands in for its line
         // (it orders one file as its lines do) and any other located
         // directive (a plugin's) is line 0; one with no location keeps its
-        // place.
+        // place. Looked up only when the plan reads them: a line table per
+        // file and a lookup per directive is work a ledger with no lot at
+        // cost under a pad would pay for nothing.
         let lines = state.options.source_lines.clone();
+        let reads_positions = rustledger_booking::pad_plan_reads_positions(
+            keyed.iter().map(|(_, _, d)| d.directive()),
+        );
         let plan = rustledger_booking::plan_pads(
             keyed.iter().map(|(_, i, d)| {
+                if !reads_positions {
+                    return (
+                        *i,
+                        d.directive(),
+                        rustledger_booking::SourcePosition::at_index(*i),
+                    );
+                }
                 let position = d.span_info().map_or(
                     rustledger_booking::SourcePosition::at_index(*i),
                     |(span, file_id)| {

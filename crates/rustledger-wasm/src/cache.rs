@@ -434,7 +434,9 @@ use crate::types::{Error, LedgerOptions};
 /// is `E2005`; a `ParsedLedger`'s validation errors also carry their own
 /// lines, columns and spans, as it validates with its spans, and it validates
 /// with the ledger's options (`tolerance_multiplier` among them), as
-/// `rledger check` does.
+/// `rledger check` does. The `open`s `auto_accounts` and `currency_accounts`
+/// make are at new lines (their place in the plugin's sorted list, as in
+/// beancount), so the archived lines and error locations for them move.
 /// (v88 was never released: #2920 held it before #2926 took v89.)
 pub const CACHE_VERSION: u32 = 91;
 

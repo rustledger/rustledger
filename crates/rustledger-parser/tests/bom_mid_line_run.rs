@@ -11,6 +11,7 @@
 
 use rustledger_core::Directive;
 use rustledger_parser::cst::parse_red_only;
+use rustledger_parser::format::format_source;
 use rustledger_parser::{__baseline_canonical_payload, ParseErrorKind, ParseResult, parse};
 
 const BOM: &str = "\u{FEFF}";
@@ -228,6 +229,109 @@ fn test_parse_secondary_bom_error_stands_for_first_bom_token_of_either_kind() {
 #[test]
 fn test_parse_bom_led_run_stops_at_blank_inside_quotes() {
     let src = format!("{HEAD}2024-01-02 query \"q\" {BOM}\"select 1\"\n");
+    let result = parse_both(&src);
+    assert_eq!(result.errors.len(), 2, "{:?}", result.errors);
+    assert_eq!(bom_errors(&result), 1, "{:?}", result.errors);
+}
+
+/// The 1-based line and column (in characters) of byte `at` of `src`.
+fn line_col(src: &str, at: usize) -> (usize, usize) {
+    let before = &src[..at];
+    let line = before.matches('\n').count() + 1;
+    let line_start = before.rfind('\n').map_or(0, |i| i + 1);
+    (line, src[line_start..at].chars().count() + 1)
+}
+
+/// The one error of a directive whose argument is a BOM-led invalid token is
+/// reported at that token, BOM to the next blank, as main reported its BOM
+/// (`rledger check` prints its line and column, the LSP squiggles it), not
+/// over the whole directive. Also for a directive with a metadata line after
+/// it, whose own error spanned both lines.
+#[test]
+fn test_parse_bom_led_argument_error_is_at_the_token() {
+    for (line, token) in [
+        (
+            format!("2024-01-02 price USD 1 {BOM}EUR"),
+            format!("{BOM}EUR"),
+        ),
+        (
+            format!("2024-01-02 commodity {BOM}EUR"),
+            format!("{BOM}EUR"),
+        ),
+        (
+            format!("2024-01-02 balance Assets:A {BOM}0 USD"),
+            format!("{BOM}0"),
+        ),
+        (
+            format!("2024-01-02 note Assets:A {BOM}\"x\""),
+            format!("{BOM}\"x\""),
+        ),
+        (
+            format!("2024-01-02 price USD 1 {BOM}EUR\n  source: \"x\""),
+            format!("{BOM}EUR"),
+        ),
+        (
+            format!("2024-01-02 event \"t\" {BOM}\"v\"\n  kk: \"x\"\n  jj: 1"),
+            format!("{BOM}\"v\""),
+        ),
+    ] {
+        let src = format!("{HEAD}{line}\n");
+        let result = parse_both(&src);
+        assert_eq!(result.errors.len(), 1, "{src:?}: {:?}", result.errors);
+        let error = &result.errors[0];
+        assert_eq!(bom_errors(&result), 1, "{src:?}");
+        let start = src.find(&token).expect("the token");
+        assert_eq!(
+            (error.span.start, error.span.end),
+            (start, start + token.len()),
+            "{src:?}"
+        );
+        // Line 3, after the two `open`s, at the BOM's column.
+        let column = line.find(BOM).expect("a BOM");
+        assert_eq!(
+            line_col(&src, error.span.start),
+            (3, line[..column].chars().count() + 1),
+            "{src:?}"
+        );
+    }
+}
+
+/// The formatter copies such a directive verbatim, metadata included, though
+/// its error now covers only the token: the token lies inside the directive.
+#[test]
+fn test_format_source_keeps_directive_with_bom_led_argument() {
+    let broken = format!("2024-01-02 price USD 1 {BOM}EUR\n  source: \"x\"\n");
+    let src = format!("{HEAD}{broken}");
+    let formatted = format_source(&src);
+    assert!(formatted.contains(&broken), "{formatted:?}");
+}
+
+/// After an invalid account, the secondary BOM error stands for one token
+/// with a stray BOM in it and every other such token has its own error,
+/// whatever their order and kinds: each line is bean-check's count.
+#[test]
+fn test_parse_secondary_bom_error_with_several_bom_tokens() {
+    for (line, errors) in [
+        (format!("Ü:A {BOM}z x{BOM}y"), 3),
+        (format!("Ü:A x{BOM}y {BOM}z"), 3),
+        (format!("Ü:A {BOM}a x{BOM}y {BOM}z"), 4),
+        (format!("Ü:A x{BOM}y z{BOM}w"), 3),
+        (format!("Ü:A x{BOM}y {BOM}a z{BOM}w"), 4),
+        (format!("Ü:A {BOM}a {BOM}b"), 3),
+    ] {
+        let src = format!("{line}\n");
+        let result = parse_both(&src);
+        assert_eq!(result.errors.len(), errors, "{src:?}: {:?}", result.errors);
+        assert_eq!(bom_errors(&result), 1, "{src:?}: {:?}", result.errors);
+    }
+}
+
+/// A BOM that starts its line, glued to an invalid run, is beancount's one
+/// invalid token there (`<BOM>tApo`), so the line's error stands for it and
+/// the run is not reported a second time.
+#[test]
+fn test_parse_line_start_bom_glued_to_invalid_run_is_one_error() {
+    let src = format!("{HEAD}{BOM}tApo\tcd\n");
     let result = parse_both(&src);
     assert_eq!(result.errors.len(), 2, "{:?}", result.errors);
     assert_eq!(bom_errors(&result), 1, "{:?}", result.errors);

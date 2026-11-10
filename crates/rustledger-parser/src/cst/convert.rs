@@ -9102,8 +9102,6 @@ fn drop_errors_inside_a_line_error(
     let mut cover: Option<(usize, usize, usize, bool, usize)> = None;
     // The line errors that take over a dropped error's name.
     let mut renamed: Vec<(usize, usize)> = Vec::new();
-    // The line errors that take over a dropped BOM error.
-    let mut bom_renamed: Vec<usize> = Vec::new();
     for &i in &syntax {
         let span = errors[i].span;
         match cover.as_mut() {
@@ -9116,11 +9114,15 @@ fn drop_errors_inside_a_line_error(
                 // A mid-line BOM-led invalid token in a directive the
                 // converter dropped (`price USD 1 <BOM>EUR`), where the header
                 // grammar first fails: beancount's one `Invalid token` there.
-                // The line error stands for it, as for any invalid token, and
-                // takes the BOM diagnostic's kind, so the line is one
-                // `BomInDirectiveBody` as it was before #2928 merged the BOM
-                // into the token. Any other BOM error is left alone and does
-                // not count as the first error inside the line error.
+                // The token's own `BomInDirectiveBody` is that error, and the
+                // generic whole-node error is dropped for it, so the line is
+                // one error, reported at the token, as it was before #2928
+                // merged the BOM into the token. (Unlike the generic merge
+                // below, the inner error is the one kept here: it already has
+                // the right kind and the token's span. The formatter still
+                // copies the directive verbatim, as the token lies inside its
+                // node.) Any other BOM error is left alone and does not count
+                // as the first error inside the line error.
                 if is_bom(&errors[i]) {
                     let header_fails_here = is_generic(&errors[*outer])
                         && grammar_failures
@@ -9128,8 +9130,7 @@ fn drop_errors_inside_a_line_error(
                             .is_ok_and(|j| grammar_failures[j].2 == span.start);
                     if header_fails_here {
                         *seen = true;
-                        dropped[i] = true;
-                        bom_renamed.push(*outer);
+                        dropped[*outer] = true;
                     }
                     continue;
                 }
@@ -9161,10 +9162,6 @@ fn drop_errors_inside_a_line_error(
                 cover = Some((span.start, span.end, line_end, false, i));
             }
         }
-    }
-    for outer in bom_renamed {
-        errors[outer].kind = crate::ParseErrorKind::BomInDirectiveBody;
-        errors[outer].hint = Some(crate::diagnostics::BOM_REMOVAL_HINT.to_string());
     }
     for (outer, inner) in renamed {
         if !is_generic(&errors[outer]) {
@@ -9202,11 +9199,13 @@ fn drop_errors_inside_a_line_error(
 /// A mid-file BOM is reported by the line's `BomInDirectiveBody`, and is left
 /// to it here in three cases. A BOM that starts its line is no invalid token
 /// at all, but layout ([`is_line_start_bom_token`]). A token with a BOM
-/// inside it, not at its start, is left to that diagnostic as it always was.
+/// inside it, not at its start, is left to that diagnostic as it always was,
+/// when that diagnostic is the line's error.
 /// And when the line's error is not the BOM diagnostic (an invalid account),
 /// so the BOM one comes after it as a second error (`secondary_bom`), that
 /// second error stands for the line's first invalid token with a stray BOM
-/// in it, BOM-led or not (`Ü:A x<BOM>y <BOM>z` is three errors). Any other
+/// in it, BOM-led or not, and every other one gets its own error
+/// (`Ü:A x<BOM>y <BOM>z` and `Ü:A <BOM>z x<BOM>y` are three errors). Any other
 /// BOM-led token, one that starts in the middle of a line and runs to the
 /// next blank as beancount's does (#2928), is an invalid token like any
 /// other and gets its own error, as it does there.
@@ -9222,20 +9221,26 @@ pub(super) fn report_invalid_tokens_of_error_line(
     out: &mut Vec<crate::ParseError>,
 ) {
     let off = bom_offset as usize;
+    let had_secondary = secondary_bom;
     let mut secondary_bom = secondary_bom;
-    for (k, range) in invalid.iter().enumerate() {
+    // Whether the token being looked at is the line's first invalid one. A
+    // BOM that starts its line is layout, not one (see below), so the first
+    // is the first after it, and the BOMs are no part of what comes before.
+    let mut first = true;
+    for range in invalid {
         let text = stripped.get(range.clone()).unwrap_or_default();
-        let starts_the_line = k == 0
+        if is_line_start_bom_token(stripped, range.start, text) {
+            continue;
+        }
+        let starts_the_line = std::mem::take(&mut first)
             && stripped
                 .get(line_start..range.start)
+                .map(|prefix| prefix.trim_start_matches(crate::bom::BOM_CHAR))
                 .is_some_and(readable_start_of_an_error_line);
         let bom_led = text.starts_with(crate::bom::BOM_CHAR);
         // A run that starts with a blank is not an invalid token but the rest
         // of a heading line after its `*`, which the lexer skips unread.
-        if starts_the_line
-            || text.starts_with([' ', '\t'])
-            || is_line_start_bom_token(stripped, range.start, text)
-        {
+        if starts_the_line || text.starts_with([' ', '\t']) {
             continue;
         }
         let holds_bom = text.contains(crate::bom::BOM_CHAR);
@@ -9245,7 +9250,11 @@ pub(super) fn report_invalid_tokens_of_error_line(
             secondary_bom = false;
             continue;
         }
-        if holds_bom && !bom_led {
+        // Without a secondary BOM error, the line's BOM diagnostic is its
+        // primary error, and a token with a BOM inside it is left to it, as
+        // it always was. With one, that second error stood for one token
+        // already, and every other token is an invalid token of its own.
+        if holds_bom && !bom_led && !had_secondary {
             continue;
         }
         out.push(crate::ParseError::new(

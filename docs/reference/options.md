@@ -216,6 +216,8 @@ option "inferred_tolerance_default" "*:0.005"
 
 A named currency's value is a minimum: a transaction mentioning `USD` balances within at least 0.01 USD, or more if its amounts' precision allows more. The `*` value is a fallback, as in beancount: it applies only to a currency the transaction gives no tolerance at all, for example one whose amounts are all integers. It does not loosen a currency whose tolerance is inferred from its amounts.
 
+The value is `CURRENCY:NUMBER`, split at the last colon followed by a number, so `A:B:0.01` sets currency `A:B`. A sign is invalid, and so is text after the number ([E7002](errors.md#e7002-invalid-option-value)). `display_precision` reads its value the same way.
+
 ### inferred_tolerance_multiplier
 
 Multiplier for inferred tolerances. This name is deprecated (warning `E7004`); use `tolerance_multiplier` instead.
@@ -287,21 +289,21 @@ directory below the filesystem root.
 | `account_current_earnings` | string | Equity:Earnings:Current | Current earnings account |
 | `account_current_conversions` | string | - | Current conversions account |
 | `account_unrealized_gains` | string | - | Unrealized gains account |
-| `account_rounding` | string | - | Rounding errors account |
+| `account_rounding` | string | - | Rounding errors account (accepted; inert, as in beancount 3) |
 | `conversion_currency` | string | - | Currency for conversions |
 | `inferred_tolerance_default` | string | - | Balance tolerance |
 | `inferred_tolerance_multiplier` | decimal | 0.5 | Tolerance multiplier (deprecated; renamed to `tolerance_multiplier`) |
 | `tolerance_multiplier` | decimal | 0.5 | Tolerance multiplier |
 | `infer_tolerance_from_cost` | bool | FALSE | Infer tolerance from cost and price (each contribution capped at 0.5, as in beancount) |
-| `use_legacy_fixed_tolerances` | bool | FALSE | Use legacy fixed tolerances |
-| `experiment_explicit_tolerances` | bool | FALSE | Enable experimental explicit tolerances |
 | `display_precision` | string | - | Per-currency display precision (e.g. `USD:0.01`) |
 | `allow_pipe_separator` | bool | FALSE | Allow pipe separator (deprecated) |
 | `documents` | string | - | Documents root directory |
 | `plugin_processing_mode` | string | default | Plugin mode |
-| `plugin` | string | - | Plugin (deprecated; use the `plugin` directive) |
+| `plugin` | string | - | Read-only (`E7005`); use the `plugin` directive |
 | `filename` | string | - | Source filename (read-only, auto-set) |
-| `long_string_maxlines` | int | 64 | Max lines for long strings |
+| `long_string_maxlines` | int | 64 | Max lines for long strings (accepted; inert, as in beancount 3) |
+
+A bool option reads `TRUE` / `FALSE` (any case) and `1` / `0`, plus the other words beancount accepts; an unrecognized word reads as false with warning [E7011](errors.md#e7011-unrecognized-boolean-option-value). `experiment_explicit_tolerances` and `use_legacy_fixed_tolerances` are not options (`E7001`), as in beancount 3.
 
 ## Example Configuration
 

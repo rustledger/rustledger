@@ -362,15 +362,15 @@ impl<'de> Deserialize<'de> for CommentList {
 /// cannot write it: a metadata key starts with a lowercase letter.
 pub const AUTOMATIC_META: &str = "__automatic__";
 
-/// The spellings of a boolean accepted in ledger source.
+/// The spellings of a boolean accepted in metadata (`render_commas: TRUE`).
 ///
-/// Stated ONCE because a boolean can arrive two ways — `option "x" "TRUE"` and
-/// `x: TRUE` metadata — and they are the same concept to a ledger author. Two
-/// separate vocabularies would mean `render_commas: YES` grouping numerals
-/// while `option "render_commas" "YES"` warns and does nothing.
+/// Not the vocabulary of `option` values: beancount reads those with two of
+/// its own (`1`/`true`/`yes` through the options' converter, `true`/`on`/`1`
+/// for `infer_tolerance_from_cost`), which the loader's option parser mirrors
+/// (#2925). This one is unchanged by that.
 ///
-/// `None` means "not recognizably boolean": the option parser turns that into
-/// an E7002 warning, and metadata leaves the default in place.
+/// `None` means "not recognizably boolean": metadata leaves the default in
+/// place.
 #[must_use]
 pub fn parse_bool_word(word: &str) -> Option<bool> {
     if word.eq_ignore_ascii_case("true") || word == "1" {
@@ -389,7 +389,7 @@ pub fn parse_bool_word(word: &str) -> Option<bool> {
 /// variant. Accepting all three keeps `render_commas: TRUE` working however it
 /// lexes, instead of silently ignoring the declaration — the failure mode that
 /// makes a display option look broken. The VALUE vocabulary is
-/// [`parse_bool_word`]'s, shared with the option parser.
+/// [`parse_bool_word`]'s.
 #[must_use]
 pub fn meta_value_as_bool(value: &MetaValue) -> Option<bool> {
     match value {
@@ -2012,14 +2012,13 @@ impl fmt::Display for Directive {
 mod bool_vocabulary_tests {
     use super::*;
 
-    /// One concept, one vocabulary: what `option "x" "V"` accepts is exactly
-    /// what `x: V` metadata accepts.
+    /// The spellings `x: V` metadata accepts as a boolean.
     ///
-    /// The loader's option parser calls [`parse_bool_word`] directly, so this
-    /// pins the shared set rather than a copy of it. Before they were unified,
-    /// metadata took `YES`/`T` while the option warned on them.
+    /// Pinned on its own since option values stopped sharing it (#2925): the
+    /// loader reads those with beancount's vocabularies, and this set must not
+    /// move with them.
     #[test]
-    fn options_and_metadata_accept_the_same_spellings() {
+    fn test_parse_bool_word_metadata_spellings() {
         for word in ["TRUE", "true", "True", "1"] {
             assert_eq!(parse_bool_word(word), Some(true), "{word}");
         }
@@ -2030,9 +2029,7 @@ mod bool_vocabulary_tests {
             assert_eq!(
                 parse_bool_word(word),
                 None,
-                "{word} is not accepted by `option`, so metadata must not take \
-                 it either — the option parser warns (E7002) and metadata \
-                 leaves the default"
+                "{word} is not a metadata boolean; metadata leaves the default"
             );
         }
     }

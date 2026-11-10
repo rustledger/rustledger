@@ -25,8 +25,6 @@ const KNOWN_OPTIONS: &[&str] = &[
     "inferred_tolerance_default",
     "inferred_tolerance_multiplier",
     "infer_tolerance_from_cost",
-    "use_legacy_fixed_tolerances",
-    "experiment_explicit_tolerances",
     "use_precise_interpolation",
     "booking_method",
     "render_commas",
@@ -36,7 +34,7 @@ const KNOWN_OPTIONS: &[&str] = &[
     "documents",
     "insert_pythonpath",
     "plugin_processing_mode",
-    "plugin",               // Deprecated, but still known
+    "plugin",               // Known, but read-only: see `READONLY_OPTIONS`
     "tolerance_multiplier", // Renamed from inferred_tolerance_multiplier
 ];
 
@@ -49,7 +47,6 @@ fn deprecation_message(key: &str) -> Option<&'static str> {
     match key {
         "inferred_tolerance_multiplier" => Some("Renamed to 'tolerance_multiplier'."),
         "allow_pipe_separator" => Some("Option 'allow_pipe_separator' is deprecated"),
-        "plugin" => Some("Option 'plugin' is deprecated; use the 'plugin' directive instead"),
         _ => None,
     }
 }
@@ -80,11 +77,13 @@ fn deprecation_message(key: &str) -> Option<&'static str> {
 /// bean-query discards plugins declared in included files, leaving the user
 /// with errors about accounts a plugin they did declare would have opened.
 ///
-/// The deprecated `option "plugin"` form is a different thing and IS a known
-/// option, so it does route through here and is scoped out like the rest.
-/// That is why the include-scope branch re-raises E7004: the option was
-/// already an error before this list existed, and being ignored must not
-/// quietly downgrade it.
+/// The `option "plugin"` form is a different thing: a known option that may
+/// not be set ([`READONLY_OPTIONS`]), so it is an E7005 error from any file,
+/// as in beancount. The include-scope branch lets the read-only options
+/// through to that error rather than scoping them out with the E7009 warning,
+/// and it re-raises E7004 for a deprecated option for the same reason: being
+/// ignored must not quietly downgrade an error that existed before this list
+/// did.
 const ACCUMULATE_ACROSS_INCLUDES: &[&str] = &[
     "operating_currency",
     "documents",
@@ -101,12 +100,200 @@ const REPEATABLE_OPTIONS: &[&str] = &[
     "display_precision",
 ];
 
-/// Options that are read-only and cannot be set by users.
-const READONLY_OPTIONS: &[&str] = &["filename"];
+/// Options that are read-only and cannot be set by users (E7005).
+///
+/// beancount's `READ_ONLY_OPTIONS`, which holds `plugin` too: `option
+/// "plugin"` is "may not be set" there, not deprecated (#2925). The `plugin`
+/// directive is the way to load one.
+const READONLY_OPTIONS: &[&str] = &["filename", "plugin"];
 
 /// beancount's default for `account_current_conversions`, a leaf under the
 /// equity root.
 pub const DEFAULT_CURRENT_CONVERSIONS: &str = "Conversions:Current";
+
+/// Which of beancount's two readings of a boolean option a value goes
+/// through (#2925).
+///
+/// beancount has two, and they disagree on `yes` and `on`:
+///
+/// * The options with a converter (`render_commas`, `use_precise_interpolation`,
+///   `allow_pipe_separator`, `insert_pythonpath`) go through
+///   `options_validate_boolean`: `value.lower() in ("1", "true", "yes")`.
+/// * `infer_tolerance_from_cost` has no converter, so `grammar.option`'s bool
+///   branch reads it: `value.lower() in {"true", "on"} or value == "1"`.
+///
+/// Neither ever rejects a value: anything else reads as false. rledger reads
+/// it as false too, and reports a word that is in neither the true list nor
+/// its false counterpart as the E7011 warning, so `check` passes as bean-check
+/// does while the typo is still visible.
+///
+/// Deliberately not [`rustledger_core::parse_bool_word`]: that is the
+/// vocabulary of metadata such as `render_commas:`, and it must not move with
+/// these.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BoolVocabulary {
+    /// beancount's `options_validate_boolean` converter.
+    Converter,
+    /// beancount's `grammar.option` bool branch.
+    Grammar,
+}
+
+impl BoolVocabulary {
+    /// The words read as true, and the words this reports as a deliberate
+    /// false, all lowercase.
+    const fn words(self) -> (&'static [&'static str], &'static [&'static str]) {
+        match self {
+            Self::Converter => (&["1", "true", "yes"], &["0", "false", "no"]),
+            // `value == "1"` in beancount is the lowercase `"1"` too: no other
+            // string lowercases to it.
+            Self::Grammar => (&["1", "true", "on"], &["0", "false", "off"]),
+        }
+    }
+
+    /// beancount's reading of `value`, and whether the word is one this
+    /// vocabulary names (`None` when it is not: it reads as false).
+    fn read(self, value: &str) -> Option<bool> {
+        // Python's `str.lower()`, which is Unicode-aware like this.
+        let lower = value.to_lowercase();
+        let (truthy, falsy) = self.words();
+        if truthy.contains(&lower.as_str()) {
+            Some(true)
+        } else if falsy.contains(&lower.as_str()) {
+            Some(false)
+        } else {
+            None
+        }
+    }
+}
+
+/// Read a `CURRENCY:NUMBER` value, as beancount's `options_validate_tolerance_map`
+/// does for `inferred_tolerance_default` and `display_precision` (#2925).
+///
+/// beancount matches `(.*):([\d\.]+)`, so the currency is everything before
+/// the LAST colon that is followed by a digit or a dot (`A:B:0.01` is
+/// currency `A:B`), and the number is digits and dots only, so a sign is
+/// rejected (`USD:-0.01`). The number is then read with `D()`.
+///
+/// Stricter than Python: beancount's `re.match` ignores whatever follows the
+/// number, so `USD:0.01abc` reads as `0.01 USD`. We reject it with E7002
+/// (a decision on #2925): text after the number is a typo, and taking the
+/// prefix silently would set a tolerance the user may not have written.
+fn parse_tolerance_map(value: &str) -> Result<(&str, Decimal), String> {
+    let is_number_char = |c: char| c.is_ascii_digit() || c == '.';
+    let Some(colon) = value
+        .rmatch_indices(':')
+        .map(|(at, _)| at)
+        .find(|&at| value[at + 1..].starts_with(is_number_char))
+    else {
+        return Err(format!(
+            "Invalid value '{value}': expected CURRENCY:NUMBER, e.g. USD:0.01"
+        ));
+    };
+    let currency = &value[..colon];
+    let rest = &value[colon + 1..];
+    let end = rest
+        .find(|c: char| !is_number_char(c))
+        .unwrap_or(rest.len());
+    let (number, trailing) = rest.split_at(end);
+    if !trailing.is_empty() {
+        return Err(format!(
+            "Invalid value '{value}': unexpected text '{trailing}' after the number"
+        ));
+    }
+    let Ok(number) = Decimal::from_str(number) else {
+        return Err(format!(
+            "Invalid value '{value}': '{number}' is not a number"
+        ));
+    };
+    Ok((currency, number))
+}
+
+/// Read a number as beancount's `D()` reads an option value (#2925): the
+/// converter of `tolerance_multiplier`.
+///
+/// An empty value is 0. Otherwise commas and spaces are stripped (`D` treats
+/// them as thousands separators) and the rest is read as Python's `Decimal`
+/// reads a string: surrounding whitespace, a sign, `_` between digits, and an
+/// exponent are accepted.
+///
+/// Not fixable locally: Python's `Decimal` also reads `NaN`, `sNaN` and
+/// `Infinity`, which a `rust_decimal::Decimal` cannot hold. Those are rejected
+/// (E7002), as is a number outside its range; no tolerance is either.
+fn parse_beancount_decimal(value: &str) -> Result<Decimal, String> {
+    if value.is_empty() {
+        return Ok(Decimal::ZERO);
+    }
+    let cleaned: String = value.chars().filter(|c| !matches!(c, ',' | ' ')).collect();
+    let text = cleaned.trim();
+    let unsigned = text.trim_start_matches(['+', '-']);
+    if ["nan", "snan", "inf", "infinity"]
+        .iter()
+        .any(|word| unsigned.eq_ignore_ascii_case(word))
+    {
+        return Err(format!(
+            "Invalid value '{value}': not a finite number, which rustledger \
+             cannot hold"
+        ));
+    }
+    let invalid = || format!("Invalid value '{value}': expected a decimal number");
+    let (mantissa, exponent) = match text.find(['e', 'E']) {
+        Some(at) => (&text[..at], Some(&text[at + 1..])),
+        None => (text, None),
+    };
+    let mantissa = python_digits(mantissa, true).ok_or_else(invalid)?;
+    let mut number = Decimal::from_str(&mantissa).map_err(|_| invalid())?;
+    if let Some(exponent) = exponent {
+        let exponent: i64 = python_digits(exponent, false)
+            .ok_or_else(invalid)?
+            .parse()
+            .map_err(|_| invalid())?;
+        let out_of_range = || format!("Invalid value '{value}': out of range");
+        // A power of ten past 10^28 overflows a `Decimal` below anyway; the
+        // cap only bounds the loop for an absurd exponent.
+        let power = exponent.unsigned_abs();
+        if power > 28 {
+            return Err(out_of_range());
+        }
+        let scale = (0..power)
+            .try_fold(Decimal::ONE, |acc, _| acc.checked_mul(Decimal::TEN))
+            .ok_or_else(out_of_range)?;
+        number = if exponent < 0 {
+            number.checked_div(scale)
+        } else {
+            number.checked_mul(scale)
+        }
+        .ok_or_else(out_of_range)?;
+    }
+    Ok(number)
+}
+
+/// The text of one part of a Python decimal string with its `_` separators
+/// removed, or `None` when it is malformed: an optional sign, then digits,
+/// with a `.` allowed (once, with a digit on at least one side) when
+/// `fraction` is set. An `_` must sit between two digits, as in Python.
+fn python_digits(text: &str, fraction: bool) -> Option<String> {
+    let body = text.strip_prefix(['+', '-']).unwrap_or(text);
+    let sign = &text[..text.len() - body.len()];
+    let bytes = body.as_bytes();
+    let mut out = String::from(sign);
+    let mut digits = 0;
+    let mut dot = false;
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'0'..=b'9' => digits += 1,
+            b'.' if fraction && !dot => dot = true,
+            b'_' if i > 0
+                && bytes[i - 1].is_ascii_digit()
+                && bytes.get(i + 1).is_some_and(u8::is_ascii_digit) =>
+            {
+                continue;
+            }
+            _ => return None,
+        }
+        out.push(char::from(b));
+    }
+    (digits > 0).then_some(out)
+}
 
 /// The full name of an account option given as a leaf under `root`.
 ///
@@ -168,7 +355,7 @@ impl RejectedOption {
 /// Option validation warning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionWarning {
-    /// Warning code (E7001 through E7009).
+    /// Warning code (E7001 through E7011).
     pub code: &'static str,
     /// Warning message.
     pub message: String,
@@ -202,9 +389,13 @@ impl OptionWarning {
     /// Treating it as an error made the exact file #1546 was about exit
     /// non-zero again. The unit tests all passed; only running the repro end
     /// to end caught it.
+    ///
+    /// `E7011` (a boolean option value beancount does not recognize) is a
+    /// warning because bean-check reports nothing for it: the word reads as
+    /// false there and here (#2925).
     #[must_use]
     pub fn is_error(&self) -> bool {
-        !matches!(self.code, "E7003" | "E7009" | "E7010")
+        !matches!(self.code, "E7003" | "E7009" | "E7010" | "E7011")
     }
 
     /// The processing phase these belong to.
@@ -292,12 +483,6 @@ pub struct Options {
 
     /// Whether to infer tolerance from cost.
     pub infer_tolerance_from_cost: bool,
-
-    /// Whether to use legacy fixed tolerances.
-    pub use_legacy_fixed_tolerances: bool,
-
-    /// Enable experimental explicit tolerances in balance assertions.
-    pub experiment_explicit_tolerances: bool,
 
     /// Beancount 3.x `use_precise_interpolation` flag, parsed for compatibility.
     /// rustledger always interpolates with exact `rust_decimal` arithmetic, so
@@ -542,8 +727,6 @@ impl Options {
             inferred_tolerance_default: FxHashMap::default(),
             inferred_tolerance_multiplier: Decimal::new(5, 1), // 0.5
             infer_tolerance_from_cost: false,
-            use_legacy_fixed_tolerances: false,
-            experiment_explicit_tolerances: false,
             use_precise_interpolation: false,
             booking_method: "STRICT".to_string(),
             render_commas: false, // Python beancount default is FALSE
@@ -654,7 +837,15 @@ impl Options {
     }
 
     fn set_scoped_inner(&mut self, key: &str, value: &str, top_level: bool) {
-        if !top_level && KNOWN_OPTIONS.contains(&key) && !ACCUMULATE_ACROSS_INCLUDES.contains(&key)
+        // A read-only option is not scoped out: it may not be set from any
+        // file, so it gets its E7005 error from `set_inner`, which never
+        // applies it. Scoping it out would turn that error into the E7009
+        // warning in an included file, the one place `option "plugin"` would
+        // stop failing the build.
+        if !top_level
+            && KNOWN_OPTIONS.contains(&key)
+            && !ACCUMULATE_ACROSS_INCLUDES.contains(&key)
+            && !READONLY_OPTIONS.contains(&key)
         {
             // A deprecated option is still deprecated when it is also ignored,
             // and E7004 is an error where the notice below is a warning. Raise
@@ -789,6 +980,45 @@ impl Options {
             )
     }
 
+    /// Read a boolean option value as beancount does (see [`BoolVocabulary`]),
+    /// raising the E7011 warning for a word it does not name. Never rejects:
+    /// such a word reads as false, as in beancount.
+    fn read_bool(&mut self, key: &str, value: &str, vocabulary: BoolVocabulary) -> bool {
+        if let Some(read) = vocabulary.read(value) {
+            return read;
+        }
+        let (truthy, falsy) = vocabulary.words();
+        self.warnings.push(OptionWarning {
+            code: "E7011",
+            message: format!(
+                "Value \"{value}\" for option \"{key}\" is not a boolean beancount \
+                 recognizes, so it reads as false (true: {}; false: {})",
+                truthy.join(", "),
+                falsy.join(", ")
+            ),
+            option: key.to_string(),
+            value: value.to_string(),
+        });
+        false
+    }
+
+    /// Read a `CURRENCY:NUMBER` option value ([`parse_tolerance_map`]),
+    /// rejecting it with E7002 when it is not one.
+    fn read_tolerance_map<'v>(&mut self, key: &str, value: &'v str) -> Option<(&'v str, Decimal)> {
+        match parse_tolerance_map(value) {
+            Ok(parsed) => Some(parsed),
+            Err(message) => {
+                self.reject(
+                    "E7002",
+                    key,
+                    value,
+                    format!("Error for option \"{key}\": {message}"),
+                );
+                None
+            }
+        }
+    }
+
     /// Apply one option value. `false` when the value was rejected, in which
     /// case the option is unchanged (see [`Self::reject`]).
     fn apply(&mut self, key: &str, value: &str) -> bool {
@@ -810,28 +1040,16 @@ impl Options {
                 *slot = value.to_string();
             }
             "account_rounding" => {
-                // An invalid value is only the E7002, as in beancount: the
-                // no-effect notice below is about a value that was set.
+                // An invalid value is the E7002, as in beancount.
                 if !self.check_leaf(key, value) {
                     return false;
                 }
-                // Accepted for Beancount compatibility but intentionally a no-op.
-                // Beancount uses `account_rounding` to absorb the residual created
-                // when an interpolated leg is *rounded* and the rounding breaks the
-                // sum. rustledger never produces such a residual: `round_interpolated`
-                // (rustledger-booking) preserves full precision instead of rounding a
-                // non-zero residual to zero, so there is nothing for a rounding
-                // account to catch. Warn so the option isn't silently swallowed.
-                self.warnings.push(OptionWarning {
-                    code: "E7007",
-                    message: "Option 'account_rounding' is accepted for compatibility \
-                              but has no effect: rustledger preserves full precision \
-                              during interpolation rather than rounding into a rounding \
-                              account, so no rounding residual is produced."
-                        .to_string(),
-                    option: key.to_string(),
-                    value: value.to_string(),
-                });
+                // Recorded, and inert, as in beancount 3.2.3: the only reader
+                // of `account_rounding` there is `fill_residual_posting`,
+                // which nothing calls. A valid value is therefore no
+                // diagnostic, as bean-check gives none. It used to raise
+                // E7007 ("accepted but has no effect"), an error, which made
+                // `check` fail a ledger bean-check passes (#2925).
                 self.account_rounding = Some(value.to_string());
             }
             "account_current_conversions" | "account_unrealized_gains" => {
@@ -864,39 +1082,28 @@ impl Options {
                 // `inferred_tolerance_multiplier` is deprecated: renamed to
                 // `tolerance_multiplier` in Python beancount.
                 self.warn_if_deprecated(key, value);
-                let Ok(d) = Decimal::from_str(value) else {
-                    return self.reject(
-                        "E7002",
-                        key,
-                        value,
-                        format!(
-                            "Invalid value \"{value}\" for option \"{key}\": expected decimal number"
-                        ),
-                    );
+                // beancount's converter is `D()`: an empty value is 0, and
+                // commas and exponents are accepted (#2925). Downstream, a
+                // multiplier of 0 is a tolerance of 0, which `0` always gave.
+                let d = match parse_beancount_decimal(value) {
+                    Ok(d) => d,
+                    Err(message) => {
+                        return self.reject(
+                            "E7002",
+                            key,
+                            value,
+                            format!("Error for option \"{key}\": {message}"),
+                        );
+                    }
                 };
                 self.inferred_tolerance_multiplier = d;
             }
             "infer_tolerance_from_cost" => {
-                // Same vocabulary as every other boolean in ledger source
-                // (`parse_bool_word`). This arm used to take TRUE/FALSE only
-                // and warn on `1`, which Python beancount accepts as true for
-                // every boolean option.
-                //
-                // Applied even when unrecognized: beancount has no converter
-                // to reject it and reads any other word as false, which is
-                // what this sets.
-                let parsed = rustledger_core::parse_bool_word(value);
-                if parsed.is_none() {
-                    self.warnings.push(OptionWarning {
-                        code: "E7002",
-                        message: format!(
-                            "Invalid value \"{value}\" for option \"{key}\": expected TRUE, FALSE, 1 or 0"
-                        ),
-                        option: key.to_string(),
-                        value: value.to_string(),
-                    });
-                }
-                self.infer_tolerance_from_cost = parsed == Some(true);
+                // beancount reads this one through `grammar.option`'s bool
+                // branch, not the converter the other booleans have, so `on`
+                // is true here and `yes` is not (#2925).
+                self.infer_tolerance_from_cost =
+                    self.read_bool(key, value, BoolVocabulary::Grammar);
             }
             "booking_method" => {
                 // beancount's converter is `data.Booking[value]`, the exact
@@ -937,101 +1144,58 @@ impl Options {
                 self.rejected_booking_method = None;
             }
             "render_commas" => {
-                // Accept TRUE/FALSE, true/false, 1/0 (Python beancount
-                // compatibility). Shared with `render_commas:` metadata so one
-                // concept has one vocabulary — see `parse_bool_word`.
-                //
-                // Applied even when unrecognized, as for
-                // `infer_tolerance_from_cost`: beancount's boolean converter
-                // never rejects, it reads any other word as false.
-                let parsed = rustledger_core::parse_bool_word(value);
-                let is_true = parsed == Some(true);
-                if parsed.is_none() {
-                    self.warnings.push(OptionWarning {
-                        code: "E7002",
-                        message: format!(
-                            "Invalid value \"{value}\" for option \"{key}\": expected TRUE, FALSE, 1 or 0"
-                        ),
-                        option: key.to_string(),
-                        value: value.to_string(),
-                    });
-                }
-                self.render_commas = is_true;
+                // beancount's `options_validate_boolean` converter (#2925).
+                self.render_commas = self.read_bool(key, value, BoolVocabulary::Converter);
             }
             "display_precision" => {
-                // Parse "CURRENCY:EXAMPLE" where EXAMPLE's decimal places define the precision.
-                // E.g., "CHF:0.01" means 2 decimal places for CHF.
-                // E.g., "USD:0.001" means 3 decimal places for USD.
-                let Some((curr, example)) = value.split_once(':') else {
-                    return self.reject(
-                        "E7002",
-                        key,
-                        value,
-                        format!(
-                            "Invalid format for option \"{key}\": expected CURRENCY:EXAMPLE (e.g., CHF:0.01)"
-                        ),
-                    );
+                // "CURRENCY:EXAMPLE", where EXAMPLE's decimal places are the
+                // precision: "CHF:0.01" is 2 places for CHF. Read by the
+                // parser `inferred_tolerance_default` uses, as beancount reads
+                // both with one converter.
+                let Some((curr, example)) = self.read_tolerance_map(key, value) else {
+                    return false;
                 };
-                let Ok(d) = Decimal::from_str(example) else {
-                    return self.reject(
-                        "E7002",
-                        key,
-                        value,
-                        format!("Invalid precision value \"{example}\" in option \"{key}\""),
-                    );
-                };
-                // Get the precision from the example number's decimal places
-                self.display_precision.insert(curr.to_string(), d.scale());
+                self.display_precision
+                    .insert(curr.to_string(), example.scale());
             }
             "filename" => self.filename = Some(value.to_string()),
             "conversion_currency" => self.conversion_currency = Some(value.to_string()),
             "inferred_tolerance_default" => {
-                // Parse "CURRENCY:TOLERANCE" or "*:TOLERANCE"
-                let Some((curr, tol)) = value.split_once(':') else {
-                    return self.reject(
-                        "E7002",
-                        key,
-                        value,
-                        format!("Invalid format for option \"{key}\": expected CURRENCY:TOLERANCE"),
-                    );
+                // "CURRENCY:TOLERANCE" or "*:TOLERANCE".
+                let Some((curr, tol)) = self.read_tolerance_map(key, value) else {
+                    return false;
                 };
-                let Ok(d) = Decimal::from_str(tol) else {
-                    return self.reject(
-                        "E7002",
-                        key,
-                        value,
-                        format!("Invalid tolerance value \"{tol}\" in option \"{key}\""),
-                    );
-                };
-                self.inferred_tolerance_default.insert(curr.to_string(), d);
-            }
-            "use_legacy_fixed_tolerances" => {
-                self.use_legacy_fixed_tolerances = value.eq_ignore_ascii_case("true");
-            }
-            "experiment_explicit_tolerances" => {
-                self.experiment_explicit_tolerances = value.eq_ignore_ascii_case("true");
+                self.inferred_tolerance_default
+                    .insert(curr.to_string(), tol);
             }
             "use_precise_interpolation" => {
                 // Accepted for beancount 3.x compatibility. rustledger already
                 // interpolates with exact decimals, so this is a no-op on
                 // results — recorded only to reflect the user's declaration.
-                self.use_precise_interpolation = value.eq_ignore_ascii_case("true");
+                self.use_precise_interpolation =
+                    self.read_bool(key, value, BoolVocabulary::Converter);
             }
             "allow_pipe_separator" => {
                 // This option is deprecated in Python beancount
                 self.warn_if_deprecated(key, value);
-                self.allow_pipe_separator = value.eq_ignore_ascii_case("true");
+                self.allow_pipe_separator = self.read_bool(key, value, BoolVocabulary::Converter);
+            }
+            "insert_pythonpath" => {
+                // A boolean with the converter in beancount. rledger records
+                // the value as written (it has no field), but reports an
+                // unrecognized word as the other booleans do.
+                self.read_bool(key, value, BoolVocabulary::Converter);
+                self.custom.insert(key.to_string(), value.to_string());
             }
             "long_string_maxlines" => {
-                let Ok(n) = value.parse::<u32>() else {
-                    return self.reject(
-                        "E7002",
-                        key,
-                        value,
-                        format!("Invalid value \"{value}\" for option \"{key}\": expected integer"),
-                    );
-                };
-                self.long_string_maxlines = n;
+                // beancount has no converter for this option and its lexer
+                // never reads it (3.2.3), so any value is accepted there with
+                // no diagnostic (#2925). rledger does not read it either: a
+                // value that is not a count is accepted and leaves the field
+                // as it was.
+                if let Ok(n) = value.parse::<u32>() {
+                    self.long_string_maxlines = n;
+                }
             }
             "documents" => {
                 // NO existence check here. A relative `documents` path is
@@ -1053,10 +1217,6 @@ impl Options {
                     return self.reject("E7002", key, value, format!("Invalid value '{value}'"));
                 }
                 self.plugin_processing_mode = value.to_string();
-            }
-            "plugin" => {
-                // Deprecated: should use `plugin` directive instead of `option "plugin"`
-                self.warn_if_deprecated(key, value);
             }
             _ => {
                 // Unknown options go to custom map
@@ -1189,15 +1349,13 @@ mod tests {
             value: String::new(),
         };
 
-        for code in ["E7003", "E7009"] {
+        for code in ["E7003", "E7009", "E7010", "E7011"] {
             assert!(
                 !warn(code).is_error(),
                 "{code} must stay a warning; `rledger check` exits 0 on it"
             );
         }
-        for code in [
-            "E7001", "E7002", "E7004", "E7005", "E7006", "E7007", "E7008",
-        ] {
+        for code in ["E7001", "E7002", "E7004", "E7005", "E7006", "E7008"] {
             assert!(
                 warn(code).is_error(),
                 "{code} must stay an error; `rledger check` exits non-zero on it"
@@ -1325,14 +1483,14 @@ mod tests {
 
     /// Scoping must not downgrade a diagnostic that already existed.
     ///
-    /// `option "plugin"` is deprecated and raises E7004, which `rledger check`
-    /// treats as an error. Reporting only the E7009 notice would silently turn
-    /// that into a warning, making an included file the one place a deprecated
-    /// option stopped failing the build.
+    /// `inferred_tolerance_multiplier` is deprecated and raises E7004, which
+    /// `rledger check` treats as an error. Reporting only the E7009 notice
+    /// would silently turn that into a warning, making an included file the
+    /// one place a deprecated option stopped failing the build.
     #[test]
     fn scoping_out_an_option_still_reports_its_deprecation() {
         let mut opts = Options::new();
-        opts.set_scoped("plugin", "some.module", false);
+        opts.set_scoped("inferred_tolerance_multiplier", "0.6", false);
 
         let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
         assert!(
@@ -1346,9 +1504,26 @@ mod tests {
         assert!(
             opts.warnings
                 .iter()
-                .any(|w| w.code == "E7004" && w.message.contains("deprecated")),
+                .any(|w| w.code == "E7004" && w.message.contains("Renamed")),
             "the message must come from the shared table, not an empty default",
         );
+    }
+
+    /// `option "plugin"` may not be set, as in beancount, from the top-level
+    /// file or an included one: E7005, an error, and nothing applied (#2925).
+    /// It used to be the deprecation E7004; scoping it out in an included
+    /// file must not turn the error into the E7009 warning.
+    #[test]
+    fn test_set_scoped_plugin_option_is_read_only_everywhere() {
+        for top_level in [true, false] {
+            let mut opts = Options::new();
+            opts.set_scoped("plugin", "some.module", top_level);
+            let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+            assert_eq!(codes, ["E7005"], "top_level = {top_level}");
+            assert_eq!(opts.warnings[0].message, "Option 'plugin' may not be set");
+            assert!(opts.warnings[0].is_error());
+            assert!(opts.custom.is_empty() && opts.set_options.is_empty());
+        }
     }
 
     /// Options that describe the file declaring them still accumulate.
@@ -1398,7 +1573,11 @@ mod tests {
         assert_eq!(opts.warnings[0].code, "E7004");
         assert!(opts.warnings[0].message.contains("Renamed"));
         assert_eq!(opts.warnings[1].code, "E7002");
-        assert!(opts.warnings[1].message.contains("expected decimal"));
+        assert!(
+            opts.warnings[1]
+                .message
+                .contains("expected a decimal number")
+        );
     }
 
     #[test]
@@ -1428,62 +1607,122 @@ mod tests {
         );
     }
 
-    #[test]
-    fn test_invalid_boolean_value() {
-        let mut opts = Options::new();
-        opts.set("infer_tolerance_from_cost", "maybe");
-
-        assert_eq!(opts.warnings.len(), 1);
-        assert_eq!(opts.warnings[0].code, "E7002");
-        assert!(
-            opts.warnings[0].message.contains("TRUE, FALSE, 1 or 0"),
-            "the message must name the vocabulary actually accepted: {}",
-            opts.warnings[0].message
-        );
+    /// The value of a boolean option as `Options` holds it.
+    fn bool_option(opts: &Options, key: &str) -> bool {
+        match key {
+            "render_commas" => opts.render_commas,
+            "use_precise_interpolation" => opts.use_precise_interpolation,
+            "allow_pipe_separator" => opts.allow_pipe_separator,
+            "infer_tolerance_from_cost" => opts.infer_tolerance_from_cost,
+            other => panic!("not a boolean option: {other}"),
+        }
     }
 
-    /// Every boolean option in ledger source shares one vocabulary, and the
-    /// E7002 message names it accurately.
-    ///
-    /// `infer_tolerance_from_cost` used to take TRUE/FALSE only and warn on
-    /// `1`, which Python beancount accepts as true for every boolean option;
-    /// `render_commas` took `1`/`0` as well. The message said "TRUE or FALSE"
-    /// on both. A test that only checks the rejected value cannot catch a
-    /// message that under-promises, so this asserts the accepted ones too.
+    /// The options with beancount's `options_validate_boolean` converter read
+    /// `1`, `true` and `yes` as true, case-insensitively, and nothing else
+    /// (#2925). `render_commas "yes"` used to be an E7002 error and false.
     #[test]
-    fn boolean_options_share_one_vocabulary() {
-        for key in ["infer_tolerance_from_cost", "render_commas"] {
+    fn test_set_converter_boolean_options_read_like_beancount() {
+        for key in [
+            "render_commas",
+            "use_precise_interpolation",
+            "allow_pipe_separator",
+        ] {
             for (value, expected) in [
                 ("TRUE", true),
                 ("true", true),
                 ("1", true),
+                ("yes", true),
+                ("YES", true),
                 ("FALSE", false),
-                ("false", false),
                 ("0", false),
+                ("no", false),
             ] {
                 let mut opts = Options::new();
                 opts.set(key, value);
                 assert!(
-                    opts.warnings.is_empty(),
-                    "{key} = {value:?} must be accepted without a warning: {:?}",
+                    opts.warnings.iter().all(|w| w.code != "E7011"),
+                    "{key} = {value:?} is a word beancount names: {:?}",
                     opts.warnings
                 );
-                let actual = if key == "render_commas" {
-                    opts.render_commas
-                } else {
-                    opts.infer_tolerance_from_cost
-                };
-                assert_eq!(actual, expected, "{key} = {value:?}");
+                assert_eq!(bool_option(&opts, key), expected, "{key} = {value:?}");
             }
-
-            let mut opts = Options::new();
-            opts.set(key, "yes");
-            assert_eq!(
-                opts.warnings.len(),
-                1,
-                "{key}: `yes` is outside the shared vocabulary and must warn"
-            );
         }
+    }
+
+    /// `infer_tolerance_from_cost` has no converter in beancount, so
+    /// `grammar.option`'s bool branch reads it: `true` and `on`
+    /// case-insensitively, or `1`. So `on` is true and `yes` is not (#2925).
+    #[test]
+    fn test_set_infer_tolerance_from_cost_reads_like_grammar_option() {
+        for (value, expected, warns) in [
+            ("TRUE", true, false),
+            ("1", true, false),
+            ("on", true, false),
+            ("ON", true, false),
+            ("FALSE", false, false),
+            ("0", false, false),
+            ("off", false, false),
+            ("yes", false, true),
+        ] {
+            let mut opts = Options::new();
+            opts.set("infer_tolerance_from_cost", value);
+            assert_eq!(opts.infer_tolerance_from_cost, expected, "{value:?}");
+            let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+            let expected_codes: &[&str] = if warns { &["E7011"] } else { &[] };
+            assert_eq!(codes, expected_codes, "{value:?}");
+        }
+    }
+
+    /// An unrecognized boolean word reads as false, as in beancount, and is
+    /// the E7011 WARNING, not an error, so `check` passes as bean-check does
+    /// (a decision on #2925). The word is still applied: a later `bogus`
+    /// turns an earlier `TRUE` off, as it does in beancount.
+    #[test]
+    fn test_set_unrecognized_boolean_word_is_false_with_a_warning() {
+        for key in ["render_commas", "infer_tolerance_from_cost"] {
+            let mut opts = Options::new();
+            opts.set(key, "TRUE");
+            opts.set(key, "bogus");
+            assert!(!bool_option(&opts, key), "{key}");
+            let w = opts
+                .warnings
+                .iter()
+                .find(|w| w.code == "E7011")
+                .unwrap_or_else(|| panic!("{key}: expected E7011: {:?}", opts.warnings));
+            assert!(!w.is_error(), "E7011 must not fail `check`");
+            assert!(
+                w.message.contains("reads as false"),
+                "the message says what the value does: {}",
+                w.message
+            );
+            assert!(opts.warnings.iter().all(|w| w.code != "E7002"), "{key}");
+        }
+    }
+
+    /// `insert_pythonpath` has the converter too, so a typo is reported the
+    /// same way; its value is still recorded as written.
+    #[test]
+    fn test_set_insert_pythonpath_unrecognized_word_warns() {
+        let mut opts = Options::new();
+        opts.set("insert_pythonpath", "TRUE");
+        assert!(opts.warnings.is_empty(), "{:?}", opts.warnings);
+        opts.set("insert_pythonpath", "maybe");
+        let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+        assert_eq!(codes, ["E7011"]);
+        assert_eq!(opts.get("insert_pythonpath"), Some("maybe"));
+    }
+
+    /// The option vocabularies are not `parse_bool_word`, which serves
+    /// `render_commas:` metadata: that one must not move with them (#2925).
+    #[test]
+    fn test_set_boolean_options_leave_metadata_vocabulary_alone() {
+        assert_eq!(rustledger_core::parse_bool_word("yes"), None);
+        assert_eq!(rustledger_core::parse_bool_word("on"), None);
+        assert_eq!(rustledger_core::parse_bool_word("TRUE"), Some(true));
+        let mut opts = Options::new();
+        opts.set("render_commas", "yes");
+        assert!(opts.render_commas);
     }
 
     /// #2401: the previous-period summary accounts resolve under the
@@ -1670,30 +1909,22 @@ mod tests {
         assert!(opts.warnings[0].message.contains("may not be set"));
     }
 
+    /// A valid `account_rounding` is stored and gives no diagnostic, as in
+    /// beancount 3.2.3, where the option is inert (#2925). It used to raise
+    /// the E7007 error, which made `check` fail a ledger bean-check passes.
     #[test]
-    fn test_account_rounding_accepted_but_warns_noop() {
+    fn test_set_account_rounding_valid_value_no_diagnostic() {
         let mut opts = Options::new();
         opts.set("account_rounding", "Equity:Rounding");
 
-        // Still stored for Beancount compatibility...
         assert_eq!(opts.account_rounding.as_deref(), Some("Equity:Rounding"));
-        // ...but a no-op warning is emitted so the option isn't silently swallowed.
-        let w = opts
-            .warnings
-            .iter()
-            .find(|w| w.code == "E7007")
-            .expect("expected an E7007 no-op warning for account_rounding");
-        assert!(w.message.contains("no effect"));
-        assert_eq!(w.option, "account_rounding");
-        // A valid account name must NOT also trip E7002 (invalid value).
-        assert!(!opts.warnings.iter().any(|w| w.code == "E7002"));
+        assert!(opts.warnings.is_empty(), "{:?}", opts.warnings);
     }
 
     #[test]
     fn test_invalid_account_name_validation() {
         // account_rounding with an invalid value: only the invalid-account
-        // error (E7002), as in beancount. The value is not set, so the
-        // accepted-but-no-op notice (E7007) has nothing to be about (#2911).
+        // error (E7002), as in beancount (#2911).
         let mut opts = Options::new();
         opts.set("account_rounding", "invalid");
 
@@ -1708,10 +1939,8 @@ mod tests {
         let mut opts = Options::new();
         opts.set("account_rounding", "Equity:Rounding");
 
-        // A valid account name does not trip E7002; the value is stored, but
-        // account_rounding is a no-op in rustledger so an E7007 warning fires.
+        // A valid account name does not trip E7002; the value is stored.
         assert!(!opts.warnings.iter().any(|w| w.code == "E7002"));
-        assert!(opts.warnings.iter().any(|w| w.code == "E7007"));
         assert_eq!(opts.account_rounding, Some("Equity:Rounding".to_string()));
     }
 
@@ -1748,14 +1977,37 @@ mod tests {
         assert_eq!(opts3.warnings[0].code, "E7002");
     }
 
+    /// The two options beancount 3.2.3 no longer has are unknown, E7001, as
+    /// beancount's "Invalid option" (#2925). They used to be accepted
+    /// silently, with no effect.
     #[test]
-    fn test_deprecated_plugin_option() {
-        let mut opts = Options::new();
-        opts.set("plugin", "some.plugin");
+    fn test_set_dead_tolerance_options_are_unknown() {
+        for key in [
+            "experiment_explicit_tolerances",
+            "use_legacy_fixed_tolerances",
+        ] {
+            let mut opts = Options::new();
+            opts.set(key, "TRUE");
+            let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+            assert_eq!(codes, ["E7001"], "{key}");
+            assert!(opts.warnings[0].is_error(), "{key}");
+        }
+    }
 
-        assert_eq!(opts.warnings.len(), 1);
-        assert_eq!(opts.warnings[0].code, "E7004");
-        assert!(opts.warnings[0].message.contains("deprecated"));
+    /// `long_string_maxlines` has no converter in beancount and nothing reads
+    /// it, so any value is accepted with no diagnostic (#2925). A count is
+    /// recorded; anything else leaves the field as it was.
+    #[test]
+    fn test_set_long_string_maxlines_accepts_any_value() {
+        let mut opts = Options::new();
+        opts.set("long_string_maxlines", "10");
+        opts.set("long_string_maxlines", "abc");
+        assert!(
+            opts.warnings.iter().all(|w| w.code == "E7003"),
+            "{:?}",
+            opts.warnings
+        );
+        assert_eq!(opts.long_string_maxlines, 10);
     }
 
     #[test]
@@ -1820,6 +2072,128 @@ mod tests {
                 "Option '{opt}' should warn on invalid account name"
             );
             assert_eq!(opts.warnings[0].code, "E7002");
+        }
+    }
+
+    /// Both tolerance-map options split on the LAST colon followed by a
+    /// number, as beancount's `(.*):([\d\.]+)` does, so `A:B:0.01` is currency
+    /// `A:B` (#2925). It used to be rejected.
+    #[test]
+    fn test_parse_tolerance_map_splits_on_last_colon_before_number() {
+        let mut opts = Options::new();
+        opts.set("inferred_tolerance_default", "A:B:0.01");
+        opts.set("display_precision", "A:B:0.001");
+        assert!(opts.warnings.is_empty(), "{:?}", opts.warnings);
+        assert_eq!(
+            opts.inferred_tolerance_default.get("A:B"),
+            Some(&rust_decimal_macros::dec!(0.01))
+        );
+        assert_eq!(opts.display_precision.get("A:B"), Some(&3));
+
+        // The number is digits and dots, so a leading dot is one.
+        assert_eq!(
+            parse_tolerance_map("USD:.5"),
+            Ok(("USD", rust_decimal_macros::dec!(0.5)))
+        );
+        // The last colon followed by a number, not merely the last colon.
+        assert_eq!(
+            parse_tolerance_map("X:1y:2"),
+            Ok(("X:1y", rust_decimal_macros::dec!(2)))
+        );
+    }
+
+    /// A sign is not part of beancount's number, so a negative tolerance or
+    /// precision is rejected with E7002 and not applied (#2925). It used to
+    /// be accepted.
+    #[test]
+    fn test_parse_tolerance_map_rejects_sign() {
+        for key in ["inferred_tolerance_default", "display_precision"] {
+            for value in ["USD:-0.01", "USD:+0.01", "USD", "USD:", "USD:1.2.3"] {
+                let mut opts = Options::new();
+                opts.set(key, value);
+                let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+                assert_eq!(codes, ["E7002"], "{key} = {value:?}");
+                assert!(opts.inferred_tolerance_default.is_empty());
+                assert!(opts.display_precision.is_empty());
+            }
+        }
+    }
+
+    /// Deliberate deviation: beancount reads `USD:0.01abc` as 0.01 USD
+    /// because its `re.match` ignores what follows the number. rledger keeps
+    /// rejecting it with E7002 (a decision on #2925).
+    #[test]
+    fn test_parse_tolerance_map_trailing_text_is_rejected() {
+        for key in ["inferred_tolerance_default", "display_precision"] {
+            let mut opts = Options::new();
+            opts.set(key, "USD:0.01abc");
+            let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+            assert_eq!(codes, ["E7002"], "{key}");
+            assert!(
+                opts.warnings[0].message.contains("'abc'"),
+                "names the stray text: {}",
+                opts.warnings[0].message
+            );
+            assert!(opts.inferred_tolerance_default.is_empty());
+            assert!(opts.display_precision.is_empty());
+        }
+    }
+
+    /// `tolerance_multiplier` is read by beancount's `D()` (#2925): empty is
+    /// 0, commas and spaces are stripped, and a sign, an exponent and `_`
+    /// between digits are accepted.
+    #[test]
+    fn test_parse_beancount_decimal_matches_d() {
+        use rust_decimal_macros::dec;
+        for (value, expected) in [
+            ("", dec!(0)),
+            ("0", dec!(0)),
+            ("0.5", dec!(0.5)),
+            ("1,000", dec!(1000)),
+            ("1,000.25", dec!(1000.25)),
+            (" 0.5 ", dec!(0.5)),
+            ("1e-3", dec!(0.001)),
+            ("1E2", dec!(100)),
+            ("2.5e+1", dec!(25)),
+            ("-0.5", dec!(-0.5)),
+            ("+0.5", dec!(0.5)),
+            (".5", dec!(0.5)),
+            ("5.", dec!(5)),
+            ("1_000", dec!(1000)),
+        ] {
+            assert_eq!(parse_beancount_decimal(value), Ok(expected), "{value:?}");
+        }
+        for value in [
+            "abc", "0.5abc", ",", "  ", "1__0", "_1", "1_", "1e", "e3", ".",
+        ] {
+            assert!(parse_beancount_decimal(value).is_err(), "{value:?}");
+        }
+    }
+
+    /// An empty `tolerance_multiplier` is 0, as beancount's `D("")` is, with
+    /// no diagnostic. It used to be an E7002 error.
+    #[test]
+    fn test_set_tolerance_multiplier_empty_is_zero() {
+        let mut opts = Options::new();
+        opts.set("tolerance_multiplier", "");
+        assert!(opts.warnings.is_empty(), "{:?}", opts.warnings);
+        assert_eq!(opts.inferred_tolerance_multiplier, Decimal::ZERO);
+
+        opts.set("tolerance_multiplier", "1,5");
+        assert_eq!(opts.inferred_tolerance_multiplier, Decimal::from(15));
+    }
+
+    /// Not fixable locally: Python's `Decimal` reads `NaN` and `Infinity`,
+    /// which `rust_decimal` cannot hold, so rledger rejects them with E7002
+    /// and keeps the earlier value.
+    #[test]
+    fn test_set_tolerance_multiplier_non_finite_is_rejected() {
+        for value in ["NaN", "-Infinity", "inf", "sNaN"] {
+            let mut opts = Options::new();
+            opts.set("tolerance_multiplier", value);
+            let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+            assert_eq!(codes, ["E7002"], "{value}");
+            assert_eq!(opts.inferred_tolerance_multiplier, Decimal::new(5, 1));
         }
     }
 
@@ -1891,7 +2265,7 @@ mod tests {
         opts.set("display_precision", "USD0.01");
         assert_eq!(opts.warnings.len(), 1);
         assert_eq!(opts.warnings[0].code, "E7002");
-        assert!(opts.warnings[0].message.contains("CURRENCY:EXAMPLE"));
+        assert!(opts.warnings[0].message.contains("CURRENCY:NUMBER"));
         assert!(opts.display_precision.is_empty());
     }
 
@@ -1960,7 +2334,7 @@ mod tests {
         opts.set("display_precision", "USD:abc");
         assert_eq!(opts.warnings.len(), 1);
         assert_eq!(opts.warnings[0].code, "E7002");
-        assert!(opts.warnings[0].message.contains("Invalid precision"));
+        assert!(opts.warnings[0].message.contains("Invalid value"));
         assert!(opts.display_precision.is_empty());
     }
 
@@ -2121,7 +2495,7 @@ mod tests {
         opts.set("account_rounding", "Rounding");
         opts.set("account_rounding", "Other");
         let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
-        assert_eq!(codes, ["E7007", "E7003", "E7007"]);
+        assert_eq!(codes, ["E7003"]);
         assert_eq!(opts.account_rounding.as_deref(), Some("Other"));
     }
 
@@ -2164,7 +2538,8 @@ mod tests {
     }
 
     /// #2911: the numeric options keep their earlier value on a bad one, and a
-    /// map option keeps its entries.
+    /// map option keeps its entries. `long_string_maxlines` takes any value
+    /// (#2925), so `ten` is only the duplicate E7003 and leaves the count.
     #[test]
     fn test_set_invalid_numeric_option_keeps_earlier_value() {
         let mut opts = Options::new();
@@ -2177,7 +2552,7 @@ mod tests {
         opts.set("display_precision", "USD:0.01");
         opts.set("display_precision", "USD:abc");
         let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
-        assert_eq!(codes, ["E7002", "E7002", "E7002", "E7002"]);
+        assert_eq!(codes, ["E7002", "E7003", "E7002", "E7002"]);
         assert_eq!(
             opts.inferred_tolerance_multiplier,
             rust_decimal_macros::dec!(0.6)

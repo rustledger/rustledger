@@ -423,7 +423,14 @@ use crate::types::{Error, LedgerOptions};
 /// `option "name_equity" "capital"`), and a ledger whose `booking_method` was
 /// rejected now has `query_refused` set; an older blob would keep serving the
 /// old names, errors and answers.
-pub const CACHE_VERSION: u32 = 90;
+/// v92: loader v69, LOADER OUTPUT changed (#2925). Option values are read as
+/// beancount reads them, so the archived error list moves: a valid
+/// `account_rounding` no longer raises `E7007`, an unrecognized boolean word
+/// is the `E7011` warning instead of an `E7002` error, `option "plugin"` is
+/// `E7005` instead of `E7004`, the two dead tolerance options are `E7001`, and
+/// the tolerance maps accept `A:B:0.01` and reject `USD:-0.01`. An older blob
+/// would keep serving the old errors. (v91 is held by #2920.)
+pub const CACHE_VERSION: u32 = 92;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -455,7 +462,7 @@ pub const CACHE_VERSION: u32 = 90;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 68;
+const LOADER_CACHE_VERSION_PIN: u32 = 69;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

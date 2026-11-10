@@ -134,13 +134,15 @@ pub enum Token<'src> {
     /// (currency, number, date, keyword, tag, link, key) starts with a
     /// non-ASCII character, so a non-ASCII start is never ambiguous.
     ///
-    /// One deliberate difference: a BOM (U+FEFF) does not START an account
-    /// here (it may continue one). beancount lexes `\u{feff}Assets:A` as one
-    /// account and rejects the name; here a BOM at the start of a line stays its
-    /// own layout-transparent error token (`apply_err_layout_transparency`), so
-    /// the directive of a concatenated file after it still parses, under the
-    /// `BomInDirectiveBody` diagnostic, and anywhere else it starts an invalid
-    /// run to the next blank (#2928). Both reject the line.
+    /// A BOM (U+FEFF) starts an account like any other non-ASCII character, as
+    /// in beancount, whose account type is `([A-Z]|{UTF-8-ONLY})...`:
+    /// `\u{feff}Assets:A` is one account token, and the account-name check
+    /// rejects it when the file loads, as beancount's `Invalid account name`
+    /// does (#2928). A BOM that is not followed by an account shape
+    /// (`\u{feff}USD`, `\u{feff}Assets:`) is an invalid token, its own
+    /// layout-transparent one at the start of a line
+    /// (`apply_err_layout_transparency`), and anywhere else a run to the next
+    /// blank.
     ///
     /// KNOWN SHARP EDGE: the non-ASCII range includes Unicode whitespace,
     /// control and line-separator characters (NBSP U+00A0, LINE SEPARATOR
@@ -154,7 +156,7 @@ pub enum Token<'src> {
     ///
     /// The account type prefix is validated later against options (`name_assets`, etc.).
     #[regex(
-        r"([A-Z]|[\x{80}-\x{FEFE}\x{FF00}-\x{10FFFF}])([A-Za-z0-9\-]|[\x{80}-\x{10FFFF}])*(:([A-Z0-9]|[\x{80}-\x{10FFFF}])([A-Za-z0-9\-]|[\x{80}-\x{10FFFF}])*)+"
+        r"([A-Z]|[\x{80}-\x{10FFFF}])([A-Za-z0-9\-]|[\x{80}-\x{10FFFF}])*(:([A-Z0-9]|[\x{80}-\x{10FFFF}])([A-Za-z0-9\-]|[\x{80}-\x{10FFFF}])*)+"
     )]
     Account(&'src str),
 
@@ -1273,7 +1275,13 @@ impl<'src> Iterator for TokenIter<'src> {
                     let bom_starts_line = text.starts_with(crate::bom::BOM_CHAR)
                         && self.at_line_start
                         && span.start == self.last_newline_end;
-                    let end = if text.starts_with('\r') || bom_starts_line {
+                    let end = if bom_starts_line {
+                        // The BOM alone: logos may have scanned past it into
+                        // a failed account (`\u{feff}2024-01-02` is no
+                        // account, but a BOM may start one), and the rest is
+                        // lexed afresh.
+                        span.start + crate::bom::BOM_CHAR.len_utf8()
+                    } else if text.starts_with('\r') {
                         span.end
                     } else {
                         span.start + text.find([' ', '\t', '\r', '\n']).unwrap_or(text.len())
@@ -2480,8 +2488,10 @@ mod tests {
         // starts, which beancount rejects.
         assert!(ok("Assets:\u{65e5}\u{672c}")); // 日本 (Lo)
         assert!(ok("Assets:\u{1c5}")); // ǅ (Lt)
-        // A BOM never starts an account (it stays its own error token).
-        assert!(!lexes_whole("\u{feff}Assets:A"));
+        // A BOM starts an account, as in beancount, whose name check then
+        // rejects it (#2928); it may continue one too.
+        assert!(lexes_whole("\u{feff}Assets:A"));
+        assert!(!ok("\u{feff}Assets:A"));
         assert!(lexes_whole("Assets:A\u{feff}"));
     }
 

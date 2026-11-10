@@ -164,10 +164,9 @@ fn test_is_stray_bom_at_finds_bom_inside_longer_error_token() {
     }
 }
 
-/// A BOM-led invalid token where a directive's argument or account belongs
-/// is that directive's one error, as bean-check's one `Invalid token` (for
-/// an account position bean-check reads the BOM into the account and rejects
-/// the name when it loads; here it is one `BomInDirectiveBody` too). The
+/// A BOM-led invalid token where a directive's argument belongs is that
+/// directive's one error, as bean-check's one `Invalid token` (a BOM-led
+/// account is an account; see `test_parse_bom_led_account_is_an_account`). The
 /// directive's own line error stands for the token, under the BOM diagnostic,
 /// and is not reported twice.
 #[test]
@@ -185,13 +184,6 @@ fn test_parse_bom_led_argument_of_directive_is_one_error() {
         format!("2024-01-02 custom {BOM}\"budget\" 1"),
         format!("2024-01-02 query {BOM}\"q\" \"select\""),
         format!("2024-01-02 query \"q\" {BOM}\"select\""),
-        format!("2024-01-02 open {BOM}Assets:C"),
-        format!("2024-01-02 open\t{BOM}Assets:C"),
-        format!("2024-01-02 close {BOM}Assets:A"),
-        format!("2024-01-02 pad {BOM}Assets:A Assets:B"),
-        format!("2024-01-02 pad Assets:A {BOM}Assets:B"),
-        format!("2024-01-02 balance {BOM}Assets:A 0 USD"),
-        format!("2024-01-02 note {BOM}Assets:A \"x\""),
     ] {
         let src = format!("{HEAD}{line}\n");
         let result = parse_both(&src);
@@ -207,6 +199,95 @@ fn test_parse_bom_led_argument_of_directive_is_one_error() {
         // The quick fix still finds the BOM, inside the line's error span.
         let at = src.find(BOM).expect("a BOM");
         assert!(result.is_stray_bom_at(at), "{src:?}");
+    }
+}
+
+/// A BOM glued to an account shape is an account in beancount, whose account
+/// type admits a non-ASCII first character, a BOM included: `<BOM>Assets:A`
+/// is one ACCOUNT there, and the BOM only makes its name invalid when the
+/// file loads. So it is here: no parse error, the directive is kept with the
+/// BOM in its account, and the account-name check reports it on load.
+#[test]
+fn test_parse_bom_led_account_is_an_account() {
+    for (line, account) in [
+        (
+            format!("2024-01-02 open {BOM}Assets:C"),
+            format!("{BOM}Assets:C"),
+        ),
+        (
+            format!("2024-01-02 open\t{BOM}Assets:C"),
+            format!("{BOM}Assets:C"),
+        ),
+        (
+            format!("2024-01-02 close {BOM}Assets:A"),
+            format!("{BOM}Assets:A"),
+        ),
+        (
+            format!("2024-01-02 pad {BOM}Assets:A Assets:B"),
+            format!("{BOM}Assets:A"),
+        ),
+        (
+            format!("2024-01-02 balance {BOM}Assets:A 0 USD"),
+            format!("{BOM}Assets:A"),
+        ),
+        (
+            format!("2024-01-02 note {BOM}Ü:A \"x\""),
+            format!("{BOM}Ü:A"),
+        ),
+        (format!("2024-01-02 close {BOM}1:A"), format!("{BOM}1:A")),
+    ] {
+        let src = format!("{HEAD}{line}\n");
+        let result = parse_both(&src);
+        assert!(result.errors.is_empty(), "{src:?}: {:?}", result.errors);
+        assert_eq!(result.directives.len(), 3, "{src:?}");
+        let got = match &result.directives[2].value {
+            Directive::Open(d) => d.account.to_string(),
+            Directive::Close(d) => d.account.to_string(),
+            Directive::Pad(d) => d.account.to_string(),
+            Directive::Balance(d) => d.account.to_string(),
+            Directive::Note(d) => d.account.to_string(),
+            other => panic!("{src:?}: {other:?}"),
+        };
+        assert_eq!(got, account, "{src:?}");
+    }
+    // Not an account shape: still an invalid token.
+    for line in [
+        format!("2024-01-02 note Assets:A \"x\" {BOM}A"),
+        format!("2024-01-02 note Assets:A \"x\" {BOM}USD"),
+        format!("2024-01-02 note Assets:A \"x\" {BOM}Assets:"),
+    ] {
+        let src = format!("{HEAD}{line}\n");
+        let result = parse_both(&src);
+        assert_eq!(bom_errors(&result), 1, "{src:?}: {:?}", result.errors);
+    }
+}
+
+/// A lone capital glued to a BOM (`A<BOM>b`) is one invalid token from the
+/// capital on, here and in beancount, and it is counted like a BOM-led one:
+/// `$x A<BOM>b` is two errors and `@ ! A<BOM>b %x` three, as in bean-check.
+#[test]
+fn test_parse_lone_capital_glued_to_bom_is_counted() {
+    for (line, errors) in [(format!("$x A{BOM}b"), 2), (format!("@ ! A{BOM}b %x"), 3)] {
+        let src = format!("{HEAD}{line}\n");
+        let result = parse_both(&src);
+        assert_eq!(result.errors.len(), errors, "{src:?}: {:?}", result.errors);
+    }
+}
+
+/// After a `<BOM>*` heading start, beancount's invalid token runs to the
+/// first blank, and the rest of the line lexes as usual: each invalid token
+/// in it is one more error, and a tag or a string is none.
+#[test]
+fn test_parse_line_start_bom_heading_counts_the_rest() {
+    for (line, errors) in [
+        (format!("{BOM}*7{BOM}* #tag"), 1),
+        (format!("{BOM}**{BOM}*\t\"s{BOM}t\""), 1),
+        (format!("{BOM}* Heading with words"), 4),
+        (format!("{BOM}*7 Z#"), 2),
+    ] {
+        let src = format!("{HEAD}{line}\n");
+        let result = parse_both(&src);
+        assert_eq!(result.errors.len(), errors, "{src:?}: {:?}", result.errors);
     }
 }
 

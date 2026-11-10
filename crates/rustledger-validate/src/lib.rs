@@ -3061,6 +3061,24 @@ mod tests {
         );
     }
 
+    /// A BOM-led account (`\u{feff}Assets:C`) is an account token since #2928,
+    /// as in beancount, and it is this check that rejects it, as beancount's
+    /// `Invalid account name` does.
+    #[test]
+    fn test_validate_bom_led_account_is_invalid_account_name() {
+        let directives = vec![Directive::Open(Open::new(
+            date(2024, 1, 1),
+            "\u{feff}Assets:C",
+        ))];
+        let errors = validate(&directives);
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.code == ErrorCode::InvalidAccountName),
+            "Should error for a BOM-led account: {errors:?}"
+        );
+    }
+
     #[test]
     fn test_validate_account_lowercase_component() {
         // Test lowercase component (must start with uppercase or digit)

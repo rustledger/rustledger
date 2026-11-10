@@ -9203,16 +9203,19 @@ fn drop_errors_inside_a_line_error(
 /// - A BOM that starts its line keeps its own extent here
 ///   ([`is_line_start_bom_token`]), where beancount's invalid token runs on
 ///   through whatever is glued to it. So it is the line's first invalid
-///   token, the one the line error stands for, and an invalid run glued to it
-///   (`<BOM>foo`) is part of that same token, not one more.
+///   token, the one the line error stands for, and an invalid run in its
+///   blank-free run (`<BOM>foo`, `<BOM>12$`) is part of that same token, not
+///   one more. After a `<BOM>*` heading start, each invalid run after the
+///   first blank is one more ([`invalid_runs`]).
 /// - When the line's error is not the BOM diagnostic (an invalid account),
 ///   the BOM one comes after it as a second error (`secondary_bom`), and
 ///   stands for the line's first invalid token with a stray BOM in it,
 ///   BOM-led or not.
-/// - A token with a BOM inside it, not at its start, is left to the line's
-///   BOM diagnostic only while that diagnostic stands for nothing else: not
-///   once it stood for a BOM that starts the line, nor when it is the second
-///   error.
+/// - A token with a BOM inside it, not at its start (nor right after a lone
+///   capital, `A<BOM>b`, which counts as BOM-led), is left to the line's BOM
+///   diagnostic only while that diagnostic stands for nothing else: not once
+///   it stood for a BOM that starts the line or a BOM-led first token, nor
+///   when it is the second error.
 ///
 /// Every other token gets its own error, a BOM-led one included: in the
 /// middle of a line it runs to the next blank, as beancount's does. Pinned,
@@ -9233,34 +9236,58 @@ pub(super) fn report_invalid_tokens_of_error_line(
     // Whether the line's BOM diagnostic already stands for a token, so a
     // token with a BOM inside it is one more invalid token.
     let mut bom_diagnostic_spent = secondary_bom;
-    // Whether the token being looked at is the line's first invalid one.
+    // Whether the token being looked at is the line's first invalid one. A
+    // line-start BOM never leaves this set for the token after it to read:
+    // the prefix then holds the BOM, which is no readable start.
     let mut first = true;
     // Where the run of BOMs that starts the line ends, once there is one.
     let mut line_start_boms_end: Option<usize> = None;
+    let report = |at: std::ops::Range<usize>, text: &str, out: &mut Vec<crate::ParseError>| {
+        out.push(crate::ParseError::new(
+            crate::ParseErrorKind::SyntaxError(format!(
+                "unexpected input: invalid token '{}'",
+                invalid_token_name(text)
+            )),
+            Span::new(at.start + off, at.end + off),
+        ));
+    };
     for range in invalid {
         let text = stripped.get(range.clone()).unwrap_or_default();
         if is_line_start_bom_token(stripped, range.start, text) {
-            first = false;
             bom_diagnostic_spent = true;
             line_start_boms_end = Some(range.end);
             continue;
         }
         // In the same blank-free run as the BOMs that start the line, glued
         // to them directly (`<BOM>foo`) or through tokens that lex here
-        // (`<BOM>12$`): part of the same beancount token. Not a token with a
-        // blank in it, the unread rest of a `<BOM>*` heading line, which
-        // holds more than that run.
+        // (`<BOM>12$`): part of the same beancount token. The unread rest of
+        // a `<BOM>*` heading line holds a blank: its part up to the blank is
+        // that token too, and each invalid token after the blank is one more,
+        // as beancount lexes the rest of such a line.
         if let Some(end) = line_start_boms_end {
-            if !text.contains([' ', '\t'])
-                && stripped
-                    .get(end..range.start)
-                    .is_some_and(|between| !between.contains([' ', '\t']))
+            if stripped
+                .get(end..range.start)
+                .is_some_and(|between| !between.contains([' ', '\t']))
             {
+                if let Some(blank) = text.find([' ', '\t']) {
+                    let rest_start = range.start + blank;
+                    for run in invalid_runs(&text[blank..]) {
+                        let at = rest_start + run.start..rest_start + run.end;
+                        report(at.clone(), &stripped[at], out);
+                    }
+                }
                 continue;
             }
             line_start_boms_end = None;
         }
         let holds_bom = text.contains(crate::bom::BOM_CHAR);
+        // BOM-led for counting: a BOM starts it, or a lone capital glued to
+        // a BOM does (`A<BOM>b`), which the lexer folds into the run after it
+        // and beancount reads as one invalid token from the capital on.
+        let bom_led = text.starts_with(crate::bom::BOM_CHAR)
+            || text
+                .strip_prefix(|c: char| c.is_ascii_uppercase())
+                .is_some_and(|rest| rest.starts_with(crate::bom::BOM_CHAR));
         let starts_the_line = std::mem::take(&mut first)
             && stripped
                 .get(line_start..range.start)
@@ -9270,24 +9297,62 @@ pub(super) fn report_invalid_tokens_of_error_line(
         if starts_the_line || text.starts_with([' ', '\t']) {
             // The line's error stands for this first token; when it holds a
             // stray BOM, that error is the BOM diagnostic, now spent on it.
-            bom_diagnostic_spent |= starts_the_line && text.starts_with(crate::bom::BOM_CHAR);
+            bom_diagnostic_spent |= starts_the_line && bom_led;
             continue;
         }
         if holds_bom && secondary_bom {
             secondary_bom = false;
             continue;
         }
-        if holds_bom && !text.starts_with(crate::bom::BOM_CHAR) && !bom_diagnostic_spent {
+        if holds_bom && !bom_led && !bom_diagnostic_spent {
             continue;
         }
-        out.push(crate::ParseError::new(
-            crate::ParseErrorKind::SyntaxError(format!(
-                "unexpected input: invalid token '{}'",
-                invalid_token_name(text)
-            )),
-            Span::new(range.start + off, range.end + off),
-        ));
+        report(range.clone(), text, out);
     }
+}
+
+/// The invalid tokens of `rest`, the text after the first blank of an unread
+/// heading line: each blank-free run beancount cannot read whole, as ranges
+/// into `rest`. A run is invalid when the lexer makes an error token of any
+/// of it, or when a lone capital in it is glued to the token after it
+/// (beancount's `CAPITAL` needs a blank after it). Comments end the line.
+fn invalid_runs(rest: &str) -> Vec<std::ops::Range<usize>> {
+    use crate::logos_lexer::Token;
+    let mut out = Vec::new();
+    // The open run: its range and whether it is invalid so far.
+    let mut run: Option<(std::ops::Range<usize>, bool)> = None;
+    let mut after_lone_capital = false;
+    let close = |run: &mut Option<(std::ops::Range<usize>, bool)>,
+                 out: &mut Vec<std::ops::Range<usize>>| {
+        if let Some((range, true)) = run.take() {
+            out.push(range);
+        }
+    };
+    for (token, span) in crate::logos_lexer::tokenize_lossless(rest) {
+        match token {
+            Token::Whitespace(_) | Token::Newline => {
+                close(&mut run, &mut out);
+                after_lone_capital = false;
+            }
+            Token::Comment(_)
+            | Token::PercentComment(_)
+            | Token::Shebang(_)
+            | Token::EmacsDirective(_) => break,
+            _ => {
+                let invalid = matches!(token, Token::Error(_)) || after_lone_capital;
+                match run.as_mut() {
+                    Some((range, bad)) => {
+                        range.end = span.end;
+                        *bad |= invalid;
+                    }
+                    None => run = Some((span.start..span.end, invalid)),
+                }
+                after_lone_capital = matches!(token, Token::Currency(c) if c.len() == 1);
+            }
+        }
+    }
+    close(&mut run, &mut out);
+    out
 }
 
 /// Whether `prefix`, the text of an `ERROR_NODE` line before its first invalid
@@ -9333,6 +9398,7 @@ fn quiet_after_invalid_tokens(
     }
     let off = bom_offset as usize;
     let mut invalid: Vec<usize> = Vec::new();
+    let mut unread: Vec<(usize, usize)> = Vec::new();
     let mut stack = vec![(
         root.green().to_owned(),
         usize::from(root.text_range().start()),
@@ -9352,6 +9418,13 @@ fn quiet_after_invalid_tokens(
                         && !is_line_start_bom_token(stripped, at, t.text())
                     {
                         invalid.push(at);
+                        // The unread rest of a heading line: the invalid
+                        // tokens counted inside it (after a line-start BOM,
+                        // `report_invalid_tokens_of_error_line`) are the
+                        // lexer's own errors too.
+                        if t.text().contains([' ', '\t']) {
+                            unread.push((at, at + t.text().len()));
+                        }
                     }
                     at += t.text().len();
                 }
@@ -9362,6 +9435,13 @@ fn quiet_after_invalid_tokens(
         return;
     }
     invalid.sort_unstable();
+    unread.sort_unstable();
+    let inside_unread = |at: usize| {
+        let i = unread.partition_point(|&(s, _)| s < at);
+        i.checked_sub(1)
+            .and_then(|i| unread.get(i))
+            .is_some_and(|&(_, e)| at < e)
+    };
     let mut dropped = vec![false; errors.len()];
     // The end (its `\n`, or the end of the source) of the last line handled.
     let mut line_end = 0;
@@ -9406,6 +9486,7 @@ fn quiet_after_invalid_tokens(
             } else {
                 e.span.start > at
                     && invalid.binary_search(&(e.span.start - off)).is_err()
+                    && !inside_unread(e.span.start - off)
                     && !matches!(
                         e.kind,
                         crate::ParseErrorKind::InvalidDateValue(_)

@@ -4753,7 +4753,8 @@ fn transaction_body_check(
 /// `ParseError` for each line that is NEITHER a section marker
 /// (a column-0 `*`, per `is_section_marker`) NOR a column-0 comment. The variant emitted
 /// mirrors the legacy parser's error-recovery classifier
-/// (`parser.rs:2186-2249`): BOM-in-line → `BomInDirectiveBody`
+/// (`parser.rs:2186-2249`): a stray BOM on the line (one in an invalid
+/// token, see [`has_stray_bom`]) → `BomInDirectiveBody`
 /// (with `BOM_REMOVAL_HINT`); Unicode-character account →
 /// `InvalidAccount`; otherwise → `SyntaxError("unexpected
 /// input")`. `stripped` is the post-BOM-strip source so token
@@ -4873,12 +4874,14 @@ fn error_node_check(
 /// literal, a comment or an account token is content, not a stray byte; see
 /// [`token_has_stray_bom`], the same rule for a single token. Shared by the
 /// red and green recovery walks (this file's and `green`'s
-/// `emit_error_node_line`).
+/// `emit_error_node_line`). Every range in `invalid` is an `ERROR_TOKEN`
+/// (both walks collect only those), so each goes through
+/// [`token_has_stray_bom`] as one.
 pub(super) fn has_stray_bom(invalid: &[std::ops::Range<usize>], stripped: &str) -> bool {
     invalid.iter().any(|r| {
         stripped
             .get(r.clone())
-            .is_some_and(|t| t.contains(crate::bom::BOM_CHAR))
+            .is_some_and(|t| token_has_stray_bom(crate::SyntaxKind::ERROR_TOKEN, t))
     })
 }
 

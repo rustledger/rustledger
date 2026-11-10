@@ -969,9 +969,12 @@ fn run_query_with_tables(
     }
 }
 
-/// The error every query of a refused [`batch`] reports; the load errors that
-/// caused it are in the batch's `load`.
-const BATCH_REFUSED: &str = "Cannot execute query: a load error leaves the ledger incomplete (a parse or booking error, or an invalid booking_method); see the load errors";
+/// The error every query of a refused [`batch`] reports first. When a load
+/// error caused the refusal, it is in the batch's `load`. When a rejected
+/// `booking_method` whose booking differs from the request caused it (#2911),
+/// which is not a load error, the reason follows this error in each query's
+/// own errors.
+const BATCH_REFUSED: &str = "Cannot execute query: a parse or booking error leaves the ledger incomplete, or a rejected booking_method books a method other than the one the ledger asks for; see the load errors and the errors that follow";
 
 /// `query.batch`: load `source` once, then run several queries against it,
 /// by [`query`]'s rule (#2882): when a load error blocks queries (a parse

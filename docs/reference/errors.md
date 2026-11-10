@@ -393,8 +393,19 @@ Only directives rledger is confident are budgets get reported. Ownership is one 
 
 ### E7002: Invalid Option Value
 
-**Cause**: Option value is invalid. The value is not applied: the option keeps
-its default, or an earlier valid setting, as in beancount.
+**Cause**: Option value is invalid. For an option whose value beancount
+validates (`name_*`, `account_*`, `booking_method`, `plugin_processing_mode`,
+the tolerance and precision options), the value is not applied: the option
+keeps its default, or an earlier valid setting, as in beancount.
+
+The boolean options are the exception (`render_commas`,
+`infer_tolerance_from_cost`): an unrecognized word is reported and still sets
+the option to false, which is what beancount reads it as, though beancount
+reports no error for it ([#2925](https://github.com/rustledger/rustledger/issues/2925)).
+
+An invalid `booking_method` that leaves the ledger booked with a method other
+than the one it asks for also stops `rledger query` and `rledger report` from
+answering (see [rledger query](../commands/query.md#when-it-refuses-to-answer)).
 
 **Fix**: Check the expected format for the option.
 
@@ -404,6 +415,19 @@ its default, or an earlier valid setting, as in beancount.
 matching `bean-check`, so this is a warning rather than an error.
 
 **Fix**: Remove duplicate option directives, or rely on the last one deliberately.
+
+### E7008: Invalid Account Type Name
+
+**Cause**: A `name_*` option (`name_assets`, `name_liabilities`, `name_equity`,
+`name_income`, `name_expenses`) is not a valid account root, as beancount's
+`is_valid_root` checks it: empty, lowercase (`"capital"`), containing a `:`, or
+containing a character outside letters, digits and `-` (`"A😀"`). The value is
+not applied: the root keeps its previous value (the default, or an earlier
+valid setting), so accounts under it stay valid, and the option error is the
+only error, as in beancount.
+
+**Fix**: Write a root that starts with an uppercase letter and holds only
+letters, digits and `-`, e.g. `option "name_equity" "Capital"`.
 
 ### E7009: Option in an Included File Is Ignored
 

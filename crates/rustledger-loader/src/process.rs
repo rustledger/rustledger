@@ -530,10 +530,10 @@ impl LedgerError {
     /// load error that blocks ([`LoadError::blocks_queries`]: a parse error,
     /// a decryption failure, an I/O error other than not-found), a booking
     /// failure ([`Self::is_booking_failure`]), or the refusal
-    /// [`Ledger::query_refusal`] makes for a rejected `booking_method`. Every other error, including
-    /// the other load errors (an include of a missing file, an include cycle,
-    /// ...), a validation error and a plugin error, is reported beside the
-    /// rows.
+    /// [`Ledger::query_refusal`] makes for a rejected `booking_method`. Every
+    /// other error, including the other load errors (an include of a missing
+    /// file, an include cycle, ...), a validation error and a plugin error, is
+    /// reported beside the rows.
     ///
     /// The rule for every file-based query surface (#2861); see
     /// [`LoadError::blocks_queries`] for the rule and where it differs from

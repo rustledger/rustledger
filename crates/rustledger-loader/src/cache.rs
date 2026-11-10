@@ -82,8 +82,6 @@ pub struct CachedOptions {
     pub inferred_tolerance_default: Vec<(String, String)>,
     pub inferred_tolerance_multiplier: String,
     pub infer_tolerance_from_cost: bool,
-    pub use_legacy_fixed_tolerances: bool,
-    pub experiment_explicit_tolerances: bool,
     pub use_precise_interpolation: bool,
     pub booking_method: String,
     pub render_commas: bool,
@@ -170,8 +168,6 @@ impl From<&Options> for CachedOptions {
                 .collect(),
             inferred_tolerance_multiplier: opts.inferred_tolerance_multiplier.to_string(),
             infer_tolerance_from_cost: opts.infer_tolerance_from_cost,
-            use_legacy_fixed_tolerances: opts.use_legacy_fixed_tolerances,
-            experiment_explicit_tolerances: opts.experiment_explicit_tolerances,
             use_precise_interpolation: opts.use_precise_interpolation,
             booking_method: opts.booking_method.clone(),
             render_commas: opts.render_commas,
@@ -223,8 +219,6 @@ impl From<CachedOptions> for Options {
             Decimal::from_str(&cached.inferred_tolerance_multiplier)
                 .unwrap_or_else(|_| Decimal::new(5, 1));
         opts.infer_tolerance_from_cost = cached.infer_tolerance_from_cost;
-        opts.use_legacy_fixed_tolerances = cached.use_legacy_fixed_tolerances;
-        opts.experiment_explicit_tolerances = cached.experiment_explicit_tolerances;
         opts.use_precise_interpolation = cached.use_precise_interpolation;
         opts.booking_method = cached.booking_method;
         opts.render_commas = cached.render_commas;
@@ -727,6 +721,14 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     `CachedOptions` gains `rejected_booking_method`, so a query refuses on
 ///     a cache hit too. An older blob would keep serving the rejected value,
 ///     and be read at the wrong offsets.
+///
+/// v69: LOADER OUTPUT changed and ARCHIVED LAYOUT moved (#2925). Option
+///     values are read as beancount reads them (`render_commas "yes"` is
+///     true, `inferred_tolerance_default "A:B:0.01"` is currency `A:B`,
+///     `tolerance_multiplier ""` is 0), and `CachedOptions` drops
+///     `use_legacy_fixed_tolerances` and `experiment_explicit_tolerances`,
+///     which are unknown options now. An older blob would keep serving the
+///     old values, and be read at the wrong offsets.
 ///
 /// v70: PARSER OUTPUT changed, no archived layout moved (#2928). A mid-file
 ///     BOM in the middle of a line starts an invalid token that runs to the
@@ -1564,6 +1566,8 @@ mod tests {
         // moves, so the arrays still hold.
         // v68 (#2911) adds a field to `CachedOptions`; no `CostNumber`
         // encoding moves, so the arrays still hold.
+        // v69 (#2925) drops two fields from `CachedOptions`; no `CostNumber`
+        // encoding moves, so the arrays still hold.
         // v70 (#2928) runs a mid-line BOM to the next blank; no archived
         // encoding moves, so the arrays still hold.
         const FIXTURE_VERSION: u32 = 70;
@@ -1717,6 +1721,8 @@ mod tests {
         // unchanged.
         // v68 (#2911) adds a field to `CachedOptions`, not to `MetaValue`;
         // the hash below is unchanged.
+        // v69 (#2925) drops two fields from `CachedOptions`, not from
+        // `MetaValue`; the hash below is unchanged.
         // v70 (#2928) runs a mid-line BOM to the next blank; the hash below
         // is unchanged.
         const FIXTURE_VERSION: u32 = 70;
@@ -2000,8 +2006,6 @@ mod tests {
             std::iter::once(("USD".to_string(), dec!(0.005))).collect();
         opts.inferred_tolerance_multiplier = dec!(1.5);
         opts.infer_tolerance_from_cost = true;
-        opts.use_legacy_fixed_tolerances = true;
-        opts.experiment_explicit_tolerances = true;
         opts.use_precise_interpolation = true;
         opts.booking_method = "FIFO".into();
         opts.render_commas = true;

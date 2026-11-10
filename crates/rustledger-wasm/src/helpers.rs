@@ -717,7 +717,8 @@ mod option_diagnostic_tests {
     fn both_paths_agree_for_every_option_code() {
         let cases: &[(&str, &str)] = &[
             ("E7001", "option \"nonsense_option\" \"x\"\n"),
-            ("E7002", "option \"render_commas\" \"not_a_bool\"\n"),
+            ("E7002", "option \"booking_method\" \"not_a_method\"\n"),
+            ("E7011", "option \"render_commas\" \"not_a_bool\"\n"),
             ("E7003", "option \"title\" \"a\"\noption \"title\" \"b\"\n"),
             ("E7004", "option \"allow_pipe_separator\" \"TRUE\"\n"),
             ("none", "option \"title\" \"t\"\n"),

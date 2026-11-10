@@ -423,6 +423,13 @@ use crate::types::{Error, LedgerOptions};
 /// `option "name_equity" "capital"`), and a ledger whose `booking_method` was
 /// rejected now has `query_refused` set; an older blob would keep serving the
 /// old names, errors and answers.
+/// v92: loader v69, LOADER OUTPUT changed (#2925). Option values are read as
+/// beancount reads them, so the archived error list moves: a valid
+/// `account_rounding` no longer raises `E7007`, an unrecognized boolean word
+/// is the `E7011` warning instead of an `E7002` error, `option "plugin"` is
+/// `E7005` instead of `E7004`, the two dead tolerance options are `E7001`, and
+/// the tolerance maps accept `A:B:0.01` and reject `USD:-0.01`. An older blob
+/// would keep serving the old errors. (v91 is held by #2920.)
 /// v93: loader v70, PARSER OUTPUT changed (#2928). A BOM in the middle of a
 /// line starts an invalid token that runs to the next blank, as in beancount,
 /// so a quote after it opens no string; an older blob would keep serving such

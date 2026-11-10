@@ -398,10 +398,28 @@ validates (`name_*`, `account_*`, `booking_method`, `plugin_processing_mode`,
 the tolerance and precision options), the value is not applied: the option
 keeps its default, or an earlier valid setting, as in beancount.
 
-The boolean options are the exception (`render_commas`,
-`infer_tolerance_from_cost`): an unrecognized word is reported and still sets
-the option to false, which is what beancount reads it as, though beancount
-reports no error for it ([#2925](https://github.com/rustledger/rustledger/issues/2925)).
+The tolerance and precision maps (`inferred_tolerance_default`,
+`display_precision`) are read as beancount reads them: `CURRENCY:NUMBER`, split
+at the last colon followed by a number (so `A:B:0.01` is currency `A:B`), with
+no sign (`USD:-0.01` is invalid). One deliberate difference: text after the
+number (`USD:0.01abc`, or an exponent as in `USD:1e-2`) is invalid here, where
+beancount reads the number before it. Trailing whitespace is accepted, as
+there.
+
+`tolerance_multiplier` is read as beancount's `D()` reads it: an empty value is
+0, commas, spaces and underscores are dropped, and exponents are accepted.
+
+A number rustledger's decimal type cannot hold exactly is invalid, though
+beancount accepts it: `NaN`, `sNaN`, `Infinity`, a value outside `rust_decimal`'s range
+(`1e100`, `1e-29`), a value with more digits than it holds
+(`0.0000000000000000000000000000001` is rejected, not rounded), and non-ASCII
+digits (`"١"`, `"１"`) in any numeric option value. `display_precision` holds
+at most 28 decimal places, where beancount keeps any number of places, and
+dropping a trailing zero to fit 96 bits lowers it
+(`USD:10000000000000000000000000000.0` reads as 0 places, beancount reads 1).
+
+The boolean options never give E7002: see
+[E7011](#e7011-unrecognized-boolean-option-value).
 
 An invalid `booking_method` that leaves the ledger booked with a method other
 than the one it asks for also stops `rledger query` and `rledger report` from
@@ -415,6 +433,14 @@ answering (see [rledger query](../commands/query.md#when-it-refuses-to-answer)).
 matching `bean-check`, so this is a warning rather than an error.
 
 **Fix**: Remove duplicate option directives, or rely on the last one deliberately.
+
+### E7005: Option May Not Be Set
+
+**Cause**: A read-only option was set: `filename`, or `plugin`
+(`option "plugin" "..."`), as in beancount. The value is not applied, from the
+top-level file or an included one.
+
+**Fix**: Load a plugin with the `plugin` directive: `plugin "module.name"`.
 
 ### E7008: Invalid Account Type Name
 
@@ -459,11 +485,29 @@ The warning says so only when the root is the equity root. A value that is the
 root itself (`"Equity"`), or that starts with another root (`"Income:Oops"`),
 has no leaf form: these options can only name accounts under equity.
 
-### E7007: Option Accepted but Has No Effect
+### E7011: Unrecognized Boolean Option Value
 
-**Cause**: A recognized Beancount option is parsed for compatibility but is intentionally a no-op in rustledger. Currently this applies to `account_rounding`: Beancount uses it to absorb the residual created when an interpolated leg is *rounded* and the rounding breaks the sum, but rustledger preserves full precision during interpolation (it never rounds a non-zero residual to zero), so no rounding residual is ever produced and there is nothing for a rounding account to catch.
+**Cause**: A boolean option's value is not a word beancount recognizes, e.g.
+`option "render_commas" "bogus"`. It reads as false, as in beancount, which
+reports nothing for it; this is a warning, so `rledger check` passes as
+`bean-check` does.
 
-**Fix**: None required — the option is harmless. Remove it if you want the warning to go away.
+beancount has two boolean vocabularies, and rustledger reads each option with
+its own:
+
+| Options | True | Recognized as false |
+|---------|------|---------------------|
+| `render_commas`, `use_precise_interpolation`, `allow_pipe_separator`, `insert_pythonpath` | `1`, `true`, `yes` | `0`, `false`, `no` |
+| `infer_tolerance_from_cost` | `1`, `true`, `on` | `0`, `false`, `off` |
+
+Case does not matter. So `infer_tolerance_from_cost "yes"` reads as false and
+warns, and `render_commas "on"` does too.
+
+**Fix**: Write `TRUE` or `FALSE`.
+
+E7007 ("option accepted but has no effect") is no longer reported: a valid
+`account_rounding` gives no diagnostic, as in beancount, where the option is
+inert.
 
 ## Document Errors (E8xxx)
 

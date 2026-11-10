@@ -872,8 +872,8 @@ impl Transaction {
     /// Transaction flag token. May be `STAR` (`*`), `PENDING_KW`
     /// (`!`), `FLAG` letter, `HASH` (`#`), `TXN_KW`
     /// (the `txn` keyword), single-char `CURRENCY` (ticker-letter
-    /// flag), or absent (implied via a leading `STRING`
-    /// payee/narration).
+    /// flag), or absent (a header starting with a `STRING`, which is a
+    /// syntax error, #2905).
     ///
     /// Scoped to the flag-position region (between `DATE` and the
     /// first `STRING`/`TAG`/`LINK`) so a stray trailing

@@ -226,7 +226,7 @@ pub enum SyntaxKind {
     // Phase 2.1b: TRANSACTION wrapper. Trigger is DATE followed by
     // one of: STAR (`*`) / PENDING_KW (`!`) / FLAG (P/S/T/C/U/R/M/?/&)
     // / HASH (`#` promoted to flag) / TXN_KW (`txn`) / STRING
-    // (implied-txn shorthand `2024-01-15 "Coffee"`) / single-char
+    // / TAG / LINK (no flag, `2024-01-15 "Coffee"`: a syntax error, #2905) / single-char
     // CURRENCY (ticker letters T/V/F/X/...). Mirrors the legacy
     // AST parser at parser.rs:1707-1715. Body spans header +
     // indented posting and metadata sub-lines until next top-

@@ -626,6 +626,33 @@ mod tests {
         );
     }
 
+    /// #2906: `Assets:٣Foo` is one account token (beancount's lexer rule), so
+    /// it is highlighted as one account, not as stray tokens.
+    #[test]
+    fn test_semantic_tokens_non_ascii_digit_account_start() {
+        let source = "2024-01-01 open Assets:\u{663}Foo\n";
+        let result = parse(source);
+        let params = SemanticTokensParams {
+            text_document: lsp_types::TextDocumentIdentifier {
+                uri: "file:///test.beancount".parse().unwrap(),
+            },
+            work_done_progress_params: Default::default(),
+            partial_result_params: Default::default(),
+        };
+        let Some(SemanticTokensResult::Tokens(tokens)) =
+            handle_semantic_tokens(&params, source, &result, PositionEncoding::Utf16)
+        else {
+            panic!("expected tokens");
+        };
+        let accounts: Vec<_> = tokens
+            .data
+            .iter()
+            .filter(|t| t.token_type == token_type::VARIABLE)
+            .collect();
+        assert_eq!(accounts.len(), 1, "{:?}", tokens.data);
+        assert_eq!(accounts[0].length, 11);
+    }
+
     #[test]
     fn test_semantic_tokens_basic() {
         let source = "2024-01-01 open Assets:Bank USD\n";

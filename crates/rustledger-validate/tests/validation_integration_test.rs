@@ -1327,6 +1327,62 @@ fn test_validate_two_pads_before_a_balance_leave_the_earlier_unused() {
     }
 }
 
+// ============================================================================
+// Account names beancount lexes with a non-ASCII start (#2906)
+// ============================================================================
+
+/// beancount 3.2.3 lexes any non-ASCII character as the start of an account
+/// component, then rejects the name (`Invalid account name`) unless the first
+/// sub-component starts with `\p{Lu}` or `\p{Nd}`. Every verdict here is
+/// bean-check's on `2024-01-01 open <name>`, except the `\p{Lo}`/`\p{Lt}`
+/// extension rledger keeps on purpose (#816). The source must PARSE without
+/// errors in every case: the name is judged after lexing, as `E1005`.
+#[test]
+fn test_e1005_matches_beancount_on_non_ascii_component_starts() {
+    let roots = ["Assets", "Liabilities", "Equity", "Income", "Expenses"];
+    let check = |account: &str, roots: &[&str], valid: bool| {
+        let source = format!("2024-01-01 open {account}\n");
+        let errors = meta_account_errors(&source, roots);
+        assert_eq!(errors.is_empty(), valid, "{account}: {errors:?}");
+    };
+    // Valid in beancount.
+    for account in [
+        "Assets:\u{663}",       // ٣
+        "Assets:\u{663}Foo",    // ٣Foo
+        "Assets:A\u{663}",      // A٣
+        "Assets:\u{dc}n\u{ef}", // Ünï
+        "Assets:A:\u{e9}clair", // later component, lowercase start
+        "Assets:A:\u{1F600}",   // later component, emoji start
+        "Assets:A\u{1F600}",    // emoji after the start
+    ] {
+        check(account, &roots, true);
+    }
+    // `Invalid account name` in beancount.
+    for account in [
+        "Assets:\u{e9}clair", // éclair
+        "Assets:\u{1F600}",   // emoji start
+        "Assets:\u{308}A",    // combining mark start
+        "Assets:\u{b2}",      // ² (No)
+        "\u{c9}quit\u{e9}:A", // Équité, a root not configured
+    ] {
+        check(account, &roots, false);
+    }
+    // A non-ASCII root is valid once configured, as with `option
+    // "name_equity" "Équité"` in beancount.
+    let renamed = [
+        "Assets",
+        "Liabilities",
+        "\u{c9}quit\u{e9}",
+        "Income",
+        "Expenses",
+    ];
+    check("\u{c9}quit\u{e9}:A", &renamed, true);
+    check("\u{c9}quit\u{e9}:\u{663}", &renamed, true);
+    check("\u{c9}quit\u{e9}:\u{e9}", &renamed, false);
+    // rledger's deliberate extension (#816): beancount rejects these.
+    check("Assets:\u{65e5}\u{672c}", &roots, true); // 日本
+}
+
 /// A pad that already padded one currency, a later pad, and balances in
 /// another currency and then the first: each balance uses its own pad, so
 /// nothing is reported, as bean-check 3.2.3 reports nothing. The removed

@@ -666,12 +666,18 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     reports its postings. An older blob would keep serving such a file with no
 ///     error.
 ///
+/// v66: PARSER OUTPUT changed, no archived layout moved (#2906). Any non-ASCII
+///     character starts an account component, as in beancount's lexer, so
+///     `Assets:٣Foo` is one account, not stray tokens; the name is judged
+///     after lexing (`E1005`). A v65 blob would keep serving such a file with
+///     its old parse errors.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 65;
+pub const CACHE_VERSION: u32 = 66;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1488,7 +1494,9 @@ mod tests {
         // v51 (#2802) reports a stray metadata token; likewise.
         // v61 (#2835) moves `Metadata`'s archived layout. No `CostNumber` is
         // in it, so the arrays still hold.
-        const FIXTURE_VERSION: u32 = 65;
+        // v66 (#2906) lexes a non-ASCII account start; no archived encoding
+        // moves, so the arrays still hold.
+        const FIXTURE_VERSION: u32 = 66;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1633,7 +1641,9 @@ mod tests {
         // v51 (#2802) reports a stray metadata token; likewise.
         // v61 (#2835) moves the map that holds metadata values, not
         // `MetaValue` itself; the hash below is unchanged.
-        const FIXTURE_VERSION: u32 = 65;
+        // v66 (#2906) lexes a non-ASCII account start; the hash below is
+        // unchanged.
+        const FIXTURE_VERSION: u32 = 66;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

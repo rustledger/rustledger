@@ -9111,24 +9111,36 @@ fn drop_errors_inside_a_line_error(
                 if *seen || span.start >= *line_end {
                     continue;
                 }
-                // A mid-line BOM-led invalid token in a directive the
-                // converter dropped (`price USD 1 <BOM>EUR`), where the header
-                // grammar first fails: beancount's one `Invalid token` there.
-                // The token's own `BomInDirectiveBody` is that error, and the
-                // generic whole-node error is dropped for it, so the line is
-                // one error, reported at the token, as it was before #2928
-                // merged the BOM into the token. (Unlike the generic merge
-                // below, the inner error is the one kept here: it already has
-                // the right kind and the token's span. The formatter still
-                // copies the directive verbatim, as the token lies inside its
-                // node.) Any other BOM error is left alone and does not count
-                // as the first error inside the line error.
+                // Whether the line's grammar first fails at this token, so
+                // its own error is beancount's first one on the line and the
+                // line error stands for it: a directive the converter
+                // dropped, whose header grammar first fails here
+                // (`2024-01-01 open Ass'ets:A`), or an indented line whose
+                // start before it is one beancount reads.
+                let fails_here = || {
+                    let (line_start, _) = line_of(span.start);
+                    let prefix = stripped
+                        .get(line_start - bom..span.start - bom)
+                        .unwrap_or_default();
+                    grammar_failures
+                        .binary_search_by_key(&errors[*outer].span.start, |&(s, _, _)| s)
+                        .is_ok_and(|j| grammar_failures[j].2 == span.start)
+                        || (prefix.starts_with([' ', '\t']) && readable_start(prefix))
+                };
+                // A mid-line BOM-led invalid token where the line's grammar
+                // first fails (`price USD 1 <BOM>EUR`, `  <BOM>a`):
+                // beancount's one `Invalid token` there. The token's own
+                // `BomInDirectiveBody` is that error, and the generic line
+                // error is dropped for it, so the line is one error, reported
+                // at the token, as it was before #2928 merged the BOM into the
+                // token. (Unlike the generic merge below, the inner error is
+                // the one kept here: it already has the right kind and the
+                // token's span. The formatter still copies the directive
+                // verbatim, as the token lies inside its node.) Any other BOM
+                // error is left alone and does not count as the first error
+                // inside the line error.
                 if is_bom(&errors[i]) {
-                    let header_fails_here = is_generic(&errors[*outer])
-                        && grammar_failures
-                            .binary_search_by_key(&errors[*outer].span.start, |&(s, _, _)| s)
-                            .is_ok_and(|j| grammar_failures[j].2 == span.start);
-                    if header_fails_here {
+                    if is_generic(&errors[*outer]) && fails_here() {
                         *seen = true;
                         dropped[*outer] = true;
                     }
@@ -9140,18 +9152,7 @@ fn drop_errors_inside_a_line_error(
                 if !is_generic(&errors[i]) {
                     continue;
                 }
-                let (line_start, _) = line_of(span.start);
-                let prefix = stripped
-                    .get(line_start - bom..span.start - bom)
-                    .unwrap_or_default();
-                // A directive the converter dropped, whose header grammar
-                // first fails at this very token: the whole-node error stands
-                // for the token's own (`2024-01-01 open Ass'ets:A`).
-                let header_fails_here = grammar_failures
-                    .binary_search_by_key(&errors[*outer].span.start, |&(s, _, _)| s)
-                    .is_ok_and(|j| grammar_failures[j].2 == span.start);
-                if header_fails_here || (prefix.starts_with([' ', '\t']) && readable_start(prefix))
-                {
+                if fails_here() {
                     dropped[i] = true;
                     renamed.push((*outer, i));
                 }
@@ -9244,12 +9245,22 @@ pub(super) fn report_invalid_tokens_of_error_line(
             line_start_boms_end = Some(range.end);
             continue;
         }
-        // Glued to the BOMs that start the line: the same beancount token.
-        if line_start_boms_end == Some(range.start) {
+        // In the same blank-free run as the BOMs that start the line, glued
+        // to them directly (`<BOM>foo`) or through tokens that lex here
+        // (`<BOM>12$`): part of the same beancount token. Not a token with a
+        // blank in it, the unread rest of a `<BOM>*` heading line, which
+        // holds more than that run.
+        if let Some(end) = line_start_boms_end {
+            if !text.contains([' ', '\t'])
+                && stripped
+                    .get(end..range.start)
+                    .is_some_and(|between| !between.contains([' ', '\t']))
+            {
+                continue;
+            }
             line_start_boms_end = None;
-            continue;
         }
-        line_start_boms_end = None;
+        let holds_bom = text.contains(crate::bom::BOM_CHAR);
         let starts_the_line = std::mem::take(&mut first)
             && stripped
                 .get(line_start..range.start)
@@ -9257,9 +9268,11 @@ pub(super) fn report_invalid_tokens_of_error_line(
         // A run that starts with a blank is not an invalid token but the rest
         // of a heading line after its `*`, which the lexer skips unread.
         if starts_the_line || text.starts_with([' ', '\t']) {
+            // The line's error stands for this first token; when it holds a
+            // stray BOM, that error is the BOM diagnostic, now spent on it.
+            bom_diagnostic_spent |= starts_the_line && text.starts_with(crate::bom::BOM_CHAR);
             continue;
         }
-        let holds_bom = text.contains(crate::bom::BOM_CHAR);
         if holds_bom && secondary_bom {
             secondary_bom = false;
             continue;

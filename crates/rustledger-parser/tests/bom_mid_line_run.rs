@@ -376,3 +376,57 @@ fn test_parse_bom_before_metadata_indentation_counts_the_key() {
         assert_eq!(on_line, errors, "{src:?}: {:?}", result.errors);
     }
 }
+
+/// A BOM-led first token after a date, or after an indentation, is the one
+/// the line's error stands for, and that error is the BOM diagnostic: a later
+/// run with a BOM inside it then has its own error. Each count is
+/// bean-check's (the lines are numbered after the two `open`s).
+#[test]
+fn test_parse_bom_led_first_token_spends_the_bom_diagnostic() {
+    for (lines, line, errors) in [
+        (format!("2024-01-02 {BOM}a x{BOM}y"), 3, 2),
+        (format!("2024-01-02\t{BOM}a x{BOM}y"), 3, 2),
+        (format!("2024-01-02  {BOM}a x{BOM}y x{BOM}z"), 3, 3),
+        (format!("2024-01-02 *\n  {BOM}a x{BOM}y"), 4, 2),
+        (format!("2024-01-02 *\n  {BOM}a"), 4, 1),
+        (format!("2024-01-02 *\n  {BOM}; c"), 4, 2),
+    ] {
+        let src = format!("{HEAD}{lines}\n");
+        let result = parse_both(&src);
+        let on_line = result
+            .errors
+            .iter()
+            .filter(|e| src[..e.span.start].matches('\n').count() + 1 == line)
+            .count();
+        assert_eq!(on_line, errors, "{src:?}: {:?}", result.errors);
+    }
+}
+
+/// A BOM that starts its line, glued to tokens that lex here and then to an
+/// invalid one, is one beancount token, the whole blank-free run: the
+/// invalid part of it is not counted again.
+#[test]
+fn test_parse_line_start_bom_run_through_valid_tokens_is_one_token() {
+    for (line, errors) in [
+        (format!("{BOM}12$ x{BOM}y"), 2),
+        (format!("{BOM}2024-01-02$x x{BOM}y"), 2),
+        (format!("{BOM}USD$ x{BOM}y"), 2),
+        (format!("{BOM}#t$ x{BOM}y"), 2),
+        (format!("{BOM}\"s\"$ x{BOM}y"), 2),
+        (format!("{BOM}12{BOM}z"), 1),
+        (format!("{BOM}2024-01-02{BOM}a"), 1),
+    ] {
+        let src = format!("{HEAD}{line}\n");
+        let result = parse_both(&src);
+        assert_eq!(result.errors.len(), errors, "{src:?}: {:?}", result.errors);
+    }
+}
+
+/// The unread rest of a `<BOM>*` heading line holds more than the BOM's run:
+/// it is still reported, so `<BOM>*7 Z#` is two errors, as in bean-check.
+#[test]
+fn test_parse_line_start_bom_heading_rest_is_not_glued() {
+    let src = format!("{HEAD}{BOM}*7 Z#\n");
+    let result = parse_both(&src);
+    assert_eq!(result.errors.len(), 2, "{:?}", result.errors);
+}

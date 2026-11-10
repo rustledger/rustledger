@@ -20,14 +20,18 @@ Token kinds (`TOKENS`), `{i}` being the token's place on the line:
 Line-start prefixes (`PREFIXES`), put before the line, so before the
 indentation of an indented line:
 
-    plain    nothing
-    bom      a BOM glued to whatever starts the line
-    glued    a BOM glued to an invalid run, then a space (`<BOM>g `)
+    plain           nothing
+    bom             a BOM glued to whatever starts the line
+    glued           a BOM glued to an invalid run, then a space (`<BOM>g `)
+    glued-number    a BOM glued to a number, then an invalid run (`<BOM>12$ `)
+    glued-currency  the same with a currency (`<BOM>USD$ `)
 
 Contexts (`CONTEXTS`): the line on its own, after an invalid account, after
 an invalid token, after a number (a grammar error), on a transaction header,
-a posting, a metadata line, a metadata line holding an invalid account, and a
-directive's header.
+a posting, a metadata line, a metadata line holding an invalid account, a
+directive's header, after a date alone, a metadata line under a header with
+no narration, and an indented line whose first token is glued to a BOM after
+the indentation (a run, and a `;`).
 
 The counts are beancount's parse errors only, filtered exactly as the
 parse-error parity harness (`scripts/compat-parse-error-parity.py`) filters
@@ -63,6 +67,7 @@ BOM = "\ufeff"
 
 HEAD = "2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n"
 TXN = '2024-01-02 * "n"\n'
+TXN_BARE = "2024-01-02 *\n"
 LEGS = "  Assets:A  1 USD\n  Assets:B\n"
 
 TOKENS = {
@@ -75,6 +80,10 @@ PREFIXES = {
     "plain": "",
     "bom": BOM,
     "glued": BOM + "g ",
+    # A BOM glued to a token that lexes here, then to an invalid one: one
+    # invalid token in beancount, the whole blank-free run.
+    "glued-number": BOM + "12$ ",
+    "glued-currency": BOM + "USD$ ",
 }
 
 # (name, text before the line, the line with a `{T}` slot, text after it)
@@ -88,6 +97,13 @@ CONTEXTS = [
     ("meta", TXN, '  kk: "v" {T}', LEGS),
     ("meta-account", TXN, "  kk: Ü:A {T}", LEGS),
     ("directive", "", "2024-01-02 commodity EUR {T}", ""),
+    # A date alone, where a directive keyword or flag is expected next.
+    ("date", "", "2024-01-02 {T}", ""),
+    # A metadata line under a header with no narration.
+    ("meta-bare", TXN_BARE, '  kk: "v" {T}', LEGS),
+    # A BOM after the indentation, glued to a run, and glued to a `;`.
+    ("indent-bom", TXN_BARE, "  " + BOM + "b {T}", LEGS),
+    ("indent-bom-comment", TXN_BARE, "  " + BOM + "; c {T}", LEGS),
 ]
 
 

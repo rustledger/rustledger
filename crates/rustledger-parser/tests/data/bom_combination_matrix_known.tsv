@@ -8,18 +8,22 @@
 # from beancount by as much or more. Each cause is named in `CAUSES` in the
 # test:
 #
-#   orphan-lines                  a line that starts with a BOM breaks its
-#                                 transaction, and rledger reports each
-#                                 indented line after it, which beancount's
-#                                 recovery skips in silence (#2872)
-#   inner-bom-under-line-error    a run with a BOM inside it, on a line whose
-#                                 BOM diagnostic already stands for the
-#                                 line's first error, is left to that
-#                                 diagnostic: one error fewer than beancount
-#   account-after-invalid-token   an invalid account after the line's first
-#                                 invalid token is still reported, where
-#                                 beancount reports nothing more for the
-#                                 statement (#2872)
+#   orphan-lines                    a line that starts with a BOM breaks its
+#                                   transaction, and rledger reports each
+#                                   indented line after it, which beancount's
+#                                   recovery skips in silence (#2872)
+#   inner-bom-under-line-error      a run with a BOM inside it, on a line
+#                                   whose BOM diagnostic already stands for
+#                                   the line's first error, is left to that
+#                                   diagnostic: one error fewer than beancount
+#   account-after-line-start-bom    a line whose first token is a BOM that
+#                                   starts it, holding an invalid account,
+#                                   gets both the account's error and the BOM
+#                                   diagnostic, where beancount's one invalid
+#                                   token (the BOM's run) is all; without the
+#                                   BOM the counts agree
+#   eol-reported-on-next-line       a date alone on a line: beancount reports
+#                                   its `unexpected EOL` on the next line
 #
 # Regenerate after a deliberate change: run the test, and replace the rows it
 # names with rledger's new counts, each with its cause.
@@ -35,10 +39,18 @@ $n0 x1<BOM>y <BOM>a2\n	3:2	inner-bom-under-line-error
 $n0 x1<BOM>y x2<BOM>y\n	3:1	inner-bom-under-line-error
 $n0 x1<BOM>y $n2\n	3:2	inner-bom-under-line-error
 $n0 $n1 x2<BOM>y\n	3:2	inner-bom-under-line-error
-<BOM>g Ü:A\n	3:2	account-after-invalid-token
-<BOM>g Ü:A $n0\n	3:3	account-after-invalid-token
-<BOM>g Ü:A $n0 $n1\n	3:4	account-after-invalid-token
-<BOM>g Ü:A $n0 $n1 $n2\n	3:5	account-after-invalid-token
+<BOM>g Ü:A\n	3:2	account-after-line-start-bom
+<BOM>g Ü:A $n0\n	3:3	account-after-line-start-bom
+<BOM>g Ü:A $n0 $n1\n	3:4	account-after-line-start-bom
+<BOM>g Ü:A $n0 $n1 $n2\n	3:5	account-after-line-start-bom
+<BOM>12$ Ü:A\n	3:2	account-after-line-start-bom
+<BOM>12$ Ü:A $n0\n	3:3	account-after-line-start-bom
+<BOM>12$ Ü:A $n0 $n1\n	3:4	account-after-line-start-bom
+<BOM>12$ Ü:A $n0 $n1 $n2\n	3:5	account-after-line-start-bom
+<BOM>USD$ Ü:A\n	3:2	account-after-line-start-bom
+<BOM>USD$ Ü:A $n0\n	3:3	account-after-line-start-bom
+<BOM>USD$ Ü:A $n0 $n1\n	3:4	account-after-line-start-bom
+<BOM>USD$ Ü:A $n0 $n1 $n2\n	3:5	account-after-line-start-bom
 foo x0<BOM>y\n	3:1	inner-bom-under-line-error
 foo <BOM>a0 x1<BOM>y\n	3:2	inner-bom-under-line-error
 foo x0<BOM>y <BOM>a1\n	3:2	inner-bom-under-line-error
@@ -169,6 +181,86 @@ foo $n0 $n1 x2<BOM>y\n	3:3	inner-bom-under-line-error
 <BOM>g 2024-01-02 * "n" $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
 <BOM>g 2024-01-02 * "n" $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
 <BOM>g 2024-01-02 * "n" $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n"\n  Assets:A  1 USD\n  Assets:B\n	3:1,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	3:2,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:2,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" $n0\n  Assets:A  1 USD\n  Assets:B\n	3:2,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	3:3,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	3:3,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	3:3,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	3:3,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	3:3,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	3:3,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>12$ 2024-01-02 * "n" $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n"\n  Assets:A  1 USD\n  Assets:B\n	3:1,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	3:2,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:2,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" $n0\n  Assets:A  1 USD\n  Assets:B\n	3:2,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	3:3,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	3:3,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	3:3,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	3:3,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	3:3,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	3:3,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
+<BOM>USD$ 2024-01-02 * "n" $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4,4:1,5:1	orphan-lines
 2024-01-02 * "n"\n<BOM>  Assets:A  1 USD\n  Assets:B\n	4:1,5:1	orphan-lines
 2024-01-02 * "n"\n<BOM>  Assets:A  1 USD <BOM>a0\n  Assets:B\n	4:2,5:1	orphan-lines
 2024-01-02 * "n"\n<BOM>  Assets:A  1 USD x0<BOM>y\n  Assets:B\n	4:2,5:1	orphan-lines
@@ -249,6 +341,86 @@ foo $n0 $n1 x2<BOM>y\n	3:3	inner-bom-under-line-error
 2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD $n0 $n1 <BOM>a2\n  Assets:B\n	4:4,5:1	orphan-lines
 2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD $n0 $n1 x2<BOM>y\n  Assets:B\n	4:4,5:1	orphan-lines
 2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD $n0 $n1 $n2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD\n  Assets:B\n	4:1,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD <BOM>a0\n  Assets:B\n	4:2,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD x0<BOM>y\n  Assets:B\n	4:2,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD $n0\n  Assets:B\n	4:2,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD <BOM>a0 <BOM>a1\n  Assets:B\n	4:3,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD <BOM>a0 x1<BOM>y\n  Assets:B\n	4:3,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD <BOM>a0 $n1\n  Assets:B\n	4:3,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD x0<BOM>y <BOM>a1\n  Assets:B\n	4:3,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD x0<BOM>y x1<BOM>y\n  Assets:B\n	4:3,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD x0<BOM>y $n1\n  Assets:B\n	4:3,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD $n0 <BOM>a1\n  Assets:B\n	4:3,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD $n0 x1<BOM>y\n  Assets:B\n	4:3,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD $n0 $n1\n  Assets:B\n	4:3,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD <BOM>a0 <BOM>a1 $n2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD <BOM>a0 x1<BOM>y $n2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD <BOM>a0 $n1 <BOM>a2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD <BOM>a0 $n1 x2<BOM>y\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD <BOM>a0 $n1 $n2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD x0<BOM>y <BOM>a1 $n2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD x0<BOM>y x1<BOM>y $n2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD x0<BOM>y $n1 <BOM>a2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD x0<BOM>y $n1 x2<BOM>y\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD x0<BOM>y $n1 $n2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD $n0 <BOM>a1 <BOM>a2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD $n0 <BOM>a1 x2<BOM>y\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD $n0 <BOM>a1 $n2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD $n0 x1<BOM>y <BOM>a2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD $n0 x1<BOM>y x2<BOM>y\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD $n0 x1<BOM>y $n2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD $n0 $n1 <BOM>a2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD $n0 $n1 x2<BOM>y\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   Assets:A  1 USD $n0 $n1 $n2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD\n  Assets:B\n	4:1,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD <BOM>a0\n  Assets:B\n	4:2,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD x0<BOM>y\n  Assets:B\n	4:2,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD $n0\n  Assets:B\n	4:2,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD <BOM>a0 <BOM>a1\n  Assets:B\n	4:3,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD <BOM>a0 x1<BOM>y\n  Assets:B\n	4:3,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD <BOM>a0 $n1\n  Assets:B\n	4:3,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD x0<BOM>y <BOM>a1\n  Assets:B\n	4:3,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD x0<BOM>y x1<BOM>y\n  Assets:B\n	4:3,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD x0<BOM>y $n1\n  Assets:B\n	4:3,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD $n0 <BOM>a1\n  Assets:B\n	4:3,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD $n0 x1<BOM>y\n  Assets:B\n	4:3,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD $n0 $n1\n  Assets:B\n	4:3,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD <BOM>a0 <BOM>a1 $n2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD <BOM>a0 x1<BOM>y $n2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD <BOM>a0 $n1 <BOM>a2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD <BOM>a0 $n1 x2<BOM>y\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD <BOM>a0 $n1 $n2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD x0<BOM>y <BOM>a1 $n2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD x0<BOM>y x1<BOM>y $n2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD x0<BOM>y $n1 <BOM>a2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD x0<BOM>y $n1 x2<BOM>y\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD x0<BOM>y $n1 $n2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD $n0 <BOM>a1 <BOM>a2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD $n0 <BOM>a1 x2<BOM>y\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD $n0 <BOM>a1 $n2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD $n0 x1<BOM>y <BOM>a2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD $n0 x1<BOM>y x2<BOM>y\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD $n0 x1<BOM>y $n2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD $n0 $n1 <BOM>a2\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD $n0 $n1 x2<BOM>y\n  Assets:B\n	4:4,5:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   Assets:A  1 USD $n0 $n1 $n2\n  Assets:B\n	4:4,5:1	orphan-lines
 2024-01-02 * "n"\n<BOM>  kk: "v"\n  Assets:A  1 USD\n  Assets:B\n	4:1,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>  kk: "v" <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>  kk: "v" x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
@@ -329,10 +501,90 @@ foo $n0 $n1 x2<BOM>y\n	3:3	inner-bom-under-line-error
 2024-01-02 * "n"\n<BOM>g   kk: "v" $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>g   kk: "v" $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>g   kk: "v" $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
-2024-01-02 * "n"\n<BOM>  kk: Ü:A\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines+account-after-invalid-token
+2024-01-02 * "n"\n<BOM>12$   kk: "v"\n  Assets:A  1 USD\n  Assets:B\n	4:1,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" $n0\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: "v" $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v"\n  Assets:A  1 USD\n  Assets:B\n	4:1,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" $n0\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: "v" $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>  kk: Ü:A\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines+account-after-line-start-bom
 2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>  kk: Ü:A x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
-2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines+account-after-invalid-token
+2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines+account-after-line-start-bom
 2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
@@ -341,7 +593,7 @@ foo $n0 $n1 x2<BOM>y\n	3:3	inner-bom-under-line-error
 2024-01-02 * "n"\n<BOM>  kk: Ü:A x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
-2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines+account-after-invalid-token
+2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines+account-after-line-start-bom
 2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
@@ -368,11 +620,11 @@ foo $n0 $n1 x2<BOM>y\n	3:3	inner-bom-under-line-error
 2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
-2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines+account-after-invalid-token
-2024-01-02 * "n"\n<BOM>g   kk: Ü:A\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines+account-after-invalid-token
+2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines+account-after-line-start-bom
+2024-01-02 * "n"\n<BOM>g   kk: Ü:A\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines+account-after-line-start-bom
 2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>g   kk: Ü:A x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
-2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines+account-after-invalid-token
+2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines+account-after-line-start-bom
 2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
@@ -381,7 +633,7 @@ foo $n0 $n1 x2<BOM>y\n	3:3	inner-bom-under-line-error
 2024-01-02 * "n"\n<BOM>g   kk: Ü:A x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
-2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines+account-after-invalid-token
+2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines+account-after-line-start-bom
 2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
@@ -408,4 +660,577 @@ foo $n0 $n1 x2<BOM>y\n	3:3	inner-bom-under-line-error
 2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
 2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
-2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines+account-after-invalid-token
+2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines+account-after-line-start-bom
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines+account-after-line-start-bom
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A $n0\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines+account-after-line-start-bom
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines+account-after-line-start-bom
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>12$   kk: Ü:A $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines+account-after-line-start-bom
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines+account-after-line-start-bom
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A $n0\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines+account-after-line-start-bom
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines+account-after-line-start-bom
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 * "n"\n<BOM>USD$   kk: Ü:A $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines+account-after-line-start-bom
+2024-01-02\n	3:1	eol-reported-on-next-line
+2024-01-02 x0<BOM>y x1<BOM>y\n	3:1	inner-bom-under-line-error
+2024-01-02 $n0 x1<BOM>y\n	3:1	inner-bom-under-line-error
+2024-01-02 x0<BOM>y <BOM>a1 x2<BOM>y\n	3:2	inner-bom-under-line-error
+2024-01-02 x0<BOM>y x1<BOM>y <BOM>a2\n	3:2	inner-bom-under-line-error
+2024-01-02 x0<BOM>y x1<BOM>y x2<BOM>y\n	3:1	inner-bom-under-line-error
+2024-01-02 x0<BOM>y x1<BOM>y $n2\n	3:2	inner-bom-under-line-error
+2024-01-02 x0<BOM>y $n1 x2<BOM>y\n	3:2	inner-bom-under-line-error
+2024-01-02 $n0 <BOM>a1 x2<BOM>y\n	3:2	inner-bom-under-line-error
+2024-01-02 $n0 x1<BOM>y <BOM>a2\n	3:2	inner-bom-under-line-error
+2024-01-02 $n0 x1<BOM>y x2<BOM>y\n	3:1	inner-bom-under-line-error
+2024-01-02 $n0 x1<BOM>y $n2\n	3:2	inner-bom-under-line-error
+2024-01-02 $n0 $n1 x2<BOM>y\n	3:2	inner-bom-under-line-error
+2024-01-02 *\n<BOM>  kk: "v"\n  Assets:A  1 USD\n  Assets:B\n	4:1,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" $n0\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  kk: "v" $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v"\n  Assets:A  1 USD\n  Assets:B\n	4:1,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" $n0\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   kk: "v" $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v"\n  Assets:A  1 USD\n  Assets:B\n	4:1,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" $n0\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   kk: "v" $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v"\n  Assets:A  1 USD\n  Assets:B\n	4:1,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" $n0\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   kk: "v" $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b $n0\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>b $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b $n0\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>b $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b $n0\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>b $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b\n  Assets:A  1 USD\n  Assets:B\n	4:2,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b $n0\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>b $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c $n0\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>  <BOM>; c $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c $n0\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>g   <BOM>; c $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c $n0\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>12$   <BOM>; c $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c\n  Assets:A  1 USD\n  Assets:B\n	4:3,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c $n0\n  Assets:A  1 USD\n  Assets:B\n	4:4,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:5,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines
+2024-01-02 *\n<BOM>USD$   <BOM>; c $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:6,5:1,6:1	orphan-lines

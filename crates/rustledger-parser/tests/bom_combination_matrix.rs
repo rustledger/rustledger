@@ -39,15 +39,19 @@ const CAUSES: &[&str] = &[
     "orphan-lines",
     // A run with a BOM inside it, on a line whose BOM diagnostic already
     // stands for the line's first error, is left to that diagnostic: one
-    // error fewer than beancount. Reporting it fixes these, and 248 more
-    // fuzz-corpus inputs, but also turns 88 matching ones into mismatches,
+    // error fewer than beancount. Reporting it fixes these, and 256 more
+    // fuzz-corpus inputs, but also turns 98 matching ones into mismatches,
     // each a difference the old count happened to offset, so it is left for
     // a change of its own.
     "inner-bom-under-line-error",
-    // An invalid account after the line's first invalid token is still
-    // reported, where beancount reports nothing more for the statement
-    // (#2872).
-    "account-after-invalid-token",
+    // A line whose first token is a BOM that starts it, holding an invalid
+    // account, gets both the account's error and the BOM diagnostic, where
+    // beancount's one invalid token (the BOM's run) is all. Without the BOM
+    // the counts agree.
+    "account-after-line-start-bom",
+    // A date alone on a line: beancount reports its `unexpected EOL` on the
+    // next line. Nothing to do with BOMs; the matrix's date context has it.
+    "eol-reported-on-next-line",
 ];
 
 /// A table source back to the input it stands for.

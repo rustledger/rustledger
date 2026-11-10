@@ -2022,28 +2022,56 @@ pub fn document_root_warnings(
         .collect()
 }
 
-/// Each directive's line, as beancount numbers it.
+/// Each directive's place in beancount's entry order: its line, as
+/// beancount numbers it, and its file's place in the load.
 ///
 /// For the validator's
-/// [`rustledger_validate::ValidationOptions::source_lines`]: the line of a
-/// byte offset in a loaded file, and 0 for any other file id (a plugin's
-/// placeholder or a synthesized directive), as beancount gives a plugin's
-/// entry line 0. Beancount's entry order reads this line whichever file it
-/// is in (#2901).
+/// [`rustledger_validate::ValidationOptions::source_lines`]. A loaded
+/// file's directive has the line of its byte offset, whichever file it is
+/// in (#2901), ranked by its file id. A plugin's directive has the line the
+/// plugin gave it ([`SourceMap::placeholder`]: `auto_accounts` numbers its
+/// `open`s by the account's place in its sorted list), ranked ahead of
+/// every file, and one with no location at all (a synthesized directive)
+/// has line 0. See [`rustledger_booking::SourcePosition`].
+///
+/// Cheap to take: no line table is built or copied until a lookup needs
+/// it (the validator only looks when the ledger has a `pad`), and the
+/// placeholders a plugin adds later are seen.
 #[cfg(feature = "validation")]
 #[must_use]
 pub fn source_lines(source_map: &SourceMap) -> rustledger_validate::SourceLines {
-    let tables: Vec<Vec<usize>> = source_map
+    source_lines_overlaid(source_map, [])
+}
+
+/// [`source_lines`], with the lines of each `(file_id, text)` in `buffers`
+/// read from that text instead of the map's.
+///
+/// For an editor's buffers, whose unsaved edits moved the lines the
+/// directives validated from them sit on.
+#[cfg(feature = "validation")]
+#[must_use]
+pub fn source_lines_overlaid<'a>(
+    source_map: &SourceMap,
+    buffers: impl IntoIterator<Item = (u16, &'a str)>,
+) -> rustledger_validate::SourceLines {
+    use rustledger_booking::SourcePosition;
+    let mut files: Vec<crate::source_map::DetachedLines> = source_map
         .files()
         .iter()
-        .map(|file| file.line_starts().to_vec())
+        .map(crate::SourceFile::detached_lines)
         .collect();
+    for (file_id, text) in buffers {
+        if let Some(lines) = files.get_mut(usize::from(file_id)) {
+            *lines = crate::source_map::DetachedLines::of_text(text);
+        }
+    }
+    let placeholders = source_map.placeholder_lines();
     rustledger_validate::SourceLines::new(move |file_id, offset| {
-        // The first start is 0, so the count of starts at or before the
-        // offset is its 1-based line.
-        tables
-            .get(usize::from(file_id))
-            .map_or(0, |starts| starts.partition_point(|&start| start <= offset))
+        if let Some(lines) = files.get(usize::from(file_id)) {
+            SourcePosition::in_file(lines.line(offset), file_id)
+        } else {
+            SourcePosition::from_plugin(placeholders.line(file_id).map_or(0, |line| line as usize))
+        }
     })
 }
 
@@ -2758,5 +2786,43 @@ mod canonical_sort_key_tests {
                 "Assets:F1Early"
             ]
         );
+    }
+}
+
+#[cfg(all(test, feature = "validation"))]
+mod source_lines_tests {
+    use super::{SourceMap, source_lines, source_lines_overlaid};
+    use rustledger_booking::SourcePosition;
+    use std::path::{Path, PathBuf};
+
+    /// A file's directives are at their lines, ranked by file id after the
+    /// plugins' (#2901); a placeholder a plugin adds AFTER the lookup was
+    /// taken is at the line it was given; a synthesized directive at 0.
+    #[test]
+    fn test_source_lines_positions_files_and_later_placeholders() {
+        let mut map = SourceMap::new();
+        map.add_file(PathBuf::from("a.beancount"), "x\ny\nz\n".into());
+        map.add_file(PathBuf::from("b.beancount"), "p\nq\n".into());
+        let lines = source_lines(&map);
+        let placeholder = map.placeholder_file_id(Path::new("<auto_accounts>"), 7);
+        assert_eq!(lines.position(0, 4), SourcePosition::new(3, 1));
+        assert_eq!(lines.position(1, 2), SourcePosition::new(2, 2));
+        assert_eq!(lines.position(placeholder, 0), SourcePosition::new(7, 0));
+        assert_eq!(
+            lines.position(rustledger_parser::SYNTHESIZED_FILE_ID, 0),
+            SourcePosition::new(0, 0)
+        );
+    }
+
+    /// A map whose text was dropped still answers lines, from the table the
+    /// drop kept; an overlaid buffer's lines come from its own text.
+    #[test]
+    fn test_source_lines_after_drop_text_and_from_a_buffer() {
+        let mut map = SourceMap::new();
+        map.add_file(PathBuf::from("a.beancount"), "x\ny\nz\n".into());
+        map.drop_text();
+        assert_eq!(source_lines(&map).position(0, 4), SourcePosition::new(3, 1));
+        let overlaid = source_lines_overlaid(&map, [(0, "\n\n\n\nx\n")]);
+        assert_eq!(overlaid.position(0, 4), SourcePosition::new(5, 1));
     }
 }

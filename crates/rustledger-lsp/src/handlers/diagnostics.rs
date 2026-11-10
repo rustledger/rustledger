@@ -23,10 +23,15 @@ use crate::ledger_state::LedgerState;
 /// A relative `document` path resolves against its own directive's file, as
 /// in the loader (never against an `option "documents"` root, #2650).
 ///
+/// `buffers` are the open buffers overlaid on the ledger, `(file_id, text)`:
+/// a pad's entry order reads its directives' lines from their text, which
+/// unsaved edits have moved off the loaded file's (#2901).
+///
 /// See issues #572 and #1648.
-fn build_validation_options_from_loader(
+fn build_validation_options_from_loader<'a>(
     loader_options: &LoaderOptions,
     source_map: &SourceMap,
+    buffers: impl IntoIterator<Item = (u16, &'a str)>,
 ) -> ValidationOptions {
     // `option "documents"` roots feed only E8001's hint (#2650), resolved
     // against the main file as the loader resolves them.
@@ -35,7 +40,9 @@ fn build_validation_options_from_loader(
         rustledger_loader::SourceFile::dir,
     );
     rustledger_loader::validation_options_from_options(loader_options)
-        .with_source_lines(rustledger_loader::source_lines(source_map))
+        .with_source_lines(rustledger_loader::source_lines_overlaid(
+            source_map, buffers,
+        ))
         .with_document_source_dirs(rustledger_loader::document_source_dirs(source_map))
         .with_document_roots(rustledger_loader::resolve_document_dirs(
             &loader_options.documents,
@@ -980,7 +987,14 @@ pub fn all_diagnostics(
         let validation_options = if let Some(ls) = ledger_state
             && let Some(ledger) = ls.ledger()
         {
-            build_validation_options_from_loader(&ledger.options, &ledger.source_map)
+            // The current buffer's lines from its text (#2901). Another open
+            // buffer's lines still come from its file as loaded: this path
+            // has only its directives, not its text.
+            build_validation_options_from_loader(
+                &ledger.options,
+                &ledger.source_map,
+                current_file_id.map(|fid| (fid, source)),
+            )
         } else {
             // Single-file: resolve relative document paths against the
             // current file's parent directory so they don't end up being
@@ -1259,8 +1273,14 @@ pub(crate) fn ledger_diagnostics_multi(
             } else {
                 Vec::new()
             };
+        // Each overlaid buffer that is a target has its lines read from its
+        // text (#2901).
+        let buffers = targets
+            .iter()
+            .filter(|t| overlay.iter().any(|(fid, _)| *fid == t.file_id))
+            .map(|t| (t.file_id, t.source));
         let validation_options =
-            build_validation_options_from_loader(&ledger.options, &ledger.source_map);
+            build_validation_options_from_loader(&ledger.options, &ledger.source_map, buffers);
         run_ledger_validation(booked_directives, validation_options, plugin_ctx.as_ref())
     } else {
         LedgerValidation {
@@ -1338,7 +1358,7 @@ mod tests {
     fn from_loader_carries_inferred_tolerance_default() {
         let mut opts = LoaderOptions::new();
         opts.set("inferred_tolerance_default", "CLP:0.5");
-        let vo = build_validation_options_from_loader(&opts, &SourceMap::new());
+        let vo = build_validation_options_from_loader(&opts, &SourceMap::new(), []);
         assert_eq!(
             vo.inferred_tolerance_default.get("CLP"),
             Some(&rust_decimal::Decimal::new(5, 1))
@@ -1353,7 +1373,7 @@ mod tests {
 
         let mut opts = LoaderOptions::new();
         opts.set("booking_method", "FIFO");
-        let vo = build_validation_options_from_loader(&opts, &SourceMap::new());
+        let vo = build_validation_options_from_loader(&opts, &SourceMap::new(), []);
         assert_eq!(vo.default_booking_method, BookingMethod::Fifo);
 
         let file_options = vec![("booking_method".to_string(), "FIFO".to_string(), Span::ZERO)];

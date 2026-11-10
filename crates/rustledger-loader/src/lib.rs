@@ -77,7 +77,9 @@ pub use vfs::{DiskFileSystem, FileSystem, VirtualFileSystem};
 /// Shared option→validation mapping and document-dir resolution — single source
 /// of truth so the LSP/MCP diagnostics cannot drift from `check` (issue #1648).
 #[cfg(feature = "validation")]
-pub use process::{document_source_dirs, source_lines, validation_options_from_options};
+pub use process::{
+    document_source_dirs, source_lines, source_lines_overlaid, validation_options_from_options,
+};
 
 /// Resolve `documents` roots against the ledger's directory.
 ///

@@ -688,12 +688,64 @@ pub struct UnusedPad {
     pub target: Account,
 }
 
-/// A directive's line in its source, as beancount numbers it.
+/// A directive's place in beancount's entry order.
 ///
-/// [`rustledger_core::beancount_entry_sort_key`] reads it: the line in its
-/// file, whichever file that is, 0 for a directive a plugin made, or the
-/// directive's place in the input when it has no location.
-pub type SourcePosition = usize;
+/// Beancount sorts its entries with a stable sort on `(date, type, lineno)`
+/// ([`rustledger_core::beancount_entry_sort_key`] reads [`Self::line`]), so
+/// entries tied there keep the order they were parsed in: their file's
+/// place in the load, then their place in the file. [`Self::file_rank`] is
+/// that file's place.
+///
+/// The derived order compares the line first, then the file.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct SourcePosition {
+    /// The line in its file, whichever file that is, as beancount numbers
+    /// it. A directive a plugin made has the line the plugin gave it
+    /// (`auto_accounts` numbers its `open`s by the account's place in its
+    /// sorted list), 0 when it gave none. A directive with no location has
+    /// its place in the input.
+    pub line: usize,
+    /// Where its file comes in the load: 0 for a directive a plugin made
+    /// (`auto_accounts` and `currency_accounts` put theirs ahead of the
+    /// parsed entries, so they come first among ties) and for a directive
+    /// with no location; 1 + its file id for a source file's directive.
+    ///
+    /// File ids number the files in the order the loader reads them, depth
+    /// first: an include's own includes come before the files included
+    /// after it. Beancount reads breadth first. The two orders differ only
+    /// for a file included from an included file, against a file its
+    /// parent includes later, and only for entries on the same date, type
+    /// and line (#2901).
+    pub file_rank: usize,
+}
+
+impl SourcePosition {
+    /// The position at `line` of the file ranked `file_rank`.
+    #[must_use]
+    pub const fn new(line: usize, file_rank: usize) -> Self {
+        Self { line, file_rank }
+    }
+
+    /// The position of the directive at `index` of an input with no
+    /// locations: its place in the input stands for its line.
+    #[must_use]
+    pub const fn at_index(index: usize) -> Self {
+        Self::new(index, 0)
+    }
+
+    /// The position of the directive at `line` of source file `file_id`,
+    /// ranked after every directive a plugin made.
+    #[must_use]
+    pub const fn in_file(line: usize, file_id: u16) -> Self {
+        Self::new(line, file_id as usize + 1)
+    }
+
+    /// The position of a directive a plugin made at `line`.
+    #[must_use]
+    pub const fn from_plugin(line: usize) -> Self {
+        Self::new(line, 0)
+    }
+}
 
 /// Compute the padding for `sorted`, beancount's rule.
 ///
@@ -731,7 +783,10 @@ where
     if pads.tracks() {
         let mut entry_order: Vec<&(usize, &Directive, SourcePosition)> = sorted.iter().collect();
         entry_order.sort_by_key(|(_, d, position)| {
-            rustledger_core::beancount_entry_sort_key(d, *position)
+            (
+                rustledger_core::beancount_entry_sort_key(d, position.line),
+                position.file_rank,
+            )
         });
         for (_, directive, _) in entry_order {
             pads.see_directive(directive);
@@ -911,20 +966,20 @@ where
 /// The padding (which pads pad, by how much, dated where) never depends on
 /// the input's order. One thing in the errors does: the order of tied
 /// positions in an "Attempt to pad an entry with cost" message follows the
-/// order beancount first meets each account, which reads the line
-/// ([`rustledger_core::beancount_entry_sort_key`]). Here a directive's place
-/// in the input stands for its line, which is right for a stream in source
-/// order (a parse). A surface reporting those errors from a stream in
-/// booking order (a loaded ledger, which puts a `pad` ahead of the same
-/// date's notes and transactions) passes the real lines instead, through
-/// [`process_pads_at`], so it answers as the
-/// validator does.
+/// order beancount first meets each account, which reads the line and the
+/// file ([`SourcePosition`]). Here a directive's place in the input stands
+/// for its position, which is right for one file's stream in source order
+/// (a parse). A surface reporting those errors from a stream in booking
+/// order (a loaded ledger, which puts a `pad` ahead of the same date's notes
+/// and transactions), or from several files, passes the real positions
+/// instead, through [`process_pads_at`], so it answers as the validator
+/// does.
 pub fn process_pads(directives: &[Directive], tolerance_multiplier: Decimal) -> PadResult {
     process_entries(
         directives
             .iter()
             .enumerate()
-            .map(|(i, d)| (i, d, i))
+            .map(|(i, d)| (i, d, SourcePosition::at_index(i)))
             .collect(),
         tolerance_multiplier,
     )
@@ -932,7 +987,8 @@ pub fn process_pads(directives: &[Directive], tolerance_multiplier: Decimal) -> 
 
 /// [`process_pads`] with each directive's [`SourcePosition`].
 ///
-/// `positions` (each directive's line) runs parallel to `directives`, for a
+/// `positions` (each directive's place in beancount's entry order) runs
+/// parallel to `directives`, for a
 /// caller that reports these errors and keeps locations beside plain
 /// directives (the WASM ledgers).
 ///
@@ -1599,7 +1655,7 @@ mod tests {
         let mut sorted: Vec<(usize, &Directive, SourcePosition)> = directives
             .iter()
             .enumerate()
-            .map(|(i, d)| (i, d, i))
+            .map(|(i, d)| (i, d, SourcePosition::at_index(i)))
             .collect();
         sorted.sort_by_key(|(_, d, _)| rustledger_core::booking_sort_key(d));
         let plan = plan_pads(sorted, DEFAULT_TOLERANCE_MULTIPLIER);

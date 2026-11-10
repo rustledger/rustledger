@@ -298,6 +298,24 @@ impl SourceFile {
             .get_or_init(|| line_starts_of(&self.source))
     }
 
+    /// This file's lines, held apart from the map, so a lookup can outlive
+    /// a borrow of it ([`crate::source_lines`]). Nothing is copied while
+    /// the text is held: the table is built from the shared text on the
+    /// first lookup, and never for a file nothing looks up. A file whose
+    /// text was dropped hands over the table the drop kept.
+    pub(crate) fn detached_lines(&self) -> DetachedLines {
+        let starts = if self.text_retained {
+            std::sync::OnceLock::new()
+        } else {
+            // `drop_text` built it before emptying the text.
+            std::sync::OnceLock::from(self.line_starts().to_vec())
+        };
+        DetachedLines {
+            text: self.source.clone(),
+            starts,
+        }
+    }
+
     /// Get the line and column (1-based) for a byte offset.
     ///
     /// The column counts CHARACTERS, not bytes. It counted bytes until #2341,
@@ -399,7 +417,62 @@ pub struct SourceMap {
     /// because plugins run with a shared `&SourceMap` (the loader and the
     /// LSP hand one to [`crate::run_plugins`]); placeholders are only added,
     /// never changed, so an id stays valid for the map's life.
-    placeholders: parking_lot::Mutex<Placeholders>,
+    placeholders: Arc<parking_lot::Mutex<Placeholders>>,
+}
+
+/// One file's lines, apart from its [`SourceMap`]; see
+/// [`SourceFile::detached_lines`].
+pub struct DetachedLines {
+    text: SourceText,
+    starts: std::sync::OnceLock<Vec<usize>>,
+}
+
+impl DetachedLines {
+    /// The 1-based line of byte `offset`.
+    pub(crate) fn line(&self, offset: usize) -> usize {
+        // The first start is 0, so the count of starts at or before the
+        // offset is the line.
+        self.starts
+            .get_or_init(|| line_starts_of(&self.text))
+            .partition_point(|&start| start <= offset)
+    }
+
+    /// The lines of `text`, built now, for a file whose text is not the
+    /// map's (an editor buffer with unsaved edits).
+    pub(crate) fn of_text(text: &str) -> Self {
+        Self {
+            text: SourceText::from(""),
+            starts: std::sync::OnceLock::from(line_starts_of(text)),
+        }
+    }
+}
+
+/// The lines of a map's placeholder locations, shared with the map, so a
+/// lookup sees the ones a plugin adds after it was taken; see
+/// [`SourceMap::placeholder_lines`].
+#[derive(Clone)]
+pub struct PlaceholderLines(Arc<parking_lot::Mutex<Placeholders>>);
+
+impl PlaceholderLines {
+    /// The line of placeholder location `file_id`, or `None` when `file_id`
+    /// is not one.
+    pub(crate) fn line(&self, file_id: u16) -> Option<u32> {
+        placeholder_index(file_id)
+            .and_then(|index| self.0.lock().locations.get(index).map(|(_, line)| *line))
+    }
+}
+
+/// `file_id`'s index among the placeholder locations, or `None` when it is
+/// not in their range.
+fn placeholder_index(file_id: u16) -> Option<usize> {
+    if rustledger_parser::is_source_file_id(file_id)
+        || file_id == rustledger_parser::SYNTHESIZED_FILE_ID
+    {
+        return None;
+    }
+    Some(usize::from(
+        file_id - rustledger_parser::FIRST_PLACEHOLDER_FILE_ID,
+    ))
 }
 
 /// See [`SourceMap::placeholder_file_id`].
@@ -542,16 +615,18 @@ impl SourceMap {
     /// [`Self::placeholder_file_id`]), or `None` when `file_id` is not one.
     #[must_use]
     pub fn placeholder(&self, file_id: u16) -> Option<(PathBuf, u32)> {
-        if rustledger_parser::is_source_file_id(file_id)
-            || file_id == rustledger_parser::SYNTHESIZED_FILE_ID
-        {
-            // Without taking the lock: callers ask for every directive a
-            // file does not hold, most of them synthesized.
-            return None;
-        }
-        let index = file_id - rustledger_parser::FIRST_PLACEHOLDER_FILE_ID;
+        // Without taking the lock for a source file or a synthesized
+        // directive: callers ask for every directive a file does not hold,
+        // most of them synthesized.
+        let index = placeholder_index(file_id)?;
         let table = self.placeholders.lock();
-        table.locations.get(usize::from(index)).cloned()
+        table.locations.get(index).cloned()
+    }
+
+    /// The lines of the placeholder locations, as [`Self::placeholder`]
+    /// gives them, including the ones added after this call.
+    pub(crate) fn placeholder_lines(&self) -> PlaceholderLines {
+        PlaceholderLines(Arc::clone(&self.placeholders))
     }
 
     /// Format a span for display.

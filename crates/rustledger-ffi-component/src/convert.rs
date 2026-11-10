@@ -343,7 +343,11 @@ fn semantic_validation_errors(
         return (Vec::new(), Vec::new());
     }
     let today = jiff::Zoned::now().date();
-    let mut validation_options = rustledger_validate::ValidationOptions::default();
+    // The options `rledger check` validates with, from the ledger's own
+    // (`LoadResult::validation_options`): a default set ignored
+    // `tolerance_multiplier`, so a balance a pad left within the ledger's
+    // tolerance was reported where `check` reports the pad unused (#2901).
+    let mut validation_options = loaded.validation_options.clone();
     if let Some(dir) = filename
         .map(std::path::Path::new)
         .and_then(std::path::Path::parent)
@@ -4882,5 +4886,65 @@ mod query_answer_rule {
             );
         }
         assert!(ran >= 4, "only {ran} source-text cases");
+    }
+}
+
+/// Drift guard (#2901): `validate` and `load` validate with the ledger's own
+/// options, as `rledger check` does. They used to validate with a default
+/// set that ignored `tolerance_multiplier`.
+#[cfg(test)]
+mod validation_options_tests {
+    /// 99.97 held against a balance of 100.00: within the tolerance
+    /// `tolerance_multiplier` 2 gives, outside the default one.
+    const HELD: &str = "option \"tolerance_multiplier\" \"2\"\n\
+        2024-01-01 open Assets:A\n2024-01-01 open Equity:O\n\
+        2024-01-02 * \"x\"\n  Assets:A  99.97 USD\n  Equity:O\n";
+    const BALANCE: &str = "2024-01-10 balance Assets:A 100.00 USD\n";
+    const PAD: &str = "2024-01-03 pad Assets:A Equity:O\n";
+
+    /// The messages `rledger check` reports for `source`: a validating load
+    /// of it as a file.
+    fn check(source: &str) -> Vec<String> {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("ledger.beancount");
+        std::fs::write(&path, source).expect("write the ledger");
+        let ledger = rustledger_loader::load(
+            &path,
+            &rustledger_loader::LoadOptions {
+                validate: true,
+                ..Default::default()
+            },
+        )
+        .expect("loads");
+        ledger.errors.iter().map(|e| e.message.clone()).collect()
+    }
+
+    /// bean-check 3.2.3: with the pad, `Unused Pad entry` (the difference is
+    /// within the tolerance, so nothing is padded); without it, nothing.
+    #[test]
+    fn test_validate_and_load_read_the_tolerance_multiplier_as_check_does() {
+        let padded = format!("{HELD}{PAD}{BALANCE}");
+        let unpadded = format!("{HELD}{BALANCE}");
+        for (source, expected) in [
+            (padded.as_str(), vec!["Unused Pad entry".to_string()]),
+            (unpadded.as_str(), Vec::new()),
+        ] {
+            let check = check(source);
+            assert_eq!(check, expected, "rledger check");
+            let validate: Vec<String> = super::validate(source)
+                .errors
+                .iter()
+                .map(|e| e.message.clone())
+                .collect();
+            assert_eq!(validate, check, "validate");
+            for expand in [false, true] {
+                let load: Vec<String> = super::load(source, "ledger.beancount", expand)
+                    .errors
+                    .iter()
+                    .map(|e| e.message.clone())
+                    .collect();
+                assert_eq!(load, check, "load, expand_pads {expand}");
+            }
+        }
     }
 }

@@ -262,7 +262,7 @@ pub fn has_fatal(errors: &[Error]) -> bool {
 
 /// Run validation on a loaded ledger and return validation errors.
 pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
-    use rustledger_validate::{ValidationOptions, ValidationSession};
+    use rustledger_validate::ValidationSession;
 
     // Skip validation only when loading produced a genuine *error* (parse or
     // booking failure) — those make the directive stream unsound to validate.
@@ -289,7 +289,17 @@ pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
     // 2999-12-31 is a valid Gregorian date, so `naive_date` is always `Some`.
     #[allow(clippy::unwrap_used)]
     let today = rustledger_core::naive_date(2999, 12, 31).unwrap();
-    let session = ValidationSession::new(ValidationOptions::default());
+    // The options `rledger check` validates with, from the ledger's own
+    // (the canonical `validation_options_from_options`): a default set
+    // ignored `tolerance_multiplier`, so a balance a pad left within the
+    // ledger's tolerance was reported as one `check` passes (#2901). And the
+    // source map's positions, for beancount's entry order.
+    let session = ValidationSession::new(
+        rustledger_loader::validation_options_from_options(&options_from_raw(
+            &load.parse_result.options,
+        ))
+        .with_source_lines(rustledger_loader::source_lines(&load.source_map)),
+    );
     // With the kept spans, as `rledger check` and the FFI validate: the pad
     // rule reads them as beancount's line order, so an "Attempt to pad an
     // entry with cost" lists tied positions as they do (#2901).
@@ -487,40 +497,38 @@ pub fn spanned_directives(
 }
 
 /// The pad expansion every WASM surface answers with: `directives` padded
-/// with each one's line as beancount numbers it
+/// with each one's place in beancount's entry order
 /// ([`rustledger_booking::process_pads_at`]), so an "Attempt to pad an entry
 /// with cost" lists tied positions in the order the validation does
-/// (#2901). `lines` runs parallel to `directives`: [`offset_lines`] for one
-/// source, a loaded ledger's own lines for several. A ledger restored from a
-/// cache that kept neither pads by its stream order.
+/// (#2901). `positions` runs parallel to `directives`: [`source_positions`]
+/// of the kept spans, or a restored ledger's kept positions. A ledger
+/// restored from a cache that kept none pads by its stream order.
 #[must_use]
 pub fn pad_expansion(
     directives: &[Directive],
-    lines: &[usize],
+    positions: &[rustledger_booking::SourcePosition],
     tolerance_multiplier: rustledger_core::Decimal,
 ) -> rustledger_booking::PadResult {
-    if lines.len() == directives.len() {
-        rustledger_booking::process_pads_at(directives, lines, tolerance_multiplier)
+    if positions.len() == directives.len() {
+        rustledger_booking::process_pads_at(directives, positions, tolerance_multiplier)
     } else {
         rustledger_booking::process_pads(directives, tolerance_multiplier)
     }
 }
 
-/// The lines [`pad_expansion`] reads for one source, from the kept spans,
-/// as the validator reads them without a line table: a source directive's
-/// byte offset (after line 0; it orders one file as its lines do), and 0
-/// for a plugin's directive, as beancount numbers it.
+/// The positions [`pad_expansion`] reads, from the kept spans and the
+/// source map they index, as the validation reads them
+/// ([`rustledger_loader::source_lines`]): a source directive's line and
+/// file, and a plugin's directive at the line the plugin gave it.
 #[must_use]
-pub fn offset_lines(spans: &[DirectiveSpan]) -> Vec<usize> {
+pub fn source_positions(
+    spans: &[DirectiveSpan],
+    source_map: &rustledger_loader::SourceMap,
+) -> Vec<rustledger_booking::SourcePosition> {
+    let lines = rustledger_loader::source_lines(source_map);
     spans
         .iter()
-        .map(|(span, file_id)| {
-            if rustledger_core::is_source_file_id(*file_id) {
-                span.start + 1
-            } else {
-                0
-            }
-        })
+        .map(|(span, file_id)| lines.position(*file_id, span.start))
         .collect()
 }
 

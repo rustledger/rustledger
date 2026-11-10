@@ -425,13 +425,16 @@ use crate::types::{Error, LedgerOptions};
 /// old names, errors and answers.
 /// v91: loader v68, unchanged. ARCHIVED LAYOUT moved: the `Ledger` payload
 /// gained `tolerance_multiplier`, which the padding a query inserts measures a
-/// balance's tolerance with, and `directive_lines`, each directive's line for
-/// the pad expansion's entry order (#2901); an older blob has neither. And
-/// both payloads' error lists move: a pad pads for a balance on a sub-account
-/// and counts only its own padding, a difference within the balance's
-/// tolerance is not padded (an `Unused Pad entry`), and padding a currency
-/// held at cost is `E2005`; a `ParsedLedger`'s validation errors also carry
-/// their own lines, columns and spans, as it validates with its spans.
+/// balance's tolerance with, and `directive_lines` and `directive_file_ranks`,
+/// each directive's line and its file's place in the load, for the pad
+/// expansion's entry order (#2901); an older blob has none of them. And both
+/// payloads' error lists move: a pad pads for a balance on a sub-account and
+/// counts only its own padding, a difference within the balance's tolerance
+/// is not padded (an `Unused Pad entry`), and padding a currency held at cost
+/// is `E2005`; a `ParsedLedger`'s validation errors also carry their own
+/// lines, columns and spans, as it validates with its spans, and it validates
+/// with the ledger's options (`tolerance_multiplier` among them), as
+/// `rledger check` does.
 /// (v88 was never released: #2920 held it before #2926 took v89.)
 pub const CACHE_VERSION: u32 = 91;
 
@@ -527,6 +530,10 @@ pub struct LedgerPayload {
     /// `directives`, for the pad expansion's entry order (#2901): a restored
     /// ledger has no spans to read them from.
     pub directive_lines: Vec<u32>,
+    /// Each directive's file's place in the load, parallel to `directives`
+    /// (`rustledger_booking::SourcePosition::file_rank`), which breaks a tie
+    /// on the line in that order.
+    pub directive_file_ranks: Vec<u32>,
     /// `[previous_balances, previous_earnings, previous_conversions,
     /// current_earnings, current_conversions, conversion_currency]`, what
     /// `FROM ... OPEN ON / CLOSE / CLEAR` summarize into (#2401, #2406). Plain
@@ -889,6 +896,7 @@ mod tests {
             booking_method: "NONE".to_string(),
             tolerance_multiplier: "0.25".to_string(),
             directive_lines: Vec::new(),
+            directive_file_ranks: Vec::new(),
             summary_account_names: vec![
                 "Eigenkapital:Anfang".to_string(),
                 "Eigenkapital:Vorjahr".to_string(),
@@ -970,6 +978,7 @@ option "operating_currency" "USD"
             booking_method: "STRICT".to_string(),
             tolerance_multiplier: "0.5".to_string(),
             directive_lines: Vec::new(),
+            directive_file_ranks: Vec::new(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
             query_refused: false,
@@ -997,6 +1006,7 @@ option "operating_currency" "USD"
             booking_method: "STRICT".to_string(),
             tolerance_multiplier: "0.5".to_string(),
             directive_lines: Vec::new(),
+            directive_file_ranks: Vec::new(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
             query_refused: false,
@@ -1042,6 +1052,7 @@ option "operating_currency" "USD"
             booking_method: "STRICT".to_string(),
             tolerance_multiplier: "0.5".to_string(),
             directive_lines: Vec::new(),
+            directive_file_ranks: Vec::new(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
             query_refused: false,

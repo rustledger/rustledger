@@ -468,7 +468,7 @@ impl ParsedLedger {
             &self.directives,
             &crate::helpers::pad_expansion(
                 &self.directives,
-                &crate::helpers::offset_lines(&self.directive_spans),
+                &crate::helpers::source_positions(&self.directive_spans, &self.source_map),
                 crate::helpers::tolerance_multiplier_from_raw(&self.parse_result.options),
             ),
         )
@@ -647,10 +647,11 @@ pub struct Ledger {
     /// Each directive's span and file id, for the source columns of a query
     /// (#2825). Empty for a ledger restored from a cache.
     directive_spans: Vec<crate::helpers::DirectiveSpan>,
-    /// Each directive's line as beancount numbers it (0 for a plugin's),
-    /// for the pad expansion's entry order (#2901). Kept in the cache
-    /// payload, unlike the spans.
-    directive_lines: Vec<usize>,
+    /// Each directive's place in beancount's entry order (its line, and its
+    /// file's place in the load; a plugin's at the line the plugin gave it),
+    /// for the pad expansion (#2901). Kept in the cache payload, unlike the
+    /// spans.
+    directive_positions: Vec<rustledger_booking::SourcePosition>,
     /// The files the ledger was loaded from, so a query resolves `filename` /
     /// `lineno` / `location` (#2825). Empty for a ledger restored from a
     /// cache, whose source columns read NULL.
@@ -700,7 +701,7 @@ impl Ledger {
     pub(crate) fn pad_result(&self) -> rustledger_booking::PadResult {
         crate::helpers::pad_expansion(
             &self.directives,
-            &self.directive_lines,
+            &self.directive_positions,
             self.tolerance_multiplier,
         )
     }
@@ -735,7 +736,7 @@ impl Ledger {
                 return Ok(Self {
                     directives: Vec::new(),
                     directive_spans: Vec::new(),
-                    directive_lines: Vec::new(),
+                    directive_positions: Vec::new(),
                     source_map: rustledger_loader::SourceMap::new(),
                     balance_discrepancies: Vec::new(),
 
@@ -788,14 +789,11 @@ impl Ledger {
                     .into_iter()
                     .map(|s| (s.value, (s.span, s.file_id)))
                     .unzip();
-                // Each directive's line as beancount numbers it, whichever
+                // Each directive's place in beancount's entry order, whichever
                 // file it is in, for the pad expansion (#2901), kept in the
                 // cache payload so a restored ledger pads alike.
-                let line_of = rustledger_loader::source_lines(&source_map);
-                let directive_lines: Vec<usize> = directive_spans
-                    .iter()
-                    .map(|(span, file_id)| line_of.line(*file_id, span.start))
-                    .collect();
+                let directive_positions =
+                    crate::helpers::source_positions(&directive_spans, &source_map);
                 let mut errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
                 errors.extend(option_warnings_to_errors(&ledger.options.warnings));
                 let editor_cache = editor::EditorCache::from_directives(&directives);
@@ -803,7 +801,7 @@ impl Ledger {
                 Ok(Self {
                     directives,
                     directive_spans,
-                    directive_lines,
+                    directive_positions,
                     source_map,
                     balance_discrepancies,
 
@@ -822,7 +820,7 @@ impl Ledger {
             Err(e) => Ok(Self {
                 directives: Vec::new(),
                 directive_spans: Vec::new(),
-                directive_lines: Vec::new(),
+                directive_positions: Vec::new(),
                 source_map: rustledger_loader::SourceMap::new(),
                 balance_discrepancies: Vec::new(),
 
@@ -1001,9 +999,14 @@ impl Ledger {
             booking_method: self.booking_method.to_string(),
             tolerance_multiplier: self.tolerance_multiplier.to_string(),
             directive_lines: self
-                .directive_lines
+                .directive_positions
                 .iter()
-                .map(|&line| u32::try_from(line).unwrap_or(u32::MAX))
+                .map(|p| u32::try_from(p.line).unwrap_or(u32::MAX))
+                .collect(),
+            directive_file_ranks: self
+                .directive_positions
+                .iter()
+                .map(|p| u32::try_from(p.file_rank).unwrap_or(u32::MAX))
                 .collect(),
             summary_account_names: vec![
                 self.summary_accounts.previous_balances.clone(),
@@ -1086,11 +1089,22 @@ impl Ledger {
         Ok(Self {
             directives: payload.directives,
             directive_spans: Vec::new(),
-            directive_lines: payload
-                .directive_lines
-                .into_iter()
-                .map(|line| line as usize)
-                .collect(),
+            // A blob whose two lists disagree in length keeps no positions,
+            // and pads by its stream order.
+            directive_positions: if payload.directive_lines.len()
+                == payload.directive_file_ranks.len()
+            {
+                payload
+                    .directive_lines
+                    .iter()
+                    .zip(&payload.directive_file_ranks)
+                    .map(|(&line, &rank)| {
+                        rustledger_booking::SourcePosition::new(line as usize, rank as usize)
+                    })
+                    .collect()
+            } else {
+                Vec::new()
+            },
             source_map: rustledger_loader::SourceMap::new(),
             balance_discrepancies: Vec::new(),
 
@@ -1188,7 +1202,7 @@ mod option_warning_severity_tests {
         let ledger = Ledger {
             directives: Vec::new(),
             directive_spans: Vec::new(),
-            directive_lines: Vec::new(),
+            directive_positions: Vec::new(),
             source_map: rustledger_loader::SourceMap::new(),
             balance_discrepancies: Vec::new(),
 
@@ -1216,7 +1230,7 @@ mod option_warning_severity_tests {
         let broken = Ledger {
             directives: Vec::new(),
             directive_spans: Vec::new(),
-            directive_lines: Vec::new(),
+            directive_positions: Vec::new(),
             source_map: rustledger_loader::SourceMap::new(),
             balance_discrepancies: Vec::new(),
 
@@ -1260,7 +1274,7 @@ mod option_warning_severity_tests {
             let ledger = Ledger {
                 directives: Vec::new(),
                 directive_spans: Vec::new(),
-                directive_lines: Vec::new(),
+                directive_positions: Vec::new(),
                 source_map: rustledger_loader::SourceMap::new(),
                 balance_discrepancies: Vec::new(),
 

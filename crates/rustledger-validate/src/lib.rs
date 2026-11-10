@@ -202,31 +202,38 @@ pub struct ValidationOptions {
     /// re-raising the very `NoMatchingLot`/`AmbiguousMatch` errors
     /// the booker just decided to skip under `NONE` (issue #1182).
     pub default_booking_method: BookingMethod,
-    /// The source line of a located directive, from its file id and byte
-    /// offset, for beancount's entry order (`(date, type, lineno)`), which
-    /// decides the order a pad group meets its accounts and so the order of
-    /// tied positions in an "Attempt to pad an entry with cost" (#2901). A
-    /// synthesized directive is line 0, as beancount gives a plugin's entry.
-    /// Without it, a located directive's byte offset stands in, which orders
-    /// one file's directives as their lines do.
+    /// Where a located directive comes in beancount's entry order, from its
+    /// file id and byte offset: its line (`(date, type, lineno)`) and its
+    /// file's place in the load, which breaks a tie on the line. The order
+    /// decides the order a pad group meets its accounts, and so the order of
+    /// tied positions in an "Attempt to pad an entry with cost" (#2901).
+    ///
+    /// Without it, a source directive's byte offset stands in for its line
+    /// (it orders one file's directives as their lines do), and a plugin's
+    /// directive is line 0: the line a plugin gave it is kept in the source
+    /// map, which this crate does not see.
     pub source_lines: Option<SourceLines>,
 }
 
-/// A directive's source line from its file id and byte offset; see
-/// [`ValidationOptions::source_lines`].
+/// A located directive's place in beancount's entry order from its file id
+/// and byte offset; see [`ValidationOptions::source_lines`].
 #[derive(Clone)]
-pub struct SourceLines(std::sync::Arc<dyn Fn(u16, usize) -> usize + Send + Sync>);
+pub struct SourceLines(
+    std::sync::Arc<dyn Fn(u16, usize) -> rustledger_booking::SourcePosition + Send + Sync>,
+);
 
 impl SourceLines {
-    /// Wrap `line_of`, which gives the line of byte `offset` of file `file_id`
-    /// (0 for a directive no file holds).
-    pub fn new(line_of: impl Fn(u16, usize) -> usize + Send + Sync + 'static) -> Self {
-        Self(std::sync::Arc::new(line_of))
+    /// Wrap `position_of`, which gives the position of byte `offset` of file
+    /// `file_id`.
+    pub fn new(
+        position_of: impl Fn(u16, usize) -> rustledger_booking::SourcePosition + Send + Sync + 'static,
+    ) -> Self {
+        Self(std::sync::Arc::new(position_of))
     }
 
-    /// The line of byte `offset` of file `file_id`.
+    /// The position of byte `offset` of file `file_id`.
     #[must_use]
-    pub fn line(&self, file_id: u16, offset: usize) -> usize {
+    pub fn position(&self, file_id: u16, offset: usize) -> rustledger_booking::SourcePosition {
         (self.0)(file_id, offset)
     }
 }
@@ -858,26 +865,35 @@ fn validate_phase_inner<D: ValidatableDirective>(
             .iter()
             .any(|(_, _, d)| matches!(d.directive(), Directive::Pad(_)))
     {
-        // Each directive's line, as beancount's entry order reads it
-        // (`ValidationOptions::source_lines`). Without the lines, a source
-        // directive's byte offset stands in (it orders one file as its lines
-        // do) and any other located directive (a plugin's) is line 0, as
-        // beancount numbers it; one with no location keeps its place.
+        // Each directive's place in beancount's entry order
+        // (`ValidationOptions::source_lines`). Without the source map's
+        // positions, a source directive's byte offset stands in for its line
+        // (it orders one file as its lines do) and any other located
+        // directive (a plugin's) is line 0; one with no location keeps its
+        // place.
         let lines = state.options.source_lines.clone();
         let plan = rustledger_booking::plan_pads(
             keyed.iter().map(|(_, i, d)| {
-                let line = d.span_info().map_or(*i, |(span, file_id)| {
-                    lines.as_ref().map_or(
-                        if rustledger_core::is_source_file_id(file_id) {
-                            // After line 0, as any source line is.
-                            span.start + 1
-                        } else {
-                            0
-                        },
-                        |lines| lines.line(file_id, span.start),
-                    )
-                });
-                (*i, d.directive(), line)
+                let position = d.span_info().map_or(
+                    rustledger_booking::SourcePosition::at_index(*i),
+                    |(span, file_id)| {
+                        lines.as_ref().map_or_else(
+                            || {
+                                if rustledger_core::is_source_file_id(file_id) {
+                                    // After line 0, as any source line is.
+                                    rustledger_booking::SourcePosition::in_file(
+                                        span.start + 1,
+                                        file_id,
+                                    )
+                                } else {
+                                    rustledger_booking::SourcePosition::from_plugin(0)
+                                }
+                            },
+                            |lines| lines.position(file_id, span.start),
+                        )
+                    },
+                );
+                (*i, d.directive(), position)
             }),
             state.options.tolerance_multiplier,
         );

@@ -318,7 +318,7 @@ pub fn expand_pads(source: &str) -> Result<JsValue, JsError> {
     // surface pads (`helpers::pad_expansion`).
     let pad_result = crate::helpers::pad_expansion(
         &load.directives,
-        &crate::helpers::offset_lines(&load.directive_spans),
+        &crate::helpers::source_positions(&load.directive_spans, &load.source_map),
         crate::helpers::tolerance_multiplier_from_raw(&load.parse_result.options),
     );
     errors.extend(

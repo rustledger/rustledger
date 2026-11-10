@@ -1113,7 +1113,10 @@ pub const fn booking_sort_key(d: &Directive) -> (NaiveDate, DirectivePriority) {
 /// Beancount's `entry_sortkey`, `(date, SORT_ORDER, lineno)`.
 ///
 /// `lineno` is the directive's line in its source, whichever file that is,
-/// and 0 for one a plugin made, as beancount numbers them.
+/// and for one a plugin made, the line the plugin gave it (0 when it gave
+/// none), as beancount numbers them. Beancount's sort is stable, so entries
+/// tied on this key keep the order they were parsed in (see
+/// `rustledger_booking::SourcePosition`).
 ///
 /// `SORT_ORDER` is `{Open: -2, Balance: -1, Document: 1, Close: 2}` and `0`
 /// for every other type, the `pad` included. [`booking_sort_key`] differs

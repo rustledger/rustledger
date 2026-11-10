@@ -59,6 +59,12 @@ pub struct LoadResult {
     /// [`expand_pads`] inserts (a difference within a balance's tolerance is
     /// not padded, #2901).
     pub tolerance_multiplier: rustledger_core::Decimal,
+    /// The options a semantic validation of this load runs with: the ones
+    /// `rledger check` builds from the ledger's options
+    /// ([`rustledger_loader::validation_options_from_options`], so
+    /// `tolerance_multiplier` and the rest are read), with the source map's
+    /// positions for beancount's entry order (#2901).
+    pub validation_options: rustledger_validate::ValidationOptions,
     pub plugins: Vec<Plugin>,
     pub includes: Vec<Include>,
 }
@@ -132,6 +138,7 @@ pub fn load_source(source: &str) -> LoadResult {
                 query_refusal: None,
                 options: LedgerOptions::default(),
                 tolerance_multiplier: rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
+                validation_options: rustledger_validate::ValidationOptions::default(),
                 plugins: Vec::new(),
                 includes,
             };
@@ -232,6 +239,9 @@ pub fn load_source(source: &str) -> LoadResult {
         })
         .collect();
 
+    let validation_options = rustledger_loader::validation_options_from_options(&ledger.options)
+        .with_source_lines(rustledger_loader::source_lines(&ledger.source_map));
+
     LoadResult {
         directives,
         spanned_directives: ledger.directives,
@@ -243,6 +253,7 @@ pub fn load_source(source: &str) -> LoadResult {
         query_refusal,
         options,
         tolerance_multiplier: ledger.options.inferred_tolerance_multiplier,
+        validation_options,
         plugins,
         includes,
     }

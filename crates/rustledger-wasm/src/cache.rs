@@ -409,11 +409,16 @@ use crate::types::{Error, LedgerOptions};
 /// v86: loader v65, PARSER OUTPUT changed (#2905). A transaction with no flag
 /// after its date is a parse error, as in beancount; an older blob would keep
 /// serving such a file with no error.
+/// v87: loader v66, PARSER OUTPUT changed (#2906). Any non-ASCII character
+/// starts an account component, as in beancount, so `Assets:٣Foo` is one
+/// account; an older blob would keep serving such a file with its old errors.
 /// v90: loader v68, LOADER OUTPUT changed (#2911). An option value its
 /// converter rejects is no longer applied, so the archived account-type names
 /// keep the default root and `Ledger`'s error list loses the errors the
 /// rejected rename caused (`E1005` on `open Equity:A` under
-/// `option "name_equity" "capital"`); a v86 blob would keep serving both.
+/// `option "name_equity" "capital"`), and a ledger whose `booking_method` was
+/// rejected now has `query_refused` set; an older blob would keep serving the
+/// old names, errors and answers.
 pub const CACHE_VERSION: u32 = 90;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.

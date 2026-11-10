@@ -208,7 +208,7 @@ group in both tools rather than displacing entries ahead of it.
 
 This is the same type-grouping-versus-`lineno` difference as issue #2149,
 which also covers the cross-file half described in section 7. Pad placement
-specifically is pinned by `pad_insertion_index` and its tests (issue #2188).
+specifically is pinned by `merge_padding_into_sorted` and its tests (issue #2188).
 
 ### 9. Shorthand Command Column Names
 

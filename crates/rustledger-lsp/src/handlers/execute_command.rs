@@ -343,7 +343,9 @@ fn handle_align_amounts(
 ///   `\p{Lo}` (letter, other), neither uppercase nor lowercase →
 ///   posting. The previous `char::is_uppercase` form rejected
 ///   these because is_uppercase is `\p{Lu}` only; the lexer's
-///   ACCOUNT regex is the wider `[\p{Lu}\p{Lo}\p{Lt}]…`.
+///   ACCOUNT rule takes any non-ASCII start (#2906). A lowercase
+///   non-ASCII root (`éclair:A`) is an invalid name (`E1005`), so
+///   leaving its line alone loses nothing.
 /// - Posting flags (`!`, `*`, `#`, `?`, `&`, `PSTCURM`, and any
 ///   single-uppercase-letter currency-as-flag): the flag is not
 ///   lowercase either, so the line is accepted without having to

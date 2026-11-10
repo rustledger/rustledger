@@ -49,6 +49,9 @@ rustc-hash.workspace = true
 bigdecimal = "0.4"
 jiff.workspace = true
 regex.workspace = true
+# NFKC-normalizes discovered document directory names, as beancount's
+# `account.walk` does (already in the tree through rustledger-ops).
+unicode-normalization.workspace = true
 
 # Python plugin support (optional)
 ureq = { workspace = true, optional = true }

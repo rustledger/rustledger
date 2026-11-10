@@ -708,6 +708,12 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     reports its postings. An older blob would keep serving such a file with no
 ///     error.
 ///
+/// v66: PARSER OUTPUT changed, no archived layout moved (#2906). Any non-ASCII
+///     character starts an account component, as in beancount's lexer, so
+///     `Assets:٣Foo` is one account, not stray tokens; the name is judged
+///     after lexing (`E1005`). A v65 blob would keep serving such a file with
+///     its old parse errors.
+///
 /// v68: LOADER OUTPUT changed and ARCHIVED LAYOUT moved (#2911). An option
 ///     value its converter rejects (an invalid `name_*` root, `account_*` leaf,
 ///     `booking_method` or `plugin_processing_mode`) is reported and no longer
@@ -1539,6 +1545,8 @@ mod tests {
         // v51 (#2802) reports a stray metadata token; likewise.
         // v61 (#2835) moves `Metadata`'s archived layout. No `CostNumber` is
         // in it, so the arrays still hold.
+        // v66 (#2906) lexes a non-ASCII account start; no archived encoding
+        // moves, so the arrays still hold.
         // v68 (#2911) adds a field to `CachedOptions`; no `CostNumber`
         // encoding moves, so the arrays still hold.
         const FIXTURE_VERSION: u32 = 68;
@@ -1686,8 +1694,10 @@ mod tests {
         // v51 (#2802) reports a stray metadata token; likewise.
         // v61 (#2835) moves the map that holds metadata values, not
         // `MetaValue` itself; the hash below is unchanged.
-        // v68 (#2911) stops applying a rejected option value; the hash below
-        // is unchanged.
+        // v66 (#2906) lexes a non-ASCII account start; the hash below is
+        // unchanged.
+        // v68 (#2911) adds a field to `CachedOptions`, not to `MetaValue`;
+        // the hash below is unchanged.
         const FIXTURE_VERSION: u32 = 68;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";

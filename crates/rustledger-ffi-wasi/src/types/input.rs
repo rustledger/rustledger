@@ -267,9 +267,9 @@ fn parse_account(context: &str, value: &str) -> Result<rustledger_core::Account,
     } else {
         Err(format!(
             "invalid {context} account {value:?}: not a valid beancount account \
-             name (expected Type:Component[:Component...] — components start \
-             with an uppercase or caseless letter, sub-components may start \
-             with a digit; letters, digits, and hyphens only)"
+             name (expected Type:Component[:Component...], the first component \
+             after the root starting with an uppercase letter, a digit or a \
+             caseless letter; letters, digits, hyphens and non-ASCII only)"
         ))
     }
 }

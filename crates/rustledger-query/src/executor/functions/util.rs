@@ -9,8 +9,8 @@ use crate::ast::FunctionCall;
 use crate::error::QueryError;
 
 use super::super::Executor;
-use super::super::summarize::{python_inventory_str, python_position_str};
 use super::super::types::{PostingContext, SourceLocation, Value};
+use rustledger_core::{python_inventory_str, python_position_str};
 
 impl Executor<'_> {
     /// Evaluate metadata functions: `META`, `ENTRY_META`, `ANY_META`.

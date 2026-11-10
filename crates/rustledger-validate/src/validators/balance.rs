@@ -2,7 +2,8 @@
 
 // ratchet: fxhash-only — hot path; use FxHashMap/FxHashSet, not std SipHash collections (#1237).
 use rustledger_booking::balance_tolerance;
-use rustledger_core::{Amount, Balance, Inventory, OverflowError, Pad, Position};
+use rustledger_core::{Account, Amount, Balance, Inventory, OverflowError, Pad, Position};
+use std::collections::BTreeSet;
 
 use super::helpers::require_account_open;
 use crate::LedgerState;
@@ -284,9 +285,10 @@ pub fn validate_balance_late(
 /// ([`rustledger_booking::PlannedPadding::held`]): the booked inventories
 /// also hold other pads' padding, which beancount's group does not see.
 ///
-/// A currency never booked at cost has no lot to find, so the subtree is
-/// not walked: a parent pad with a balance on each of many sub-accounts
-/// stays linear.
+/// Only accounts a posting at cost was booked to are read, and only those
+/// under the padded account (`LedgerState::cost_accounts`): a lot at cost
+/// elsewhere in the ledger, or none, costs a padded balance nothing, as
+/// beancount, reading its running `pad_balance`, pays nothing for it.
 fn check_padding_at_cost(
     state: &LedgerState,
     bal: &Balance,
@@ -294,10 +296,15 @@ fn check_padding_at_cost(
     errors: &mut Vec<ValidationError>,
 ) {
     for (target, units, held) in state.pads.padded_for(index) {
-        if !state.currencies_at_cost.contains(&units.currency) {
+        // The plan copies `held` only when a posting at cost in this
+        // currency was made under `target`.
+        let Some(held) = held else {
             continue;
-        }
-        let lots = match lots_at_cost(state, target) {
+        };
+        let Some(accounts) = state.cost_accounts.get(&units.currency) else {
+            continue;
+        };
+        let lots = match lots_at_cost(state, &units.currency, accounts, target) {
             Ok(lots) => lots,
             Err(e) => {
                 errors.push(
@@ -311,16 +318,16 @@ fn check_padding_at_cost(
                 continue;
             }
         };
-        let count = lots
-            .positions()
-            .filter(|p| p.units.currency == units.currency)
-            .count();
+        let count = lots.positions().count();
         if count == 0 {
             continue;
         }
-        let message = match held_without_cost(lots, held) {
-            // Beancount prints the inventory in parentheses.
-            Ok(shown) => format!("Attempt to pad an entry with cost for balance: ({shown})"),
+        let message = match shown_balance(state, target, &units.currency, lots, held) {
+            // Beancount's `str(Inventory)`, sorted as it sorts.
+            Ok(shown) => format!(
+                "Attempt to pad an entry with cost for balance: {}",
+                rustledger_core::python_inventory_str(shown.positions())
+            ),
             Err(e) => format!("Attempt to pad an entry with cost ({e})"),
         };
         for _ in 0..count {
@@ -332,44 +339,59 @@ fn check_padding_at_cost(
     }
 }
 
-/// The positions held at cost in `target` and its sub-accounts, merged as
-/// one inventory merges them (one lot held in two sub-accounts is one
-/// position).
+/// The positions held at cost by those of `accounts` that are `target` or
+/// under it, merged as one inventory merges them (one lot held in two
+/// sub-accounts is one position).
 fn lots_at_cost(
     state: &LedgerState,
-    target: &rustledger_core::Account,
+    currency: &rustledger_core::Currency,
+    accounts: &BTreeSet<Account>,
+    target: &Account,
 ) -> Result<Inventory, OverflowError> {
     let mut lots = Inventory::new();
-    let mut add = |account: &rustledger_core::Account| -> Result<(), OverflowError> {
+    let under =
+        accounts
+            .get(target.as_str())
+            .into_iter()
+            .chain(rustledger_core::strict_subaccounts(
+                accounts,
+                target.as_str(),
+            ));
+    for account in under {
+        #[cfg(test)]
+        tests::COST_ACCOUNTS_READ.with(|n| n.set(n.get() + 1));
         if let Some(inventory) = state.inventories.get(account) {
-            for position in inventory.positions().filter(|p| p.cost.is_some()) {
+            for position in inventory
+                .positions()
+                .filter(|p| p.cost.is_some() && p.units.currency == *currency)
+            {
                 lots.add(position.clone())?;
             }
         }
-        Ok(())
-    };
-    add(target)?;
-    let mut result = Ok(());
-    rustledger_core::for_each_strict_subaccount(
-        &state.inventory_accounts,
-        target.as_str(),
-        |sub| {
-            if result.is_ok() {
-                result = add(sub);
-            }
-        },
-    );
-    result.map(|()| lots)
+    }
+    Ok(lots)
 }
 
-/// `lots` plus what the pad group held without cost: its units per currency
-/// (`held`) less the units held at cost.
-fn held_without_cost(mut lots: Inventory, held: &[Amount]) -> Result<Inventory, OverflowError> {
-    let at_cost: Vec<(rustledger_core::Currency, rust_decimal::Decimal)> = held
-        .iter()
-        .map(|a| (a.currency.clone(), lots.units(&a.currency)))
-        .collect();
-    for (amount, (_, cost_units)) in held.iter().zip(at_cost) {
+/// What the message shows: the pad group's lots at cost in every currency
+/// (`lots` already holds those of the padded one) and what it held without
+/// cost, its units per currency (`held`) less the units at cost.
+fn shown_balance(
+    state: &LedgerState,
+    target: &Account,
+    padded: &rustledger_core::Currency,
+    mut lots: Inventory,
+    held: &[Amount],
+) -> Result<Inventory, OverflowError> {
+    for (currency, accounts) in &state.cost_accounts {
+        if currency != padded {
+            for position in lots_at_cost(state, currency, accounts, target)?.positions() {
+                lots.add(position.clone())?;
+            }
+        }
+    }
+    let at_cost: Vec<rust_decimal::Decimal> =
+        held.iter().map(|a| lots.units(&a.currency)).collect();
+    for (amount, cost_units) in held.iter().zip(at_cost) {
         let plain = amount
             .number
             .checked_sub(cost_units)
@@ -381,4 +403,83 @@ fn held_without_cost(mut lots: Inventory, held: &[Amount]) -> Result<Inventory, 
         }
     }
     Ok(lots)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{ErrorCode, ValidationOptions, ValidationSession};
+
+    std::thread_local! {
+        /// Accounts the "pad an entry with cost" check has read on this
+        /// thread, for the tests below.
+        pub static COST_ACCOUNTS_READ: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
+    }
+
+    /// `n` sub-accounts of `Assets:P` holding 1 STK each without cost, a
+    /// lot at cost in `lot_account`, then a `pad` on the parent before each
+    /// sub-account's balance, each a different amount so every one pads.
+    /// Returns the `E2005` count and the accounts the check read.
+    fn run(n: usize, lot_account: &str) -> (usize, usize) {
+        let mut source = format!(
+            "2024-01-01 open Equity:O\n2024-01-01 open Assets:Cash\n2024-01-01 open {lot_account}\n\
+             2024-01-01 * \"lot\"\n  {lot_account}  1 STK {{10.00 USD}}\n  Assets:Cash  -10.00 USD\n"
+        );
+        for i in 0..n {
+            source.push_str(&format!(
+                "2024-01-01 open Assets:P:C{i:05}\n2024-01-01 * \"x\"\n  Assets:P:C{i:05}  1.00 STK\n  Equity:O\n"
+            ));
+        }
+        let mut day = rustledger_core::naive_date(2024, 1, 1).expect("date");
+        for i in 0..n {
+            day = day.tomorrow().expect("in range");
+            source.push_str(&format!("{day} pad Assets:P Equity:O\n"));
+            day = day.tomorrow().expect("in range");
+            source.push_str(&format!(
+                "{day} balance Assets:P:C{i:05} {}.00 STK\n",
+                i + 2
+            ));
+        }
+        let parsed = rustledger_parser::parse(&source);
+        assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+        let directives: Vec<_> = parsed.directives.into_iter().map(|d| d.value).collect();
+        let today = rustledger_core::naive_date(2030, 1, 1).expect("date");
+        COST_ACCOUNTS_READ.with(|c| c.set(0));
+        let session = ValidationSession::new(ValidationOptions::default());
+        let (session, mut errors) = session.run_early(&directives, today);
+        let (session, late) = session.run_late(&directives, today);
+        errors.extend(late);
+        errors.extend(session.finalize());
+        let cost_errors = errors
+            .iter()
+            .filter(|e| e.code == ErrorCode::PadWithCost)
+            .count();
+        (cost_errors, COST_ACCOUNTS_READ.with(std::cell::Cell::get))
+    }
+
+    /// A lot at cost OUTSIDE the padded account's subtree costs its padded
+    /// balances nothing: no account is read. A ledger-wide "any lot at cost
+    /// in this currency" gate read the whole subtree at every padded balance
+    /// (#2920 review: 10k sub-accounts took 14.8 s where main took 0.29 s).
+    #[test]
+    fn test_padding_at_cost_reads_nothing_for_a_lot_outside_the_subtree() {
+        let n = 300;
+        let (cost_errors, read) = run(n, "Assets:Broker");
+        assert_eq!(cost_errors, 0);
+        assert_eq!(read, 0, "no account under Assets:P holds a lot at cost");
+    }
+
+    /// A lot at cost INSIDE the subtree is read once per padded balance, and
+    /// no other account is: the check reads the accounts that hold a lot at
+    /// cost, not the subtree.
+    #[test]
+    fn test_padding_at_cost_reads_only_the_accounts_with_a_lot() {
+        let n = 300;
+        let (cost_errors, read) = run(n, "Assets:P:Lot");
+        assert_eq!(
+            cost_errors, n,
+            "every padded balance pads a currency held at cost"
+        );
+        assert_eq!(read, n, "one account read per padded balance");
+    }
 }

@@ -349,7 +349,7 @@ pub(crate) struct PadState {
 pub(crate) type PaddedFor = (
     Account,
     rustledger_core::Amount,
-    Vec<rustledger_core::Amount>,
+    Option<Vec<rustledger_core::Amount>>,
 );
 
 /// An unused `pad` the late walk reached (E2003).
@@ -370,15 +370,13 @@ impl PadState {
     fn load(&mut self, plan: rustledger_booking::PadPlan) {
         self.padding.clear();
         self.padded_for.clear();
-        for padding in plan.paddings {
+        for mut padding in plan.paddings {
+            // Moved, not copied: the padding entry keeps no use for it.
+            let held = padding.held.take();
             self.padded_for
                 .entry(padding.origin.balance)
                 .or_default()
-                .push((
-                    padding.target.clone(),
-                    padding.units.clone(),
-                    padding.held.clone(),
-                ));
+                .push((padding.target.clone(), padding.units.clone(), held));
             self.padding
                 .entry(padding.origin.pad)
                 .or_default()
@@ -479,10 +477,11 @@ pub struct LedgerState {
     /// just the target's subtree, instead of an O(all-accounts) scan per
     /// assertion (`Account`'s `Ord`/`Borrow<str>` are lexical).
     inventory_accounts: BTreeSet<Account>,
-    /// Currencies some posting booked at cost. Only these can make a pad
-    /// "pad an entry with cost", so the check walks a subtree for no other
+    /// The accounts some posting booked at cost, per currency: the only ones
+    /// that can hold a lot at cost, so the "pad an entry with cost" check
+    /// reads these under the padded account and no other
     /// (`validators::balance::check_padding_at_cost`).
-    currencies_at_cost: FxHashSet<rustledger_core::Currency>,
+    cost_accounts: FxHashMap<rustledger_core::Currency, BTreeSet<Account>>,
     /// Declared commodities.
     commodities: FxHashSet<rustledger_core::Currency>,
     /// The padding the late walk applies, and the unused pads it reached.

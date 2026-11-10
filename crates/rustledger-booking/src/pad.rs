@@ -22,6 +22,7 @@
 //!   Equity:Opening-Balances -1000.00 USD
 //! ```
 
+use bigdecimal::BigDecimal;
 use rust_decimal::Decimal;
 use rustc_hash::{FxHashMap, FxHashSet};
 use rustledger_core::{
@@ -201,12 +202,52 @@ struct PadGroup {
     /// once when the group's first `pad` comes, then moved by each posting
     /// (`PadTracker::post`). Summing the subtree at every balance instead
     /// made a parent pad with balances on its sub-accounts quadratic.
-    real: Totals,
-    /// Currencies whose running `real` total left the representable range
-    /// (#1863). Their amount is summed from the inventories when needed.
-    real_overflowed: FxHashSet<Currency>,
+    real: RunningTotals,
     /// The padding this group has inserted, per currency.
-    padded: Totals,
+    padded: FxHashMap<Currency, Decimal>,
+}
+
+/// Running units per currency, by hash, so a group holding many currencies
+/// stays linear. A total that leaves `Decimal`'s range (#1863) carries on in
+/// `BigDecimal`, so it never needs re-summing from the inventories, and
+/// reads as unrepresentable only while it is out of range.
+#[derive(Debug, Default)]
+struct RunningTotals {
+    fast: FxHashMap<Currency, Decimal>,
+    wide: FxHashMap<Currency, BigDecimal>,
+}
+
+impl RunningTotals {
+    fn add(&mut self, currency: &Currency, number: Decimal) {
+        if let Some(wide) = self.wide.get_mut(currency) {
+            *wide += rustledger_core::to_bigdecimal(number);
+            return;
+        }
+        let total = self.fast.entry(currency.clone()).or_default();
+        if let Some(sum) = total.checked_add(number) {
+            *total = sum;
+        } else {
+            let wide =
+                rustledger_core::to_bigdecimal(*total) + rustledger_core::to_bigdecimal(number);
+            self.fast.remove(currency);
+            self.wide.insert(currency.clone(), wide);
+        }
+    }
+
+    /// The total of `currency`, or `None` when it cannot be represented.
+    fn get(&self, currency: &Currency) -> Option<Decimal> {
+        match self.wide.get(currency) {
+            None => Some(self.fast.get(currency).copied().unwrap_or_default()),
+            Some(wide) => wide_to_decimal(wide),
+        }
+    }
+}
+
+/// `wide` as a `Decimal`, when it is one exactly.
+fn wide_to_decimal(wide: &BigDecimal) -> Option<Decimal> {
+    use std::str::FromStr;
+    let narrow = Decimal::from_str(&wide.to_plain_string()).ok()?;
+    (rustledger_core::to_bigdecimal(narrow) == *wide).then_some(narrow)
 }
 
 /// A `pad` known to a [`PadTracker`].
@@ -246,16 +287,15 @@ impl PadTracker {
         date: NaiveDate,
         source_account: Account,
         index: usize,
-        seed: impl FnOnce() -> (Totals, FxHashSet<Currency>),
+        seed: impl FnOnce() -> RunningTotals,
     ) {
-        let group = self.groups.entry(target.clone()).or_insert_with(|| {
-            let (real, real_overflowed) = seed();
-            PadGroup {
-                real,
-                real_overflowed,
+        let group = self
+            .groups
+            .entry(target.clone())
+            .or_insert_with(|| PadGroup {
+                real: seed(),
                 ..PadGroup::default()
-            }
-        });
+            });
         group.active = Some(self.pads.len());
         group.padded_lots.clear();
         self.pads.push(TrackedPad {
@@ -267,27 +307,15 @@ impl PadTracker {
         });
     }
 
-    /// The prefixes of `account` that can name a group: its ancestors,
-    /// outermost first, then the account itself.
-    fn prefixes(account: &str) -> impl Iterator<Item = &str> {
-        account
-            .match_indices(':')
-            .map(|(at, _)| &account[..at])
-            .chain(std::iter::once(account))
-    }
-
     /// A real posting of `number` `currency` to `account`: every group it
     /// falls in (the account's own and its ancestors') moves by it. O(depth).
     fn post(&mut self, account: &Account, currency: &Currency, number: Decimal) {
         if self.groups.is_empty() {
             return;
         }
-        for prefix in Self::prefixes(account.as_str()) {
-            if let Some(group) = self.groups.get_mut(prefix)
-                && !group.real_overflowed.contains(currency)
-                && add_units(&mut group.real, currency, number).is_err()
-            {
-                group.real_overflowed.insert(currency.clone());
+        for prefix in prefixes(account.as_str()) {
+            if let Some(group) = self.groups.get_mut(prefix) {
+                group.real.add(currency, number);
             }
         }
     }
@@ -299,27 +327,27 @@ impl PadTracker {
         if self.groups.is_empty() {
             return Vec::new();
         }
-        Self::prefixes(account.as_str())
+        prefixes(account.as_str())
             .filter_map(|prefix| self.groups.get_key_value(prefix).map(|(k, _)| k.clone()))
             .collect()
     }
 
     /// Apply the rule for the group of `group_account` to a `balance` of
-    /// `asserted`, checked with `tolerance`. `summed` sums the units of the
-    /// currency in the group's account and its sub-accounts from the
-    /// inventories (`None` when they cannot be represented); it is called
-    /// only when the group's running total of the currency left range.
+    /// `asserted`, checked with `tolerance`.
     ///
-    /// Returns what to do, the active pad when the group can pad, and the
-    /// group's units before any padding for this balance (its real units and
-    /// its own earlier padding, per currency: beancount's `pad_balance`).
+    /// Returns what to do, and the active pad when the group can pad. When
+    /// it pads and `with_held` says the group may hold a lot at cost in the
+    /// currency, also what the group held before this padding (its real
+    /// units and its own earlier padding, per currency: beancount's
+    /// `pad_balance`), for the "pad an entry with cost" message; otherwise
+    /// nothing is copied.
     fn balance(
         &mut self,
         group_account: &Account,
         asserted: &Amount,
         tolerance: Decimal,
-        summed: impl FnOnce() -> Option<Decimal>,
-    ) -> (PadAction, Option<(&TrackedPad, Vec<Amount>)>) {
+        with_held: impl FnOnce() -> bool,
+    ) -> (PadAction, Option<(&TrackedPad, Option<Vec<Amount>>)>) {
         let Some(group) = self.groups.get_mut(group_account) else {
             return (PadAction::Compare, None);
         };
@@ -329,28 +357,27 @@ impl PadTracker {
         let Some(active) = group.active.filter(|_| fresh) else {
             return (PadAction::Compare, None);
         };
-        let real = if group.real_overflowed.contains(currency) {
-            summed()
-        } else {
-            Some(units_of(&group.real, currency))
-        };
-        let own_padding = units_of(&group.padded, currency);
-        let mut held = Vec::new();
-        let action = match real
+        let own_padding = group.padded.get(currency).copied().unwrap_or_default();
+        let mut held = None;
+        let action = match group
+            .real
+            .get(currency)
             .and_then(|r| r.checked_add(own_padding))
             .and_then(|current| asserted.number.checked_sub(current))
         {
             None => PadAction::Unrepresentable,
             Some(difference) if difference.abs() <= tolerance => PadAction::Compare,
-            Some(difference) => {
-                held = held_units(group);
-                if add_units(&mut group.padded, currency, difference).is_err() {
-                    PadAction::Unrepresentable
-                } else {
+            Some(difference) => match own_padding.checked_add(difference) {
+                None => PadAction::Unrepresentable,
+                Some(padded) => {
+                    if with_held() {
+                        held = Some(held_units(group));
+                    }
+                    group.padded.insert(currency.clone(), padded);
                     self.pads[active].used = true;
                     PadAction::Pad(difference)
                 }
-            }
+            },
         };
         (action, Some((&self.pads[active], held)))
     }
@@ -360,29 +387,60 @@ impl PadTracker {
     /// not be applied. It restores a total that existed a moment ago, so it
     /// cannot overflow.
     fn retract(&mut self, group_account: &Account, currency: &Currency, difference: Decimal) {
-        if let Some(group) = self.groups.get_mut(group_account) {
-            drop(add_units(&mut group.padded, currency, -difference));
+        if let Some(padded) = self
+            .groups
+            .get_mut(group_account)
+            .and_then(|group| group.padded.get_mut(currency))
+        {
+            *padded -= difference;
         }
     }
+}
+
+/// The prefixes of `account` that can name a pad group: its ancestors,
+/// outermost first, then the account itself.
+fn prefixes(account: &str) -> impl Iterator<Item = &str> {
+    account
+        .match_indices(':')
+        .map(|(at, _)| &account[..at])
+        .chain(std::iter::once(account))
+}
+
+/// Whether `accounts` holds `account` or one of its sub-accounts: one range
+/// query on the sorted set, stopping at the first.
+fn has_subtree_account(accounts: &std::collections::BTreeSet<Account>, account: &Account) -> bool {
+    accounts.contains(account.as_str())
+        || rustledger_core::strict_subaccounts(accounts, account.as_str())
+            .next()
+            .is_some()
 }
 
 /// What `group` holds, per currency: its real units and its own padding
 /// (beancount's `pad_balance`), for the "pad an entry with cost" message. A
 /// currency whose total cannot be represented is left out: the message is
-/// all it is for.
+/// all it is for. O(currencies).
 fn held_units(group: &PadGroup) -> Vec<Amount> {
-    let mut held: Totals = group
+    let mut held: FxHashMap<&Currency, Decimal> = group
         .real
+        .fast
         .iter()
-        .filter(|(c, _)| !group.real_overflowed.contains(c))
-        .cloned()
+        .map(|(currency, number)| (currency, *number))
         .collect();
+    let mut unrepresentable: FxHashSet<&Currency> = group.real.wide.keys().collect();
     for (currency, number) in &group.padded {
-        if add_units(&mut held, currency, *number).is_err() {
-            held.retain(|(c, _)| c != currency);
+        if unrepresentable.contains(currency) {
+            continue;
+        }
+        let total = held.entry(currency).or_default();
+        match total.checked_add(*number) {
+            Some(sum) => *total = sum,
+            None => {
+                unrepresentable.insert(currency);
+            }
         }
     }
     held.into_iter()
+        .filter(|(currency, _)| !unrepresentable.contains(currency))
         .map(|(currency, number)| Amount::new(number, currency))
         .collect()
 }
@@ -461,8 +519,10 @@ pub struct PlannedPadding {
     /// units of `target` and its sub-accounts and the group's own earlier
     /// padding (beancount's `pad_balance`). Units only; the validator adds
     /// the lots held at cost from its booked inventories for the "pad an
-    /// entry with cost" message.
-    pub held: Vec<Amount>,
+    /// entry with cost" message. `None` when no posting at cost in the
+    /// padded currency was made to `target` or its sub-accounts, so that
+    /// check has nothing to find: the copy is made only when it may.
+    pub held: Option<Vec<Amount>>,
 }
 
 /// A `pad` that inserted no padding.
@@ -495,6 +555,10 @@ where
     I: IntoIterator<Item = (usize, &'a Directive)>,
 {
     let mut inventories = PadInventories::default();
+    // The accounts a posting at cost was made to, per currency: the only
+    // ones that can hold a lot at cost (the "pad an entry with cost" check).
+    let mut cost_accounts: FxHashMap<Currency, std::collections::BTreeSet<Account>> =
+        FxHashMap::default();
     let mut pads = PadTracker::default();
     let mut plan = PadPlan::default();
 
@@ -503,6 +567,12 @@ where
             Directive::Transaction(txn) => {
                 for posting in &txn.postings {
                     if let Some(units) = posting.amount() {
+                        if posting.cost.is_some() {
+                            cost_accounts
+                                .entry(units.currency.clone())
+                                .or_default()
+                                .insert(posting.account.clone());
+                        }
                         // A running balance that leaves range makes every pad
                         // measured against it wrong, so report it here rather
                         // than pad from a clamped total (#1863).
@@ -537,7 +607,9 @@ where
                 // as the balance check sums them.
                 for group in pads.groups_of(&bal.account) {
                     let (action, pad) = pads.balance(&group, &bal.amount, tolerance, || {
-                        inventories.subtree_units(&group, &bal.amount.currency)
+                        cost_accounts
+                            .get(&bal.amount.currency)
+                            .is_some_and(|accounts| has_subtree_account(accounts, &group))
                     });
                     let (difference, pad) = match (action, pad) {
                         (PadAction::Pad(difference), Some((pad, held))) => (
@@ -814,18 +886,14 @@ impl PadInventories {
         add_units(padded, currency, number)
     }
 
-    /// The units of every currency in `account` and its sub-accounts, and the
-    /// currencies whose sum leaves the representable range (#1863): the seed
-    /// of a pad group's running total, read once per group.
-    fn subtree_all(&self, account: &Account) -> (Totals, FxHashSet<Currency>) {
-        let mut sum = Totals::new();
-        let mut overflowed = FxHashSet::default();
+    /// The units of every currency in `account` and its sub-accounts: the
+    /// seed of a pad group's running total, read once per group. O(log A +
+    /// subtree) through the prefix index.
+    fn subtree_all(&self, account: &Account) -> RunningTotals {
+        let mut sum = RunningTotals::default();
         let mut add = |totals: &Totals| {
             for (currency, units) in totals {
-                if !overflowed.contains(currency) && add_units(&mut sum, currency, *units).is_err()
-                {
-                    overflowed.insert(currency.clone());
-                }
+                sum.add(currency, *units);
             }
         };
         if let Some(totals) = self.by_account.get(account) {
@@ -836,33 +904,7 @@ impl PadInventories {
                 add(totals);
             }
         });
-        (sum, overflowed)
-    }
-
-    /// The units of `currency` in `account` and its sub-accounts, as a
-    /// `balance` assertion sums them (beancount includes sub-accounts), or
-    /// `None` when the sum leaves the representable range (#1863).
-    ///
-    /// O(log A + subtree) through the prefix index. Summing over a scan of
-    /// every account ([`rustledger_core::sum_account_and_subaccounts`]) made
-    /// `rledger check`, BQL and the reports quadratic in a ledger with many
-    /// padded balances.
-    fn subtree_units(&self, account: &Account, currency: &Currency) -> Option<Decimal> {
-        let mut total = Some(Decimal::ZERO);
-        let mut add = |totals: &Totals| {
-            if let Some((_, units)) = totals.iter().find(|(c, _)| c == currency) {
-                total = total.and_then(|t| t.checked_add(*units));
-            }
-        };
-        if let Some(totals) = self.by_account.get(account) {
-            add(totals);
-        }
-        rustledger_core::for_each_strict_subaccount(&self.index, account.as_str(), |sub| {
-            if let Some(totals) = self.by_account.get(sub) {
-                add(totals);
-            }
-        });
-        total
+        sum
     }
 }
 
@@ -1184,6 +1226,95 @@ mod tests {
         assert_eq!(result.padding_transactions.len(), n);
         assert!(result.errors.is_empty(), "{:?}", result.errors);
         assert_eq!(summed, n, "each balance reads only its own account");
+    }
+
+    /// A group's running total that leaves `Decimal`'s range carries on in
+    /// `BigDecimal`, so later balances do not re-sum the subtree: two
+    /// sub-accounts holding 5e28 USD each, then the parent-pad loop, still
+    /// reads the subtree once. Re-summing on every balance after the
+    /// overflow made this quadratic (#2920 review: 20k took 11.2 s where
+    /// main took 0.73 s).
+    #[test]
+    fn test_plan_pads_overflowed_group_total_reads_its_subtree_once() {
+        let n: u32 = 300;
+        let big = dec!(50000000000000000000000000000);
+        let mut directives = vec![
+            Directive::Open(Open::new(date(2024, 1, 1), "Assets:B")),
+            Directive::Open(Open::new(date(2024, 1, 1), "Equity:O")),
+            transfer(date(2024, 1, 1), "Assets:P:X1", big),
+            transfer(date(2024, 1, 1), "Assets:P:X2", big),
+        ];
+        for i in 0..n {
+            let account = format!("Assets:P:C{i:05}");
+            directives.push(transfer(date(2024, 1, 1), &account, dec!(1.00)));
+        }
+        let mut day = date(2024, 1, 1);
+        for i in 0..n {
+            let account = format!("Assets:P:C{i:05}");
+            day = day.tomorrow().expect("in range");
+            directives.push(Directive::Pad(Pad::new(day, "Assets:P", "Equity:O")));
+            day = day.tomorrow().expect("in range");
+            directives.push(balance(day, &account, Decimal::from(i + 2)));
+        }
+        ACCOUNTS_READ.with(|c| c.set(0));
+        let result = process_pads(&directives, DEFAULT_TOLERANCE_MULTIPLIER);
+        let read = ACCOUNTS_READ.with(std::cell::Cell::get);
+        // The parent's 1e29 cannot be padded against: each balance reports
+        // it rather than padding from a clamped total (#1863).
+        assert!(result.padding_transactions.is_empty());
+        assert_eq!(
+            read,
+            // The parent, `X1`, `X2` and the `n` sub-accounts, once.
+            n as usize + 3,
+            "the parent's subtree is read once, when its first pad comes"
+        );
+    }
+
+    /// The group's holdings are copied for a padding only when a lot at
+    /// cost in the padded currency may sit under the group (the "pad an
+    /// entry with cost" message is all they are for). Copying every
+    /// currency for every padding made a group holding many currencies
+    /// cubic (#2920 review: 2,000 currencies took 6-12 s and 266 MB).
+    #[test]
+    fn test_plan_pads_copies_holdings_only_for_a_lot_at_cost() {
+        let currencies: Vec<String> = (0..50).map(|i| format!("C{i:03}X")).collect();
+        let mut directives = vec![Directive::Open(Open::new(date(2024, 1, 1), "Equity:O"))];
+        for currency in &currencies {
+            directives.push(Directive::Transaction(
+                Transaction::new(date(2024, 1, 1), "t")
+                    .with_synthesized_posting(Posting::new(
+                        "Assets:P",
+                        Amount::new(dec!(1), currency.as_str()),
+                    ))
+                    .with_synthesized_posting(Posting::new(
+                        "Equity:O",
+                        Amount::new(dec!(-1), currency.as_str()),
+                    )),
+            ));
+        }
+        directives.push(Directive::Pad(Pad::new(
+            date(2024, 1, 2),
+            "Assets:P",
+            "Equity:O",
+        )));
+        for currency in &currencies {
+            directives.push(Directive::Balance(Balance::new(
+                date(2024, 1, 3),
+                "Assets:P",
+                Amount::new(dec!(2), currency.as_str()),
+            )));
+        }
+        let sorted = {
+            let mut sorted: Vec<(usize, &Directive)> = directives.iter().enumerate().collect();
+            sorted.sort_by_key(|(_, d)| rustledger_core::booking_sort_key(d));
+            sorted
+        };
+        let plan = plan_pads(sorted, DEFAULT_TOLERANCE_MULTIPLIER);
+        assert_eq!(plan.paddings.len(), currencies.len());
+        assert!(
+            plan.paddings.iter().all(|p| p.held.is_none()),
+            "no lot at cost anywhere: nothing to copy"
+        );
     }
 
     /// A pad on a parent with balances on its sub-accounts reads the subtree

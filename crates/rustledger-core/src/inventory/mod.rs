@@ -3400,6 +3400,65 @@ where
         })
 }
 
+/// Python's `str(Inventory)`, sorted by beancount's `Position.sortkey`.
+///
+/// For example `(55.00 USD, 10 AAPL {150.00 USD,
+/// 2024-01-03})`, SORTED by beancount's `Position.sortkey`, not in the
+/// balance's own order. The key is a currency rank (USD, EUR, JPY, CAD,
+/// GBP, AUD, NZD, CHF first; any other currency `8 + len(code)`), then the
+/// cost number, the cost currency and the units. The sort is stable, as
+/// Python's is. So bean-query names `(-55.00 USD, 50.00 EUR)` while
+/// listing the EUR posting first.
+///
+/// CANONICAL: shared by the `C` conversions narration and BQL's `str()`
+/// (#2822), and the validator's "pad an entry with cost" message (#2901), so
+/// the renderings of one inventory cannot drift.
+pub fn python_inventory_str<'a>(positions: impl IntoIterator<Item = &'a Position>) -> String {
+    const CURRENCY_ORDER: [&str; 8] = ["USD", "EUR", "JPY", "CAD", "GBP", "AUD", "NZD", "CHF"];
+    let rank = |currency: &str| {
+        CURRENCY_ORDER
+            .iter()
+            .position(|c| *c == currency)
+            .unwrap_or(CURRENCY_ORDER.len() + currency.len())
+    };
+    let mut sorted: Vec<&Position> = positions.into_iter().collect();
+    sorted.sort_by(|a, b| {
+        let key = |p: &Position| {
+            (
+                rank(p.units.currency.as_str()),
+                p.cost.as_ref().map_or(crate::Decimal::ZERO, |c| c.number),
+                p.cost
+                    .as_ref()
+                    .map_or_else(String::new, |c| c.currency.to_string()),
+                p.units.number,
+            )
+        };
+        key(a).cmp(&key(b))
+    });
+    let positions: Vec<String> = sorted.into_iter().map(python_position_str).collect();
+    format!("({})", positions.join(", "))
+}
+
+/// Python's `str(Position)`, as `10 AAPL {150.00 USD, 2024-01-03, "lot"}`.
+///
+/// The cost has no space inside its braces (the bean-query CELL renderer, and
+/// [`Position`]'s `Display`, write `{ 150.00 USD}` instead).
+pub fn python_position_str(p: &Position) -> String {
+    match &p.cost {
+        None => p.units.to_string(),
+        Some(cost) => {
+            let mut parts = vec![format!("{} {}", cost.number, cost.currency)];
+            if let Some(date) = cost.date {
+                parts.push(date.to_string());
+            }
+            if let Some(label) = &cost.label {
+                parts.push(format!("\"{label}\""));
+            }
+            format!("{} {{{}}}", p.units, parts.join(", "))
+        }
+    }
+}
+
 /// Visit each strict sub-account of `account` that `index` holds, by a range
 /// query rather than a scan.
 ///
@@ -3423,6 +3482,21 @@ pub fn for_each_strict_subaccount<K>(
 ) where
     K: Ord + std::borrow::Borrow<str>,
 {
+    for sub in strict_subaccounts(index, account) {
+        visit(sub);
+    }
+}
+
+/// The strict sub-accounts of `account` that `index` holds, in order, by the
+/// range query [`for_each_strict_subaccount`] runs: an iterator, so a caller
+/// that needs only the first stops there.
+pub fn strict_subaccounts<'a, K>(
+    index: &'a std::collections::BTreeSet<K>,
+    account: &str,
+) -> std::collections::btree_set::Range<'a, K>
+where
+    K: Ord + std::borrow::Borrow<str>,
+{
     // The explicit `Bound` tuple gives `RangeBounds<str>` (a `&str..&str`
     // range would be `RangeBounds<&str>`, which `range::<str>` doesn't
     // accept). The two bound strings are built without `format!`: this runs
@@ -3437,9 +3511,7 @@ pub fn for_each_strict_subaccount<K>(
         std::ops::Bound::Included(lower.as_str()),
         std::ops::Bound::Excluded(upper.as_str()),
     );
-    for sub in index.range::<str, _>(bounds) {
-        visit(sub);
-    }
+    index.range::<str, _>(bounds)
 }
 
 impl fmt::Display for Inventory {

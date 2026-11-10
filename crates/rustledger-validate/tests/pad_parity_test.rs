@@ -36,7 +36,7 @@ use rustledger_validate::{ErrorCode, ValidationOptions};
 const DEFAULT: Decimal = rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER;
 
 /// Two lots of the same cost, told apart by a label.
-const LOTS_2: &str = "(5 STK { 10 USD, 2024-01-02}, 5 STK { 10 USD, 2024-01-02, \"b\"})";
+const LOTS_2: &str = "(5 STK {10 USD, 2024-01-02}, 5 STK {10 USD, 2024-01-02, \"b\"})";
 
 const HEAD: &str = "2024-01-01 open Equity:O\n2024-01-01 open Assets:B\n";
 
@@ -50,7 +50,7 @@ struct Shape {
     /// Dates of beancount's `Unused Pad entry` errors.
     unused: Vec<&'static str>,
     /// beancount's `Attempt to pad an entry with cost` errors, one per lot,
-    /// each as rledger words it (its positions print `{ 10 USD, ...}`).
+    /// word for word as bean-check prints them.
     cost_messages: Vec<&'static str>,
     /// The ledger's `tolerance_multiplier` option.
     tolerance_multiplier: Decimal,
@@ -321,7 +321,7 @@ fn shapes_2901() -> Vec<Shape> {
             vec![("Assets:Inv", dec!(5))],
             vec![],
             vec![],
-            vec!["(10 STK { 10 USD, 2024-01-02})"],
+            vec!["(10 STK {10 USD, 2024-01-02})"],
         ),
         shape(
             "padding a currency held at cost in two lots",
@@ -399,7 +399,7 @@ fn shapes_2901() -> Vec<Shape> {
             vec![("Assets:A", dec!(6))],
             vec![],
             vec![],
-            vec!["(14 STK { 10 USD, 2024-01-02})"],
+            vec!["(14 STK {10 USD, 2024-01-02})"],
         ),
         // A lot held in a sub-account of the padded account.
         shape(
@@ -412,7 +412,7 @@ fn shapes_2901() -> Vec<Shape> {
             vec![("Assets:A", dec!(5))],
             vec![],
             vec![],
-            vec!["(10 STK { 10 USD, 2024-01-02})"],
+            vec!["(10 STK {10 USD, 2024-01-02})"],
         ),
         // Pads on a sub-account and then its parent, at cost: each group's
         // message shows what that group holds, not the other's padding.
@@ -428,9 +428,25 @@ fn shapes_2901() -> Vec<Shape> {
             vec!["2024-01-10"],
             vec![],
             vec![
-                "(10 STK { 10 USD, 2024-01-02})",
-                "(10 STK { 10 USD, 2024-01-02})",
+                "(10 STK {10 USD, 2024-01-02})",
+                "(10 STK {10 USD, 2024-01-02})",
             ],
+        ),
+        // The message lists the group's inventory as beancount sorts it:
+        // USD first, then the rest, a position at cost after one without.
+        shape(
+            "the message sorts the inventory as beancount does",
+            format!(
+                "{}{}2024-01-02 * \"gift\"\n  Assets:A  5 STK\n  Assets:A  20 USD\n\
+                 \x20 Equity:O  -5 STK\n  Equity:O  -20 USD\n\
+                 2024-01-03 pad Assets:A Equity:O\n2024-01-10 balance Assets:A 20 STK\n",
+                opens(&["Assets:A", "Assets:Cash", "Equity:O"]),
+                buy("  Assets:A  10 STK {10 USD}\n")
+            ),
+            vec![("Assets:A", dec!(5))],
+            vec![],
+            vec![],
+            vec!["(20 USD, 5 STK, 10 STK {10 USD, 2024-01-02})"],
         ),
         // A later balance just beyond the tolerance (0.016 against 0.01)
         // fails: pins the balance check's tolerance to the pad's.

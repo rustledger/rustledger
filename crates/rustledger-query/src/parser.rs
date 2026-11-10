@@ -164,9 +164,15 @@ fn nesting_error(source: &str) -> Option<ParseError> {
 /// an aggregate chain), so tests that run a query at the limit give it a
 /// 64 MiB thread.
 ///
-/// Stricter than bean-query, deliberately: its parser and evaluator recurse
-/// too, and a long enough chain raises Python's `RecursionError` there. Here
-/// the same query is a parse error with a position.
+/// Against bean-query 0.2.0: it raises Python's `RecursionError` on a chain
+/// of 1,000 `+`, `*` or `NOT`, and on 200 nested parentheses, where these
+/// limits give a parse error with a position. But it reads `AND` and `OR`
+/// chains as one node with many operands, and runs 4,000 terms of either,
+/// where rledger builds them two operands at a time and refuses one that
+/// passes 720 (about 360 comparisons). That is a deliberate deviation, kept
+/// until the tree holds such chains flat: a query with that many
+/// alternatives can say them as one `IN (...)` list, whose elements cost no
+/// depth, or one regular expression with `|` alternatives.
 const MAX_EXPR_DEPTH: usize = 720;
 
 /// What one bracket costs in [`MAX_EXPR_DEPTH`]: the stack the grammar's
@@ -1447,6 +1453,58 @@ fn comparison_op<'a>() -> impl Parser<'a, ParserInput<'a>, BinaryOperator, Parse
     ))
 }
 
+/// Whether `source` opens with a `(` whose bracket holds a `,` at its own
+/// level, before the `)` that closes it: the `,` a set literal needs after
+/// its first element (see [`set_literal`]).
+///
+/// A first element is an expression, whose brackets (`(`, and `[` of a
+/// subscript) are balanced and whose commas are all inside them, so the
+/// first `,` at the bracket's own level is the one after it. Strings are
+/// skipped so a `,` or bracket in one does not count: lexed as
+/// [`string_literal`] reads them, as [`nesting_exceeds_limit`] describes
+/// (backslash is an ordinary byte, `''` continues a single-quoted string).
+/// Reads only up to the closing `)`, so a query's `IN` brackets are each
+/// read once per nesting level around them, at most [`MAX_NESTING_DEPTH`].
+fn bracket_holds_a_comma(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    if bytes.first() != Some(&b'(') {
+        return false;
+    }
+    let mut depth = 0usize;
+    let mut i = 1;
+    while let Some(&b) = bytes.get(i) {
+        match b {
+            quote @ (b'"' | b'\'') => {
+                i += 1;
+                loop {
+                    match bytes.get(i) {
+                        None => return false,
+                        Some(&c) if c == quote => {
+                            if quote == b'\'' && bytes.get(i + 1) == Some(&b'\'') {
+                                i += 2;
+                                continue;
+                            }
+                            break;
+                        }
+                        Some(_) => i += 1,
+                    }
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => {
+                if depth == 0 {
+                    return false;
+                }
+                depth -= 1;
+            }
+            b',' if depth == 0 => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Parse a set literal for IN operator, e.g., `('EUR', 'USD')`.
 ///
 /// To distinguish from parenthesized expressions like `IN (tags)`, set literals
@@ -1456,34 +1514,56 @@ fn comparison_op<'a>() -> impl Parser<'a, ParserInput<'a>, BinaryOperator, Parse
 ///
 /// This ensures `IN (tags)` is parsed as `IN <parenthesized-column>` rather than
 /// `IN <single-element-set>`.
+///
+/// The set is tried only when [`bracket_holds_a_comma`] finds a `,` at the
+/// bracket's own level, which a set needs after its first element. Without
+/// that check, a bracket with one element was parsed twice: in full here,
+/// failing at the missing `,`, then again as the parenthesized expression
+/// the `IN` falls back to. Nested, that doubled at every level, so
+/// `1 IN (1 IN (1 IN (...)))` took time exponential in its depth. With it,
+/// a bracket with no such `,` is parsed once, and the queries accepted, and
+/// what they mean, are unchanged: a set still needs that `,`, and the check
+/// finds every `,` that can follow a first element.
 fn set_literal<'a>(
     expr: impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> + Clone + 'a,
 ) -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> + Clone {
-    just('(')
-        .ignore_then(ws())
-        .ignore_then(
-            // Parse first element
-            expr.clone()
-                .then(
-                    // Then require either:
-                    // - comma + more elements (with optional trailing comma)
-                    // - trailing comma (for single-element sets)
-                    ws().ignore_then(just(',')).ignore_then(ws()).ignore_then(
-                        expr.separated_by(ws().then(just(',')).then(ws()))
-                            .allow_trailing()
-                            .collect::<Vec<_>>(),
-                    ),
-                )
-                .map(|(first, rest)| {
-                    let mut elements = Vec::with_capacity(1 + rest.len());
-                    elements.push(first);
-                    elements.extend(rest);
-                    elements
-                }),
-        )
-        .then_ignore(ws())
-        .then_ignore(just(')'))
-        .map(Expr::Set)
+    custom(|inp| {
+        let before = inp.cursor();
+        let rest: &str = inp.slice_from(&before..);
+        if bracket_holds_a_comma(rest) {
+            Ok(())
+        } else {
+            Err(Rich::custom(
+                inp.span_since(&before),
+                "a set needs a ',' after its first element",
+            ))
+        }
+    })
+    .ignore_then(just('('))
+    .ignore_then(ws())
+    .ignore_then(
+        // Parse first element
+        expr.clone()
+            .then(
+                // Then require either:
+                // - comma + more elements (with optional trailing comma)
+                // - trailing comma (for single-element sets)
+                ws().ignore_then(just(',')).ignore_then(ws()).ignore_then(
+                    expr.separated_by(ws().then(just(',')).then(ws()))
+                        .allow_trailing()
+                        .collect::<Vec<_>>(),
+                ),
+            )
+            .map(|(first, rest)| {
+                let mut elements = Vec::with_capacity(1 + rest.len());
+                elements.push(first);
+                elements.extend(rest);
+                elements
+            }),
+    )
+    .then_ignore(ws())
+    .then_ignore(just(')'))
+    .map(Expr::Set)
 }
 
 /// Parse primary expressions.
@@ -1504,7 +1584,10 @@ fn primary_expr<'a>(
         // literal parser only matches the reserved keywords plus number/string/
         // date literals, so ordinary column and function names still fall
         // through to `function_call_or_column`.
-        literal().map(Expr::Literal),
+        literal().map(|literal| {
+            note_literal_parsed();
+            Expr::Literal(literal)
+        }),
         // Function call or column reference (must come before wildcard check)
         // Pass expr to allow nested function calls like units(sum(position))
         function_call_or_column(expr),
@@ -1521,6 +1604,33 @@ fn primary_expr<'a>(
         }),
     ))
 }
+
+#[cfg(test)]
+thread_local! {
+    /// In tests, how many more literal operands the parser on this thread may
+    /// read before it panics, if set: how the tests bound parser work
+    /// without timing it.
+    static LITERAL_BUDGET: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Count a literal operand read by the grammar, against `LITERAL_BUDGET`.
+/// A literal is read again each time the grammar parses the text around it
+/// again, so the count measures how much re-parsing a query costs.
+#[cfg(test)]
+fn note_literal_parsed() {
+    LITERAL_BUDGET.with(|budget| {
+        if let Some(left) = budget.get() {
+            assert!(left > 0, "the parser read more literals than its budget");
+            budget.set(Some(left - 1));
+        }
+    });
+}
+
+/// Outside tests, reading a literal counts nothing (see the test build's
+/// version, which counts parser work for the tests).
+#[cfg(not(test))]
+#[inline]
+const fn note_literal_parsed() {}
 
 /// The error for a `*` where an operand belongs (#2871).
 const STAR_IS_NOT_A_VALUE: &str = "'*' is not a value: it stands only for the whole target list, or alone in a call such as count(*)";
@@ -3095,5 +3205,100 @@ mod tests {
         );
         // And the query as a whole still parses (the string is opaque).
         assert!(parse(&src).is_ok(), "string-literal query should parse");
+    }
+
+    /// Parse `source` as [`parse`] does, on a thread with [`PARSE_STACK_SIZE`]
+    /// of stack, letting the grammar read at most `budget` literals. `None`
+    /// if it needed more: the parse thread panics at the budget, so a parse
+    /// that re-reads its input exponentially fails here at once rather than
+    /// running for years.
+    fn parse_within_literal_budget(source: &str, budget: usize) -> Option<bool> {
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(PARSE_STACK_SIZE)
+                .spawn_scoped(scope, || {
+                    LITERAL_BUDGET.with(|b| b.set(Some(budget)));
+                    if nesting_error(source).is_some() {
+                        return false;
+                    }
+                    parse_on_current_stack(source).is_ok()
+                })
+                .expect("spawn parse thread")
+                .join()
+                .ok()
+        })
+    }
+
+    /// `1 IN (1 IN (... 1 ...))` at the deepest nesting the limits accept
+    /// (55 levels; 51 for `NOT IN`, whose `NOT` counts too) parses reading
+    /// each literal a bounded number of times. A bracket with one element
+    /// was parsed twice, as a set and then as a parenthesized expression, so
+    /// the work doubled at every level: 2^55 literal reads at this depth, and
+    /// seconds already at 20.
+    #[test]
+    fn test_parse_nested_single_element_in_reads_each_literal_once() {
+        let nest = |head: &str, pre: &str, center: &str, n: usize| {
+            format!("{head}{}{center}{}", pre.repeat(n), ")".repeat(n))
+        };
+        for (shape, n, ok) in [
+            (nest("SELECT ", "1 IN (", "1", 55), 55, true),
+            (nest("SELECT ", "1 NOT IN (", "1", 51), 51, true),
+            (
+                nest("SELECT account WHERE ", "TRUE IN (", "TRUE", 55),
+                55,
+                true,
+            ),
+            // A syntax error at the center fails just as fast.
+            (nest("SELECT ", "1 IN (", "1 +", 55), 55, false),
+        ] {
+            assert_eq!(
+                parse_within_literal_budget(&shape, 4 * (n + 1)),
+                Some(ok),
+                "{}...",
+                &shape[..40]
+            );
+        }
+        // One level past the limit is refused by the nesting check.
+        assert!(parse(&nest("SELECT ", "1 IN (", "1", 56)).is_err());
+        assert!(parse(&nest("SELECT ", "1 NOT IN (", "1", 52)).is_err());
+    }
+
+    /// The set is tried only when a `,` follows its first element, found
+    /// with brackets and strings read as the grammar reads them; the meaning
+    /// of every `IN` is as before.
+    #[test]
+    fn test_in_reads_a_set_only_with_a_comma_at_its_own_level() {
+        let right = |q: &str| match parse(q).unwrap_or_else(|e| panic!("{q}: {e}")) {
+            Query::Select(sel) => match sel.targets.into_iter().next().map(|t| t.expr) {
+                Some(Expr::BinaryOp(op)) => op.right,
+                other => panic!("{q}: {other:?}"),
+            },
+            other => panic!("{q}: {other:?}"),
+        };
+        let set_len = |e: Expr| match e {
+            Expr::Set(elements) => Some(elements.len()),
+            _ => None,
+        };
+        // A comma in a string, a call's arguments or a subscript is not the
+        // set's: one element, a parenthesized expression.
+        assert_eq!(set_len(right("SELECT 'x' IN ('a,b')")), None);
+        assert_eq!(set_len(right("SELECT 'x' IN ('it''s, ok')")), None);
+        assert_eq!(set_len(right("SELECT 1 IN (max(1, 2))")), None);
+        assert_eq!(set_len(right("SELECT 1 IN (1 IN (1, 2))")), None);
+        // Brackets and quotes in a set's elements do not hide its comma.
+        assert_eq!(set_len(right("SELECT 'x' IN ('a)', 'b')")), Some(2));
+        assert_eq!(set_len(right("SELECT 'x' IN (\"(\", 'b')")), Some(2));
+        assert_eq!(set_len(right("SELECT 1 IN (max(1, 2), 3)")), Some(2));
+        assert_eq!(set_len(right("SELECT 1 IN ((1), 2,)")), Some(2));
+        assert_eq!(set_len(right("SELECT 1 IN (1,)")), Some(1));
+        // A bracketed pair is no element, before as now.
+        assert!(parse("SELECT 1 IN ((1, 2))").is_err());
+
+        assert!(bracket_holds_a_comma("(a, b)"));
+        assert!(bracket_holds_a_comma("(f(a, b), c)"));
+        assert!(!bracket_holds_a_comma("(f(a, b)) , c"));
+        assert!(!bracket_holds_a_comma("(x['a,b'])"));
+        assert!(!bracket_holds_a_comma("('a,"));
+        assert!(!bracket_holds_a_comma("a, b"));
     }
 }

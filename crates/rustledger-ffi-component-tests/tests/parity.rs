@@ -1520,8 +1520,8 @@ fn depth_query_errors(store: &mut Store<Host>, inst: &Rustledger, q: &str) -> Re
     Ok(r.errors.into_iter().map(|e| e.message).collect())
 }
 
-/// An ordinary query on the same instance still answers.
-fn assert_instance_answers(store: &mut Store<Host>, inst: &Rustledger) -> Result<()> {
+/// A following ordinary query still answers.
+fn assert_next_query_answers(store: &mut Store<Host>, inst: &Rustledger) -> Result<()> {
     let r = inst.rustledger_ledger_ledger().call_query(
         store,
         DEPTH_LEDGER,
@@ -1533,8 +1533,8 @@ fn assert_instance_answers(store: &mut Store<Host>, inst: &Rustledger) -> Result
 }
 
 /// The deepest bracket nesting and bracket-plus-chain mix the parser
-/// accepts run in the component on wasmtime's default stack, and the
-/// instance answers afterwards. (60 brackets; and 55 brackets around an
+/// accepts run in the component on wasmtime's default stack, and a following
+/// query still answers. (60 brackets; and 55 brackets around an
 /// aggregate chain that brings the depth budget to exactly 720: 55 * 12 for
 /// the brackets, 12 for `sum(`, 48 for the `+`s.)
 #[test]
@@ -1546,6 +1546,8 @@ fn query_at_the_nesting_limits_runs_in_the_component() -> Result<()> {
     for q in [
         format!("SELECT {}1{}", "(".repeat(60), ")".repeat(60)),
         format!("SELECT {}1{}", "abs(".repeat(60), ")".repeat(60)),
+        // Nested single-element `IN` at its deepest, parsed once per level.
+        format!("SELECT {}1{}", "1 IN (".repeat(55), ")".repeat(55)),
         format!(
             "SELECT account, {}sum(number){} GROUP BY account",
             "abs(".repeat(59),
@@ -1561,11 +1563,11 @@ fn query_at_the_nesting_limits_runs_in_the_component() -> Result<()> {
         let errors = depth_query_errors(&mut store, &inst, &q)?;
         assert!(errors.is_empty(), "{errors:?}");
     }
-    assert_instance_answers(&mut store, &inst)
+    assert_next_query_answers(&mut store, &inst)
 }
 
 /// One step past each limit, and chains far past it, come back as the
-/// nesting error, and the same instance answers afterwards.
+/// nesting error, and a following query still answers.
 #[test]
 fn query_past_the_nesting_limits_is_refused_in_the_component() -> Result<()> {
     if !component_path().exists() {
@@ -1593,7 +1595,7 @@ fn query_past_the_nesting_limits_is_refused_in_the_component() -> Result<()> {
             errors.iter().any(|m| m.contains("nesting too deep")),
             "{errors:?}"
         );
-        assert_instance_answers(&mut store, &inst)?;
+        assert_next_query_answers(&mut store, &inst)?;
     }
     Ok(())
 }

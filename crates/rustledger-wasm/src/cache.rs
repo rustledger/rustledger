@@ -423,7 +423,14 @@ use crate::types::{Error, LedgerOptions};
 /// `option "name_equity" "capital"`), and a ledger whose `booking_method` was
 /// rejected now has `query_refused` set; an older blob would keep serving the
 /// old names, errors and answers.
-/// v91: loader v68, unchanged. ARCHIVED LAYOUT moved: the `Ledger` payload
+/// v92: loader v69, LOADER OUTPUT changed (#2925). Option values are read as
+/// beancount reads them, so the archived error list moves: a valid
+/// `account_rounding` no longer raises `E7007`, an unrecognized boolean word
+/// is the `E7011` warning instead of an `E7002` error, `option "plugin"` is
+/// `E7005` instead of `E7004`, the two dead tolerance options are `E7001`, and
+/// the tolerance maps accept `A:B:0.01` and reject `USD:-0.01`. An older blob
+/// would keep serving the old errors. (v91 is held by #2920.)
+/// v94: loader v69, unchanged. ARCHIVED LAYOUT moved: the `Ledger` payload
 /// gained `tolerance_multiplier`, which the padding a query inserts measures a
 /// balance's tolerance with, and `directive_lines` and `directive_file_ranks`,
 /// each directive's line and its file's place in the load, for the pad
@@ -437,8 +444,9 @@ use crate::types::{Error, LedgerOptions};
 /// `rledger check` does. The `open`s `auto_accounts` and `currency_accounts`
 /// make are at new lines (their place in the plugin's sorted list, as in
 /// beancount), so the archived lines and error locations for them move.
-/// (v88 was never released: #2920 held it before #2926 took v89.)
-pub const CACHE_VERSION: u32 = 91;
+/// (v88 and v91 were never released: #2920 held v88 before #2926 took v89,
+/// and held v91 before #2930 took v92. v93 is held by #2931.)
+pub const CACHE_VERSION: u32 = 94;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -470,7 +478,7 @@ pub const CACHE_VERSION: u32 = 91;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 68;
+const LOADER_CACHE_VERSION_PIN: u32 = 69;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

@@ -332,25 +332,18 @@ pub(crate) struct PadState {
     padding: FxHashMap<usize, Vec<rustledger_booking::PlannedPadding>>,
     /// The `pad`s that insert no padding, by index.
     unused: FxHashSet<usize>,
-    /// The padding inserted for each `balance` (the padded account and the
-    /// units), by the balance's index in the late stream, for the "pad an
-    /// entry with cost" check (`validators::balance::check_padding_at_cost`).
-    padded_for: FxHashMap<usize, Vec<PaddedFor>>,
+    /// Beancount's "pad an entry with cost" for each `balance` the plan
+    /// padded a currency held at cost for, with the padded account, by the
+    /// balance's index in the late stream. The plan derives it from each pad
+    /// group's own inventory (`rustledger_booking::PaddedAtCost`); the walk
+    /// only reports it, at the balance.
+    at_cost: FxHashMap<usize, Vec<(Account, rustledger_booking::PaddedAtCost)>>,
     /// Pad amounts that could not be computed or applied, by the index of
     /// the `balance` they were for.
     failed: FxHashMap<usize, rustledger_booking::PadError>,
     /// The unused `pad`s the walk has reached, for `check_unused_pads`.
     pub(crate) unused_found: Vec<UnusedPadFound>,
 }
-
-/// The padding planned for one `balance` by one pad group: the padded
-/// account, the units, and what the group held before it
-/// ([`rustledger_booking::PlannedPadding::held`]).
-pub(crate) type PaddedFor = (
-    Account,
-    rustledger_core::Amount,
-    Option<Vec<rustledger_core::Amount>>,
-);
 
 /// An unused `pad` the late walk reached (E2003).
 #[derive(Debug)]
@@ -369,14 +362,15 @@ impl PadState {
     /// those from the validator's own inventories.
     fn load(&mut self, plan: rustledger_booking::PadPlan) {
         self.padding.clear();
-        self.padded_for.clear();
+        self.at_cost.clear();
         for mut padding in plan.paddings {
             // Moved, not copied: the padding entry keeps no use for it.
-            let held = padding.held.take();
-            self.padded_for
-                .entry(padding.origin.balance)
-                .or_default()
-                .push((padding.target.clone(), padding.units.clone(), held));
+            if let Some(at_cost) = padding.at_cost.take() {
+                self.at_cost
+                    .entry(padding.origin.balance)
+                    .or_default()
+                    .push((padding.target.clone(), at_cost));
+            }
             self.padding
                 .entry(padding.origin.pad)
                 .or_default()
@@ -392,10 +386,14 @@ impl PadState {
         self.failed.get(&index)
     }
 
-    /// The padding inserted for the `balance` at `index`: the padded account
-    /// and the units, one entry per pad group that padded for it.
-    pub(crate) fn padded_for(&self, index: usize) -> &[PaddedFor] {
-        self.padded_for.get(&index).map_or(&[], Vec::as_slice)
+    /// The "pad an entry with cost" of the padding inserted for the
+    /// `balance` at `index`, one per pad group that padded a currency it
+    /// held at cost.
+    pub(crate) fn at_cost_of(
+        &self,
+        index: usize,
+    ) -> &[(Account, rustledger_booking::PaddedAtCost)] {
+        self.at_cost.get(&index).map_or(&[], Vec::as_slice)
     }
 
     /// The padding entries of the `pad` at `index`.
@@ -477,11 +475,6 @@ pub struct LedgerState {
     /// just the target's subtree, instead of an O(all-accounts) scan per
     /// assertion (`Account`'s `Ord`/`Borrow<str>` are lexical).
     inventory_accounts: BTreeSet<Account>,
-    /// The accounts some posting booked at cost, per currency: the only ones
-    /// that can hold a lot at cost, so the "pad an entry with cost" check
-    /// reads these under the padded account and no other
-    /// (`validators::balance::check_padding_at_cost`).
-    cost_accounts: FxHashMap<rustledger_core::Currency, BTreeSet<Account>>,
     /// Declared commodities.
     commodities: FxHashSet<rustledger_core::Currency>,
     /// The padding the late walk applies, and the unused pads it reached.

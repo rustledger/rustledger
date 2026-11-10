@@ -38,6 +38,9 @@ const DEFAULT: Decimal = rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER;
 /// Two lots of the same cost, told apart by a label.
 const LOTS_2: &str = "(5 STK {10 USD, 2024-01-02}, 5 STK {10 USD, 2024-01-02, \"b\"})";
 
+/// The two lots of the first tie shape, in posting order.
+const TIE_1: &str = "(10 STK {10 USD, 2024-01-02}, 10 STK {10 USD, 2024-01-03})";
+
 const HEAD: &str = "2024-01-01 open Equity:O\n2024-01-01 open Assets:B\n";
 
 struct Shape {
@@ -447,6 +450,75 @@ fn shapes_2901() -> Vec<Shape> {
             vec![],
             vec![],
             vec!["(20 USD, 5 STK, 10 STK {10 USD, 2024-01-02})"],
+        ),
+        // Ties in beancount's sort key (`Position.sortkey` reads no currency
+        // name and no lot date) keep the order the positions came in, as its
+        // stable sort leaves them: lots, then plain positions, then both.
+        shape(
+            "tie: two lots of one cost, in posting order",
+            format!(
+                "{}2024-01-02 * \"z\"\n  Assets:A:Z  10 STK {{10 USD}}\n  Assets:Cash  -100 USD\n\
+                 2024-01-03 * \"b\"\n  Assets:A:B  10 STK {{10 USD}}\n  Assets:Cash  -100 USD\n\
+                 2024-01-04 pad Assets:A Equity:O\n2024-01-10 balance Assets:A 25 STK\n",
+                opens(&[
+                    "Assets:A",
+                    "Assets:A:Z",
+                    "Assets:A:B",
+                    "Assets:Cash",
+                    "Equity:O"
+                ])
+            ),
+            vec![("Assets:A", dec!(5))],
+            vec![],
+            vec![],
+            vec![TIE_1, TIE_1],
+        ),
+        shape(
+            "tie: plain positions in posting order",
+            format!(
+                "{}2024-01-02 * \"g\"\n  Assets:A  5 XYZ\n  Assets:A  5 ABC\n  Assets:A  5 QQQ\n\
+                 \x20 Assets:A  5 MMM\n  Equity:O  -5 XYZ\n  Equity:O  -5 ABC\n  Equity:O  -5 QQQ\n\
+                 \x20 Equity:O  -5 MMM\n2024-01-03 * \"buy\"\n  Assets:A  10 STK {{10 USD}}\n\
+                 \x20 Assets:Cash  -100 USD\n2024-01-04 pad Assets:A Equity:O\n\
+                 2024-01-10 balance Assets:A 20 STK\n",
+                opens(&["Assets:A", "Assets:Cash", "Equity:O"])
+            ),
+            vec![("Assets:A", dec!(10))],
+            vec![],
+            vec![],
+            vec!["(5 XYZ, 5 ABC, 5 QQQ, 5 MMM, 10 STK {10 USD, 2024-01-03})"],
+        ),
+        shape(
+            "tie: plain positions in the reverse posting order",
+            format!(
+                "{}2024-01-02 * \"g\"\n  Assets:A  5 MMM\n  Assets:A  5 QQQ\n  Assets:A  5 ABC\n\
+                 \x20 Assets:A  5 XYZ\n  Equity:O  -5 MMM\n  Equity:O  -5 QQQ\n  Equity:O  -5 ABC\n\
+                 \x20 Equity:O  -5 XYZ\n2024-01-03 * \"buy\"\n  Assets:A  10 STK {{10 USD}}\n\
+                 \x20 Assets:Cash  -100 USD\n2024-01-04 pad Assets:A Equity:O\n\
+                 2024-01-10 balance Assets:A 20 STK\n",
+                opens(&["Assets:A", "Assets:Cash", "Equity:O"])
+            ),
+            vec![("Assets:A", dec!(10))],
+            vec![],
+            vec![],
+            vec!["(5 MMM, 5 QQQ, 5 ABC, 5 XYZ, 10 STK {10 USD, 2024-01-03})"],
+        ),
+        shape(
+            "tie: lots of several currencies in posting order",
+            format!(
+                "{}2024-01-02 * \"buy\"\n  Assets:A  1 BBB {{10 USD}}\n  Assets:A  1 AAA {{10 USD}}\n\
+                 \x20 Assets:A  1 YYY {{10 USD}}\n  Assets:A  1 CCC {{10 USD}}\n\
+                 \x20 Assets:Cash  -40 USD\n2024-01-04 pad Assets:A Equity:O\n\
+                 2024-01-10 balance Assets:A 3 AAA\n",
+                opens(&["Assets:A", "Assets:Cash", "Equity:O"])
+            ),
+            vec![("Assets:A", dec!(2))],
+            vec![],
+            vec![],
+            vec![
+                "(1 BBB {10 USD, 2024-01-02}, 1 AAA {10 USD, 2024-01-02}, \
+                 1 YYY {10 USD, 2024-01-02}, 1 CCC {10 USD, 2024-01-02})",
+            ],
         ),
         // A later balance just beyond the tolerance (0.016 against 0.01)
         // fails: pins the balance check's tolerance to the pad's.

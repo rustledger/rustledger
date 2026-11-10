@@ -410,11 +410,13 @@ there.
 0, commas, spaces and underscores are dropped, and exponents are accepted.
 
 A number rustledger's decimal type cannot hold exactly is invalid, though
-beancount accepts it: `NaN`, `Infinity`, a value outside `rust_decimal`'s range
+beancount accepts it: `NaN`, `sNaN`, `Infinity`, a value outside `rust_decimal`'s range
 (`1e100`, `1e-29`), a value with more digits than it holds
 (`0.0000000000000000000000000000001` is rejected, not rounded), and non-ASCII
 digits (`"١"`, `"１"`) in any numeric option value. `display_precision` holds
-at most 28 decimal places, where bean-query prints 29 or 30.
+at most 28 decimal places, where beancount keeps any number of places, and
+dropping a trailing zero to fit 96 bits lowers it
+(`USD:10000000000000000000000000000.0` reads as 0 places, beancount reads 1).
 
 The boolean options never give E7002: see
 [E7011](#e7011-unrecognized-boolean-option-value).

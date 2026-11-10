@@ -287,11 +287,16 @@ fn parse_beancount_decimal(value: &str) -> Result<Decimal, String> {
     if value.is_empty() {
         return Ok(Decimal::ZERO);
     }
-    let cleaned: String = value
+    // In beancount's order: `D()` drops commas and spaces, then `Decimal`
+    // strips surrounding whitespace, then drops every `_`. So whitespace left
+    // next to an `_` stays inside the number and makes it invalid (`"_\t1"`).
+    let cleaned: String = value.chars().filter(|c| !matches!(c, ',' | ' ')).collect();
+    let text: String = cleaned
+        .trim_matches(is_python_space)
         .chars()
-        .filter(|c| !matches!(c, ',' | ' ' | '_'))
+        .filter(|&c| c != '_')
         .collect();
-    let text = cleaned.trim_matches(is_python_space);
+    let text = text.as_str();
     let unsigned = text.trim_start_matches(['+', '-']);
     if ["nan", "snan", "inf", "infinity"]
         .iter()
@@ -388,7 +393,9 @@ const DECIMAL_MAX_MANTISSA: i128 = 79_228_162_514_264_337_593_543_950_335;
 /// The written scale is kept where it fits, since `display_precision` reads
 /// it: a trailing zero is dropped only while the scale is past 28 or the
 /// coefficient past 96 bits (`79228162514264337593543950335.0` is held). So
-/// `display_precision` reads at most 28 places, where beancount reads more.
+/// `display_precision` reads at most 28 places, where beancount keeps any
+/// number of places, and dropping a trailing zero to fit 96 bits lowers it
+/// (`USD:10000000000000000000000000000.0` reads as 0 places, beancount 1).
 ///
 /// Linear in the input's length: the value is untrusted ledger text, read on
 /// every LSP edit, so no step may rescan it per digit.
@@ -2510,6 +2517,20 @@ mod tests {
                 dec!(10000000000000000000000000000),
             ),
             ("79228162514264337593543950335.0", Decimal::MAX),
+            // 29 digits, so `must_pop` drops nothing: only the 96-bit loop
+            // brings these under 2^96 - 1.
+            (
+                "8000000000000000000000000000.0",
+                dec!(8000000000000000000000000000),
+            ),
+            (
+                "9999999999999999999999999999.0",
+                dec!(9999999999999999999999999999),
+            ),
+            (
+                "7922816251426433759354395034.0",
+                dec!(7922816251426433759354395034),
+            ),
         ] {
             assert_eq!(parse_beancount_decimal(value), Ok(expected), "{value}");
             assert_eq!(
@@ -2519,6 +2540,11 @@ mod tests {
             );
         }
         // Past 96 bits with no trailing zero to drop: not held.
+        // The same 29-digit coefficient, reached through an exponent.
+        assert_eq!(
+            parse_beancount_decimal("80000000000000000000000000000e-1"),
+            Ok(dec!(8000000000000000000000000000))
+        );
         assert!(parse_beancount_decimal("79228162514264337593543950336").is_err());
     }
 
@@ -2549,10 +2575,19 @@ mod tests {
     /// past that, as bean-check reports `0e99999999999999999999`.
     #[test]
     fn test_parse_beancount_decimal_zero_exponent_bounds() {
-        for value in ["0e999999999999999999", "0e-1000000000000000000", "0.00e100"] {
+        for value in [
+            "0e999999999999999999",
+            "0e-1000000000000000000",
+            "0.00e100",
+            "0e-1999999999999999997",
+        ] {
             assert_eq!(parse_beancount_decimal(value), Ok(Decimal::ZERO), "{value}");
         }
-        for value in ["0e1000000000000000000", "0e99999999999999999999"] {
+        for value in [
+            "0e1000000000000000000",
+            "0e99999999999999999999",
+            "0e-1999999999999999998",
+        ] {
             assert!(parse_beancount_decimal(value).is_err(), "{value}");
         }
     }
@@ -2577,6 +2612,15 @@ mod tests {
                 "{value:?}"
             );
         }
+        // Whitespace is stripped before `_` is dropped, as in CPython, so
+        // whitespace next to an `_` stays inside and is invalid (bean-check
+        // exit 1 on each).
+        for value in ["_\t1", "1\t_", "1\u{3000}_"] {
+            assert!(parse_beancount_decimal(value).is_err(), "{value:?}");
+        }
+        // `D()` drops the ASCII space first, so `"_ 1"` is `"_1"`, which is 1
+        // (bean-check exit 0).
+        assert_eq!(parse_beancount_decimal("_ 1"), Ok(dec!(1)));
     }
 
     /// An empty `tolerance_multiplier` is 0, as beancount's `D("")` is, with

@@ -953,7 +953,7 @@ fn run_query_with_tables(
 
 /// The error every query of a refused [`batch`] reports; the load errors that
 /// caused it are in the batch's `load`.
-const BATCH_REFUSED: &str = "Cannot execute query: a load error leaves the ledger incomplete (a parse or booking error); see the load errors";
+const BATCH_REFUSED: &str = "Cannot execute query: a load error leaves the ledger incomplete (a parse or booking error, or an invalid booking_method); see the load errors";
 
 /// `query.batch`: load `source` once, then run several queries against it,
 /// by [`query`]'s rule (#2882): when a load error blocks queries (a parse

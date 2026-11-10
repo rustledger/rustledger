@@ -118,6 +118,49 @@ pub fn resolve_leaf_account(root: &str, leaf: &str) -> String {
     format!("{root}:{leaf}")
 }
 
+/// Where an `option` line was written: its file and 1-based line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionSite {
+    /// The file the option is in, as the loader names it.
+    pub file: String,
+    /// The 1-based line of the `option`.
+    pub line: usize,
+}
+
+/// An option value that was rejected (and so not applied) in a way that
+/// changes what the ledger's figures mean.
+///
+/// Today only `booking_method`: see [`Options::query_refusal`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectedOption {
+    /// The option's name.
+    pub key: String,
+    /// The value that was rejected.
+    pub value: String,
+    /// Where the option was written, when the loader knows (an option set
+    /// through [`Options::set`] has no site).
+    pub site: Option<OptionSite>,
+}
+
+impl RejectedOption {
+    /// Why a query over the ledger refuses to answer: the option, its bad
+    /// value and where it is, and the method the figures would be booked
+    /// with instead. One text for every surface that refuses on it.
+    #[must_use]
+    pub fn query_refusal_message(&self, booked_with: &str) -> String {
+        let site = self
+            .site
+            .as_ref()
+            .map(|s| format!(" at {}:{}", s.file, s.line))
+            .unwrap_or_default();
+        format!(
+            "option \"{}\" \"{}\"{site} is invalid (E7002); refusing to derive figures, \
+             which would be booked with {booked_with} rather than the method the ledger asks for",
+            self.key, self.value,
+        )
+    }
+}
+
 /// Option validation warning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionWarning {
@@ -289,6 +332,11 @@ pub struct Options {
 
     /// Validation warnings collected during parsing.
     pub warnings: Vec<OptionWarning>,
+
+    /// The first `booking_method` value that was rejected, if any. The
+    /// option keeps its previous method, but a query over the ledger refuses
+    /// (see [`Self::query_refusal`]).
+    pub rejected_booking_method: Option<RejectedOption>,
 }
 
 impl Default for Options {
@@ -501,6 +549,7 @@ impl Options {
             custom: FxHashMap::default(),
             set_options: FxHashSet::default(),
             warnings: Vec::new(),
+            rejected_booking_method: None,
         }
     }
 
@@ -537,6 +586,47 @@ impl Options {
     /// top-level file's value governs, so an included sub-ledger cannot change
     /// how the whole tree books or balances.
     pub fn set_scoped(&mut self, key: &str, value: &str, top_level: bool) {
+        self.set_scoped_at(key, value, top_level, None);
+    }
+
+    /// [`Self::set_scoped`] for an option written at `site`, so a rejection
+    /// that refuses queries ([`Self::query_refusal`]) can say where it is.
+    pub fn set_scoped_at(
+        &mut self,
+        key: &str,
+        value: &str,
+        top_level: bool,
+        site: Option<OptionSite>,
+    ) {
+        let had_rejection = self.rejected_booking_method.is_some();
+        self.set_scoped_inner(key, value, top_level);
+        if !had_rejection && let Some(rejected) = &mut self.rejected_booking_method {
+            rejected.site = site;
+        }
+    }
+
+    /// The rejected option that stops a query over this ledger from
+    /// answering, if any: an invalid `booking_method` (#2911).
+    ///
+    /// The option keeps its previous method, as in beancount, so `check`
+    /// reports the E7002 and books as before. A query or report does not
+    /// answer, though: every lot reduction would be booked with a method the
+    /// user did not ask for (`fifo` was meant as FIFO and is booked STRICT),
+    /// and the figures would look right.
+    ///
+    /// Stricter than Python: bean-query answers here, with the figures
+    /// booked under the default STRICT method. We refuse because those
+    /// figures silently use a booking method the ledger did not ask for.
+    /// The other rejected options keep their default and answer: none of
+    /// them changes which lots a sale consumes.
+    ///
+    /// Part of the query rule `Ledger::blocks_queries` applies.
+    #[must_use]
+    pub const fn query_refusal(&self) -> Option<&RejectedOption> {
+        self.rejected_booking_method.as_ref()
+    }
+
+    fn set_scoped_inner(&mut self, key: &str, value: &str, top_level: bool) {
         if !top_level && KNOWN_OPTIONS.contains(&key) && !ACCUMULATE_ACROSS_INCLUDES.contains(&key)
         {
             // A deprecated option is still deprecated when it is also ignored,
@@ -794,6 +884,13 @@ impl Options {
                     "NONE",
                 ];
                 if !valid_methods.contains(&value) {
+                    if self.rejected_booking_method.is_none() {
+                        self.rejected_booking_method = Some(RejectedOption {
+                            key: key.to_string(),
+                            value: value.to_string(),
+                            site: None,
+                        });
+                    }
                     return self.reject(
                         "E7002",
                         key,
@@ -2033,5 +2130,49 @@ mod tests {
             Some(&rust_decimal_macros::dec!(0.01))
         );
         assert_eq!(opts.display_precision.get("USD"), Some(&2));
+    }
+
+    /// #2911: only a rejected `booking_method` refuses queries, and the
+    /// refusal names the option, its value and its line.
+    #[test]
+    fn test_query_refusal_only_for_rejected_booking_method() {
+        let mut opts = Options::new();
+        opts.set_scoped_at(
+            "booking_method",
+            "fifo",
+            true,
+            Some(OptionSite {
+                file: "main.beancount".to_string(),
+                line: 3,
+            }),
+        );
+        let refusal = opts
+            .query_refusal()
+            .expect("a rejected booking_method refuses");
+        let message = refusal.query_refusal_message("STRICT");
+        assert!(
+            message.contains("\"booking_method\" \"fifo\" at main.beancount:3"),
+            "{message}"
+        );
+        assert!(message.contains("booked with STRICT"), "{message}");
+
+        let mut opts = Options::new();
+        opts.set("booking_method", "FIFO");
+        assert!(opts.query_refusal().is_none(), "a valid method answers");
+
+        let mut opts = Options::new();
+        opts.set("account_rounding", "bad:leaf");
+        opts.set("name_equity", "capital");
+        opts.set("plugin_processing_mode", "bogus");
+        assert!(
+            opts.query_refusal().is_none(),
+            "other rejected options keep their default and answer"
+        );
+
+        // An ignored `booking_method` in an included file is not validated,
+        // so it does not refuse either.
+        let mut opts = Options::new();
+        opts.set_scoped("booking_method", "fifo", false);
+        assert!(opts.query_refusal().is_none());
     }
 }

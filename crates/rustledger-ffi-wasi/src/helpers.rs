@@ -190,7 +190,7 @@ pub fn load_source(source: &str) -> LoadResult {
     // `\` on Windows, while declared include paths use `/`.
     let normalized_includes: Vec<String> =
         includes.iter().map(|i| i.path.replace('\\', "/")).collect();
-    let (errors, error_blocks_queries): (Vec<Error>, Vec<bool>) = ledger
+    let (mut errors, mut error_blocks_queries): (Vec<Error>, Vec<bool>) = ledger
         .errors
         .iter()
         .filter(|e| {
@@ -204,6 +204,7 @@ pub fn load_source(source: &str) -> LoadResult {
         })
         .map(|e| (ledger_error_to_ffi(e), e.blocks_queries()))
         .unzip();
+    push_query_refusal(&ledger, &mut errors, &mut error_blocks_queries);
 
     let mut options = build_ledger_options(&ledger.options, &ledger.display_context);
     let mut commodity_list: Vec<_> = commodities.into_iter().collect();
@@ -442,12 +443,13 @@ pub fn load_file_with_fs(
         }
     }
 
-    let errors: Vec<Error> = ledger.errors.iter().map(ledger_error_to_ffi).collect();
-    let error_blocks_queries: Vec<bool> = ledger
+    let mut errors: Vec<Error> = ledger.errors.iter().map(ledger_error_to_ffi).collect();
+    let mut error_blocks_queries: Vec<bool> = ledger
         .errors
         .iter()
         .map(rustledger_loader::LedgerError::blocks_queries)
         .collect();
+    push_query_refusal(&ledger, &mut errors, &mut error_blocks_queries);
     let options = build_ledger_options(&ledger.options, &ledger.display_context);
     let plugins: Vec<Plugin> = ledger
         .plugins
@@ -485,6 +487,26 @@ pub fn load_file_with_fs(
 /// (`"validate"`, `"plugin"`) maps to `"validate"`. The `ledger.validate`/
 /// `query` handlers gate semantic validation on parse-phase errors only, so
 /// non-parse diagnostics must not be reported as `"parse"`.
+/// Add the refusal a rejected option makes ([`rustledger_loader::Ledger::query_refusal`],
+/// an invalid `booking_method`, #2911) to an FFI error list, flagged as
+/// blocking, so the FFI applies the whole query rule
+/// ([`rustledger_loader::Ledger::blocks_queries`]) and says why it refused.
+/// The FFI lists no option warnings, so this is the option's only error here.
+fn push_query_refusal(
+    ledger: &rustledger_loader::Ledger,
+    errors: &mut Vec<Error>,
+    error_blocks_queries: &mut Vec<bool>,
+) {
+    if let Some(refusal) = ledger.query_refusal() {
+        debug_assert!(refusal.blocks_queries());
+        // Not "parse" on the wire, though options are read at parse time:
+        // a parse-phase error there stops semantic validation, and the
+        // ledger parsed; `rledger check` still validates it.
+        errors.push(ledger_error_to_ffi(&refusal).validate_phase());
+        error_blocks_queries.push(true);
+    }
+}
+
 fn ledger_error_to_ffi(e: &rustledger_loader::LedgerError) -> Error {
     let mut err = Error::new(e.message.clone());
     if let Some(loc) = &e.location {

@@ -210,6 +210,10 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
 
     match process(raw, &load_options) {
         Ok(ledger) => {
+            // The whole query rule (`Ledger::blocks_queries`), read before the
+            // fields move out: a blocking error, or a rejected
+            // `booking_method` (#2911), whose E7002 is in `option_errors`.
+            let query_blocked = ledger.blocks_queries();
             let source_map = ledger.source_map;
             let (directives, directive_spans) = ledger
                 .directives
@@ -217,10 +221,6 @@ pub fn load_and_book(source: &str) -> ProcessedLedger {
                 .map(|s| (s.value, (s.span, s.file_id)))
                 .unzip();
 
-            let query_blocked = ledger
-                .errors
-                .iter()
-                .any(rustledger_loader::LedgerError::blocks_queries);
             let errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
 
             ProcessedLedger {

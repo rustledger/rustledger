@@ -2539,12 +2539,12 @@ mod tests {
                 "{value}"
             );
         }
-        // Past 96 bits with no trailing zero to drop: not held.
         // The same 29-digit coefficient, reached through an exponent.
         assert_eq!(
             parse_beancount_decimal("80000000000000000000000000000e-1"),
             Ok(dec!(8000000000000000000000000000))
         );
+        // Past 96 bits with no trailing zero to drop: not held.
         assert!(parse_beancount_decimal("79228162514264337593543950336").is_err());
     }
 

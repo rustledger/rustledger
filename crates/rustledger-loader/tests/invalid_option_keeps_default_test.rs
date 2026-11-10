@@ -37,14 +37,17 @@ fn codes(src: &str) -> (Vec<String>, rustledger_loader::Options) {
     (codes, ledger.options)
 }
 
-/// The issue's shape: only the option error, and `Equity:A` stays valid. (The
-/// issue's own `"A😀"` is an invalid root only under #2908's strict account
-/// check, which this shares through `is_valid_account_root`.)
+/// The issue's example, and a lowercase root: only the option error, and
+/// `Equity:A` stays valid, as bean-check 3.2.3 reports it.
 #[test]
 fn test_load_invalid_name_option_keeps_default_root() {
-    let (codes, options) = codes("option \"name_equity\" \"capital\"\n2024-01-01 open Equity:A\n");
-    assert_eq!(codes, ["E7008"]);
-    assert_eq!(options.name_equity, "Equity");
+    for root in ["A\u{1F600}", "capital"] {
+        let (codes, options) = codes(&format!(
+            "option \"name_equity\" \"{root}\"\n2024-01-01 open Equity:A\n"
+        ));
+        assert_eq!(codes, ["E7008"], "{root}");
+        assert_eq!(options.name_equity, "Equity", "{root}");
+    }
 }
 
 /// A valid rename followed by an invalid one keeps the valid rename, so
@@ -78,4 +81,26 @@ fn test_load_invalid_account_option_keeps_earlier_valid_leaf() {
     assert_eq!(codes, ["E7002", "E7002"]);
     assert_eq!(options.previous_balances_account(), "Equity:Anfang");
     assert_eq!(options.account_rounding, None);
+}
+
+/// A rejected `booking_method` keeps STRICT, as beancount does: the sale
+/// below matches two lots, so STRICT reports it as ambiguous (bean-check:
+/// `Error for option 'booking_method': 'fifo'` and `Ambiguous matches`).
+/// rledger upper-cased the value and booked FIFO, with no error at all.
+#[test]
+fn test_load_lowercase_booking_method_books_strict() {
+    let (codes, options) = codes(
+        "option \"booking_method\" \"fifo\"\n\
+         2024-01-01 open Assets:A\n\
+         2024-01-01 open Equity:O\n\
+         2024-01-02 * \"b1\"\n  Assets:A  1 X {1 USD}\n  Equity:O\n\
+         2024-01-03 * \"b2\"\n  Assets:A  1 X {2 USD}\n  Equity:O\n\
+         2024-01-04 * \"s\"\n  Assets:A  -1 X {}\n  Equity:O\n",
+    );
+    assert_eq!(codes, ["E7002", "E4003"]);
+    assert_eq!(options.booking_method, "STRICT");
+    assert_eq!(
+        options.query_refusal().map(|r| r.value.as_str()),
+        Some("fifo")
+    );
 }

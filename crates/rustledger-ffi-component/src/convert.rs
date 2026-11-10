@@ -847,10 +847,15 @@ fn account_types_from(
     }
 }
 
+/// The ledger-wide booking method for the held options' `booking-method`,
+/// resolved by the loader's one rule, [`rustledger_loader::Options::effective_booking_method`],
+/// over the loader's default, rather than parsed here (#2911): the value is
+/// read back through `Options::set`, so it is validated as the loader
+/// validates the option.
 fn booking_method_from(booking_method: &str) -> rustledger_core::BookingMethod {
-    booking_method
-        .parse()
-        .unwrap_or(rustledger_core::BookingMethod::Strict)
+    let mut options = rustledger_loader::Options::new();
+    options.set("booking_method", booking_method);
+    options.effective_booking_method(rustledger_loader::LoadOptions::default().booking_method)
 }
 
 /// Run one query over pad-expanded, spanned `directives` (their source

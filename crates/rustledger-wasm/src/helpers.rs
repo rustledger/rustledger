@@ -432,20 +432,12 @@ fn options_from_raw(
     opts
 }
 
+/// [`LedgerOptions`] for raw parsed option tuples, read through the loader's
+/// [`rustledger_loader::Options`] like every other raw-option reader here, so
+/// no surface reads an option value the loader would treat differently
+/// (#2911).
 pub fn extract_options(options: &[(String, String, rustledger_parser::Span)]) -> LedgerOptions {
-    let mut ledger_options = LedgerOptions::default();
-
-    for (key, value, _span) in options {
-        match key.as_str() {
-            "title" => ledger_options.title = Some(value.clone()),
-            "operating_currency" => {
-                ledger_options.operating_currencies.push(value.clone());
-            }
-            _ => {}
-        }
-    }
-
-    ledger_options
+    extract_loader_options(&options_from_raw(options))
 }
 
 /// Extract [`LedgerOptions`] from loader's [`rustledger_loader::Options`] struct.

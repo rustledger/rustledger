@@ -39,7 +39,7 @@ use super::load::{load_source, warn_load_errors};
 use crate::cmd::messages::Messages;
 use crate::cmd::report_cmd::Diagnostics;
 
-pub use super::closed_nonempty::OutputFormat;
+use super::OutputFormat;
 
 /// Report control characters in the ledger's strings.
 #[derive(Parser, Debug)]

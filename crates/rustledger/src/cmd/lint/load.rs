@@ -318,37 +318,52 @@ pub struct TransactionSite {
     pub unidentified: Option<&'static str>,
 }
 
-/// Gives each transaction its [`TransactionSite`].
+/// Numbers the transactions with no source location across a whole run.
 ///
-/// Keep one for the whole run, so that the transactions with no source
-/// location are numbered apart across inputs, and [`Self::count`] each
-/// ledger before asking for its sites.
+/// Keep one for the run, so that such transactions are numbered apart
+/// across inputs, and take each ledger's sites from
+/// [`Self::for_ledger`]: the per-ledger counts live in the view it returns,
+/// so a site can never be read against another ledger's counts.
 #[derive(Default)]
 pub struct TransactionSites {
-    /// How many transactions each source location of the current ledger
-    /// holds: more than one means a plugin inserted a transaction at its
-    /// parent's location.
-    per_location: HashMap<(u16, usize), usize>,
     /// Transactions with no source location so far.
     unlocated: usize,
 }
 
 impl TransactionSites {
-    /// Count the transactions at each source location of `ledger`.
-    pub fn count(&mut self, ledger: &Ledger) {
-        self.per_location.clear();
+    /// The sites of `ledger`'s transactions.
+    pub fn for_ledger<'a>(&'a mut self, ledger: &'a Ledger) -> LedgerSites<'a> {
+        let mut per_location: HashMap<(u16, usize), usize> = HashMap::new();
         for directive in &ledger.directives {
             if matches!(directive.value, Directive::Transaction(_)) {
-                *self
-                    .per_location
+                *per_location
                     .entry((directive.file_id, directive.span.start))
                     .or_default() += 1;
             }
         }
+        LedgerSites {
+            ledger,
+            per_location,
+            unlocated: &mut self.unlocated,
+        }
     }
+}
 
-    /// The site of `directive`, a transaction of `ledger`.
-    pub fn site(&mut self, ledger: &Ledger, directive: &Spanned<Directive>) -> TransactionSite {
+/// One ledger's [`TransactionSite`]s, from [`TransactionSites::for_ledger`].
+pub struct LedgerSites<'a> {
+    ledger: &'a Ledger,
+    /// How many transactions each source location of the ledger holds:
+    /// more than one means a plugin inserted a transaction at its parent's
+    /// location.
+    per_location: HashMap<(u16, usize), usize>,
+    /// The run's count of transactions with no source location.
+    unlocated: &'a mut usize,
+}
+
+impl LedgerSites<'_> {
+    /// The site of `directive`, a transaction of this ledger.
+    pub fn site(&mut self, directive: &Spanned<Directive>) -> TransactionSite {
+        let ledger = self.ledger;
         if let Some(source) = ledger.source_map.get(directive.file_id as usize) {
             let (line, _) = source.line_col(directive.span.start);
             let (_, last) = span_lines(source, directive.span);
@@ -367,7 +382,7 @@ impl TransactionSites {
                 ),
             }
         } else {
-            self.unlocated += 1;
+            *self.unlocated += 1;
             let (file, line) = ledger
                 .source_map
                 .placeholder(directive.file_id)
@@ -376,7 +391,7 @@ impl TransactionSites {
                     |(name, line)| (name.display().to_string(), line as usize),
                 );
             TransactionSite {
-                key: (PathBuf::from(format!("<unlocated {}>", self.unlocated)), 0),
+                key: (PathBuf::from(format!("<unlocated {}>", *self.unlocated)), 0),
                 file,
                 line,
                 lines: None,
@@ -712,14 +727,14 @@ mod tests {
         for (i, error) in ledger.errors.iter().enumerate() {
             index.insert(i, error);
         }
-        let mut sites = TransactionSites::default();
-        sites.count(&ledger);
+        let mut run = TransactionSites::default();
+        let mut sites = run.for_ledger(&ledger);
         let found: Vec<(usize, BTreeSet<usize>, Option<&str>)> = ledger
             .directives
             .iter()
             .filter(|d| matches!(d.value, Directive::Transaction(_)))
             .map(|d| {
-                let site = sites.site(&ledger, d);
+                let site = sites.site(d);
                 (site.line, index.on_transaction(d, &site), site.unidentified)
             })
             .collect();

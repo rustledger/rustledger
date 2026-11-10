@@ -2745,6 +2745,10 @@ fn test_lint_every_lint_exits_two_when_it_cannot_answer() {
         assert_eq!(code, 2, "{lint}");
         let (_, envelope, _) = run_in(tmp.path(), &["lint", lint, missing]);
         assert_eq!(envelope["ok"], false, "{lint}: {envelope}");
+        assert_eq!(
+            envelope["error"]["code"], "FILE_NOT_FOUND",
+            "{lint}: {envelope}"
+        );
     }
     // `closed-nonempty` refuses load errors and a failed booking or plugin.
     for (file, says) in [
@@ -2778,6 +2782,18 @@ fn test_lint_every_lint_exits_two_when_it_cannot_answer() {
         &["lint", "transfers", "--apply", broken.to_str().unwrap()],
     );
     assert_eq!(code, 2);
+    let (_, envelope, _) = run_in(
+        tmp.path(),
+        &["lint", "transfers", "--apply", broken.to_str().unwrap()],
+    );
+    assert_eq!(envelope["ok"], false, "{envelope}");
+    assert_eq!(envelope["error"]["code"], "COMMAND_FAILED", "{envelope}");
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("cannot inspect source with load errors")),
+        "{envelope}"
+    );
 }
 
 /// `control-chars` answers over a file with load errors, and the envelope's

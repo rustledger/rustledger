@@ -23,8 +23,10 @@
 //! either would be an answer the lint cannot vouch for.
 
 use anyhow::Result;
-use clap::{Parser, ValueEnum};
+use clap::Parser;
 use rustledger_validate::ErrorCode;
+
+use super::OutputFormat;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::process::ExitCode;
@@ -32,16 +34,6 @@ use std::process::ExitCode;
 /// Validate code for "account closed with a non-zero balance", sourced from the
 /// canonical [`ErrorCode`] so it can't drift from the enum.
 const CLOSE_NONEMPTY_CODE: &str = ErrorCode::AccountCloseNotEmpty.code();
-
-/// Output format for the report.
-#[derive(Debug, Clone, Copy, Default, ValueEnum)]
-pub enum OutputFormat {
-    /// Human-readable text (default).
-    #[default]
-    Text,
-    /// JSON: a single object with a `findings` array.
-    Json,
-}
 
 /// Report accounts that are closed while still holding a non-zero balance.
 #[derive(Parser, Debug)]

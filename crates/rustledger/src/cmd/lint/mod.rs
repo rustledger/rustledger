@@ -11,7 +11,7 @@
 
 use crate::cmd::report_cmd::Diagnostics;
 use anyhow::Result;
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::process::ExitCode;
 
 pub mod closed_nonempty;
@@ -19,6 +19,17 @@ pub mod control_chars;
 pub mod linked_transit;
 pub mod load;
 pub mod transfers;
+
+/// Output format of the lints' reports (`linked-transit`, `closed-nonempty`,
+/// `control-chars`; `transfers` has its own).
+#[derive(Debug, Clone, Copy, Default, ValueEnum)]
+pub enum OutputFormat {
+    /// Human-readable text (default).
+    #[default]
+    Text,
+    /// JSON: a single object with a `findings` array.
+    Json,
+}
 
 /// Run non-fatal advisory passes over one or more beancount files.
 #[derive(Parser, Debug)]

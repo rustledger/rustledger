@@ -45,7 +45,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use super::closed_nonempty::OutputFormat;
+use super::OutputFormat;
 use super::load::{ErrorIndex, TransactionSite, TransactionSites, describe_error, load_booked};
 use crate::cmd::messages::Messages;
 use crate::cmd::report_cmd::{Diagnostic, Diagnostics};
@@ -341,7 +341,7 @@ pub fn run_with_writer<W: std::io::Write>(
                 on_leg: false,
             });
         }
-        sites.count(&ledger);
+        let mut ledger_sites = sites.for_ledger(&ledger);
         for directive in &ledger.directives {
             let txn = match &directive.value {
                 Directive::Open(open) => {
@@ -373,7 +373,7 @@ pub fn run_with_writer<W: std::io::Write>(
             // two transactions. A plugin-inserted one may have no source
             // location, or reuse its parent's: neither identifies it, so
             // its link is `ambiguous`, never merged into a match.
-            let site = sites.site(&ledger, directive);
+            let site = ledger_sites.site(directive);
             let errors = on_transactions.on_transaction(directive, &site);
             let TransactionSite {
                 key,

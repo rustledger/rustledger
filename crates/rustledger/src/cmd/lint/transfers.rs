@@ -85,10 +85,12 @@ pub struct Args {
 
 /// Run the lint.
 ///
-/// Exit code: `0` if no matches above the threshold, `0` if matches were
-/// found and reported (this is a lint, not a check — finding matches is not
-/// a failure). Returns a non-zero `ExitCode` only on hard errors (file not
-/// found, parse failure, etc., propagated via `anyhow::Error`).
+/// Exit code: `0` when it answered, whether or not it found matches (this
+/// is a lint, not a check: finding matches is not a failure). A read-only run
+/// over a file with load errors still answers, with a warning. When it
+/// cannot answer (a missing file, or `--apply` over a file with load errors)
+/// it returns an `Err`, and `rledger lint` exits 2
+/// ([`super::ERROR_EXIT_CODE`]).
 ///
 /// # Errors
 /// - Fails if any input file does not exist or cannot be read.

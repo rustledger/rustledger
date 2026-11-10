@@ -19,9 +19,9 @@
 use super::ast::AstNode as _; // brings `Directive::can_cast` into scope
 use super::convert::{
     DescendantsWalkResult, HeaderEnd, TopLevelWalkResult, body_tag_joins_transaction,
-    classify_recovery_error, cost_spec_from_tokens, decode_string_token, is_comment_kind,
-    is_section_marker, is_trivia_kind, meta_value_from_tokens, parse_date_token,
-    parse_decimal_token, tags_after_posting_error,
+    classify_recovery_error, cost_spec_from_tokens, decode_string_token, has_stray_bom,
+    is_comment_kind, is_section_marker, is_trivia_kind, meta_value_from_tokens, parse_date_token,
+    parse_decimal_token, tags_after_posting_error, token_has_stray_bom,
 };
 use rowan::{Language, NodeOrToken};
 use rustledger_core::cost::CostSpec;
@@ -932,7 +932,7 @@ impl DescendantsWalker<'_> {
         if kind == K::BOM {
             return;
         }
-        let has_bom = text.contains(crate::bom::BOM_CHAR);
+        let has_bom = token_has_stray_bom(kind, text);
         let is_error_token = kind == K::ERROR_TOKEN;
         // The ERROR_NODE check is only consulted for tokens whose emission depends
         // on it; gate the rest out fast (most tokens are plain whitespace/idents).
@@ -953,7 +953,7 @@ impl DescendantsWalker<'_> {
                 .account_occurrences
                 .push(Spanned::new(Account::new(text), span));
         }
-        // Inline errors: a BOM byte (-> BomInDirectiveBody) or ERROR_TOKEN
+        // Inline errors: a stray BOM byte (-> BomInDirectiveBody) or ERROR_TOKEN
         // (-> SyntaxError) in a recognized directive; skip inside ERROR_NODE.
         if (!has_bom && !is_error_token) || in_error_node {
             return;
@@ -1329,10 +1329,11 @@ fn emit_error_node_line(
     let Some(ls) = line_start else { return };
     let span = Span::new(ls + bom_offset as usize, end + bom_offset as usize);
     let line_text = stripped.get(ls..end).unwrap_or("");
-    let primary = classify_recovery_error(line_text, span);
+    let stray_bom = has_stray_bom(invalid, stripped);
+    let primary = classify_recovery_error(line_text, stray_bom, span);
     let primary_is_bom = matches!(primary.kind, crate::ParseErrorKind::BomInDirectiveBody);
     out.push(primary);
-    if !primary_is_bom && line_text.contains(crate::bom::BOM_CHAR) {
+    if !primary_is_bom && stray_bom {
         out.push(
             crate::ParseError::new(crate::ParseErrorKind::BomInDirectiveBody, span)
                 .with_hint(crate::diagnostics::BOM_REMOVAL_HINT),

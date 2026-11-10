@@ -261,6 +261,48 @@ pub struct Ledger {
 }
 
 impl Ledger {
+    /// Whether a query or report over this ledger refuses to answer: one of
+    /// its errors blocks queries ([`LedgerError::blocks_queries`]: a parse
+    /// error, a file that could not be read or decrypted, a booking failure)
+    /// or a rejected option would change its figures
+    /// ([`Options::query_refusal`]: an invalid `booking_method` whose ledger
+    /// is booked with a method other than the one it asked for, #2911).
+    ///
+    /// The whole rule, for every surface that answers queries over a loaded
+    /// ledger, so none of them can apply half of it.
+    #[must_use]
+    pub fn blocks_queries(&self) -> bool {
+        self.errors.iter().any(LedgerError::blocks_queries) || self.query_refusal().is_some()
+    }
+
+    /// The reason a rejected option stops queries over this ledger, as an
+    /// error a surface can list beside its other errors: the refusal message
+    /// of [`Options::query_refusal`], at the option's line, flagged so
+    /// [`LedgerError::blocks_queries`] holds for it. `None` when no option
+    /// refuses.
+    ///
+    /// For surfaces that report only `errors`, not the option warnings: the
+    /// E7002 itself is on `options.warnings`, so a surface listing both must
+    /// not list this as well.
+    #[must_use]
+    pub fn query_refusal(&self) -> Option<LedgerError> {
+        let rejected = self.options.query_refusal(self.booking_method)?;
+        let mut err = LedgerError::error(
+            "E7002",
+            rejected.query_refusal_message(&self.booking_method.to_string()),
+        )
+        .with_phase("parse");
+        err.option_refusal = true;
+        if let Some(site) = &rejected.site {
+            err = err.with_location(ErrorLocation {
+                file: site.file.clone().into(),
+                line: site.line,
+                column: 1,
+            });
+        }
+        Some(err)
+    }
+
     /// Return the directive stream merged with synthesized
     /// pad-equivalent transactions, suitable for inventory /
     /// balance math.
@@ -372,6 +414,9 @@ pub struct LedgerError {
     /// Whether this is a load error that stops a query from answering
     /// ([`LoadError::blocks_queries`]). See [`Self::blocks_queries`].
     blocking_load: bool,
+    /// Whether this is [`Ledger::query_refusal`]: a rejected option that
+    /// would change the ledger's figures. See [`Self::blocks_queries`].
+    option_refusal: bool,
 }
 
 /// Error severity level.
@@ -412,6 +457,7 @@ impl LedgerError {
             booking_failure: false,
             plugin_failure: false,
             blocking_load: false,
+            option_refusal: false,
         }
     }
 
@@ -429,6 +475,7 @@ impl LedgerError {
             booking_failure: false,
             plugin_failure: false,
             blocking_load: false,
+            option_refusal: false,
         }
     }
 
@@ -481,18 +528,19 @@ impl LedgerError {
 
     /// Whether this error stops a query over the ledger from answering: a
     /// load error that blocks ([`LoadError::blocks_queries`]: a parse error,
-    /// a decryption failure, an I/O error other than not-found) or a booking
-    /// failure ([`Self::is_booking_failure`]). Every other error, including
-    /// the other load errors (an include of a missing file, an include cycle,
-    /// ...), a validation error and a plugin error, is reported beside the
-    /// rows.
+    /// a decryption failure, an I/O error other than not-found), a booking
+    /// failure ([`Self::is_booking_failure`]), or the refusal
+    /// [`Ledger::query_refusal`] makes for a rejected `booking_method`. Every
+    /// other error, including the other load errors (an include of a missing
+    /// file, an include cycle, ...), a validation error and a plugin error, is
+    /// reported beside the rows.
     ///
     /// The rule for every file-based query surface (#2861); see
     /// [`LoadError::blocks_queries`] for the rule and where it differs from
     /// `bean-query`.
     #[must_use]
     pub const fn blocks_queries(&self) -> bool {
-        self.blocking_load || self.booking_failure
+        self.blocking_load || self.booking_failure || self.option_refusal
     }
 
     /// Set the processing phase for this error.
@@ -2083,6 +2131,7 @@ fn ledger_errors_extend(
             booking_failure: false,
             plugin_failure: false,
             blocking_load: false,
+            option_refusal: false,
         });
     }
 }

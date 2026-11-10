@@ -49,6 +49,11 @@ pub struct LoadResult {
     /// outright. Every other error, a plugin's among them, is reported beside
     /// the rows.
     pub error_blocks_queries: Vec<bool>,
+    /// Why a query over the source refuses though no error blocks it: a
+    /// rejected `booking_method`
+    /// ([`rustledger_loader::Ledger::query_refusal`]). Listed only on
+    /// query results, not among `errors`.
+    pub query_refusal: Option<Error>,
     pub options: LedgerOptions,
     pub plugins: Vec<Plugin>,
     pub includes: Vec<Include>,
@@ -56,10 +61,11 @@ pub struct LoadResult {
 
 impl LoadResult {
     /// Whether a query over this load refuses: one of its errors blocks
-    /// queries (see [`Self::error_blocks_queries`]).
+    /// queries (see [`Self::error_blocks_queries`]), or
+    /// [`Self::query_refusal`] holds a reason.
     #[must_use]
     pub fn blocks_queries(&self) -> bool {
-        self.error_blocks_queries.iter().any(|&blocks| blocks)
+        self.error_blocks_queries.iter().any(|&blocks| blocks) || self.query_refusal.is_some()
     }
 }
 
@@ -119,6 +125,7 @@ pub fn load_source(source: &str) -> LoadResult {
                 errors: vec![Error::new(e).validate_phase()],
                 // Nothing was loaded, so a query has nothing to answer from.
                 error_blocks_queries: vec![true],
+                query_refusal: None,
                 options: LedgerOptions::default(),
                 plugins: Vec::new(),
                 includes,
@@ -204,6 +211,7 @@ pub fn load_source(source: &str) -> LoadResult {
         })
         .map(|e| (ledger_error_to_ffi(e), e.blocks_queries()))
         .unzip();
+    let query_refusal = query_refusal_error(&ledger);
 
     let mut options = build_ledger_options(&ledger.options, &ledger.display_context);
     let mut commodity_list: Vec<_> = commodities.into_iter().collect();
@@ -227,6 +235,7 @@ pub fn load_source(source: &str) -> LoadResult {
         line_lookup: lookup,
         errors,
         error_blocks_queries,
+        query_refusal,
         options,
         plugins,
         includes,
@@ -266,7 +275,11 @@ pub fn build_ledger_options(
         name_expenses: options.name_expenses.clone(),
         documents: options.documents.clone(),
         commodities: Vec::new(),
-        booking_method: options.booking_method.clone(),
+        // The method booking used (`Options::effective_booking_method`, over
+        // the loader's default), not a field read: one rule for every surface.
+        booking_method: options
+            .effective_booking_method(rustledger_loader::LoadOptions::default().booking_method)
+            .to_string(),
         display_precision: display.resolved_precisions().into_iter().collect(),
         render_commas: options.render_commas,
         inferred_tolerance_default: options
@@ -325,6 +338,12 @@ pub struct FileLoad {
     /// decrypted, or a booking failure
     /// ([`rustledger_loader::LedgerError::blocks_queries`], #2861).
     pub error_blocks_queries: Vec<bool>,
+    /// Why a query over the ledger refuses though no error blocks it: a
+    /// rejected `booking_method`
+    /// ([`rustledger_loader::Ledger::query_refusal`]). Listed only on
+    /// query results, not among `errors`, so it does not stop the session
+    /// plugins [`apply_plugins`] runs.
+    pub query_refusal: Option<Error>,
     pub options: LedgerOptions,
     pub plugins: Vec<Plugin>,
     pub loaded_files: Vec<String>,
@@ -447,6 +466,7 @@ pub fn load_file_with_fs(
         .iter()
         .map(rustledger_loader::LedgerError::blocks_queries)
         .collect();
+    let query_refusal = query_refusal_error(&ledger);
     let options = build_ledger_options(&ledger.options, &ledger.display_context);
     let plugins: Vec<Plugin> = ledger
         .plugins
@@ -471,9 +491,29 @@ pub fn load_file_with_fs(
         directive_placeholders,
         errors,
         error_blocks_queries,
+        query_refusal,
         options,
         plugins,
         loaded_files,
+    })
+}
+
+/// The refusal a rejected option makes for queries over `ledger`
+/// ([`rustledger_loader::Ledger::query_refusal`]: an invalid
+/// `booking_method` whose ledger books another method, #2911), as a wire
+/// error, or `None`.
+///
+/// Kept apart from the load's `errors`: it belongs to query results only.
+/// The load's own errors are what `load`/`validate` list and what
+/// [`apply_plugins`] gates on, and a ledger the loader booked is neither
+/// broken nor a reason to skip a host's plugins.
+fn query_refusal_error(ledger: &rustledger_loader::Ledger) -> Option<Error> {
+    ledger.query_refusal().map(|refusal| {
+        debug_assert!(refusal.blocks_queries());
+        // Not "parse" on the wire, though options are read at parse time:
+        // a parse-phase error there stops semantic validation, and the
+        // ledger parsed.
+        ledger_error_to_ffi(&refusal).validate_phase()
     })
 }
 

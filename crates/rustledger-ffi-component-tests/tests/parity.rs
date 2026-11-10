@@ -1501,3 +1501,99 @@ fn session_budget_rejects_an_empty_or_malformed_window() -> Result<()> {
     handle.resource_drop(&mut store)?;
     Ok(())
 }
+
+/// A small ledger with two accounts for the depth-limit queries below.
+const DEPTH_LEDGER: &str = "\
+2024-01-01 open Assets:Bank
+2024-01-01 open Equity:Opening
+2024-01-02 *
+  Assets:Bank     10 USD
+  Equity:Opening
+";
+
+/// Run `q` on `inst` and return the query's error messages, after checking
+/// the call itself returned.
+fn depth_query_errors(store: &mut Store<Host>, inst: &Rustledger, q: &str) -> Result<Vec<String>> {
+    let r = inst
+        .rustledger_ledger_ledger()
+        .call_query(store, DEPTH_LEDGER, q)?;
+    Ok(r.errors.into_iter().map(|e| e.message).collect())
+}
+
+/// An ordinary query on the same instance still answers.
+fn assert_instance_answers(store: &mut Store<Host>, inst: &Rustledger) -> Result<()> {
+    let r = inst.rustledger_ledger_ledger().call_query(
+        store,
+        DEPTH_LEDGER,
+        "SELECT account WHERE account = 'Assets:Bank'",
+    )?;
+    assert!(r.errors.is_empty(), "{:?}", r.errors);
+    assert_eq!(r.rows.len(), 1);
+    Ok(())
+}
+
+/// The deepest bracket nesting and bracket-plus-chain mix the parser
+/// accepts run in the component on wasmtime's default stack, and the
+/// instance answers afterwards. (60 brackets; and 55 brackets around an
+/// aggregate chain that brings the depth budget to exactly 720: 55 * 12 for
+/// the brackets, 12 for `sum(`, 48 for the `+`s.)
+#[test]
+fn query_at_the_nesting_limits_runs_in_the_component() -> Result<()> {
+    if !component_path().exists() {
+        return Ok(());
+    }
+    let (mut store, inst) = instantiate()?;
+    for q in [
+        format!("SELECT {}1{}", "(".repeat(60), ")".repeat(60)),
+        format!("SELECT {}1{}", "abs(".repeat(60), ")".repeat(60)),
+        format!(
+            "SELECT account, {}sum(number){} GROUP BY account",
+            "abs(".repeat(59),
+            ")".repeat(59)
+        ),
+        format!(
+            "SELECT account, {}sum(number){}{} GROUP BY account",
+            "(".repeat(55),
+            " + 1".repeat(48),
+            ")".repeat(55)
+        ),
+    ] {
+        let errors = depth_query_errors(&mut store, &inst, &q)?;
+        assert!(errors.is_empty(), "{errors:?}");
+    }
+    assert_instance_answers(&mut store, &inst)
+}
+
+/// One step past each limit, and chains far past it, come back as the
+/// nesting error, and the same instance answers afterwards.
+#[test]
+fn query_past_the_nesting_limits_is_refused_in_the_component() -> Result<()> {
+    if !component_path().exists() {
+        return Ok(());
+    }
+    let (mut store, inst) = instantiate()?;
+    for q in [
+        format!("SELECT {}1{}", "(".repeat(61), ")".repeat(61)),
+        format!("SELECT {}1{}", "abs(".repeat(127), ")".repeat(127)),
+        format!(
+            "SELECT account, {}sum(number){}{} GROUP BY account",
+            "(".repeat(55),
+            " + 1".repeat(49),
+            ")".repeat(55)
+        ),
+        format!(
+            "SELECT account, sum(number){} GROUP BY account",
+            " + 1".repeat(2000)
+        ),
+        format!("SELECT account WHERE 1 = 1{}", " AND 1 = 1".repeat(4000)),
+        format!("SELECT account WHERE {}TRUE", "NOT ".repeat(5000)),
+    ] {
+        let errors = depth_query_errors(&mut store, &inst, &q)?;
+        assert!(
+            errors.iter().any(|m| m.contains("nesting too deep")),
+            "{errors:?}"
+        );
+        assert_instance_answers(&mut store, &inst)?;
+    }
+    Ok(())
+}

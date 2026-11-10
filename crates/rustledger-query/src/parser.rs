@@ -35,8 +35,15 @@ enum ComparisonSuffix {
 /// denial-of-service surfaced by the query fuzzer's slow-unit corpus
 /// (a ~2 KB input of
 /// 1023 nested parens took >10 s and overflowed an 8 MB stack). Real
-/// queries nest only a handful deep; 64 is far above any legitimate
+/// queries nest only a handful deep; 60 is far above any legitimate
 /// query yet shallow enough to stay fast and stack-safe.
+///
+/// 60 is sized by the tightest stack a query runs on: the wasm32-wasip2
+/// component under wasmtime's default 512 KiB `max_wasm_stack`, where the
+/// grammar's recursion takes about 4 KiB per bracket and an optimized
+/// build ran out of stack at 127 brackets. 60 keeps half of it free. Each
+/// bracket also costs [`BRACKET_WEIGHT`] in [`MAX_EXPR_DEPTH`], so brackets
+/// and operator chains cannot add up past either limit.
 ///
 /// STACK SAFETY: the cap alone is not what keeps recursion safe — frame
 /// sizes drift with toolchains (Rust 1.97's debug frames grew enough
@@ -47,7 +54,7 @@ enum ComparisonSuffix {
 /// happens to call it (main = 8 MiB, cargo-test/rayon workers = 2 MiB).
 /// On wasm32 there are no threads; the pre-scan cap and the engine's own
 /// stack limits apply as before.
-const MAX_NESTING_DEPTH: usize = 128;
+const MAX_NESTING_DEPTH: usize = 60;
 
 /// Stack size for the dedicated parse thread on native targets. Sized
 /// for `MAX_NESTING_DEPTH` recursion levels at worst-case (debug-build)
@@ -109,8 +116,8 @@ fn nesting_error(source: &str) -> Option<ParseError> {
 }
 
 /// Maximum depth of the expression tree a query may build, as bounded by
-/// [`scan_delimiters`]: every operator and every bracket on the way from the
-/// root to the deepest operand counts one level.
+/// [`scan_delimiters`]: every operator on the way from the root to the
+/// deepest operand counts one level, and every bracket [`BRACKET_WEIGHT`].
 ///
 /// [`MAX_NESTING_DEPTH`] bounds the brackets, which is what the recursive
 /// grammar descends into. An operator chain does not recurse in the grammar
@@ -127,27 +134,45 @@ fn nesting_error(source: &str) -> Option<ParseError> {
 /// bound of the real depth, not the depth itself (a comparison and the `OR`
 /// joining it to the next each count, though they are siblings, not nested),
 /// so a query reaches the limit with fewer terms than the limit:
-/// `x ~ 'a' OR x ~ 'b' OR ...` counts two per term and fits about 500 terms.
+/// `x ~ 'a' OR x ~ 'b' OR ...` counts two per term and fits about 360 terms.
 /// Real queries, generated ones included, chain far fewer.
 ///
-/// Why 1,000, measured by running each shape (`+`, `AND`, `OR`, `NOT`,
-/// `= ... AND`, `~ ... OR`, `* ... -`) with the limit lifted:
+/// Why 720: optimized builds were run with both limits lifted, and each
+/// shape's length was bisected to the first that ran out of stack. The
+/// costliest operator shapes are a chain in an aggregate query
+/// (`SELECT account, sum(number) + 1 + ... GROUP BY account`, and the same
+/// chain in `ORDER BY` or joining `sum(...) > 0` with `AND`) and an
+/// attribute chain (`entry.meta.meta...`):
 ///
-/// - wasm32, optimized (`--release`), through `ParsedLedger::query` on the
-///   default 1 MiB shadow stack: every shape ran at 3,000 terms and ran
-///   out of stack at 4,000, so 1,000 levels takes at most about a third of
-///   the stack.
-/// - native x86-64, optimized: `rledger query` ran every shape at the limit
-///   with the main thread's stack cut to 1 MiB (`ulimit -s 1024`); the
-///   default is 8 MiB, and a 2 MiB worker thread holds it too.
-/// - unoptimized builds take several times the stack per level (about
-///   3.5 KiB natively, about 2 KiB on wasm32), so tests that run a query at
-///   the limit give it the main thread's 8 MiB.
+/// | runtime (stack)                        | aggregate chain | attribute chain | brackets | subqueries |
+/// |----------------------------------------|-----------------|-----------------|----------|------------|
+/// | wasm32-wasip2 component (512 KiB)      | 1,555           | 1,480           | 127      | 412        |
+/// | wasm32 in Node, main thread (1 MiB)    | 1,555           | 3,437           | 424      | 741        |
+/// | wasm32 in Node, worker thread          | 1,555           | 3,437           | 1,687    | 741        |
+/// | native x86-64, 2 MiB thread            | 1,650           | 3,727           | 3,727    | 625        |
+///
+/// So 720 levels leave at least half of every stack free (1,480 / 720 is
+/// 2.06), and [`MAX_NESTING_DEPTH`] does the same for brackets (127 / 60).
+/// A bracket costs about 12 aggregate-chain levels in the component (4 KiB
+/// against 340 bytes), which is [`BRACKET_WEIGHT`], so 60 brackets alone
+/// fill the budget exactly. Mixed shapes cost less than the sum: a chain
+/// inside 60 brackets runs out at the same length as the chain alone, as
+/// the brackets' stack is taken while parsing and the chain's while
+/// evaluating.
+///
+/// Unoptimized builds take many times the stack per level (over 11 KiB for
+/// an aggregate chain), so tests that run a query at the limit give it a
+/// 64 MiB thread.
 ///
 /// Stricter than bean-query, deliberately: its parser and evaluator recurse
 /// too, and a long enough chain raises Python's `RecursionError` there. Here
 /// the same query is a parse error with a position.
-const MAX_EXPR_DEPTH: usize = 1000;
+const MAX_EXPR_DEPTH: usize = 720;
+
+/// What one bracket costs in [`MAX_EXPR_DEPTH`]: the stack the grammar's
+/// recursion takes per bracket, in units of the costliest operator level,
+/// as measured in the wasm32-wasip2 component (see [`MAX_EXPR_DEPTH`]).
+const BRACKET_WEIGHT: usize = 12;
 
 /// What [`scan_delimiters`] finds: where nesting first passes the limit, and
 /// the brackets and quotes still open at the end, by offset.
@@ -194,8 +219,9 @@ fn is_operator_word(word: &str) -> bool {
 /// and [`MAX_EXPR_DEPTH`] for the expression-depth bound.
 ///
 /// The depth bound is kept along the open path: each enclosing level's
-/// operators so far, one per open bracket, and the current item's operators
-/// and deepest closed bracket. Every operator token counts, whatever it binds:
+/// operators so far, [`BRACKET_WEIGHT`] per open bracket, and the current
+/// item's operators and deepest closed bracket. Every operator token counts,
+/// whatever it binds:
 /// `+ - * / % = != < <= > >= ~ !~ . [` and the words in [`is_operator_word`].
 /// Counting too many is safe (`NOT IN` builds one node from two words, a `*`
 /// may be `count(*)`, a date's `-` is no operator); counting too few is not,
@@ -277,7 +303,7 @@ fn scan_delimiters(source: &str) -> DelimiterScan {
                 }
                 // The new bracket is entered instead of the item's closed
                 // ones, so they leave the path while it is open.
-                path = path - levels.last().expect("root level").child + 1;
+                path = path - levels.last().expect("root level").child + BRACKET_WEIGHT;
                 levels.push(DepthLevel::default());
             }
             ')' => {
@@ -289,8 +315,8 @@ fn scan_delimiters(source: &str) -> DelimiterScan {
                     let inner = levels.pop().expect("an open bracket");
                     let reached = inner.deepest.max(inner.item());
                     let outer = levels.last_mut().expect("root level");
-                    path = path - inner.item() - 1 + outer.child;
-                    let child = outer.child.max(1 + reached);
+                    path = path - inner.item() - BRACKET_WEIGHT + outer.child;
+                    let child = outer.child.max(BRACKET_WEIGHT + reached);
                     path += child - outer.child;
                     outer.child = child;
                 }
@@ -3041,12 +3067,12 @@ mod tests {
     /// to the limit still parses.
     #[test]
     fn moderate_nesting_still_parses() {
-        // 100 levels of real function nesting (well under the 128 cap).
+        // 55 levels of real function nesting (under the 60 cap).
         // Runs on `parse`'s dedicated big-stack thread, so this passes
         // regardless of the 2 MiB cargo-test thread stack or toolchain
         // frame-size drift (Rust 1.97 SIGABRT'd this test at the old
         // caller-stack recursion).
-        let depth = 100usize;
+        let depth = 55usize;
         let inner = "x".to_string();
         let body = format!("{}{}{}", "abs(".repeat(depth), inner, ")".repeat(depth));
         let src = format!("SELECT {body}");

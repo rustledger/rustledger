@@ -1,0 +1,6 @@
+# Regression inputs, kept in tree
+
+Each file here once broke an assertion of `fuzz_green_eq_red` (the parser's losslessR^
+und-trip, see `fuz_ztargets/common/lossless.rs`). They live beside the fix
+rather than only in the durable fuz fix
+rather than only in the durable fuzz coend of the file, while the heading line was tokenized, so the directives after it vanished with no error (#1389). The round-trip stays lossless here; the heading-line check in `common/lossless.rs` (no tokend) is what fails. |

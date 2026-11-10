@@ -336,3 +336,43 @@ fn test_parse_line_start_bom_glued_to_invalid_run_is_one_error() {
     assert_eq!(result.errors.len(), 2, "{:?}", result.errors);
     assert_eq!(bom_errors(&result), 1, "{:?}", result.errors);
 }
+
+/// A BOM that starts its line, glued to an invalid run, is beancount's first
+/// invalid token there, and the line's BOM diagnostic stands for it. So a
+/// later run with a BOM inside it is one more invalid token, with its own
+/// error. Each count is bean-check's.
+#[test]
+fn test_parse_line_start_glued_bom_then_inner_bom_token_counts_both() {
+    for (line, errors) in [
+        (format!("{BOM}foo x{BOM}y"), 2),
+        (format!("{BOM}tApo x{BOM}y"), 2),
+        (format!("{BOM}$x x{BOM}y"), 2),
+        (format!("{BOM}foo {BOM}a x{BOM}y"), 3),
+    ] {
+        let src = format!("{HEAD}{line}\n");
+        let result = parse_both(&src);
+        assert_eq!(result.errors.len(), errors, "{src:?}: {:?}", result.errors);
+        assert_eq!(bom_errors(&result), 1, "{src:?}: {:?}", result.errors);
+    }
+}
+
+/// A BOM before the indentation of a metadata line is beancount's first
+/// invalid token on the line (it is followed by a blank, so nothing is glued
+/// to it), and the invalid key after it is one more: both are counted, with
+/// the rest of the line, as in bean-check.
+#[test]
+fn test_parse_bom_before_metadata_indentation_counts_the_key() {
+    for (line, errors) in [
+        (format!("{BOM}  k: Ü:A {BOM}a0 x{BOM}y1"), 4),
+        (format!("{BOM}  k: Ü:A x{BOM}y0"), 3),
+    ] {
+        let src = format!("{HEAD}2024-01-02 *\n{line}\n");
+        let result = parse_both(&src);
+        let on_line = result
+            .errors
+            .iter()
+            .filter(|e| src[..e.span.start].matches('\n').count() == 3)
+            .count();
+        assert_eq!(on_line, errors, "{src:?}: {:?}", result.errors);
+    }
+}

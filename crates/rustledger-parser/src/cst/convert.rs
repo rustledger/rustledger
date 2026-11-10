@@ -9196,19 +9196,26 @@ fn drop_errors_inside_a_line_error(
 /// is the grammar error otherwise; each other invalid token on the line gets
 /// its own error.
 ///
-/// A mid-file BOM is reported by the line's `BomInDirectiveBody`, and is left
-/// to it here in three cases. A BOM that starts its line is no invalid token
-/// at all, but layout ([`is_line_start_bom_token`]). A token with a BOM
-/// inside it, not at its start, is left to that diagnostic as it always was,
-/// when that diagnostic is the line's error.
-/// And when the line's error is not the BOM diagnostic (an invalid account),
-/// so the BOM one comes after it as a second error (`secondary_bom`), that
-/// second error stands for the line's first invalid token with a stray BOM
-/// in it, BOM-led or not, and every other one gets its own error
-/// (`Ü:A x<BOM>y <BOM>z` and `Ü:A <BOM>z x<BOM>y` are three errors). Any other
-/// BOM-led token, one that starts in the middle of a line and runs to the
-/// next blank as beancount's does (#2928), is an invalid token like any
-/// other and gets its own error, as it does there.
+/// A mid-file BOM is reported by the line's `BomInDirectiveBody`, which also
+/// stands for some of beancount's `Invalid token` errors (#2928):
+///
+/// - A BOM that starts its line keeps its own extent here
+///   ([`is_line_start_bom_token`]), where beancount's invalid token runs on
+///   through whatever is glued to it. So it is the line's first invalid
+///   token, the one the line error stands for, and an invalid run glued to it
+///   (`<BOM>foo`) is part of that same token, not one more.
+/// - When the line's error is not the BOM diagnostic (an invalid account),
+///   the BOM one comes after it as a second error (`secondary_bom`), and
+///   stands for the line's first invalid token with a stray BOM in it,
+///   BOM-led or not.
+/// - A token with a BOM inside it, not at its start, is left to the line's
+///   BOM diagnostic only while that diagnostic stands for nothing else: not
+///   once it stood for a BOM that starts the line, nor when it is the second
+///   error.
+///
+/// Every other token gets its own error, a BOM-led one included: in the
+/// middle of a line it runs to the next blank, as beancount's does. Pinned,
+/// combination by combination, by `tests/bom_combination_matrix.rs`.
 ///
 /// `invalid` holds the line's `ERROR_TOKEN` ranges (stripped frame) and
 /// `line_start` where its first token starts.
@@ -9221,40 +9228,43 @@ pub(super) fn report_invalid_tokens_of_error_line(
     out: &mut Vec<crate::ParseError>,
 ) {
     let off = bom_offset as usize;
-    let had_secondary = secondary_bom;
     let mut secondary_bom = secondary_bom;
-    // Whether the token being looked at is the line's first invalid one. A
-    // BOM that starts its line is layout, not one (see below), so the first
-    // is the first after it, and the BOMs are no part of what comes before.
+    // Whether the line's BOM diagnostic already stands for a token, so a
+    // token with a BOM inside it is one more invalid token.
+    let mut bom_diagnostic_spent = secondary_bom;
+    // Whether the token being looked at is the line's first invalid one.
     let mut first = true;
+    // Where the run of BOMs that starts the line ends, once there is one.
+    let mut line_start_boms_end: Option<usize> = None;
     for range in invalid {
         let text = stripped.get(range.clone()).unwrap_or_default();
         if is_line_start_bom_token(stripped, range.start, text) {
+            first = false;
+            bom_diagnostic_spent = true;
+            line_start_boms_end = Some(range.end);
             continue;
         }
+        // Glued to the BOMs that start the line: the same beancount token.
+        if line_start_boms_end == Some(range.start) {
+            line_start_boms_end = None;
+            continue;
+        }
+        line_start_boms_end = None;
         let starts_the_line = std::mem::take(&mut first)
             && stripped
                 .get(line_start..range.start)
-                .map(|prefix| prefix.trim_start_matches(crate::bom::BOM_CHAR))
                 .is_some_and(readable_start_of_an_error_line);
-        let bom_led = text.starts_with(crate::bom::BOM_CHAR);
         // A run that starts with a blank is not an invalid token but the rest
         // of a heading line after its `*`, which the lexer skips unread.
         if starts_the_line || text.starts_with([' ', '\t']) {
             continue;
         }
         let holds_bom = text.contains(crate::bom::BOM_CHAR);
-        // The secondary BOM error stands for the line's first token with a
-        // stray BOM, whichever kind it is.
         if holds_bom && secondary_bom {
             secondary_bom = false;
             continue;
         }
-        // Without a secondary BOM error, the line's BOM diagnostic is its
-        // primary error, and a token with a BOM inside it is left to it, as
-        // it always was. With one, that second error stood for one token
-        // already, and every other token is an invalid token of its own.
-        if holds_bom && !bom_led && !had_secondary {
+        if holds_bom && !text.starts_with(crate::bom::BOM_CHAR) && !bom_diagnostic_spent {
             continue;
         }
         out.push(crate::ParseError::new(

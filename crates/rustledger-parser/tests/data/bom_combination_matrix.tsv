@@ -1,0 +1,1078 @@
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>a0\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nx0<BOM>y\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n$n0\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>a0 <BOM>a1\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>a0 x1<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>a0 $n1\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nx0<BOM>y <BOM>a1\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nx0<BOM>y x1<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nx0<BOM>y $n1\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n$n0 <BOM>a1\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n$n0 x1<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n$n0 $n1\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>a0 <BOM>a1 <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>a0 <BOM>a1 x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>a0 <BOM>a1 $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>a0 x1<BOM>y <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>a0 x1<BOM>y x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>a0 x1<BOM>y $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>a0 $n1 <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>a0 $n1 x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>a0 $n1 $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nx0<BOM>y <BOM>a1 <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nx0<BOM>y <BOM>a1 x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nx0<BOM>y <BOM>a1 $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nx0<BOM>y x1<BOM>y <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nx0<BOM>y x1<BOM>y x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nx0<BOM>y x1<BOM>y $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nx0<BOM>y $n1 <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nx0<BOM>y $n1 x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nx0<BOM>y $n1 $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n$n0 <BOM>a1 <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n$n0 <BOM>a1 x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n$n0 <BOM>a1 $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n$n0 x1<BOM>y <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n$n0 x1<BOM>y x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n$n0 x1<BOM>y $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n$n0 $n1 <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n$n0 $n1 x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n$n0 $n1 $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM><BOM>a0\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>x0<BOM>y\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>$n0\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM><BOM>a0 <BOM>a1\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM><BOM>a0 x1<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM><BOM>a0 $n1\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>x0<BOM>y <BOM>a1\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>x0<BOM>y x1<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>x0<BOM>y $n1\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>$n0 <BOM>a1\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>$n0 x1<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>$n0 $n1\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM><BOM>a0 <BOM>a1 <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM><BOM>a0 <BOM>a1 x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM><BOM>a0 <BOM>a1 $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM><BOM>a0 x1<BOM>y <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM><BOM>a0 x1<BOM>y x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM><BOM>a0 x1<BOM>y $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM><BOM>a0 $n1 <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM><BOM>a0 $n1 x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM><BOM>a0 $n1 $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>x0<BOM>y <BOM>a1 <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>x0<BOM>y <BOM>a1 x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>x0<BOM>y <BOM>a1 $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>x0<BOM>y x1<BOM>y <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>x0<BOM>y x1<BOM>y x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>x0<BOM>y x1<BOM>y $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>x0<BOM>y $n1 <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>x0<BOM>y $n1 x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>x0<BOM>y $n1 $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>$n0 <BOM>a1 <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>$n0 <BOM>a1 x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>$n0 <BOM>a1 $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>$n0 x1<BOM>y <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>$n0 x1<BOM>y x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>$n0 x1<BOM>y $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>$n0 $n1 <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>$n0 $n1 x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>$n0 $n1 $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g <BOM>a0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g x0<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g $n0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g <BOM>a0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g <BOM>a0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g <BOM>a0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g x0<BOM>y <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g x0<BOM>y x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g x0<BOM>y $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g $n0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g $n0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g $n0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g <BOM>a0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g <BOM>a0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g <BOM>a0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g <BOM>a0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g <BOM>a0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g <BOM>a0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g <BOM>a0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g <BOM>a0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g <BOM>a0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g x0<BOM>y <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g x0<BOM>y <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g x0<BOM>y <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g x0<BOM>y x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g x0<BOM>y x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g x0<BOM>y x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g x0<BOM>y $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g x0<BOM>y $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g x0<BOM>y $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g $n0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g $n0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g $n0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g $n0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g $n0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g $n0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g $n0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g $n0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g $n0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A <BOM>a0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A x0<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A $n0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A <BOM>a0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A <BOM>a0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A <BOM>a0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A x0<BOM>y <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A x0<BOM>y x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A x0<BOM>y $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A $n0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A $n0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A $n0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A <BOM>a0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A <BOM>a0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A <BOM>a0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A <BOM>a0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A <BOM>a0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A <BOM>a0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A <BOM>a0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A <BOM>a0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A <BOM>a0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A x0<BOM>y <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A x0<BOM>y <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A x0<BOM>y <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A x0<BOM>y x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A x0<BOM>y x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A x0<BOM>y x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A x0<BOM>y $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A x0<BOM>y $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A x0<BOM>y $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A $n0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A $n0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A $n0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A $n0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A $n0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A $n0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A $n0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A $n0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nÜ:A $n0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A <BOM>a0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A x0<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A $n0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A <BOM>a0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A <BOM>a0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A <BOM>a0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A x0<BOM>y <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A x0<BOM>y x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A x0<BOM>y $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A $n0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A $n0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A $n0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A <BOM>a0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A <BOM>a0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A <BOM>a0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A <BOM>a0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A <BOM>a0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A <BOM>a0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A <BOM>a0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A <BOM>a0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A <BOM>a0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A x0<BOM>y <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A x0<BOM>y <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A x0<BOM>y <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A x0<BOM>y x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A x0<BOM>y x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A x0<BOM>y x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A x0<BOM>y $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A x0<BOM>y $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A x0<BOM>y $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A $n0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A $n0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A $n0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A $n0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A $n0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A $n0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A $n0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A $n0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>Ü:A $n0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A <BOM>a0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A x0<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A $n0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A <BOM>a0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A <BOM>a0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A <BOM>a0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A x0<BOM>y <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A x0<BOM>y x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A x0<BOM>y $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A $n0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A $n0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A $n0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A <BOM>a0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A <BOM>a0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A <BOM>a0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A <BOM>a0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A <BOM>a0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A <BOM>a0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A <BOM>a0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A <BOM>a0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A <BOM>a0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A x0<BOM>y <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A x0<BOM>y <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A x0<BOM>y <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A x0<BOM>y x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A x0<BOM>y x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A x0<BOM>y x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A x0<BOM>y $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A x0<BOM>y $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A x0<BOM>y $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A $n0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A $n0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A $n0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A $n0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A $n0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A $n0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A $n0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A $n0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g Ü:A $n0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo <BOM>a0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo x0<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo $n0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo <BOM>a0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo <BOM>a0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo <BOM>a0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo x0<BOM>y <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo x0<BOM>y x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo x0<BOM>y $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo $n0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo $n0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo $n0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo <BOM>a0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo <BOM>a0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo <BOM>a0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo <BOM>a0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo <BOM>a0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo <BOM>a0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo <BOM>a0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo <BOM>a0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo <BOM>a0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo x0<BOM>y <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo x0<BOM>y <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo x0<BOM>y <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo x0<BOM>y x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo x0<BOM>y x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo x0<BOM>y x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo x0<BOM>y $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo x0<BOM>y $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo x0<BOM>y $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo $n0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo $n0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo $n0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo $n0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo $n0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo $n0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo $n0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo $n0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\nfoo $n0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo <BOM>a0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo x0<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo $n0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo <BOM>a0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo <BOM>a0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo <BOM>a0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo x0<BOM>y <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo x0<BOM>y x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo x0<BOM>y $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo $n0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo $n0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo $n0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo <BOM>a0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo <BOM>a0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo <BOM>a0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo <BOM>a0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo <BOM>a0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo <BOM>a0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo <BOM>a0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo <BOM>a0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo <BOM>a0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo x0<BOM>y <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo x0<BOM>y <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo x0<BOM>y <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo x0<BOM>y x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo x0<BOM>y x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo x0<BOM>y x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo x0<BOM>y $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo x0<BOM>y $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo x0<BOM>y $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo $n0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo $n0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo $n0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo $n0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo $n0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo $n0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo $n0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo $n0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>foo $n0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo <BOM>a0\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo x0<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo $n0\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo <BOM>a0 <BOM>a1\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo <BOM>a0 x1<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo <BOM>a0 $n1\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo x0<BOM>y <BOM>a1\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo x0<BOM>y x1<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo x0<BOM>y $n1\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo $n0 <BOM>a1\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo $n0 x1<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo $n0 $n1\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo <BOM>a0 <BOM>a1 <BOM>a2\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo <BOM>a0 <BOM>a1 x2<BOM>y\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo <BOM>a0 <BOM>a1 $n2\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo <BOM>a0 x1<BOM>y <BOM>a2\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo <BOM>a0 x1<BOM>y x2<BOM>y\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo <BOM>a0 x1<BOM>y $n2\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo <BOM>a0 $n1 <BOM>a2\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo <BOM>a0 $n1 x2<BOM>y\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo <BOM>a0 $n1 $n2\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo x0<BOM>y <BOM>a1 <BOM>a2\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo x0<BOM>y <BOM>a1 x2<BOM>y\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo x0<BOM>y <BOM>a1 $n2\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo x0<BOM>y x1<BOM>y <BOM>a2\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo x0<BOM>y x1<BOM>y x2<BOM>y\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo x0<BOM>y x1<BOM>y $n2\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo x0<BOM>y $n1 <BOM>a2\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo x0<BOM>y $n1 x2<BOM>y\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo x0<BOM>y $n1 $n2\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo $n0 <BOM>a1 <BOM>a2\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo $n0 <BOM>a1 x2<BOM>y\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo $n0 <BOM>a1 $n2\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo $n0 x1<BOM>y <BOM>a2\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo $n0 x1<BOM>y x2<BOM>y\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo $n0 x1<BOM>y $n2\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo $n0 $n1 <BOM>a2\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo $n0 $n1 x2<BOM>y\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g foo $n0 $n1 $n2\n	3:5
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 <BOM>a0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 x0<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 $n0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 <BOM>a0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 <BOM>a0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 <BOM>a0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 x0<BOM>y <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 x0<BOM>y x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 x0<BOM>y $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 $n0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 $n0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 $n0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 <BOM>a0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 <BOM>a0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 <BOM>a0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 <BOM>a0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 <BOM>a0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 <BOM>a0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 <BOM>a0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 <BOM>a0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 <BOM>a0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 x0<BOM>y <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 x0<BOM>y <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 x0<BOM>y <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 x0<BOM>y x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 x0<BOM>y x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 x0<BOM>y x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 x0<BOM>y $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 x0<BOM>y $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 x0<BOM>y $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 $n0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 $n0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 $n0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 $n0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 $n0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 $n0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 $n0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 $n0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n313 $n0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 <BOM>a0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 x0<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 $n0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 <BOM>a0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 <BOM>a0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 <BOM>a0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 x0<BOM>y <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 x0<BOM>y x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 x0<BOM>y $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 $n0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 $n0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 $n0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 <BOM>a0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 <BOM>a0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 <BOM>a0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 <BOM>a0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 <BOM>a0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 <BOM>a0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 <BOM>a0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 <BOM>a0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 <BOM>a0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 x0<BOM>y <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 x0<BOM>y <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 x0<BOM>y <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 x0<BOM>y x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 x0<BOM>y x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 x0<BOM>y x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 x0<BOM>y $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 x0<BOM>y $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 x0<BOM>y $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 $n0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 $n0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 $n0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 $n0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 $n0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 $n0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 $n0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 $n0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>313 $n0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 <BOM>a0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 x0<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 $n0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 <BOM>a0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 <BOM>a0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 <BOM>a0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 x0<BOM>y <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 x0<BOM>y x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 x0<BOM>y $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 $n0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 $n0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 $n0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 <BOM>a0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 <BOM>a0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 <BOM>a0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 <BOM>a0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 <BOM>a0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 <BOM>a0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 <BOM>a0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 <BOM>a0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 <BOM>a0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 x0<BOM>y <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 x0<BOM>y <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 x0<BOM>y <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 x0<BOM>y x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 x0<BOM>y x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 x0<BOM>y x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 x0<BOM>y $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 x0<BOM>y $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 x0<BOM>y $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 $n0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 $n0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 $n0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 $n0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 $n0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 $n0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 $n0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 $n0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 313 $n0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD\n  Assets:B\n	
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" $n0\n  Assets:A  1 USD\n  Assets:B\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n" $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n"\n  Assets:A  1 USD\n  Assets:B\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" $n0\n  Assets:A  1 USD\n  Assets:B\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 * "n" $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n"\n  Assets:A  1 USD\n  Assets:B\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" $n0\n  Assets:A  1 USD\n  Assets:B\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 * "n" $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD <BOM>a0\n  Assets:B\n	4:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD x0<BOM>y\n  Assets:B\n	4:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD $n0\n  Assets:B\n	4:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD <BOM>a0 <BOM>a1\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD <BOM>a0 x1<BOM>y\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD <BOM>a0 $n1\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD x0<BOM>y <BOM>a1\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD x0<BOM>y x1<BOM>y\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD x0<BOM>y $n1\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD $n0 <BOM>a1\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD $n0 x1<BOM>y\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD $n0 $n1\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD <BOM>a0 <BOM>a1 $n2\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD <BOM>a0 x1<BOM>y $n2\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD <BOM>a0 $n1 <BOM>a2\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD <BOM>a0 $n1 x2<BOM>y\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD <BOM>a0 $n1 $n2\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD x0<BOM>y <BOM>a1 $n2\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD x0<BOM>y x1<BOM>y $n2\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD x0<BOM>y $n1 <BOM>a2\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD x0<BOM>y $n1 x2<BOM>y\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD x0<BOM>y $n1 $n2\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD $n0 <BOM>a1 <BOM>a2\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD $n0 <BOM>a1 x2<BOM>y\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD $n0 <BOM>a1 $n2\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD $n0 x1<BOM>y <BOM>a2\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD $n0 x1<BOM>y x2<BOM>y\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD $n0 x1<BOM>y $n2\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD $n0 $n1 <BOM>a2\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD $n0 $n1 x2<BOM>y\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  Assets:A  1 USD $n0 $n1 $n2\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD\n  Assets:B\n	4:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD <BOM>a0\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD x0<BOM>y\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD $n0\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD <BOM>a0 <BOM>a1\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD <BOM>a0 x1<BOM>y\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD <BOM>a0 $n1\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD x0<BOM>y <BOM>a1\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD x0<BOM>y x1<BOM>y\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD x0<BOM>y $n1\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD $n0 <BOM>a1\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD $n0 x1<BOM>y\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD $n0 $n1\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD <BOM>a0 <BOM>a1 $n2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD <BOM>a0 x1<BOM>y $n2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD <BOM>a0 $n1 <BOM>a2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD <BOM>a0 $n1 x2<BOM>y\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD <BOM>a0 $n1 $n2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD x0<BOM>y <BOM>a1 $n2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD x0<BOM>y x1<BOM>y $n2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD x0<BOM>y $n1 <BOM>a2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD x0<BOM>y $n1 x2<BOM>y\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD x0<BOM>y $n1 $n2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD $n0 <BOM>a1 <BOM>a2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD $n0 <BOM>a1 x2<BOM>y\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD $n0 <BOM>a1 $n2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD $n0 x1<BOM>y <BOM>a2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD $n0 x1<BOM>y x2<BOM>y\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD $n0 x1<BOM>y $n2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD $n0 $n1 <BOM>a2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD $n0 $n1 x2<BOM>y\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  Assets:A  1 USD $n0 $n1 $n2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD\n  Assets:B\n	4:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD <BOM>a0\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD x0<BOM>y\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD $n0\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD <BOM>a0 <BOM>a1\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD <BOM>a0 x1<BOM>y\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD <BOM>a0 $n1\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD x0<BOM>y <BOM>a1\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD x0<BOM>y x1<BOM>y\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD x0<BOM>y $n1\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD $n0 <BOM>a1\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD $n0 x1<BOM>y\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD $n0 $n1\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD <BOM>a0 <BOM>a1 $n2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD <BOM>a0 x1<BOM>y $n2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD <BOM>a0 $n1 <BOM>a2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD <BOM>a0 $n1 x2<BOM>y\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD <BOM>a0 $n1 $n2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD x0<BOM>y <BOM>a1 $n2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD x0<BOM>y x1<BOM>y $n2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD x0<BOM>y $n1 <BOM>a2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD x0<BOM>y $n1 x2<BOM>y\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD x0<BOM>y $n1 $n2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD $n0 <BOM>a1 <BOM>a2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD $n0 <BOM>a1 x2<BOM>y\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD $n0 <BOM>a1 $n2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD $n0 x1<BOM>y <BOM>a2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD $n0 x1<BOM>y x2<BOM>y\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD $n0 x1<BOM>y $n2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD $n0 $n1 <BOM>a2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD $n0 $n1 x2<BOM>y\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   Assets:A  1 USD $n0 $n1 $n2\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v"\n  Assets:A  1 USD\n  Assets:B\n	
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" $n0\n  Assets:A  1 USD\n  Assets:B\n	4:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: "v" $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v"\n  Assets:A  1 USD\n  Assets:B\n	4:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" $n0\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: "v" $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v"\n  Assets:A  1 USD\n  Assets:B\n	4:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" $n0\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: "v" $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A\n  Assets:A  1 USD\n  Assets:B\n	
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A $n0\n  Assets:A  1 USD\n  Assets:B\n	4:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n  kk: Ü:A $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A\n  Assets:A  1 USD\n  Assets:B\n	4:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>  kk: Ü:A $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A\n  Assets:A  1 USD\n  Assets:B\n	4:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A x0<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0\n  Assets:A  1 USD\n  Assets:B\n	4:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A x0<BOM>y <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A x0<BOM>y x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A x0<BOM>y $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 <BOM>a1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 x1<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 $n1\n  Assets:A  1 USD\n  Assets:B\n	4:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A <BOM>a0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A x0<BOM>y <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A x0<BOM>y <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A x0<BOM>y <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A x0<BOM>y x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A x0<BOM>y x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A x0<BOM>y x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A x0<BOM>y $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A x0<BOM>y $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A x0<BOM>y $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 <BOM>a1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 <BOM>a1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 <BOM>a1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 x1<BOM>y <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 x1<BOM>y x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 x1<BOM>y $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 $n1 <BOM>a2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 $n1 x2<BOM>y\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 * "n"\n<BOM>g   kk: Ü:A $n0 $n1 $n2\n  Assets:A  1 USD\n  Assets:B\n	4:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR\n	
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR <BOM>a0\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR x0<BOM>y\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR $n0\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR <BOM>a0 <BOM>a1\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR <BOM>a0 x1<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR <BOM>a0 $n1\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR x0<BOM>y <BOM>a1\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR x0<BOM>y x1<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR x0<BOM>y $n1\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR $n0 <BOM>a1\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR $n0 x1<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR $n0 $n1\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR <BOM>a0 <BOM>a1 <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR <BOM>a0 <BOM>a1 x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR <BOM>a0 <BOM>a1 $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR <BOM>a0 x1<BOM>y <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR <BOM>a0 x1<BOM>y x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR <BOM>a0 x1<BOM>y $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR <BOM>a0 $n1 <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR <BOM>a0 $n1 x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR <BOM>a0 $n1 $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR x0<BOM>y <BOM>a1 <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR x0<BOM>y <BOM>a1 x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR x0<BOM>y <BOM>a1 $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR x0<BOM>y x1<BOM>y <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR x0<BOM>y x1<BOM>y x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR x0<BOM>y x1<BOM>y $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR x0<BOM>y $n1 <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR x0<BOM>y $n1 x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR x0<BOM>y $n1 $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR $n0 <BOM>a1 <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR $n0 <BOM>a1 x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR $n0 <BOM>a1 $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR $n0 x1<BOM>y <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR $n0 x1<BOM>y x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR $n0 x1<BOM>y $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR $n0 $n1 <BOM>a2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR $n0 $n1 x2<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n2024-01-02 commodity EUR $n0 $n1 $n2\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR <BOM>a0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR x0<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR $n0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR <BOM>a0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR <BOM>a0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR <BOM>a0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR x0<BOM>y <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR x0<BOM>y x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR x0<BOM>y $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR $n0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR $n0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR $n0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR <BOM>a0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR <BOM>a0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR <BOM>a0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR <BOM>a0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR <BOM>a0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR <BOM>a0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR <BOM>a0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR <BOM>a0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR <BOM>a0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR x0<BOM>y <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR x0<BOM>y <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR x0<BOM>y <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR x0<BOM>y x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR x0<BOM>y x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR x0<BOM>y x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR x0<BOM>y $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR x0<BOM>y $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR x0<BOM>y $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR $n0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR $n0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR $n0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR $n0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR $n0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR $n0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR $n0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR $n0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>2024-01-02 commodity EUR $n0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR\n	3:1
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR <BOM>a0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR x0<BOM>y\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR $n0\n	3:2
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR <BOM>a0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR <BOM>a0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR <BOM>a0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR x0<BOM>y <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR x0<BOM>y x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR x0<BOM>y $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR $n0 <BOM>a1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR $n0 x1<BOM>y\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR $n0 $n1\n	3:3
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR <BOM>a0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR <BOM>a0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR <BOM>a0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR <BOM>a0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR <BOM>a0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR <BOM>a0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR <BOM>a0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR <BOM>a0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR <BOM>a0 $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR x0<BOM>y <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR x0<BOM>y <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR x0<BOM>y <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR x0<BOM>y x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR x0<BOM>y x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR x0<BOM>y x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR x0<BOM>y $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR x0<BOM>y $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR x0<BOM>y $n1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR $n0 <BOM>a1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR $n0 <BOM>a1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR $n0 <BOM>a1 $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR $n0 x1<BOM>y <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR $n0 x1<BOM>y x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR $n0 x1<BOM>y $n2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR $n0 $n1 <BOM>a2\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR $n0 $n1 x2<BOM>y\n	3:4
+2024-01-01 open Assets:A\n2024-01-01 open Assets:B\n<BOM>g 2024-01-02 commodity EUR $n0 $n1 $n2\n	3:4

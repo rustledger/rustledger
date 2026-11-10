@@ -412,14 +412,20 @@ use crate::types::{Error, LedgerOptions};
 /// v87: loader v66, PARSER OUTPUT changed (#2906). Any non-ASCII character
 /// starts an account component, as in beancount, so `Assets:٣Foo` is one
 /// account; an older blob would keep serving such a file with its old errors.
-/// v88: loader v66, unchanged. ARCHIVED LAYOUT moved: the `Ledger` payload
+/// v89: loader v67, PARSER OUTPUT changed (#2910). A BOM inside a string
+/// literal or a comment, or glued into an account, is content, as in
+/// beancount; an older blob would keep serving such a file with a
+/// `BomInDirectiveBody` error.
+/// v91: loader v67, unchanged. ARCHIVED LAYOUT moved: the `Ledger` payload
 /// gained `tolerance_multiplier`, which the padding a query inserts measures a
 /// balance's tolerance with (#2901); an older blob has no such field. And
 /// `Ledger`'s error list moves: a pad pads for a balance on a sub-account and
 /// counts only its own padding, a difference within the balance's tolerance
 /// is not padded (an `Unused Pad entry`), and padding a currency held at cost
 /// is `E2005`.
-pub const CACHE_VERSION: u32 = 88;
+/// (v88 was never released: #2920 held it before #2926 took v89. v90 is
+/// claimed by #2923.)
+pub const CACHE_VERSION: u32 = 91;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -451,7 +457,7 @@ pub const CACHE_VERSION: u32 = 88;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 66;
+const LOADER_CACHE_VERSION_PIN: u32 = 67;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

@@ -672,12 +672,17 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     after lexing (`E1005`). A v65 blob would keep serving such a file with
 ///     its old parse errors.
 ///
+/// v67: PARSER OUTPUT changed, no archived layout moved (#2910). A BOM (U+FEFF)
+///     inside a string literal or a comment, or glued into an account, is
+///     content, as in beancount, where it was a `BomInDirectiveBody` parse
+///     error. An older blob would keep serving such a file with that error.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 66;
+pub const CACHE_VERSION: u32 = 67;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1496,7 +1501,9 @@ mod tests {
         // in it, so the arrays still hold.
         // v66 (#2906) lexes a non-ASCII account start; no archived encoding
         // moves, so the arrays still hold.
-        const FIXTURE_VERSION: u32 = 66;
+        // v67 (#2910) keeps a BOM inside a string; no archived encoding
+        // moves, so the arrays still hold.
+        const FIXTURE_VERSION: u32 = 67;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1643,7 +1650,9 @@ mod tests {
         // `MetaValue` itself; the hash below is unchanged.
         // v66 (#2906) lexes a non-ASCII account start; the hash below is
         // unchanged.
-        const FIXTURE_VERSION: u32 = 66;
+        // v67 (#2910) keeps a BOM inside a string; the hash below is
+        // unchanged.
+        const FIXTURE_VERSION: u32 = 67;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

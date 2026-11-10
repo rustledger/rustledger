@@ -34,10 +34,13 @@
 //! # Mid-file BOMs
 //!
 //! Because the leading BOM is stripped before lexing, any U+FEFF byte
-//! the lexer encounters is by construction mid-file and unrecognized.
-//! Logos produces a `Token::Error` for it, and the parser's existing
-//! error classifier (`error_text.contains('\u{FEFF}')`) surfaces the
-//! dedicated diagnostic.
+//! the lexer encounters is by construction mid-file. Where no token
+//! takes it, it is unrecognized: logos produces a `Token::Error` for it,
+//! and the parser's existing error classifier (an invalid token
+//! containing U+FEFF) surfaces the dedicated diagnostic. Inside a string
+//! literal it is ordinary content, kept byte-for-byte in the parsed
+//! value, as beancount 3.2.3 does (#2910); likewise inside a comment, or
+//! glued into an account, whose token takes any non-ASCII character.
 //!
 //! # Span coordinates
 //!

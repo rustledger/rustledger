@@ -1548,6 +1548,8 @@ fn query_at_the_nesting_limits_runs_in_the_component() -> Result<()> {
         format!("SELECT {}1{}", "abs(".repeat(60), ")".repeat(60)),
         // Nested single-element `IN` at its deepest, parsed once per level.
         format!("SELECT {}1{}", "1 IN (".repeat(55), ")".repeat(55)),
+        // Nested two-element sets at their deepest.
+        format!("SELECT {}1{}", "1 IN (".repeat(55), ", 2)".repeat(55)),
         format!(
             "SELECT account, {}sum(number){} GROUP BY account",
             "abs(".repeat(59),
@@ -1563,6 +1565,14 @@ fn query_at_the_nesting_limits_runs_in_the_component() -> Result<()> {
         let errors = depth_query_errors(&mut store, &inst, &q)?;
         assert!(errors.is_empty(), "{errors:?}");
     }
+    // The same nest with a syntax error in its innermost first element is
+    // refused as quickly, with a syntax error, not the nesting one.
+    let q = format!("SELECT {}1 +{}", "1 IN (".repeat(55), ", 2)".repeat(55));
+    let errors = depth_query_errors(&mut store, &inst, &q)?;
+    assert!(
+        !errors.is_empty() && errors.iter().all(|m| !m.contains("nesting too deep")),
+        "{errors:?}"
+    );
     assert_next_query_answers(&mut store, &inst)
 }
 

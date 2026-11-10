@@ -1345,7 +1345,7 @@ fn expr<'a>() -> Boxed<'a, 'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
                         .ignore_then(ws())
                         .ignore_then(choice((
                             set_literal(expr.clone()),
-                            additive.clone(),
+                            not_a_set().ignore_then(additive.clone()),
                         )))
                         .map(ComparisonSuffix::NotIn),
                     // IN - try set literal first, then fall back to expression
@@ -1354,7 +1354,7 @@ fn expr<'a>() -> Boxed<'a, 'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
                         .ignore_then(ws())
                         .ignore_then(choice((
                             set_literal(expr.clone()),
-                            additive.clone(),
+                            not_a_set().ignore_then(additive.clone()),
                         )))
                         .map(ComparisonSuffix::In),
                     // Regular comparison operators
@@ -1453,6 +1453,31 @@ fn comparison_op<'a>() -> impl Parser<'a, ParserInput<'a>, BinaryOperator, Parse
     ))
 }
 
+/// The guard on the expression an `IN` falls back to when [`set_literal`]
+/// fails: it refuses a bracket that [`bracket_holds_a_comma`], so that
+/// bracket is parsed once, as a set, and not again as `( expr )`.
+///
+/// That second parse could never succeed: a parenthesized expression needs
+/// its `)` right after the expression, and this bracket has a `,` at its own
+/// level first. But when the set failed (a syntax error in its first
+/// element), the retry parsed the bracket all over again, so a nest of
+/// such sets, `1 IN (1 IN (1 +, 2), 2)`, took time doubling with its depth.
+/// What a query means, and the error a refused one gets, are unchanged.
+fn not_a_set<'a>() -> impl Parser<'a, ParserInput<'a>, (), ParserExtra<'a>> + Clone {
+    custom(|inp| {
+        let before = inp.cursor();
+        let rest: &str = inp.slice_from(&before..);
+        if bracket_holds_a_comma(rest) {
+            Err(Rich::custom(
+                inp.span_since(&before),
+                "a bracket with a ',' after its first element is a set",
+            ))
+        } else {
+            Ok(())
+        }
+    })
+}
+
 /// Whether `source` opens with a `(` whose bracket holds a `,` at its own
 /// level, before the `)` that closes it: the `,` a set literal needs after
 /// its first element (see [`set_literal`]).
@@ -1464,7 +1489,8 @@ fn comparison_op<'a>() -> impl Parser<'a, ParserInput<'a>, BinaryOperator, Parse
 /// [`string_literal`] reads them, as [`nesting_exceeds_limit`] describes
 /// (backslash is an ordinary byte, `''` continues a single-quoted string).
 /// Reads only up to the closing `)`, so a query's `IN` brackets are each
-/// read once per nesting level around them, at most [`MAX_NESTING_DEPTH`].
+/// read twice (by [`set_literal`] and [`not_a_set`]) per nesting level
+/// around them, of which there are at most [`MAX_NESTING_DEPTH`].
 fn bracket_holds_a_comma(source: &str) -> bool {
     let bytes = source.as_bytes();
     if bytes.first() != Some(&b'(') {
@@ -3261,6 +3287,37 @@ mod tests {
         // One level past the limit is refused by the nesting check.
         assert!(parse(&nest("SELECT ", "1 IN (", "1", 56)).is_err());
         assert!(parse(&nest("SELECT ", "1 NOT IN (", "1", 52)).is_err());
+    }
+
+    /// Nested sets at the deepest nesting the limits accept parse reading
+    /// each literal a bounded number of times, including with a syntax error
+    /// in the innermost first element. There, the failed set was parsed
+    /// again as `( expr )`, which a `,` at the bracket's level rules out,
+    /// so the work doubled at every level until [`not_a_set`] refused the
+    /// retry.
+    #[test]
+    fn test_parse_nested_sets_read_each_literal_a_bounded_number_of_times() {
+        let nest = |pre: &str, center: &str, post: &str, n: usize| {
+            format!("SELECT {}{center}{}", pre.repeat(n), post.repeat(n))
+        };
+        for (shape, n, ok) in [
+            (nest("1 IN (", "1", ", 2)", 55), 55, true),
+            (nest("1 IN (", "1 +", ", 2)", 55), 55, false),
+            (nest("1 IN (", "1 +", ", 2 2)", 55), 55, false),
+            (nest("1 IN (", "1 +", ",)", 55), 55, false),
+            (nest("1 NOT IN (", "1 +", ", 2)", 51), 51, false),
+            // Two brackets a level, so 28 levels reach the limit.
+            (nest("1 IN ((", "1", "), 2)", 28), 28, true),
+            (nest("1 IN ((", "1 +", "), 2)", 28), 28, false),
+            (nest("1 + (1 IN (", "1 +", ", 2))", 25), 25, false),
+        ] {
+            assert_eq!(
+                parse_within_literal_budget(&shape, 4 * (n + 1)),
+                Some(ok),
+                "{}...",
+                &shape[..40]
+            );
+        }
     }
 
     /// The set is tried only when a `,` follows its first element, found

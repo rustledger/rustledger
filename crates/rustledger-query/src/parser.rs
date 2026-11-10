@@ -83,15 +83,125 @@ fn nesting_exceeds_limit(source: &str) -> Option<usize> {
     scan_delimiters(source).too_deep
 }
 
+/// Byte offset at which the expression tree's depth bound first exceeds
+/// [`MAX_EXPR_DEPTH`], or `None` if the input stays within it. The bound is
+/// counted by [`scan_delimiters`], with the same string lexing as
+/// [`nesting_exceeds_limit`].
+fn expression_depth_exceeds_limit(source: &str) -> Option<usize> {
+    scan_delimiters(source).tree_too_deep
+}
+
+/// The error for `source` nesting too deep, by brackets ([`MAX_NESTING_DEPTH`])
+/// or by operators ([`MAX_EXPR_DEPTH`]), at whichever limit it passes first.
+fn nesting_error(source: &str) -> Option<ParseError> {
+    let brackets = nesting_exceeds_limit(source).map(|at| (at, MAX_NESTING_DEPTH));
+    let operators = expression_depth_exceeds_limit(source).map(|at| (at, MAX_EXPR_DEPTH));
+    let (offset, limit) = match (brackets, operators) {
+        (Some(b), Some(o)) => b.min(o),
+        (b, o) => b.or(o)?,
+    };
+    Some(ParseError::new(
+        ParseErrorKind::SyntaxError(format!(
+            "expression nesting too deep (exceeds maximum of {limit})"
+        )),
+        offset,
+    ))
+}
+
+/// Maximum depth of the expression tree a query may build, as bounded by
+/// [`scan_delimiters`]: every operator and every bracket on the way from the
+/// root to the deepest operand counts one level.
+///
+/// [`MAX_NESTING_DEPTH`] bounds the brackets, which is what the recursive
+/// grammar descends into. An operator chain does not recurse in the grammar
+/// (`foldl` builds it in a loop), but it builds a left-deep tree:
+/// `a AND b AND c` is `(a AND b) AND c`, so a chain of N operators is N levels
+/// deep, and so are N stacked `NOT`s. Everything that walks the tree after the
+/// parse (planning, evaluation, header naming, `Display`, `Drop`) recurses one
+/// frame per level, so a chain of some thousands of terms overflowed the
+/// stack.
+///
+/// The bound is counted, not measured on the tree: [`scan_delimiters`] reads
+/// the operator tokens and refuses the query before any tree is built, so a
+/// refused tree never exists to be walked or dropped. The count is an upper
+/// bound of the real depth, not the depth itself (a comparison and the `OR`
+/// joining it to the next each count, though they are siblings, not nested),
+/// so a query reaches the limit with fewer terms than the limit:
+/// `x ~ 'a' OR x ~ 'b' OR ...` counts two per term and fits about 500 terms.
+/// Real queries, generated ones included, chain far fewer.
+///
+/// Why 1,000, measured by running each shape (`+`, `AND`, `OR`, `NOT`,
+/// `= ... AND`, `~ ... OR`, `* ... -`) with the limit lifted:
+///
+/// - wasm32, optimized (`--release`), through `ParsedLedger::query` on the
+///   default 1 MiB shadow stack: every shape ran at 3,000 terms and ran
+///   out of stack at 4,000, so 1,000 levels takes at most about a third of
+///   the stack.
+/// - native x86-64, optimized: `rledger query` ran every shape at the limit
+///   with the main thread's stack cut to 1 MiB (`ulimit -s 1024`); the
+///   default is 8 MiB, and a 2 MiB worker thread holds it too.
+/// - unoptimized builds take several times the stack per level (about
+///   3.5 KiB natively, about 2 KiB on wasm32), so tests that run a query at
+///   the limit give it the main thread's 8 MiB.
+///
+/// Stricter than bean-query, deliberately: its parser and evaluator recurse
+/// too, and a long enough chain raises Python's `RecursionError` there. Here
+/// the same query is a parse error with a position.
+const MAX_EXPR_DEPTH: usize = 1000;
+
 /// What [`scan_delimiters`] finds: where nesting first passes the limit, and
 /// the brackets and quotes still open at the end, by offset.
 struct DelimiterScan {
+    /// Where bracket (and sign) nesting first passes [`MAX_NESTING_DEPTH`].
     too_deep: Option<usize>,
+    /// Where the expression tree's depth bound first passes
+    /// [`MAX_EXPR_DEPTH`].
+    tree_too_deep: Option<usize>,
     unclosed: Vec<(usize, char)>,
 }
 
-/// One pass over `source`'s brackets, quotes and sign runs; see
-/// [`nesting_exceeds_limit`] for the lexing rules it shares with the grammar.
+/// One bracket level of the expression-depth bound in [`scan_delimiters`].
+///
+/// The level's current comma-separated item (an argument, a set element, a
+/// target) has `ops` operators so far and holds closed brackets reaching at
+/// most `child` deep, so its tree is at most `ops + child` deep: an operand
+/// reached through the operators is either an atom or one of those brackets.
+/// Items are siblings, so the level is as deep as its deepest item, kept in
+/// `deepest` once the item is closed by a `,`.
+#[derive(Default)]
+struct DepthLevel {
+    ops: usize,
+    child: usize,
+    deepest: usize,
+}
+
+impl DepthLevel {
+    const fn item(&self) -> usize {
+        self.ops + self.child
+    }
+}
+
+/// The words that build an operator node: `AND`, `OR`, `NOT`, `IN`, `IS`
+/// (`IS NULL`) and `BETWEEN`.
+fn is_operator_word(word: &str) -> bool {
+    ["AND", "OR", "NOT", "IN", "IS", "BETWEEN"]
+        .iter()
+        .any(|w| word.eq_ignore_ascii_case(w))
+}
+
+/// One pass over `source`'s brackets, quotes, sign runs and operators; see
+/// [`nesting_exceeds_limit`] for the lexing rules it shares with the grammar,
+/// and [`MAX_EXPR_DEPTH`] for the expression-depth bound.
+///
+/// The depth bound is kept along the open path: each enclosing level's
+/// operators so far, one per open bracket, and the current item's operators
+/// and deepest closed bracket. Every operator token counts, whatever it binds:
+/// `+ - * / % = != < <= > >= ~ !~ . [` and the words in [`is_operator_word`].
+/// Counting too many is safe (`NOT IN` builds one node from two words, a `*`
+/// may be `count(*)`, a date's `-` is no operator); counting too few is not,
+/// so the one token passed over is a decimal number's `.`, which the grammar
+/// reads inside the literal. A `,` starts a new sibling item, so a long
+/// `IN (...)` list, argument list or target list costs no depth.
 fn scan_delimiters(source: &str) -> DelimiterScan {
     // Each open bracket's offset and the depth it added: itself plus the
     // signs pending before it.
@@ -100,8 +210,43 @@ fn scan_delimiters(source: &str) -> DelimiterScan {
     let mut signs: usize = 0;
     let mut too_deep = None;
     let mut unclosed_quote = None;
+    // The expression-depth bound: the root level and one per open bracket,
+    // and `path`, the bound along the open path.
+    let mut levels = vec![DepthLevel::default()];
+    let mut path: usize = 0;
+    let mut tree_too_deep = None;
+    // The word (identifier, keyword or number) being read, by its start, and
+    // whether it is a number that may still take a decimal point.
+    let mut word: Option<usize> = None;
+    let mut number_before_dot = false;
+    // Set by a decimal point, so the digits after it stay in the number.
+    let mut after_decimal_point = false;
+    let mut prev = ' ';
     let mut chars = source.char_indices().peekable();
     while let Some((i, c)) = chars.next() {
+        if c.is_alphanumeric() || c == '_' {
+            if word.is_none() {
+                word = Some(i);
+                number_before_dot = c.is_ascii_digit() && !after_decimal_point;
+            }
+            after_decimal_point = false;
+            signs = 0;
+            prev = c;
+            continue;
+        }
+        let ended_number = word.is_some() && number_before_dot;
+        if let Some(start) = word.take()
+            && is_operator_word(&source[start..i])
+        {
+            levels.last_mut().expect("root level").ops += 1;
+            path += 1;
+            if path > MAX_EXPR_DEPTH {
+                tree_too_deep.get_or_insert(start);
+            }
+        }
+        number_before_dot = false;
+        after_decimal_point = false;
+        let mut operator = false;
         match c {
             '"' | '\'' => {
                 signs = 0;
@@ -130,26 +275,74 @@ fn scan_delimiters(source: &str) -> DelimiterScan {
                 if depth > MAX_NESTING_DEPTH {
                     too_deep.get_or_insert(i);
                 }
+                // The new bracket is entered instead of the item's closed
+                // ones, so they leave the path while it is open.
+                path = path - levels.last().expect("root level").child + 1;
+                levels.push(DepthLevel::default());
             }
             ')' => {
                 signs = 0;
                 if let Some((_, added)) = open.pop() {
                     depth -= added;
                 }
+                if levels.len() > 1 {
+                    let inner = levels.pop().expect("an open bracket");
+                    let reached = inner.deepest.max(inner.item());
+                    let outer = levels.last_mut().expect("root level");
+                    path = path - inner.item() - 1 + outer.child;
+                    let child = outer.child.max(1 + reached);
+                    path += child - outer.child;
+                    outer.child = child;
+                }
+            }
+            ',' => {
+                signs = 0;
+                let level = levels.last_mut().expect("root level");
+                level.deepest = level.deepest.max(level.item());
+                path -= level.item();
+                level.ops = 0;
+                level.child = 0;
             }
             '-' => {
                 signs += 1;
                 if depth + signs > MAX_NESTING_DEPTH {
                     too_deep.get_or_insert(i);
                 }
+                operator = true;
+            }
+            // `<=`, `>=`, `!=` and `!~` are one operator each.
+            '=' | '~' => {
+                signs = 0;
+                operator = !matches!(prev, '<' | '>' | '!');
+            }
+            // A number's decimal point (`1.5`, `5.`) is part of the literal.
+            '.' if ended_number => {
+                signs = 0;
+                after_decimal_point = true;
+            }
+            '+' | '*' | '/' | '%' | '<' | '>' | '!' | '.' | '[' => {
+                signs = 0;
+                operator = true;
             }
             c if c.is_whitespace() => {}
             _ => signs = 0,
         }
+        if operator {
+            levels.last_mut().expect("root level").ops += 1;
+            path += 1;
+        }
+        if path > MAX_EXPR_DEPTH {
+            tree_too_deep.get_or_insert(i);
+        }
+        prev = c;
     }
     let mut unclosed: Vec<(usize, char)> = open.into_iter().map(|(i, _)| (i, '(')).collect();
     unclosed.extend(unclosed_quote);
-    DelimiterScan { too_deep, unclosed }
+    DelimiterScan {
+        too_deep,
+        tree_too_deep,
+        unclosed,
+    }
 }
 
 /// `source` with every `/* ... */` comment outside a string literal replaced
@@ -234,18 +427,14 @@ pub fn strip_comments(source: &str) -> Result<std::borrow::Cow<'_, str>, ParseEr
 /// # Errors
 ///
 /// Returns a `ParseError` if the query string is malformed, if a comment is
-/// not closed, or if parenthesis nesting exceeds the internal nesting limit
-/// (rejected up front to bound parse time and stack depth).
+/// not closed, or if parenthesis nesting or an operator chain exceeds the
+/// internal nesting limits (rejected up front to bound parse time and stack
+/// depth).
 pub fn parse(source: &str) -> Result<Query, ParseError> {
     let stripped = strip_comments(source)?;
     let source = stripped.as_ref();
-    if let Some(offset) = nesting_exceeds_limit(source) {
-        return Err(ParseError::new(
-            ParseErrorKind::SyntaxError(format!(
-                "expression nesting too deep (exceeds maximum of {MAX_NESTING_DEPTH})"
-            )),
-            offset,
-        ));
+    if let Some(error) = nesting_error(source) {
+        return Err(error);
     }
 
     // Run the recursive descent on a thread with an explicit, generous

@@ -406,10 +406,13 @@ use crate::types::{Error, LedgerOptions};
 /// sees the padding from the pad's date, and an account referenced before its
 /// later `open` is inactive. A v84 blob would keep serving the old errors.
 /// (v83 was never released: #2896 held it before #2872 took v84.)
-/// v86: loader v64, PARSER OUTPUT changed (#2906). Any non-ASCII character
+/// v86: loader v65, PARSER OUTPUT changed (#2905). A transaction with no flag
+/// after its date is a parse error, as in beancount; an older blob would keep
+/// serving such a file with no error.
+/// v87: loader v66, PARSER OUTPUT changed (#2906). Any non-ASCII character
 /// starts an account component, as in beancount, so `Assets:٣Foo` is one
 /// account; an older blob would keep serving such a file with its old errors.
-pub const CACHE_VERSION: u32 = 86;
+pub const CACHE_VERSION: u32 = 87;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -441,7 +444,7 @@ pub const CACHE_VERSION: u32 = 86;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 64;
+const LOADER_CACHE_VERSION_PIN: u32 = 66;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

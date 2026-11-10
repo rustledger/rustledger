@@ -118,6 +118,53 @@ pub fn resolve_leaf_account(root: &str, leaf: &str) -> String {
     format!("{root}:{leaf}")
 }
 
+/// Where an `option` line was written: its file and 1-based line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct OptionSite {
+    /// The file the option is in, as the loader names it.
+    pub file: String,
+    /// The 1-based line of the `option`.
+    pub line: usize,
+}
+
+/// An option value that was rejected (and so not applied) in a way that
+/// changes what the ledger's figures mean.
+///
+/// Today only `booking_method`: see [`Options::query_refusal`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RejectedOption {
+    /// The option's name.
+    pub key: String,
+    /// The value that was rejected.
+    pub value: String,
+    /// Where the option was written, when the loader knows (an option set
+    /// through [`Options::set`] has no site).
+    pub site: Option<OptionSite>,
+}
+
+impl RejectedOption {
+    /// Why a query over the ledger refuses to answer: the option and where
+    /// it is, that its value is not a booking method, and the method the
+    /// figures would be booked with. One text for every surface that refuses
+    /// on it.
+    ///
+    /// It names only the rejected value as wrong, never `booked_with`: the
+    /// refusal is made only when the two differ ([`Options::query_refusal`]).
+    #[must_use]
+    pub fn query_refusal_message(&self, booked_with: &str) -> String {
+        let site = self
+            .site
+            .as_ref()
+            .map(|s| format!(" at {}:{}", s.file, s.line))
+            .unwrap_or_default();
+        format!(
+            "option \"{}\"{site}: \"{}\" is not a booking method (E7002); refusing to \
+             derive figures, which would be booked with {booked_with}",
+            self.key, self.value,
+        )
+    }
+}
+
 /// Option validation warning.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OptionWarning {
@@ -289,6 +336,13 @@ pub struct Options {
 
     /// Validation warnings collected during parsing.
     pub warnings: Vec<OptionWarning>,
+
+    /// The latest `booking_method` value that was rejected, if no accepted
+    /// value came after it (a later accepted value clears it: the last value
+    /// wins). The option keeps its previous method, and a query over the
+    /// ledger refuses when that method is not the one this value asks for
+    /// (see [`Self::query_refusal`]).
+    pub rejected_booking_method: Option<RejectedOption>,
 }
 
 impl Default for Options {
@@ -501,6 +555,7 @@ impl Options {
             custom: FxHashMap::default(),
             set_options: FxHashSet::default(),
             warnings: Vec::new(),
+            rejected_booking_method: None,
         }
     }
 
@@ -537,6 +592,68 @@ impl Options {
     /// top-level file's value governs, so an included sub-ledger cannot change
     /// how the whole tree books or balances.
     pub fn set_scoped(&mut self, key: &str, value: &str, top_level: bool) {
+        self.set_scoped_at(key, value, top_level, None);
+    }
+
+    /// [`Self::set_scoped`] for an option written at `site`, so a rejection
+    /// that refuses queries ([`Self::query_refusal`]) can say where it is.
+    pub fn set_scoped_at(
+        &mut self,
+        key: &str,
+        value: &str,
+        top_level: bool,
+        site: Option<OptionSite>,
+    ) {
+        self.set_scoped_inner(key, value, top_level);
+        // A new rejection starts with no site (see the `booking_method` arm);
+        // this is where it was written.
+        if key == "booking_method"
+            && let Some(rejected) = &mut self.rejected_booking_method
+            && rejected.site.is_none()
+        {
+            rejected.site = site;
+        }
+    }
+
+    /// The rejected option that stops a query over this ledger from
+    /// answering, if any (#2911): the last `booking_method` value, when it
+    /// was rejected and the ledger is booked with `booked_with`
+    /// (`Ledger::booking_method`), a method other than the one it asked for.
+    ///
+    /// The option keeps its previous method, as in beancount, so `check`
+    /// reports the E7002 and books as before. A query or report does not
+    /// answer, though: every lot reduction would be booked with a method the
+    /// user did not ask for (`fifo` alone was meant as FIFO and is booked
+    /// STRICT), and the figures would look right.
+    ///
+    /// Only then. A later accepted value clears the rejection (the last
+    /// value wins), so `fifo` then `FIFO` books FIFO and answers. A rejected
+    /// value whose case-insensitive reading names the method booked does not
+    /// refuse either: `FIFO` then `fifo` books FIFO, which is what both lines
+    /// ask for. Anything else refuses: `fifo` alone, `bogus`, `FIFO` then
+    /// `bogus`.
+    ///
+    /// Stricter than Python: bean-query answers here, with the figures
+    /// booked under the kept method. We refuse because those figures
+    /// silently use a booking method the ledger did not ask for. The other
+    /// rejected options keep their default and answer: none of them changes
+    /// which lots a sale consumes.
+    ///
+    /// Part of the query rule `Ledger::blocks_queries` applies.
+    #[must_use]
+    pub fn query_refusal(
+        &self,
+        booked_with: rustledger_core::BookingMethod,
+    ) -> Option<&RejectedOption> {
+        let rejected = self.rejected_booking_method.as_ref()?;
+        let asked = rejected
+            .value
+            .parse::<rustledger_core::BookingMethod>()
+            .ok();
+        (asked != Some(booked_with)).then_some(rejected)
+    }
+
+    fn set_scoped_inner(&mut self, key: &str, value: &str, top_level: bool) {
         if !top_level && KNOWN_OPTIONS.contains(&key) && !ACCUMULATE_ACROSS_INCLUDES.contains(&key)
         {
             // A deprecated option is still deprecated when it is also ignored,
@@ -592,51 +709,111 @@ impl Options {
         // `option "title"` / `booking_method` / ... for standalone use — is a
         // legitimate layout (issue #1546). The value below is applied last-wins
         // to match. `cmd::check` and `validate` both surface this as a warning.
+        //
+        // Only when the new value is ACCEPTED: a rejected value does not win,
+        // so "the last value wins" would be false (#2911). Inserted ahead of
+        // the value's own diagnostics, where it was raised before.
         let is_repeatable = REPEATABLE_OPTIONS.contains(&key);
-        if is_known && !is_repeatable && self.set_options.contains(key) {
-            self.warnings.push(OptionWarning {
-                code: "E7003",
-                message: format!("Option \"{key}\" is set more than once; the last value wins"),
-                option: key.to_string(),
-                value: value.to_string(),
-            });
+        let already_set = self.set_options.contains(key);
+        let mark = self.warnings.len();
+
+        if self.apply(key, value) {
+            if is_known && !is_repeatable && already_set {
+                self.warnings.insert(
+                    mark,
+                    OptionWarning {
+                        code: "E7003",
+                        message: format!(
+                            "Option \"{key}\" is set more than once; the last value wins"
+                        ),
+                        option: key.to_string(),
+                        value: value.to_string(),
+                    },
+                );
+            }
+            // Track that this option was set. A rejected value is not
+            // tracked: nothing it would gate (`effective_booking_method`,
+            // `rooted_leaf_warnings`) may see a value that was never applied.
+            self.set_options.insert(key.to_string());
         }
+    }
 
-        // Track that this option was set
-        self.set_options.insert(key.to_string());
+    /// Report a value the option's converter rejects, and keep the option as
+    /// it was. Always `false`, so an arm can `return self.reject(..)`.
+    ///
+    /// beancount's `grammar.option` returns on the converter's `ValueError`
+    /// without assigning, so the option keeps its default or an earlier valid
+    /// setting, and the bad value has no other effect: `option "name_equity"
+    /// "capital"` leaves `Equity:A` valid (#2911). Every arm that validates its
+    /// value rejects through here, so none can report the error and still
+    /// apply the value.
+    fn reject(&mut self, code: &'static str, key: &str, value: &str, message: String) -> bool {
+        self.warnings.push(OptionWarning {
+            code,
+            message,
+            option: key.to_string(),
+            value: value.to_string(),
+        });
+        false
+    }
 
-        // Apply the option value
+    /// Reject an account-name option value that is not a valid leaf (E7002).
+    /// `true` when the value is valid.
+    fn check_leaf(&mut self, key: &str, value: &str) -> bool {
+        Self::is_valid_leaf(value)
+            || self.reject(
+                "E7002",
+                key,
+                value,
+                format!("Invalid leaf account name: '{value}'"),
+            )
+    }
+
+    /// Reject a `name_*` value that is not a valid account root (E7008).
+    /// `true` when the value is valid.
+    ///
+    /// An invalid root is never applied, so the accounts under the previous
+    /// root stay valid and the bad value produces this one error, as in
+    /// beancount (#2911). The `account_*` options get the analogous E7002
+    /// guard in [`Self::check_leaf`].
+    fn check_root(&mut self, key: &str, value: &str) -> bool {
+        Self::is_valid_account_root(value)
+            || self.reject(
+                "E7008",
+                key,
+                value,
+                format!(
+                    "Invalid account type name: '{value}' cannot begin an \
+                     account name, so the option keeps its previous value"
+                ),
+            )
+    }
+
+    /// Apply one option value. `false` when the value was rejected, in which
+    /// case the option is unchanged (see [`Self::reject`]).
+    fn apply(&mut self, key: &str, value: &str) -> bool {
         match key {
             "title" => self.title = Some(value.to_string()),
             "operating_currency" => self.operating_currency.push(value.to_string()),
-            "name_assets" => {
-                self.warn_if_invalid_root("name_assets", value);
-                self.name_assets = value.to_string();
-            }
-            "name_liabilities" => {
-                self.warn_if_invalid_root("name_liabilities", value);
-                self.name_liabilities = value.to_string();
-            }
-            "name_equity" => {
-                self.warn_if_invalid_root("name_equity", value);
-                self.name_equity = value.to_string();
-            }
-            "name_income" => {
-                self.warn_if_invalid_root("name_income", value);
-                self.name_income = value.to_string();
-            }
-            "name_expenses" => {
-                self.warn_if_invalid_root("name_expenses", value);
-                self.name_expenses = value.to_string();
+            "name_assets" | "name_liabilities" | "name_equity" | "name_income"
+            | "name_expenses" => {
+                if !self.check_root(key, value) {
+                    return false;
+                }
+                let slot = match key {
+                    "name_assets" => &mut self.name_assets,
+                    "name_liabilities" => &mut self.name_liabilities,
+                    "name_equity" => &mut self.name_equity,
+                    "name_income" => &mut self.name_income,
+                    _ => &mut self.name_expenses,
+                };
+                *slot = value.to_string();
             }
             "account_rounding" => {
-                if !Self::is_valid_leaf(value) {
-                    self.warnings.push(OptionWarning {
-                        code: "E7002",
-                        message: format!("Invalid leaf account name: '{value}'"),
-                        option: key.to_string(),
-                        value: value.to_string(),
-                    });
+                // An invalid value is only the E7002, as in beancount: the
+                // no-effect notice below is about a value that was set.
+                if !self.check_leaf(key, value) {
+                    return false;
                 }
                 // Accepted for Beancount compatibility but intentionally a no-op.
                 // Beancount uses `account_rounding` to absorb the residual created
@@ -657,64 +834,57 @@ impl Options {
                 });
                 self.account_rounding = Some(value.to_string());
             }
-            "account_current_conversions" => {
-                if !Self::is_valid_leaf(value) {
-                    self.warnings.push(OptionWarning {
-                        code: "E7002",
-                        message: format!("Invalid leaf account name: '{value}'"),
-                        option: key.to_string(),
-                        value: value.to_string(),
-                    });
+            "account_current_conversions" | "account_unrealized_gains" => {
+                if !self.check_leaf(key, value) {
+                    return false;
                 }
-                self.account_current_conversions = Some(value.to_string());
+                let slot = if key == "account_current_conversions" {
+                    &mut self.account_current_conversions
+                } else {
+                    &mut self.account_unrealized_gains
+                };
+                *slot = Some(value.to_string());
             }
-            "account_unrealized_gains" => {
-                if !Self::is_valid_leaf(value) {
-                    self.warnings.push(OptionWarning {
-                        code: "E7002",
-                        message: format!("Invalid leaf account name: '{value}'"),
-                        option: key.to_string(),
-                        value: value.to_string(),
-                    });
+            "account_previous_balances"
+            | "account_previous_earnings"
+            | "account_previous_conversions"
+            | "account_current_earnings" => {
+                if !self.check_leaf(key, value) {
+                    return false;
                 }
-                self.account_unrealized_gains = Some(value.to_string());
+                let slot = match key {
+                    "account_previous_balances" => &mut self.account_previous_balances,
+                    "account_previous_earnings" => &mut self.account_previous_earnings,
+                    "account_previous_conversions" => &mut self.account_previous_conversions,
+                    _ => &mut self.account_current_earnings,
+                };
+                *slot = value.to_string();
             }
-            "inferred_tolerance_multiplier" => {
-                // Deprecated: renamed to tolerance_multiplier in Python beancount
+            "inferred_tolerance_multiplier" | "tolerance_multiplier" => {
+                // `inferred_tolerance_multiplier` is deprecated: renamed to
+                // `tolerance_multiplier` in Python beancount.
                 self.warn_if_deprecated(key, value);
-                if let Ok(d) = Decimal::from_str(value) {
-                    self.inferred_tolerance_multiplier = d;
-                } else {
-                    // E7002: Invalid option value
-                    self.warnings.push(OptionWarning {
-                        code: "E7002",
-                        message: format!(
+                let Ok(d) = Decimal::from_str(value) else {
+                    return self.reject(
+                        "E7002",
+                        key,
+                        value,
+                        format!(
                             "Invalid value \"{value}\" for option \"{key}\": expected decimal number"
                         ),
-                        option: key.to_string(),
-                        value: value.to_string(),
-                    });
-                }
-            }
-            "tolerance_multiplier" => {
-                if let Ok(d) = Decimal::from_str(value) {
-                    self.inferred_tolerance_multiplier = d;
-                } else {
-                    self.warnings.push(OptionWarning {
-                        code: "E7002",
-                        message: format!(
-                            "Invalid value \"{value}\" for option \"{key}\": expected decimal number"
-                        ),
-                        option: key.to_string(),
-                        value: value.to_string(),
-                    });
-                }
+                    );
+                };
+                self.inferred_tolerance_multiplier = d;
             }
             "infer_tolerance_from_cost" => {
                 // Same vocabulary as every other boolean in ledger source
                 // (`parse_bool_word`). This arm used to take TRUE/FALSE only
                 // and warn on `1`, which Python beancount accepts as true for
                 // every boolean option.
+                //
+                // Applied even when unrecognized: beancount has no converter
+                // to reject it and reads any other word as false, which is
+                // what this sets.
                 let parsed = rustledger_core::parse_bool_word(value);
                 if parsed.is_none() {
                     self.warnings.push(OptionWarning {
@@ -729,6 +899,8 @@ impl Options {
                 self.infer_tolerance_from_cost = parsed == Some(true);
             }
             "booking_method" => {
+                // beancount's converter is `data.Booking[value]`, the exact
+                // enum name, so `fifo` is rejected there and here.
                 let valid_methods = [
                     "STRICT",
                     "STRICT_WITH_SIZE",
@@ -738,25 +910,40 @@ impl Options {
                     "AVERAGE",
                     "NONE",
                 ];
-                if !valid_methods.contains(&value.to_uppercase().as_str()) {
-                    self.warnings.push(OptionWarning {
-                        code: "E7002",
-                        message: format!(
+                if !valid_methods.contains(&value) {
+                    // The latest rejection, since the last value is the one
+                    // the ledger asks for; its site is filled in by
+                    // `set_scoped_at`.
+                    self.rejected_booking_method = Some(RejectedOption {
+                        key: key.to_string(),
+                        value: value.to_string(),
+                        site: None,
+                    });
+                    return self.reject(
+                        "E7002",
+                        key,
+                        value,
+                        format!(
                             "Invalid value \"{}\" for option \"{}\": expected one of {}",
                             value,
                             key,
                             valid_methods.join(", ")
                         ),
-                        option: key.to_string(),
-                        value: value.to_string(),
-                    });
+                    );
                 }
                 self.booking_method = value.to_string();
+                // Last wins: an accepted method is what the ledger asks for,
+                // so an earlier rejection no longer refuses queries.
+                self.rejected_booking_method = None;
             }
             "render_commas" => {
                 // Accept TRUE/FALSE, true/false, 1/0 (Python beancount
                 // compatibility). Shared with `render_commas:` metadata so one
                 // concept has one vocabulary — see `parse_bool_word`.
+                //
+                // Applied even when unrecognized, as for
+                // `infer_tolerance_from_cost`: beancount's boolean converter
+                // never rejects, it reads any other word as false.
                 let parsed = rustledger_core::parse_bool_word(value);
                 let is_true = parsed == Some(true);
                 if parsed.is_none() {
@@ -775,103 +962,48 @@ impl Options {
                 // Parse "CURRENCY:EXAMPLE" where EXAMPLE's decimal places define the precision.
                 // E.g., "CHF:0.01" means 2 decimal places for CHF.
                 // E.g., "USD:0.001" means 3 decimal places for USD.
-                if let Some((curr, example)) = value.split_once(':') {
-                    if let Ok(d) = Decimal::from_str(example) {
-                        // Get the precision from the example number's decimal places
-                        let precision = d.scale();
-                        self.display_precision.insert(curr.to_string(), precision);
-                    } else {
-                        self.warnings.push(OptionWarning {
-                            code: "E7002",
-                            message: format!(
-                                "Invalid precision value \"{example}\" in option \"{key}\""
-                            ),
-                            option: key.to_string(),
-                            value: value.to_string(),
-                        });
-                    }
-                } else {
-                    self.warnings.push(OptionWarning {
-                        code: "E7002",
-                        message: format!(
+                let Some((curr, example)) = value.split_once(':') else {
+                    return self.reject(
+                        "E7002",
+                        key,
+                        value,
+                        format!(
                             "Invalid format for option \"{key}\": expected CURRENCY:EXAMPLE (e.g., CHF:0.01)"
                         ),
-                        option: key.to_string(),
-                        value: value.to_string(),
-                    });
-                }
+                    );
+                };
+                let Ok(d) = Decimal::from_str(example) else {
+                    return self.reject(
+                        "E7002",
+                        key,
+                        value,
+                        format!("Invalid precision value \"{example}\" in option \"{key}\""),
+                    );
+                };
+                // Get the precision from the example number's decimal places
+                self.display_precision.insert(curr.to_string(), d.scale());
             }
             "filename" => self.filename = Some(value.to_string()),
-            "account_previous_balances" => {
-                if !Self::is_valid_leaf(value) {
-                    self.warnings.push(OptionWarning {
-                        code: "E7002",
-                        message: format!("Invalid leaf account name: '{value}'"),
-                        option: key.to_string(),
-                        value: value.to_string(),
-                    });
-                }
-                self.account_previous_balances = value.to_string();
-            }
-            "account_previous_earnings" => {
-                if !Self::is_valid_leaf(value) {
-                    self.warnings.push(OptionWarning {
-                        code: "E7002",
-                        message: format!("Invalid leaf account name: '{value}'"),
-                        option: key.to_string(),
-                        value: value.to_string(),
-                    });
-                }
-                self.account_previous_earnings = value.to_string();
-            }
-            "account_previous_conversions" => {
-                if !Self::is_valid_leaf(value) {
-                    self.warnings.push(OptionWarning {
-                        code: "E7002",
-                        message: format!("Invalid leaf account name: '{value}'"),
-                        option: key.to_string(),
-                        value: value.to_string(),
-                    });
-                }
-                self.account_previous_conversions = value.to_string();
-            }
-            "account_current_earnings" => {
-                if !Self::is_valid_leaf(value) {
-                    self.warnings.push(OptionWarning {
-                        code: "E7002",
-                        message: format!("Invalid leaf account name: '{value}'"),
-                        option: key.to_string(),
-                        value: value.to_string(),
-                    });
-                }
-                self.account_current_earnings = value.to_string();
-            }
             "conversion_currency" => self.conversion_currency = Some(value.to_string()),
             "inferred_tolerance_default" => {
                 // Parse "CURRENCY:TOLERANCE" or "*:TOLERANCE"
-                if let Some((curr, tol)) = value.split_once(':') {
-                    if let Ok(d) = Decimal::from_str(tol) {
-                        self.inferred_tolerance_default.insert(curr.to_string(), d);
-                    } else {
-                        self.warnings.push(OptionWarning {
-                            code: "E7002",
-                            message: format!(
-                                "Invalid tolerance value \"{tol}\" in option \"{key}\""
-                            ),
-                            option: key.to_string(),
-                            value: value.to_string(),
-                        });
-                    }
-                } else {
-                    self.warnings.push(OptionWarning {
-                        code: "E7002",
-                        message: format!(
-                            "Invalid format for option \"{key}\": expected CURRENCY:TOLERANCE"
-                        ),
-                        option: key.to_string(),
-                        value: value.to_string(),
-                    });
-                }
+                let Some((curr, tol)) = value.split_once(':') else {
+                    return self.reject(
+                        "E7002",
+                        key,
+                        value,
+                        format!("Invalid format for option \"{key}\": expected CURRENCY:TOLERANCE"),
+                    );
+                };
+                let Ok(d) = Decimal::from_str(tol) else {
+                    return self.reject(
+                        "E7002",
+                        key,
+                        value,
+                        format!("Invalid tolerance value \"{tol}\" in option \"{key}\""),
+                    );
+                };
+                self.inferred_tolerance_default.insert(curr.to_string(), d);
             }
             "use_legacy_fixed_tolerances" => {
                 self.use_legacy_fixed_tolerances = value.eq_ignore_ascii_case("true");
@@ -891,18 +1023,15 @@ impl Options {
                 self.allow_pipe_separator = value.eq_ignore_ascii_case("true");
             }
             "long_string_maxlines" => {
-                if let Ok(n) = value.parse::<u32>() {
-                    self.long_string_maxlines = n;
-                } else {
-                    self.warnings.push(OptionWarning {
-                        code: "E7002",
-                        message: format!(
-                            "Invalid value \"{value}\" for option \"{key}\": expected integer"
-                        ),
-                        option: key.to_string(),
-                        value: value.to_string(),
-                    });
-                }
+                let Ok(n) = value.parse::<u32>() else {
+                    return self.reject(
+                        "E7002",
+                        key,
+                        value,
+                        format!("Invalid value \"{value}\" for option \"{key}\": expected integer"),
+                    );
+                };
+                self.long_string_maxlines = n;
             }
             "documents" => {
                 // NO existence check here. A relative `documents` path is
@@ -921,12 +1050,7 @@ impl Options {
             "plugin_processing_mode" => {
                 // Valid values are "default" and "raw" (case-sensitive, like Python)
                 if value != "default" && value != "raw" {
-                    self.warnings.push(OptionWarning {
-                        code: "E7002",
-                        message: format!("Invalid value '{value}'"),
-                        option: key.to_string(),
-                        value: value.to_string(),
-                    });
+                    return self.reject("E7002", key, value, format!("Invalid value '{value}'"));
                 }
                 self.plugin_processing_mode = value.to_string();
             }
@@ -939,6 +1063,7 @@ impl Options {
                 self.custom.insert(key.to_string(), value.to_string());
             }
         }
+        true
     }
 
     /// Get a custom option value.
@@ -1005,29 +1130,6 @@ impl Options {
             &self.name_income,
             &self.name_expenses,
         ]
-    }
-
-    /// Warn (E7008) when a `name_*` account-type rename is not a valid
-    /// account root by beancount's `is_valid_root` (which rejects it with
-    /// `Invalid root account name` and keeps the default root): a digit
-    /// start, whose accounts fail at parse time in both tools, or a
-    /// character outside `[\p{L}\p{Nd}-]` such as `A😀` (#2906). Accepted
-    /// anyway for option-handling parity; the warning
-    /// makes the failure mode visible at the option site instead of at
-    /// every account mention. The `account_*` options get the analogous
-    /// E7002 guard; `name_*` used to be the unguarded exception.
-    fn warn_if_invalid_root(&mut self, key: &str, value: &str) {
-        if !Self::is_valid_account_root(value) {
-            self.warnings.push(OptionWarning {
-                code: "E7008",
-                message: format!(
-                    "Invalid account type name: '{value}' is not a valid \
-                     root account name (accounts under it are invalid)"
-                ),
-                option: key.to_string(),
-                value: value.to_string(),
-            });
-        }
     }
 
     /// beancount's `is_valid_leaf`: one or more account components, with no
@@ -1589,17 +1691,16 @@ mod tests {
 
     #[test]
     fn test_invalid_account_name_validation() {
-        // account_rounding with an invalid value: both the invalid-account
-        // warning (E7002) and the accepted-but-no-op warning (E7007) fire.
+        // account_rounding with an invalid value: only the invalid-account
+        // error (E7002), as in beancount. The value is not set, so the
+        // accepted-but-no-op notice (E7007) has nothing to be about (#2911).
         let mut opts = Options::new();
         opts.set("account_rounding", "invalid");
 
-        assert!(
-            opts.warnings
-                .iter()
-                .any(|w| w.code == "E7002" && w.message.contains("Invalid leaf account"))
-        );
-        assert!(opts.warnings.iter().any(|w| w.code == "E7007"));
+        assert_eq!(opts.warnings.len(), 1, "{:?}", opts.warnings);
+        assert_eq!(opts.warnings[0].code, "E7002");
+        assert!(opts.warnings[0].message.contains("Invalid leaf account"));
+        assert_eq!(opts.account_rounding, None);
     }
 
     #[test]
@@ -1796,22 +1897,22 @@ mod tests {
 
     #[test]
     fn test_name_option_invalid_root_warns_e7008() {
-        // Digit-start root: every account under it is unparsable (both
-        // rledger and Python fail at parse time) — the option site now
-        // says so up front instead of the ledger erroring at every mention.
+        // Digit-start root: no account under it could parse, so the option
+        // site reports it and keeps the previous root (#2911).
         let mut opts = Options::new();
         opts.set("name_assets", "1Assets");
         assert_eq!(opts.warnings.len(), 1);
         assert_eq!(opts.warnings[0].code, "E7008");
         assert!(opts.warnings[0].message.contains("1Assets"));
-        // Accepted anyway (option-handling parity).
-        assert_eq!(opts.name_assets, "1Assets");
+        // Rejected, as beancount rejects it: the root stays the default.
+        assert_eq!(opts.name_assets, "Assets");
 
         // Colon inside a root can never match a root component.
         let mut opts = Options::new();
         opts.set("name_income", "In:Come");
         assert_eq!(opts.warnings.len(), 1);
         assert_eq!(opts.warnings[0].code, "E7008");
+        assert_eq!(opts.name_income, "Income");
 
         // A character outside `[\p{L}\p{Nd}-]` (#2906): bean-check reports
         // `Invalid root account name: 'A😀'`, although `A😀:X` lexes.
@@ -1819,6 +1920,7 @@ mod tests {
         opts.set("name_equity", "A\u{1F600}");
         assert_eq!(opts.warnings.len(), 1);
         assert_eq!(opts.warnings[0].code, "E7008");
+        assert_eq!(opts.name_equity, "Equity");
     }
 
     #[test]
@@ -1860,5 +1962,306 @@ mod tests {
         assert_eq!(opts.warnings[0].code, "E7002");
         assert!(opts.warnings[0].message.contains("Invalid precision"));
         assert!(opts.display_precision.is_empty());
+    }
+
+    /// The `name_*` options whose converter (beancount's
+    /// `options_validate_root_account`) can reject a value.
+    const NAME_OPTIONS: [&str; 5] = [
+        "name_assets",
+        "name_liabilities",
+        "name_equity",
+        "name_income",
+        "name_expenses",
+    ];
+
+    /// The `account_*` options whose converter (beancount's
+    /// `options_validate_leaf_account`) can reject a value.
+    const ACCOUNT_OPTIONS: [&str; 7] = [
+        "account_previous_balances",
+        "account_previous_earnings",
+        "account_previous_conversions",
+        "account_current_earnings",
+        "account_current_conversions",
+        "account_unrealized_gains",
+        "account_rounding",
+    ];
+
+    /// The value an option holds, for the families rejected by #2911.
+    fn held(opts: &Options, key: &str) -> Option<String> {
+        match key {
+            "name_assets" => Some(opts.name_assets.clone()),
+            "name_liabilities" => Some(opts.name_liabilities.clone()),
+            "name_equity" => Some(opts.name_equity.clone()),
+            "name_income" => Some(opts.name_income.clone()),
+            "name_expenses" => Some(opts.name_expenses.clone()),
+            "account_previous_balances" => Some(opts.account_previous_balances.clone()),
+            "account_previous_earnings" => Some(opts.account_previous_earnings.clone()),
+            "account_previous_conversions" => Some(opts.account_previous_conversions.clone()),
+            "account_current_earnings" => Some(opts.account_current_earnings.clone()),
+            "account_current_conversions" => opts.account_current_conversions.clone(),
+            "account_unrealized_gains" => opts.account_unrealized_gains.clone(),
+            "account_rounding" => opts.account_rounding.clone(),
+            other => panic!("not an account-name option: {other}"),
+        }
+    }
+
+    /// #2911: an invalid root is reported once and not applied, as beancount's
+    /// `grammar.option` returns on the converter's error without assigning.
+    /// The issue's example, then an empty string, a lowercase name and a
+    /// colon, on every `name_*` option.
+    #[test]
+    fn test_set_invalid_name_option_keeps_default() {
+        for key in NAME_OPTIONS {
+            for bad in [
+                "A\u{1F600}",
+                "Cap ital",
+                "",
+                "revenue",
+                "Exp:Sub",
+                "1Assets",
+            ] {
+                let mut opts = Options::new();
+                let before = held(&opts, key);
+                opts.set(key, bad);
+                let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+                assert_eq!(codes, ["E7008"], "{key}={bad:?}");
+                assert_eq!(held(&opts, key), before, "{key}={bad:?} must not apply");
+                assert!(
+                    !opts.set_options.contains(key),
+                    "{key}={bad:?}: a rejected value is not a setting"
+                );
+            }
+        }
+    }
+
+    /// #2911: an earlier valid root survives a later invalid one, and an
+    /// invalid one does not stop a later valid one from applying. Neither
+    /// order is a duplicate setting: only one value was applied.
+    #[test]
+    fn test_set_invalid_name_option_keeps_earlier_valid_value() {
+        for key in NAME_OPTIONS {
+            let mut opts = Options::new();
+            opts.set(key, "Capital");
+            opts.set(key, "bad");
+            let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+            assert_eq!(codes, ["E7008"], "{key}");
+            assert_eq!(held(&opts, key).as_deref(), Some("Capital"), "{key}");
+
+            let mut opts = Options::new();
+            opts.set(key, "bad");
+            opts.set(key, "Capital");
+            let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+            assert_eq!(codes, ["E7008"], "{key}");
+            assert_eq!(held(&opts, key).as_deref(), Some("Capital"), "{key}");
+        }
+    }
+
+    /// A root that collides with another root's name is a valid root, so it
+    /// is applied, as in beancount (which then rejects accounts under the
+    /// renamed type, not the option).
+    #[test]
+    fn test_set_name_option_colliding_root_is_applied() {
+        let mut opts = Options::new();
+        opts.set("name_income", "Assets");
+        assert!(opts.warnings.is_empty(), "{:?}", opts.warnings);
+        assert_eq!(opts.name_income, "Assets");
+    }
+
+    /// #2911: an invalid leaf on any `account_*` option is one E7002 and
+    /// leaves the option as it was: the default, or unset where it has none.
+    /// `account_rounding` raises no E7007 for a value it did not take.
+    #[test]
+    fn test_set_invalid_account_option_keeps_default() {
+        for key in ACCOUNT_OPTIONS {
+            for bad in ["bad:leaf", "", "x", "Conv ersions", "Anfang:"] {
+                let mut opts = Options::new();
+                let before = held(&opts, key);
+                opts.set(key, bad);
+                let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+                assert_eq!(codes, ["E7002"], "{key}={bad:?}");
+                assert_eq!(held(&opts, key), before, "{key}={bad:?} must not apply");
+                assert!(!opts.set_options.contains(key), "{key}={bad:?}");
+                assert!(opts.rooted_leaf_warnings().is_empty(), "{key}={bad:?}");
+            }
+        }
+    }
+
+    /// #2911: an earlier valid leaf survives a later invalid one, and a later
+    /// valid leaf applies after an invalid one.
+    #[test]
+    fn test_set_invalid_account_option_keeps_earlier_valid_value() {
+        for key in ACCOUNT_OPTIONS {
+            let mut opts = Options::new();
+            opts.set(key, "Anfang");
+            opts.set(key, "x");
+            assert_eq!(held(&opts, key).as_deref(), Some("Anfang"), "{key}");
+            assert!(
+                !opts.warnings.iter().any(|w| w.code == "E7003"),
+                "{key}: the rejected value did not win, so it is no duplicate"
+            );
+
+            let mut opts = Options::new();
+            opts.set(key, "x");
+            opts.set(key, "Anfang");
+            assert_eq!(held(&opts, key).as_deref(), Some("Anfang"), "{key}");
+            assert!(!opts.warnings.iter().any(|w| w.code == "E7003"), "{key}");
+        }
+        // The resolved account follows the kept leaf.
+        let mut opts = Options::new();
+        opts.set("account_previous_balances", "Anfang");
+        opts.set("account_previous_balances", "x");
+        assert_eq!(opts.previous_balances_account(), "Equity:Anfang");
+    }
+
+    /// Two ACCEPTED settings are still a duplicate, reported ahead of the
+    /// second value's own diagnostics.
+    #[test]
+    fn test_set_two_valid_values_still_warn_duplicate() {
+        let mut opts = Options::new();
+        opts.set("account_rounding", "Rounding");
+        opts.set("account_rounding", "Other");
+        let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+        assert_eq!(codes, ["E7007", "E7003", "E7007"]);
+        assert_eq!(opts.account_rounding.as_deref(), Some("Other"));
+    }
+
+    /// #2911: `booking_method`'s converter is beancount's `Booking[value]`, so
+    /// an unknown or lowercase method is rejected and the earlier method kept.
+    #[test]
+    fn test_set_invalid_booking_method_keeps_earlier_value() {
+        let mut opts = Options::new();
+        opts.set("booking_method", "FIFO");
+        opts.set("booking_method", "XYZ");
+        let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+        assert_eq!(codes, ["E7002"]);
+        assert_eq!(opts.booking_method, "FIFO");
+        assert_eq!(
+            opts.effective_booking_method(rustledger_core::BookingMethod::Strict),
+            rustledger_core::BookingMethod::Fifo
+        );
+
+        let mut opts = Options::new();
+        opts.set("booking_method", "fifo");
+        let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+        assert_eq!(
+            codes,
+            ["E7002"],
+            "beancount's Booking[...] is case-sensitive"
+        );
+        assert_eq!(opts.booking_method, "STRICT");
+        assert!(!opts.set_options.contains("booking_method"));
+    }
+
+    /// #2911: an invalid `plugin_processing_mode` keeps the earlier mode.
+    #[test]
+    fn test_set_invalid_plugin_processing_mode_keeps_earlier_value() {
+        let mut opts = Options::new();
+        opts.set("plugin_processing_mode", "raw");
+        opts.set("plugin_processing_mode", "bogus");
+        let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+        assert_eq!(codes, ["E7002"]);
+        assert_eq!(opts.plugin_processing_mode, "raw");
+    }
+
+    /// #2911: the numeric options keep their earlier value on a bad one, and a
+    /// map option keeps its entries.
+    #[test]
+    fn test_set_invalid_numeric_option_keeps_earlier_value() {
+        let mut opts = Options::new();
+        opts.set("tolerance_multiplier", "0.6");
+        opts.set("tolerance_multiplier", "abc");
+        opts.set("long_string_maxlines", "10");
+        opts.set("long_string_maxlines", "ten");
+        opts.set("inferred_tolerance_default", "USD:0.01");
+        opts.set("inferred_tolerance_default", "USD:abc");
+        opts.set("display_precision", "USD:0.01");
+        opts.set("display_precision", "USD:abc");
+        let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+        assert_eq!(codes, ["E7002", "E7002", "E7002", "E7002"]);
+        assert_eq!(
+            opts.inferred_tolerance_multiplier,
+            rust_decimal_macros::dec!(0.6)
+        );
+        assert_eq!(opts.long_string_maxlines, 10);
+        assert_eq!(
+            opts.inferred_tolerance_default.get("USD"),
+            Some(&rust_decimal_macros::dec!(0.01))
+        );
+        assert_eq!(opts.display_precision.get("USD"), Some(&2));
+    }
+
+    /// #2911: only a rejected `booking_method` refuses queries, only when
+    /// the ledger is booked with a method other than the one its last value
+    /// asks for, and the refusal names the option, its value and its line.
+    #[test]
+    fn test_query_refusal_only_when_booking_differs_from_the_request() {
+        use rustledger_core::BookingMethod;
+        let booked = |opts: &Options| opts.effective_booking_method(BookingMethod::Strict);
+        let refuses = |values: &[&str]| {
+            let mut opts = Options::new();
+            for value in values {
+                opts.set("booking_method", value);
+            }
+            opts.query_refusal(booked(&opts))
+                .map(|r| (r.value.clone(), booked(&opts)))
+        };
+
+        // Refuses: the booking is not what the last value asks for.
+        assert_eq!(
+            refuses(&["fifo"]),
+            Some(("fifo".to_string(), BookingMethod::Strict))
+        );
+        assert_eq!(
+            refuses(&["bogus"]),
+            Some(("bogus".to_string(), BookingMethod::Strict))
+        );
+        assert_eq!(
+            refuses(&["FIFO", "bogus"]),
+            Some(("bogus".to_string(), BookingMethod::Fifo))
+        );
+        // Answers: a later accepted value wins, and a rejected value that
+        // reads as the method booked asks for what is booked.
+        assert_eq!(refuses(&["fifo", "FIFO"]), None);
+        // A later accepted value clears the rejection outright: `bogus`
+        // names no method, so only the clearing lets this answer.
+        assert_eq!(refuses(&["bogus", "FIFO"]), None);
+        assert_eq!(refuses(&["FIFO", "fifo"]), None);
+        assert_eq!(refuses(&["FIFO"]), None);
+
+        // The message, at the option's line, names only the value as wrong.
+        let mut opts = Options::new();
+        opts.set_scoped_at(
+            "booking_method",
+            "fifo",
+            true,
+            Some(OptionSite {
+                file: "main.beancount".to_string(),
+                line: 3,
+            }),
+        );
+        let message = opts
+            .query_refusal(BookingMethod::Strict)
+            .expect("refuses")
+            .query_refusal_message("STRICT");
+        assert_eq!(
+            message,
+            "option \"booking_method\" at main.beancount:3: \"fifo\" is not a booking \
+             method (E7002); refusing to derive figures, which would be booked with STRICT"
+        );
+
+        let mut opts = Options::new();
+        opts.set("account_rounding", "bad:leaf");
+        opts.set("name_equity", "capital");
+        opts.set("plugin_processing_mode", "bogus");
+        assert!(
+            opts.query_refusal(BookingMethod::Strict).is_none(),
+            "other rejected options keep their default and answer"
+        );
+
+        // An ignored `booking_method` in an included file is not validated,
+        // so it does not refuse either.
+        let mut opts = Options::new();
+        opts.set_scoped("booking_method", "fifo", false);
+        assert!(opts.query_refusal(BookingMethod::Strict).is_none());
     }
 }

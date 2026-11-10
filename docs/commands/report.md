@@ -43,6 +43,12 @@ A report subcommand (e.g. `balances`, `journal`) is required — running `rledge
 | `--no-pager` | Disable pager for output |
 | `--no-cache` | Disable the on-disk parse cache (always re-parse) |
 
+`rledger report` refuses, as [`rledger query`](query.md#when-it-refuses-to-answer)
+does, on a file that did not parse or could not be read, a transaction that
+could not be booked, and an invalid last `option "booking_method"` (`E7002`)
+whose ledger is booked with a method other than the one it asks for (a later
+valid value, or a rejected one that reads as the method kept, still answers).
+
 ## Date Windows
 
 `balances`, `balsheet`, `income`, `journal`, `register` and `holdings` (and `budget`) take one shared set of window flags:

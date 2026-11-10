@@ -242,10 +242,32 @@ pub fn bail_on_load_errors(raw: &rustledger_loader::LoadResult, file: &Path) -> 
 /// build profile and ignoring it in the other; this stops the CLI reaching that
 /// point at all, and says what to do about it.
 ///
+/// The same gate refuses a ledger whose last `booking_method` value was
+/// rejected and which is therefore booked with a method other than the one
+/// it asks for (#2911, [`rustledger_loader::Options::query_refusal`]): the
+/// option keeps its previous method, so every figure would be booked with a
+/// method the ledger did not ask for. A later accepted value, or a rejected
+/// one that reads as the method kept (`FIFO` then `fifo`), answers. Stricter
+/// than bean-query, which answers with the kept method's figures; see
+/// `Options::query_refusal` for why.
+///
+/// Together with [`bail_on_load_errors`] this is
+/// [`rustledger_loader::Ledger::blocks_queries`], the one rule.
+///
 /// # Errors
 ///
-/// When any directive failed to book.
+/// When any directive failed to book, or the last `booking_method` value was
+/// rejected and the ledger is booked with a method other than the one it
+/// asks for.
 pub fn bail_on_booking_errors(ledger: &rustledger_loader::Ledger, file: &Path) -> Result<()> {
+    if let Some(refusal) = ledger.query_refusal() {
+        anyhow::bail!(
+            "{}: {}. Run `rledger check {}` to see it.",
+            file.display(),
+            refusal.message,
+            file.display(),
+        );
+    }
     // Counting booking failures specifically. `ledger.errors` also carries
     // validation diagnostics, which do NOT leave the stream unbooked and must
     // not gate a report — `rledger check` is where those are read. Not by
@@ -268,6 +290,10 @@ pub fn bail_on_booking_errors(ledger: &rustledger_loader::Ledger, file: &Path) -
         .map(|e| e.message.as_str())
         .collect();
     if failures.is_empty() {
+        debug_assert!(
+            !ledger.blocks_queries(),
+            "a ledger the canonical query rule blocks passed every gate"
+        );
         return Ok(());
     }
     anyhow::bail!(

@@ -102,6 +102,46 @@ pub struct CachedOptions {
     /// distinguishes "file set this" from "inherited default" behaves
     /// identically on a cache hit. See the struct-level note (#1340).
     pub set_options: Vec<String>,
+    /// [`Options::rejected_booking_method`]: restored so a cache hit still
+    /// refuses queries over a ledger whose `booking_method` was rejected
+    /// (#2911).
+    pub rejected_booking_method: Option<CachedRejectedOption>,
+}
+
+/// A cached [`crate::RejectedOption`].
+#[derive(Debug, Clone, rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+#[allow(missing_docs)]
+pub struct CachedRejectedOption {
+    pub key: String,
+    pub value: String,
+    /// The option's file and 1-based line, when known.
+    pub site: Option<(String, u64)>,
+}
+
+impl From<&crate::RejectedOption> for CachedRejectedOption {
+    fn from(rejected: &crate::RejectedOption) -> Self {
+        Self {
+            key: rejected.key.clone(),
+            value: rejected.value.clone(),
+            site: rejected
+                .site
+                .as_ref()
+                .map(|site| (site.file.clone(), site.line as u64)),
+        }
+    }
+}
+
+impl From<CachedRejectedOption> for crate::RejectedOption {
+    fn from(cached: CachedRejectedOption) -> Self {
+        Self {
+            key: cached.key,
+            value: cached.value,
+            site: cached.site.map(|(file, line)| crate::OptionSite {
+                file,
+                line: usize::try_from(line).unwrap_or(usize::MAX),
+            }),
+        }
+    }
 }
 
 impl From<&Options> for CachedOptions {
@@ -150,6 +190,7 @@ impl From<&Options> for CachedOptions {
                 .map(|(k, v)| (k.clone(), v.clone()))
                 .collect(),
             set_options: opts.set_options.iter().cloned().collect(),
+            rejected_booking_method: opts.rejected_booking_method.as_ref().map(Into::into),
         }
     }
 }
@@ -194,6 +235,7 @@ impl From<CachedOptions> for Options {
         opts.plugin_processing_mode = cached.plugin_processing_mode;
         opts.custom = cached.custom.into_iter().collect();
         opts.set_options = cached.set_options.into_iter().collect();
+        opts.rejected_booking_method = cached.rejected_booking_method.map(Into::into);
         opts
     }
 }
@@ -677,12 +719,21 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     content, as in beancount, where it was a `BomInDirectiveBody` parse
 ///     error. An older blob would keep serving such a file with that error.
 ///
+/// v68: LOADER OUTPUT changed and ARCHIVED LAYOUT moved (#2911). An option
+///     value its converter rejects (an invalid `name_*` root, `account_*` leaf,
+///     `booking_method` or `plugin_processing_mode`) is reported and no longer
+///     applied, as in beancount: the cached options keep the default or an
+///     earlier valid value, and `set_options` no longer lists the option.
+///     `CachedOptions` gains `rejected_booking_method`, so a query refuses on
+///     a cache hit too. An older blob would keep serving the rejected value,
+///     and be read at the wrong offsets.
+///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
 /// alters PARSER OUTPUT has to bump both — and on #1942 only this one was
 /// bumped, which review caught rather than any test. See
 /// `loader_cache_version_is_pinned` in `rustledger-wasm/src/cache.rs`.
-pub const CACHE_VERSION: u32 = 67;
+pub const CACHE_VERSION: u32 = 68;
 
 /// Cache header stored at the start of cache files.
 #[derive(Debug, Clone)]
@@ -1503,7 +1554,9 @@ mod tests {
         // moves, so the arrays still hold.
         // v67 (#2910) keeps a BOM inside a string; no archived encoding
         // moves, so the arrays still hold.
-        const FIXTURE_VERSION: u32 = 67;
+        // v68 (#2911) adds a field to `CachedOptions`; no `CostNumber`
+        // encoding moves, so the arrays still hold.
+        const FIXTURE_VERSION: u32 = 68;
         assert_eq!(
             CACHE_VERSION, FIXTURE_VERSION,
             "CACHE_VERSION advanced past the fixture version; regenerate \
@@ -1652,7 +1705,9 @@ mod tests {
         // unchanged.
         // v67 (#2910) keeps a BOM inside a string; the hash below is
         // unchanged.
-        const FIXTURE_VERSION: u32 = 67;
+        // v68 (#2911) adds a field to `CachedOptions`, not to `MetaValue`;
+        // the hash below is unchanged.
+        const FIXTURE_VERSION: u32 = 68;
         const META_VALUE_LAYOUT_HASH: &str =
             "43e3c258fe376cede6a6c2c975100bcf67ddda0ab84b21566b123c01e0a54b25";
         assert_eq!(

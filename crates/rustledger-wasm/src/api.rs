@@ -856,19 +856,21 @@ fn query_with_filesystem(
         }
     };
 
-    // The other half of the same rule (`LedgerError::blocks_queries`): a
-    // booking failure leaves the directive stream unbooked.
-    let booking_failed = ledger
-        .errors
-        .iter()
-        .any(rustledger_loader::LedgerError::blocks_queries);
+    // The rest of the same rule (`Ledger::blocks_queries`): a booking
+    // failure leaves the directive stream unbooked, and a rejected
+    // `booking_method` would book it with a method the ledger did not ask for
+    // (#2911).
+    let booking_failed = ledger.blocks_queries();
     // Advisory-only codes (E1004, closing an account with a balance) are not
     // reported by `rledger query` either: the same canonical predicate.
-    let errors: Vec<Error> = std::mem::take(&mut ledger.errors)
+    let mut errors: Vec<Error> = std::mem::take(&mut ledger.errors)
         .into_iter()
         .filter(|e| !rustledger_validate::is_advisory_only_code(&e.code))
         .map(Error::from)
         .collect();
+    // This surface lists the ledger's errors, not the option warnings, so the
+    // rejected option's refusal says why the query did not answer.
+    errors.extend(ledger.query_refusal().map(Error::from));
     if booking_failed {
         let result = QueryResult {
             columns: Vec::new(),

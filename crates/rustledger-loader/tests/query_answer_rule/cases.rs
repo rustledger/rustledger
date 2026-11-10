@@ -85,6 +85,16 @@ const TXN: &str = "2024-01-06 * \"more\"
   Income:Salary
 ";
 
+/// `BASE`, as a literal for `concat!`.
+macro_rules! base_ledger {
+    () => {
+        concat!(
+            "2024-01-01 open Assets:Cash\n2024-01-01 open Income:Salary\n",
+            "2024-01-02 * \"pay\"\n  Assets:Cash  100 USD\n  Income:Salary\n",
+        )
+    };
+}
+
 /// `BASE` after the given `include` line(s).
 macro_rules! with_include {
     ($include:literal) => {
@@ -294,6 +304,115 @@ pub const QUERY_RULE_CASES: &[QueryRuleCase] = &[
         )],
         rows: Some(&["pay"]),
         error: Some("Missing Commodity directive for 'USD' in 'Assets:Cash'"),
+        confinement: Confinement::Any,
+        disk_only: false,
+        source_text: true,
+    },
+    // bean-query: `Error for option 'booking_method': 'fifo'`, then the rows,
+    // booked STRICT. rledger refuses (#2911): beancount's `Booking[...]`
+    // rejects the lowercase name, so the option keeps STRICT, and the figures
+    // would be booked with a method the ledger did not ask for. Stricter than
+    // Python, deliberately: see `Options::query_refusal`.
+    QueryRuleCase {
+        name: "invalid booking_method",
+        entry: "main.beancount",
+        files: &[(
+            "main.beancount",
+            concat!("option \"booking_method\" \"fifo\"\n", base_ledger!()),
+        )],
+        rows: None,
+        error: Some("booking_method"),
+        confinement: Confinement::Any,
+        disk_only: false,
+        source_text: true,
+    },
+    // The same option, valid: answers.
+    QueryRuleCase {
+        name: "valid booking_method",
+        entry: "main.beancount",
+        files: &[(
+            "main.beancount",
+            concat!("option \"booking_method\" \"FIFO\"\n", base_ledger!()),
+        )],
+        rows: Some(&["pay"]),
+        error: None,
+        confinement: Confinement::Any,
+        disk_only: false,
+        source_text: true,
+    },
+    // Any other rejected option keeps its default and answers, as in
+    // bean-query: none of them changes which lots a sale consumes (#2911).
+    QueryRuleCase {
+        name: "invalid account_rounding",
+        entry: "main.beancount",
+        files: &[(
+            "main.beancount",
+            concat!("option \"account_rounding\" \"bad:leaf\"\n", base_ledger!()),
+        )],
+        rows: Some(&["pay"]),
+        error: None,
+        confinement: Confinement::Any,
+        disk_only: false,
+        source_text: true,
+    },
+    // The last value wins: the accepted `FIFO` clears the rejected `fifo`, the
+    // ledger books FIFO as it asks, and every surface answers, as bean-query does.
+    QueryRuleCase {
+        name: "booking_method fifo then FIFO",
+        entry: "main.beancount",
+        files: &[(
+            "main.beancount",
+            concat!("option \"booking_method\" \"fifo\"\noption \"booking_method\" \"FIFO\"\n", base_ledger!()),
+        )],
+        rows: Some(&["pay"]),
+        error: None,
+        confinement: Confinement::Any,
+        disk_only: false,
+        source_text: true,
+    },
+    // The last value wins: the accepted `FIFO` clears the rejected `bogus`,
+    // which names no method, so only that clearing lets it answer.
+    QueryRuleCase {
+        name: "booking_method bogus then FIFO",
+        entry: "main.beancount",
+        files: &[(
+            "main.beancount",
+            concat!(
+                "option \"booking_method\" \"bogus\"\noption \"booking_method\" \"FIFO\"\n",
+                base_ledger!()
+            ),
+        )],
+        rows: Some(&["pay"]),
+        error: None,
+        confinement: Confinement::Any,
+        disk_only: false,
+        source_text: true,
+    },
+    // `fifo` is rejected and `FIFO` kept, which is what `fifo` asks for read
+    // case-insensitively: the booking is what the ledger asks, so it answers.
+    QueryRuleCase {
+        name: "booking_method FIFO then fifo",
+        entry: "main.beancount",
+        files: &[(
+            "main.beancount",
+            concat!("option \"booking_method\" \"FIFO\"\noption \"booking_method\" \"fifo\"\n", base_ledger!()),
+        )],
+        rows: Some(&["pay"]),
+        error: None,
+        confinement: Confinement::Any,
+        disk_only: false,
+        source_text: true,
+    },
+    // `bogus` asks for no method, and the ledger books FIFO: it refuses.
+    QueryRuleCase {
+        name: "booking_method FIFO then bogus",
+        entry: "main.beancount",
+        files: &[(
+            "main.beancount",
+            concat!("option \"booking_method\" \"FIFO\"\noption \"booking_method\" \"bogus\"\n", base_ledger!()),
+        )],
+        rows: None,
+        error: Some("booking_method"),
         confinement: Confinement::Any,
         disk_only: false,
         source_text: true,

@@ -767,6 +767,13 @@ impl Ledger {
 
         match process(load_result, &load_options) {
             Ok(ledger) => {
+                // The file-based query rule (#2861), whole
+                // (`Ledger::blocks_queries`): not over a parse error, a file
+                // that could not be read or decrypted, a booking failure, or a
+                // rejected `booking_method` (#2911; its E7002 is among the
+                // option errors below); every other error is reported beside
+                // the rows. Read before the fields move out.
+                let query_refused = ledger.blocks_queries();
                 let balance_discrepancies = ledger.balance_discrepancies;
                 let source_map = ledger.source_map;
                 let (directives, directive_spans): (Vec<Directive>, Vec<_>) = ledger
@@ -774,13 +781,6 @@ impl Ledger {
                     .into_iter()
                     .map(|s| (s.value, (s.span, s.file_id)))
                     .unzip();
-                // The file-based query rule (#2861): not over a parse error,
-                // a file that could not be read or decrypted, or a booking
-                // failure; every other error is reported beside the rows.
-                let query_refused = ledger
-                    .errors
-                    .iter()
-                    .any(rustledger_loader::LedgerError::blocks_queries);
                 let mut errors: Vec<Error> = ledger.errors.into_iter().map(Error::from).collect();
                 errors.extend(option_warnings_to_errors(&ledger.options.warnings));
                 let editor_cache = editor::EditorCache::from_directives(&directives);

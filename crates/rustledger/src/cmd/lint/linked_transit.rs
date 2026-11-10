@@ -1,15 +1,16 @@
 //! Read-only inspection of explicitly linked transit postings.
 //!
 //! The lint reads the booked and validated ledger, as `rledger check` sees
-//! it: each input is loaded, refused if it has load errors (as
-//! `lint closed-nonempty` does), then run through
+//! it: each input is read by [`super::load::load_booked`], the lints' shared
+//! loader, which refuses load errors and runs
 //! [`rustledger_loader::process`] with plugins and validation. An elided
 //! transit amount is the amount booking computed, and a `plugin` line runs
 //! as it does in `check`.
 //!
 //! What processing reports is handled by what it can do to the answer:
 //!
-//! - An error that drops or alters transactions refuses the input: a
+//! - An error that drops or alters transactions refuses the input (the
+//!   shared loader does this, for `closed-nonempty` too): a
 //!   transaction booking rejected is left out of the booked stream, and a
 //!   plugin that failed (it could not run, its output was discarded, or a
 //!   native plugin could not use its config and did nothing) left the
@@ -35,10 +36,10 @@
 //! warning. Warnings go where the CLI's warnings go (stderr, or the
 //! `ag-rledger` envelope's `warnings`).
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
 use rustledger_core::{Amount, Directive, Link};
-use rustledger_loader::{ErrorSeverity, LedgerError, LoadOptions, Loader};
+use rustledger_loader::ErrorSeverity;
 use rustledger_validate::is_advisory_only_code;
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
@@ -46,6 +47,7 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use super::closed_nonempty::OutputFormat;
+use super::load::{describe_error, load_booked};
 use crate::cmd::messages::Messages;
 use crate::cmd::report_cmd::{Diagnostic, Diagnostics};
 
@@ -291,21 +293,6 @@ pub fn run(args: &Args) -> Result<ExitCode> {
     )
 }
 
-/// `file:line: CODE: message`.
-fn describe_error(err: &LedgerError) -> String {
-    let at = err
-        .location
-        .as_ref()
-        .map(|l| format!("{}:{}: ", l.file.display(), l.line))
-        .unwrap_or_default();
-    format!("{at}{}: {}", err.code, err.message)
-}
-
-/// [`describe_error`] for each error, joined for one message.
-fn describe_errors<'a>(errors: impl Iterator<Item = &'a LedgerError>) -> String {
-    errors.map(describe_error).collect::<Vec<_>>().join("; ")
-}
-
 /// Inspect booked transactions and write an advisory report.
 ///
 /// The report goes to `out`. Warnings (a dropped `^`, an account or prefix
@@ -355,49 +342,17 @@ pub fn run_with_writer<W: std::io::Write>(
     let accounts: BTreeSet<&str> = args.account.iter().map(String::as_str).collect();
     let mut seen_accounts: BTreeSet<&str> = BTreeSet::new();
     let mut any_link_matches = false;
-    // Booking, plugins and validation, as `rledger check` runs them, so a
-    // leg `check` rejects is not reported as matched. See the module docs
-    // for what each kind of error does to the answer.
-    let options = LoadOptions {
-        run_plugins: true,
-        validate: true,
-        plugin_max_time_secs: crate::plugin_budget::max_time_secs(),
-        plugin_max_memory_mb: crate::plugin_budget::max_memory_mb(),
-        ..Default::default()
-    };
     let mut groups: BTreeMap<String, BTreeMap<(PathBuf, usize), Leg>> = BTreeMap::new();
     let mut reported: Vec<Reported> = Vec::new();
     // Plugin-inserted transactions with no source location, numbered so
     // that none is merged with another.
     let mut unlocated = 0usize;
     for path in &args.files {
-        let result = Loader::new()
-            .load(path)
-            .with_context(|| format!("failed to load {}", path.display()))?;
-        anyhow::ensure!(
-            result.errors.is_empty(),
-            "{}: cannot inspect source with load errors: {}",
-            path.display(),
-            result
-                .errors
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; ")
-        );
-        let ledger = rustledger_loader::process(result, &options)
-            .with_context(|| format!("failed to process {}", path.display()))?;
-        let mut refusals = ledger
-            .errors
-            .iter()
-            .filter(|e| e.is_booking_failure() || e.is_plugin_failure())
-            .peekable();
-        anyhow::ensure!(
-            refusals.peek().is_none(),
-            "{}: cannot inspect a ledger whose processing failed: {}",
-            path.display(),
-            describe_errors(refusals)
-        );
+        // Booking, plugins and validation, as `rledger check` runs them, so
+        // a leg `check` rejects is not reported as matched. The shared lint
+        // loader refuses load errors and booking or plugin failures; see the
+        // module docs for what each other kind of error does to the answer.
+        let ledger = load_booked(path)?;
         // The other errors, by the transaction each is located on: a
         // validator's by its span, a plugin's by its file and line.
         let mut by_span: HashMap<(u16, usize), Vec<usize>> = HashMap::new();
@@ -739,6 +694,7 @@ pub fn run_with_writer<W: std::io::Write>(
 mod tests {
     use super::*;
     use crate::cmd::report_cmd::CollectedDiagnostics;
+    use rustledger_loader::Loader;
     use std::fs;
 
     fn inspect(files: Vec<PathBuf>, accounts: &[&str]) -> Result<serde_json::Value> {

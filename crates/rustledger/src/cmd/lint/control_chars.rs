@@ -17,14 +17,27 @@
 //!
 //! Like the other lints, finding something is not a failure: the exit code
 //! is `0` either way. A file that cannot be read is an error.
+//!
+//! A file with load errors is NOT refused: the input is read by
+//! [`super::load::load_source`], the lints' shared loader, at the parsed
+//! level, load errors and all. A control character is often what broke the
+//! parse (a stray one in a narration can end the string early), and the
+//! parser recovers enough to find it, so refusing would hide the very
+//! finding that explains the error. But the lint warns that the file had
+//! load errors and its findings may be incomplete
+//! ([`super::load::warn_load_errors`]), so it never prints a clean "no
+//! control characters" over a file it only partly read.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
 use rustledger_core::{Directive, MetaValue, Metadata};
-use rustledger_loader::Loader;
 use serde::Serialize;
 use std::path::PathBuf;
 use std::process::ExitCode;
+
+use super::load::{load_source, warn_load_errors};
+use crate::cmd::messages::Messages;
+use crate::cmd::report_cmd::Diagnostics;
 
 pub use super::closed_nonempty::OutputFormat;
 
@@ -162,28 +175,40 @@ impl Strings<'_> {
     }
 }
 
-/// Run the lint, writing its report to stdout.
+/// Run the lint, writing its report to stdout and its warnings to stderr.
 ///
 /// # Errors
 /// Fails if an input file cannot be read.
 pub fn run(args: &Args) -> Result<ExitCode> {
-    let mut stdout = std::io::stdout().lock();
-    run_with_writer(args, &mut stdout)
+    run_with_writer(
+        args,
+        &mut std::io::stdout().lock(),
+        None,
+        &mut std::io::stderr().lock(),
+    )
 }
 
 /// Run the lint, writing the text/JSON report to `out`.
 ///
 /// Scans the directives as written (parsed, before plugins and booking), so
-/// a finding points at the line to fix.
+/// a finding points at the line to fix. A file with load errors is scanned
+/// as far as it parsed, with a warning that says so (see the module docs);
+/// warnings go to `warnings` when given, else to `err` as `warning: ...`
+/// lines.
 ///
 /// # Errors
 /// Fails if an input file cannot be read.
-pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<ExitCode> {
+pub fn run_with_writer<W: std::io::Write>(
+    args: &Args,
+    out: &mut W,
+    warnings: Option<&mut dyn Diagnostics>,
+    err: &mut dyn std::io::Write,
+) -> Result<ExitCode> {
+    let messages = &mut Messages::new(err, warnings);
     let mut findings = Vec::new();
     for path in &args.files {
-        let loaded = Loader::new()
-            .load(path)
-            .with_context(|| format!("failed to load {}", path.display()))?;
+        let loaded = load_source(path)?;
+        warn_load_errors(messages, path, &loaded.errors);
         for spanned in &loaded.directives {
             let mut found = Vec::new();
             Strings { found: &mut found }.directive(&spanned.value);
@@ -239,9 +264,11 @@ pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<Ex
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cmd::report_cmd::{CollectedDiagnostics, Diagnostic};
     use std::io::Write as _;
 
-    fn lint(content: &str, format: OutputFormat) -> String {
+    /// The report, and the warnings, for `content`.
+    fn lint_with_warnings(content: &str, format: OutputFormat) -> (String, Vec<Diagnostic>) {
         let mut file = tempfile::Builder::new()
             .suffix(".beancount")
             .tempfile()
@@ -252,8 +279,93 @@ mod tests {
             format,
         };
         let mut buf: Vec<u8> = Vec::new();
-        run_with_writer(&args, &mut buf).unwrap();
-        String::from_utf8(buf).unwrap()
+        let mut sink = CollectedDiagnostics::default();
+        let mut err: Vec<u8> = Vec::new();
+        let code = run_with_writer(&args, &mut buf, Some(&mut sink), &mut err).unwrap();
+        assert_eq!(code, ExitCode::SUCCESS);
+        assert!(err.is_empty(), "{err:?}");
+        (String::from_utf8(buf).unwrap(), sink.0)
+    }
+
+    /// The report for `content`, which loads without errors.
+    fn lint(content: &str, format: OutputFormat) -> String {
+        let (out, warnings) = lint_with_warnings(content, format);
+        assert!(warnings.is_empty(), "{warnings:?}");
+        out
+    }
+
+    /// A control character on a line that also has a parse error is still
+    /// found, and the load error is a warning, not a refusal.
+    #[test]
+    fn test_run_with_writer_answers_over_load_errors_with_a_warning() {
+        let (out, warnings) = lint_with_warnings(
+            concat!(
+                "2024-01-01 open Assets:Cash\n",
+                "2024-01-02 * \"bell\u{7}\" junk\n",
+                "  Assets:Cash  -1 USD\n",
+                "  Expenses:Food\n",
+            ),
+            OutputFormat::Text,
+        );
+        assert!(
+            out.contains(":2: control character in narration: \"bell\\u{7}\""),
+            "the control character is still found:\n{out}"
+        );
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(
+            warnings[0].code.as_deref(),
+            Some(super::super::load::LOAD_ERRORS)
+        );
+        assert!(
+            warnings[0]
+                .message
+                .contains("has load errors, so findings may be incomplete"),
+            "{warnings:?}"
+        );
+    }
+
+    /// With no finding at all, the load errors still say the clean report
+    /// is not the whole story.
+    #[test]
+    fn test_run_with_writer_never_reports_clean_silently_over_load_errors() {
+        let (out, warnings) =
+            lint_with_warnings("include \"missing-xyz.beancount\"\n", OutputFormat::Json);
+        let report: serde_json::Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(report["findings"], serde_json::json!([]));
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert_eq!(
+            warnings[0].code.as_deref(),
+            Some(super::super::load::LOAD_ERRORS)
+        );
+    }
+
+    /// Without a sink, the warning is a `warning:` line on stderr.
+    #[test]
+    fn test_run_with_writer_writes_the_load_warning_to_err_without_a_sink() {
+        let mut file = tempfile::Builder::new()
+            .suffix(".beancount")
+            .tempfile()
+            .unwrap();
+        file.write_all(b"include \"missing-xyz.beancount\"\n")
+            .unwrap();
+        let args = Args {
+            files: vec![file.path().to_path_buf()],
+            format: OutputFormat::Text,
+        };
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        run_with_writer(&args, &mut out, None, &mut err).unwrap();
+        let err = String::from_utf8(err).unwrap();
+        assert!(
+            err.starts_with(&format!(
+                "warning: {}: has load errors, so findings may be incomplete: ",
+                file.path().display()
+            )),
+            "{err}"
+        );
+        assert_eq!(
+            String::from_utf8(out).unwrap(),
+            "No control characters in the ledger's strings.\n"
+        );
     }
 
     #[test]

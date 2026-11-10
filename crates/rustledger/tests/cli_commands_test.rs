@@ -372,6 +372,98 @@ fn test_lint_transfers_apply_is_idempotent() {
     );
 }
 
+/// A ledger whose plugin and booking failed (#2899): `closed-nonempty`
+/// printed "No accounts closed with a non-zero balance." and exited 0. It
+/// now refuses with an error and exits 2, as `linked-transit` does.
+#[test]
+fn test_lint_closed_nonempty_refuses_failed_processing_with_exit_2() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let ledger = dir.path().join("main.beancount");
+    std::fs::write(
+        &ledger,
+        "plugin \"no.such.plugin\"\n\
+         2024-01-01 open Assets:Cash\n\
+         2024-01-01 open Expenses:Food\n\
+         2024-01-02 * \"lunch\"\n  \
+         Assets:Cash\n  \
+         Expenses:Food\n\
+         2024-12-31 close Assets:Cash\n",
+    )
+    .unwrap();
+    let output = Command::new(require_rledger!())
+        .args(["lint", "closed-nonempty"])
+        .arg(&ledger)
+        .output()
+        .expect("run rledger lint closed-nonempty");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(2), "stderr: {stderr}");
+    assert!(
+        stdout.is_empty(),
+        "no report over a failed ledger: {stdout}"
+    );
+    assert!(
+        stderr.starts_with(&format!(
+            "error: {}: cannot inspect a ledger whose processing failed: ",
+            ledger.display()
+        )),
+        "{stderr}"
+    );
+}
+
+/// `transfers --apply` refuses a file with load errors and writes nothing,
+/// not even to an input that loaded clean; it exits 1 (#2899).
+#[test]
+fn test_lint_transfers_apply_refuses_load_errors_and_writes_nothing() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let checking = dir.path().join("checking.bean");
+    let savings = dir.path().join("savings.bean");
+    let checking_text = "2024-01-01 open Assets:Checking USD\n\
+         2024-01-15 * \"Transfer to savings\"\n  \
+         Assets:Checking  -500.00 USD\n  \
+         Assets:Savings    500.00 USD\n";
+    let savings_text = "2024-01-01 open Assets:Savings USD\n\
+         2024-01-15 * \"Transfer from checking\"\n  \
+         Assets:Savings    500.00 USD\n  \
+         Assets:Checking  -500.00 USD\n\
+         this line is not beancount\n";
+    std::fs::write(&checking, checking_text).unwrap();
+    std::fs::write(&savings, savings_text).unwrap();
+    let bin = require_rledger!();
+
+    let output = Command::new(&bin)
+        .args(["lint", "transfers", "--apply"])
+        .arg(&checking)
+        .arg(&savings)
+        .output()
+        .expect("run rledger lint transfers --apply");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert!(
+        stderr.contains("cannot inspect source with load errors"),
+        "{stderr}"
+    );
+    assert_eq!(std::fs::read_to_string(&checking).unwrap(), checking_text);
+    assert_eq!(std::fs::read_to_string(&savings).unwrap(), savings_text);
+
+    // Read-only, it answers with a warning on stderr.
+    let output = Command::new(&bin)
+        .args(["lint", "transfers", "-f", "json"])
+        .arg(&checking)
+        .arg(&savings)
+        .output()
+        .expect("run rledger lint transfers");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "stderr: {stderr}");
+    assert!(
+        stderr.starts_with(&format!(
+            "warning: {}: has load errors, so findings may be incomplete: ",
+            savings.display()
+        )),
+        "{stderr}"
+    );
+}
+
 // =============================================================================
 // rledger check --lint transfers tests (Phase 2)
 // =============================================================================

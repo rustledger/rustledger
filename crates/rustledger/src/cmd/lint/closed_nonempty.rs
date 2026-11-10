@@ -11,12 +11,19 @@
 //! transferred out first).
 //!
 //! This is a lint, not a check: finding accounts is not a failure, so the exit
-//! code is `0` whether or not any are reported. Hard errors (missing file,
-//! parse failure) propagate via `anyhow::Error`.
+//! code is `0` whether or not any are reported.
+//!
+//! The ledger is read by [`super::load::load_booked`], the lints' shared
+//! loader, as `linked-transit` reads it. An input it cannot answer for is
+//! refused with an `Err`, and `rledger lint` exits 2 (see
+//! [`super::error_exit_code`]): a missing file, load errors, a transaction
+//! booking rejected, or a plugin that failed. A transaction booking dropped
+//! never reaches the balances, and a failed plugin left the ledger other
+//! than it would have, so "No accounts closed with a non-zero balance." over
+//! either would be an answer the lint cannot vouch for.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::{Parser, ValueEnum};
-use rustledger_loader::{LoadOptions, Loader};
 use rustledger_validate::ErrorCode;
 use serde::Serialize;
 use std::path::PathBuf;
@@ -69,7 +76,8 @@ struct Report {
 /// Run the lint, writing its report to stdout.
 ///
 /// # Errors
-/// Fails if any input file does not exist or cannot be parsed/processed.
+/// Fails if any input file does not exist, has load errors, or cannot be
+/// processed, or if booking or a plugin failed on it.
 pub fn run(args: &Args) -> Result<ExitCode> {
     let mut stdout = std::io::stdout().lock();
     run_with_writer(args, &mut stdout)
@@ -83,38 +91,15 @@ pub fn run(args: &Args) -> Result<ExitCode> {
 /// lint keeps only it.
 ///
 /// # Errors
-/// Fails if any input file does not exist or cannot be parsed/processed.
+/// Fails if any input file does not exist, has load errors, or cannot be
+/// processed, or if booking or a plugin failed on it.
 pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<ExitCode> {
     let mut findings = Vec::new();
-    let options = LoadOptions {
-        run_plugins: true,
-        validate: true,
-        plugin_max_time_secs: crate::plugin_budget::max_time_secs(),
-        plugin_max_memory_mb: crate::plugin_budget::max_memory_mb(),
-        ..Default::default()
-    };
     for path in &args.files {
-        let load_result = Loader::new()
-            .load(path)
-            .with_context(|| format!("failed to load {}", path.display()))?;
-        // The Loader surfaces parse/include errors in `errors` rather than
-        // returning `Err`. We can't reliably analyze account closes in a file
-        // that didn't parse, so fail loudly instead of reporting a misleading
-        // "no accounts closed with a non-zero balance" for invalid input.
-        if !load_result.errors.is_empty() {
-            let joined = load_result
-                .errors
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; ");
-            anyhow::bail!(
-                "{}: cannot lint a file with load errors: {joined}",
-                path.display()
-            );
-        }
-        let ledger = rustledger_loader::process(load_result, &options)
-            .with_context(|| format!("failed to process {}", path.display()))?;
+        // Refuses load errors and booking or plugin failures (see the
+        // module docs), so a clean report is never printed over a ledger
+        // this lint could not read whole.
+        let ledger = super::load::load_booked(path)?;
         for err in &ledger.errors {
             if err.code == CLOSE_NONEMPTY_CODE {
                 findings.push(Finding {
@@ -232,5 +217,44 @@ mod tests {
             run_with_writer(&args, &mut buf).is_err(),
             "expected a hard error when the file has load errors"
         );
+    }
+
+    /// A plugin that does not exist, a transaction with two elided postings
+    /// (which booking cannot resolve) and a `close`. This used to print "No
+    /// accounts closed with a non-zero balance." and exit 0.
+    #[test]
+    fn test_run_with_writer_refuses_failed_booking_and_plugins() {
+        let mut file = tempfile::Builder::new()
+            .suffix(".beancount")
+            .tempfile()
+            .unwrap();
+        file.write_all(
+            concat!(
+                "plugin \"no.such.plugin\"\n",
+                "2024-01-01 open Assets:Cash\n",
+                "2024-01-01 open Expenses:Food\n",
+                "2024-01-02 * \"lunch\"\n",
+                "  Assets:Cash\n",
+                "  Expenses:Food\n",
+                "2024-12-31 close Assets:Cash\n",
+            )
+            .as_bytes(),
+        )
+        .unwrap();
+        let args = Args {
+            files: vec![file.path().to_path_buf()],
+            format: OutputFormat::Text,
+        };
+        let mut buf: Vec<u8> = Vec::new();
+        let err = run_with_writer(&args, &mut buf).unwrap_err().to_string();
+        assert!(
+            err.starts_with(&format!(
+                "{}: cannot inspect a ledger whose processing failed: ",
+                file.path().display()
+            )),
+            "{err}"
+        );
+        assert!(err.contains("no.such.plugin"), "{err}");
+        assert!(buf.is_empty(), "nothing is reported: {buf:?}");
     }
 }

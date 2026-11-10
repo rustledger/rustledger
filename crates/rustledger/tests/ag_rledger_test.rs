@@ -2712,10 +2712,48 @@ fn test_lint_linked_transit_exits_two_when_it_cannot_answer() {
     let (cli, envelope) = lint(&good, "Assets:Transit");
     assert_eq!(cli, 1, "{envelope}");
     assert_eq!(envelope["ok"], true, "{envelope}");
+    // `closed-nonempty` reads the booked ledger through the same shared
+    // loader, and exits 2 too (#2899).
+    for file in [&missing, &broken, &plugin] {
+        let (code, _) = rledger_stdout(
+            tmp.path(),
+            &["lint", "closed-nonempty", file.to_str().unwrap()],
+        );
+        assert_eq!(code, 2, "{}", file.display());
+    }
     // The other lints keep exiting 1 when they cannot run.
-    let (code, _) = rledger_stdout(
+    for lint in ["transfers", "control-chars"] {
+        let (code, _) = rledger_stdout(tmp.path(), &["lint", lint, missing.to_str().unwrap()]);
+        assert_eq!(code, 1, "{lint}");
+    }
+}
+
+/// `control-chars` answers over a file with load errors, and the envelope's
+/// `warnings` says the file had them (#2899).
+#[test]
+fn test_lint_control_chars_warns_on_load_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(
         tmp.path(),
-        &["lint", "closed-nonempty", missing.to_str().unwrap()],
+        "main.beancount",
+        "2024-01-01 open Assets:Cash\n\
+         2024-01-02 * \"bell\u{7}\" junk\n  Assets:Cash -1 USD\n  Expenses:Food\n",
     );
-    assert_eq!(code, 1);
+    let (code, envelope, _) = run_in(
+        tmp.path(),
+        &["lint", "control-chars", file.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["ok"], true, "{envelope}");
+    let warnings = envelope["result"]["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warnings: {envelope}"));
+    assert_eq!(warnings.len(), 1, "{envelope}");
+    assert_eq!(warnings[0]["code"], "LOAD_ERRORS", "{envelope}");
+    assert!(
+        envelope["result"]["stdout"]
+            .as_str()
+            .is_some_and(|s| s.contains("control character in narration")),
+        "{envelope}"
+    );
 }

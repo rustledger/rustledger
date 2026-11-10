@@ -7,11 +7,23 @@
 //! `^xfer-YYYYMMDD-<hash>` link to both sides of each match. Re-running
 //! `--apply` is a no-op because the detector skips pairs that already
 //! share a link.
+//!
+//! Load errors, read through the lints' shared loader ([`super::load`]):
+//!
+//! - `--apply` refuses a file with load errors before writing anything
+//!   ([`super::load::load_clean`]; every input is loaded before any edit).
+//!   It rewrites transaction header lines by the line numbers the parse
+//!   gave, and a parse that went wrong is not one to edit source files from.
+//! - Read-only, the lint answers over what parsed ([`super::load::load_source`])
+//!   and warns that the file had load errors and its matches may be
+//!   incomplete ([`super::load::warn_load_errors`]): a preview writes
+//!   nothing, and a transaction the parser recovered is still a candidate
+//!   worth seeing, but a pair whose other leg did not parse is missing, so
+//!   the report must not pass as complete.
 
 use anyhow::{Context, Result, anyhow};
 use clap::{Parser, ValueEnum};
 use rust_decimal::Decimal;
-use rustledger_loader::Loader;
 use rustledger_ops::transfer::{
     LocatedDirective, TransferConfig, TransferMatch, find_transfers_in_ledger,
 };
@@ -22,6 +34,10 @@ use std::fmt::Write as _;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::str::FromStr;
+
+use super::load::{load_clean, load_source, warn_load_errors};
+use crate::cmd::messages::Messages;
+use crate::cmd::report_cmd::Diagnostics;
 
 /// Output format for the report.
 #[derive(Debug, Clone, Copy, Default, ValueEnum)]
@@ -69,28 +85,45 @@ pub struct Args {
 
 /// Run the lint.
 ///
-/// Exit code: `0` if no matches above the threshold, `0` if matches were
-/// found and reported (this is a lint, not a check — finding matches is not
-/// a failure). Returns a non-zero `ExitCode` only on hard errors (file not
-/// found, parse failure, etc., propagated via `anyhow::Error`).
+/// Exit code: `0` when it answered, whether or not it found matches (this
+/// is a lint, not a check: finding matches is not a failure). A read-only run
+/// over a file with load errors still answers, with a warning. When it
+/// cannot answer (a missing file, or `--apply` over a file with load errors)
+/// it returns an `Err`, and `rledger lint` exits 2
+/// ([`super::ERROR_EXIT_CODE`]).
 ///
 /// # Errors
-/// - Fails if any input file does not exist or cannot be parsed.
-/// - Fails if `--apply` is set and a file edit can't be written.
+/// - Fails if any input file does not exist or cannot be read.
+/// - Fails if `--apply` is set and a file has load errors (nothing is
+///   written), or a file edit can't be written.
 ///
 /// Thin wrapper over [`run_with_writer`] for the synchronous `rledger`
-/// binary (writes its report to stdout); `ag-rledger` calls
-/// `run_with_writer` with a buffer.
+/// binary (writes its report to stdout, its warnings to stderr);
+/// `ag-rledger` calls `run_with_writer` with a buffer.
 pub fn run(args: &Args) -> Result<ExitCode> {
-    let mut stdout = std::io::stdout().lock();
-    run_with_writer(args, &mut stdout)
+    run_with_writer(
+        args,
+        &mut std::io::stdout().lock(),
+        None,
+        &mut std::io::stderr().lock(),
+    )
 }
 
 /// Run the transfers lint, writing the text/JSON report to `out`.
 ///
-/// Behavior matches the original `run()`; `--apply` still mutates source
-/// files. Only the report sink is redirected to the injected writer.
-pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<ExitCode> {
+/// Behavior matches [`run`]; `--apply` still mutates source files. Warnings
+/// (a read-only run over a file with load errors) go to `warnings` when
+/// given, else to `err` as `warning: ...` lines.
+///
+/// # Errors
+/// As [`run`].
+pub fn run_with_writer<W: std::io::Write>(
+    args: &Args,
+    out: &mut W,
+    warnings: Option<&mut dyn Diagnostics>,
+    err: &mut dyn std::io::Write,
+) -> Result<ExitCode> {
+    let messages = &mut Messages::new(err, warnings);
     let tolerance = Decimal::from_str(&args.amount_tolerance)
         .with_context(|| format!("invalid --amount-tolerance: {}", args.amount_tolerance))?;
     let config = TransferConfig {
@@ -105,10 +138,15 @@ pub fn run_with_writer<W: std::io::Write>(args: &Args, out: &mut W) -> Result<Ex
     let mut loaded = Vec::with_capacity(args.files.len());
     for path in &args.files {
         let resolved = canonicalize_for_report(path)?;
-        let mut loader = Loader::new();
-        let result = loader
-            .load(path)
-            .with_context(|| format!("failed to load {}", path.display()))?;
+        // See the module docs: `--apply` refuses load errors before any
+        // file is written; a read-only run answers with a warning.
+        let result = if args.apply {
+            load_clean(path)?
+        } else {
+            let result = load_source(path)?;
+            warn_load_errors(messages, path, &result);
+            result
+        };
         loaded.push((resolved, result));
     }
 
@@ -663,6 +701,102 @@ mod tests {
             !after.contains("^xfer-"),
             "same-account transactions must not be paired"
         );
+        Ok(())
+    }
+
+    /// A transfer pair across two files, the second with a line that does
+    /// not parse below its transaction.
+    fn pair_with_a_load_error(dir: &std::path::Path) -> Result<(PathBuf, PathBuf, Args)> {
+        let checking = dir.join("checking.bean");
+        let savings = dir.join("savings.bean");
+        std::fs::write(
+            &checking,
+            "2024-01-01 open Assets:Checking USD\n\
+             2024-01-15 * \"Transfer to savings\"\n  \
+             Assets:Checking  -500.00 USD\n  \
+             Assets:Savings    500.00 USD\n",
+        )?;
+        std::fs::write(
+            &savings,
+            "2024-01-01 open Assets:Savings USD\n\
+             2024-01-15 * \"Transfer from checking\"\n  \
+             Assets:Savings    500.00 USD\n  \
+             Assets:Checking  -500.00 USD\n\
+             this line is not beancount\n",
+        )?;
+        let args = Args {
+            files: vec![checking.clone(), savings.clone()],
+            min_confidence: 0.8,
+            date_window: 3,
+            amount_tolerance: "0.01".to_string(),
+            apply: true,
+            format: OutputFormat::Json,
+        };
+        Ok((checking, savings, args))
+    }
+
+    #[test]
+    fn test_run_with_writer_apply_refuses_load_errors_before_writing() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (checking, savings, args) = pair_with_a_load_error(dir.path())?;
+        let before = (
+            std::fs::read_to_string(&checking)?,
+            std::fs::read_to_string(&savings)?,
+        );
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let error = run_with_writer(&args, &mut out, None, &mut err)
+            .expect_err("--apply must refuse a file with load errors");
+        assert!(
+            error.to_string().starts_with(&format!(
+                "{}: cannot inspect source with load errors: ",
+                savings.display()
+            )),
+            "{error:#}"
+        );
+        // Neither file is written, not even the one that loaded clean.
+        assert_eq!(
+            before,
+            (
+                std::fs::read_to_string(&checking)?,
+                std::fs::read_to_string(&savings)?,
+            )
+        );
+        assert!(out.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn test_run_with_writer_preview_warns_on_load_errors() -> Result<()> {
+        let dir = tempfile::tempdir()?;
+        let (_, savings, args) = pair_with_a_load_error(dir.path())?;
+        let args = Args {
+            apply: false,
+            ..clone_args(&args)
+        };
+        let mut out = Vec::new();
+        let mut err = Vec::new();
+        let mut sink = crate::cmd::report_cmd::CollectedDiagnostics::default();
+        let code = run_with_writer(&args, &mut out, Some(&mut sink), &mut err)?;
+        assert_eq!(code, ExitCode::SUCCESS);
+        // It still answers over what parsed: the pair is found.
+        let report: serde_json::Value = serde_json::from_slice(&out)?;
+        assert_eq!(report["matches"].as_array().map(Vec::len), Some(1));
+        assert_eq!(report["applied"], false);
+        // And says the file had load errors.
+        assert_eq!(sink.0.len(), 1, "{:?}", sink.0);
+        assert_eq!(
+            sink.0[0].code.as_deref(),
+            Some(super::super::load::LOAD_ERRORS)
+        );
+        assert!(
+            sink.0[0].message.starts_with(&format!(
+                "{}: has load errors, so findings may be incomplete: ",
+                savings.display()
+            )),
+            "{:?}",
+            sink.0
+        );
+        assert!(err.is_empty());
         Ok(())
     }
 

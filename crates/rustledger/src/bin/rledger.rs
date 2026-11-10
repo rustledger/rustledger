@@ -574,7 +574,7 @@ fn main() -> ExitCode {
             Err(e) if rustledger::pager::is_broken_pipe(&e) => ExitCode::SUCCESS,
             Err(e) => {
                 eprintln!("error: {}", render_error(&e));
-                ExitCode::from(rustledger::cmd::lint::error_exit_code(&args))
+                ExitCode::from(rustledger::cmd::lint::ERROR_EXIT_CODE)
             }
         },
         Commands::Compat { action } => match action {

@@ -402,11 +402,16 @@ The tolerance and precision maps (`inferred_tolerance_default`,
 `display_precision`) are read as beancount reads them: `CURRENCY:NUMBER`, split
 at the last colon followed by a number (so `A:B:0.01` is currency `A:B`), with
 no sign (`USD:-0.01` is invalid). One deliberate difference: text after the
-number (`USD:0.01abc`) is invalid here, where beancount reads it as `0.01`.
+number (`USD:0.01abc`, or an exponent as in `USD:1e-2`) is invalid here, where
+beancount reads the number before it.
 
 `tolerance_multiplier` is read as beancount's `D()` reads it: an empty value is
-0, and commas and exponents are accepted. `NaN` and `Infinity`, which beancount
-accepts, are invalid here, since rustledger's decimal type cannot hold them.
+0, commas, spaces and underscores are dropped, and exponents are accepted.
+
+A number rustledger's decimal type cannot hold is invalid, though beancount
+accepts it: `NaN`, `Infinity`, a non-zero value outside its range (`1e100`,
+`1e-29`, an integer of 29 or more digits), and a non-ASCII digit in a
+tolerance map (`USD:١`).
 
 The boolean options never give E7002: see
 [E7011](#e7011-unrecognized-boolean-option-value).

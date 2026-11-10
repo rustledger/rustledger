@@ -107,6 +107,53 @@ const REPEATABLE_OPTIONS: &[&str] = &[
 /// directive is the way to load one.
 const READONLY_OPTIONS: &[&str] = &["filename", "plugin"];
 
+/// Every option name the loader knows, read-only ones included, in the
+/// loader's order. The one list: `rledger doctor list-options` prints this
+/// rather than keeping its own.
+#[must_use]
+pub const fn known_options() -> &'static [&'static str] {
+    KNOWN_OPTIONS
+}
+
+/// Whether `key` is a known option that may not be set (E7005).
+#[must_use]
+pub fn is_read_only_option(key: &str) -> bool {
+    READONLY_OPTIONS.contains(&key)
+}
+
+/// The kind of value a known option takes, as [`Options::set`] reads it, or
+/// `None` for a name that is not a known option.
+#[must_use]
+pub fn option_value_kind(key: &str) -> Option<&'static str> {
+    let kind = match key {
+        "title" | "filename" | "plugin" => "string",
+        "operating_currency" | "conversion_currency" => "currency",
+        "name_assets" | "name_liabilities" | "name_equity" | "name_income" | "name_expenses" => {
+            "account root"
+        }
+        "account_rounding"
+        | "account_previous_balances"
+        | "account_previous_earnings"
+        | "account_previous_conversions"
+        | "account_current_earnings"
+        | "account_current_conversions"
+        | "account_unrealized_gains" => "account leaf",
+        "inferred_tolerance_default" | "display_precision" => "CURRENCY:NUMBER",
+        "inferred_tolerance_multiplier" | "tolerance_multiplier" => "decimal",
+        "infer_tolerance_from_cost"
+        | "use_precise_interpolation"
+        | "render_commas"
+        | "allow_pipe_separator"
+        | "insert_pythonpath" => "bool",
+        "booking_method" => "booking method",
+        "long_string_maxlines" => "int",
+        "documents" => "path",
+        "plugin_processing_mode" => "default | raw",
+        _ => return None,
+    };
+    Some(kind)
+}
+
 /// beancount's default for `account_current_conversions`, a leaf under the
 /// equity root.
 pub const DEFAULT_CURRENT_CONVERSIONS: &str = "Conversions:Current";
@@ -172,18 +219,27 @@ impl BoolVocabulary {
 /// beancount matches `(.*):([\d\.]+)`, so the currency is everything before
 /// the LAST colon that is followed by a digit or a dot (`A:B:0.01` is
 /// currency `A:B`), and the number is digits and dots only, so a sign is
-/// rejected (`USD:-0.01`). The number is then read with `D()`.
+/// rejected (`USD:-0.01`). `.` does not match a newline, so the colon must be
+/// on the value's first line (`"A\nB:0.5"` is invalid). The number is then
+/// read with `D()`.
 ///
 /// Stricter than Python: beancount's `re.match` ignores whatever follows the
 /// number, so `USD:0.01abc` reads as `0.01 USD`. We reject it with E7002
 /// (a decision on #2925): text after the number is a typo, and taking the
-/// prefix silently would set a tolerance the user may not have written.
+/// prefix silently would set a tolerance the user may not have written. That
+/// includes an exponent: beancount reads `USD:1e-2` as 1, we reject it.
+///
+/// Not fixable locally: Python's `\d` also matches non-ASCII decimal digits
+/// (`USD:١` is 1 in beancount), which `rust_decimal` does not parse; only
+/// ASCII digits are read here. A number past `rust_decimal`'s range (29 or
+/// more integer digits) is rejected too.
 fn parse_tolerance_map(value: &str) -> Result<(&str, Decimal), String> {
     let is_number_char = |c: char| c.is_ascii_digit() || c == '.';
-    let Some(colon) = value
+    let first_line = value.split('\n').next().unwrap_or_default();
+    let Some(colon) = first_line
         .rmatch_indices(':')
         .map(|(at, _)| at)
-        .find(|&at| value[at + 1..].starts_with(is_number_char))
+        .find(|&at| first_line[at + 1..].starts_with(is_number_char))
     else {
         return Err(format!(
             "Invalid value '{value}': expected CURRENCY:NUMBER, e.g. USD:0.01"
@@ -202,7 +258,7 @@ fn parse_tolerance_map(value: &str) -> Result<(&str, Decimal), String> {
     }
     let Ok(number) = Decimal::from_str(number) else {
         return Err(format!(
-            "Invalid value '{value}': '{number}' is not a number"
+            "Invalid value '{value}': '{number}' is not a number rustledger can hold"
         ));
     };
     Ok((currency, number))
@@ -213,17 +269,25 @@ fn parse_tolerance_map(value: &str) -> Result<(&str, Decimal), String> {
 ///
 /// An empty value is 0. Otherwise commas and spaces are stripped (`D` treats
 /// them as thousands separators) and the rest is read as Python's `Decimal`
-/// reads a string: surrounding whitespace, a sign, `_` between digits, and an
-/// exponent are accepted.
+/// reads a string: surrounding whitespace, a sign and an exponent are
+/// accepted, and every `_` is dropped wherever it sits (`1__0` is 10, `_1` is
+/// 1, `1._5` is 1.5, `1e_1` is 10); a value that is only underscores is
+/// invalid. A zero significand is 0 whatever its exponent (`0e100`).
 ///
 /// Not fixable locally: Python's `Decimal` also reads `NaN`, `sNaN` and
-/// `Infinity`, which a `rust_decimal::Decimal` cannot hold. Those are rejected
-/// (E7002), as is a number outside its range; no tolerance is either.
+/// `Infinity`, and any magnitude, while a `rust_decimal::Decimal` holds about
+/// 28 to 29 significant digits and exponents from 10^-28 to about 10^28. A
+/// non-finite value, or a non-zero one outside that range (`1e100`, `1e-29`,
+/// an integer of 29 or more digits), is rejected (E7002). No real tolerance
+/// multiplier is any of these.
 fn parse_beancount_decimal(value: &str) -> Result<Decimal, String> {
     if value.is_empty() {
         return Ok(Decimal::ZERO);
     }
-    let cleaned: String = value.chars().filter(|c| !matches!(c, ',' | ' ')).collect();
+    let cleaned: String = value
+        .chars()
+        .filter(|c| !matches!(c, ',' | ' ' | '_'))
+        .collect();
     let text = cleaned.trim();
     let unsigned = text.trim_start_matches(['+', '-']);
     if ["nan", "snan", "inf", "infinity"]
@@ -240,14 +304,21 @@ fn parse_beancount_decimal(value: &str) -> Result<Decimal, String> {
         Some(at) => (&text[..at], Some(&text[at + 1..])),
         None => (text, None),
     };
-    let mantissa = python_digits(mantissa, true).ok_or_else(invalid)?;
-    let mut number = Decimal::from_str(&mantissa).map_err(|_| invalid())?;
+    if !is_python_number_part(mantissa, true) {
+        return Err(invalid());
+    }
+    let out_of_range =
+        || format!("Invalid value '{value}': outside the range rustledger's decimal can hold");
+    let mut number = Decimal::from_str(mantissa).map_err(|_| out_of_range())?;
     if let Some(exponent) = exponent {
-        let exponent: i64 = python_digits(exponent, false)
-            .ok_or_else(invalid)?
-            .parse()
-            .map_err(|_| invalid())?;
-        let out_of_range = || format!("Invalid value '{value}': out of range");
+        if !is_python_number_part(exponent, false) {
+            return Err(invalid());
+        }
+        if number.is_zero() {
+            // Zero at any exponent is zero, as `Decimal("0e100")` is.
+            return Ok(Decimal::ZERO);
+        }
+        let exponent: i64 = exponent.parse().map_err(|_| out_of_range())?;
         // A power of ten past 10^28 overflows a `Decimal` below anyway; the
         // cap only bounds the loop for an absurd exponent.
         let power = exponent.unsigned_abs();
@@ -263,36 +334,29 @@ fn parse_beancount_decimal(value: &str) -> Result<Decimal, String> {
             number.checked_mul(scale)
         }
         .ok_or_else(out_of_range)?;
+        // A quotient that rounded to zero was not representable.
+        if number.is_zero() {
+            return Err(out_of_range());
+        }
     }
     Ok(number)
 }
 
-/// The text of one part of a Python decimal string with its `_` separators
-/// removed, or `None` when it is malformed: an optional sign, then digits,
-/// with a `.` allowed (once, with a digit on at least one side) when
-/// `fraction` is set. An `_` must sit between two digits, as in Python.
-fn python_digits(text: &str, fraction: bool) -> Option<String> {
+/// Whether `text` is one part of a Python decimal string (underscores
+/// already dropped): an optional sign, then ASCII digits, with one `.` allowed
+/// when `fraction` is set, and at least one digit.
+fn is_python_number_part(text: &str, fraction: bool) -> bool {
     let body = text.strip_prefix(['+', '-']).unwrap_or(text);
-    let sign = &text[..text.len() - body.len()];
-    let bytes = body.as_bytes();
-    let mut out = String::from(sign);
     let mut digits = 0;
     let mut dot = false;
-    for (i, &b) in bytes.iter().enumerate() {
+    for b in body.bytes() {
         match b {
             b'0'..=b'9' => digits += 1,
             b'.' if fraction && !dot => dot = true,
-            b'_' if i > 0
-                && bytes[i - 1].is_ascii_digit()
-                && bytes.get(i + 1).is_some_and(u8::is_ascii_digit) =>
-            {
-                continue;
-            }
-            _ => return None,
+            _ => return false,
         }
-        out.push(char::from(b));
     }
-    (digits > 0).then_some(out)
+    digits > 0
 }
 
 /// The full name of an account option given as a leaf under `root`.
@@ -1364,6 +1428,18 @@ mod tests {
     }
     use super::*;
 
+    /// Every known option has a value kind, so `doctor list-options`, which
+    /// prints the loader's list, can never print one without a type.
+    #[test]
+    fn test_option_value_kind_covers_every_known_option() {
+        for key in known_options() {
+            assert!(option_value_kind(key).is_some(), "{key} has no kind");
+        }
+        assert_eq!(option_value_kind("experiment_explicit_tolerances"), None);
+        assert_eq!(option_value_kind("insert_pythonpath"), Some("bool"));
+        assert!(is_read_only_option("plugin") && is_read_only_option("filename"));
+    }
+
     #[test]
     fn test_default_options() {
         let opts = Options::new();
@@ -1637,12 +1713,17 @@ mod tests {
                 ("FALSE", false),
                 ("0", false),
                 ("no", false),
+                // `on` / `off` are the grammar branch's words, not the converter's.
+                ("on", false),
+                ("off", false),
             ] {
                 let mut opts = Options::new();
                 opts.set(key, value);
-                assert!(
-                    opts.warnings.iter().all(|w| w.code != "E7011"),
-                    "{key} = {value:?} is a word beancount names: {:?}",
+                let warns = matches!(value, "on" | "off");
+                assert_eq!(
+                    opts.warnings.iter().any(|w| w.code == "E7011"),
+                    warns,
+                    "{key} = {value:?}: {:?}",
                     opts.warnings
                 );
                 assert_eq!(bool_option(&opts, key), expected, "{key} = {value:?}");
@@ -2139,9 +2220,36 @@ mod tests {
         }
     }
 
+    /// The same deviation covers an exponent: beancount reads `USD:1e-2` as
+    /// 1 (the `e-2` is ignored), rledger rejects it.
+    #[test]
+    fn test_parse_tolerance_map_exponent_is_rejected() {
+        let err = parse_tolerance_map("USD:1e-2").expect_err("trailing exponent");
+        assert!(err.contains("'e-2'"), "{err}");
+    }
+
+    /// beancount's `(.*)` does not cross a newline, so the colon must be on
+    /// the first line: `"A\nB:0.5"` is invalid there and here.
+    #[test]
+    fn test_parse_tolerance_map_colon_after_newline_is_rejected() {
+        assert!(parse_tolerance_map("A\nB:0.5").is_err());
+        let mut opts = Options::new();
+        opts.set("inferred_tolerance_default", "A\nB:0.5");
+        let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+        assert_eq!(codes, ["E7002"]);
+    }
+
+    /// Not fixable locally (deviation 3): a number past `rust_decimal`'s
+    /// range, and a non-ASCII digit Python's `\d` would match, are rejected.
+    #[test]
+    fn test_parse_tolerance_map_unrepresentable_number_is_rejected() {
+        assert!(parse_tolerance_map("USD:123456789012345678901234567890").is_err());
+        assert!(parse_tolerance_map("USD:\u{661}").is_err());
+    }
+
     /// `tolerance_multiplier` is read by beancount's `D()` (#2925): empty is
-    /// 0, commas and spaces are stripped, and a sign, an exponent and `_`
-    /// between digits are accepted.
+    /// 0, commas, spaces and every `_` are stripped, and a sign and an exponent
+    /// are accepted.
     #[test]
     fn test_parse_beancount_decimal_matches_d() {
         use rust_decimal_macros::dec;
@@ -2160,13 +2268,35 @@ mod tests {
             (".5", dec!(0.5)),
             ("5.", dec!(5)),
             ("1_000", dec!(1000)),
+            // CPython's `Decimal` drops every `_`, wherever it sits.
+            ("1__0", dec!(10)),
+            ("1_", dec!(1)),
+            ("_1", dec!(1)),
+            ("1._5", dec!(1.5)),
+            ("._5", dec!(0.5)),
+            ("1e_1", dec!(10)),
+            ("1_e1", dec!(10)),
+            // A zero significand is zero at any exponent.
+            ("0e100", dec!(0)),
+            ("0E-50", dec!(0)),
+            ("-0e5", dec!(0)),
         ] {
             assert_eq!(parse_beancount_decimal(value), Ok(expected), "{value:?}");
         }
         for value in [
-            "abc", "0.5abc", ",", "  ", "1__0", "_1", "1_", "1e", "e3", ".",
+            "abc", "0.5abc", ",", "  ", "_", "__", "1e", "e3", ".", "1.2.3",
         ] {
             assert!(parse_beancount_decimal(value).is_err(), "{value:?}");
+        }
+    }
+
+    /// Not fixable locally (deviation 3 on #2925): a non-zero value past
+    /// `rust_decimal`'s range, which Python's `Decimal` holds, is rejected.
+    #[test]
+    fn test_parse_beancount_decimal_out_of_range_is_rejected() {
+        for value in ["1e100", "1e-29", "123456789012345678901234567890"] {
+            let err = parse_beancount_decimal(value).expect_err(value);
+            assert!(err.contains("range"), "{value}: {err}");
         }
     }
 

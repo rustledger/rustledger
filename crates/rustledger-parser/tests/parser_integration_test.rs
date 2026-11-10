@@ -1993,3 +1993,35 @@ fn tags_after_first_posting_are_an_error_and_dropped() {
         assert_eq!(txn.postings.len(), 2, "{path}");
     }
 }
+
+/// `ParseResult::account_at` binary-searches `account_occurrences`, so the
+/// occurrences must be in source order and must not overlap. Pinned on a
+/// ledger with accounts in every position (headers, postings, metadata,
+/// `custom` values, pads), and checked against a linear scan at every byte.
+#[test]
+fn account_occurrences_are_sorted_for_account_at() {
+    let source = "2024-01-01 open Assets:A\u{1F600}B USD\n\
+                  2024-01-01 open Equity:O\n\
+                  2024-01-02 pad Assets:A\u{1F600}B Equity:O\n\
+                  2024-01-03 * \"x\"\n  ref: Assets:Ref\n  Assets:A\u{1F600}B  1 USD\n    pk: Equity:O\n  Equity:O\n\
+                  2024-01-04 custom \"budget\" Expenses:Food \"month\" 1 USD\n\
+                  2024-01-05 balance Assets:A\u{1F600}B 1 USD\n";
+    let parsed = rustledger_parser::parse(source);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+    let occ = &parsed.account_occurrences;
+    assert!(occ.len() >= 9, "{occ:?}");
+    assert!(
+        occ.windows(2).all(|w| w[0].span.end < w[1].span.start),
+        "{occ:?}"
+    );
+    for offset in 0..=source.len() {
+        let linear = occ
+            .iter()
+            .find(|o| o.span.start <= offset && offset <= o.span.end);
+        assert_eq!(
+            parsed.account_at(offset).map(|o| o.span),
+            linear.map(|o| o.span),
+            "offset {offset}"
+        );
+    }
+}

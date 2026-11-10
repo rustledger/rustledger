@@ -258,8 +258,8 @@ mod tests {
     #[test]
     fn test_run_with_writer_refuses_a_plugin_failure() {
         let (err, _) = refusal("plugin \"no.such.plugin\"\n2024-01-01 open Assets:Cash\n");
-        assert!(err.contains("E8004: "), "{err}");
-        assert!(err.contains("no.such.plugin"), "{err}");
+        // E8004 with the Python plugin runtime, E8005 in a build without it.
+        assert!(err.contains(": Python plugin \"no.such.plugin\""), "{err}");
     }
 
     /// The ledger from #2899: a plugin that does not exist, the unbookable
@@ -272,6 +272,7 @@ mod tests {
             err.contains(&format!("{shown}:5: BOOK: interpolation failed")),
             "{err}"
         );
-        assert!(err.contains("E8004: "), "{err}");
+        // E8004 with the Python plugin runtime, E8005 in a build without it.
+        assert!(err.contains(": Python plugin \"no.such.plugin\""), "{err}");
     }
 }

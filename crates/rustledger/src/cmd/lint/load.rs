@@ -453,12 +453,13 @@ mod tests {
         let err = load_booked(&path).unwrap_err().to_string();
         assert!(
             err.starts_with(&format!(
-                "{}: cannot inspect a ledger whose processing failed: E8004: ",
+                "{}: cannot inspect a ledger whose processing failed: E800",
                 path.display()
             )),
             "{err}"
         );
-        assert!(err.contains("no.such.plugin"), "{err}");
+        // E8004 with the Python plugin runtime, E8005 in a build without it.
+        assert!(err.contains(": Python plugin \"no.such.plugin\""), "{err}");
     }
 
     #[test]
@@ -471,7 +472,8 @@ mod tests {
             err.contains(&format!("{}:6: BOOK: interpolation failed", path.display())),
             "{err}"
         );
-        assert!(err.contains("E8004: "), "{err}");
+        // E8004 with the Python plugin runtime, E8005 in a build without it.
+        assert!(err.contains(": Python plugin \"no.such.plugin\""), "{err}");
     }
 
     #[test]

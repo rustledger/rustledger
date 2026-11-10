@@ -412,7 +412,11 @@ use crate::types::{Error, LedgerOptions};
 /// v87: loader v66, PARSER OUTPUT changed (#2906). Any non-ASCII character
 /// starts an account component, as in beancount, so `Assets:٣Foo` is one
 /// account; an older blob would keep serving such a file with its old errors.
-pub const CACHE_VERSION: u32 = 87;
+/// v89: loader v67, PARSER OUTPUT changed (#2910). A BOM inside a string
+/// literal or a comment, or glued into an account, is content, as in
+/// beancount; an older blob would keep serving such a file with a
+/// `BomInDirectiveBody` error.
+pub const CACHE_VERSION: u32 = 89;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -444,7 +448,7 @@ pub const CACHE_VERSION: u32 = 87;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 66;
+const LOADER_CACHE_VERSION_PIN: u32 = 67;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

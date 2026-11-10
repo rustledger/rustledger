@@ -3443,6 +3443,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.21",
  "tokio",
+ "unicode-normalization",
  "ureq",
  "wasmtime",
  "wasmtime-wasi",

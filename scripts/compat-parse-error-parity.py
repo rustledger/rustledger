@@ -301,12 +301,14 @@ def _spawn(items):
     pid = os.fork()
     if pid == 0:
         os.close(r)
-        code = 0
+        # Exit 3 unless the worker finishes; `finally` runs on any exception,
+        # so the child never returns into the parent's code.
+        code = 3
         try:
             _worker(items, w)
-        except BaseException:  # never return into the parent's code
-            code = 3
-        os._exit(code)
+            code = 0
+        finally:
+            os._exit(code)
     os.close(w)
     return pid, os.fdopen(r, "r")
 

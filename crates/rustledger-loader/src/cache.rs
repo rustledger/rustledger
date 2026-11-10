@@ -666,10 +666,16 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     reports its postings. An older blob would keep serving such a file with no
 ///     error.
 ///
+/// v66: PARSER OUTPUT changed, no archived layout moved (#2906). Any non-ASCII
+///     character starts an account component, as in beancount's lexer, so
+///     `Assets:٣Foo` is one account, not stray tokens; the name is judged
+///     after lexing (`E1005`). A v65 blob would keep serving such a file with
+///     its old parse errors.
+///
 /// v67: PARSER OUTPUT changed, no archived layout moved (#2910). A BOM (U+FEFF)
-///     inside a string literal or a comment is content, as in beancount, where
-///     it was a `BomInDirectiveBody` parse error. An older blob would keep
-///     serving such a file with that error.
+///     inside a string literal or a comment, or glued into an account, is
+///     content, as in beancount, where it was a `BomInDirectiveBody` parse
+///     error. An older blob would keep serving such a file with that error.
 ///
 /// Public so `rustledger-wasm` can pin its own cache version against this one.
 /// Both caches archive the same `Vec<Directive>`, so a parser change that
@@ -1493,6 +1499,8 @@ mod tests {
         // v51 (#2802) reports a stray metadata token; likewise.
         // v61 (#2835) moves `Metadata`'s archived layout. No `CostNumber` is
         // in it, so the arrays still hold.
+        // v66 (#2906) lexes a non-ASCII account start; no archived encoding
+        // moves, so the arrays still hold.
         // v67 (#2910) keeps a BOM inside a string; no archived encoding
         // moves, so the arrays still hold.
         const FIXTURE_VERSION: u32 = 67;
@@ -1640,6 +1648,8 @@ mod tests {
         // v51 (#2802) reports a stray metadata token; likewise.
         // v61 (#2835) moves the map that holds metadata values, not
         // `MetaValue` itself; the hash below is unchanged.
+        // v66 (#2906) lexes a non-ASCII account start; the hash below is
+        // unchanged.
         // v67 (#2910) keeps a BOM inside a string; the hash below is
         // unchanged.
         const FIXTURE_VERSION: u32 = 67;

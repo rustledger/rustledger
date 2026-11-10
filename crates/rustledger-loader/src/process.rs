@@ -304,11 +304,11 @@ impl Ledger {
     ///
     /// # Performance
     ///
-    /// Each call clones every source directive once (`O(n)`).
-    /// Inlines the merge logic from
-    /// [`rustledger_booking::merge_with_padding`] so the already-
-    /// owned `booked` vector can be moved into the merged output
-    /// instead of cloned a second time. For short-lived CLI
+    /// Each call clones every source directive once (`O(n)`) and hands
+    /// the owned vector to
+    /// [`rustledger_booking::merge_with_padding_owned`], which moves it
+    /// into the merged output instead of cloning it a second time, and
+    /// places every pad synth in one pass (#2904). For short-lived CLI
     /// invocations the single clone is negligible. Long-lived
     /// processes (FFI servers, LSPs) that query the same ledger
     /// repeatedly should hoist the result above their loop.

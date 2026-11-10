@@ -15,7 +15,7 @@ use rustledger_core::{Directive, SYNTHESIZED_FILE_ID};
 use rustledger_parser::ParseResult;
 use std::collections::HashMap;
 
-use super::utils::{LineIndex, PositionEncoding, get_word_at_position, is_account_like};
+use super::utils::{LineIndex, PositionEncoding, get_symbol_at_position, is_account_like};
 
 /// Handle a prepare call hierarchy request.
 /// Returns the account at the cursor position as a CallHierarchyItem.
@@ -27,12 +27,10 @@ pub fn handle_prepare_call_hierarchy(
     encoding: PositionEncoding,
 ) -> Option<Vec<CallHierarchyItem>> {
     let position = params.text_document_position_params.position;
-    let line_idx = position.line as usize;
-    let lines: Vec<&str> = source.lines().collect();
-    let line = lines.get(line_idx)?;
 
     // Get the word at the cursor position
-    let (word, start, end) = get_word_at_position(line, position.character as usize, encoding)?;
+    let (word, start, end) =
+        get_symbol_at_position(&LineIndex::new(source, encoding), parse_result, position)?;
 
     // Check if it's an account
     if !is_account_like(&word) {

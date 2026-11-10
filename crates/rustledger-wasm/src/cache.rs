@@ -409,9 +409,13 @@ use crate::types::{Error, LedgerOptions};
 /// v86: loader v65, PARSER OUTPUT changed (#2905). A transaction with no flag
 /// after its date is a parse error, as in beancount; an older blob would keep
 /// serving such a file with no error.
+/// v87: loader v66, PARSER OUTPUT changed (#2906). Any non-ASCII character
+/// starts an account component, as in beancount, so `Assets:٣Foo` is one
+/// account; an older blob would keep serving such a file with its old errors.
 /// v89: loader v67, PARSER OUTPUT changed (#2910). A BOM inside a string
-/// literal or a comment is content, as in beancount; an older blob would keep
-/// serving such a file with a `BomInDirectiveBody` error.
+/// literal or a comment, or glued into an account, is content, as in
+/// beancount; an older blob would keep serving such a file with a
+/// `BomInDirectiveBody` error.
 pub const CACHE_VERSION: u32 = 89;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.

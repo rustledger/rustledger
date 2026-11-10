@@ -17,7 +17,9 @@ use std::ops::Range;
 //
 // No BOM-aware lexer callback, no `Token::Bom` variant, and no
 // BOM regex in the Token enum — but the `Err(()) => ...` arm in
-// `tokenize` DOES contain one mid-file-BOM special case: it preserves
+// `tokenize` DOES contain one mid-file-BOM special case: a BOM that
+// starts its line keeps its own extent (elsewhere it starts an invalid run
+// to the next blank, like any other error; #2928), and it preserves
 // `at_line_start` and advances `last_newline_end` past leading BOM
 // bytes in the error span, so indented content on the same logical
 // line still emits an `Indent` token. That logic lives in the
@@ -134,10 +136,11 @@ pub enum Token<'src> {
     ///
     /// One deliberate difference: a BOM (U+FEFF) does not START an account
     /// here (it may continue one). beancount lexes `\u{feff}Assets:A` as one
-    /// account and rejects the name; here the BOM stays its own
-    /// layout-transparent error token (`apply_err_layout_transparency`), so
+    /// account and rejects the name; here a BOM at the start of a line stays its
+    /// own layout-transparent error token (`apply_err_layout_transparency`), so
     /// the directive of a concatenated file after it still parses, under the
-    /// `BomInDirectiveBody` diagnostic. Both reject the line.
+    /// `BomInDirectiveBody` diagnostic, and anywhere else it starts an invalid
+    /// run to the next blank (#2928). Both reject the line.
     ///
     /// KNOWN SHARP EDGE: the non-ASCII range includes Unicode whitespace,
     /// control and line-separator characters (NBSP U+00A0, LINE SEPARATOR
@@ -885,8 +888,10 @@ impl<'src> TokenIter<'src> {
     /// The first lexer error in the run of non-blank characters that goes on
     /// at `from`, right after a lone capital: its start, and a lexer that has
     /// just produced it. `None`, and the run remembered as clean, when every
-    /// token that starts in the run lexes, or the first error is a `\r` or a
-    /// mid-file BOM (which keep their own extent; see the `Err` arm).
+    /// token that starts in the run lexes, or the first error is a `\r`
+    /// (which keeps its own extent; see the `Err` arm). A BOM is an error
+    /// like any other here: it keeps its own extent only at the start of a
+    /// line, and a run that goes on after a lone capital is never there.
     ///
     /// Lexes on a clone of the lexer, dropped unless it is returned. Linear:
     /// a run with an error becomes one error token, so it is not lexed again,
@@ -910,7 +915,7 @@ impl<'src> TokenIter<'src> {
                 break;
             }
             if result.is_err() {
-                if self.source[at..].starts_with(['\r', crate::bom::BOM_CHAR]) {
+                if self.source[at..].starts_with('\r') {
                     break;
                 }
                 return Some((at, peek));
@@ -1251,14 +1256,24 @@ impl<'src> Iterator for TokenIter<'src> {
                     //
                     // Two errors keep their own extent. A `\r` with more of
                     // its line after it (beancount reads it as a space; see
-                    // `stray_cr_trivia_end`). And a mid-file BOM at the start
-                    // of the error, which is layout-transparent here
+                    // `stray_cr_trivia_end`). And a mid-file BOM that starts
+                    // its line, which is layout-transparent here
                     // (`apply_err_layout_transparency`) so that the directive
                     // of a concatenated file after it still parses, under its
                     // own `BomInDirectiveBody` diagnostic: deliberately not
                     // beancount's `Invalid token: '\ufeff2024-01-01'`.
+                    //
+                    // Only there (#2928). Anywhere else on a line, layout is
+                    // not at stake, and a BOM-led error runs to the next
+                    // blank like any other, as beancount's does: `<BOM>"x"`,
+                    // `<BOM>#!d` and `<BOM>#+x` are each one invalid token,
+                    // so the quote opens no string and the `#!` / `#+` starts
+                    // no token of its own.
                     let text = &source[span.start..];
-                    let end = if text.starts_with(['\r', crate::bom::BOM_CHAR]) {
+                    let bom_starts_line = text.starts_with(crate::bom::BOM_CHAR)
+                        && self.at_line_start
+                        && span.start == self.last_newline_end;
+                    let end = if text.starts_with('\r') || bom_starts_line {
                         span.end
                     } else {
                         span.start + text.find([' ', '\t', '\r', '\n']).unwrap_or(text.len())
@@ -1955,6 +1970,72 @@ mod tests {
                 .iter()
                 .any(|(t, _)| matches!(t, Token::MetaKey("meta-key:"))),
             "expected MetaKey after consecutive-BOM-prefixed indent, got: {tokens:?}"
+        );
+    }
+
+    /// The error tokens of `source`, through the lossless (CST) tokenizer.
+    fn error_tokens(source: &str) -> Vec<&str> {
+        tokenize_lossless(source)
+            .into_iter()
+            .filter_map(|(t, _)| match t {
+                Token::Error(s) => Some(s),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// In the middle of a line, a BOM-led error runs to the next space, tab
+    /// or line ending, as beancount's `<INVALID>[^ \t\n\r]+` does (#2928): a
+    /// `"` after the BOM opens no string, and a `#!` or `#+` starts no token
+    /// of its own. Two BOMs in a row are one run too.
+    #[test]
+    fn test_tokenize_mid_line_bom_runs_to_next_blank() {
+        let bom = crate::bom::BOM;
+        for (rest, run) in [
+            (format!("{bom}\"x\" USD"), format!("{bom}\"x\"")),
+            (format!("{bom}#!d"), format!("{bom}#!d")),
+            (format!("{bom}#+x\tUSD"), format!("{bom}#+x")),
+            (format!("{bom}{bom}\"x\"\n"), format!("{bom}{bom}\"x\"")),
+            (format!("x{bom}\"y\""), format!("x{bom}\"y\"")),
+        ] {
+            let source = format!("2024-01-02 * \"n\" {rest}");
+            assert_eq!(error_tokens(&source), vec![run.as_str()], "{source:?}");
+        }
+    }
+
+    /// After a lone capital, a BOM is an error like any other: the run from
+    /// the capital on is one error token, so its quote opens no string.
+    #[test]
+    fn test_tokenize_bom_after_lone_capital_runs_to_next_blank() {
+        let bom = crate::bom::BOM;
+        let source = format!("2024-01-02 * \"n\" A{bom}\"x\" USD\n");
+        assert_eq!(
+            error_tokens(&source),
+            vec![format!("A{bom}\"x\"").as_str()],
+            "{source:?}"
+        );
+    }
+
+    /// At the start of a line a BOM still keeps its own extent (layout
+    /// transparency for concatenated files, #2928 leaves it as it was): the
+    /// date after it lexes, and so does a quote, each BOM being one token.
+    #[test]
+    fn test_tokenize_line_start_bom_keeps_own_extent() {
+        let bom = crate::bom::BOM;
+        for (source, errors) in [
+            (format!("x\n{bom}2024-01-02 open Assets:A\n"), vec![bom]),
+            (format!("x\n{bom}{bom}\"q\"\n"), vec![bom, bom]),
+        ] {
+            let mut want = vec!["x"];
+            want.extend(errors);
+            assert_eq!(error_tokens(&source), want, "{source:?}");
+        }
+        let source = format!("x\n{bom}2024-01-02 open Assets:A\n");
+        assert!(
+            tokenize_lossless(&source)
+                .iter()
+                .any(|(t, _)| matches!(t, Token::Date(_))),
+            "{source:?}"
         );
     }
 

@@ -4799,7 +4799,14 @@ fn emit_error_node_line(
                 .with_hint(crate::diagnostics::BOM_REMOVAL_HINT),
         );
     }
-    report_invalid_tokens_of_error_line(ls as usize, invalid, stripped, bom_offset, out);
+    report_invalid_tokens_of_error_line(
+        ls as usize,
+        invalid,
+        stripped,
+        bom_offset,
+        !primary_is_bom && stray_bom,
+        out,
+    );
 }
 
 fn error_node_check(
@@ -4897,6 +4904,36 @@ pub(super) fn has_stray_bom(invalid: &[std::ops::Range<usize>], stripped: &str) 
 /// it to an `ERROR_NODE` line.
 pub fn token_has_stray_bom(kind: crate::SyntaxKind, text: &str) -> bool {
     kind == crate::SyntaxKind::ERROR_TOKEN && text.contains(crate::bom::BOM_CHAR)
+}
+
+/// Whether the invalid token `text`, starting at byte `start` of `source`, is
+/// a mid-file BOM the lexer kept as a token of its own: one that starts its
+/// line, or follows another such BOM (#2928).
+///
+/// Only such a BOM is layout-transparent (the lexer's `Err` arm and
+/// `apply_err_layout_transparency`), and stands for nothing but itself: its
+/// line's `BomInDirectiveBody` reports it, and the rest of the line lexes
+/// as if it were not there. Anywhere else, a BOM starts (or sits inside) an
+/// invalid run that goes on to the next blank, as beancount's does, and is
+/// an invalid token like any other. A token the lexer cut at a line-start
+/// BOM starts with one, and what stands before it on its line is nothing
+/// or more such BOMs; a BOM-led run in the middle of a line never follows a
+/// BOM, as a token ending in one (an invalid run, an account) would have
+/// taken it in. So one look back, at the character before `start`, tells
+/// the two apart, at constant cost.
+pub(super) fn is_line_start_bom_token(source: &str, start: usize, text: &str) -> bool {
+    source
+        .get(..start)
+        .is_some_and(|before| bom_token_starts_its_line(before, text))
+}
+
+/// [`is_line_start_bom_token`] for a token whose position is not at hand:
+/// `before` is any text that ends right where the token starts (the whole
+/// source before it, or just the token before it), empty at the start of the
+/// source or of a directive.
+fn bom_token_starts_its_line(before: &str, text: &str) -> bool {
+    text.starts_with(crate::bom::BOM_CHAR)
+        && (before.is_empty() || before.ends_with(['\n', crate::bom::BOM_CHAR]))
 }
 
 /// Pick the most specific `ParseError` variant for an
@@ -9127,27 +9164,49 @@ fn drop_errors_inside_a_line_error(
 /// what comes before it is a start beancount's grammar reads
 /// (`readable_start_of_an_error_line`: `foo`, `2024-01-01 commodi*ty`), and
 /// is the grammar error otherwise; each other invalid token on the line gets
-/// its own error. One that holds a mid-file BOM is left to the line's BOM
-/// diagnostic. `invalid` holds the
-/// line's `ERROR_TOKEN` ranges (stripped frame) and `line_start` where its
-/// first token starts.
+/// its own error.
+///
+/// A mid-file BOM is reported by the line's `BomInDirectiveBody`, and is left
+/// to it here in three cases. A BOM that starts its line is no invalid token
+/// at all, but layout ([`is_line_start_bom_token`]). A token with a BOM
+/// inside it, not at its start, is left to that diagnostic as it always was.
+/// And when the line's error is not the BOM diagnostic (an invalid account),
+/// so the BOM one comes after it as a second error (`secondary_bom`), that
+/// second error stands for the line's first BOM-led invalid token. Any other
+/// BOM-led token, one that starts in the middle of a line and runs to the
+/// next blank as beancount's does (#2928), is an invalid token like any
+/// other and gets its own error, as it does there.
+///
+/// `invalid` holds the line's `ERROR_TOKEN` ranges (stripped frame) and
+/// `line_start` where its first token starts.
 pub(super) fn report_invalid_tokens_of_error_line(
     line_start: usize,
     invalid: &[std::ops::Range<usize>],
     stripped: &str,
     bom_offset: u32,
+    secondary_bom: bool,
     out: &mut Vec<crate::ParseError>,
 ) {
     let off = bom_offset as usize;
+    let mut secondary_bom = secondary_bom;
     for (k, range) in invalid.iter().enumerate() {
         let text = stripped.get(range.clone()).unwrap_or_default();
         let starts_the_line = k == 0
             && stripped
                 .get(line_start..range.start)
                 .is_some_and(readable_start_of_an_error_line);
+        let bom_led = text.starts_with(crate::bom::BOM_CHAR);
         // A run that starts with a blank is not an invalid token but the rest
         // of a heading line after its `*`, which the lexer skips unread.
-        if starts_the_line || text.starts_with([' ', '\t']) || text.contains(crate::bom::BOM_CHAR) {
+        if starts_the_line
+            || text.starts_with([' ', '\t'])
+            || (!bom_led && text.contains(crate::bom::BOM_CHAR))
+            || is_line_start_bom_token(stripped, range.start, text)
+        {
+            continue;
+        }
+        if bom_led && secondary_bom {
+            secondary_bom = false;
             continue;
         }
         out.push(crate::ParseError::new(
@@ -9184,8 +9243,9 @@ fn readable_start_of_an_error_line(prefix: &str) -> bool {
 /// on whatever followed. Kept after the invalid token: another invalid
 /// token's error (an error starting at an `ERROR_TOKEN`), an invalid date
 /// (beancount builds dates in its lexer, so it reports them wherever they
-/// stand) and a mid-file BOM. An invalid token that starts with a BOM does
-/// not count, as it is layout-transparent here (see the lexer's `Err` arm).
+/// stand) and a mid-file BOM. A BOM that starts its line does not count as an
+/// invalid token, as it is layout-transparent here
+/// ([`is_line_start_bom_token`]); a BOM-led run anywhere else does (#2928).
 ///
 /// `errors` is sorted by start and stays so. Walks the green tree for the
 /// `ERROR_TOKEN`s, only when there are errors at all, and steps over each
@@ -9218,7 +9278,7 @@ fn quiet_after_invalid_tokens(
                 rowan::NodeOrToken::Token(t) => {
                     if <crate::BeancountLanguage as rowan::Language>::kind_from_raw(t.kind())
                         == K::ERROR_TOKEN
-                        && !t.text().starts_with(crate::bom::BOM_CHAR)
+                        && !is_line_start_bom_token(stripped, at, t.text())
                     {
                         invalid.push(at);
                     }
@@ -9457,23 +9517,29 @@ fn report_no_metadata_continuations(
 }
 
 /// Whether `node`'s subtree holds an invalid token (`ERROR_TOKEN`), other than
-/// one that starts with a mid-file BOM, which is layout-transparent here (see
-/// the lexer's `Err` arm). Walks green nodes only.
+/// a mid-file BOM that starts its line, which is layout-transparent here
+/// ([`is_line_start_bom_token`]; a BOM-led run in the middle of a line is an
+/// invalid token like any other, #2928). `node` starts a line, as every
+/// directive does. Walks green nodes only, in source order, so the token
+/// before each one is at hand.
 fn holds_an_invalid_token(node: &rowan::GreenNodeData) -> bool {
     use rowan::Language as _;
-    let mut stack = vec![node];
-    while let Some(n) = stack.pop() {
-        for child in n.children() {
-            match child {
-                rowan::NodeOrToken::Node(inner) => stack.push(inner),
-                rowan::NodeOrToken::Token(t) => {
-                    if crate::BeancountLanguage::kind_from_raw(t.kind())
-                        == crate::SyntaxKind::ERROR_TOKEN
-                        && !t.text().starts_with(crate::bom::BOM_CHAR)
-                    {
-                        return true;
-                    }
+    let mut stack = vec![node.children()];
+    let mut before = "";
+    while let Some(children) = stack.last_mut() {
+        match children.next() {
+            None => {
+                stack.pop();
+            }
+            Some(rowan::NodeOrToken::Node(inner)) => stack.push(inner.children()),
+            Some(rowan::NodeOrToken::Token(t)) => {
+                if crate::BeancountLanguage::kind_from_raw(t.kind())
+                    == crate::SyntaxKind::ERROR_TOKEN
+                    && !bom_token_starts_its_line(before, t.text())
+                {
+                    return true;
                 }
+                before = t.text();
             }
         }
     }

@@ -1339,7 +1339,14 @@ fn emit_error_node_line(
                 .with_hint(crate::diagnostics::BOM_REMOVAL_HINT),
         );
     }
-    super::convert::report_invalid_tokens_of_error_line(ls, invalid, stripped, bom_offset, out);
+    super::convert::report_invalid_tokens_of_error_line(
+        ls,
+        invalid,
+        stripped,
+        bom_offset,
+        !primary_is_bom && stray_bom,
+        out,
+    );
 }
 
 /// `error_node_check` on green: each `ERROR_NODE` line that is neither a section

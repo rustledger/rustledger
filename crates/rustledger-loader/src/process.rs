@@ -358,22 +358,18 @@ impl Ledger {
     /// matters.
     #[must_use]
     pub fn balance_view(&self) -> Vec<Directive> {
-        let booked: Vec<Directive> = self.directives.iter().map(|s| s.value.clone()).collect();
-
-        // Call the canonical placement rule rather than re-deriving it.
-        // This used to inline the merge so `booked` could be moved instead of
-        // cloned a second time; `merge_with_padding_owned` gives the same
-        // saving without the copy. The copy had already drifted — it still
-        // prepended synths after the shared rule learned to place them
-        // relative to a same-date `Balance`.
-        debug_assert!(
-            !booked.iter().any(|d| matches!(d, Directive::Transaction(t) if rustledger_booking::is_synthesized_pad(t))),
-            "balance_view called on a Ledger whose directives already contain synth pad transactions",
-        );
-        rustledger_booking::merge_with_padding_owned(
-            booked,
+        // Call the canonical placement rule rather than re-deriving it, and
+        // through its spanned form: the source locations stand for the line
+        // in beancount's entry order, which decides the order a pad group
+        // meets its accounts (#2901). The spanned merge also refuses input
+        // that already holds synth pad transactions (a debug assertion).
+        rustledger_booking::merge_with_padding_spanned(
+            &self.directives,
             self.options.inferred_tolerance_multiplier,
         )
+        .into_iter()
+        .map(|s| s.value)
+        .collect()
     }
 }
 

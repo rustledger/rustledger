@@ -47,6 +47,21 @@ const RANK_BODY: &str = "2024-01-02 * \"lot\"\n  Assets:P:X  1 STK {10 USD}\n  A
      2024-01-03 * \"g\"\n  Assets:P:Y  1 CCC\n  Assets:P:X  1 DDD\n  Equity:O  -1 CCC\n  Equity:O  -1 DDD\n\
      2024-01-04 pad Assets:P Equity:O\n2024-01-10 balance Assets:P 2 STK\n";
 
+/// `Assets:A:C` opened before `Assets:A:D`, a lot in `Assets:A`, one
+/// transaction posting to both, and a pad on the parent with its balance.
+const REG_BASE: &str = "2024-01-01 open Assets:A\n2024-01-01 open Assets:A:C\n\
+    2024-01-01 open Assets:A:D\n2024-01-01 open Assets:Z\n2024-01-01 open Assets:Cash\n\
+    2024-01-01 open Equity:O\n2024-02-01 * \"lot\"\n  Assets:A  10 STK {10 USD}\n\
+    \x20 Assets:Cash  -100 USD\n2024-02-02 * \"g\"\n  Assets:A:C  1 CCC\n  Assets:A:D  1 DDD\n\
+    \x20 Equity:O  -1 CCC\n  Equity:O  -1 DDD\n2024-02-03 pad Assets:A Equity:O\n\
+    2024-02-10 balance Assets:A 11 STK\n";
+
+/// bean-check's message for [`REG_BASE`] with `Assets:A:C` met first.
+const REG_C_FIRST: &str = "(1 CCC, 1 DDD, 10 STK {10 USD, 2024-02-01})";
+
+/// The same with `Assets:A:D` met first.
+const REG_D_FIRST: &str = "(1 DDD, 1 CCC, 10 STK {10 USD, 2024-02-01})";
+
 const HEAD: &str = "2024-01-01 open Equity:O\n2024-01-01 open Assets:B\n";
 
 struct Shape {
@@ -596,6 +611,124 @@ fn shapes_2901() -> Vec<Shape> {
             vec![],
             vec![],
             vec!["(2 STK {10.00 USD, 2024-01-02})"],
+        ),
+        // Every directive beancount's `realization.postings_by_account`
+        // registers an account through ranks it, so one line dated before
+        // the opens that names `Assets:A:D` puts its postings ahead of
+        // `Assets:A:C`'s, whatever the opens say.
+        shape(
+            "registration: the opens alone",
+            REG_BASE.to_string(),
+            vec![("Assets:A", dec!(1))],
+            vec![],
+            vec![],
+            vec![REG_C_FIRST],
+        ),
+        shape(
+            "registration: a note",
+            format!("2023-12-31 note Assets:A:D \"n\"\n{REG_BASE}"),
+            vec![("Assets:A", dec!(1))],
+            vec![],
+            vec![],
+            vec![REG_D_FIRST],
+        ),
+        shape(
+            "registration: a document",
+            format!("2023-12-31 document Assets:A:D \"/nonexistent/x.pdf\"\n{REG_BASE}"),
+            vec![("Assets:A", dec!(1))],
+            vec![],
+            vec![],
+            vec![REG_D_FIRST],
+        ),
+        shape(
+            "registration: a balance",
+            format!("2023-12-31 balance Assets:A:D 0 DDD\n{REG_BASE}"),
+            vec![("Assets:A", dec!(1))],
+            vec![],
+            vec![],
+            vec![REG_D_FIRST],
+        ),
+        shape(
+            "registration: a pad's source",
+            format!("2023-12-31 pad Assets:Z Assets:A:D\n{REG_BASE}"),
+            vec![("Assets:A", dec!(1))],
+            vec![],
+            vec!["2023-12-31"],
+            vec![REG_D_FIRST],
+        ),
+        shape(
+            "registration: a pad's account",
+            format!("2023-12-31 pad Assets:A:D Equity:O\n{REG_BASE}"),
+            vec![("Assets:A", dec!(1))],
+            vec![],
+            vec!["2023-12-31"],
+            vec![REG_D_FIRST],
+        ),
+        shape(
+            "registration: a custom",
+            format!("2023-12-31 custom \"x\" Assets:A:D\n{REG_BASE}"),
+            vec![("Assets:A", dec!(1))],
+            vec![],
+            vec![],
+            vec![REG_D_FIRST],
+        ),
+        shape(
+            "registration: a custom's account values in order",
+            format!("2023-12-31 custom \"x\" \"s\" Assets:A:D 2 Assets:A:C\n{REG_BASE}"),
+            vec![("Assets:A", dec!(1))],
+            vec![],
+            vec![],
+            vec![REG_D_FIRST],
+        ),
+        shape(
+            "registration: a close",
+            format!("2023-12-31 close Assets:A:D\n{REG_BASE}"),
+            vec![("Assets:A", dec!(1))],
+            vec![],
+            vec![],
+            vec![REG_D_FIRST],
+        ),
+        shape(
+            "registration: a posting",
+            format!("2023-12-31 * \"e\"\n  Assets:A:D  1 EEEE\n  Equity:O  -1 EEEE\n{REG_BASE}"),
+            vec![("Assets:A", dec!(1))],
+            vec![],
+            vec![],
+            vec!["(1 DDD, 1 CCC, 10 STK {10 USD, 2024-02-01}, 1 EEEE)"],
+        ),
+        // A same-date `pad` meets its accounts at its own line, as
+        // beancount's entry order ranks it with the date's transactions,
+        // notes and customs, not ahead of them as the booking order does.
+        shape(
+            "same date: a note before a pad",
+            format!(
+                "2023-12-31 note Assets:A:C \"n\"\n2023-12-31 pad Assets:Z Assets:A:D\n{REG_BASE}"
+            ),
+            vec![("Assets:A", dec!(1))],
+            vec![],
+            vec!["2023-12-31"],
+            vec![REG_C_FIRST],
+        ),
+        shape(
+            "same date: a transaction before a pad",
+            format!(
+                "2023-12-31 * \"c\"\n  Assets:A:C  1 FFFF\n  Equity:O  -1 FFFF\n\
+                 2023-12-31 pad Assets:Z Assets:A:D\n{REG_BASE}"
+            ),
+            vec![("Assets:A", dec!(1))],
+            vec![],
+            vec!["2023-12-31"],
+            vec!["(1 CCC, 1 DDD, 10 STK {10 USD, 2024-02-01}, 1 FFFF)"],
+        ),
+        shape(
+            "same date: a custom before a pad",
+            format!(
+                "2023-12-31 custom \"x\" Assets:A:C\n2023-12-31 pad Assets:Z Assets:A:D\n{REG_BASE}"
+            ),
+            vec![("Assets:A", dec!(1))],
+            vec![],
+            vec!["2023-12-31"],
+            vec![REG_C_FIRST],
         ),
         // A later balance just beyond the tolerance (0.016 against 0.01)
         // fails: pins the balance check's tolerance to the pad's.

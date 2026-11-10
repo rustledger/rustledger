@@ -408,8 +408,12 @@ impl PadTracker {
 
     /// Rank `account` if the walk has not met it yet.
     fn see(&mut self, account: &Account) {
-        let next = self.ranks.len();
-        self.ranks.entry(account.clone()).or_insert(next);
+        // A lookup first: most calls meet an account already ranked, and the
+        // key clone is only for a new one.
+        if !self.ranks.contains_key(account) {
+            let next = self.ranks.len();
+            self.ranks.insert(account.clone(), next);
+        }
     }
 
     /// Rank the accounts `directive` names, in the order beancount's
@@ -684,13 +688,20 @@ pub struct UnusedPad {
     pub target: Account,
 }
 
+/// Where a directive sits in its source.
+///
+/// It stands for beancount's line number in
+/// [`rustledger_core::beancount_entry_sort_key`]: its file id and byte
+/// offset, or `(0, its index in the input)` when it carries none.
+pub type SourcePosition = (u16, usize);
+
 /// Compute the padding for `sorted`, beancount's rule.
 ///
 /// `sorted` must be in booking order ([`rustledger_core::booking_sort_key`]),
 /// each directive with its index in the caller's input (the indices
-/// [`PadOrigin`] and [`UnusedPad`] report). `tolerance_multiplier` is the
-/// ledger's `tolerance_multiplier` option, which a balance's tolerance
-/// derives from ([`balance_tolerance`]).
+/// [`PadOrigin`] and [`UnusedPad`] report) and its [`SourcePosition`].
+/// `tolerance_multiplier` is the ledger's `tolerance_multiplier` option,
+/// which a balance's tolerance derives from ([`balance_tolerance`]).
 ///
 /// Inventories track every account a posting names, opened or not, as
 /// beancount's padding reads every posting: tracking only opened accounts
@@ -698,23 +709,37 @@ pub struct UnusedPad {
 /// amount (#2896). They hold real postings only: each pad group counts its
 /// own padding on top, and no other group's (the private `PadTracker`,
 /// which is the rule).
+///
+/// The walk is the booking order; the order accounts are first met in,
+/// which decides the order a transaction's postings enter a group, is
+/// beancount's entry order instead (by the positions), as its
+/// `realization.postings_by_account` meets them.
 pub fn plan_pads<'a, I>(sorted: I, tolerance_multiplier: Decimal) -> PadPlan
 where
-    I: IntoIterator<Item = (usize, &'a Directive)>,
+    I: IntoIterator<Item = (usize, &'a Directive, SourcePosition)>,
 {
-    let sorted: Vec<(usize, &Directive)> = sorted.into_iter().collect();
+    let sorted: Vec<(usize, &Directive, SourcePosition)> = sorted.into_iter().collect();
     let mut inventories = PadInventories::default();
     // A group for every account a `pad` names, before the walk, so each
     // group holds every posting under it from the first one, as beancount's
     // `pad_balance` does.
-    let mut pads = PadTracker::new(sorted.iter().filter_map(|(_, d)| match d {
+    let mut pads = PadTracker::new(sorted.iter().filter_map(|(_, d, _)| match d {
         Directive::Pad(pad) => Some(&pad.account),
         _ => None,
     }));
+    // Rank the accounts in beancount's entry order, once, before the walk.
+    if pads.tracks() {
+        let mut entry_order: Vec<&(usize, &Directive, SourcePosition)> = sorted.iter().collect();
+        entry_order.sort_by_key(|(_, d, position)| {
+            rustledger_core::beancount_entry_sort_key(d, *position)
+        });
+        for (_, directive, _) in entry_order {
+            pads.see_directive(directive);
+        }
+    }
     let mut plan = PadPlan::default();
 
-    for (index, directive) in sorted {
-        pads.see_directive(directive);
+    for (index, directive, _) in sorted {
         match directive {
             Directive::Transaction(txn) => {
                 let mut posted = Vec::new();
@@ -881,14 +906,53 @@ where
 /// `rustledger-validate` applies [`plan_pads`] output to its own booked
 /// inventories in its walk, at the pad (see [`PadPlan`]).
 pub fn process_pads(directives: &[Directive], tolerance_multiplier: Decimal) -> PadResult {
-    let mut sorted: Vec<(usize, &Directive)> = directives.iter().enumerate().collect();
+    // No source locations: a directive's place in the input stands for its
+    // line in beancount's entry order.
+    process_entries(
+        directives
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (i, d, (0, i)))
+            .collect(),
+        tolerance_multiplier,
+    )
+}
+
+/// [`process_pads`] for directives that carry their source location.
+///
+/// The location stands for the line in beancount's entry order
+/// ([`rustledger_core::beancount_entry_sort_key`]): a same-date `pad` and
+/// `note` meet their accounts in the order they were written, wherever the
+/// booking order puts the pad. [`merge_with_padding_spanned`] pads through
+/// it.
+#[must_use]
+pub fn process_pads_spanned(
+    directives: &[Spanned<Directive>],
+    tolerance_multiplier: Decimal,
+) -> PadResult {
+    process_entries(
+        directives
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (i, &s.value, (s.file_id, s.span.start)))
+            .collect(),
+        tolerance_multiplier,
+    )
+}
+
+/// The one body of [`process_pads`] and [`process_pads_spanned`].
+fn process_entries(
+    mut sorted: Vec<(usize, &Directive, SourcePosition)>,
+    tolerance_multiplier: Decimal,
+) -> PadResult {
+    let date_of: Vec<NaiveDate> = sorted.iter().map(|(_, d, _)| d.date()).collect();
     // Sort by the canonical booking key, not by date alone. Date-only left
     // same-date directives in source order, so a `pad` written above the
     // `balance` it targets was processed first and the balance consumed it --
     // synthesizing a padding transaction beancount does not (#2150). The key
     // puts Balance before Pad, so that balance is seen first and the pad ends
     // up with nothing to satisfy.
-    sorted.sort_by_key(|(_, d)| rustledger_core::booking_sort_key(d));
+    sorted.sort_by_key(|(_, d, _)| rustledger_core::booking_sort_key(d));
     let plan = plan_pads(sorted, tolerance_multiplier);
 
     let mut padding_transactions = Vec::with_capacity(plan.paddings.len());
@@ -910,7 +974,7 @@ pub fn process_pads(directives: &[Directive], tolerance_multiplier: Decimal) -> 
     // beancount reports it.
     for p in &plan.paddings {
         if let Some(at_cost) = &p.at_cost {
-            let date = directives[p.origin.balance].date();
+            let date = date_of[p.origin.balance];
             for _ in 0..at_cost.lots {
                 errors.push(PadError::new(date, at_cost.message()).with_account(p.target.clone()));
             }
@@ -1238,16 +1302,15 @@ pub fn merge_with_padding_spanned(
     directives: &[Spanned<Directive>],
     tolerance_multiplier: Decimal,
 ) -> Vec<Spanned<Directive>> {
-    let plain: Vec<Directive> = directives.iter().map(|s| s.value.clone()).collect();
     debug_assert!(
-        !plain
+        !directives
             .iter()
-            .any(|d| matches!(d, Directive::Transaction(t) if is_synthesized_pad(t))),
+            .any(|s| matches!(&s.value, Directive::Transaction(t) if is_synthesized_pad(t))),
         "merge_with_padding_spanned called on input that already contains synth pad transactions; \
          re-running would double-count pad effects",
     );
 
-    let result = process_pads(&plain, tolerance_multiplier);
+    let result = process_pads_spanned(directives, tolerance_multiplier);
 
     // Placement via the shared [`merge_padding_into_sorted`]; located at the
     // pad and the balance it came from, as beancount locates them.
@@ -1508,8 +1571,12 @@ mod tests {
             3 * n as usize,
             "only the group's own postings, a lot check and an add per padding"
         );
-        let mut sorted: Vec<(usize, &Directive)> = directives.iter().enumerate().collect();
-        sorted.sort_by_key(|(_, d)| rustledger_core::booking_sort_key(d));
+        let mut sorted: Vec<(usize, &Directive, SourcePosition)> = directives
+            .iter()
+            .enumerate()
+            .map(|(i, d)| (i, d, (0, i)))
+            .collect();
+        sorted.sort_by_key(|(_, d, _)| rustledger_core::booking_sort_key(d));
         let plan = plan_pads(sorted, DEFAULT_TOLERANCE_MULTIPLIER);
         assert!(
             plan.paddings.iter().all(|p| p.at_cost.is_none()),

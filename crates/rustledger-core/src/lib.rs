@@ -79,8 +79,8 @@ pub use decimal::{
 pub use directive::{
     AUTOMATIC_META, Balance, BookingDecision, Close, CommentList, Commodity, Custom, Directive,
     DirectivePriority, Document, Event, MetaMap, MetaValue, Metadata, Note, Open, Pad, Posting,
-    Price, PriceAnnotation, PriceKind, Query, Transaction, booking_sort_key, meta_value_as_bool,
-    parse_bool_word, parse_precision_meta, sort_directives,
+    Price, PriceAnnotation, PriceKind, Query, Transaction, beancount_entry_sort_key,
+    booking_sort_key, meta_value_as_bool, parse_bool_word, parse_precision_meta, sort_directives,
 };
 pub use display_context::{DEFAULT_CURRENCY, DisplayContext, OutputSurface, Precision};
 pub use extract::{

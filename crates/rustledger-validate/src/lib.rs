@@ -818,7 +818,14 @@ fn validate_phase_inner<D: ValidatableDirective>(
             .any(|(_, _, d)| matches!(d.directive(), Directive::Pad(_)))
     {
         let plan = rustledger_booking::plan_pads(
-            keyed.iter().map(|(_, i, d)| (*i, d.directive())),
+            keyed.iter().map(|(_, i, d)| {
+                // Its source location, as beancount's entry order reads the
+                // line; its place in the stream without one.
+                let position = d
+                    .span_info()
+                    .map_or((0, *i), |(span, file_id)| (file_id, span.start));
+                (*i, d.directive(), position)
+            }),
             state.options.tolerance_multiplier,
         );
         state.pads.load(plan);

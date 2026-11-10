@@ -264,3 +264,38 @@ fn test_balance_view_pad_ignores_inferred_tolerance_default() {
     assert_eq!(padding, ["0.03 USD"]);
     assert!(!unused);
 }
+
+/// A loaded ledger keeps its directives in booking order, which puts a
+/// `pad` ahead of the same date's `note`; the pad rule ranks accounts by
+/// their source location instead, as beancount's entry order does (#2901).
+/// bean-check 3.2.3 prints `(1 CCC, 1 DDD, ...)` for this ledger: the note
+/// meets `Assets:A:C` before the pad meets `Assets:A:D`.
+#[test]
+fn test_loaded_pad_ranks_accounts_in_beancount_entry_order() {
+    let fixture = write_fixture(
+        "2023-12-31 note Assets:A:C \"n\"\n2023-12-31 pad Assets:Z Assets:A:D\n\
+         2024-01-01 open Assets:A\n2024-01-01 open Assets:A:C\n2024-01-01 open Assets:A:D\n\
+         2024-01-01 open Assets:Z\n2024-01-01 open Assets:Cash\n2024-01-01 open Equity:O\n\
+         2024-02-01 * \"lot\"\n  Assets:A  10 STK {10 USD}\n  Assets:Cash  -100 USD\n\
+         2024-02-02 * \"g\"\n  Assets:A:C  1 CCC\n  Assets:A:D  1 DDD\n  Equity:O  -1 CCC\n\
+         \x20 Equity:O  -1 DDD\n2024-02-03 pad Assets:A Equity:O\n\
+         2024-02-10 balance Assets:A 11 STK\n",
+    );
+    let opts = LoadOptions {
+        validate: true,
+        ..Default::default()
+    };
+    let ledger = load(fixture.path(), &opts).expect("load");
+    let messages: Vec<&str> = ledger
+        .errors
+        .iter()
+        .filter(|e| e.code == "E2005")
+        .map(|e| e.message.as_str())
+        .collect();
+    assert_eq!(
+        messages,
+        [
+            "Attempt to pad an entry with cost for balance: (1 CCC, 1 DDD, 10 STK {10 USD, 2024-02-01})"
+        ]
+    );
+}

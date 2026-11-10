@@ -157,6 +157,31 @@ BALANCES [AT ...] [FROM ...] [WHERE ...]
 JOURNAL 'Account:Name'
 ```
 
+## When it refuses to answer
+
+`rledger query` reports the ledger's errors on stderr and answers anyway, as
+`bean-query` does, except when the figures would be wrong. It prints no rows
+and exits non-zero when:
+
+- a file did not parse, or could not be read or decrypted;
+- a transaction could not be booked (its lots did not resolve);
+- the last `option "booking_method"` has an invalid value (`E7002`, for
+  example the lowercase `"fifo"`) and the ledger is booked with a method other
+  than the one it asks for. The option keeps its previous method, as in
+  beancount, so every lot reduction would be booked with a method the ledger
+  did not ask for. `bean-query` answers here with the figures of the kept
+  method; rledger refuses, naming the option, its line, the value that is not
+  a booking method, and the method the figures would be booked with.
+
+  The last value wins, so `"fifo"` followed by a valid `"FIFO"` answers. A
+  rejected value that reads as the method kept answers too: `"FIFO"` then
+  `"fifo"` books FIFO, which both lines ask for. `"fifo"` alone, `"bogus"`,
+  and `"FIFO"` then `"bogus"` refuse.
+
+Any other error, including another rejected option (which keeps its default),
+is reported beside the rows. Run [`rledger check`](check.md) to see them all.
+`--no-errors` does not change this.
+
 ## Output precision
 
 Numbers in query output are rendered using a per-currency precision inferred from the input file. This matches Python `bean-query`'s default behavior, so a column of `Position` values for USD prints with the same number of decimal places `bean-query` would use.

@@ -782,7 +782,7 @@ fn query_loaded(loaded: &ffi::helpers::LoadResult, query_str: &str) -> out::Quer
         return out::QueryResult {
             columns: Vec::new(),
             rows: Vec::new(),
-            errors: loaded.errors.iter().cloned().map(error).collect(),
+            errors: refused_errors(loaded),
         };
     }
     let directives = rustledger_booking::merge_with_padding_spanned(&loaded.spanned_directives);
@@ -796,6 +796,19 @@ fn query_loaded(loaded: &ffi::helpers::LoadResult, query_str: &str) -> out::Quer
             query_str,
         ),
     )
+}
+
+/// The errors a refused query over `loaded` reports: the load's errors, then
+/// the reason a rejected `booking_method` refuses (#2911), which is listed on
+/// query results only.
+fn refused_errors(loaded: &ffi::helpers::LoadResult) -> Vec<wit::Error> {
+    loaded
+        .errors
+        .iter()
+        .chain(&loaded.query_refusal)
+        .cloned()
+        .map(error)
+        .collect()
 }
 
 /// `result` with `loaded`'s errors (none of which blocks queries) ahead of
@@ -847,10 +860,15 @@ fn account_types_from(
     }
 }
 
+/// The ledger-wide booking method for the held options' `booking-method`,
+/// resolved by the loader's one rule, [`rustledger_loader::Options::effective_booking_method`],
+/// over the loader's default, rather than parsed here (#2911): the value is
+/// read back through `Options::set`, so it is validated as the loader
+/// validates the option.
 fn booking_method_from(booking_method: &str) -> rustledger_core::BookingMethod {
-    booking_method
-        .parse()
-        .unwrap_or(rustledger_core::BookingMethod::Strict)
+    let mut options = rustledger_loader::Options::new();
+    options.set("booking_method", booking_method);
+    options.effective_booking_method(rustledger_loader::LoadOptions::default().booking_method)
 }
 
 /// Run one query over pad-expanded, spanned `directives` (their source
@@ -951,9 +969,12 @@ fn run_query_with_tables(
     }
 }
 
-/// The error every query of a refused [`batch`] reports; the load errors that
-/// caused it are in the batch's `load`.
-const BATCH_REFUSED: &str = "Cannot execute query: a load error leaves the ledger incomplete (a parse or booking error); see the load errors";
+/// The error every query of a refused [`batch`] reports first. When a load
+/// error caused the refusal, it is in the batch's `load`. When a rejected
+/// `booking_method` whose booking differs from the request caused it (#2911),
+/// which is not a load error, the reason follows this error in each query's
+/// own errors.
+const BATCH_REFUSED: &str = "Cannot execute query: a parse or booking error leaves the ledger incomplete, or a rejected booking_method books a method other than the one the ledger asks for; see the load errors and the errors that follow";
 
 /// `query.batch`: load `source` once, then run several queries against it,
 /// by [`query`]'s rule (#2882): when a load error blocks queries (a parse
@@ -972,7 +993,12 @@ pub fn batch(source: &str, queries: &[String]) -> out::BatchResult {
             .map(|_| out::QueryResult {
                 columns: Vec::new(),
                 rows: Vec::new(),
-                errors: vec![simple_error(BATCH_REFUSED.to_string())],
+                // The refusal names itself; the cause is in the load, or,
+                // for a rejected `booking_method`, which the load does not
+                // list as an error (#2911), here beside it.
+                errors: std::iter::once(simple_error(BATCH_REFUSED.to_string()))
+                    .chain(loaded.query_refusal.iter().cloned().map(error))
+                    .collect(),
             })
             .collect()
     } else {
@@ -1758,6 +1784,33 @@ pub fn query_entries(entries: &[wit::Directive], query_str: &str) -> out::QueryR
 // the free functions: these run against the held *core* directives, so they
 // never re-parse source nor round-trip a directive list through the host.
 
+/// Check the `booking_method` held options carry (#2911). It is read back,
+/// exactly as given, through the loader's `Options`, so it is held to the
+/// option's own rule: the exact method name, as in beancount (`"FIFO "` and
+/// `"fifo"` are rejected, as there). Only an empty value, as a
+/// zero-initialized record from a guest language holds, is the default, as
+/// [`sanitize_options`] treats an empty root. Any other value the loader
+/// rejects is reported, quoted as the host sent it, and replaced by the
+/// default, so it cannot silently change what a query realizes with, and
+/// `info()` echoes the method used.
+fn held_booking_method(options: &mut wit::LedgerOptions) -> Option<wit::Error> {
+    let default = rustledger_loader::LoadOptions::default().booking_method;
+    if options.booking_method.is_empty() {
+        options.booking_method = default.to_string();
+        return None;
+    }
+    let mut checked = rustledger_loader::Options::new();
+    checked.set("booking_method", &options.booking_method);
+    if checked.warnings.is_empty() {
+        return None;
+    }
+    let given = std::mem::replace(&mut options.booking_method, default.to_string());
+    Some(simple_error(format!(
+        "invalid booking_method {given:?} (expected the exact method name, e.g. FIFO); \
+         using the default {default}"
+    )))
+}
+
 /// Replace empty `name-*` roots in host-supplied options with their
 /// defaults: an empty root can never classify an account, so a
 /// zero-initialized record from a guest language would silently break
@@ -1796,6 +1849,11 @@ pub struct SessionState {
     /// them, is reported beside the rows. A session from source text follows
     /// the same rule (#2882); it refused on any load error before.
     query_blocked: bool,
+    /// Why a query refuses though no error blocks it: a rejected
+    /// `booking_method` whose ledger books another method (#2911). Listed on
+    /// query results only, not among `errors`, which `info()` echoes and the
+    /// session plugins are gated on.
+    query_refusal: Option<wit::Error>,
     options: wit::LedgerOptions,
     plugins: Vec<ffi::Plugin>,
     includes: Vec<(String, u32)>,
@@ -1891,6 +1949,7 @@ impl SessionState {
             lines: loaded.directive_lines,
             files,
             query_blocked,
+            query_refusal: loaded.query_refusal.map(error),
             errors: loaded.errors.into_iter().map(error).collect(),
             options: options(loaded.options),
             plugins: loaded.plugins,
@@ -1942,7 +2001,8 @@ impl SessionState {
         entries: &[wit::Directive],
         options: wit::LedgerOptions,
     ) -> Self {
-        let options = sanitize_options(options);
+        let mut options = sanitize_options(options);
+        let booking_method_error = held_booking_method(&mut options);
         // The one-time conversion is this API's whole reason to exist —
         // reserve up front so a large ledger doesn't reallocate through
         // the collect (review catch; drops are rare, over-reserving by
@@ -1958,8 +2018,9 @@ impl SessionState {
             directives,
             lines: vec![0; n],
             files: vec!["<entries>".to_string(); n],
-            errors: vec![],
+            errors: booking_method_error.into_iter().collect(),
             query_blocked: false,
+            query_refusal: None,
             options,
             plugins: vec![],
             includes: vec![],
@@ -1997,7 +2058,10 @@ impl SessionState {
                 }
                 // Decided by the load alone: an error a session plugin reports
                 // below is reported, as a file plugin's is, not a refusal.
-                let query_blocked = !errors.is_empty();
+                // A rejected `booking_method` refuses queries too (#2911),
+                // but is kept out of `errors`, which gate the session plugins.
+                let query_blocked = !errors.is_empty() || fl.query_refusal.is_some();
+                let query_refusal = fl.query_refusal.map(error);
                 let opts = fl.options;
                 let plugin_dtos = fl.plugins;
                 let loaded_files = fl.loaded_files;
@@ -2042,6 +2106,7 @@ impl SessionState {
                     lines,
                     files,
                     query_blocked,
+                    query_refusal,
                     errors: notices.into_iter().chain(errors).map(error).collect(),
                     options: options(opts),
                     plugins: plugin_dtos,
@@ -2061,6 +2126,7 @@ impl SessionState {
                 files: vec![],
                 errors: vec![simple_error(e)],
                 query_blocked: true,
+                query_refusal: None,
                 options: options(ffi::LedgerOptions::default()),
                 plugins: vec![],
                 includes: vec![],
@@ -2119,7 +2185,12 @@ impl SessionState {
             return out::QueryResult {
                 columns: vec![],
                 rows: vec![],
-                errors: self.errors.clone(),
+                errors: self
+                    .errors
+                    .iter()
+                    .chain(&self.query_refusal)
+                    .cloned()
+                    .collect(),
             };
         }
         let directives = self.padded_spanned.get_or_init(|| {
@@ -3322,6 +3393,92 @@ option \"display_precision\" \"USD:0.001\"
         assert!(
             text.contains("2024-01-15 balance Assets:Bank 100.50 USD\n"),
             "options-less entries keep the entry-inferred 2dp, got:\n{text}"
+        );
+    }
+
+    /// #2911: a host-supplied `booking-method` the loader would reject (a
+    /// lowercase `fifo`) is reported as a session error and replaced by the
+    /// default, so it cannot silently change what the session realizes with;
+    /// a valid or empty one is not an error, and `info()` echoes the method
+    /// used.
+    #[test]
+    fn test_from_entries_with_options_reports_an_invalid_booking_method() {
+        let info = SessionState::from_source(PRECISION_LEDGER).info();
+        let with = |method: &str| {
+            let mut options = info.options.clone();
+            options.booking_method = method.to_string();
+            SessionState::from_entries_with_options(&info.entries, options)
+        };
+
+        let valid = with("FIFO");
+        assert!(valid.errors.is_empty(), "{:?}", valid.errors);
+        assert_eq!(valid.info().options.booking_method, "FIFO");
+
+        let empty = with("");
+        assert!(empty.errors.is_empty(), "{:?}", empty.errors);
+        assert_eq!(empty.info().options.booking_method, "STRICT");
+
+        // Lowercase, or a space on either side: each is what the loader
+        // rejects (as beancount does), quoted exactly as the host sent it.
+        for sent in ["fifo", "FIFO ", " FIFO"] {
+            let rejected = with(sent);
+            assert_eq!(rejected.errors.len(), 1, "{sent:?}: {:?}", rejected.errors);
+            assert!(
+                rejected.errors[0]
+                    .message
+                    .contains(&format!("invalid booking_method {sent:?}")),
+                "{sent:?}: {:?}",
+                rejected.errors
+            );
+            assert_eq!(rejected.info().options.booking_method, "STRICT", "{sent:?}");
+        }
+    }
+
+    /// #2911: a session from a file whose `booking_method` was rejected
+    /// still runs the host's session plugins and lists no refusal among its
+    /// errors (`info()`), but its queries refuse with the reason.
+    #[test]
+    fn test_from_file_invalid_booking_method_refuses_queries_only() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("main.beancount");
+        std::fs::write(
+            &path,
+            "option \"booking_method\" \"fifo\"\n\
+             2024-01-01 open Assets:Cash\n2024-01-01 open Income:Salary\n\
+             2024-01-02 * \"pay\"\n  Assets:Cash  100 USD\n  Income:Salary\n",
+        )
+        .expect("write");
+        let session = SessionState::from_file(
+            path.to_str().expect("utf-8"),
+            true,
+            &["check_commodity".to_string()],
+        );
+        // The session plugin ran (its finding is listed), which it would not
+        // over a load error, and the refusal is not among the errors.
+        assert!(
+            session
+                .errors
+                .iter()
+                .any(|e| e.message.contains("Missing Commodity")),
+            "the session plugin must run: {:?}",
+            session.errors
+        );
+        assert!(
+            !session
+                .errors
+                .iter()
+                .any(|e| e.message.contains("booking method")),
+            "the refusal is not a load error: {:?}",
+            session.errors
+        );
+        let result = session.query("SELECT narration");
+        assert!(result.columns.is_empty(), "{result:?}");
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| e.message.contains("\"fifo\" is not a booking method")),
+            "{result:?}"
         );
     }
 
@@ -4592,7 +4749,17 @@ mod query_answer_rule {
                     "{}",
                     case.name
                 );
-                assert!(!batch.load.errors.is_empty(), "{}", case.name);
+                // A rejected `booking_method` is not a load error (#2911);
+                // its reason travels with the refusal instead.
+                assert!(
+                    !batch.load.errors.is_empty()
+                        || batch.queries[0]
+                            .errors
+                            .iter()
+                            .any(|e| e.message.contains("booking_method")),
+                    "{}",
+                    case.name
+                );
             }
             let session = super::SessionState::from_source(source);
             check(

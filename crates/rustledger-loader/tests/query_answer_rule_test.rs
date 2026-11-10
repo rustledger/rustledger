@@ -43,8 +43,25 @@ fn test_blocks_queries_gives_each_case_its_answer() {
                 ..Default::default()
             };
             let ledger = load(&entry, &options).expect("load");
-            let messages: Vec<&str> = ledger.errors.iter().map(|e| e.message.as_str()).collect();
-            let refuses = ledger.errors.iter().any(LedgerError::blocks_queries);
+            // The ledger's errors, and the refusal a rejected option makes
+            // (#2911), which is not among them: its E7002 is an option
+            // warning.
+            let refusal = ledger.query_refusal();
+            let messages: Vec<&str> = ledger
+                .errors
+                .iter()
+                .chain(refusal.as_ref())
+                .map(|e| e.message.as_str())
+                .collect();
+            // The whole rule, and the per-error half agreeing with it.
+            let refuses = ledger.blocks_queries();
+            assert_eq!(
+                refuses,
+                ledger.errors.iter().any(LedgerError::blocks_queries)
+                    || refusal.as_ref().is_some_and(LedgerError::blocks_queries),
+                "{}",
+                case.name
+            );
             assert_eq!(
                 !refuses,
                 case.rows.is_some(),

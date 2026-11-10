@@ -66,7 +66,10 @@ pub use discover::{
     COMMON_ROOT_NAMES, MAX_CANDIDATES, discover_include_roots_upward, discover_journal_file,
     discover_journal_upward,
 };
-pub use options::{DEFAULT_CURRENT_CONVERSIONS, OptionWarning, Options, resolve_leaf_account};
+pub use options::{
+    DEFAULT_CURRENT_CONVERSIONS, OptionSite, OptionWarning, Options, RejectedOption,
+    resolve_leaf_account,
+};
 pub use source_map::{LineIndex, SourceFile, SourceMap, SourceText, line_col_in};
 pub use vfs::{DiskFileSystem, FileSystem, VirtualFileSystem};
 
@@ -717,8 +720,14 @@ impl Loader {
         // included sub-ledger must not silently change how the whole tree
         // books or what counts as balanced (#2151).
         let top_level = self.include_stack.len() == 1;
-        for (key, value, _span) in result.options {
-            options.set_scoped(&key, &value, top_level);
+        for (key, value, span) in result.options {
+            // Where the option is, so a rejection that refuses queries
+            // (`Options::query_refusal`) can name its line.
+            let site = source_map.get(file_id).map(|file| OptionSite {
+                file: file.path.display().to_string(),
+                line: file.line_col(span.start).0,
+            });
+            options.set_scoped_at(&key, &value, top_level, site);
         }
 
         // Process plugins

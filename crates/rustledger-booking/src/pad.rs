@@ -75,7 +75,9 @@ pub struct PadResult {
     /// Beancount gives a padding entry the `pad`'s source location and its
     /// postings the `balance`'s, so a query reports both (#2825).
     pub padding_origins: Vec<PadOrigin>,
-    /// Any errors encountered during pad processing.
+    /// Any errors encountered during pad processing: running totals and pad
+    /// amounts out of range (#1863), beancount's "Attempt to pad an entry
+    /// with cost" once per lot at cost ([`PaddedAtCost`]), and unused pads.
     pub errors: Vec<PadError>,
 }
 
@@ -190,6 +192,13 @@ struct PadTracker {
     groups: FxHashMap<Account, PadGroup>,
     /// Every `pad`, in walk order.
     pads: Vec<TrackedPad>,
+    /// Each account's rank: the order the walk first met it, as beancount's
+    /// `realization.postings_by_account` keys its accounts. Beancount
+    /// collects a group's postings account by account in that order and
+    /// stable-sorts them by date, type and line, and one transaction's
+    /// postings share a line, so they enter `pad_balance` in account rank
+    /// order, not as written ([`Self::post_transaction`]).
+    ranks: FxHashMap<Account, usize>,
 }
 
 /// One account's pads (one of beancount's per-account walks).
@@ -263,11 +272,14 @@ type LotKey = (Currency, Option<Cost>);
 /// to zero is dropped, and positions keep the order they were first added
 /// (a dropped one that comes back goes last, as a Python `dict` key does).
 /// That order is what beancount's stable sort leaves ties in when it prints
-/// the inventory.
+/// the inventory. A joined lot takes the incoming posting's cost object, as
+/// `add_amount` rebuilds the position with it: `{10 USD}` joined by an equal
+/// `{10.00 USD, 2024-01-02}` prints as the latter.
 #[derive(Debug, Default)]
 struct GroupInventory {
-    /// Each lot's place in `order` and its units.
-    lots: FxHashMap<LotKey, (u64, Decimal)>,
+    /// Each lot's place in `order`, its units, and the cost it prints with
+    /// (equal to the key's, but as last written).
+    lots: FxHashMap<LotKey, (u64, Decimal, Option<Cost>)>,
     /// The lots, by the order they were added.
     order: BTreeMap<u64, LotKey>,
     next: u64,
@@ -277,14 +289,16 @@ struct GroupInventory {
 
 impl GroupInventory {
     fn add(&mut self, currency: &Currency, cost: Option<&Cost>, number: Decimal) {
+        #[cfg(test)]
+        tests::WORK.with(|n| n.set(n.get() + 1));
         let key: LotKey = (currency.clone(), cost.cloned());
-        let Some((slot, units)) = self.lots.get_mut(&key) else {
+        let Some((slot, units, written)) = self.lots.get_mut(&key) else {
             if !number.is_zero() {
                 if cost.is_some() {
                     *self.at_cost.entry(currency.clone()).or_default() += 1;
                 }
                 self.order.insert(self.next, key.clone());
-                self.lots.insert(key, (self.next, number));
+                self.lots.insert(key, (self.next, number, cost.cloned()));
                 self.next += 1;
             }
             return;
@@ -305,11 +319,14 @@ impl GroupInventory {
             }
         } else {
             *units = sum;
+            written.clone_from(&key.1);
         }
     }
 
     /// How many lots at cost of `currency` it holds.
     fn lots_at_cost(&self, currency: &Currency) -> usize {
+        #[cfg(test)]
+        tests::WORK.with(|n| n.set(n.get() + 1));
         self.at_cost.get(currency).copied().unwrap_or_default()
     }
 
@@ -319,12 +336,12 @@ impl GroupInventory {
             .order
             .values()
             .filter_map(|key| {
-                let (_, units) = self.lots.get(key)?;
+                let (_, units, cost) = self.lots.get(key)?;
                 #[cfg(test)]
                 tests::WORK.with(|n| n.set(n.get() + 1));
                 Some(Position {
                     units: Amount::new(*units, &key.0),
-                    cost: key.1.clone(),
+                    cost: cost.clone(),
                 })
             })
             .collect();
@@ -384,6 +401,66 @@ impl PadTracker {
         });
     }
 
+    /// Whether any `pad` names a group, so postings have somewhere to go.
+    fn tracks(&self) -> bool {
+        !self.groups.is_empty()
+    }
+
+    /// Rank `account` if the walk has not met it yet.
+    fn see(&mut self, account: &Account) {
+        let next = self.ranks.len();
+        self.ranks.entry(account.clone()).or_insert(next);
+    }
+
+    /// Rank the accounts `directive` names, in the order beancount's
+    /// `realization.postings_by_account` registers them: an `open`,
+    /// `close`, `balance`, `note` or `document` its account, a `pad` its
+    /// account then its source, a `custom` its account values, and a
+    /// transaction its postings' accounts as written. Only when a group can
+    /// read the ranks.
+    fn see_directive(&mut self, directive: &Directive) {
+        if self.groups.is_empty() {
+            return;
+        }
+        match directive {
+            Directive::Open(d) => self.see(&d.account),
+            Directive::Close(d) => self.see(&d.account),
+            Directive::Balance(d) => self.see(&d.account),
+            Directive::Note(d) => self.see(&d.account),
+            Directive::Document(d) => self.see(&d.account),
+            Directive::Pad(d) => {
+                self.see(&d.account);
+                self.see(&d.source_account);
+            }
+            Directive::Custom(d) => {
+                for value in &d.values {
+                    if let rustledger_core::MetaValue::Account(account) = value {
+                        self.see(account);
+                    }
+                }
+            }
+            Directive::Transaction(d) => {
+                for posting in &d.postings {
+                    self.see(&posting.account);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// A transaction's real postings, `(account, units, cost)`, entering the
+    /// groups in account rank order, written order within an account, as
+    /// beancount's stable sort leaves them (see [`Self::ranks`]).
+    fn post_transaction(&mut self, postings: &mut [(&Account, &Amount, Option<Cost>)]) {
+        if self.groups.is_empty() {
+            return;
+        }
+        postings.sort_by_key(|(account, _, _)| self.ranks.get(*account).copied());
+        for (account, units, cost) in postings.iter() {
+            self.post(account, units, cost.as_ref());
+        }
+    }
+
     /// A real posting of `units` (at `cost`, if any) to `account`: every
     /// group it falls in (the account's own and its ancestors') takes it.
     /// O(depth).
@@ -393,8 +470,6 @@ impl PadTracker {
         }
         for prefix in prefixes(account.as_str()) {
             if let Some(group) = self.groups.get_mut(prefix) {
-                #[cfg(test)]
-                tests::WORK.with(|n| n.set(n.get() + 1));
                 group.real.add(&units.currency, units.number);
                 group.held.add(&units.currency, cost, units.number);
             }
@@ -639,24 +714,28 @@ where
     let mut plan = PadPlan::default();
 
     for (index, directive) in sorted {
+        pads.see_directive(directive);
         match directive {
             Directive::Transaction(txn) => {
+                let mut posted = Vec::new();
                 for posting in &txn.postings {
                     if let Some(units) = posting.amount() {
                         // A running balance that leaves range makes every pad
                         // measured against it wrong, so report it here rather
                         // than pad from a clamped total (#1863).
                         match inventories.add(&posting.account, &units.currency, units.number) {
-                            Ok(()) => {
-                                // The lot as booking resolved it, the
-                                // canonical way (`Position::from_posting`).
+                            // The lot as booking resolved it, the canonical
+                            // way (`Position::from_posting`), when a group can
+                            // read it.
+                            Ok(()) if pads.tracks() => {
                                 let position = Position::from_posting(
                                     units,
                                     posting.cost.as_deref(),
                                     txn.date,
                                 );
-                                pads.post(&posting.account, units, position.cost.as_ref());
+                                posted.push((&posting.account, units, position.cost));
                             }
+                            Ok(()) => {}
                             Err(e) => {
                                 plan.inventory_errors.push(
                                     PadError::new(txn.date, e.to_string())
@@ -666,6 +745,7 @@ where
                         }
                     }
                 }
+                pads.post_transaction(&mut posted);
             }
 
             Directive::Pad(pad) => {
@@ -790,7 +870,9 @@ where
 ///
 /// A `PadResult` containing:
 /// - The synthetic padding transactions derived from the input
-/// - Any errors encountered
+/// - Any errors encountered: out-of-range totals (#1863), "Attempt to pad an
+///   entry with cost" once per lot at cost, dated at its balance, and
+///   unused pads
 ///
 /// The input directives are NOT echoed back in the result; the caller
 /// already owns them. To get the source merged with the synth
@@ -1283,7 +1365,11 @@ mod tests {
         let (result, work) = work(&directives);
         assert_eq!(result.padding_transactions.len(), n);
         assert!(result.errors.is_empty(), "{:?}", result.errors);
-        assert_eq!(work, n, "one group update per posting");
+        assert_eq!(
+            work,
+            3 * n,
+            "per posting one inventory add; per padding one lot check and one add"
+        );
     }
 
     /// Scenario A of the #2920 review: a parent pad with a balance on each
@@ -1298,7 +1384,11 @@ mod tests {
         });
         let (result, work) = work(&directives);
         assert_eq!(result.padding_transactions.len(), n as usize);
-        assert_eq!(work, n as usize, "one group update per posting");
+        assert_eq!(
+            work,
+            3 * n as usize,
+            "per posting one inventory add; per padding one lot check and one add"
+        );
     }
 
     /// Scenario E: two sub-accounts holding 5e28 USD each take the parent's
@@ -1363,7 +1453,11 @@ mod tests {
         let (result, work) = work(&directives);
         assert_eq!(result.padding_transactions.len(), n as usize);
         assert!(result.errors.is_empty(), "{:?}", result.errors);
-        assert_eq!(work, 3 * n as usize, "one group update per posting");
+        assert_eq!(
+            work,
+            5 * n as usize,
+            "three inventory adds per sub-account; per padding one lot check and one add"
+        );
     }
 
     /// Scenario F: the lots are kept. They are one lot (the same cost and
@@ -1382,8 +1476,8 @@ mod tests {
         assert_eq!(result.padding_transactions.len(), n as usize);
         assert_eq!(result.errors.len(), n as usize, "one lot at cost each time");
         assert!(
-            work <= 2 * n as usize + 2 * n as usize,
-            "postings plus a two-position print per padding, got {work}"
+            work <= 6 * n as usize,
+            "two adds per sub-account; per padding a lot check, one add and a two-position print; got {work}"
         );
     }
 
@@ -1409,7 +1503,11 @@ mod tests {
         let (result, work) = work(&directives);
         assert_eq!(result.padding_transactions.len(), n as usize);
         assert!(result.errors.is_empty(), "{:?}", result.errors);
-        assert_eq!(work, n as usize, "only the group's own postings");
+        assert_eq!(
+            work,
+            3 * n as usize,
+            "only the group's own postings, a lot check and an add per padding"
+        );
         let mut sorted: Vec<(usize, &Directive)> = directives.iter().enumerate().collect();
         sorted.sort_by_key(|(_, d)| rustledger_core::booking_sort_key(d));
         let plan = plan_pads(sorted, DEFAULT_TOLERANCE_MULTIPLIER);

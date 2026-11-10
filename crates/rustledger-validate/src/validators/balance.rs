@@ -179,6 +179,11 @@ pub fn validate_balance_late(
     // account and a `Balance failed`): an unopened account's postings are in
     // its inventory (`crate::account_inventory`).
     //
+    // Padding a currency held at cost is reported first, whatever the
+    // balance comes to: one pad group can pad it while another fails, and
+    // `process_pads` reports it either way.
+    check_padding_at_cost(state, bal, index, errors);
+
     // A pad amount for this balance that could not be computed or applied is
     // reported, not clamped, and nothing was padded; comparing would only
     // add a balance failure for the same cause (#1863).
@@ -193,8 +198,6 @@ pub fn validate_balance_late(
         );
         return;
     }
-
-    check_padding_at_cost(state, bal, index, errors);
 
     // Get inventory and check balance (no padding case).
     // In beancount, balance assertions include sub-accounts

@@ -101,7 +101,7 @@ pub use intern::{InternedStr, StringInterner};
 pub use inventory::{
     AccountedBookingError, BookingError, BookingMethod, BookingResult, Inventory,
     MergeSpecMismatch, OverflowError, ReductionScope, for_each_strict_subaccount,
-    python_inventory_str, python_position_str, strict_subaccounts, sum_account_and_subaccounts,
+    python_inventory_str, python_position_str, sum_account_and_subaccounts,
 };
 pub use meta_json::{json_to_meta_value, meta_value_to_json, meta_value_type_tag};
 pub use metadata::MetadataBuilder;

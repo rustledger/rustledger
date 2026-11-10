@@ -41,6 +41,12 @@ const LOTS_2: &str = "(5 STK {10 USD, 2024-01-02}, 5 STK {10 USD, 2024-01-02, \"
 /// The two lots of the first tie shape, in posting order.
 const TIE_1: &str = "(10 STK {10 USD, 2024-01-02}, 10 STK {10 USD, 2024-01-03})";
 
+/// A lot in `Assets:P:X`, then one transaction posting to `Assets:P:Y`
+/// before `Assets:P:X`, a pad on the parent and its balance.
+const RANK_BODY: &str = "2024-01-02 * \"lot\"\n  Assets:P:X  1 STK {10 USD}\n  Assets:Cash  -10 USD\n\
+     2024-01-03 * \"g\"\n  Assets:P:Y  1 CCC\n  Assets:P:X  1 DDD\n  Equity:O  -1 CCC\n  Equity:O  -1 DDD\n\
+     2024-01-04 pad Assets:P Equity:O\n2024-01-10 balance Assets:P 2 STK\n";
+
 const HEAD: &str = "2024-01-01 open Equity:O\n2024-01-01 open Assets:B\n";
 
 struct Shape {
@@ -520,6 +526,77 @@ fn shapes_2901() -> Vec<Shape> {
                  1 YYY {10 USD, 2024-01-02}, 1 CCC {10 USD, 2024-01-02})",
             ],
         ),
+        // One transaction's postings to several sub-accounts enter the
+        // group in the order beancount first met each account (its
+        // `postings_by_account` key order), not as written: it stable-sorts
+        // the group's postings by date, type and line, which they share.
+        shape(
+            "rank: postings to sub-accounts in their open order",
+            format!(
+                "{}{RANK_BODY}",
+                opens(&[
+                    "Assets:P",
+                    "Assets:Cash",
+                    "Equity:O",
+                    "Assets:P:X",
+                    "Assets:P:Y"
+                ])
+            ),
+            vec![("Assets:P", dec!(1))],
+            vec![],
+            vec![],
+            vec!["(1 DDD, 1 CCC, 1 STK {10 USD, 2024-01-02})"],
+        ),
+        shape(
+            "rank: the opens swapped",
+            format!(
+                "{}{RANK_BODY}",
+                opens(&[
+                    "Assets:P",
+                    "Assets:Cash",
+                    "Equity:O",
+                    "Assets:P:Y",
+                    "Assets:P:X"
+                ])
+            ),
+            vec![("Assets:P", dec!(1))],
+            vec![],
+            vec![],
+            vec!["(1 CCC, 1 DDD, 1 STK {10 USD, 2024-01-02})"],
+        ),
+        // Accounts with no `open` are met first through a posting, in the
+        // order it writes them.
+        shape(
+            "rank: accounts first met through a posting",
+            format!(
+                "{}2024-01-02 * \"lot\"\n  Assets:P  1 STK {{10 USD}}\n  Assets:Cash  -10 USD\n\
+                 2024-01-03 * \"g\"\n  Assets:P:Y  1 CCC\n  Assets:P:X  1 DDD\n  Equity:O  -1 CCC\n\
+                 \x20 Equity:O  -1 DDD\n2024-01-04 * \"h\"\n  Assets:P:X  1 EEE\n  Assets:P:Y  1 FFF\n\
+                 \x20 Equity:O  -1 EEE\n  Equity:O  -1 FFF\n2024-01-05 pad Assets:P Equity:O\n\
+                 2024-01-10 balance Assets:P 2 STK\n",
+                opens(&["Assets:P", "Assets:Cash", "Equity:O"])
+            ),
+            vec![("Assets:P", dec!(1))],
+            vec![],
+            vec![],
+            vec!["(1 CCC, 1 DDD, 1 FFF, 1 EEE, 1 STK {10 USD, 2024-01-02})"],
+        ),
+        // A joined lot prints the cost it was last written with, as
+        // beancount's `add_amount` rebuilds it with the incoming cost.
+        shape(
+            "a joined lot prints its latest cost",
+            format!(
+                "{}2024-01-02 * \"a\"\n  Assets:A  1 STK {{10 USD}}\n  Assets:Cash  -10 USD\n\
+                 2024-01-02 * \"b\"\n  Assets:A  1 STK {{10.00 USD, 2024-01-02}}\n\
+                 \x20 Assets:Cash  -10.00 USD\n2024-01-03 pad Assets:A Equity:O\n\
+                 2024-01-10 balance Assets:A 3 STK\n",
+                opens(&["Assets:A", "Assets:Cash", "Equity:O"])
+            ),
+            vec![("Assets:A", dec!(1))],
+            vec![],
+            vec![],
+            vec!["(2 STK {10.00 USD, 2024-01-02})"],
+        ),
         // A later balance just beyond the tolerance (0.016 against 0.01)
         // fails: pins the balance check's tolerance to the pad's.
         shape(
@@ -667,4 +744,36 @@ fn test_validator_padding_matches_process_pads_and_beancount() {
             "{name}: `Attempt to pad an entry with cost` errors vs beancount"
         );
     }
+}
+
+/// One balance, two pad groups: the parent's total cannot be represented
+/// (#1863), and the sub-account pads a currency it holds at cost. The
+/// validator reports the "pad an entry with cost" as `process_pads` does,
+/// whatever the parent's group came to.
+#[test]
+fn test_validator_reports_padding_at_cost_beside_an_unrepresentable_group() {
+    let big = "50000000000000000000000000000";
+    let source = format!(
+        "2024-01-01 open Assets:P\n2024-01-01 open Assets:P:X1\n2024-01-01 open Assets:P:X2\n\
+         2024-01-01 open Assets:P:B\n2024-01-01 open Assets:Cash\n2024-01-01 open Equity:O\n\
+         2024-01-02 * \"x1\"\n  Assets:P:X1  {big} STK\n  Equity:O  -{big} STK\n\
+         2024-01-02 * \"x2\"\n  Assets:P:X2  {big} STK\n  Equity:O  -{big} STK\n\
+         2024-01-02 * \"lot\"\n  Assets:P:B  1 STK {{10 USD}}\n  Assets:Cash  -10 USD\n\
+         2024-01-03 pad Assets:P Equity:O\n2024-01-03 pad Assets:P:B Equity:O\n\
+         2024-01-10 balance Assets:P:B 2 STK\n"
+    );
+    let directives = parse(&source);
+    let pads = rustledger_booking::process_pads(&directives, DEFAULT);
+    let canonical = pads
+        .errors
+        .iter()
+        .filter(|e| e.message.starts_with("Attempt to pad an entry with cost"))
+        .count();
+    assert_eq!(canonical, 1, "{:?}", pads.errors);
+    let errors = validate_with_options(&directives, ValidationOptions::default());
+    let inline = errors
+        .iter()
+        .filter(|e| e.code == ErrorCode::PadWithCost)
+        .count();
+    assert_eq!(inline, canonical, "{errors:?}");
 }

@@ -3411,7 +3411,7 @@ where
 /// listing the EUR posting first.
 ///
 /// CANONICAL: shared by the `C` conversions narration and BQL's `str()`
-/// (#2822), and the validator's "pad an entry with cost" message (#2901), so
+/// (#2822), the "pad an entry with cost" message (#2901) and `sell_gains`, so
 /// the renderings of one inventory cannot drift.
 pub fn python_inventory_str<'a>(positions: impl IntoIterator<Item = &'a Position>) -> String {
     const CURRENCY_ORDER: [&str; 8] = ["USD", "EUR", "JPY", "CAD", "GBP", "AUD", "NZD", "CHF"];
@@ -3471,8 +3471,8 @@ pub fn python_position_str(p: &Position) -> String {
 /// [`sum_account_and_subaccounts`] scans every account: a subtree sum per
 /// `balance` over a scan made a ledger with many padded balances quadratic.
 ///
-/// The one implementation of that range query, shared by the validator's
-/// balance check and booking's pad computation (`plan_pads`). The account
+/// The one implementation of that range query, used by the validator's
+/// balance check (`sum_account_subtree`). The account
 /// itself is the caller's to add. Generic over the key only so a test can
 /// count how many keys a query reads; callers pass `BTreeSet<Account>`.
 pub fn for_each_strict_subaccount<K>(
@@ -3480,21 +3480,6 @@ pub fn for_each_strict_subaccount<K>(
     account: &str,
     mut visit: impl FnMut(&K),
 ) where
-    K: Ord + std::borrow::Borrow<str>,
-{
-    for sub in strict_subaccounts(index, account) {
-        visit(sub);
-    }
-}
-
-/// The strict sub-accounts of `account` that `index` holds, in order, by the
-/// range query [`for_each_strict_subaccount`] runs: an iterator, so a caller
-/// that needs only the first stops there.
-pub fn strict_subaccounts<'a, K>(
-    index: &'a std::collections::BTreeSet<K>,
-    account: &str,
-) -> std::collections::btree_set::Range<'a, K>
-where
     K: Ord + std::borrow::Borrow<str>,
 {
     // The explicit `Bound` tuple gives `RangeBounds<str>` (a `&str..&str`
@@ -3511,7 +3496,9 @@ where
         std::ops::Bound::Included(lower.as_str()),
         std::ops::Bound::Excluded(upper.as_str()),
     );
-    index.range::<str, _>(bounds)
+    for sub in index.range::<str, _>(bounds) {
+        visit(sub);
+    }
 }
 
 impl fmt::Display for Inventory {

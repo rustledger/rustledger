@@ -4,11 +4,14 @@ ______________________________________________________________________
 
 # rledger lint
 
-Run a named advisory pass over one or more ledger files. A lint reports what
-it finds without failing: unless a lint's own option says otherwise, it exits
-0 whether or not it finds anything, and non-zero only when it cannot run (a
-missing file, a file that does not load): 1, or 2 for `linked-transit` (see
-its exit status below).
+Run a named advisory pass over one or more ledger files. Every lint follows
+one exit rule:
+
+| Exit | Meaning |
+|------|---------|
+| 0 | It answered, whether or not it found anything |
+| 1 | It found something an opt-in fail flag names (`linked-transit --fail-on`) |
+| 2 | It could not answer: a missing file, a file that does not load, or a ledger or configuration it refuses, as `rledger check` exits 2 on a file it cannot read |
 
 ## Usage
 
@@ -24,6 +27,48 @@ rledger lint <LINT> <FILE>... [OPTIONS]
 | `control-chars` | Control characters in narrations, payees, metadata and comments |
 
 Every lint takes `-f, --format <text|json>`.
+
+## What each lint reads, and when it refuses
+
+Every lint loads its files the same way, and what it does with a file that
+has load errors (a parse error, a missing include) depends on what it reads:
+
+| Lint | Reads | Load errors | Booking or plugin failure |
+|------|-------|-------------|---------------------------|
+| `linked-transit` | The booked ledger, as `check` sees it | Refused, exit 2 | Refused, exit 2 |
+| `closed-nonempty` | The booked ledger, as `check` sees it | Refused, exit 2 | Refused, exit 2 |
+| `transfers --apply` | The source, as written | Refused before any file is written, exit 2 | Not run |
+| `transfers` (preview) | The source, as written | Answers over what parsed, with a warning | Not run |
+| `control-chars` | The source, as written | Answers over what parsed, with a warning | Not run |
+
+A lint that refuses load errors refuses every one, including those the
+loader counts as harmless to the ledger's contents (a duplicate include, an
+include cycle, an include glob that matches nothing), as `bean-check`
+reports each of them as an error. The refusal, and the warning below, list
+each load error, a parse error as `file:line: Pnnnn: message`, up to ten,
+then how many more there are.
+
+A lint that reads the booked ledger refuses one whose booking or plugins
+failed: a transaction booking rejected is left out of the balances, and a
+failed plugin leaves the ledger other than it would have been, so a clean
+"nothing found" over either could be wrong. The refusal names each failure:
+
+```text
+error: main.beancount: cannot inspect a ledger whose processing failed: ...
+```
+
+`transfers --apply` rewrites transaction lines in the source files, so it
+refuses to work from a parse that went wrong. A read-only `transfers` and
+`control-chars` still answer: a control character is often what broke the
+parse, and the parser recovers enough to find it. Both say that the file had
+load errors, so a clean report never passes as complete:
+
+```text
+warning: main.beancount: has load errors, so findings may be incomplete: ...
+```
+
+Warnings go to stderr; in `ag-rledger` they are the envelope's `warnings`,
+this one with the code `LOAD_ERRORS`.
 
 ## linked-transit
 

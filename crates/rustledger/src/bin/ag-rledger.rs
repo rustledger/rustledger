@@ -2139,24 +2139,24 @@ fn build_lint_args(req: &Req<'_>) -> Result<rustledger::cmd::lint::Args, Command
                     .collect::<Result<_, _>>()?
             },
             format: match format {
-                "text" => closed_nonempty::OutputFormat::Text,
-                "json" => closed_nonempty::OutputFormat::Json,
+                "text" => rustledger::cmd::lint::OutputFormat::Text,
+                "json" => rustledger::cmd::lint::OutputFormat::Json,
                 other => return Err(invalid_enum("format", other, &["text", "json"])),
             },
         }),
         "closed-nonempty" => LintKind::ClosedNonempty(closed_nonempty::Args {
             files,
             format: match format {
-                "text" => closed_nonempty::OutputFormat::Text,
-                "json" => closed_nonempty::OutputFormat::Json,
+                "text" => rustledger::cmd::lint::OutputFormat::Text,
+                "json" => rustledger::cmd::lint::OutputFormat::Json,
                 other => return Err(invalid_enum("format", other, &["text", "json"])),
             },
         }),
         "control-chars" => LintKind::ControlChars(control_chars::Args {
             files,
             format: match format {
-                "text" => closed_nonempty::OutputFormat::Text,
-                "json" => closed_nonempty::OutputFormat::Json,
+                "text" => rustledger::cmd::lint::OutputFormat::Text,
+                "json" => rustledger::cmd::lint::OutputFormat::Json,
                 other => return Err(invalid_enum("format", other, &["text", "json"])),
             },
         }),
@@ -3383,7 +3383,7 @@ mod tests {
     /// #2567: `lint closed-nonempty` and `explain` are offered.
     #[test]
     fn closed_nonempty_and_explain_build() {
-        use rustledger::cmd::lint::{LintKind, closed_nonempty::OutputFormat};
+        use rustledger::cmd::lint::{LintKind, OutputFormat};
         let invocation = agcli::Invocation::parse(
             [
                 "ag-rledger",

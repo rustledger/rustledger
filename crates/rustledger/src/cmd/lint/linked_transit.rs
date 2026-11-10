@@ -1,15 +1,16 @@
 //! Read-only inspection of explicitly linked transit postings.
 //!
 //! The lint reads the booked and validated ledger, as `rledger check` sees
-//! it: each input is loaded, refused if it has load errors (as
-//! `lint closed-nonempty` does), then run through
+//! it: each input is read by [`super::load::load_booked`], the lints' shared
+//! loader, which refuses load errors and runs
 //! [`rustledger_loader::process`] with plugins and validation. An elided
 //! transit amount is the amount booking computed, and a `plugin` line runs
 //! as it does in `check`.
 //!
 //! What processing reports is handled by what it can do to the answer:
 //!
-//! - An error that drops or alters transactions refuses the input: a
+//! - An error that drops or alters transactions refuses the input (the
+//!   shared loader does this, for `closed-nonempty` too): a
 //!   transaction booking rejected is left out of the booked stream, and a
 //!   plugin that failed (it could not run, its output was discarded, or a
 //!   native plugin could not use its config and did nothing) left the
@@ -35,17 +36,17 @@
 //! warning. Warnings go where the CLI's warnings go (stderr, or the
 //! `ag-rledger` envelope's `warnings`).
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use clap::Parser;
 use rustledger_core::{Amount, Directive, Link};
-use rustledger_loader::{ErrorSeverity, LedgerError, LoadOptions, Loader};
 use rustledger_validate::is_advisory_only_code;
 use serde::Serialize;
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-use super::closed_nonempty::OutputFormat;
+use super::OutputFormat;
+use super::load::{ErrorIndex, TransactionSite, TransactionSites, describe_error, load_booked};
 use crate::cmd::messages::Messages;
 use crate::cmd::report_cmd::{Diagnostic, Diagnostics};
 
@@ -245,39 +246,6 @@ struct Reported {
     on_leg: bool,
 }
 
-/// Errors by the file and line they are located at: indices into the run's
-/// [`Reported`] list.
-type ErrorsByLine = HashMap<PathBuf, BTreeMap<usize, Vec<usize>>>;
-
-/// The first and last line `span` covers in `source`. A directive's span
-/// runs from its date to the start of the next directive, so for a
-/// transaction it covers the header, the postings, and any blank or comment
-/// lines before the next directive (none of which an error is located at).
-fn span_lines(
-    source: &rustledger_loader::SourceFile,
-    span: rustledger_core::Span,
-) -> (usize, usize) {
-    let (first, _) = source.line_col(span.start);
-    let (last, _) = source.line_col(span.end.saturating_sub(1).max(span.start));
-    (first, last)
-}
-
-/// The errors located on lines `first..=last` of `file`: for a transaction,
-/// the lines [`span_lines`] gives, so a plugin error located at one of its
-/// postings is the transaction's too.
-fn errors_within<'a>(
-    by_line: &'a ErrorsByLine,
-    file: &std::path::Path,
-    first: usize,
-    last: usize,
-) -> impl Iterator<Item = usize> + 'a {
-    by_line
-        .get(file)
-        .into_iter()
-        .flat_map(move |lines| lines.range(first..=last))
-        .flat_map(|(_, indices)| indices.iter().copied())
-}
-
 /// Run the lint on stdout, its warnings on stderr.
 ///
 /// # Errors
@@ -289,21 +257,6 @@ pub fn run(args: &Args) -> Result<ExitCode> {
         None,
         &mut std::io::stderr().lock(),
     )
-}
-
-/// `file:line: CODE: message`.
-fn describe_error(err: &LedgerError) -> String {
-    let at = err
-        .location
-        .as_ref()
-        .map(|l| format!("{}:{}: ", l.file.display(), l.line))
-        .unwrap_or_default();
-    format!("{at}{}: {}", err.code, err.message)
-}
-
-/// [`describe_error`] for each error, joined for one message.
-fn describe_errors<'a>(errors: impl Iterator<Item = &'a LedgerError>) -> String {
-    errors.map(describe_error).collect::<Vec<_>>().join("; ")
 }
 
 /// Inspect booked transactions and write an advisory report.
@@ -355,73 +308,27 @@ pub fn run_with_writer<W: std::io::Write>(
     let accounts: BTreeSet<&str> = args.account.iter().map(String::as_str).collect();
     let mut seen_accounts: BTreeSet<&str> = BTreeSet::new();
     let mut any_link_matches = false;
-    // Booking, plugins and validation, as `rledger check` runs them, so a
-    // leg `check` rejects is not reported as matched. See the module docs
-    // for what each kind of error does to the answer.
-    let options = LoadOptions {
-        run_plugins: true,
-        validate: true,
-        plugin_max_time_secs: crate::plugin_budget::max_time_secs(),
-        plugin_max_memory_mb: crate::plugin_budget::max_memory_mb(),
-        ..Default::default()
-    };
     let mut groups: BTreeMap<String, BTreeMap<(PathBuf, usize), Leg>> = BTreeMap::new();
     let mut reported: Vec<Reported> = Vec::new();
-    // Plugin-inserted transactions with no source location, numbered so
-    // that none is merged with another.
-    let mut unlocated = 0usize;
+    // Every transaction's site; plugin-inserted transactions with no source
+    // location are numbered across inputs, so that none is merged with
+    // another.
+    let mut sites = TransactionSites::default();
     for path in &args.files {
-        let result = Loader::new()
-            .load(path)
-            .with_context(|| format!("failed to load {}", path.display()))?;
-        anyhow::ensure!(
-            result.errors.is_empty(),
-            "{}: cannot inspect source with load errors: {}",
-            path.display(),
-            result
-                .errors
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("; ")
-        );
-        let ledger = rustledger_loader::process(result, &options)
-            .with_context(|| format!("failed to process {}", path.display()))?;
-        let mut refusals = ledger
-            .errors
-            .iter()
-            .filter(|e| e.is_booking_failure() || e.is_plugin_failure())
-            .peekable();
-        anyhow::ensure!(
-            refusals.peek().is_none(),
-            "{}: cannot inspect a ledger whose processing failed: {}",
-            path.display(),
-            describe_errors(refusals)
-        );
-        // The other errors, by the transaction each is located on: a
-        // validator's by its span, a plugin's by its file and line.
-        let mut by_span: HashMap<(u16, usize), Vec<usize>> = HashMap::new();
-        let mut by_line = ErrorsByLine::new();
+        // Booking, plugins and validation, as `rledger check` runs them, so
+        // a leg `check` rejects is not reported as matched. The shared lint
+        // loader refuses load errors and booking or plugin failures; see the
+        // module docs for what each other kind of error does to the answer.
+        let ledger = load_booked(path)?;
+        // The other errors, by the transaction each is located on.
+        let mut on_transactions = ErrorIndex::default();
         for error in &ledger.errors {
             // `check` stays silent on these; `lint closed-nonempty` reports
             // them.
             if is_advisory_only_code(&error.code) {
                 continue;
             }
-            let index = reported.len();
-            if error.severity == ErrorSeverity::Error {
-                if let (Some(file_id), Some((start, _))) = (error.file_id, error.source_span) {
-                    by_span.entry((file_id, start)).or_default().push(index);
-                }
-                if let Some(location) = &error.location {
-                    by_line
-                        .entry(location.file.clone())
-                        .or_default()
-                        .entry(location.line)
-                        .or_default()
-                        .push(index);
-                }
-            }
+            on_transactions.insert(reported.len(), error);
             reported.push(Reported {
                 described: describe_error(error),
                 code: error.code.clone(),
@@ -434,16 +341,7 @@ pub fn run_with_writer<W: std::io::Write>(
                 on_leg: false,
             });
         }
-        // How many transactions each source location holds: more than one
-        // means a plugin inserted a transaction at its parent's location.
-        let mut located: HashMap<(u16, usize), usize> = HashMap::new();
-        for directive in &ledger.directives {
-            if matches!(directive.value, Directive::Transaction(_)) {
-                *located
-                    .entry((directive.file_id, directive.span.start))
-                    .or_default() += 1;
-            }
-        }
+        let mut ledger_sites = sites.for_ledger(&ledger);
         for directive in &ledger.directives {
             let txn = match &directive.value {
                 Directive::Open(open) => {
@@ -475,52 +373,16 @@ pub fn run_with_writer<W: std::io::Write>(
             // two transactions. A plugin-inserted one may have no source
             // location, or reuse its parent's: neither identifies it, so
             // its link is `ambiguous`, never merged into a match.
-            let (key, location, at, unidentified) =
-                if let Some(source) = ledger.source_map.get(directive.file_id as usize) {
-                    // `path` is the file's identity (symlinks resolved, one
-                    // path for every include of it), and the path the other
-                    // lints print.
-                    let (line, _) = source.line_col(directive.span.start);
-                    // A plugin can locate an error at one of its postings.
-                    let (_, last) = span_lines(source, directive.span);
-                    let shared = located
-                        .get(&(directive.file_id, directive.span.start))
-                        .is_some_and(|&count| count > 1);
-                    (
-                        (source.path.clone(), directive.span.start),
-                        (source.path.display().to_string(), line),
-                        Some((source.path.clone(), line, last)),
-                        shared.then_some(
-                            "several transactions share one source location \
-                             (a plugin inserted one)",
-                        ),
-                    )
-                } else {
-                    unlocated += 1;
-                    let (file, line) = ledger
-                        .source_map
-                        .placeholder(directive.file_id)
-                        .map_or_else(
-                            || ("<plugin>".to_string(), 0),
-                            |(name, line)| (name.display().to_string(), line as usize),
-                        );
-                    (
-                        (PathBuf::from(format!("<unlocated {unlocated}>")), 0),
-                        (file, line),
-                        None,
-                        Some("a plugin inserted this transaction, which has no source location"),
-                    )
-                };
-            let errors: BTreeSet<usize> =
-                by_span
-                    .get(&(directive.file_id, directive.span.start))
-                    .into_iter()
-                    .flatten()
-                    .copied()
-                    .chain(at.iter().flat_map(|(file, first, last)| {
-                        errors_within(&by_line, file, *first, *last)
-                    }))
-                    .collect();
+            let site = ledger_sites.site(directive);
+            let errors = on_transactions.on_transaction(directive, &site);
+            let TransactionSite {
+                key,
+                file,
+                line,
+                unidentified,
+                ..
+            } = site;
+            let location = (file, line);
             let multiple_links = links.len() > 1;
             for link in links {
                 let leg = groups
@@ -1624,89 +1486,5 @@ mod tests {
         fs::write(&path, ledger("Assets:Cash")).unwrap();
         let report = inspect(vec![path], &["Assets:Transit"]).unwrap();
         assert_status(&report, "xfer-a", "ambiguous");
-    }
-
-    /// Every line in the range counts, header and postings alike; a line
-    /// past it, or one in another file, does not.
-    #[test]
-    fn test_errors_within_takes_every_line_in_the_range() {
-        let file = PathBuf::from("/ledger/main.bean");
-        let mut by_line = ErrorsByLine::new();
-        for (line, index) in [(10, 0), (12, 1), (13, 2), (20, 3)] {
-            by_line
-                .entry(file.clone())
-                .or_default()
-                .entry(line)
-                .or_default()
-                .push(index);
-        }
-        by_line
-            .entry(PathBuf::from("/ledger/other.bean"))
-            .or_default()
-            .entry(11)
-            .or_default()
-            .push(4);
-        // A range of lines 10 to 12, as span_lines gives for a transaction.
-        let found: Vec<usize> = errors_within(&by_line, &file, 10, 12).collect();
-        assert_eq!(found, [0, 1]);
-        assert_eq!(
-            errors_within(&by_line, std::path::Path::new("/ledger/none.bean"), 1, 99).count(),
-            0
-        );
-    }
-
-    /// The range of a real transaction: from its header up to the next
-    /// directive, so its postings (and blank and comment lines after them)
-    /// are in it, and the next transaction is not.
-    #[test]
-    fn test_span_lines_covers_a_parsed_transaction() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("main.bean");
-        fs::write(
-            &path,
-            concat!(
-                "2000-01-01 open Assets:Cash\n",
-                "\n",
-                "2024-01-01 * \"a\" ^xfer-a\n",
-                "  Assets:Transit 5 USD\n",
-                "  Assets:Cash\n",
-                "\n",
-                "; a comment\n",
-                "2024-01-02 * \"b\"\n",
-                "  Assets:Cash 1 USD\n",
-                "  Assets:Transit\n",
-            ),
-        )
-        .unwrap();
-        let loaded = Loader::new().load(&path).unwrap();
-        let file = &loaded.source_map.files()[0];
-        let spans: Vec<(usize, usize)> = loaded
-            .directives
-            .iter()
-            .filter(|d| matches!(d.value, Directive::Transaction(_)))
-            .map(|d| span_lines(file, d.span))
-            .collect();
-        assert_eq!(spans.len(), 2, "{spans:?}");
-        let (first, last) = spans[0];
-        assert_eq!(first, 3, "{spans:?}");
-        // Up to the line before the next directive: the comment.
-        assert_eq!(last, 7, "{spans:?}");
-        assert_eq!(spans[1].0, 8, "{spans:?}");
-        // An error at the first transaction's second posting is its own,
-        // not the next one's.
-        let mut by_line = ErrorsByLine::new();
-        by_line
-            .entry(file.path.clone())
-            .or_default()
-            .entry(5)
-            .or_default()
-            .push(0);
-        assert_eq!(errors_within(&by_line, &file.path, first, last).count(), 1);
-        let (next_first, next_last) = spans[1];
-        assert_eq!(
-            errors_within(&by_line, &file.path, next_first, next_last).count(),
-            0,
-            "{spans:?}"
-        );
     }
 }

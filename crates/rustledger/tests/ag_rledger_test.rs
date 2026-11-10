@@ -2712,10 +2712,116 @@ fn test_lint_linked_transit_exits_two_when_it_cannot_answer() {
     let (cli, envelope) = lint(&good, "Assets:Transit");
     assert_eq!(cli, 1, "{envelope}");
     assert_eq!(envelope["ok"], true, "{envelope}");
-    // The other lints keep exiting 1 when they cannot run.
+}
+
+/// One exit rule for every lint (#2899): a lint that cannot answer (a
+/// missing file, a file the shared loader refuses) exits 2 in `rledger`, as
+/// `linked-transit` does above. In `ag-rledger` it is an error envelope,
+/// `"ok": false`.
+#[test]
+fn test_lint_every_lint_exits_two_when_it_cannot_answer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let broken = write_fixture(
+        tmp.path(),
+        "broken.beancount",
+        "2024-01-01 * \"x\"\n  bad\n",
+    );
+    let plugin = write_fixture(
+        tmp.path(),
+        "plugin.beancount",
+        "plugin \"no.such.plugin_xyz\"\n2000-01-01 open Assets:Cash\n",
+    );
+    let unbookable = write_fixture(
+        tmp.path(),
+        "unbookable.beancount",
+        "2024-01-01 open Assets:Cash\n2024-01-01 open Expenses:Food\n\
+         2024-01-02 * \"lunch\"\n  Assets:Cash\n  Expenses:Food\n\
+         2024-12-31 close Assets:Cash\n",
+    );
+    let missing = tmp.path().join("missing.beancount");
+    let missing = missing.to_str().unwrap();
+    for lint in ["closed-nonempty", "transfers", "control-chars"] {
+        let (code, _) = rledger_stdout(tmp.path(), &["lint", lint, missing]);
+        assert_eq!(code, 2, "{lint}");
+        let (_, envelope, _) = run_in(tmp.path(), &["lint", lint, missing]);
+        assert_eq!(envelope["ok"], false, "{lint}: {envelope}");
+        assert_eq!(
+            envelope["error"]["code"], "FILE_NOT_FOUND",
+            "{lint}: {envelope}"
+        );
+    }
+    // `closed-nonempty` refuses load errors and a failed booking or plugin.
+    for (file, says) in [
+        (&broken, "cannot inspect source with load errors"),
+        (&plugin, "cannot inspect a ledger whose processing failed"),
+        (
+            &unbookable,
+            "cannot inspect a ledger whose processing failed",
+        ),
+    ] {
+        let file = file.to_str().unwrap();
+        let (code, stdout) = rledger_stdout(tmp.path(), &["lint", "closed-nonempty", file]);
+        assert_eq!(code, 2, "{file}");
+        assert!(stdout.is_empty(), "{file}: {stdout}");
+        let (_, envelope, _) = run_in(tmp.path(), &["lint", "closed-nonempty", file]);
+        assert_eq!(envelope["ok"], false, "{file}: {envelope}");
+        assert_eq!(
+            envelope["error"]["code"], "COMMAND_FAILED",
+            "{file}: {envelope}"
+        );
+        assert!(
+            envelope["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains(says)),
+            "{file}: {envelope}"
+        );
+    }
+    // `transfers --apply` refuses load errors too.
     let (code, _) = rledger_stdout(
         tmp.path(),
-        &["lint", "closed-nonempty", missing.to_str().unwrap()],
+        &["lint", "transfers", "--apply", broken.to_str().unwrap()],
     );
-    assert_eq!(code, 1);
+    assert_eq!(code, 2);
+    let (_, envelope, _) = run_in(
+        tmp.path(),
+        &["lint", "transfers", "--apply", broken.to_str().unwrap()],
+    );
+    assert_eq!(envelope["ok"], false, "{envelope}");
+    assert_eq!(envelope["error"]["code"], "COMMAND_FAILED", "{envelope}");
+    assert!(
+        envelope["error"]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("cannot inspect source with load errors")),
+        "{envelope}"
+    );
+}
+
+/// `control-chars` answers over a file with load errors, and the envelope's
+/// `warnings` says the file had them (#2899).
+#[test]
+fn test_lint_control_chars_warns_on_load_errors() {
+    let tmp = tempfile::tempdir().unwrap();
+    let file = write_fixture(
+        tmp.path(),
+        "main.beancount",
+        "2024-01-01 open Assets:Cash\n\
+         2024-01-02 * \"bell\u{7}\" junk\n  Assets:Cash -1 USD\n  Expenses:Food\n",
+    );
+    let (code, envelope, _) = run_in(
+        tmp.path(),
+        &["lint", "control-chars", file.to_str().unwrap()],
+    );
+    assert_eq!(code, 0, "{envelope}");
+    assert_eq!(envelope["ok"], true, "{envelope}");
+    let warnings = envelope["result"]["warnings"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no warnings: {envelope}"));
+    assert_eq!(warnings.len(), 1, "{envelope}");
+    assert_eq!(warnings[0]["code"], "LOAD_ERRORS", "{envelope}");
+    assert!(
+        envelope["result"]["stdout"]
+            .as_str()
+            .is_some_and(|s| s.contains("control character in narration")),
+        "{envelope}"
+    );
 }

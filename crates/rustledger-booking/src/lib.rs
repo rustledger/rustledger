@@ -37,8 +37,8 @@ pub use interpolate::{
 };
 pub use pad::{
     PadError, PadOrigin, PadPlan, PadResult, PlannedPadding, SYNTH_PAD_NARRATION_PREFIX, UnusedPad,
-    is_synthesized_pad, merge_with_padding, merge_with_padding_owned, merge_with_padding_spanned,
-    pad_insertion_index, plan_pads, process_pads,
+    is_synthesized_pad, merge_padding_into_sorted, merge_with_padding, merge_with_padding_owned,
+    merge_with_padding_spanned, plan_pads, process_pads,
 };
 
 use bigdecimal::BigDecimal;

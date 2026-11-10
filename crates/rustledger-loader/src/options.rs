@@ -2,7 +2,6 @@
 
 use rust_decimal::Decimal;
 use rustc_hash::{FxHashMap, FxHashSet};
-use std::str::FromStr;
 
 /// Known beancount option names.
 const KNOWN_OPTIONS: &[&str] = &[
@@ -146,7 +145,9 @@ pub fn option_value_kind(key: &str) -> Option<&'static str> {
         | "allow_pipe_separator"
         | "insert_pythonpath" => "bool",
         "booking_method" => "booking method",
-        "long_string_maxlines" => "int",
+        // Any value is accepted (beancount has no converter and never reads
+        // it); a count is recorded.
+        "long_string_maxlines" => "any",
         "documents" => "path",
         "plugin_processing_mode" => "default | raw",
         _ => return None,
@@ -221,18 +222,17 @@ impl BoolVocabulary {
 /// currency `A:B`), and the number is digits and dots only, so a sign is
 /// rejected (`USD:-0.01`). `.` does not match a newline, so the colon must be
 /// on the value's first line (`"A\nB:0.5"` is invalid). The number is then
-/// read with `D()`.
+/// read with `D()`. Trailing whitespace is ignored, as there.
 ///
 /// Stricter than Python: beancount's `re.match` ignores whatever follows the
-/// number, so `USD:0.01abc` reads as `0.01 USD`. We reject it with E7002
-/// (a decision on #2925): text after the number is a typo, and taking the
+/// number, so `USD:0.01abc` reads as `0.01 USD`. We reject other text after
+/// the number with E7002 (a decision on #2925): it is a typo, and taking the
 /// prefix silently would set a tolerance the user may not have written. That
 /// includes an exponent: beancount reads `USD:1e-2` as 1, we reject it.
 ///
-/// Not fixable locally: Python's `\d` also matches non-ASCII decimal digits
-/// (`USD:١` is 1 in beancount), which `rust_decimal` does not parse; only
-/// ASCII digits are read here. A number past `rust_decimal`'s range (29 or
-/// more integer digits) is rejected too.
+/// Not fixable locally: see [`exact_decimal`] for the numbers rustledger
+/// cannot hold. Also, Python's `\d` matches non-ASCII decimal digits
+/// (`USD:١` is 1 in beancount); only ASCII digits are read here.
 fn parse_tolerance_map(value: &str) -> Result<(&str, Decimal), String> {
     let is_number_char = |c: char| c.is_ascii_digit() || c == '.';
     let first_line = value.split('\n').next().unwrap_or_default();
@@ -251,16 +251,20 @@ fn parse_tolerance_map(value: &str) -> Result<(&str, Decimal), String> {
         .find(|c: char| !is_number_char(c))
         .unwrap_or(rest.len());
     let (number, trailing) = rest.split_at(end);
-    if !trailing.is_empty() {
+    let trailing_text = trailing.trim_matches([' ', '\t', '\n', '\r']);
+    if !trailing_text.is_empty() {
         return Err(format!(
-            "Invalid value '{value}': unexpected text '{trailing}' after the number"
+            "Invalid value '{value}': unexpected text '{trailing_text}' after the number"
         ));
     }
-    let Ok(number) = Decimal::from_str(number) else {
+    if !is_python_number_part(number, true) {
         return Err(format!(
-            "Invalid value '{value}': '{number}' is not a number rustledger can hold"
+            "Invalid value '{value}': '{number}' is not a number"
         ));
-    };
+    }
+    let number = exact_decimal(number, 0).ok_or_else(|| {
+        format!("Invalid value '{value}': '{number}' cannot be held exactly by rustledger")
+    })?;
     Ok((currency, number))
 }
 
@@ -275,11 +279,8 @@ fn parse_tolerance_map(value: &str) -> Result<(&str, Decimal), String> {
 /// invalid. A zero significand is 0 whatever its exponent (`0e100`).
 ///
 /// Not fixable locally: Python's `Decimal` also reads `NaN`, `sNaN` and
-/// `Infinity`, and any magnitude, while a `rust_decimal::Decimal` holds about
-/// 28 to 29 significant digits and exponents from 10^-28 to about 10^28. A
-/// non-finite value, or a non-zero one outside that range (`1e100`, `1e-29`,
-/// an integer of 29 or more digits), is rejected (E7002). No real tolerance
-/// multiplier is any of these.
+/// `Infinity`, and non-ASCII decimal digits (`"١"` and `"１"` are 1), all
+/// rejected here (E7002), as is any number [`exact_decimal`] cannot hold.
 fn parse_beancount_decimal(value: &str) -> Result<Decimal, String> {
     if value.is_empty() {
         return Ok(Decimal::ZERO);
@@ -307,39 +308,64 @@ fn parse_beancount_decimal(value: &str) -> Result<Decimal, String> {
     if !is_python_number_part(mantissa, true) {
         return Err(invalid());
     }
-    let out_of_range =
-        || format!("Invalid value '{value}': outside the range rustledger's decimal can hold");
-    let mut number = Decimal::from_str(mantissa).map_err(|_| out_of_range())?;
-    if let Some(exponent) = exponent {
-        if !is_python_number_part(exponent, false) {
-            return Err(invalid());
-        }
-        if number.is_zero() {
-            // Zero at any exponent is zero, as `Decimal("0e100")` is.
-            return Ok(Decimal::ZERO);
-        }
-        let exponent: i64 = exponent.parse().map_err(|_| out_of_range())?;
-        // A power of ten past 10^28 overflows a `Decimal` below anyway; the
-        // cap only bounds the loop for an absurd exponent.
-        let power = exponent.unsigned_abs();
-        if power > 28 {
-            return Err(out_of_range());
-        }
-        let scale = (0..power)
-            .try_fold(Decimal::ONE, |acc, _| acc.checked_mul(Decimal::TEN))
-            .ok_or_else(out_of_range)?;
-        number = if exponent < 0 {
-            number.checked_div(scale)
-        } else {
-            number.checked_mul(scale)
-        }
-        .ok_or_else(out_of_range)?;
-        // A quotient that rounded to zero was not representable.
-        if number.is_zero() {
-            return Err(out_of_range());
-        }
+    if exponent.is_some_and(|e| !is_python_number_part(e, false)) {
+        return Err(invalid());
     }
-    Ok(number)
+    let (negative, digits) = match mantissa.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, mantissa.strip_prefix('+').unwrap_or(mantissa)),
+    };
+    let not_held =
+        || format!("Invalid value '{value}': it cannot be held exactly by rustledger's decimal");
+    // Zero at any exponent is zero, as `Decimal("0e100")` is.
+    if digits.bytes().all(|b| b == b'0' || b == b'.') {
+        return Ok(Decimal::ZERO);
+    }
+    let exponent = match exponent {
+        Some(e) => e.parse::<i64>().map_err(|_| not_held())?,
+        None => 0,
+    };
+    let number = exact_decimal(digits, exponent).ok_or_else(not_held)?;
+    Ok(if negative { -number } else { number })
+}
+
+/// The exact value of `digits` (ASCII digits with at most one `.`, at least
+/// one digit, no sign) times `10^exponent`, or `None` when a
+/// `rust_decimal::Decimal` cannot hold it exactly.
+///
+/// Not fixable locally (deviation 3 on #2925): Python's `Decimal` holds any
+/// such number exactly, while `rust_decimal` holds a 96-bit coefficient (about
+/// 28 to 29 significant digits) at a scale of at most 28. A value outside that
+/// range (`1e100`, `1e-29`) or needing more digits than it holds
+/// (`0.0000000000000000000000000000001`, which beancount holds as 1E-31) is
+/// rejected (E7002) rather than silently rounded. No real tolerance is. The
+/// written scale is kept where it fits, since `display_precision` reads it.
+fn exact_decimal(digits: &str, exponent: i64) -> Option<Decimal> {
+    let (int_part, frac_part) = digits.split_once('.').unwrap_or((digits, ""));
+    let mut coefficient: String = format!("{int_part}{frac_part}");
+    let mut scale = i64::try_from(frac_part.len()).ok()?.checked_sub(exponent)?;
+    // Drop trailing zeros only where the written form does not fit.
+    while (scale > 28 || coefficient.trim_start_matches('0').len() > 38)
+        && coefficient.len() > 1
+        && coefficient.ends_with('0')
+    {
+        coefficient.pop();
+        scale -= 1;
+    }
+    let trimmed = coefficient.trim_start_matches('0');
+    if trimmed.len() > 38 {
+        return None;
+    }
+    let mut n: i128 = if trimmed.is_empty() {
+        0
+    } else {
+        trimmed.parse().ok()?
+    };
+    while scale < 0 {
+        n = n.checked_mul(10)?;
+        scale += 1;
+    }
+    Decimal::try_from_i128_with_scale(n, u32::try_from(scale).ok()?).ok()
 }
 
 /// Whether `text` is one part of a Python decimal string (underscores
@@ -1427,6 +1453,7 @@ mod tests {
         }
     }
     use super::*;
+    use std::str::FromStr;
 
     /// Every known option has a value kind, so `doctor list-options`, which
     /// prints the loader's list, can never print one without a type.
@@ -1438,6 +1465,42 @@ mod tests {
         assert_eq!(option_value_kind("experiment_explicit_tolerances"), None);
         assert_eq!(option_value_kind("insert_pythonpath"), Some("bool"));
         assert!(is_read_only_option("plugin") && is_read_only_option("filename"));
+    }
+
+    /// Drift guard between `option_value_kind` and `Options::apply`: a value
+    /// of each option's declared kind is accepted with no value diagnostic,
+    /// so the kind `doctor list-options` prints cannot disagree with what
+    /// `set` takes (#2925 review). A read-only option is E7005 instead.
+    #[test]
+    fn test_option_value_kind_matches_what_set_accepts() {
+        for &key in known_options() {
+            let kind = option_value_kind(key).expect("covered above");
+            let value = match kind {
+                "string" => "Some text",
+                "currency" => "USD",
+                "account root" => "Capital",
+                "account leaf" => "Rounding",
+                "CURRENCY:NUMBER" => "USD:0.01",
+                "decimal" => "0.6",
+                "bool" => "TRUE",
+                "booking method" => "FIFO",
+                "any" => "not a number",
+                "path" => "documents",
+                "default | raw" => "raw",
+                other => panic!("{key}: no representative value for kind {other:?}"),
+            };
+            let mut opts = Options::new();
+            opts.set(key, value);
+            let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+            if is_read_only_option(key) {
+                assert_eq!(codes, ["E7005"], "{key}");
+            } else {
+                assert!(
+                    codes.iter().all(|c| *c == "E7004"),
+                    "{key} = {value:?} ({kind}) must be accepted: {codes:?}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -2239,12 +2302,43 @@ mod tests {
         assert_eq!(codes, ["E7002"]);
     }
 
-    /// Not fixable locally (deviation 3): a number past `rust_decimal`'s
-    /// range, and a non-ASCII digit Python's `\d` would match, are rejected.
+    /// Not fixable locally (deviation 3): a number `rust_decimal` cannot hold
+    /// exactly, and a non-ASCII digit Python's `\d` would match, are rejected
+    /// rather than rounded. beancount holds `0.000...01` (31 places) as 1E-31.
     #[test]
     fn test_parse_tolerance_map_unrepresentable_number_is_rejected() {
-        assert!(parse_tolerance_map("USD:123456789012345678901234567890").is_err());
-        assert!(parse_tolerance_map("USD:\u{661}").is_err());
+        for value in [
+            "USD:123456789012345678901234567890",
+            "USD:0.0000000000000000000000000000001",
+            "USD:\u{661}",
+        ] {
+            assert!(parse_tolerance_map(value).is_err(), "{value:?}");
+            let mut opts = Options::new();
+            opts.set("display_precision", value);
+            let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+            assert_eq!(codes, ["E7002"], "{value:?}");
+        }
+        // The written scale is kept where it fits: display_precision reads it.
+        assert_eq!(
+            parse_tolerance_map("USD:0.010").map(|(_, d)| d.scale()),
+            Ok(3)
+        );
+    }
+
+    /// Trailing whitespace after the number is ignored, as beancount ignores
+    /// everything after it; deviation 2 is about other text only.
+    #[test]
+    fn test_parse_tolerance_map_trailing_whitespace_is_accepted() {
+        for value in ["USD:0.5 ", "USD:0.5\n", "USD:0.5\t", "USD:0.5 \r\n"] {
+            assert_eq!(
+                parse_tolerance_map(value),
+                Ok(("USD", rust_decimal_macros::dec!(0.5))),
+                "{value:?}"
+            );
+        }
+        for value in ["USD:0.5 x", "USD:0.5\nx"] {
+            assert!(parse_tolerance_map(value).is_err(), "{value:?}");
+        }
     }
 
     /// `tolerance_multiplier` is read by beancount's `D()` (#2925): empty is
@@ -2290,13 +2384,43 @@ mod tests {
         }
     }
 
-    /// Not fixable locally (deviation 3 on #2925): a non-zero value past
-    /// `rust_decimal`'s range, which Python's `Decimal` holds, is rejected.
+    /// Not fixable locally (deviation 3 on #2925): a value `rust_decimal`
+    /// cannot hold exactly, which Python's `Decimal` holds, is rejected rather
+    /// than rounded, and so are non-ASCII digits, which Python reads.
     #[test]
-    fn test_parse_beancount_decimal_out_of_range_is_rejected() {
-        for value in ["1e100", "1e-29", "123456789012345678901234567890"] {
-            let err = parse_beancount_decimal(value).expect_err(value);
-            assert!(err.contains("range"), "{value}: {err}");
+    fn test_parse_beancount_decimal_unrepresentable_is_rejected() {
+        for value in [
+            "1e100",
+            "1e-29",
+            "123456789012345678901234567890",
+            "0.0000000000000000000000000000001",
+            "\u{661}",
+            "\u{ff11}",
+        ] {
+            assert!(parse_beancount_decimal(value).is_err(), "{value:?}");
+            let mut opts = Options::new();
+            opts.set("tolerance_multiplier", value);
+            let codes: Vec<&str> = opts.warnings.iter().map(|w| w.code).collect();
+            assert_eq!(codes, ["E7002"], "{value:?}");
+        }
+    }
+
+    /// The range is checked on the value, not the exponent: these are in
+    /// range however they are written.
+    #[test]
+    fn test_parse_beancount_decimal_in_range_by_value() {
+        use rust_decimal_macros::dec;
+        for (value, expected) in [
+            ("10e-29", dec!(0.0000000000000000000000000001)),
+            ("0.1e29", dec!(10000000000000000000000000000)),
+            (
+                "10000000000000000000000000000",
+                dec!(10000000000000000000000000000),
+            ),
+            ("1e-28", dec!(0.0000000000000000000000000001)),
+            ("-2.5e1", dec!(-25)),
+        ] {
+            assert_eq!(parse_beancount_decimal(value), Ok(expected), "{value:?}");
         }
     }
 

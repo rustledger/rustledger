@@ -617,11 +617,10 @@ fn transaction_with_indented_comment_between_postings() {
 #[test]
 fn transaction_with_implied_flag_via_bare_string() {
     use SyntaxKind::*;
-    // Beancount accepts the implied-transaction shorthand:
-    // `DATE WS STRING ...` with no explicit flag. The legacy
-    // AST parser at parser.rs:1713 dispatches `Token::String(_)`
-    // to parse_transaction_directive with an implied `*`. Common
-    // in real ledgers as a convenient shorthand.
+    // `DATE WS STRING ...` with no flag is a syntax error in beancount
+    // (its `txn` is required), and the converter reports it (#2905). The
+    // CST still reads it as a TRANSACTION so that its postings stay
+    // inside it rather than becoming orphaned indented lines.
     let source = "2024-01-15 \"Coffee\"\n\
                   \x20\x20Assets:Cash 100 USD\n";
     let tree = parse_structured(source);

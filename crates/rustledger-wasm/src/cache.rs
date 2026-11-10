@@ -406,14 +406,17 @@ use crate::types::{Error, LedgerOptions};
 /// sees the padding from the pad's date, and an account referenced before its
 /// later `open` is inactive. A v84 blob would keep serving the old errors.
 /// (v83 was never released: #2896 held it before #2872 took v84.)
-/// v86: loader v63, unchanged. ARCHIVED LAYOUT moved: the `Ledger` payload
+/// v86: loader v65, PARSER OUTPUT changed (#2905). A transaction with no flag
+/// after its date is a parse error, as in beancount; an older blob would keep
+/// serving such a file with no error.
+/// v88: loader v65, unchanged. ARCHIVED LAYOUT moved: the `Ledger` payload
 /// gained `tolerance_multiplier`, which the padding a query inserts measures a
-/// balance's tolerance with (#2901); a v85 blob has no such field. And
+/// balance's tolerance with (#2901); an older blob has no such field. And
 /// `Ledger`'s error list moves: a pad pads for a balance on a sub-account and
 /// counts only its own padding, a difference within the balance's tolerance
 /// is not padded (an `Unused Pad entry`), and padding a currency held at cost
 /// is `E2005`.
-pub const CACHE_VERSION: u32 = 86;
+pub const CACHE_VERSION: u32 = 88;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -445,7 +448,7 @@ pub const CACHE_VERSION: u32 = 86;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 63;
+const LOADER_CACHE_VERSION_PIN: u32 = 65;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

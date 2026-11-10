@@ -628,7 +628,9 @@ fn transaction_flag_scoped_to_pre_string_region() {
     // A stray trailing single-char CURRENCY after the narration
     // STRING must NOT be misclassified as a ticker-letter flag.
     // The header is `DATE WS STRING WS CURRENCY NEWLINE`,
-    // classified as TRANSACTION via the STRING-implied-flag arm.
+    // a TRANSACTION node through `identify_directive`'s bare-STRING
+    // arm. Having no flag is itself a syntax error (#2905), reported by
+    // the converter; this typed-AST test only reads the flag region.
     let f = parse("2024-01-15 \"narration\" T\n  Assets:Cash  -5 USD\n");
     let Directive::Transaction(t) = single_directive(&f) else {
         panic!("expected Transaction");

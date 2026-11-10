@@ -296,7 +296,7 @@ directory below the filesystem root.
 | `tolerance_multiplier` | decimal | 0.5 | Tolerance multiplier |
 | `infer_tolerance_from_cost` | bool | FALSE | Infer tolerance from cost and price (each contribution capped at 0.5, as in beancount) |
 | `use_precise_interpolation` | bool | FALSE | Accepted; rustledger always interpolates precisely |
-| `insert_pythonpath` | bool | FALSE | Prepend the ledger's directory to the Python path |
+| `insert_pythonpath` | bool | FALSE | Accepted for compatibility; no effect in rledger |
 | `display_precision` | string | - | Per-currency display precision (e.g. `USD:0.01`) |
 | `allow_pipe_separator` | bool | FALSE | Allow pipe separator (deprecated) |
 | `documents` | string | - | Documents root directory |

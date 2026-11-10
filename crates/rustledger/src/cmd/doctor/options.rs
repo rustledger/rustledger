@@ -37,7 +37,7 @@ fn option_description(key: &str) -> Option<&'static str> {
         "allow_pipe_separator" => "Allow the pipe separator (deprecated)",
         "long_string_maxlines" => "Maximum lines for long strings (inert, as in beancount 3)",
         "documents" => "Directories to search for documents",
-        "insert_pythonpath" => "Prepend the ledger's directory to the Python path",
+        "insert_pythonpath" => "Accepted for compatibility; no effect in rledger",
         "plugin_processing_mode" => "Plugin processing mode",
         "plugin" => "Use the plugin directive instead",
         _ => return None,

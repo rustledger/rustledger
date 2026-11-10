@@ -222,7 +222,8 @@ impl BoolVocabulary {
 /// currency `A:B`), and the number is digits and dots only, so a sign is
 /// rejected (`USD:-0.01`). `.` does not match a newline, so the colon must be
 /// on the value's first line (`"A\nB:0.5"` is invalid). The number is then
-/// read with `D()`. Trailing whitespace is ignored, as there.
+/// read with `D()`. Trailing whitespace ([`is_python_space`]) is ignored, as
+/// beancount ignores everything after the number.
 ///
 /// Stricter than Python: beancount's `re.match` ignores whatever follows the
 /// number, so `USD:0.01abc` reads as `0.01 USD`. We reject other text after
@@ -251,7 +252,7 @@ fn parse_tolerance_map(value: &str) -> Result<(&str, Decimal), String> {
         .find(|c: char| !is_number_char(c))
         .unwrap_or(rest.len());
     let (number, trailing) = rest.split_at(end);
-    let trailing_text = trailing.trim_matches([' ', '\t', '\n', '\r']);
+    let trailing_text = trailing.trim_matches(is_python_space);
     if !trailing_text.is_empty() {
         return Err(format!(
             "Invalid value '{value}': unexpected text '{trailing_text}' after the number"
@@ -273,10 +274,11 @@ fn parse_tolerance_map(value: &str) -> Result<(&str, Decimal), String> {
 ///
 /// An empty value is 0. Otherwise commas and spaces are stripped (`D` treats
 /// them as thousands separators) and the rest is read as Python's `Decimal`
-/// reads a string: surrounding whitespace, a sign and an exponent are
-/// accepted, and every `_` is dropped wherever it sits (`1__0` is 10, `_1` is
-/// 1, `1._5` is 1.5, `1e_1` is 10); a value that is only underscores is
-/// invalid. A zero significand is 0 whatever its exponent (`0e100`).
+/// reads a string: surrounding whitespace ([`is_python_space`]), a sign and an
+/// exponent are accepted, and every `_` is dropped wherever it sits (`1__0`
+/// is 10, `_1` is 1, `1._5` is 1.5, `1e_1` is 10); a value that is only
+/// underscores is invalid. A zero significand is 0 whatever its exponent
+/// (`0e100`), within the exponents Python can build.
 ///
 /// Not fixable locally: Python's `Decimal` also reads `NaN`, `sNaN` and
 /// `Infinity`, and non-ASCII decimal digits (`"١"` and `"１"` are 1), all
@@ -289,7 +291,7 @@ fn parse_beancount_decimal(value: &str) -> Result<Decimal, String> {
         .chars()
         .filter(|c| !matches!(c, ',' | ' ' | '_'))
         .collect();
-    let text = cleaned.trim();
+    let text = cleaned.trim_matches(is_python_space);
     let unsigned = text.trim_start_matches(['+', '-']);
     if ["nan", "snan", "inf", "infinity"]
         .iter()
@@ -317,17 +319,60 @@ fn parse_beancount_decimal(value: &str) -> Result<Decimal, String> {
     };
     let not_held =
         || format!("Invalid value '{value}': it cannot be held exactly by rustledger's decimal");
-    // Zero at any exponent is zero, as `Decimal("0e100")` is.
+    let exponent = match exponent {
+        Some(e) => Some(parse_exponent(e).ok_or_else(not_held)?),
+        None => None,
+    };
+    // Zero at any exponent is zero, as `Decimal("0e100")` is, as long as
+    // Python can build that exponent: its context allows a final exponent
+    // from `MIN_ETINY` to `MAX_EMAX`, so `0e1000000000000000000` is an error
+    // in beancount and here.
     if digits.bytes().all(|b| b == b'0' || b == b'.') {
+        let places = digits.split_once('.').map_or(0, |(_, frac)| frac.len());
+        let places = i128::try_from(places).map_err(|_| not_held())?;
+        let final_exponent = exponent.unwrap_or(0) - places;
+        if !(PYTHON_MIN_ETINY..=PYTHON_MAX_EMAX).contains(&final_exponent) {
+            return Err(format!(
+                "Invalid value '{value}': the exponent is outside what beancount's \
+                 Decimal can build"
+            ));
+        }
         return Ok(Decimal::ZERO);
     }
-    let exponent = match exponent {
-        Some(e) => e.parse::<i64>().map_err(|_| not_held())?,
-        None => 0,
-    };
+    let exponent = i64::try_from(exponent.unwrap_or(0)).map_err(|_| not_held())?;
     let number = exact_decimal(digits, exponent).ok_or_else(not_held)?;
     Ok(if negative { -number } else { number })
 }
+
+/// `CPython`'s `decimal.MAX_EMAX` on a 64-bit build: the largest exponent a
+/// `Decimal` built from a string may have.
+const PYTHON_MAX_EMAX: i128 = 999_999_999_999_999_999;
+
+/// `CPython`'s `decimal.MIN_ETINY` on a 64-bit build: the smallest.
+const PYTHON_MIN_ETINY: i128 = -1_999_999_999_999_999_997;
+
+/// The value of an exponent written after `e` (an optional sign, then ASCII
+/// digits), or `None` when it is too long to be any exponent Python builds.
+/// Linear in its length: leading zeros are skipped once.
+fn parse_exponent(text: &str) -> Option<i128> {
+    let (negative, digits) = match text.strip_prefix('-') {
+        Some(rest) => (true, rest),
+        None => (false, text.strip_prefix('+').unwrap_or(text)),
+    };
+    let digits = digits.trim_start_matches('0');
+    if digits.len() > 30 {
+        return None;
+    }
+    let n: i128 = if digits.is_empty() {
+        0
+    } else {
+        digits.parse().ok()?
+    };
+    Some(if negative { -n } else { n })
+}
+
+/// The largest coefficient a `rust_decimal::Decimal` holds: 2^96 - 1.
+const DECIMAL_MAX_MANTISSA: i128 = 79_228_162_514_264_337_593_543_950_335;
 
 /// The exact value of `digits` (ASCII digits with at most one `.`, at least
 /// one digit, no sign) times `10^exponent`, or `None` when a
@@ -338,34 +383,60 @@ fn parse_beancount_decimal(value: &str) -> Result<Decimal, String> {
 /// 28 to 29 significant digits) at a scale of at most 28. A value outside that
 /// range (`1e100`, `1e-29`) or needing more digits than it holds
 /// (`0.0000000000000000000000000000001`, which beancount holds as 1E-31) is
-/// rejected (E7002) rather than silently rounded. No real tolerance is. The
-/// written scale is kept where it fits, since `display_precision` reads it.
+/// rejected (E7002) rather than silently rounded. No real tolerance is.
+///
+/// The written scale is kept where it fits, since `display_precision` reads
+/// it: a trailing zero is dropped only while the scale is past 28 or the
+/// coefficient past 96 bits (`79228162514264337593543950335.0` is held). So
+/// `display_precision` reads at most 28 places, where beancount reads more.
+///
+/// Linear in the input's length: the value is untrusted ledger text, read on
+/// every LSP edit, so no step may rescan it per digit.
 fn exact_decimal(digits: &str, exponent: i64) -> Option<Decimal> {
     let (int_part, frac_part) = digits.split_once('.').unwrap_or((digits, ""));
-    let mut coefficient: String = format!("{int_part}{frac_part}");
     let mut scale = i64::try_from(frac_part.len()).ok()?.checked_sub(exponent)?;
-    // Drop trailing zeros only where the written form does not fit.
-    while (scale > 28 || coefficient.trim_start_matches('0').len() > 38)
-        && coefficient.len() > 1
-        && coefficient.ends_with('0')
-    {
-        coefficient.pop();
-        scale -= 1;
-    }
-    let trimmed = coefficient.trim_start_matches('0');
-    if trimmed.len() > 38 {
+    let coefficient: Vec<u8> = int_part.bytes().chain(frac_part.bytes()).collect();
+    let Some(first) = coefficient.iter().position(|&b| b != b'0') else {
+        // Zero: keep the written scale, as far as a `Decimal` holds one.
+        return Decimal::try_from_i128_with_scale(0, u32::try_from(scale.clamp(0, 28)).ok()?).ok();
+    };
+    let significant = &coefficient[first..];
+    let trailing_zeros = significant.iter().rev().take_while(|&&b| b == b'0').count();
+    // Trailing zeros that must go before the rest can fit: the scale past
+    // 28, and the digits past the 29 a 96-bit coefficient can have.
+    let len = i64::try_from(significant.len()).ok()?;
+    let must_pop = scale.saturating_sub(28).max(len - 29).max(0);
+    if must_pop > i64::try_from(trailing_zeros).ok()? {
         return None;
     }
-    let mut n: i128 = if trimmed.is_empty() {
-        0
-    } else {
-        trimmed.parse().ok()?
-    };
+    let mut kept = significant.len() - usize::try_from(must_pop).ok()?;
+    scale -= must_pop;
+    let mut n: i128 = std::str::from_utf8(&significant[..kept])
+        .ok()?
+        .parse()
+        .ok()?;
+    // A 29-digit coefficient can still be past 96 bits: drop one more
+    // trailing zero while there is one and the scale allows it.
+    while n > DECIMAL_MAX_MANTISSA && scale > 0 && significant[kept - 1] == b'0' {
+        n /= 10;
+        kept -= 1;
+        scale -= 1;
+    }
     while scale < 0 {
         n = n.checked_mul(10)?;
         scale += 1;
     }
+    if n > DECIMAL_MAX_MANTISSA {
+        return None;
+    }
     Decimal::try_from_i128_with_scale(n, u32::try_from(scale).ok()?).ok()
+}
+
+/// Whether `c` is whitespace to Python's `str.isspace`, which `str.strip` and
+/// `Decimal(str)` strip: Unicode `White_Space` (what `char::is_whitespace`
+/// tests) plus the separators U+001C to U+001F.
+const fn is_python_space(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '\u{1c}'..='\u{1f}')
 }
 
 /// Whether `text` is one part of a Python decimal string (underscores
@@ -2421,6 +2492,90 @@ mod tests {
             ("-2.5e1", dec!(-25)),
         ] {
             assert_eq!(parse_beancount_decimal(value), Ok(expected), "{value:?}");
+        }
+    }
+
+    /// A value whose coefficient is past 96 bits only because of trailing
+    /// zeros is held, by dropping them: bean-check and main accept these.
+    #[test]
+    fn test_exact_decimal_drops_trailing_zeros_past_96_bits() {
+        use rust_decimal_macros::dec;
+        for (value, expected) in [
+            (
+                "1000000000000000000000000000.00",
+                dec!(1000000000000000000000000000),
+            ),
+            (
+                "10000000000000000000000000000.0",
+                dec!(10000000000000000000000000000),
+            ),
+            ("79228162514264337593543950335.0", Decimal::MAX),
+        ] {
+            assert_eq!(parse_beancount_decimal(value), Ok(expected), "{value}");
+            assert_eq!(
+                parse_tolerance_map(&format!("USD:{value}")),
+                Ok(("USD", expected)),
+                "{value}"
+            );
+        }
+        // Past 96 bits with no trailing zero to drop: not held.
+        assert!(parse_beancount_decimal("79228162514264337593543950336").is_err());
+    }
+
+    /// `exact_decimal` is linear in the value's length: the value is untrusted
+    /// ledger text, and the LSP reads it on every edit. A version that
+    /// rescanned the leading zeros per trailing zero took 30 s here.
+    #[test]
+    fn test_exact_decimal_is_linear_on_long_input() {
+        let zeros = "0".repeat(160_000);
+        let value = format!("USD:{zeros}1{zeros}");
+        let multiplier = format!("{zeros}1{zeros}");
+        let start = std::time::Instant::now();
+        assert!(parse_tolerance_map(&value).is_err());
+        assert!(parse_beancount_decimal(&multiplier).is_err());
+        let fraction = format!("USD:0.{zeros}");
+        assert_eq!(
+            parse_tolerance_map(&fraction).map(|(_, d)| d.scale()),
+            Ok(28)
+        );
+        assert!(
+            start.elapsed() < std::time::Duration::from_secs(2),
+            "took {:?}",
+            start.elapsed()
+        );
+    }
+
+    /// A zero is 0 at any exponent Python's `Decimal` can build, and an error
+    /// past that, as bean-check reports `0e99999999999999999999`.
+    #[test]
+    fn test_parse_beancount_decimal_zero_exponent_bounds() {
+        for value in ["0e999999999999999999", "0e-1000000000000000000", "0.00e100"] {
+            assert_eq!(parse_beancount_decimal(value), Ok(Decimal::ZERO), "{value}");
+        }
+        for value in ["0e1000000000000000000", "0e99999999999999999999"] {
+            assert!(parse_beancount_decimal(value).is_err(), "{value}");
+        }
+    }
+
+    /// Whitespace is Python's `str.isspace`, not only ASCII: `Decimal(str)`
+    /// strips it, and a tolerance map ignores it after the number.
+    #[test]
+    fn test_parse_beancount_decimal_strips_python_whitespace() {
+        use rust_decimal_macros::dec;
+        for value in ["\u{c}0.5\u{a0}", "\u{1c}0.5\u{1f}", "\t0.5\n", "1 000"] {
+            let expected = if value == "1 000" {
+                dec!(1000)
+            } else {
+                dec!(0.5)
+            };
+            assert_eq!(parse_beancount_decimal(value), Ok(expected), "{value:?}");
+        }
+        for value in ["USD:0.5\u{a0}", "USD:0.5\u{1c}", "USD:0.5\u{3000}"] {
+            assert_eq!(
+                parse_tolerance_map(value),
+                Ok(("USD", dec!(0.5))),
+                "{value:?}"
+            );
         }
     }
 

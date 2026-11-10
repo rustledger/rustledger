@@ -714,6 +714,11 @@ const CACHE_MAGIC: &[u8; 8] = b"RLEDGER\0";
 ///     after lexing (`E1005`). A v65 blob would keep serving such a file with
 ///     its old parse errors.
 ///
+/// v67: PARSER OUTPUT changed, no archived layout moved (#2910). A BOM (U+FEFF)
+///     inside a string literal or a comment, or glued into an account, is
+///     content, as in beancount, where it was a `BomInDirectiveBody` parse
+///     error. An older blob would keep serving such a file with that error.
+///
 /// v68: LOADER OUTPUT changed and ARCHIVED LAYOUT moved (#2911). An option
 ///     value its converter rejects (an invalid `name_*` root, `account_*` leaf,
 ///     `booking_method` or `plugin_processing_mode`) is reported and no longer
@@ -1547,6 +1552,8 @@ mod tests {
         // in it, so the arrays still hold.
         // v66 (#2906) lexes a non-ASCII account start; no archived encoding
         // moves, so the arrays still hold.
+        // v67 (#2910) keeps a BOM inside a string; no archived encoding
+        // moves, so the arrays still hold.
         // v68 (#2911) adds a field to `CachedOptions`; no `CostNumber`
         // encoding moves, so the arrays still hold.
         const FIXTURE_VERSION: u32 = 68;
@@ -1695,6 +1702,8 @@ mod tests {
         // v61 (#2835) moves the map that holds metadata values, not
         // `MetaValue` itself; the hash below is unchanged.
         // v66 (#2906) lexes a non-ASCII account start; the hash below is
+        // unchanged.
+        // v67 (#2910) keeps a BOM inside a string; the hash below is
         // unchanged.
         // v68 (#2911) adds a field to `CachedOptions`, not to `MetaValue`;
         // the hash below is unchanged.

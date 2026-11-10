@@ -412,6 +412,10 @@ use crate::types::{Error, LedgerOptions};
 /// v87: loader v66, PARSER OUTPUT changed (#2906). Any non-ASCII character
 /// starts an account component, as in beancount, so `Assets:٣Foo` is one
 /// account; an older blob would keep serving such a file with its old errors.
+/// v89: loader v67, PARSER OUTPUT changed (#2910). A BOM inside a string
+/// literal or a comment, or glued into an account, is content, as in
+/// beancount; an older blob would keep serving such a file with a
+/// `BomInDirectiveBody` error.
 /// v90: loader v68, LOADER OUTPUT changed (#2911). An option value its
 /// converter rejects is no longer applied, so the archived account-type names
 /// keep the default root and `Ledger`'s error list loses the errors the

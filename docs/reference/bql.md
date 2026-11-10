@@ -214,6 +214,25 @@ WHERE account ~ "Income" OR account ~ "Expenses"
 WHERE NOT account ~ "Equity"
 ```
 
+#### Long lists of alternatives
+
+An expression may nest only so deep: each operator on the way down counts
+one level and each bracket 12, up to 720, and brackets may nest 60 deep.
+Past that the query is refused with `expression nesting too deep`, at the
+place it passes the limit. A long chain of `OR`s (or `AND`s) counts every
+operator, so a generated filter of more than about 360
+`account = '...' OR ...` comparisons reaches it. bean-query runs such a
+chain; rledger refuses it. Say the alternatives as one `IN` list, whose
+elements cost nothing against the limit, or as one regular expression:
+
+```sql
+/* Instead of account = 'Assets:A' OR account = 'Assets:B' OR ... */
+WHERE account IN ('Assets:A', 'Assets:B', 'Assets:C')
+
+/* Instead of account ~ 'Food' OR account ~ 'Travel' OR ... */
+WHERE account ~ 'Food|Travel|Books'
+```
+
 ### NULL Checks
 
 ```sql

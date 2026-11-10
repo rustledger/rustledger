@@ -162,3 +162,73 @@ fn test_is_stray_bom_at_finds_bom_inside_longer_error_token() {
         }
     }
 }
+
+/// A BOM-led invalid token where a directive's argument or account belongs
+/// is that directive's one error, as bean-check's one `Invalid token` (for
+/// an account position bean-check reads the BOM into the account and rejects
+/// the name when it loads; here it is one `BomInDirectiveBody` too). The
+/// directive's own line error stands for the token, under the BOM diagnostic,
+/// and is not reported twice.
+#[test]
+fn test_parse_bom_led_argument_of_directive_is_one_error() {
+    for line in [
+        format!("2024-01-02 balance Assets:A 0 {BOM}USD"),
+        format!("2024-01-02 balance Assets:A {BOM}0 USD"),
+        format!("2024-01-02 price USD 1 {BOM}EUR"),
+        format!("2024-01-02 price {BOM}USD 1 EUR"),
+        format!("2024-01-02 commodity {BOM}EUR"),
+        format!("2024-01-02 note Assets:A {BOM}\"x\""),
+        format!("2024-01-02 event {BOM}\"t\" \"v\""),
+        format!("2024-01-02 event \"t\" {BOM}\"v\""),
+        format!("2024-01-02 document Assets:A {BOM}\"f.pdf\""),
+        format!("2024-01-02 custom {BOM}\"budget\" 1"),
+        format!("2024-01-02 query {BOM}\"q\" \"select\""),
+        format!("2024-01-02 query \"q\" {BOM}\"select\""),
+        format!("2024-01-02 open {BOM}Assets:C"),
+        format!("2024-01-02 open\t{BOM}Assets:C"),
+        format!("2024-01-02 close {BOM}Assets:A"),
+        format!("2024-01-02 pad {BOM}Assets:A Assets:B"),
+        format!("2024-01-02 pad Assets:A {BOM}Assets:B"),
+        format!("2024-01-02 balance {BOM}Assets:A 0 USD"),
+        format!("2024-01-02 note {BOM}Assets:A \"x\""),
+    ] {
+        let src = format!("{HEAD}{line}\n");
+        let result = parse_both(&src);
+        assert_eq!(result.errors.len(), 1, "{src:?}: {:?}", result.errors);
+        assert_eq!(bom_errors(&result), 1, "{src:?}: {:?}", result.errors);
+        // The two `open`s are kept; the broken directive is not.
+        assert_eq!(
+            result.directives.len(),
+            2,
+            "{src:?}: {:?}",
+            result.directives
+        );
+        // The quick fix still finds the BOM, inside the line's error span.
+        let at = src.find(BOM).expect("a BOM");
+        assert!(result.is_stray_bom_at(at), "{src:?}");
+    }
+}
+
+/// The secondary BOM error after an invalid account stands for the line's
+/// first token with a stray BOM in it, whether the BOM leads that token or
+/// not, so a later BOM-led token keeps its own error: `Ü:A x<BOM>y <BOM>z`
+/// is three errors, as in bean-check.
+#[test]
+fn test_parse_secondary_bom_error_stands_for_first_bom_token_of_either_kind() {
+    let src = format!("Ü:A x{BOM}y {BOM}z\n");
+    let result = parse_both(&src);
+    assert_eq!(result.errors.len(), 3, "{:?}", result.errors);
+    assert_eq!(bom_errors(&result), 1, "{:?}", result.errors);
+}
+
+/// The run stops at the next blank, as beancount's does: in
+/// `query "q" <BOM>"select 1"` it is `<BOM>"select`, and the `"` after the
+/// `1` is one more invalid token (an unterminated string here). Two errors,
+/// as in bean-check.
+#[test]
+fn test_parse_bom_led_run_stops_at_blank_inside_quotes() {
+    let src = format!("{HEAD}2024-01-02 query \"q\" {BOM}\"select 1\"\n");
+    let result = parse_both(&src);
+    assert_eq!(result.errors.len(), 2, "{:?}", result.errors);
+    assert_eq!(bom_errors(&result), 1, "{:?}", result.errors);
+}

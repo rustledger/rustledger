@@ -1112,8 +1112,8 @@ pub const fn booking_sort_key(d: &Directive) -> (NaiveDate, DirectivePriority) {
 
 /// Beancount's `entry_sortkey`, `(date, SORT_ORDER, lineno)`.
 ///
-/// `position` stands for the line: the directive's place in its source
-/// (file id, then offset), or its place in the input when it has none.
+/// `lineno` is the directive's line in its source, whichever file that is,
+/// and 0 for one a plugin made, as beancount numbers them.
 ///
 /// `SORT_ORDER` is `{Open: -2, Balance: -1, Document: 1, Close: 2}` and `0`
 /// for every other type, the `pad` included. [`booking_sort_key`] differs
@@ -1123,10 +1123,7 @@ pub const fn booking_sort_key(d: &Directive) -> (NaiveDate, DirectivePriority) {
 /// beancount's `realization.postings_by_account` first meets each account,
 /// this is the key.
 #[must_use]
-pub const fn beancount_entry_sort_key(
-    d: &Directive,
-    position: (u16, usize),
-) -> (NaiveDate, i8, u16, usize) {
+pub const fn beancount_entry_sort_key(d: &Directive, lineno: usize) -> (NaiveDate, i8, usize) {
     let order = match d {
         Directive::Open(_) => -2,
         Directive::Balance(_) => -1,
@@ -1134,7 +1131,7 @@ pub const fn beancount_entry_sort_key(
         Directive::Close(_) => 2,
         _ => 0,
     };
-    (d.date(), order, position.0, position.1)
+    (d.date(), order, lineno)
 }
 
 /// A transaction directive.
@@ -2737,14 +2734,10 @@ mod tests {
         ));
         let close = Directive::Close(Close::new(day, "Assets:A"));
         assert!(booking_sort_key(&pad) < booking_sort_key(&note));
-        assert!(beancount_entry_sort_key(&note, (0, 1)) < beancount_entry_sort_key(&pad, (0, 2)));
-        assert!(beancount_entry_sort_key(&pad, (0, 1)) < beancount_entry_sort_key(&note, (0, 2)));
-        assert!(
-            beancount_entry_sort_key(&open, (0, 9)) < beancount_entry_sort_key(&balance, (0, 1))
-        );
-        assert!(
-            beancount_entry_sort_key(&balance, (0, 9)) < beancount_entry_sort_key(&note, (0, 1))
-        );
-        assert!(beancount_entry_sort_key(&note, (0, 9)) < beancount_entry_sort_key(&close, (0, 1)));
+        assert!(beancount_entry_sort_key(&note, 1) < beancount_entry_sort_key(&pad, 2));
+        assert!(beancount_entry_sort_key(&pad, 1) < beancount_entry_sort_key(&note, 2));
+        assert!(beancount_entry_sort_key(&open, 9) < beancount_entry_sort_key(&balance, 1));
+        assert!(beancount_entry_sort_key(&balance, 9) < beancount_entry_sort_key(&note, 1));
+        assert!(beancount_entry_sort_key(&note, 9) < beancount_entry_sort_key(&close, 1));
     }
 }

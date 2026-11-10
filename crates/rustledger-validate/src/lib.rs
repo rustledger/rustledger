@@ -202,6 +202,39 @@ pub struct ValidationOptions {
     /// re-raising the very `NoMatchingLot`/`AmbiguousMatch` errors
     /// the booker just decided to skip under `NONE` (issue #1182).
     pub default_booking_method: BookingMethod,
+    /// The source line of a located directive, from its file id and byte
+    /// offset, for beancount's entry order (`(date, type, lineno)`), which
+    /// decides the order a pad group meets its accounts and so the order of
+    /// tied positions in an "Attempt to pad an entry with cost" (#2901). A
+    /// synthesized directive is line 0, as beancount gives a plugin's entry.
+    /// Without it, a located directive's byte offset stands in, which orders
+    /// one file's directives as their lines do.
+    pub source_lines: Option<SourceLines>,
+}
+
+/// A directive's source line from its file id and byte offset; see
+/// [`ValidationOptions::source_lines`].
+#[derive(Clone)]
+pub struct SourceLines(std::sync::Arc<dyn Fn(u16, usize) -> usize + Send + Sync>);
+
+impl SourceLines {
+    /// Wrap `line_of`, which gives the line of byte `offset` of file `file_id`
+    /// (0 for a directive no file holds).
+    pub fn new(line_of: impl Fn(u16, usize) -> usize + Send + Sync + 'static) -> Self {
+        Self(std::sync::Arc::new(line_of))
+    }
+
+    /// The line of byte `offset` of file `file_id`.
+    #[must_use]
+    pub fn line(&self, file_id: u16, offset: usize) -> usize {
+        (self.0)(file_id, offset)
+    }
+}
+
+impl std::fmt::Debug for SourceLines {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("SourceLines(..)")
+    }
 }
 
 impl Default for ValidationOptions {
@@ -225,6 +258,7 @@ impl Default for ValidationOptions {
             tolerance_multiplier: Decimal::new(5, 1), // 0.5
             inferred_tolerance_default: FxHashMap::default(),
             default_booking_method: BookingMethod::default(),
+            source_lines: None,
         }
     }
 }
@@ -311,6 +345,13 @@ impl ValidationOptions {
     #[must_use]
     pub const fn with_default_booking_method(mut self, method: BookingMethod) -> Self {
         self.default_booking_method = method;
+        self
+    }
+
+    /// Set [`Self::source_lines`].
+    #[must_use]
+    pub fn with_source_lines(mut self, source_lines: SourceLines) -> Self {
+        self.source_lines = Some(source_lines);
         self
     }
 }
@@ -817,14 +858,26 @@ fn validate_phase_inner<D: ValidatableDirective>(
             .iter()
             .any(|(_, _, d)| matches!(d.directive(), Directive::Pad(_)))
     {
+        // Each directive's line, as beancount's entry order reads it
+        // (`ValidationOptions::source_lines`). Without the lines, a source
+        // directive's byte offset stands in (it orders one file as its lines
+        // do) and any other located directive (a plugin's) is line 0, as
+        // beancount numbers it; one with no location keeps its place.
+        let lines = state.options.source_lines.clone();
         let plan = rustledger_booking::plan_pads(
             keyed.iter().map(|(_, i, d)| {
-                // Its source location, as beancount's entry order reads the
-                // line; its place in the stream without one.
-                let position = d
-                    .span_info()
-                    .map_or((0, *i), |(span, file_id)| (file_id, span.start));
-                (*i, d.directive(), position)
+                let line = d.span_info().map_or(*i, |(span, file_id)| {
+                    lines.as_ref().map_or(
+                        if rustledger_core::is_source_file_id(file_id) {
+                            // After line 0, as any source line is.
+                            span.start + 1
+                        } else {
+                            0
+                        },
+                        |lines| lines.line(file_id, span.start),
+                    )
+                });
+                (*i, d.directive(), line)
             }),
             state.options.tolerance_multiplier,
         );

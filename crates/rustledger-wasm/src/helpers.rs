@@ -487,26 +487,41 @@ pub fn spanned_directives(
 }
 
 /// The pad expansion every WASM surface answers with: `directives` padded
-/// with their kept spans as source locations
+/// with each one's line as beancount numbers it
 /// ([`rustledger_booking::process_pads_at`]), so an "Attempt to pad an entry
-/// with cost" lists tied positions in the order `rledger check` does
-/// (#2901). A ledger restored from a cache whose spans were not kept has
-/// none, and pads by its stream order.
+/// with cost" lists tied positions in the order the validation does
+/// (#2901). `lines` runs parallel to `directives`: [`offset_lines`] for one
+/// source, a loaded ledger's own lines for several. A ledger restored from a
+/// cache that kept neither pads by its stream order.
 #[must_use]
 pub fn pad_expansion(
     directives: &[Directive],
-    spans: &[DirectiveSpan],
+    lines: &[usize],
     tolerance_multiplier: rustledger_core::Decimal,
 ) -> rustledger_booking::PadResult {
-    if spans.len() == directives.len() {
-        let positions: Vec<rustledger_booking::SourcePosition> = spans
-            .iter()
-            .map(|(span, file_id)| (*file_id, span.start))
-            .collect();
-        rustledger_booking::process_pads_at(directives, &positions, tolerance_multiplier)
+    if lines.len() == directives.len() {
+        rustledger_booking::process_pads_at(directives, lines, tolerance_multiplier)
     } else {
         rustledger_booking::process_pads(directives, tolerance_multiplier)
     }
+}
+
+/// The lines [`pad_expansion`] reads for one source, from the kept spans,
+/// as the validator reads them without a line table: a source directive's
+/// byte offset (after line 0; it orders one file as its lines do), and 0
+/// for a plugin's directive, as beancount numbers it.
+#[must_use]
+pub fn offset_lines(spans: &[DirectiveSpan]) -> Vec<usize> {
+    spans
+        .iter()
+        .map(|(span, file_id)| {
+            if rustledger_core::is_source_file_id(*file_id) {
+                span.start + 1
+            } else {
+                0
+            }
+        })
+        .collect()
 }
 
 /// The source map a query over an unnamed in-memory source reads its source

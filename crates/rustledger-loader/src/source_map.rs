@@ -293,7 +293,7 @@ impl SourceFile {
     }
 
     /// The line-start table, built on first use.
-    fn line_starts(&self) -> &[usize] {
+    pub(crate) fn line_starts(&self) -> &[usize] {
         self.line_starts
             .get_or_init(|| line_starts_of(&self.source))
     }

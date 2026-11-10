@@ -484,7 +484,6 @@ fn load_result(
             loaded.directives,
             loaded.directive_lines,
             &0u32,
-            ffi::helpers::line_position,
             loaded.tolerance_multiplier,
         )
     } else {
@@ -1158,7 +1157,6 @@ pub fn load_file(
                     directives,
                     tags,
                     &(0u32, "<synthesized>".to_string()),
-                    ffi::helpers::file_line_position(&fl.source_map),
                     tolerance_multiplier,
                 );
                 let (lines, files): (Vec<u32>, Vec<String>) = tags.into_iter().unzip();

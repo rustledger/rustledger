@@ -425,12 +425,13 @@ use crate::types::{Error, LedgerOptions};
 /// old names, errors and answers.
 /// v91: loader v68, unchanged. ARCHIVED LAYOUT moved: the `Ledger` payload
 /// gained `tolerance_multiplier`, which the padding a query inserts measures a
-/// balance's tolerance with (#2901); an older blob has no such field. And
-/// `Ledger`'s error list moves: a pad pads for a balance on a sub-account and
-/// counts only its own padding, a difference within the balance's tolerance
-/// is not padded (an `Unused Pad entry`), and padding a currency held at cost
-/// is `E2005`. A `ParsedLedger` validates with its spans, so its errors
-/// carry their own lines rather than their date's first line.
+/// balance's tolerance with, and `directive_lines`, each directive's line for
+/// the pad expansion's entry order (#2901); an older blob has neither. And
+/// both payloads' error lists move: a pad pads for a balance on a sub-account
+/// and counts only its own padding, a difference within the balance's
+/// tolerance is not padded (an `Unused Pad entry`), and padding a currency
+/// held at cost is `E2005`; a `ParsedLedger`'s validation errors also carry
+/// their own lines, columns and spans, as it validates with its spans.
 /// (v88 was never released: #2920 held it before #2926 took v89.)
 pub const CACHE_VERSION: u32 = 91;
 
@@ -522,6 +523,10 @@ pub struct LedgerPayload {
     /// the padding a query inserts measures a balance's tolerance with
     /// (#2901). A string for the same reason as above.
     pub tolerance_multiplier: String,
+    /// Each directive's line as beancount numbers it, parallel to
+    /// `directives`, for the pad expansion's entry order (#2901): a restored
+    /// ledger has no spans to read them from.
+    pub directive_lines: Vec<u32>,
     /// `[previous_balances, previous_earnings, previous_conversions,
     /// current_earnings, current_conversions, conversion_currency]`, what
     /// `FROM ... OPEN ON / CLOSE / CLEAR` summarize into (#2401, #2406). Plain
@@ -883,6 +888,7 @@ mod tests {
             ],
             booking_method: "NONE".to_string(),
             tolerance_multiplier: "0.25".to_string(),
+            directive_lines: Vec::new(),
             summary_account_names: vec![
                 "Eigenkapital:Anfang".to_string(),
                 "Eigenkapital:Vorjahr".to_string(),
@@ -963,6 +969,7 @@ option "operating_currency" "USD"
             account_type_names: Vec::new(),
             booking_method: "STRICT".to_string(),
             tolerance_multiplier: "0.5".to_string(),
+            directive_lines: Vec::new(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
             query_refused: false,
@@ -989,6 +996,7 @@ option "operating_currency" "USD"
             account_type_names: Vec::new(),
             booking_method: "STRICT".to_string(),
             tolerance_multiplier: "0.5".to_string(),
+            directive_lines: Vec::new(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
             query_refused: false,
@@ -1033,6 +1041,7 @@ option "operating_currency" "USD"
             account_type_names: Vec::new(),
             booking_method: "STRICT".to_string(),
             tolerance_multiplier: "0.5".to_string(),
+            directive_lines: Vec::new(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
             query_refused: false,

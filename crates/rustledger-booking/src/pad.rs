@@ -688,12 +688,12 @@ pub struct UnusedPad {
     pub target: Account,
 }
 
-/// Where a directive sits in its source.
+/// A directive's line in its source, as beancount numbers it.
 ///
-/// It stands for beancount's line number in
-/// [`rustledger_core::beancount_entry_sort_key`]: its file id and byte
-/// offset, or `(0, its index in the input)` when it carries none.
-pub type SourcePosition = (u16, usize);
+/// [`rustledger_core::beancount_entry_sort_key`] reads it: the line in its
+/// file, whichever file that is, 0 for a directive a plugin made, or the
+/// directive's place in the input when it has no location.
+pub type SourcePosition = usize;
 
 /// Compute the padding for `sorted`, beancount's rule.
 ///
@@ -712,7 +712,7 @@ pub type SourcePosition = (u16, usize);
 ///
 /// The walk is the booking order; the order accounts are first met in,
 /// which decides the order a transaction's postings enter a group, is
-/// beancount's entry order instead (by the positions), as its
+/// beancount's entry order instead (by the lines), as its
 /// `realization.postings_by_account` meets them.
 pub fn plan_pads<'a, I>(sorted: I, tolerance_multiplier: Decimal) -> PadPlan
 where
@@ -916,15 +916,15 @@ where
 /// in the input stands for its line, which is right for a stream in source
 /// order (a parse). A surface reporting those errors from a stream in
 /// booking order (a loaded ledger, which puts a `pad` ahead of the same
-/// date's notes and transactions) passes the real locations instead, through
-/// [`process_pads_spanned`] or [`process_pads_at`], so it answers as the
+/// date's notes and transactions) passes the real lines instead, through
+/// [`process_pads_at`], so it answers as the
 /// validator does.
 pub fn process_pads(directives: &[Directive], tolerance_multiplier: Decimal) -> PadResult {
     process_entries(
         directives
             .iter()
             .enumerate()
-            .map(|(i, d)| (i, d, (0, i)))
+            .map(|(i, d)| (i, d, i))
             .collect(),
         tolerance_multiplier,
     )
@@ -932,9 +932,9 @@ pub fn process_pads(directives: &[Directive], tolerance_multiplier: Decimal) -> 
 
 /// [`process_pads`] with each directive's [`SourcePosition`].
 ///
-/// `positions` runs parallel to `directives`, for a caller that keeps
-/// locations beside plain directives (the FFI's lines and files, the WASM
-/// ledgers' spans).
+/// `positions` (each directive's line) runs parallel to `directives`, for a
+/// caller that reports these errors and keeps locations beside plain
+/// directives (the WASM ledgers).
 ///
 /// # Panics
 ///
@@ -962,30 +962,7 @@ pub fn process_pads_at(
     )
 }
 
-/// [`process_pads`] for directives that carry their source location.
-///
-/// The location stands for the line in beancount's entry order
-/// ([`rustledger_core::beancount_entry_sort_key`]): a same-date `pad` and
-/// `note` meet their accounts in the order they were written, wherever the
-/// booking order puts the pad. [`merge_with_padding_spanned`] pads through
-/// it.
-#[must_use]
-pub fn process_pads_spanned(
-    directives: &[Spanned<Directive>],
-    tolerance_multiplier: Decimal,
-) -> PadResult {
-    process_entries(
-        directives
-            .iter()
-            .enumerate()
-            .map(|(i, s)| (i, &s.value, (s.file_id, s.span.start)))
-            .collect(),
-        tolerance_multiplier,
-    )
-}
-
-/// The one body of [`process_pads`], [`process_pads_at`] and
-/// [`process_pads_spanned`].
+/// The one body of [`process_pads`] and [`process_pads_at`].
 fn process_entries(
     mut sorted: Vec<(usize, &Directive, SourcePosition)>,
     tolerance_multiplier: Decimal,
@@ -1355,7 +1332,10 @@ pub fn merge_with_padding_spanned(
          re-running would double-count pad effects",
     );
 
-    let result = process_pads_spanned(directives, tolerance_multiplier);
+    // Padding only (this merge discards errors), which never depends on the
+    // input order, so the plain computation serves.
+    let plain: Vec<Directive> = directives.iter().map(|s| s.value.clone()).collect();
+    let result = process_pads(&plain, tolerance_multiplier);
 
     // Placement via the shared [`merge_padding_into_sorted`]; located at the
     // pad and the balance it came from, as beancount locates them.
@@ -1619,7 +1599,7 @@ mod tests {
         let mut sorted: Vec<(usize, &Directive, SourcePosition)> = directives
             .iter()
             .enumerate()
-            .map(|(i, d)| (i, d, (0, i)))
+            .map(|(i, d)| (i, d, i))
             .collect();
         sorted.sort_by_key(|(_, d, _)| rustledger_core::booking_sort_key(d));
         let plan = plan_pads(sorted, DEFAULT_TOLERANCE_MULTIPLIER);

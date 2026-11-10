@@ -207,7 +207,6 @@ fn the_pad_expanded_stream_is_also_globally_sorted() {
         loaded.directives,
         tags,
         &synth_tag,
-        rustledger_ffi_wasi::helpers::file_line_position(&loaded.source_map),
         loaded.tolerance_multiplier,
     );
 

@@ -358,18 +358,22 @@ impl Ledger {
     /// matters.
     #[must_use]
     pub fn balance_view(&self) -> Vec<Directive> {
-        // Call the canonical placement rule rather than re-deriving it, and
-        // through its spanned form: the source locations stand for the line
-        // in beancount's entry order, which decides the order a pad group
-        // meets its accounts (#2901). The spanned merge also refuses input
-        // that already holds synth pad transactions (a debug assertion).
-        rustledger_booking::merge_with_padding_spanned(
-            &self.directives,
+        let booked: Vec<Directive> = self.directives.iter().map(|s| s.value.clone()).collect();
+
+        // Call the canonical placement rule rather than re-deriving it.
+        // This used to inline the merge so `booked` could be moved instead of
+        // cloned a second time; `merge_with_padding_owned` gives the same
+        // saving without the copy. The copy had already drifted: it still
+        // prepended synths after the shared rule learned to place them
+        // relative to a same-date `Balance`.
+        debug_assert!(
+            !booked.iter().any(|d| matches!(d, Directive::Transaction(t) if rustledger_booking::is_synthesized_pad(t))),
+            "balance_view called on a Ledger whose directives already contain synth pad transactions",
+        );
+        rustledger_booking::merge_with_padding_owned(
+            booked,
             self.options.inferred_tolerance_multiplier,
         )
-        .into_iter()
-        .map(|s| s.value)
-        .collect()
     }
 }
 
@@ -2018,6 +2022,31 @@ pub fn document_root_warnings(
         .collect()
 }
 
+/// Each directive's line, as beancount numbers it.
+///
+/// For the validator's
+/// [`rustledger_validate::ValidationOptions::source_lines`]: the line of a
+/// byte offset in a loaded file, and 0 for any other file id (a plugin's
+/// placeholder or a synthesized directive), as beancount gives a plugin's
+/// entry line 0. Beancount's entry order reads this line whichever file it
+/// is in (#2901).
+#[cfg(feature = "validation")]
+#[must_use]
+pub fn source_lines(source_map: &SourceMap) -> rustledger_validate::SourceLines {
+    let tables: Vec<Vec<usize>> = source_map
+        .files()
+        .iter()
+        .map(|file| file.line_starts().to_vec())
+        .collect();
+    rustledger_validate::SourceLines::new(move |file_id, offset| {
+        // The first start is 0, so the count of starts at or before the
+        // offset is its 1-based line.
+        tables
+            .get(usize::from(file_id))
+            .map_or(0, |starts| starts.partition_point(|&start| start <= offset))
+    })
+}
+
 /// Per-`file_id` source-file directories, parallel to `source_map.files()`.
 ///
 /// Lets the validator resolve a relative `document` path against its own
@@ -2059,6 +2088,7 @@ fn build_validation_options(
             Some(base_dir),
         ))
         .with_default_booking_method(default_booking_method)
+        .with_source_lines(source_lines(source_map))
 }
 
 /// Where an error at byte `offset` of `file_id` is: the file, line and column

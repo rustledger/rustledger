@@ -35,6 +35,7 @@ fn build_validation_options_from_loader(
         rustledger_loader::SourceFile::dir,
     );
     rustledger_loader::validation_options_from_options(loader_options)
+        .with_source_lines(rustledger_loader::source_lines(source_map))
         .with_document_source_dirs(rustledger_loader::document_source_dirs(source_map))
         .with_document_roots(rustledger_loader::resolve_document_dirs(
             &loader_options.documents,

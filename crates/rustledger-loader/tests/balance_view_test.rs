@@ -299,3 +299,63 @@ fn test_loaded_pad_ranks_accounts_in_beancount_entry_order() {
         ]
     );
 }
+
+/// The "Attempt to pad an entry with cost" messages of the ledger at `path`.
+fn pad_at_cost_messages(path: &std::path::Path) -> Vec<String> {
+    let opts = LoadOptions {
+        validate: true,
+        ..Default::default()
+    };
+    let ledger = load(path, &opts).expect("load");
+    ledger
+        .errors
+        .iter()
+        .filter(|e| e.code == "E2005")
+        .map(|e| e.message.clone())
+        .collect()
+}
+
+const RANK_TAIL: &str =
+    "2024-02-01 * \"lot\"\n  Assets:A  10 STK {10 USD}\n  Assets:Cash  -100 USD\n";
+const RANK_END: &str = "2024-02-02 * \"g\"\n  Assets:A:C  1 CCC\n  Assets:A:D  1 DDD\n\
+    \x20 Equity:O  -1 CCC\n  Equity:O  -1 DDD\n2024-02-03 pad Assets:A Equity:O\n\
+    2024-02-10 balance Assets:A 11 STK\n";
+const D_FIRST: &str =
+    "Attempt to pad an entry with cost for balance: (1 DDD, 1 CCC, 10 STK {10 USD, 2024-02-01})";
+
+/// Beancount's entry order reads the line number whichever file it is in
+/// (#2901): `Assets:A:D` opened on line 1 of an included file comes before
+/// `Assets:A:C` opened on line 5 of the main file. bean-check 3.2.3 prints
+/// `(1 DDD, 1 CCC, ...)`.
+#[test]
+fn test_pad_ranks_accounts_by_line_across_files() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    // A long first line puts the open past the main file's `Assets:A:C` by
+    // byte offset, though not by line: only the line decides.
+    let long = format!("; {}\n2024-01-01 open Assets:A:D\n", "x".repeat(300));
+    std::fs::write(dir.path().join("inc.beancount"), long).expect("write");
+    let main = dir.path().join("main.beancount");
+    std::fs::write(
+        &main,
+        format!(
+            "include \"inc.beancount\"\n2024-01-01 open Assets:A\n2024-01-01 open Assets:Cash\n\
+             2024-01-01 open Equity:O\n2024-01-01 open Assets:A:C\n{RANK_TAIL}{RANK_END}"
+        ),
+    )
+    .expect("write");
+    assert_eq!(pad_at_cost_messages(&main), [D_FIRST]);
+}
+
+/// A plugin's entry has line 0 in beancount's entry order (#2901): the
+/// `open` `auto_accounts` makes for `Assets:A:D` comes before the written
+/// same-date `open` of `Assets:A:C`. bean-check 3.2.3 prints
+/// `(1 DDD, 1 CCC, ...)`.
+#[test]
+fn test_pad_ranks_a_plugins_open_first() {
+    let fixture = write_fixture(&format!(
+        "plugin \"beancount.plugins.auto_accounts\"\n2024-01-01 open Assets:A\n\
+         2024-01-01 open Assets:Cash\n2024-01-01 open Equity:O\n{RANK_TAIL}\
+         2024-02-02 open Assets:A:C\n{RANK_END}"
+    ));
+    assert_eq!(pad_at_cost_messages(fixture.path()), [D_FIRST]);
+}

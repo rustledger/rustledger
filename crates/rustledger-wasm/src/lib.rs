@@ -699,12 +699,13 @@ include "accounts.beancount"
 
     /// Drift guard (#2901): a same-date `note` written above a `pad` puts the
     /// pad's accounts after the note's in beancount's entry order, though the
-    /// booking order puts the pad first. Every surface that pads answers as
-    /// bean-check 3.2.3 does, `(1 CCC, 1 DDD, ...)`: the validator behind
-    /// `rledger check`, the WASM pad expansion, and the located
-    /// `process_pads_spanned` behind `balance_view`. The padding itself is
-    /// the same through `balance_view`, the WASM expansion and ffi-wasi's
-    /// `expand_pads`.
+    /// booking order puts the pad first. Every surface that reports it
+    /// answers as bean-check 3.2.3 does, `(1 CCC, 1 DDD, ...)`: `rledger
+    /// check`, the WASM `ParsedLedger`'s validation and `expandPads`, and the
+    /// multi-file `Ledger`'s errors and `expandPads`, before and after a
+    /// cache round trip. The padding itself is the same through
+    /// `balance_view` and the WASM expansions (and ffi-wasi's `expand_pads`
+    /// on a native build).
     #[test]
     fn test_pad_at_cost_ties_agree_across_surfaces() {
         use rustledger_core::Directive;
@@ -748,6 +749,13 @@ include "accounts.beancount"
                 })
                 .collect()
         };
+        let synths = |result: rustledger_booking::PadResult| -> Vec<Directive> {
+            result
+                .padding_transactions
+                .into_iter()
+                .map(Directive::Transaction)
+                .collect()
+        };
 
         // `rledger check`: the loader with validation.
         let mut vfs = VirtualFileSystem::new();
@@ -771,32 +779,20 @@ include "accounts.beancount"
             .map(|e| e.message.clone())
             .collect();
         assert_eq!(check, expected, "rledger check");
-
-        // `balance_view`'s located pad computation.
-        let located = rustledger_booking::process_pads_spanned(
-            &ledger.directives,
-            ledger.options.inferred_tolerance_multiplier,
-        );
-        assert_eq!(
-            at_cost(located.errors.iter().map(|e| e.message.clone()).collect()),
-            expected,
-            "process_pads_spanned"
-        );
         let view = padding(&ledger.balance_view());
 
-        // The WASM pad expansion (`expandPads`).
+        // The WASM `ParsedLedger`: its validation and `expandPads`.
         let load = helpers::load_and_book(source);
         let wasm = helpers::pad_expansion(
             &load.directives,
-            &load.directive_spans,
+            &helpers::offset_lines(&load.directive_spans),
             helpers::tolerance_multiplier_from_raw(&load.parse_result.options),
         );
         assert_eq!(
             at_cost(wasm.errors.iter().map(|e| e.message.clone()).collect()),
             expected,
-            "WASM expandPads"
+            "ParsedLedger expandPads"
         );
-        // The WASM ledgers' own validation (`getErrors`).
         assert_eq!(
             at_cost(
                 helpers::run_validation(&load)
@@ -805,25 +801,46 @@ include "accounts.beancount"
                     .collect(),
             ),
             expected,
-            "WASM validation"
+            "ParsedLedger validation"
         );
-        let wasm_padding: Vec<Directive> = wasm
-            .padding_transactions
-            .into_iter()
-            .map(Directive::Transaction)
-            .collect();
-        assert_eq!(padding(&wasm_padding), view, "WASM padding vs balance_view");
+        assert_eq!(padding(&synths(wasm)), view, "ParsedLedger padding");
 
-        // ffi-wasi's `expand_pads`.
-        let ffi = rustledger_ffi_wasi::helpers::load_source(source);
-        let (expanded, _) = rustledger_ffi_wasi::helpers::expand_pads(
-            ffi.directives,
-            ffi.directive_lines,
-            &0u32,
-            rustledger_ffi_wasi::helpers::line_position,
-            ffi.tolerance_multiplier,
-        );
-        assert_eq!(padding(&expanded), view, "ffi-wasi padding vs balance_view");
+        // The multi-file `Ledger`: its errors and `expandPads`, before and
+        // after a cache round trip.
+        let files: std::collections::HashMap<String, String> =
+            [("test.beancount".to_string(), source.to_string())].into();
+        let Ok(multi) = parsed_ledger::Ledger::from_file_map(files, "test.beancount") else {
+            panic!("the multi-file ledger loads");
+        };
+        let Ok(bytes) = multi.serialize() else {
+            panic!("the ledger serializes");
+        };
+        let Ok(restored) = parsed_ledger::Ledger::from_cache(&bytes) else {
+            panic!("the ledger restores");
+        };
+        for (name, ledger) in [("Ledger", &multi), ("restored Ledger", &restored)] {
+            assert_eq!(at_cost(ledger.error_messages()), expected, "{name} errors");
+            let result = ledger.pad_result();
+            assert_eq!(
+                at_cost(result.errors.iter().map(|e| e.message.clone()).collect()),
+                expected,
+                "{name} expandPads"
+            );
+            assert_eq!(padding(&synths(result)), view, "{name} padding");
+        }
+
+        // ffi-wasi's `expand_pads`, a native-only dependency.
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let ffi = rustledger_ffi_wasi::helpers::load_source(source);
+            let (expanded, _) = rustledger_ffi_wasi::helpers::expand_pads(
+                ffi.directives,
+                ffi.directive_lines,
+                &0u32,
+                ffi.tolerance_multiplier,
+            );
+            assert_eq!(padding(&expanded), view, "ffi-wasi padding");
+        }
     }
 
     /// Helper: process source through WASM pipeline and return directives.
@@ -1078,6 +1095,7 @@ option "operating_currency" "EUR"
             account_type_names: Vec::new(),
             booking_method: "STRICT".to_string(),
             tolerance_multiplier: "0.5".to_string(),
+            directive_lines: Vec::new(),
             summary_account_names: Vec::new(),
             errors: Vec::new(),
             query_refused: false,

@@ -166,7 +166,8 @@ fn test_is_stray_bom_at_finds_bom_inside_longer_error_token() {
 
 /// A BOM-led invalid token where a directive's argument belongs is that
 /// directive's one error, as bean-check's one `Invalid token` (a BOM-led
-/// account is an account; see `test_parse_bom_led_account_is_an_account`). The
+/// account keeps the account; see
+/// `test_parse_bom_glued_to_account_keeps_the_account`). The
 /// directive's own line error stands for the token, under the BOM diagnostic,
 /// and is not reported twice.
 #[test]
@@ -202,55 +203,49 @@ fn test_parse_bom_led_argument_of_directive_is_one_error() {
     }
 }
 
-/// A BOM glued to an account shape is an account in beancount, whose account
-/// type admits a non-ASCII first character, a BOM included: `<BOM>Assets:A`
-/// is one ACCOUNT there, and the BOM only makes its name invalid when the
-/// file loads. So it is here: no parse error, the directive is kept with the
-/// BOM in its account, and the account-name check reports it on load.
+/// A BOM glued to an account shape (`<BOM>Assets:A`) keeps its own extent in
+/// the middle of a line, as a line-start BOM does: it is reported as the
+/// stray BOM it is (`P0026`, whose quick fix removes it), and the account
+/// lexes as the account it names, so the directive keeps it. beancount reads
+/// the BOM into the account and rejects the name when it loads; on a line
+/// with another error the BOM adds no invalid token, as there.
 #[test]
-fn test_parse_bom_led_account_is_an_account() {
+fn test_parse_bom_glued_to_account_keeps_the_account() {
     for (line, account) in [
-        (
-            format!("2024-01-02 open {BOM}Assets:C"),
-            format!("{BOM}Assets:C"),
-        ),
-        (
-            format!("2024-01-02 open\t{BOM}Assets:C"),
-            format!("{BOM}Assets:C"),
-        ),
-        (
-            format!("2024-01-02 close {BOM}Assets:A"),
-            format!("{BOM}Assets:A"),
-        ),
-        (
-            format!("2024-01-02 pad {BOM}Assets:A Assets:B"),
-            format!("{BOM}Assets:A"),
-        ),
+        (format!("2024-01-02 open {BOM}Assets:C"), "Assets:C"),
+        (format!("2024-01-02 open\t{BOM}{BOM}Assets:C"), "Assets:C"),
+        (format!("2024-01-02 close {BOM}Assets:A"), "Assets:A"),
         (
             format!("2024-01-02 balance {BOM}Assets:A 0 USD"),
-            format!("{BOM}Assets:A"),
+            "Assets:A",
         ),
-        (
-            format!("2024-01-02 note {BOM}Ü:A \"x\""),
-            format!("{BOM}Ü:A"),
-        ),
-        (format!("2024-01-02 close {BOM}1:A"), format!("{BOM}1:A")),
+        (format!("2024-01-02 note {BOM}Ü:A \"x\""), "Ü:A"),
     ] {
         let src = format!("{HEAD}{line}\n");
         let result = parse_both(&src);
-        assert!(result.errors.is_empty(), "{src:?}: {:?}", result.errors);
+        assert_eq!(result.errors.len(), 1, "{src:?}: {:?}", result.errors);
+        assert_eq!(bom_errors(&result), 1, "{src:?}: {:?}", result.errors);
         assert_eq!(result.directives.len(), 3, "{src:?}");
         let got = match &result.directives[2].value {
             Directive::Open(d) => d.account.to_string(),
             Directive::Close(d) => d.account.to_string(),
-            Directive::Pad(d) => d.account.to_string(),
             Directive::Balance(d) => d.account.to_string(),
             Directive::Note(d) => d.account.to_string(),
             other => panic!("{src:?}: {other:?}"),
         };
         assert_eq!(got, account, "{src:?}");
+        for (at, _) in src.match_indices(BOM) {
+            assert!(result.is_stray_bom_at(at), "{src:?}");
+        }
     }
-    // Not an account shape: still an invalid token.
+    // On an error line, the BOM is no invalid token of its own: `$x
+    // <BOM>Assets:A` is one error, as in bean-check.
+    for line in [format!("$x {BOM}Assets:A"), format!("{BOM}\t{BOM}Assets:A")] {
+        let src = format!("{HEAD}{line}\n");
+        let result = parse_both(&src);
+        assert_eq!(result.errors.len(), 1, "{src:?}: {:?}", result.errors);
+    }
+    // Not an account shape: an invalid run to the next blank.
     for line in [
         format!("2024-01-02 note Assets:A \"x\" {BOM}A"),
         format!("2024-01-02 note Assets:A \"x\" {BOM}USD"),

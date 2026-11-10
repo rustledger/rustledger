@@ -134,15 +134,17 @@ pub enum Token<'src> {
     /// (currency, number, date, keyword, tag, link, key) starts with a
     /// non-ASCII character, so a non-ASCII start is never ambiguous.
     ///
-    /// A BOM (U+FEFF) starts an account like any other non-ASCII character, as
-    /// in beancount, whose account type is `([A-Z]|{UTF-8-ONLY})...`:
-    /// `\u{feff}Assets:A` is one account token, and the account-name check
-    /// rejects it when the file loads, as beancount's `Invalid account name`
-    /// does (#2928). A BOM that is not followed by an account shape
-    /// (`\u{feff}USD`, `\u{feff}Assets:`) is an invalid token, its own
-    /// layout-transparent one at the start of a line
-    /// (`apply_err_layout_transparency`), and anywhere else a run to the next
-    /// blank.
+    /// One deliberate difference: a BOM (U+FEFF) does not START an account
+    /// here (it may continue one). beancount lexes `\u{feff}Assets:A` as one
+    /// account and rejects the name; here a BOM at the start of a line stays its
+    /// own layout-transparent error token (`apply_err_layout_transparency`), so
+    /// the directive of a concatenated file after it still parses, under the
+    /// `BomInDirectiveBody` diagnostic. Anywhere else it starts an invalid run
+    /// to the next blank (#2928), unless an account follows it: then the run
+    /// of BOMs is its own token there too, so it is reported as the stray BOM
+    /// it is, and the account lexes as one (`bom_run_before_account`).
+    /// beancount reads the BOMs into the account and rejects the name when it
+    /// loads.
     ///
     /// KNOWN SHARP EDGE: the non-ASCII range includes Unicode whitespace,
     /// control and line-separator characters (NBSP U+00A0, LINE SEPARATOR
@@ -156,7 +158,7 @@ pub enum Token<'src> {
     ///
     /// The account type prefix is validated later against options (`name_assets`, etc.).
     #[regex(
-        r"([A-Z]|[\x{80}-\x{10FFFF}])([A-Za-z0-9\-]|[\x{80}-\x{10FFFF}])*(:([A-Z0-9]|[\x{80}-\x{10FFFF}])([A-Za-z0-9\-]|[\x{80}-\x{10FFFF}])*)+"
+        r"([A-Z]|[\x{80}-\x{FEFE}\x{FF00}-\x{10FFFF}])([A-Za-z0-9\-]|[\x{80}-\x{10FFFF}])*(:([A-Z0-9]|[\x{80}-\x{10FFFF}])([A-Za-z0-9\-]|[\x{80}-\x{10FFFF}])*)+"
     )]
     Account(&'src str),
 
@@ -696,6 +698,39 @@ pub fn is_valid_account_name_strict(name: &str) -> bool {
         })
 }
 
+/// The length of the run of BOMs that starts `text`, when an account follows
+/// it directly (`\u{feff}Assets:A`): the account's own token is the next one
+/// the lexer reads there. `None` when `text` starts with no BOM, or no
+/// account follows its BOMs.
+///
+/// beancount reads such a run and its account as ONE account (its account
+/// type admits any non-ASCII first character, a BOM included) and rejects
+/// the name only when the file loads, so the BOMs are no invalid token of
+/// beancount's, and the account is one. Here the BOMs keep their own extent
+/// in the middle of a line too (the lexer's `Err` arm), so they are reported
+/// as the stray BOM they are (`BomInDirectiveBody`, which the "Remove BOM"
+/// quick fix acts on) and the account still lexes as one (#2928). Linear:
+/// it reads no further than the next blank, which an account never holds
+/// (so an unterminated `"` after the BOMs is not scanned to the end of the
+/// file).
+pub(crate) fn bom_run_before_account(text: &str) -> Option<usize> {
+    let after = text.trim_start_matches(crate::bom::BOM_CHAR);
+    let run = text.len() - after.len();
+    #[cfg(test)]
+    test_counters::ERROR_SCANNED_BYTES.with(|c| c.set(c.get() + run));
+    (run > 0 && starts_with_account(after)).then_some(run)
+}
+
+/// Whether the first token the lexer reads in `text` is an account. Reads no
+/// further than the next blank, which an account never holds (so an
+/// unterminated `"` is not scanned to the end of the file).
+pub(crate) fn starts_with_account(text: &str) -> bool {
+    let word = &text[..text.find([' ', '\t', '\r', '\n']).unwrap_or(text.len())];
+    #[cfg(test)]
+    test_counters::ERROR_SCANNED_BYTES.with(|c| c.set(c.get() + word.len()));
+    matches!(Token::lexer(word).next(), Some(Ok(Token::Account(_))))
+}
+
 /// Whether `name` lexes to exactly one [`Token::Account`] spanning it.
 fn lexes_as_one_account(name: &str) -> bool {
     let mut lexer = Token::lexer(name);
@@ -1022,6 +1057,10 @@ pub(crate) mod test_counters {
         /// after a lone capital, on this thread.
         pub(crate) static CAPITAL_RUN_SCANNED_BYTES: std::cell::Cell<usize> =
             const { std::cell::Cell::new(0) };
+        /// Bytes logos scanned into the error spans the `Err` arm received,
+        /// and bytes `bom_run_before_account` looked at, on this thread.
+        pub(crate) static ERROR_SCANNED_BYTES: std::cell::Cell<usize> =
+            const { std::cell::Cell::new(0) };
     }
 }
 
@@ -1272,17 +1311,20 @@ impl<'src> Iterator for TokenIter<'src> {
                     // so the quote opens no string and the `#!` / `#+` starts
                     // no token of its own.
                     let text = &source[span.start..];
+                    #[cfg(test)]
+                    test_counters::ERROR_SCANNED_BYTES
+                        .with(|c| c.set(c.get() + (span.end - span.start)));
                     let bom_starts_line = text.starts_with(crate::bom::BOM_CHAR)
                         && self.at_line_start
                         && span.start == self.last_newline_end;
-                    let end = if bom_starts_line {
-                        // The BOM alone: logos may have scanned past it into
-                        // a failed account (`\u{feff}2024-01-02` is no
-                        // account, but a BOM may start one), and the rest is
-                        // lexed afresh.
-                        span.start + crate::bom::BOM_CHAR.len_utf8()
-                    } else if text.starts_with('\r') {
+                    let end = if text.starts_with('\r') || bom_starts_line {
                         span.end
+                    } else if let Some(run) = bom_run_before_account(text) {
+                        // A run of BOMs glued to an account
+                        // (`$x \u{feff}Assets:A`): the BOMs are one token of
+                        // their own, as the line-start ones are, and the
+                        // account lexes as one (`bom_run_before_account`).
+                        span.start + run
                     } else {
                         span.start + text.find([' ', '\t', '\r', '\n']).unwrap_or(text.len())
                     };
@@ -1981,6 +2023,50 @@ mod tests {
         );
     }
 
+    /// A long run of BOMs, at the start of a line or in the middle of one, and
+    /// glued to an invalid run or to an account, is lexed and parsed in linear time: no
+    /// BOM makes logos or the account lookahead rescan the BOMs after it, and
+    /// no restart sees the rest of the line again (#2928). A version that let
+    /// a BOM start an account scanned each line-start BOM through every BOM
+    /// after it, and a 1 MB line took over a minute.
+    #[test]
+    fn test_tokenize_long_bom_runs_are_linear() {
+        let bom = crate::bom::BOM;
+        // A short run first, so a quadratic version fails on the counts in a
+        // few seconds rather than running for minutes on the 1 MB one.
+        for count in [20_000, 350_000] {
+            let run = bom.repeat(count);
+            check_linear_bom_run(&[
+                format!("x\n{run}a\n"),
+                format!("x\n{run}Assets:A\n"),
+                format!("x {run}a\n"),
+                format!("x {run}Assets:A\n"),
+                format!("x\n{run} a\n"),
+            ]);
+        }
+    }
+
+    fn check_linear_bom_run(sources: &[String]) {
+        for source in sources {
+            test_counters::ERROR_SCANNED_BYTES.with(|c| c.set(0));
+            test_counters::RESTART_VISIBLE_BYTES.with(|c| c.set(0));
+            let tokens = tokenize_lossless(source);
+            assert!(!tokens.is_empty());
+            // The whole parse too: its error recovery asks about each BOM
+            // token, and a lookahead over the rest of the run per BOM was
+            // quadratic there while the lexer was linear.
+            let result = crate::parse(source);
+            assert!(!result.errors.is_empty());
+            let scanned = test_counters::ERROR_SCANNED_BYTES.with(std::cell::Cell::get);
+            let restarted = test_counters::RESTART_VISIBLE_BYTES.with(std::cell::Cell::get);
+            assert!(
+                scanned <= 8 * source.len() && restarted <= 8 * source.len(),
+                "{} bytes: {scanned} scanned in errors, {restarted} seen by restarts",
+                source.len()
+            );
+        }
+    }
+
     /// The error tokens of `source`, through the lossless (CST) tokenizer.
     fn error_tokens(source: &str) -> Vec<&str> {
         tokenize_lossless(source)
@@ -2488,10 +2574,8 @@ mod tests {
         // starts, which beancount rejects.
         assert!(ok("Assets:\u{65e5}\u{672c}")); // 日本 (Lo)
         assert!(ok("Assets:\u{1c5}")); // ǅ (Lt)
-        // A BOM starts an account, as in beancount, whose name check then
-        // rejects it (#2928); it may continue one too.
-        assert!(lexes_whole("\u{feff}Assets:A"));
-        assert!(!ok("\u{feff}Assets:A"));
+        // A BOM never starts an account (it stays its own error token).
+        assert!(!lexes_whole("\u{feff}Assets:A"));
         assert!(lexes_whole("Assets:A\u{feff}"));
     }
 

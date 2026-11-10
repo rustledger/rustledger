@@ -23,7 +23,7 @@
 use std::collections::BTreeMap;
 
 use rustledger_parser::cst::parse_red_only;
-use rustledger_parser::{__baseline_canonical_payload, parse};
+use rustledger_parser::{__baseline_canonical_payload, ParseErrorKind, parse};
 
 const DATA: &str = include_str!("data/bom_combination_matrix.tsv");
 const KNOWN: &str = include_str!("data/bom_combination_matrix_known.tsv");
@@ -34,10 +34,21 @@ const HEAD: &str = "2024-01-01 open Assets:A\\n2024-01-01 open Assets:B\\n";
 
 /// The causes a known difference may name. Each predates #2928.
 const CAUSES: &[&str] = &[
-    // A line that starts with a BOM breaks its transaction, and rledger
-    // reports each indented line after it, which beancount's recovery skips
-    // in silence (#2872).
-    "orphan-lines",
+    // An indented line in a block whose header or an earlier line beancount
+    // could not read (or which starts with a BOM): its recovery skips the line
+    // in silence, rledger reports it (#2872).
+    "indented-line-after-error",
+    // A line right after one beancount could not read: its recovery reports
+    // no grammar error there, rledger does (#2872).
+    "line-after-error-line",
+    // A `#!` or `#+` in the middle of a line: beancount lexes `#` and `!` /
+    // `+`, here it is one token to the end of the line (part 2 of #2928).
+    "mid-line-hash-bang",
+    // A BOM glued to an account (`$x <BOM>Assets:A`): beancount reads it into
+    // the account and rejects the name on load; rledger reports the stray BOM
+    // (`P0026`, with its quick fix), one error more than beancount's parse
+    // errors.
+    "bom-glued-to-account",
     // A run with a BOM inside it, on a line whose BOM diagnostic already
     // stands for the line's first error, is left to that diagnostic: one
     // error fewer than beancount. Reporting it fixes these, and 256 more
@@ -45,27 +56,31 @@ const CAUSES: &[&str] = &[
     // each a difference the old count happened to offset, so it is left for
     // a change of its own.
     "inner-bom-under-line-error",
-    // A line whose first token is a BOM that starts it, holding an invalid
-    // account, gets both the account's error and the BOM diagnostic, where
-    // beancount's one invalid token (the BOM's run) is all. Without the BOM
-    // the counts agree.
-    "account-after-line-start-bom",
-    // A date alone on a line: beancount reports its `unexpected EOL` on the
-    // next line. Nothing to do with BOMs; the matrix's date context has it.
-    "eol-reported-on-next-line",
-    // Further from beancount than main only because main miscounted the BOM:
-    // the same input with each BOM replaced by an ordinary character is
-    // counted the same way on main. Mostly a later grammar error after a
-    // line's first invalid token (`<BOM>12$ 2024-01-02 open Assets:C USD
-    // #tag`, as `$x 2024-01-02 ...` on main): beancount keeps parsing and
-    // reports it, rledger reports one diagnostic per line.
+    // Further from beancount than main on the line, only because main
+    // miscounted the BOM: the input with each BOM replaced by an ordinary
+    // character (`<BOM>` to `$`, and a BOM run glued to an account to `Ü`)
+    // is counted the same way on main. Mostly a later grammar error after the
+    // line's first invalid token, which beancount reports and rledger, one
+    // diagnostic per line, does not.
     "like-main-without-bom",
-    // An indented line right after a line beancount could not read: its
-    // recovery reports no grammar error there, rledger does (#2872).
-    "recovery-after-error-line",
-    // A random-probe or other row rledger counts no further from beancount
-    // than main does.
-    "no-worse-than-main",
+    // An invalid account after a BOM token on the line gets rledger's
+    // `P0006` as well as the BOM diagnostic, where beancount reports nothing
+    // more for the statement.
+    "invalid-account-after-invalid-token",
+    // beancount reports a later grammar error after the line's first error,
+    // rledger one diagnostic for the line.
+    "one-diagnostic-per-line",
+    // rledger reports one more construct-level error (a custom value, a
+    // price's link, a header's stray token, a pipe) on a line beancount's
+    // grammar abandons at its first error; the same on main.
+    "extra-construct-error",
+    // A `pushtag` / `pushmeta` line with junk after it: beancount never
+    // pushes, so it reports no unclosed push at the end of the file (line 0);
+    // rledger keeps the push.
+    "failed-push-still-pushed",
+    // A date alone on a line: beancount reports its `unexpected EOL` on the
+    // next line.
+    "eol-reported-on-next-line",
 ];
 
 /// A table source back to the input it stands for.
@@ -87,7 +102,18 @@ fn rledger_cells(src: &str) -> String {
     );
     let mut counts: BTreeMap<usize, usize> = BTreeMap::new();
     for e in &green.errors {
-        let line = src[..e.span.start.min(src.len())].matches('\n').count() + 1;
+        // A file-level error is line 0 on both sides, as in the parity
+        // harness (`RLEDGER_EOF_CODES`): beancount reports an unclosed
+        // `pushtag` / `pushmeta` there, rledger at the push.
+        let file_level = matches!(
+            e.kind,
+            ParseErrorKind::UnclosedPushtag(_) | ParseErrorKind::UnclosedPushmeta(_)
+        );
+        let line = if file_level {
+            0
+        } else {
+            src[..e.span.start.min(src.len())].matches('\n').count() + 1
+        };
         *counts.entry(line).or_default() += 1;
     }
     counts

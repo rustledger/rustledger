@@ -842,6 +842,8 @@ mod tests {
             "2024-01-02 * \"x\" \u{FEFF}#!d",
             "2024-01-02 * \"x\" \u{FEFF}#+x",
             "2024-01-02 * \"x\" x\u{FEFF}\"y\"",
+            "2024-01-02 open \u{FEFF}Assets:C",
+            "2024-01-02 open \u{FEFF}\u{FEFF}Assets:C",
         ] {
             let source = format!("{header}\n  Assets:A  1 USD\n  Assets:B\n");
             let result = parse(&source);

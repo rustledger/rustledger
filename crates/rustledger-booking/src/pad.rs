@@ -905,14 +905,58 @@ where
 ///
 /// `rustledger-validate` applies [`plan_pads`] output to its own booked
 /// inventories in its walk, at the pad (see [`PadPlan`]).
+///
+/// # What the input's order promises
+///
+/// The padding (which pads pad, by how much, dated where) never depends on
+/// the input's order. One thing in the errors does: the order of tied
+/// positions in an "Attempt to pad an entry with cost" message follows the
+/// order beancount first meets each account, which reads the line
+/// ([`rustledger_core::beancount_entry_sort_key`]). Here a directive's place
+/// in the input stands for its line, which is right for a stream in source
+/// order (a parse). A surface reporting those errors from a stream in
+/// booking order (a loaded ledger, which puts a `pad` ahead of the same
+/// date's notes and transactions) passes the real locations instead, through
+/// [`process_pads_spanned`] or [`process_pads_at`], so it answers as the
+/// validator does.
 pub fn process_pads(directives: &[Directive], tolerance_multiplier: Decimal) -> PadResult {
-    // No source locations: a directive's place in the input stands for its
-    // line in beancount's entry order.
     process_entries(
         directives
             .iter()
             .enumerate()
             .map(|(i, d)| (i, d, (0, i)))
+            .collect(),
+        tolerance_multiplier,
+    )
+}
+
+/// [`process_pads`] with each directive's [`SourcePosition`].
+///
+/// `positions` runs parallel to `directives`, for a caller that keeps
+/// locations beside plain directives (the FFI's lines and files, the WASM
+/// ledgers' spans).
+///
+/// # Panics
+///
+/// When `positions` is not as long as `directives`: the caller's parallel
+/// lists have come apart.
+#[must_use]
+pub fn process_pads_at(
+    directives: &[Directive],
+    positions: &[SourcePosition],
+    tolerance_multiplier: Decimal,
+) -> PadResult {
+    assert_eq!(
+        directives.len(),
+        positions.len(),
+        "process_pads_at: one position per directive"
+    );
+    process_entries(
+        directives
+            .iter()
+            .zip(positions)
+            .enumerate()
+            .map(|(i, (d, position))| (i, d, *position))
             .collect(),
         tolerance_multiplier,
     )
@@ -940,7 +984,8 @@ pub fn process_pads_spanned(
     )
 }
 
-/// The one body of [`process_pads`] and [`process_pads_spanned`].
+/// The one body of [`process_pads`], [`process_pads_at`] and
+/// [`process_pads_spanned`].
 fn process_entries(
     mut sorted: Vec<(usize, &Directive, SourcePosition)>,
     tolerance_multiplier: Decimal,

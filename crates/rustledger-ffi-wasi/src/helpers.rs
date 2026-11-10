@@ -357,18 +357,49 @@ pub struct FileLoad {
     pub loaded_files: Vec<String>,
 }
 
+/// The position of a directive tagged with its line in a single source.
+///
+/// For [`expand_pads`]: within one file the line orders directives as the
+/// byte offset the validator reads does.
+#[must_use]
+pub const fn line_position(line: &u32) -> rustledger_booking::SourcePosition {
+    (0, *line as usize)
+}
+
+/// The position of a directive tagged with its line and file.
+///
+/// For [`expand_pads`]: the file's id in `source_map`, as the loader numbers
+/// files, then the line. A file `source_map` does not hold (`<unknown>`, a
+/// plugin's placeholder) sorts after the real files.
+pub fn file_line_position(
+    source_map: &rustledger_loader::SourceMap,
+) -> impl Fn(&(u32, String)) -> rustledger_booking::SourcePosition + '_ {
+    move |(line, file)| {
+        let id = source_map
+            .files()
+            .iter()
+            .position(|f| f.path.display().to_string() == *file)
+            .and_then(|i| u16::try_from(i).ok())
+            .unwrap_or(u16::MAX);
+        (id, *line as usize)
+    }
+}
+
 /// Expand `pad` directives into synthesized `Padding` transactions for
 /// balance-computing consumers, preserving each directive's parallel tag
 /// (line, or line+file).
 ///
 /// Mirrors `Ledger::balance_view`, which merges via
-/// [`rustledger_booking::merge_with_padding_owned`]. This cannot call that
+/// [`rustledger_booking::merge_with_padding_spanned`]. This cannot call that
 /// directly: it carries a parallel tag per directive (line, or line+file), and
 /// a synth has no source location so it takes `synth_tag`. It therefore sorts
 /// the tagged pairs itself and places the synths with
 /// [`rustledger_booking::merge_padding_into_sorted`], the shared rule, not a
 /// second copy of it. An earlier copy here prepended the synths instead, and
 /// silently kept doing so after the shared rule changed.
+///
+/// `position_of` gives each tag's source location ([`line_position`],
+/// [`file_line_position`]), as the validator pads with its spans (#2901).
 ///
 /// Source-faithful callers skip this; only the `load`/`load-file` consumers
 /// that opt in (#1628) expand. The input must not already contain synth pad
@@ -378,10 +409,15 @@ pub fn expand_pads<T: Clone>(
     directives: Vec<Directive>,
     tags: Vec<T>,
     synth_tag: &T,
+    position_of: impl Fn(&T) -> rustledger_booking::SourcePosition,
     tolerance_multiplier: rustledger_core::Decimal,
 ) -> (Vec<Directive>, Vec<T>) {
-    let pads =
-        rustledger_booking::process_pads(&directives, tolerance_multiplier).padding_transactions;
+    // Each directive's location from its tag, as the validator and
+    // `balance_view` pad with theirs (#2901).
+    let positions: Vec<rustledger_booking::SourcePosition> =
+        tags.iter().map(&position_of).collect();
+    let pads = rustledger_booking::process_pads_at(&directives, &positions, tolerance_multiplier)
+        .padding_transactions;
     let mut pairs: Vec<(Directive, T)> = directives.into_iter().zip(tags).collect();
     pairs.sort_by_key(|(d, _)| d.date());
 
@@ -724,6 +760,7 @@ option \"operating_currency\" \"USD\"
             load.directives,
             load.directive_lines,
             &0u32,
+            line_position,
             load.tolerance_multiplier,
         );
         // Exactly one synthesized Padding transaction is inserted, tags aligned.
@@ -797,6 +834,7 @@ option \"operating_currency\" \"USD\"
             load.directives,
             load.directive_lines,
             &0u32,
+            line_position,
             load.tolerance_multiplier,
         );
 
@@ -827,6 +865,7 @@ option \"operating_currency\" \"USD\"
             load.directives,
             load.directive_lines,
             &0u32,
+            line_position,
             load.tolerance_multiplier,
         );
 
@@ -862,6 +901,7 @@ option \"operating_currency\" \"USD\"
             load.directives,
             load.directive_lines,
             &0u32,
+            line_position,
             load.tolerance_multiplier,
         );
 

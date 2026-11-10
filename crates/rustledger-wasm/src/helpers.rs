@@ -59,7 +59,9 @@ pub fn validation_error_to_wasm(
                 .or_else(|| e.context.clone()),
         )
         .with_file(file);
-    if let Some(span) = e.span {
+    // A span is a place in the one source text (file id 0) only; one a
+    // plugin's directive carries (a placeholder id) says nothing about it.
+    if let Some(span) = e.span.filter(|_| e.file_id.is_none_or(|id| id == 0)) {
         out = out.with_span(
             lookup.byte_to_line_col(span.start),
             lookup.byte_to_line_col(span.end),
@@ -288,9 +290,21 @@ pub fn run_validation(load: &ProcessedLedger) -> Vec<Error> {
     #[allow(clippy::unwrap_used)]
     let today = rustledger_core::naive_date(2999, 12, 31).unwrap();
     let session = ValidationSession::new(ValidationOptions::default());
-    let (session, mut errors) = session.run_early(&load.directives, today);
-    let (session, late_errs) = session.run_late(&load.directives, today);
-    errors.extend(late_errs);
+    // With the kept spans, as `rledger check` and the FFI validate: the pad
+    // rule reads them as beancount's line order, so an "Attempt to pad an
+    // entry with cost" lists tied positions as they do (#2901).
+    let (session, mut errors) = if load.directive_spans.len() == load.directives.len() {
+        let spanned = spanned_directives(&load.directives, &load.directive_spans);
+        let (session, mut errors) = session.run_early_spanned(&spanned, today);
+        let (session, late_errs) = session.run_late_spanned(&spanned, today);
+        errors.extend(late_errs);
+        (session, errors)
+    } else {
+        let (session, mut errors) = session.run_early(&load.directives, today);
+        let (session, late_errs) = session.run_late(&load.directives, today);
+        errors.extend(late_errs);
+        (session, errors)
+    };
     errors.extend(session.finalize());
 
     errors
@@ -470,6 +484,29 @@ pub fn spanned_directives(
     spans: &[DirectiveSpan],
 ) -> Vec<rustledger_core::Spanned<Directive>> {
     rustledger_query::executor::spanned_from_parts(directives, spans)
+}
+
+/// The pad expansion every WASM surface answers with: `directives` padded
+/// with their kept spans as source locations
+/// ([`rustledger_booking::process_pads_at`]), so an "Attempt to pad an entry
+/// with cost" lists tied positions in the order `rledger check` does
+/// (#2901). A ledger restored from a cache whose spans were not kept has
+/// none, and pads by its stream order.
+#[must_use]
+pub fn pad_expansion(
+    directives: &[Directive],
+    spans: &[DirectiveSpan],
+    tolerance_multiplier: rustledger_core::Decimal,
+) -> rustledger_booking::PadResult {
+    if spans.len() == directives.len() {
+        let positions: Vec<rustledger_booking::SourcePosition> = spans
+            .iter()
+            .map(|(span, file_id)| (*file_id, span.start))
+            .collect();
+        rustledger_booking::process_pads_at(directives, &positions, tolerance_multiplier)
+    } else {
+        rustledger_booking::process_pads(directives, tolerance_multiplier)
+    }
 }
 
 /// The source map a query over an unnamed in-memory source reads its source

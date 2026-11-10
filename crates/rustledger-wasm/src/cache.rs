@@ -429,7 +429,8 @@ use crate::types::{Error, LedgerOptions};
 /// `Ledger`'s error list moves: a pad pads for a balance on a sub-account and
 /// counts only its own padding, a difference within the balance's tolerance
 /// is not padded (an `Unused Pad entry`), and padding a currency held at cost
-/// is `E2005`.
+/// is `E2005`. A `ParsedLedger` validates with its spans, so its errors
+/// carry their own lines rather than their date's first line.
 /// (v88 was never released: #2920 held it before #2926 took v89.)
 pub const CACHE_VERSION: u32 = 91;
 

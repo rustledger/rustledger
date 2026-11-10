@@ -118,11 +118,10 @@ fn execute_query(
 
 fn execute_expand_pads(
     directives: &[Directive],
+    spans: &[crate::helpers::DirectiveSpan],
     tolerance_multiplier: rustledger_core::Decimal,
 ) -> Result<JsValue, JsError> {
-    use rustledger_booking::process_pads;
-
-    let pad_result = process_pads(directives, tolerance_multiplier);
+    let pad_result = crate::helpers::pad_expansion(directives, spans, tolerance_multiplier);
 
     let result = PadResult {
         // The source stream, verbatim — `process_pads` no longer
@@ -470,6 +469,7 @@ impl ParsedLedger {
         }
         execute_expand_pads(
             &self.directives,
+            &self.directive_spans,
             crate::helpers::tolerance_multiplier_from_raw(&self.parse_result.options),
         )
     }
@@ -911,7 +911,11 @@ impl Ledger {
     /// Expand pad directives.
     #[wasm_bindgen(js_name = "expandPads")]
     pub fn expand_pads(&self) -> Result<JsValue, JsError> {
-        execute_expand_pads(&self.directives, self.tolerance_multiplier)
+        execute_expand_pads(
+            &self.directives,
+            &self.directive_spans,
+            self.tolerance_multiplier,
+        )
     }
 
     /// Run a native plugin on this ledger.

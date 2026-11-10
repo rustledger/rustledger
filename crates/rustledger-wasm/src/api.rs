@@ -298,8 +298,6 @@ pub fn format(source: &str) -> Result<JsValue, JsError> {
 /// Returns directives with pad-generated transactions included.
 #[wasm_bindgen(js_name = "expandPads")]
 pub fn expand_pads(source: &str) -> Result<JsValue, JsError> {
-    use rustledger_booking::process_pads;
-
     let load = load_and_book(source);
 
     // Return early only on actual errors (parse/booking); warnings must not
@@ -316,9 +314,11 @@ pub fn expand_pads(source: &str) -> Result<JsValue, JsError> {
     // Carry non-fatal load warnings through to the result.
     let mut errors = load.reported_errors();
 
-    // Process pads
-    let pad_result = process_pads(
+    // Process pads, with the kept spans as source locations, as every WASM
+    // surface pads (`helpers::pad_expansion`).
+    let pad_result = crate::helpers::pad_expansion(
         &load.directives,
+        &load.directive_spans,
         crate::helpers::tolerance_multiplier_from_raw(&load.parse_result.options),
     );
     errors.extend(

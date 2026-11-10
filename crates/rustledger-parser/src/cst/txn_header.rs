@@ -60,6 +60,11 @@ pub(super) enum HeaderDefect {
     /// token only there, so `P"x"`, `P;c` and `P\r\n` are an invalid token
     /// (#2802).
     GluedLetterFlag,
+    /// No flag between the date and the first string, tag or link
+    /// (`2024-01-02 "x"`). beancount's `txn` is not optional, so this is
+    /// `syntax error, unexpected STRING` (or `TAG`, `LINK`) there (#2905).
+    /// Reported at that token.
+    MissingFlag,
 }
 
 /// Trivia and separators that may appear anywhere in a header.
@@ -155,6 +160,19 @@ where
             }
             continue;
         }
+        // beancount's `txn` is required: a header whose first string, tag or
+        // link comes straight after the date has no flag, and fails there
+        // (#2905). `parser::identify_directive` opens a transaction node on
+        // any of the three after the date, so the postings stay inside it.
+        if flags == 0
+            && !seen_header_content
+            && matches!(
+                kind,
+                SyntaxKind::STRING | SyntaxKind::TAG | SyntaxKind::LINK
+            )
+        {
+            return Some((HeaderDefect::MissingFlag, range));
+        }
         match kind {
             SyntaxKind::STRING => {
                 if seen_tag_or_link {
@@ -246,6 +264,10 @@ pub(super) fn defect_message(defect: HeaderDefect, text: &str) -> String {
             "unexpected {text:?} in transaction header: a one-letter flag must be \
              followed by a space, as beancount reads it"
         ),
+        HeaderDefect::MissingFlag => format!(
+            "unexpected {text:?} in transaction header: a transaction needs a flag \
+             (`*` or `!`) or `txn` after the date"
+        ),
     }
 }
 
@@ -288,10 +310,12 @@ mod tests {
             ])),
             None
         );
-        // bare date + narration (flag implied)
+        // `txn` + narration
         assert_eq!(
             first_header_defect(toks(&[
                 (SyntaxKind::DATE, "2014-04-20"),
+                WS,
+                (SyntaxKind::TXN_KW, "txn"),
                 WS,
                 (SyntaxKind::STRING, "\"n\""),
             ])),
@@ -357,6 +381,31 @@ mod tests {
             ])),
             Some((HeaderDefect::UnexpectedToken, _))
         ));
+    }
+
+    /// #2905: beancount's `txn` is required, so a string, tag or link straight
+    /// after the date is a syntax error there, reported at that token.
+    #[test]
+    fn rejects_a_header_with_no_flag() {
+        for first in [
+            (SyntaxKind::STRING, "\"x\""),
+            (SyntaxKind::TAG, "#t"),
+            (SyntaxKind::LINK, "^l"),
+        ] {
+            let stream = toks(&[
+                (SyntaxKind::DATE, "2024-01-02"),
+                WS,
+                first,
+                WS,
+                (SyntaxKind::STRING, "\"y\""),
+            ]);
+            let at = stream[2].1.clone();
+            assert_eq!(
+                first_header_defect(stream),
+                Some((HeaderDefect::MissingFlag, at)),
+                "{first:?}"
+            );
+        }
     }
 
     /// #2008 case 3.

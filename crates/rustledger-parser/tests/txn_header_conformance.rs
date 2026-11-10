@@ -12,6 +12,7 @@
 //! machine that has not fetched it — the failure mode AGENTS.md calls out
 //! under "Availability-gated tests must fail loudly somewhere".
 
+use rustledger_parser::cst::parse_red_only;
 use rustledger_parser::parse;
 
 /// Every diagnostic the transaction-header rule can produce, so a test can
@@ -108,6 +109,136 @@ fn three_header_strings_are_rejected() {
     }
 }
 
+/// #2905: beancount's `txn` (a flag or the `txn` keyword) is required after
+/// the date, so a header that starts with a string has none. beancount:
+/// `syntax error, unexpected STRING`, on the header line, with or without a
+/// payee, tags or links. Both converters (green, and red alone) report it, and
+/// both keep the transaction, as for every other header defect.
+#[test]
+fn a_header_with_no_flag_is_rejected() {
+    let bodies = "\x20 Expenses:R  100 USD\n\x20 Assets:C   -100 USD\n";
+    for header in [
+        "2024-01-02 \"x\"",
+        "2024-01-02 \"p\" \"x\"",
+        "2024-01-02 \"x\" #t ^l",
+        "2024-01-02 \"p\" \"x\" ^l #t ; note",
+    ] {
+        let src = format!("{header}\n{bodies}");
+        for (name, result) in [("parse", parse(&src)), ("red", parse_red_only(&src))] {
+            assert_eq!(
+                result.errors.len(),
+                1,
+                "{name} {header:?}: expected one error, got {:?}",
+                result.errors
+            );
+            let msg = result.errors[0].to_string();
+            assert!(
+                msg.contains("needs a flag"),
+                "{name} {header:?}: wrong diagnostic: {msg}"
+            );
+            // Reported at the first string, the token beancount fails on.
+            let first = header.find('"').unwrap();
+            let end = first + 1 + header[first + 1..].find('"').unwrap() + 1;
+            assert_eq!(
+                (result.errors[0].span.start, result.errors[0].span.end),
+                (first, end),
+                "{name} {header:?}"
+            );
+            assert_eq!(result.directives.len(), 1, "{name} {header:?}");
+        }
+    }
+}
+
+/// #2905: beancount's grammar fails at the first string of a header with no
+/// flag and discards the rest of the line, so a `|` (its deprecation warning
+/// comes from the grammar) or a mid-line `#!` / `#+` after it is not reported
+/// there: one error. With a flag, both are still reported.
+#[test]
+fn nothing_after_a_missing_flag_is_reported_on_the_line() {
+    let bodies = "\x20 Expenses:R  100 USD\n\x20 Assets:C   -100 USD\n";
+    for header in [
+        "2024-01-02 \"p\" | \"x\"",
+        "2024-01-02 \"x\" #!",
+        "2024-01-02 \"x\" #+ y",
+        // The first string spans two lines: the header line ends at the
+        // NEWLINE token after it, not at the `\n` inside the string.
+        "2024-01-02 \"a\nb\" #!",
+    ] {
+        let src = format!("{header}\n{bodies}");
+        for (name, result) in [("parse", parse(&src)), ("red", parse_red_only(&src))] {
+            assert_eq!(
+                result.errors.len(),
+                1,
+                "{name} {header:?}: expected one error, got {:?}",
+                result.errors
+            );
+            assert!(
+                result.errors[0].to_string().contains("needs a flag"),
+                "{name} {header:?}: {:?}",
+                result.errors
+            );
+        }
+    }
+    // Controls: with a flag the pipe warns and the `#!` is an error.
+    for header in ["2024-01-02 * \"p\" | \"x\"", "2024-01-02 * \"x\" #!"] {
+        let src = format!("{header}\n{bodies}");
+        assert_eq!(parse(&src).errors.len(), 1, "{header:?}");
+        assert!(
+            !parse(&src).errors[0].to_string().contains("needs a flag"),
+            "{header:?}"
+        );
+    }
+}
+
+/// #2905: a header whose first token after the date is a tag or a link has no
+/// flag either. beancount: `syntax error, unexpected TAG` (or `LINK`), one
+/// error, on the header line. Its postings belong to it, so they are not each
+/// reported as stray indented lines, as they were.
+#[test]
+fn a_header_opening_with_a_tag_or_link_is_one_error() {
+    let bodies = "\x20 Expenses:R  100 USD\n\x20 Assets:C   -100 USD\n";
+    for (header, at) in [("2024-01-02 #t ^l", "#t"), ("2024-01-02 ^l \"y\"", "^l")] {
+        let src = format!("{header}\n{bodies}");
+        for (name, result) in [("parse", parse(&src)), ("red", parse_red_only(&src))] {
+            assert_eq!(
+                result.errors.len(),
+                1,
+                "{name} {header:?}: expected one error, got {:?}",
+                result.errors
+            );
+            assert!(
+                result.errors[0].to_string().contains("needs a flag"),
+                "{name} {header:?}: {:?}",
+                result.errors
+            );
+            let start = header.find(at).unwrap();
+            assert_eq!(
+                (result.errors[0].span.start, result.errors[0].span.end),
+                (start, start + at.len()),
+                "{name} {header:?}"
+            );
+        }
+    }
+}
+
+/// #2905, from the review of #2903: `2024-01-02 "x" $` is two errors in
+/// beancount, `syntax error, unexpected STRING` and `Invalid token: '$'`. The
+/// missing flag comes first, so the invalid token after it does not hide it.
+#[test]
+fn a_header_with_no_flag_and_an_invalid_token_reports_both() {
+    let src = "2024-01-02 \"x\" $\n\x20 Expenses:R  100 USD\n\x20 Assets:C   -100 USD\n";
+    for (name, result) in [("parse", parse(src)), ("red", parse_red_only(src))] {
+        let errs: Vec<String> = result.errors.iter().map(ToString::to_string).collect();
+        assert_eq!(errs.len(), 2, "{name}: {errs:?}");
+        assert!(errs[0].contains("needs a flag"), "{name}: {errs:?}");
+        assert_eq!(
+            result.errors[1].span.start,
+            src.find('$').unwrap(),
+            "{name}"
+        );
+    }
+}
+
 /// The rule must stay silent on everything beancount accepts. A sweep of the
 /// 731-file compatibility corpus produced exactly the four diagnostics above
 /// and nothing else; these are the shapes that sweep proves are safe, kept
@@ -122,7 +253,6 @@ fn valid_headers_are_untouched() {
         "2014-04-20 txn \"n\"",
         "2014-04-20 ! \"pending\"",
         "2014-04-20 # \"hash flag\"",
-        "2014-04-20 \"implied flag\"",
         "2014-04-20 * \"p\" \"n\" #tag1 #tag2 ^link-a ^link-b",
         "2014-04-20 * #tag-only",
         "2014-04-20 * \"p\" \"n\" ; trailing comment",

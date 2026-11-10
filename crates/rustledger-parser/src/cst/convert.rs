@@ -1361,8 +1361,9 @@ fn convert_transaction(
 ) -> Option<Spanned<Directive>> {
     let date = parse_directive_date(&node.date()?, errors, bom_offset)?;
 
-    // Flag: explicit (TransactionFlag) or implied (leading STRING
-    // with no flag token; defaults to '*').
+    // Flag: explicit (TransactionFlag), or '*' for a header with no flag
+    // token, which `transaction_header_check` reports as a syntax error
+    // (#2905); the transaction is kept, as for every header defect.
     let flag = node.flag().map_or('*', |f| flag_char_from_transaction(&f));
 
     // Header strings, consumed straight off the iterator (no intermediate Vec,
@@ -1476,22 +1477,41 @@ fn convert_transaction(
 /// parser surfaces a `DeprecatedPipeSymbol` diagnostic for this
 /// shape; the CST lexer classifies `|` as `PIPE`, so we just
 /// scan the header directly.
+///
+/// beancount warns about the pipe from its grammar, as it reads it, so a
+/// header with no flag (#2905), which its grammar fails on at the first
+/// string, is discarded to the end of the line, pipe included, with no
+/// warning. Only that defect is asked about here: it is always the first
+/// token after the date, so it always precedes the pipe.
 fn header_has_pipe(node: &AstTransaction) -> bool {
     // Leading trivia (blank lines, comments) can precede the header inside the
     // node; `HeaderEnd` skips it (#2628).
     let mut header = HeaderEnd::default();
+    let mut pipe_at = None;
     for el in node.syntax().children_with_tokens() {
         let rowan::NodeOrToken::Token(t) = el else {
             continue;
         };
         if !header.in_header(t.kind()) {
-            return false;
+            break;
         }
         if t.kind() == crate::SyntaxKind::PIPE {
-            return true;
+            pipe_at = Some(usize::from(t.text_range().start()));
+            break;
         }
     }
-    false
+    let Some(pipe_at) = pipe_at else {
+        return false;
+    };
+    let tokens = node.header_tokens().map(|t| {
+        let r = t.text_range();
+        (t.kind(), usize::from(r.start())..usize::from(r.end()))
+    });
+    !matches!(
+        super::txn_header::first_header_defect(tokens),
+        Some((defect, range))
+            if defect == super::txn_header::HeaderDefect::MissingFlag && range.start < pipe_at
+    )
 }
 
 /// Walk a `TRANSACTION`'s children in source order, attaching any
@@ -4507,6 +4527,16 @@ fn indented_comment_check(
     if !source.contains("#!") && !source.contains("#+") {
         return;
     }
+    // A header with no flag (#2905) fails beancount's grammar at its first
+    // string, and bison discards the rest of that line in silence, so a `#!`
+    // or `#+` later on it is not reported there. Up to the `NEWLINE` token that
+    // ends the header, not the first `\n` byte, which may be inside a string.
+    let header_end = header_line_tokens(node, tokens);
+    let no_flag_line_end = matches!(
+        super::txn_header::first_header_defect(tokens.iter().cloned()),
+        Some((super::txn_header::HeaderDefect::MissingFlag, _))
+    )
+    .then_some(header_end);
     tokens.clear();
     let mut at = usize::from(node.text_range().start());
     flatten_green_matching(node.green(), &mut at, tokens, |k| {
@@ -4515,6 +4545,9 @@ fn indented_comment_check(
     let off = bom_offset as usize;
     for (_, range) in tokens.iter() {
         if range.start == 0 || stripped.as_bytes().get(range.start - 1) == Some(&b'\n') {
+            continue;
+        }
+        if no_flag_line_end.is_some_and(|end| range.start < end) {
             continue;
         }
         let start = range.start + off;
@@ -6418,13 +6451,20 @@ mod tests {
     }
 
     #[test]
-    fn transaction_implied_flag_via_leading_string() {
+    fn transaction_with_no_flag_is_reported_and_kept() {
+        // beancount: `syntax error, unexpected STRING` (#2905). Reported at
+        // the string; the transaction is kept, as for every header defect.
         let src = "2024-01-15 \"Implied\"\n  Assets:Cash  -5 USD\n";
         let result = parse_via_cst(src);
+        assert_eq!(result.errors.len(), 1, "{:?}", result.errors);
+        assert_eq!(
+            (result.errors[0].span.start, result.errors[0].span.end),
+            (11, 20)
+        );
         let Directive::Transaction(t) = &result.directives[0].value else {
             panic!("expected Transaction");
         };
-        assert_eq!(t.flag, '*', "implied flag defaults to *");
+        assert_eq!(t.flag, '*');
     }
 
     #[test]

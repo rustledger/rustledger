@@ -35,8 +35,15 @@ enum ComparisonSuffix {
 /// denial-of-service surfaced by the query fuzzer's slow-unit corpus
 /// (a ~2 KB input of
 /// 1023 nested parens took >10 s and overflowed an 8 MB stack). Real
-/// queries nest only a handful deep; 64 is far above any legitimate
+/// queries nest only a handful deep; 60 is far above any legitimate
 /// query yet shallow enough to stay fast and stack-safe.
+///
+/// 60 is sized by the tightest stack a query runs on: the wasm32-wasip2
+/// component under wasmtime's default 512 KiB `max_wasm_stack`, where the
+/// grammar's recursion takes about 4 KiB per bracket and an optimized
+/// build ran out of stack at 127 brackets. 60 keeps half of it free. Each
+/// bracket also costs [`BRACKET_WEIGHT`] in [`MAX_EXPR_DEPTH`], so brackets
+/// and operator chains cannot add up past either limit.
 ///
 /// STACK SAFETY: the cap alone is not what keeps recursion safe — frame
 /// sizes drift with toolchains (Rust 1.97's debug frames grew enough
@@ -47,7 +54,7 @@ enum ComparisonSuffix {
 /// happens to call it (main = 8 MiB, cargo-test/rayon workers = 2 MiB).
 /// On wasm32 there are no threads; the pre-scan cap and the engine's own
 /// stack limits apply as before.
-const MAX_NESTING_DEPTH: usize = 128;
+const MAX_NESTING_DEPTH: usize = 60;
 
 /// Stack size for the dedicated parse thread on native targets. Sized
 /// for `MAX_NESTING_DEPTH` recursion levels at worst-case (debug-build)
@@ -83,15 +90,150 @@ fn nesting_exceeds_limit(source: &str) -> Option<usize> {
     scan_delimiters(source).too_deep
 }
 
+/// Byte offset at which the expression tree's depth bound first exceeds
+/// [`MAX_EXPR_DEPTH`], or `None` if the input stays within it. The bound is
+/// counted by [`scan_delimiters`], with the same string lexing as
+/// [`nesting_exceeds_limit`].
+fn expression_depth_exceeds_limit(source: &str) -> Option<usize> {
+    scan_delimiters(source).tree_too_deep
+}
+
+/// The error for `source` nesting too deep, by brackets ([`MAX_NESTING_DEPTH`])
+/// or by operators ([`MAX_EXPR_DEPTH`]), at whichever limit it passes first.
+fn nesting_error(source: &str) -> Option<ParseError> {
+    let brackets = nesting_exceeds_limit(source).map(|at| (at, MAX_NESTING_DEPTH));
+    let operators = expression_depth_exceeds_limit(source).map(|at| (at, MAX_EXPR_DEPTH));
+    let (offset, limit) = match (brackets, operators) {
+        (Some(b), Some(o)) => b.min(o),
+        (b, o) => b.or(o)?,
+    };
+    Some(ParseError::new(
+        ParseErrorKind::SyntaxError(format!(
+            "expression nesting too deep (exceeds maximum of {limit})"
+        )),
+        offset,
+    ))
+}
+
+/// Maximum depth of the expression tree a query may build, as bounded by
+/// [`scan_delimiters`]: every operator on the way from the root to the
+/// deepest operand counts one level, and every bracket [`BRACKET_WEIGHT`].
+///
+/// [`MAX_NESTING_DEPTH`] bounds the brackets, which is what the recursive
+/// grammar descends into. An operator chain does not recurse in the grammar
+/// (`foldl` builds it in a loop), but it builds a left-deep tree:
+/// `a AND b AND c` is `(a AND b) AND c`, so a chain of N operators is N levels
+/// deep, and so are N stacked `NOT`s. Everything that walks the tree after the
+/// parse (planning, evaluation, header naming, `Display`, `Drop`) recurses one
+/// frame per level, so a chain of some thousands of terms overflowed the
+/// stack.
+///
+/// The bound is counted, not measured on the tree: [`scan_delimiters`] reads
+/// the operator tokens and refuses the query before any tree is built, so a
+/// refused tree never exists to be walked or dropped. The count is an upper
+/// bound of the real depth, not the depth itself (a comparison and the `OR`
+/// joining it to the next each count, though they are siblings, not nested),
+/// so a query reaches the limit with fewer terms than the limit:
+/// `x ~ 'a' OR x ~ 'b' OR ...` counts two per term and fits about 360 terms.
+/// Real queries, generated ones included, chain far fewer.
+///
+/// Why 720: optimized builds were run with both limits lifted, and each
+/// shape's length was bisected to the first that ran out of stack. The
+/// costliest operator shapes are a chain in an aggregate query
+/// (`SELECT account, sum(number) + 1 + ... GROUP BY account`, and the same
+/// chain in `ORDER BY` or joining `sum(...) > 0` with `AND`) and an
+/// attribute chain (`entry.meta.meta...`):
+///
+/// | runtime (stack)                        | aggregate chain | attribute chain | brackets | subqueries |
+/// |----------------------------------------|-----------------|-----------------|----------|------------|
+/// | wasm32-wasip2 component (512 KiB)      | 1,555           | 1,480           | 127      | 412        |
+/// | wasm32 in Node, main thread (1 MiB)    | 1,555           | 3,437           | 424      | 741        |
+/// | wasm32 in Node, worker thread          | 1,555           | 3,437           | 1,687    | 741        |
+/// | native x86-64, 2 MiB thread            | 1,650           | 3,727           | 3,727    | 625        |
+///
+/// So 720 levels leave at least half of every stack free (1,480 / 720 is
+/// 2.06), and [`MAX_NESTING_DEPTH`] does the same for brackets (127 / 60).
+/// A bracket costs about 12 aggregate-chain levels in the component (4 KiB
+/// against 340 bytes), which is [`BRACKET_WEIGHT`], so 60 brackets alone
+/// fill the budget exactly. Mixed shapes cost less than the sum: a chain
+/// inside 60 brackets runs out at the same length as the chain alone, as
+/// the brackets' stack is taken while parsing and the chain's while
+/// evaluating.
+///
+/// Unoptimized builds take many times the stack per level (over 11 KiB for
+/// an aggregate chain), so tests that run a query at the limit give it a
+/// 64 MiB thread.
+///
+/// Against bean-query 0.2.0: it raises Python's `RecursionError` on a chain
+/// of 1,000 `+`, `*` or `NOT`, and on 200 nested parentheses, where these
+/// limits give a parse error with a position. But it reads `AND` and `OR`
+/// chains as one node with many operands, and runs 4,000 terms of either,
+/// where rledger builds them two operands at a time and refuses one that
+/// passes 720 (about 360 comparisons). That is a deliberate deviation, kept
+/// until the tree holds such chains flat: a query with that many
+/// alternatives can say them as one `IN (...)` list, whose elements cost no
+/// depth, or one regular expression with `|` alternatives.
+const MAX_EXPR_DEPTH: usize = 720;
+
+/// What one bracket costs in [`MAX_EXPR_DEPTH`]: the stack the grammar's
+/// recursion takes per bracket, in units of the costliest operator level,
+/// as measured in the wasm32-wasip2 component (see [`MAX_EXPR_DEPTH`]).
+const BRACKET_WEIGHT: usize = 12;
+
 /// What [`scan_delimiters`] finds: where nesting first passes the limit, and
 /// the brackets and quotes still open at the end, by offset.
 struct DelimiterScan {
+    /// Where bracket (and sign) nesting first passes [`MAX_NESTING_DEPTH`].
     too_deep: Option<usize>,
+    /// Where the expression tree's depth bound first passes
+    /// [`MAX_EXPR_DEPTH`].
+    tree_too_deep: Option<usize>,
     unclosed: Vec<(usize, char)>,
 }
 
-/// One pass over `source`'s brackets, quotes and sign runs; see
-/// [`nesting_exceeds_limit`] for the lexing rules it shares with the grammar.
+/// One bracket level of the expression-depth bound in [`scan_delimiters`].
+///
+/// The level's current comma-separated item (an argument, a set element, a
+/// target) has `ops` operators so far and holds closed brackets reaching at
+/// most `child` deep, so its tree is at most `ops + child` deep: an operand
+/// reached through the operators is either an atom or one of those brackets.
+/// Items are siblings, so the level is as deep as its deepest item, kept in
+/// `deepest` once the item is closed by a `,`.
+#[derive(Default)]
+struct DepthLevel {
+    ops: usize,
+    child: usize,
+    deepest: usize,
+}
+
+impl DepthLevel {
+    const fn item(&self) -> usize {
+        self.ops + self.child
+    }
+}
+
+/// The words that build an operator node: `AND`, `OR`, `NOT`, `IN`, `IS`
+/// (`IS NULL`) and `BETWEEN`.
+fn is_operator_word(word: &str) -> bool {
+    ["AND", "OR", "NOT", "IN", "IS", "BETWEEN"]
+        .iter()
+        .any(|w| word.eq_ignore_ascii_case(w))
+}
+
+/// One pass over `source`'s brackets, quotes, sign runs and operators; see
+/// [`nesting_exceeds_limit`] for the lexing rules it shares with the grammar,
+/// and [`MAX_EXPR_DEPTH`] for the expression-depth bound.
+///
+/// The depth bound is kept along the open path: each enclosing level's
+/// operators so far, [`BRACKET_WEIGHT`] per open bracket, and the current
+/// item's operators and deepest closed bracket. Every operator token counts,
+/// whatever it binds:
+/// `+ - * / % = != < <= > >= ~ !~ . [` and the words in [`is_operator_word`].
+/// Counting too many is safe (`NOT IN` builds one node from two words, a `*`
+/// may be `count(*)`, a date's `-` is no operator); counting too few is not,
+/// so the one token passed over is a decimal number's `.`, which the grammar
+/// reads inside the literal. A `,` starts a new sibling item, so a long
+/// `IN (...)` list, argument list or target list costs no depth.
 fn scan_delimiters(source: &str) -> DelimiterScan {
     // Each open bracket's offset and the depth it added: itself plus the
     // signs pending before it.
@@ -100,8 +242,43 @@ fn scan_delimiters(source: &str) -> DelimiterScan {
     let mut signs: usize = 0;
     let mut too_deep = None;
     let mut unclosed_quote = None;
+    // The expression-depth bound: the root level and one per open bracket,
+    // and `path`, the bound along the open path.
+    let mut levels = vec![DepthLevel::default()];
+    let mut path: usize = 0;
+    let mut tree_too_deep = None;
+    // The word (identifier, keyword or number) being read, by its start, and
+    // whether it is a number that may still take a decimal point.
+    let mut word: Option<usize> = None;
+    let mut number_before_dot = false;
+    // Set by a decimal point, so the digits after it stay in the number.
+    let mut after_decimal_point = false;
+    let mut prev = ' ';
     let mut chars = source.char_indices().peekable();
     while let Some((i, c)) = chars.next() {
+        if c.is_alphanumeric() || c == '_' {
+            if word.is_none() {
+                word = Some(i);
+                number_before_dot = c.is_ascii_digit() && !after_decimal_point;
+            }
+            after_decimal_point = false;
+            signs = 0;
+            prev = c;
+            continue;
+        }
+        let ended_number = word.is_some() && number_before_dot;
+        if let Some(start) = word.take()
+            && is_operator_word(&source[start..i])
+        {
+            levels.last_mut().expect("root level").ops += 1;
+            path += 1;
+            if path > MAX_EXPR_DEPTH {
+                tree_too_deep.get_or_insert(start);
+            }
+        }
+        number_before_dot = false;
+        after_decimal_point = false;
+        let mut operator = false;
         match c {
             '"' | '\'' => {
                 signs = 0;
@@ -130,26 +307,74 @@ fn scan_delimiters(source: &str) -> DelimiterScan {
                 if depth > MAX_NESTING_DEPTH {
                     too_deep.get_or_insert(i);
                 }
+                // The new bracket is entered instead of the item's closed
+                // ones, so they leave the path while it is open.
+                path = path - levels.last().expect("root level").child + BRACKET_WEIGHT;
+                levels.push(DepthLevel::default());
             }
             ')' => {
                 signs = 0;
                 if let Some((_, added)) = open.pop() {
                     depth -= added;
                 }
+                if levels.len() > 1 {
+                    let inner = levels.pop().expect("an open bracket");
+                    let reached = inner.deepest.max(inner.item());
+                    let outer = levels.last_mut().expect("root level");
+                    path = path - inner.item() - BRACKET_WEIGHT + outer.child;
+                    let child = outer.child.max(BRACKET_WEIGHT + reached);
+                    path += child - outer.child;
+                    outer.child = child;
+                }
+            }
+            ',' => {
+                signs = 0;
+                let level = levels.last_mut().expect("root level");
+                level.deepest = level.deepest.max(level.item());
+                path -= level.item();
+                level.ops = 0;
+                level.child = 0;
             }
             '-' => {
                 signs += 1;
                 if depth + signs > MAX_NESTING_DEPTH {
                     too_deep.get_or_insert(i);
                 }
+                operator = true;
+            }
+            // `<=`, `>=`, `!=` and `!~` are one operator each.
+            '=' | '~' => {
+                signs = 0;
+                operator = !matches!(prev, '<' | '>' | '!');
+            }
+            // A number's decimal point (`1.5`, `5.`) is part of the literal.
+            '.' if ended_number => {
+                signs = 0;
+                after_decimal_point = true;
+            }
+            '+' | '*' | '/' | '%' | '<' | '>' | '!' | '.' | '[' => {
+                signs = 0;
+                operator = true;
             }
             c if c.is_whitespace() => {}
             _ => signs = 0,
         }
+        if operator {
+            levels.last_mut().expect("root level").ops += 1;
+            path += 1;
+        }
+        if path > MAX_EXPR_DEPTH {
+            tree_too_deep.get_or_insert(i);
+        }
+        prev = c;
     }
     let mut unclosed: Vec<(usize, char)> = open.into_iter().map(|(i, _)| (i, '(')).collect();
     unclosed.extend(unclosed_quote);
-    DelimiterScan { too_deep, unclosed }
+    DelimiterScan {
+        too_deep,
+        tree_too_deep,
+        unclosed,
+    }
 }
 
 /// `source` with every `/* ... */` comment outside a string literal replaced
@@ -234,18 +459,14 @@ pub fn strip_comments(source: &str) -> Result<std::borrow::Cow<'_, str>, ParseEr
 /// # Errors
 ///
 /// Returns a `ParseError` if the query string is malformed, if a comment is
-/// not closed, or if parenthesis nesting exceeds the internal nesting limit
-/// (rejected up front to bound parse time and stack depth).
+/// not closed, or if parenthesis nesting or an operator chain exceeds the
+/// internal nesting limits (rejected up front to bound parse time and stack
+/// depth).
 pub fn parse(source: &str) -> Result<Query, ParseError> {
     let stripped = strip_comments(source)?;
     let source = stripped.as_ref();
-    if let Some(offset) = nesting_exceeds_limit(source) {
-        return Err(ParseError::new(
-            ParseErrorKind::SyntaxError(format!(
-                "expression nesting too deep (exceeds maximum of {MAX_NESTING_DEPTH})"
-            )),
-            offset,
-        ));
+    if let Some(error) = nesting_error(source) {
+        return Err(error);
     }
 
     // Run the recursive descent on a thread with an explicit, generous
@@ -1124,7 +1345,7 @@ fn expr<'a>() -> Boxed<'a, 'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
                         .ignore_then(ws())
                         .ignore_then(choice((
                             set_literal(expr.clone()),
-                            additive.clone(),
+                            not_a_set().ignore_then(additive.clone()),
                         )))
                         .map(ComparisonSuffix::NotIn),
                     // IN - try set literal first, then fall back to expression
@@ -1133,7 +1354,7 @@ fn expr<'a>() -> Boxed<'a, 'a, ParserInput<'a>, Expr, ParserExtra<'a>> {
                         .ignore_then(ws())
                         .ignore_then(choice((
                             set_literal(expr.clone()),
-                            additive.clone(),
+                            not_a_set().ignore_then(additive.clone()),
                         )))
                         .map(ComparisonSuffix::In),
                     // Regular comparison operators
@@ -1232,6 +1453,84 @@ fn comparison_op<'a>() -> impl Parser<'a, ParserInput<'a>, BinaryOperator, Parse
     ))
 }
 
+/// The guard on the expression an `IN` falls back to when [`set_literal`]
+/// fails: it refuses a bracket that [`bracket_holds_a_comma`], so that
+/// bracket is parsed once, as a set, and not again as `( expr )`.
+///
+/// That second parse could never succeed: a parenthesized expression needs
+/// its `)` right after the expression, and this bracket has a `,` at its own
+/// level first. But when the set failed (a syntax error in its first
+/// element), the retry parsed the bracket all over again, so a nest of
+/// such sets, `1 IN (1 IN (1 +, 2), 2)`, took time doubling with its depth.
+/// What a query means, and the error a refused one gets, are unchanged.
+fn not_a_set<'a>() -> impl Parser<'a, ParserInput<'a>, (), ParserExtra<'a>> + Clone {
+    custom(|inp| {
+        let before = inp.cursor();
+        let rest: &str = inp.slice_from(&before..);
+        if bracket_holds_a_comma(rest) {
+            Err(Rich::custom(
+                inp.span_since(&before),
+                "a bracket with a ',' after its first element is a set",
+            ))
+        } else {
+            Ok(())
+        }
+    })
+}
+
+/// Whether `source` opens with a `(` whose bracket holds a `,` at its own
+/// level, before the `)` that closes it: the `,` a set literal needs after
+/// its first element (see [`set_literal`]).
+///
+/// A first element is an expression, whose brackets (`(`, and `[` of a
+/// subscript) are balanced and whose commas are all inside them, so the
+/// first `,` at the bracket's own level is the one after it. Strings are
+/// skipped so a `,` or bracket in one does not count: lexed as
+/// [`string_literal`] reads them, as [`nesting_exceeds_limit`] describes
+/// (backslash is an ordinary byte, `''` continues a single-quoted string).
+/// Reads only up to the closing `)`, so a query's `IN` brackets are each
+/// read twice (by [`set_literal`] and [`not_a_set`]) per nesting level
+/// around them, of which there are at most [`MAX_NESTING_DEPTH`].
+fn bracket_holds_a_comma(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    if bytes.first() != Some(&b'(') {
+        return false;
+    }
+    let mut depth = 0usize;
+    let mut i = 1;
+    while let Some(&b) = bytes.get(i) {
+        match b {
+            quote @ (b'"' | b'\'') => {
+                i += 1;
+                loop {
+                    match bytes.get(i) {
+                        None => return false,
+                        Some(&c) if c == quote => {
+                            if quote == b'\'' && bytes.get(i + 1) == Some(&b'\'') {
+                                i += 2;
+                                continue;
+                            }
+                            break;
+                        }
+                        Some(_) => i += 1,
+                    }
+                }
+            }
+            b'(' | b'[' => depth += 1,
+            b')' | b']' => {
+                if depth == 0 {
+                    return false;
+                }
+                depth -= 1;
+            }
+            b',' if depth == 0 => return true,
+            _ => {}
+        }
+        i += 1;
+    }
+    false
+}
+
 /// Parse a set literal for IN operator, e.g., `('EUR', 'USD')`.
 ///
 /// To distinguish from parenthesized expressions like `IN (tags)`, set literals
@@ -1241,34 +1540,56 @@ fn comparison_op<'a>() -> impl Parser<'a, ParserInput<'a>, BinaryOperator, Parse
 ///
 /// This ensures `IN (tags)` is parsed as `IN <parenthesized-column>` rather than
 /// `IN <single-element-set>`.
+///
+/// The set is tried only when [`bracket_holds_a_comma`] finds a `,` at the
+/// bracket's own level, which a set needs after its first element. Without
+/// that check, a bracket with one element was parsed twice: in full here,
+/// failing at the missing `,`, then again as the parenthesized expression
+/// the `IN` falls back to. Nested, that doubled at every level, so
+/// `1 IN (1 IN (1 IN (...)))` took time exponential in its depth. With it,
+/// a bracket with no such `,` is parsed once, and the queries accepted, and
+/// what they mean, are unchanged: a set still needs that `,`, and the check
+/// finds every `,` that can follow a first element.
 fn set_literal<'a>(
     expr: impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> + Clone + 'a,
 ) -> impl Parser<'a, ParserInput<'a>, Expr, ParserExtra<'a>> + Clone {
-    just('(')
-        .ignore_then(ws())
-        .ignore_then(
-            // Parse first element
-            expr.clone()
-                .then(
-                    // Then require either:
-                    // - comma + more elements (with optional trailing comma)
-                    // - trailing comma (for single-element sets)
-                    ws().ignore_then(just(',')).ignore_then(ws()).ignore_then(
-                        expr.separated_by(ws().then(just(',')).then(ws()))
-                            .allow_trailing()
-                            .collect::<Vec<_>>(),
-                    ),
-                )
-                .map(|(first, rest)| {
-                    let mut elements = Vec::with_capacity(1 + rest.len());
-                    elements.push(first);
-                    elements.extend(rest);
-                    elements
-                }),
-        )
-        .then_ignore(ws())
-        .then_ignore(just(')'))
-        .map(Expr::Set)
+    custom(|inp| {
+        let before = inp.cursor();
+        let rest: &str = inp.slice_from(&before..);
+        if bracket_holds_a_comma(rest) {
+            Ok(())
+        } else {
+            Err(Rich::custom(
+                inp.span_since(&before),
+                "a set needs a ',' after its first element",
+            ))
+        }
+    })
+    .ignore_then(just('('))
+    .ignore_then(ws())
+    .ignore_then(
+        // Parse first element
+        expr.clone()
+            .then(
+                // Then require either:
+                // - comma + more elements (with optional trailing comma)
+                // - trailing comma (for single-element sets)
+                ws().ignore_then(just(',')).ignore_then(ws()).ignore_then(
+                    expr.separated_by(ws().then(just(',')).then(ws()))
+                        .allow_trailing()
+                        .collect::<Vec<_>>(),
+                ),
+            )
+            .map(|(first, rest)| {
+                let mut elements = Vec::with_capacity(1 + rest.len());
+                elements.push(first);
+                elements.extend(rest);
+                elements
+            }),
+    )
+    .then_ignore(ws())
+    .then_ignore(just(')'))
+    .map(Expr::Set)
 }
 
 /// Parse primary expressions.
@@ -1289,7 +1610,10 @@ fn primary_expr<'a>(
         // literal parser only matches the reserved keywords plus number/string/
         // date literals, so ordinary column and function names still fall
         // through to `function_call_or_column`.
-        literal().map(Expr::Literal),
+        literal().map(|literal| {
+            note_literal_parsed();
+            Expr::Literal(literal)
+        }),
         // Function call or column reference (must come before wildcard check)
         // Pass expr to allow nested function calls like units(sum(position))
         function_call_or_column(expr),
@@ -1306,6 +1630,33 @@ fn primary_expr<'a>(
         }),
     ))
 }
+
+#[cfg(test)]
+thread_local! {
+    /// In tests, how many more literal operands the parser on this thread may
+    /// read before it panics, if set: how the tests bound parser work
+    /// without timing it.
+    static LITERAL_BUDGET: std::cell::Cell<Option<usize>> = const { std::cell::Cell::new(None) };
+}
+
+/// Count a literal operand read by the grammar, against `LITERAL_BUDGET`.
+/// A literal is read again each time the grammar parses the text around it
+/// again, so the count measures how much re-parsing a query costs.
+#[cfg(test)]
+fn note_literal_parsed() {
+    LITERAL_BUDGET.with(|budget| {
+        if let Some(left) = budget.get() {
+            assert!(left > 0, "the parser read more literals than its budget");
+            budget.set(Some(left - 1));
+        }
+    });
+}
+
+/// Outside tests, reading a literal counts nothing (see the test build's
+/// version, which counts parser work for the tests).
+#[cfg(not(test))]
+#[inline]
+const fn note_literal_parsed() {}
 
 /// The error for a `*` where an operand belongs (#2871).
 const STAR_IS_NOT_A_VALUE: &str = "'*' is not a value: it stands only for the whole target list, or alone in a call such as count(*)";
@@ -2852,12 +3203,12 @@ mod tests {
     /// to the limit still parses.
     #[test]
     fn moderate_nesting_still_parses() {
-        // 100 levels of real function nesting (well under the 128 cap).
+        // 55 levels of real function nesting (under the 60 cap).
         // Runs on `parse`'s dedicated big-stack thread, so this passes
         // regardless of the 2 MiB cargo-test thread stack or toolchain
         // frame-size drift (Rust 1.97 SIGABRT'd this test at the old
         // caller-stack recursion).
-        let depth = 100usize;
+        let depth = 55usize;
         let inner = "x".to_string();
         let body = format!("{}{}{}", "abs(".repeat(depth), inner, ")".repeat(depth));
         let src = format!("SELECT {body}");
@@ -2880,5 +3231,131 @@ mod tests {
         );
         // And the query as a whole still parses (the string is opaque).
         assert!(parse(&src).is_ok(), "string-literal query should parse");
+    }
+
+    /// Parse `source` as [`parse`] does, on a thread with [`PARSE_STACK_SIZE`]
+    /// of stack, letting the grammar read at most `budget` literals. `None`
+    /// if it needed more: the parse thread panics at the budget, so a parse
+    /// that re-reads its input exponentially fails here at once rather than
+    /// running for years.
+    fn parse_within_literal_budget(source: &str, budget: usize) -> Option<bool> {
+        std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .stack_size(PARSE_STACK_SIZE)
+                .spawn_scoped(scope, || {
+                    LITERAL_BUDGET.with(|b| b.set(Some(budget)));
+                    if nesting_error(source).is_some() {
+                        return false;
+                    }
+                    parse_on_current_stack(source).is_ok()
+                })
+                .expect("spawn parse thread")
+                .join()
+                .ok()
+        })
+    }
+
+    /// `1 IN (1 IN (... 1 ...))` at the deepest nesting the limits accept
+    /// (55 levels; 51 for `NOT IN`, whose `NOT` counts too) parses reading
+    /// each literal a bounded number of times. A bracket with one element
+    /// was parsed twice, as a set and then as a parenthesized expression, so
+    /// the work doubled at every level: 2^55 literal reads at this depth, and
+    /// seconds already at 20.
+    #[test]
+    fn test_parse_nested_single_element_in_reads_each_literal_once() {
+        let nest = |head: &str, pre: &str, center: &str, n: usize| {
+            format!("{head}{}{center}{}", pre.repeat(n), ")".repeat(n))
+        };
+        for (shape, n, ok) in [
+            (nest("SELECT ", "1 IN (", "1", 55), 55, true),
+            (nest("SELECT ", "1 NOT IN (", "1", 51), 51, true),
+            (
+                nest("SELECT account WHERE ", "TRUE IN (", "TRUE", 55),
+                55,
+                true,
+            ),
+            // A syntax error at the center fails just as fast.
+            (nest("SELECT ", "1 IN (", "1 +", 55), 55, false),
+        ] {
+            assert_eq!(
+                parse_within_literal_budget(&shape, 4 * (n + 1)),
+                Some(ok),
+                "{}...",
+                &shape[..40]
+            );
+        }
+        // One level past the limit is refused by the nesting check.
+        assert!(parse(&nest("SELECT ", "1 IN (", "1", 56)).is_err());
+        assert!(parse(&nest("SELECT ", "1 NOT IN (", "1", 52)).is_err());
+    }
+
+    /// Nested sets at the deepest nesting the limits accept parse reading
+    /// each literal a bounded number of times, including with a syntax error
+    /// in the innermost first element. There, the failed set was parsed
+    /// again as `( expr )`, which a `,` at the bracket's level rules out,
+    /// so the work doubled at every level until [`not_a_set`] refused the
+    /// retry.
+    #[test]
+    fn test_parse_nested_sets_read_each_literal_a_bounded_number_of_times() {
+        let nest = |pre: &str, center: &str, post: &str, n: usize| {
+            format!("SELECT {}{center}{}", pre.repeat(n), post.repeat(n))
+        };
+        for (shape, n, ok) in [
+            (nest("1 IN (", "1", ", 2)", 55), 55, true),
+            (nest("1 IN (", "1 +", ", 2)", 55), 55, false),
+            (nest("1 IN (", "1 +", ", 2 2)", 55), 55, false),
+            (nest("1 IN (", "1 +", ",)", 55), 55, false),
+            (nest("1 NOT IN (", "1 +", ", 2)", 51), 51, false),
+            // Two brackets a level, so 28 levels reach the limit.
+            (nest("1 IN ((", "1", "), 2)", 28), 28, true),
+            (nest("1 IN ((", "1 +", "), 2)", 28), 28, false),
+            (nest("1 + (1 IN (", "1 +", ", 2))", 25), 25, false),
+        ] {
+            assert_eq!(
+                parse_within_literal_budget(&shape, 4 * (n + 1)),
+                Some(ok),
+                "{}...",
+                &shape[..40]
+            );
+        }
+    }
+
+    /// The set is tried only when a `,` follows its first element, found
+    /// with brackets and strings read as the grammar reads them; the meaning
+    /// of every `IN` is as before.
+    #[test]
+    fn test_in_reads_a_set_only_with_a_comma_at_its_own_level() {
+        let right = |q: &str| match parse(q).unwrap_or_else(|e| panic!("{q}: {e}")) {
+            Query::Select(sel) => match sel.targets.into_iter().next().map(|t| t.expr) {
+                Some(Expr::BinaryOp(op)) => op.right,
+                other => panic!("{q}: {other:?}"),
+            },
+            other => panic!("{q}: {other:?}"),
+        };
+        let set_len = |e: Expr| match e {
+            Expr::Set(elements) => Some(elements.len()),
+            _ => None,
+        };
+        // A comma in a string, a call's arguments or a subscript is not the
+        // set's: one element, a parenthesized expression.
+        assert_eq!(set_len(right("SELECT 'x' IN ('a,b')")), None);
+        assert_eq!(set_len(right("SELECT 'x' IN ('it''s, ok')")), None);
+        assert_eq!(set_len(right("SELECT 1 IN (max(1, 2))")), None);
+        assert_eq!(set_len(right("SELECT 1 IN (1 IN (1, 2))")), None);
+        // Brackets and quotes in a set's elements do not hide its comma.
+        assert_eq!(set_len(right("SELECT 'x' IN ('a)', 'b')")), Some(2));
+        assert_eq!(set_len(right("SELECT 'x' IN (\"(\", 'b')")), Some(2));
+        assert_eq!(set_len(right("SELECT 1 IN (max(1, 2), 3)")), Some(2));
+        assert_eq!(set_len(right("SELECT 1 IN ((1), 2,)")), Some(2));
+        assert_eq!(set_len(right("SELECT 1 IN (1,)")), Some(1));
+        // A bracketed pair is no element, before as now.
+        assert!(parse("SELECT 1 IN ((1, 2))").is_err());
+
+        assert!(bracket_holds_a_comma("(a, b)"));
+        assert!(bracket_holds_a_comma("(f(a, b), c)"));
+        assert!(!bracket_holds_a_comma("(f(a, b)) , c"));
+        assert!(!bracket_holds_a_comma("(x['a,b'])"));
+        assert!(!bracket_holds_a_comma("('a,"));
+        assert!(!bracket_holds_a_comma("a, b"));
     }
 }

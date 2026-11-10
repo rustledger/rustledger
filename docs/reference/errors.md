@@ -393,7 +393,8 @@ Only directives rledger is confident are budgets get reported. Ownership is one 
 
 ### E7002: Invalid Option Value
 
-**Cause**: Option value is invalid.
+**Cause**: Option value is invalid. The value is not applied: the option keeps
+its default, or an earlier valid setting, as in beancount.
 
 **Fix**: Check the expected format for the option.
 

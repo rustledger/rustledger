@@ -318,6 +318,12 @@ pub fn to_js<T: serde::Serialize>(value: &T) -> Result<JsValue, JsError> {
 /// Derive the configured [`rustledger_core::AccountTypes`] from raw parsed
 /// option tuples (`name_assets` etc. over the standard defaults).
 ///
+/// Read through the loader's [`rustledger_loader::Options`], like
+/// [`booking_method_from_raw`], so a rename the loader rejects (E7008) is not
+/// applied here either. This used to copy each raw `name_*` value in, so an
+/// invalid root the loader kept at its default still renamed the root on this
+/// surface (#2911).
+///
 /// The wasm wire `LedgerOptions` deliberately carries only title/currencies,
 /// so query surfaces must NOT go through it for classification — they take
 /// the account types from here (single-file paths) or from the loader's
@@ -326,18 +332,7 @@ pub fn to_js<T: serde::Serialize>(value: &T) -> Result<JsValue, JsError> {
 pub fn account_types_from_raw(
     options: &[(String, String, rustledger_parser::Span)],
 ) -> rustledger_core::AccountTypes {
-    let mut at = rustledger_core::AccountTypes::default();
-    for (key, value, _span) in options {
-        match key.as_str() {
-            "name_assets" => at.assets.clone_from(value),
-            "name_liabilities" => at.liabilities.clone_from(value),
-            "name_equity" => at.equity.clone_from(value),
-            "name_income" => at.income.clone_from(value),
-            "name_expenses" => at.expenses.clone_from(value),
-            _ => {}
-        }
-    }
-    at
+    options_from_raw(options).to_account_types()
 }
 
 /// Option warnings as WASM [`Error`]s, carrying the severity, code, and phase
@@ -636,6 +631,21 @@ mod account_types_tests {
         assert_eq!(at.assets, "Assets"); // untouched types keep defaults
         assert!(at.is_credit_normal("Revenue:Sales"));
         assert!(!at.is_credit_normal("Income:Sales")); // renamed away
+    }
+
+    /// #2911: a root the loader rejects is not applied here either; the
+    /// root keeps its earlier valid value, as in the loader and beancount.
+    #[test]
+    fn test_account_types_from_raw_rejected_root_keeps_earlier_value() {
+        let span = rustledger_parser::Span::ZERO;
+        let opts = vec![
+            ("name_income".to_string(), "Revenue".to_string(), span),
+            ("name_income".to_string(), "bad".to_string(), span),
+            ("name_equity".to_string(), "Cap ital".to_string(), span),
+        ];
+        let at = account_types_from_raw(&opts);
+        assert_eq!(at.income, "Revenue");
+        assert_eq!(at.equity, "Equity");
     }
 }
 

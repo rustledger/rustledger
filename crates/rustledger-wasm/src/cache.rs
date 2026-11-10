@@ -409,7 +409,12 @@ use crate::types::{Error, LedgerOptions};
 /// v86: loader v65, PARSER OUTPUT changed (#2905). A transaction with no flag
 /// after its date is a parse error, as in beancount; an older blob would keep
 /// serving such a file with no error.
-pub const CACHE_VERSION: u32 = 86;
+/// v90: loader v68, LOADER OUTPUT changed (#2911). An option value its
+/// converter rejects is no longer applied, so the archived account-type names
+/// keep the default root and `Ledger`'s error list loses the errors the
+/// rejected rename caused (`E1005` on `open Equity:A` under
+/// `option "name_equity" "capital"`); a v86 blob would keep serving both.
+pub const CACHE_VERSION: u32 = 90;
 
 /// The `rustledger-loader` cache version this one was last reconciled with.
 ///
@@ -441,7 +446,7 @@ pub const CACHE_VERSION: u32 = 86;
 /// than in the test module so a reader of this file meets the contract next
 /// to `CACHE_VERSION`, which is the thing they came to change.
 #[cfg(test)]
-const LOADER_CACHE_VERSION_PIN: u32 = 65;
+const LOADER_CACHE_VERSION_PIN: u32 = 68;
 
 /// Magic bytes for [`ParsedLedgerPayload`] cache blobs.
 pub const MAGIC_PARSED: &[u8; 8] = b"WLPARSED";

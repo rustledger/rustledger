@@ -370,6 +370,24 @@ pub const QUERY_RULE_CASES: &[QueryRuleCase] = &[
         disk_only: false,
         source_text: true,
     },
+    // The last value wins: the accepted `FIFO` clears the rejected `bogus`,
+    // which names no method, so only that clearing lets it answer.
+    QueryRuleCase {
+        name: "booking_method bogus then FIFO",
+        entry: "main.beancount",
+        files: &[(
+            "main.beancount",
+            concat!(
+                "option \"booking_method\" \"bogus\"\noption \"booking_method\" \"FIFO\"\n",
+                base_ledger!()
+            ),
+        )],
+        rows: Some(&["pay"]),
+        error: None,
+        confinement: Confinement::Any,
+        disk_only: false,
+        source_text: true,
+    },
     // `fifo` is rejected and `FIFO` kept, which is what `fifo` asks for read
     // case-insensitively: the booking is what the ledger asks, so it answers.
     QueryRuleCase {

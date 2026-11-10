@@ -242,18 +242,23 @@ pub fn bail_on_load_errors(raw: &rustledger_loader::LoadResult, file: &Path) -> 
 /// build profile and ignoring it in the other; this stops the CLI reaching that
 /// point at all, and says what to do about it.
 ///
-/// The same gate refuses a ledger whose `booking_method` option was rejected
-/// (#2911, [`rustledger_loader::Options::query_refusal`]): the option keeps
-/// its previous method, so every figure would be booked with a method the
-/// ledger did not ask for. Stricter than bean-query, which answers with the
-/// STRICT figures; see `Options::query_refusal` for why.
+/// The same gate refuses a ledger whose last `booking_method` value was
+/// rejected and which is therefore booked with a method other than the one
+/// it asks for (#2911, [`rustledger_loader::Options::query_refusal`]): the
+/// option keeps its previous method, so every figure would be booked with a
+/// method the ledger did not ask for. A later accepted value, or a rejected
+/// one that reads as the method kept (`FIFO` then `fifo`), answers. Stricter
+/// than bean-query, which answers with the kept method's figures; see
+/// `Options::query_refusal` for why.
 ///
 /// Together with [`bail_on_load_errors`] this is
 /// [`rustledger_loader::Ledger::blocks_queries`], the one rule.
 ///
 /// # Errors
 ///
-/// When any directive failed to book, or `booking_method` was rejected.
+/// When any directive failed to book, or the last `booking_method` value was
+/// rejected and the ledger is booked with a method other than the one it
+/// asks for.
 pub fn bail_on_booking_errors(ledger: &rustledger_loader::Ledger, file: &Path) -> Result<()> {
     if let Some(refusal) = ledger.query_refusal() {
         anyhow::bail!(

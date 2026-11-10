@@ -798,8 +798,6 @@ fn query_loaded(loaded: &ffi::helpers::LoadResult, query_str: &str) -> out::Quer
     )
 }
 
-/// `result` with `loaded`'s errors (none of which blocks queries) ahead of
-/// the query's own, as a session's `query` reports them.
 /// The errors a refused query over `loaded` reports: the load's errors, then
 /// the reason a rejected `booking_method` refuses (#2911), which is listed on
 /// query results only.
@@ -813,6 +811,8 @@ fn refused_errors(loaded: &ffi::helpers::LoadResult) -> Vec<wit::Error> {
         .collect()
 }
 
+/// `result` with `loaded`'s errors (none of which blocks queries) ahead of
+/// the query's own, as a session's `query` reports them.
 fn with_load_errors(
     loaded: &ffi::helpers::LoadResult,
     mut result: out::QueryResult,
@@ -1781,39 +1781,39 @@ pub fn query_entries(entries: &[wit::Directive], query_str: &str) -> out::QueryR
 // the free functions: these run against the held *core* directives, so they
 // never re-parse source nor round-trip a directive list through the host.
 
-/// Replace empty `name-*` roots in host-supplied options with their
-/// defaults: an empty root can never classify an account, so a
-/// zero-initialized record from a guest language would silently break
-/// every `POSSIGN`/`ACCOUNT_SORTKEY` result with no diagnostic (deep
-/// review of #1805). Non-empty values pass through verbatim — including
-/// duplicates, which are the host's to avoid.
-/// Check the `booking_method` held options carry (#2911). It is read back
-/// through the loader's `Options`, so it is held to the option's own rule:
-/// the exact method name, as in beancount. An empty value, as a
+/// Check the `booking_method` held options carry (#2911). It is read back,
+/// exactly as given, through the loader's `Options`, so it is held to the
+/// option's own rule: the exact method name, as in beancount (`"FIFO "` and
+/// `"fifo"` are rejected, as there). Only an empty value, as a
 /// zero-initialized record from a guest language holds, is the default, as
 /// [`sanitize_options`] treats an empty root. Any other value the loader
-/// rejects, a lowercase `fifo` among them, is reported and replaced by the
+/// rejects is reported, quoted as the host sent it, and replaced by the
 /// default, so it cannot silently change what a query realizes with, and
 /// `info()` echoes the method used.
 fn held_booking_method(options: &mut wit::LedgerOptions) -> Option<wit::Error> {
     let default = rustledger_loader::LoadOptions::default().booking_method;
-    let given = options.booking_method.trim().to_string();
-    if given.is_empty() {
+    if options.booking_method.is_empty() {
         options.booking_method = default.to_string();
         return None;
     }
     let mut checked = rustledger_loader::Options::new();
-    checked.set("booking_method", &given);
+    checked.set("booking_method", &options.booking_method);
     if checked.warnings.is_empty() {
         return None;
     }
-    options.booking_method = default.to_string();
+    let given = std::mem::replace(&mut options.booking_method, default.to_string());
     Some(simple_error(format!(
         "invalid booking_method {given:?} (expected the exact method name, e.g. FIFO); \
          using the default {default}"
     )))
 }
 
+/// Replace empty `name-*` roots in host-supplied options with their
+/// defaults: an empty root can never classify an account, so a
+/// zero-initialized record from a guest language would silently break
+/// every `POSSIGN`/`ACCOUNT_SORTKEY` result with no diagnostic (deep
+/// review of #1805). Non-empty values pass through verbatim — including
+/// duplicates, which are the host's to avoid.
 fn sanitize_options(mut provided: wit::LedgerOptions) -> wit::LedgerOptions {
     let defaults = options(ffi::LedgerOptions::default());
     let fix = |field: &mut String, default: String| {
@@ -3415,16 +3415,20 @@ option \"display_precision\" \"USD:0.001\"
         assert!(empty.errors.is_empty(), "{:?}", empty.errors);
         assert_eq!(empty.info().options.booking_method, "STRICT");
 
-        let lowercase = with("fifo");
-        assert_eq!(lowercase.errors.len(), 1, "{:?}", lowercase.errors);
-        assert!(
-            lowercase.errors[0]
-                .message
-                .contains("invalid booking_method \"fifo\""),
-            "{:?}",
-            lowercase.errors
-        );
-        assert_eq!(lowercase.info().options.booking_method, "STRICT");
+        // Lowercase, or a space on either side: each is what the loader
+        // rejects (as beancount does), quoted exactly as the host sent it.
+        for sent in ["fifo", "FIFO ", " FIFO"] {
+            let rejected = with(sent);
+            assert_eq!(rejected.errors.len(), 1, "{sent:?}: {:?}", rejected.errors);
+            assert!(
+                rejected.errors[0]
+                    .message
+                    .contains(&format!("invalid booking_method {sent:?}")),
+                "{sent:?}: {:?}",
+                rejected.errors
+            );
+            assert_eq!(rejected.info().options.booking_method, "STRICT", "{sent:?}");
+        }
     }
 
     /// #2911: a session from a file whose `booking_method` was rejected

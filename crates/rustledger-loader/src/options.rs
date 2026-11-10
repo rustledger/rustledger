@@ -337,8 +337,10 @@ pub struct Options {
     /// Validation warnings collected during parsing.
     pub warnings: Vec<OptionWarning>,
 
-    /// The first `booking_method` value that was rejected, if any. The
-    /// option keeps its previous method, but a query over the ledger refuses
+    /// The latest `booking_method` value that was rejected, if no accepted
+    /// value came after it (a later accepted value clears it: the last value
+    /// wins). The option keeps its previous method, and a query over the
+    /// ledger refuses when that method is not the one this value asks for
     /// (see [`Self::query_refusal`]).
     pub rejected_booking_method: Option<RejectedOption>,
 }
@@ -2220,6 +2222,9 @@ mod tests {
         // Answers: a later accepted value wins, and a rejected value that
         // reads as the method booked asks for what is booked.
         assert_eq!(refuses(&["fifo", "FIFO"]), None);
+        // A later accepted value clears the rejection outright: `bogus`
+        // names no method, so only the clearing lets this answer.
+        assert_eq!(refuses(&["bogus", "FIFO"]), None);
         assert_eq!(refuses(&["FIFO", "fifo"]), None);
         assert_eq!(refuses(&["FIFO"]), None);
 

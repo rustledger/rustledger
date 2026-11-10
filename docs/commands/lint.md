@@ -4,12 +4,14 @@ ______________________________________________________________________
 
 # rledger lint
 
-Run a named advisory pass over one or more ledger files. A lint reports what
-it finds without failing: unless a lint's own option says otherwise, it exits
-0 whether or not it finds anything, and non-zero only when it cannot answer
-(a missing file, a file that does not load, a ledger it refuses): 2 for
-`linked-transit` and `closed-nonempty`, as `rledger check` exits 2 on a file
-it cannot read, and 1 for `transfers` and `control-chars`.
+Run a named advisory pass over one or more ledger files. Every lint follows
+one exit rule:
+
+| Exit | Meaning |
+|------|---------|
+| 0 | It answered, whether or not it found anything |
+| 1 | It found something an opt-in fail flag names (`linked-transit --fail-on`) |
+| 2 | It could not answer: a missing file, a file that does not load, or a ledger or configuration it refuses, as `rledger check` exits 2 on a file it cannot read |
 
 ## Usage
 
@@ -35,9 +37,16 @@ has load errors (a parse error, a missing include) depends on what it reads:
 |------|-------|-------------|---------------------------|
 | `linked-transit` | The booked ledger, as `check` sees it | Refused, exit 2 | Refused, exit 2 |
 | `closed-nonempty` | The booked ledger, as `check` sees it | Refused, exit 2 | Refused, exit 2 |
-| `transfers --apply` | The source, as written | Refused before any file is written, exit 1 | Not run |
+| `transfers --apply` | The source, as written | Refused before any file is written, exit 2 | Not run |
 | `transfers` (preview) | The source, as written | Answers over what parsed, with a warning | Not run |
 | `control-chars` | The source, as written | Answers over what parsed, with a warning | Not run |
+
+A lint that refuses load errors refuses every one, including those the
+loader counts as harmless to the ledger's contents (a duplicate include, an
+include cycle, an include glob that matches nothing), as `bean-check`
+reports each of them as an error. The refusal, and the warning below, list
+each load error, a parse error as `file:line: Pnnnn: message`, up to ten,
+then how many more there are.
 
 A lint that reads the booked ledger refuses one whose booking or plugins
 failed: a transaction booking rejected is left out of the balances, and a

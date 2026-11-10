@@ -412,7 +412,8 @@ fn test_lint_closed_nonempty_refuses_failed_processing_with_exit_2() {
 }
 
 /// `transfers --apply` refuses a file with load errors and writes nothing,
-/// not even to an input that loaded clean; it exits 1 (#2899).
+/// not even to an input that loaded clean; it exits 2, as every lint does
+/// when it cannot answer (#2899).
 #[test]
 fn test_lint_transfers_apply_refuses_load_errors_and_writes_nothing() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -438,7 +439,7 @@ fn test_lint_transfers_apply_refuses_load_errors_and_writes_nothing() {
         .output()
         .expect("run rledger lint transfers --apply");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert_eq!(output.status.code(), Some(1), "stderr: {stderr}");
+    assert_eq!(output.status.code(), Some(2), "stderr: {stderr}");
     assert!(
         stderr.contains("cannot inspect source with load errors"),
         "{stderr}"

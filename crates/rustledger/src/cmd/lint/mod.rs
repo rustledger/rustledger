@@ -90,18 +90,13 @@ pub fn run_with_writer<W: std::io::Write>(
     }
 }
 
-/// The exit status for a lint that could not run (a missing file, a file
-/// that does not load, a configuration it refuses).
+/// The exit status of every lint that could not answer.
 ///
-/// `linked-transit` and `closed-nonempty` exit 2, as `rledger check` does on
-/// a file it cannot read: both read the booked ledger through
-/// [`load::load_booked`] and refuse one they cannot answer for, and for
-/// `linked-transit` with `--fail-on` a 1 always means a finding. The other
-/// lints exit 1, as they always have.
-#[must_use]
-pub const fn error_exit_code(args: &Args) -> u8 {
-    match args.lint {
-        LintKind::LinkedTransit(_) | LintKind::ClosedNonempty(_) => 2,
-        LintKind::Transfers(_) | LintKind::ControlChars(_) => 1,
-    }
-}
+/// That is a missing file, a file the shared loader ([`load`]) refuses (load
+/// errors, or a booking or plugin failure for a lint over the booked
+/// ledger), or a configuration the lint refuses.
+///
+/// One rule for every lint: 0 means it answered, 1 means a finding under an
+/// opt-in fail flag (`linked-transit --fail-on`), and 2 means it could not
+/// answer, as `rledger check` exits 2 on a file it cannot read.
+pub const ERROR_EXIT_CODE: u8 = 2;

@@ -2712,20 +2712,72 @@ fn test_lint_linked_transit_exits_two_when_it_cannot_answer() {
     let (cli, envelope) = lint(&good, "Assets:Transit");
     assert_eq!(cli, 1, "{envelope}");
     assert_eq!(envelope["ok"], true, "{envelope}");
-    // `closed-nonempty` reads the booked ledger through the same shared
-    // loader, and exits 2 too (#2899).
-    for file in [&missing, &broken, &plugin] {
-        let (code, _) = rledger_stdout(
-            tmp.path(),
-            &["lint", "closed-nonempty", file.to_str().unwrap()],
+}
+
+/// One exit rule for every lint (#2899): a lint that cannot answer (a
+/// missing file, a file the shared loader refuses) exits 2 in `rledger`, as
+/// `linked-transit` does above. In `ag-rledger` it is an error envelope,
+/// `"ok": false`.
+#[test]
+fn test_lint_every_lint_exits_two_when_it_cannot_answer() {
+    let tmp = tempfile::tempdir().unwrap();
+    let broken = write_fixture(
+        tmp.path(),
+        "broken.beancount",
+        "2024-01-01 * \"x\"\n  bad\n",
+    );
+    let plugin = write_fixture(
+        tmp.path(),
+        "plugin.beancount",
+        "plugin \"no.such.plugin_xyz\"\n2000-01-01 open Assets:Cash\n",
+    );
+    let unbookable = write_fixture(
+        tmp.path(),
+        "unbookable.beancount",
+        "2024-01-01 open Assets:Cash\n2024-01-01 open Expenses:Food\n\
+         2024-01-02 * \"lunch\"\n  Assets:Cash\n  Expenses:Food\n\
+         2024-12-31 close Assets:Cash\n",
+    );
+    let missing = tmp.path().join("missing.beancount");
+    let missing = missing.to_str().unwrap();
+    for lint in ["closed-nonempty", "transfers", "control-chars"] {
+        let (code, _) = rledger_stdout(tmp.path(), &["lint", lint, missing]);
+        assert_eq!(code, 2, "{lint}");
+        let (_, envelope, _) = run_in(tmp.path(), &["lint", lint, missing]);
+        assert_eq!(envelope["ok"], false, "{lint}: {envelope}");
+    }
+    // `closed-nonempty` refuses load errors and a failed booking or plugin.
+    for (file, says) in [
+        (&broken, "cannot inspect source with load errors"),
+        (&plugin, "cannot inspect a ledger whose processing failed"),
+        (
+            &unbookable,
+            "cannot inspect a ledger whose processing failed",
+        ),
+    ] {
+        let file = file.to_str().unwrap();
+        let (code, stdout) = rledger_stdout(tmp.path(), &["lint", "closed-nonempty", file]);
+        assert_eq!(code, 2, "{file}");
+        assert!(stdout.is_empty(), "{file}: {stdout}");
+        let (_, envelope, _) = run_in(tmp.path(), &["lint", "closed-nonempty", file]);
+        assert_eq!(envelope["ok"], false, "{file}: {envelope}");
+        assert_eq!(
+            envelope["error"]["code"], "COMMAND_FAILED",
+            "{file}: {envelope}"
         );
-        assert_eq!(code, 2, "{}", file.display());
+        assert!(
+            envelope["error"]["message"]
+                .as_str()
+                .is_some_and(|m| m.contains(says)),
+            "{file}: {envelope}"
+        );
     }
-    // The other lints keep exiting 1 when they cannot run.
-    for lint in ["transfers", "control-chars"] {
-        let (code, _) = rledger_stdout(tmp.path(), &["lint", lint, missing.to_str().unwrap()]);
-        assert_eq!(code, 1, "{lint}");
-    }
+    // `transfers --apply` refuses load errors too.
+    let (code, _) = rledger_stdout(
+        tmp.path(),
+        &["lint", "transfers", "--apply", broken.to_str().unwrap()],
+    );
+    assert_eq!(code, 2);
 }
 
 /// `control-chars` answers over a file with load errors, and the envelope's

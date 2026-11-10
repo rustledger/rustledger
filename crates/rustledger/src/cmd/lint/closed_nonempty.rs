@@ -16,7 +16,7 @@
 //! The ledger is read by [`super::load::load_booked`], the lints' shared
 //! loader, as `linked-transit` reads it. An input it cannot answer for is
 //! refused with an `Err`, and `rledger lint` exits 2 (see
-//! [`super::error_exit_code`]): a missing file, load errors, a transaction
+//! [`super::ERROR_EXIT_CODE`]): a missing file, load errors, a transaction
 //! booking rejected, or a plugin that failed. A transaction booking dropped
 //! never reaches the balances, and a failed plugin left the ledger other
 //! than it would have, so "No accounts closed with a non-zero balance." over
@@ -219,42 +219,67 @@ mod tests {
         );
     }
 
-    /// A plugin that does not exist, a transaction with two elided postings
-    /// (which booking cannot resolve) and a `close`. This used to print "No
-    /// accounts closed with a non-zero balance." and exit 0.
-    #[test]
-    fn test_run_with_writer_refuses_failed_booking_and_plugins() {
+    /// The refusal for `content`, which must leave nothing on `out`.
+    fn refusal(content: &str) -> (String, String) {
         let mut file = tempfile::Builder::new()
             .suffix(".beancount")
             .tempfile()
             .unwrap();
-        file.write_all(
-            concat!(
-                "plugin \"no.such.plugin\"\n",
-                "2024-01-01 open Assets:Cash\n",
-                "2024-01-01 open Expenses:Food\n",
-                "2024-01-02 * \"lunch\"\n",
-                "  Assets:Cash\n",
-                "  Expenses:Food\n",
-                "2024-12-31 close Assets:Cash\n",
-            )
-            .as_bytes(),
-        )
-        .unwrap();
+        file.write_all(content.as_bytes()).unwrap();
         let args = Args {
             files: vec![file.path().to_path_buf()],
             format: OutputFormat::Text,
         };
         let mut buf: Vec<u8> = Vec::new();
         let err = run_with_writer(&args, &mut buf).unwrap_err().to_string();
+        assert!(buf.is_empty(), "nothing is reported: {buf:?}");
+        let shown = file.path().display().to_string();
         assert!(
             err.starts_with(&format!(
-                "{}: cannot inspect a ledger whose processing failed: ",
-                file.path().display()
+                "{shown}: cannot inspect a ledger whose processing failed: "
             )),
             "{err}"
         );
+        (err, shown)
+    }
+
+    /// A transaction with two elided postings (which booking cannot resolve)
+    /// and a `close`: the transaction is left out of the balances.
+    const UNBOOKABLE: &str = concat!(
+        "2024-01-01 open Assets:Cash\n",
+        "2024-01-01 open Expenses:Food\n",
+        "2024-01-02 * \"lunch\"\n",
+        "  Assets:Cash\n",
+        "  Expenses:Food\n",
+        "2024-12-31 close Assets:Cash\n",
+    );
+
+    #[test]
+    fn test_run_with_writer_refuses_a_booking_failure() {
+        let (err, shown) = refusal(UNBOOKABLE);
+        assert!(
+            err.contains(&format!("{shown}:4: BOOK: interpolation failed")),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn test_run_with_writer_refuses_a_plugin_failure() {
+        let (err, _) = refusal("plugin \"no.such.plugin\"\n2024-01-01 open Assets:Cash\n");
+        assert!(err.contains("E8004: "), "{err}");
         assert!(err.contains("no.such.plugin"), "{err}");
-        assert!(buf.is_empty(), "nothing is reported: {buf:?}");
+    }
+
+    /// The ledger from #2899: a plugin that does not exist, the unbookable
+    /// transaction and a `close`. This used to print "No accounts closed
+    /// with a non-zero balance." and exit 0. Both failures are named.
+    #[test]
+    fn test_run_with_writer_refuses_failed_booking_and_plugins() {
+        let (err, shown) = refusal(&format!("plugin \"no.such.plugin\"\n{UNBOOKABLE}"));
+        assert!(
+            err.contains(&format!("{shown}:5: BOOK: interpolation failed")),
+            "{err}"
+        );
+        assert!(err.contains("E8004: "), "{err}");
     }
 }

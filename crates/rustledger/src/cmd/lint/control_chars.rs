@@ -208,7 +208,7 @@ pub fn run_with_writer<W: std::io::Write>(
     let mut findings = Vec::new();
     for path in &args.files {
         let loaded = load_source(path)?;
-        warn_load_errors(messages, path, &loaded.errors);
+        warn_load_errors(messages, path, &loaded);
         for spanned in &loaded.directives {
             let mut found = Vec::new();
             Strings { found: &mut found }.directive(&spanned.value);

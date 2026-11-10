@@ -142,7 +142,7 @@ pub fn run_with_writer<W: std::io::Write>(
             load_clean(path)?
         } else {
             let result = load_source(path)?;
-            warn_load_errors(messages, path, &result.errors);
+            warn_load_errors(messages, path, &result);
             result
         };
         loaded.push((resolved, result));

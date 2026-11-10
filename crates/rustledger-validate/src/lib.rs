@@ -335,13 +335,22 @@ pub(crate) struct PadState {
     /// The padding inserted for each `balance` (the padded account and the
     /// units), by the balance's index in the late stream, for the "pad an
     /// entry with cost" check (`validators::balance::check_padding_at_cost`).
-    padded_for: FxHashMap<usize, Vec<(Account, rustledger_core::Amount)>>,
+    padded_for: FxHashMap<usize, Vec<PaddedFor>>,
     /// Pad amounts that could not be computed or applied, by the index of
     /// the `balance` they were for.
     failed: FxHashMap<usize, rustledger_booking::PadError>,
     /// The unused `pad`s the walk has reached, for `check_unused_pads`.
     pub(crate) unused_found: Vec<UnusedPadFound>,
 }
+
+/// The padding planned for one `balance` by one pad group: the padded
+/// account, the units, and what the group held before it
+/// ([`rustledger_booking::PlannedPadding::held`]).
+pub(crate) type PaddedFor = (
+    Account,
+    rustledger_core::Amount,
+    Vec<rustledger_core::Amount>,
+);
 
 /// An unused `pad` the late walk reached (E2003).
 #[derive(Debug)]
@@ -365,7 +374,11 @@ impl PadState {
             self.padded_for
                 .entry(padding.origin.balance)
                 .or_default()
-                .push((padding.target.clone(), padding.units.clone()));
+                .push((
+                    padding.target.clone(),
+                    padding.units.clone(),
+                    padding.held.clone(),
+                ));
             self.padding
                 .entry(padding.origin.pad)
                 .or_default()
@@ -383,7 +396,7 @@ impl PadState {
 
     /// The padding inserted for the `balance` at `index`: the padded account
     /// and the units, one entry per pad group that padded for it.
-    pub(crate) fn padded_for(&self, index: usize) -> &[(Account, rustledger_core::Amount)] {
+    pub(crate) fn padded_for(&self, index: usize) -> &[PaddedFor] {
         self.padded_for.get(&index).map_or(&[], Vec::as_slice)
     }
 
@@ -466,6 +479,10 @@ pub struct LedgerState {
     /// just the target's subtree, instead of an O(all-accounts) scan per
     /// assertion (`Account`'s `Ord`/`Borrow<str>` are lexical).
     inventory_accounts: BTreeSet<Account>,
+    /// Currencies some posting booked at cost. Only these can make a pad
+    /// "pad an entry with cost", so the check walks a subtree for no other
+    /// (`validators::balance::check_padding_at_cost`).
+    currencies_at_cost: FxHashSet<rustledger_core::Currency>,
     /// Declared commodities.
     commodities: FxHashSet<rustledger_core::Currency>,
     /// The padding the late walk applies, and the unused pads it reached.

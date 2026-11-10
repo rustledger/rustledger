@@ -1775,23 +1775,40 @@ pub fn query_entries(entries: &[wit::Directive], query_str: &str) -> out::QueryR
 // the free functions: these run against the held *core* directives, so they
 // never re-parse source nor round-trip a directive list through the host.
 
+/// The `tolerance_multiplier` held options carry, for the padding a query
+/// over held entries inserts (#2901). An empty value, as a zero-initialized
+/// record from a guest language holds, is beancount's default, the same
+/// treatment [`sanitize_options`] gives an empty root. A value that is not a
+/// decimal is reported and replaced by the default too. Either way `options`
+/// is rewritten to the value used, so `info()` echoes what pads.
+fn held_tolerance_multiplier(
+    options: &mut wit::LedgerOptions,
+) -> (rust_decimal::Decimal, Option<wit::Error>) {
+    let default = rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER;
+    let given = options.inferred_tolerance_multiplier.trim();
+    let (used, error) = if given.is_empty() {
+        (default, None)
+    } else {
+        match given.parse::<rust_decimal::Decimal>() {
+            Ok(value) => (value, None),
+            Err(e) => (
+                default,
+                Some(simple_error(format!(
+                    "invalid tolerance_multiplier {given:?} ({e}); using the default {default}"
+                ))),
+            ),
+        }
+    };
+    options.inferred_tolerance_multiplier = used.to_string();
+    (used, error)
+}
+
 /// Replace empty `name-*` roots in host-supplied options with their
 /// defaults: an empty root can never classify an account, so a
 /// zero-initialized record from a guest language would silently break
 /// every `POSSIGN`/`ACCOUNT_SORTKEY` result with no diagnostic (deep
 /// review of #1805). Non-empty values pass through verbatim — including
 /// duplicates, which are the host's to avoid.
-/// The `tolerance_multiplier` held options carry, for the padding a query
-/// over held entries inserts. Beancount's default when the record holds no
-/// decimal there, as a zero-initialized record from a guest language does
-/// (the same treatment [`sanitize_options`] gives an empty root).
-fn held_tolerance_multiplier(options: &wit::LedgerOptions) -> rust_decimal::Decimal {
-    options
-        .inferred_tolerance_multiplier
-        .parse()
-        .unwrap_or(rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER)
-}
-
 fn sanitize_options(mut provided: wit::LedgerOptions) -> wit::LedgerOptions {
     let defaults = options(ffi::LedgerOptions::default());
     let fix = |field: &mut String, default: String| {
@@ -1974,7 +1991,8 @@ impl SessionState {
         entries: &[wit::Directive],
         options: wit::LedgerOptions,
     ) -> Self {
-        let options = sanitize_options(options);
+        let mut options = sanitize_options(options);
+        let (tolerance_multiplier, multiplier_error) = held_tolerance_multiplier(&mut options);
         // The one-time conversion is this API's whole reason to exist —
         // reserve up front so a large ledger doesn't reallocate through
         // the collect (review catch; drops are rare, over-reserving by
@@ -1990,9 +2008,9 @@ impl SessionState {
             directives,
             lines: vec![0; n],
             files: vec!["<entries>".to_string(); n],
-            errors: vec![],
+            errors: multiplier_error.into_iter().collect(),
             query_blocked: false,
-            tolerance_multiplier: held_tolerance_multiplier(&options),
+            tolerance_multiplier,
             options,
             plugins: vec![],
             includes: vec![],
@@ -3329,6 +3347,57 @@ option \"display_precision\" \"USD:0.001\"
             text.contains("2024-01-15 balance Assets:Bank 100.500 USD\n"),
             "option 3dp must pad the written 2dp amount, got:\n{text}"
         );
+    }
+
+    /// Held options' `tolerance_multiplier` reaches the padding a query
+    /// inserts (#2901): under 2 a 0.03 difference against `balance 100.00`
+    /// is within tolerance and nothing is padded. A value that is not a
+    /// decimal is reported and replaced by the default, and `info()` echoes
+    /// the value used.
+    #[test]
+    fn test_from_entries_with_options_uses_and_reports_the_tolerance_multiplier() {
+        let loaded = SessionState::from_source(
+            "2024-01-01 open Assets:A\n2024-01-01 open Equity:O\n\
+             2024-01-02 * \"x\"\n  Assets:A  99.97 USD\n  Equity:O  -99.97 USD\n\
+             2024-01-03 pad Assets:A Equity:O\n2024-01-10 balance Assets:A 100.00 USD\n",
+        );
+        let info = loaded.info();
+        let padding = |state: &SessionState| {
+            let result =
+                state.query("SELECT sum(number) WHERE flag = 'P' AND account = 'Assets:A'");
+            format!("{:?}", result.rows)
+        };
+        let with = |multiplier: &str| {
+            let mut options = info.options.clone();
+            options.inferred_tolerance_multiplier = multiplier.to_string();
+            SessionState::from_entries_with_options(&info.entries, options)
+        };
+
+        let wide = with("2");
+        assert!(wide.errors.is_empty(), "{:?}", wide.errors);
+        assert_eq!(wide.info().options.inferred_tolerance_multiplier, "2");
+        let default = with("0.5");
+        assert_ne!(
+            padding(&wide),
+            padding(&default),
+            "2 pads nothing, 0.5 pads 0.03"
+        );
+
+        let invalid = with("two");
+        assert_eq!(invalid.errors.len(), 1, "{:?}", invalid.errors);
+        assert!(
+            invalid.errors[0]
+                .message
+                .contains("invalid tolerance_multiplier \"two\""),
+            "{:?}",
+            invalid.errors
+        );
+        assert_eq!(invalid.info().options.inferred_tolerance_multiplier, "0.5");
+        assert_eq!(padding(&invalid), padding(&default));
+
+        let empty = with("");
+        assert!(empty.errors.is_empty(), "{:?}", empty.errors);
+        assert_eq!(empty.info().options.inferred_tolerance_multiplier, "0.5");
     }
 
     /// The round-trip that motivated the whole options carrier: a session

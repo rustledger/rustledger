@@ -271,47 +271,59 @@ pub fn validate_balance_late(
 }
 
 /// Beancount's "Attempt to pad an entry with cost" (`beancount/ops/pad.py`):
-/// when padding is inserted for the `balance` at `index`, every lot of the
-/// padded currency that the padded account and its sub-accounts hold at cost
-/// is an error, once per lot, as beancount reports it. The padding still
-/// applies (it was added at the pad), as beancount still inserts it.
+/// when padding is inserted for the `balance` at `index`, every position of
+/// the padded currency that the padded account and its sub-accounts hold at
+/// cost is an error, once per position, as beancount reports it (the same
+/// lot held in two sub-accounts is one position there, as here). The padding
+/// still applies (it was added at the pad), as beancount still inserts it.
 ///
 /// The padding plan has units only (`rustledger_booking::plan_pads`), so the
-/// lots are read here, from the booked inventories, which hold the same lots
-/// beancount's `pad_balance` does: padding adds no lot at cost. The message
-/// shows those inventories without this padding, as beancount checks before
-/// it pads.
+/// lots are read here, from the booked inventories, which hold the lots
+/// beancount's `pad_balance` holds: padding adds none at cost. The rest of
+/// the message, what the group held without cost, is the plan's
+/// ([`rustledger_booking::PlannedPadding::held`]): the booked inventories
+/// also hold other pads' padding, which beancount's group does not see.
+///
+/// A currency never booked at cost has no lot to find, so the subtree is
+/// not walked: a parent pad with a balance on each of many sub-accounts
+/// stays linear.
 fn check_padding_at_cost(
     state: &LedgerState,
     bal: &Balance,
     index: usize,
     errors: &mut Vec<ValidationError>,
 ) {
-    for (target, units) in state.pads.padded_for(index) {
-        // The key clones are reference-count bumps (`Account` is interned).
-        let mut subtree = vec![target.clone()];
-        rustledger_core::for_each_strict_subaccount(
-            &state.inventory_accounts,
-            target.as_str(),
-            |sub| subtree.push(sub.clone()),
-        );
-        let inventories = subtree
-            .iter()
-            .filter_map(|account| state.inventories.get(account));
-        let lots_at_cost = inventories
-            .clone()
-            .flat_map(Inventory::positions)
-            .filter(|p| p.units.currency == units.currency && p.cost.is_some())
-            .count();
-        if lots_at_cost == 0 {
+    for (target, units, held) in state.pads.padded_for(index) {
+        if !state.currencies_at_cost.contains(&units.currency) {
             continue;
         }
-        let message = match held_before_padding(inventories, units) {
+        let lots = match lots_at_cost(state, target) {
+            Ok(lots) => lots,
+            Err(e) => {
+                errors.push(
+                    ValidationError::new(
+                        ErrorCode::PadWithCost,
+                        format!("Attempt to pad an entry with cost ({e})"),
+                        bal.date,
+                    )
+                    .with_context(format!("account: {target}")),
+                );
+                continue;
+            }
+        };
+        let count = lots
+            .positions()
+            .filter(|p| p.units.currency == units.currency)
+            .count();
+        if count == 0 {
+            continue;
+        }
+        let message = match held_without_cost(lots, held) {
             // Beancount prints the inventory in parentheses.
-            Ok(held) => format!("Attempt to pad an entry with cost for balance: ({held})"),
+            Ok(shown) => format!("Attempt to pad an entry with cost for balance: ({shown})"),
             Err(e) => format!("Attempt to pad an entry with cost ({e})"),
         };
-        for _ in 0..lots_at_cost {
+        for _ in 0..count {
             errors.push(
                 ValidationError::new(ErrorCode::PadWithCost, message.clone(), bal.date)
                     .with_context(format!("account: {target}")),
@@ -320,19 +332,53 @@ fn check_padding_at_cost(
     }
 }
 
-/// What `inventories` hold together, without the `padding` just applied to
-/// them.
-fn held_before_padding<'a>(
-    inventories: impl Iterator<Item = &'a Inventory>,
-    padding: &Amount,
+/// The positions held at cost in `target` and its sub-accounts, merged as
+/// one inventory merges them (one lot held in two sub-accounts is one
+/// position).
+fn lots_at_cost(
+    state: &LedgerState,
+    target: &rustledger_core::Account,
 ) -> Result<Inventory, OverflowError> {
-    let mut held = Inventory::new();
-    for inventory in inventories {
-        held.merge(inventory)?;
+    let mut lots = Inventory::new();
+    let mut add = |account: &rustledger_core::Account| -> Result<(), OverflowError> {
+        if let Some(inventory) = state.inventories.get(account) {
+            for position in inventory.positions().filter(|p| p.cost.is_some()) {
+                lots.add(position.clone())?;
+            }
+        }
+        Ok(())
+    };
+    add(target)?;
+    let mut result = Ok(());
+    rustledger_core::for_each_strict_subaccount(
+        &state.inventory_accounts,
+        target.as_str(),
+        |sub| {
+            if result.is_ok() {
+                result = add(sub);
+            }
+        },
+    );
+    result.map(|()| lots)
+}
+
+/// `lots` plus what the pad group held without cost: its units per currency
+/// (`held`) less the units held at cost.
+fn held_without_cost(mut lots: Inventory, held: &[Amount]) -> Result<Inventory, OverflowError> {
+    let at_cost: Vec<(rustledger_core::Currency, rust_decimal::Decimal)> = held
+        .iter()
+        .map(|a| (a.currency.clone(), lots.units(&a.currency)))
+        .collect();
+    for (amount, (_, cost_units)) in held.iter().zip(at_cost) {
+        let plain = amount
+            .number
+            .checked_sub(cost_units)
+            .ok_or_else(|| OverflowError {
+                currency: amount.currency.clone(),
+            })?;
+        if !plain.is_zero() {
+            lots.add(Position::simple(Amount::new(plain, &amount.currency)))?;
+        }
     }
-    held.add(Position::simple(Amount::new(
-        -padding.number,
-        &padding.currency,
-    )))?;
-    Ok(held)
+    Ok(lots)
 }

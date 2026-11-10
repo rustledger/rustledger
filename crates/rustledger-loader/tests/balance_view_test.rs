@@ -202,3 +202,65 @@ fn balance_view_on_pad_free_ledger_is_equivalent_to_directives() {
          pad-free input."
     );
 }
+
+/// The padding `units` the balance view and the validator inserts for
+/// `source`, and whether validation reports the pad unused (`E2003`).
+fn padding_and_unused(source: &str) -> (Vec<String>, bool) {
+    let fixture = write_fixture(source);
+    let opts = LoadOptions {
+        validate: true,
+        ..Default::default()
+    };
+    let ledger = load(fixture.path(), &opts).expect("load");
+    let padding = ledger
+        .balance_view()
+        .iter()
+        .filter_map(|d| match d {
+            Directive::Transaction(t) if rustledger_booking::is_synthesized_pad(t) => t.postings[0]
+                .amount()
+                .map(|a| format!("{} {}", a.number, a.currency)),
+            _ => None,
+        })
+        .collect();
+    let unused = ledger.errors.iter().any(|e| e.code == "E2003");
+    (padding, unused)
+}
+
+const TOLERANCE_PAD: &str = "2024-01-01 open Assets:A
+2024-01-01 open Equity:O
+2024-01-02 * \"x\"
+  Assets:A  99.97 USD
+  Equity:O  -99.97 USD
+2024-01-03 pad Assets:A Equity:O
+2024-01-10 balance Assets:A 100.00 USD
+";
+
+/// The ledger's `tolerance_multiplier` reaches the pad rule, in the balance
+/// view and in validation alike (#2901). Verified with bean-check and
+/// bean-query 3.2.3: under `option "tolerance_multiplier" "2"` the 0.03
+/// difference is within 2 * 2 * 0.01, so nothing is padded and the pad is
+/// an `Unused Pad entry`; at the default 0.5 it pads 0.03.
+#[test]
+fn test_balance_view_pads_with_the_ledgers_tolerance_multiplier() {
+    let (padding, unused) = padding_and_unused(&format!(
+        "option \"tolerance_multiplier\" \"2\"\n{TOLERANCE_PAD}"
+    ));
+    assert!(padding.is_empty(), "nothing is padded: {padding:?}");
+    assert!(unused, "the pad is unused");
+
+    let (padding, unused) = padding_and_unused(TOLERANCE_PAD);
+    assert_eq!(padding, ["0.03 USD"]);
+    assert!(!unused);
+}
+
+/// `inferred_tolerance_default` does not widen a balance's tolerance, so
+/// the pad still pads (bean-query 3.2.3: 0.03 USD under
+/// `option "inferred_tolerance_default" "USD:0.05"`, bean-check clean).
+#[test]
+fn test_balance_view_pad_ignores_inferred_tolerance_default() {
+    let (padding, unused) = padding_and_unused(&format!(
+        "option \"inferred_tolerance_default\" \"USD:0.05\"\n{TOLERANCE_PAD}"
+    ));
+    assert_eq!(padding, ["0.03 USD"]);
+    assert!(!unused);
+}

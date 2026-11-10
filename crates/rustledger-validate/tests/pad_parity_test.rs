@@ -27,11 +27,16 @@
 
 mod common;
 
-use common::validate;
+use common::validate_with_options;
 use rust_decimal::Decimal;
 use rust_decimal_macros::dec;
 use rustledger_core::{Directive, NaiveDate};
-use rustledger_validate::ErrorCode;
+use rustledger_validate::{ErrorCode, ValidationOptions};
+
+const DEFAULT: Decimal = rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER;
+
+/// Two lots of the same cost, told apart by a label.
+const LOTS_2: &str = "(5 STK { 10 USD, 2024-01-02}, 5 STK { 10 USD, 2024-01-02, \"b\"})";
 
 const HEAD: &str = "2024-01-01 open Equity:O\n2024-01-01 open Assets:B\n";
 
@@ -44,8 +49,11 @@ struct Shape {
     failed: Vec<&'static str>,
     /// Dates of beancount's `Unused Pad entry` errors.
     unused: Vec<&'static str>,
-    /// How many `Attempt to pad an entry with cost` errors beancount reports.
-    cost_errors: usize,
+    /// beancount's `Attempt to pad an entry with cost` errors, one per lot,
+    /// each as rledger words it (its positions print `{ 10 USD, ...}`).
+    cost_messages: Vec<&'static str>,
+    /// The ledger's `tolerance_multiplier` option.
+    tolerance_multiplier: Decimal,
 }
 
 fn shapes() -> Vec<Shape> {
@@ -70,7 +78,8 @@ fn shapes() -> Vec<Shape> {
             padding: vec![("Assets:A", dec!(130))],
             failed: vec![],
             unused: vec![],
-            cost_errors: 0,
+            cost_messages: vec![],
+            tolerance_multiplier: DEFAULT,
         });
         // Already satisfied: no padding, `Unused Pad entry`.
         out.push(Shape {
@@ -83,7 +92,8 @@ fn shapes() -> Vec<Shape> {
             padding: vec![],
             failed: vec![],
             unused: vec!["2024-01-02"],
-            cost_errors: 0,
+            cost_messages: vec![],
+            tolerance_multiplier: DEFAULT,
         });
         // A balance on an unopened target is compared: `Balance failed`.
         out.push(Shape {
@@ -95,7 +105,8 @@ fn shapes() -> Vec<Shape> {
             padding: vec![],
             failed: vec!["2024-01-05"],
             unused: vec![],
-            cost_errors: 0,
+            cost_messages: vec![],
+            tolerance_multiplier: DEFAULT,
         });
         // A zero difference uses up the currency: `Unused Pad entry` and
         // `Balance failed` on the second balance, the target opened or not.
@@ -113,7 +124,8 @@ fn shapes() -> Vec<Shape> {
             padding: vec![],
             failed: vec!["2024-01-05"],
             unused: vec!["2024-01-02"],
-            cost_errors: 0,
+            cost_messages: vec![],
+            tolerance_multiplier: DEFAULT,
         });
     }
     // A superseded pad is never used again: `Unused Pad entry` on it and
@@ -127,7 +139,8 @@ fn shapes() -> Vec<Shape> {
         padding: vec![("Assets:A", dec!(100))],
         failed: vec!["2024-01-12"],
         unused: vec!["2024-01-09"],
-        cost_errors: 0,
+        cost_messages: vec![],
+        tolerance_multiplier: DEFAULT,
     });
     // The padding is dated at the pad, so a balance on the source between
     // the pad and the balance it satisfies sees it (bean-check: clean).
@@ -140,7 +153,8 @@ fn shapes() -> Vec<Shape> {
         padding: vec![("Assets:A", dec!(100))],
         failed: vec![],
         unused: vec![],
-        cost_errors: 0,
+        cost_messages: vec![],
+        tolerance_multiplier: DEFAULT,
     });
     // A pad that padded USD is no contender for EUR after a later pad: each
     // balance uses the latest pad (bean-check: clean).
@@ -158,7 +172,8 @@ fn shapes() -> Vec<Shape> {
         ],
         failed: vec![],
         unused: vec![],
-        cost_errors: 0,
+        cost_messages: vec![],
+        tolerance_multiplier: DEFAULT,
     });
     // The ordinary case, as a control.
     out.push(Shape {
@@ -171,7 +186,8 @@ fn shapes() -> Vec<Shape> {
         padding: vec![("Assets:A", dec!(130))],
         failed: vec![],
         unused: vec![],
-        cost_errors: 0,
+        cost_messages: vec![],
+        tolerance_multiplier: DEFAULT,
     });
     out
 }
@@ -192,16 +208,17 @@ fn shapes_2901() -> Vec<Shape> {
                  padding: Vec<(&'static str, Decimal)>,
                  failed: Vec<&'static str>,
                  unused: Vec<&'static str>,
-                 cost_errors: usize| Shape {
+                 cost_messages: Vec<&'static str>| Shape {
         name: name.into(),
         source,
         padding,
         failed,
         unused,
-        cost_errors,
+        cost_messages,
+        tolerance_multiplier: DEFAULT,
     };
     let buy = |lots: &str| format!("2024-01-02 * \"buy\"\n{lots}  Assets:Cash  -100 USD\n");
-    vec![
+    let mut out = vec![
         // A pad on a sub-account, a balance on its parent between the pad and
         // the sub-account's balance: the padding, dated at the pad, reaches
         // the parent (clean).
@@ -215,7 +232,7 @@ fn shapes_2901() -> Vec<Shape> {
             vec![("Assets:A:Sub", dec!(100))],
             vec![],
             vec![],
-            0,
+            vec![],
         ),
         // A pad on the parent, a balance on its sub-account: the parent is
         // padded to the sub-account's amount, measured over the parent and
@@ -232,7 +249,7 @@ fn shapes_2901() -> Vec<Shape> {
             vec![("Assets:A", dec!(70))],
             vec!["2024-01-10", "2024-01-15"],
             vec![],
-            0,
+            vec![],
         ),
         // A balance on a sub-account that already holds uses up the parent's
         // pad: `Unused Pad entry`, and the parent's balance fails.
@@ -247,7 +264,7 @@ fn shapes_2901() -> Vec<Shape> {
             vec![],
             vec!["2024-01-05"],
             vec!["2024-01-03"],
-            0,
+            vec![],
         ),
         // Pads on a parent and on its sub-account: each pad group counts its
         // own padding only, so both pad 40 and the parent's balance fails.
@@ -261,7 +278,7 @@ fn shapes_2901() -> Vec<Shape> {
             vec![("Assets:A", dec!(40)), ("Assets:A:Sub", dec!(40))],
             vec!["2024-01-10"],
             vec![],
-            0,
+            vec![],
         ),
         // A sub-account's padding is not part of its parent's pad group:
         // the parent pads its full 150, and its balance sees 250.
@@ -275,7 +292,7 @@ fn shapes_2901() -> Vec<Shape> {
             vec![("Assets:A:B", dec!(100)), ("Assets:A", dec!(150))],
             vec!["2024-01-05"],
             vec![],
-            0,
+            vec![],
         ),
         // Padding taken out of an account as a pad source is not part of
         // that account's own pad group: its pad sees 0, held, and is unused,
@@ -290,7 +307,7 @@ fn shapes_2901() -> Vec<Shape> {
             vec![("Assets:A", dec!(100))],
             vec!["2024-01-05"],
             vec!["2024-01-04"],
-            0,
+            vec![],
         ),
         // Padding a currency held at cost: the padding is inserted, and the
         // error is reported once per lot held at cost.
@@ -304,7 +321,7 @@ fn shapes_2901() -> Vec<Shape> {
             vec![("Assets:Inv", dec!(5))],
             vec![],
             vec![],
-            1,
+            vec!["(10 STK { 10 USD, 2024-01-02})"],
         ),
         shape(
             "padding a currency held at cost in two lots",
@@ -317,7 +334,7 @@ fn shapes_2901() -> Vec<Shape> {
             vec![("Assets:Inv", dec!(5))],
             vec![],
             vec![],
-            2,
+            vec![LOTS_2, LOTS_2],
         ),
         // Held at cost and already balanced: nothing is padded, so nothing
         // is reported but the unused pad.
@@ -331,7 +348,7 @@ fn shapes_2901() -> Vec<Shape> {
             vec![],
             vec![],
             vec!["2024-01-03"],
-            0,
+            vec![],
         ),
         // A difference within the balance's inferred tolerance (0.005 for
         // `100.00`) is not padded: `Unused Pad entry`, and the currency is
@@ -347,7 +364,7 @@ fn shapes_2901() -> Vec<Shape> {
             vec![],
             vec![],
             vec!["2024-01-03"],
-            0,
+            vec![],
         ),
         // Within an explicit tolerance: not padded, and the later exact
         // balance fails on the 99.5 the account still holds.
@@ -362,10 +379,95 @@ fn shapes_2901() -> Vec<Shape> {
             vec![],
             vec!["2024-01-15"],
             vec!["2024-01-03"],
-            0,
+            vec![],
         ),
-    ]
+        // The same lot held in two sub-accounts is one position: one error.
+        shape(
+            "the same lot in two sub-accounts",
+            format!(
+                "{}2024-01-02 * \"buy\"\n  Assets:A:B  10 STK {{10 USD}}\n  Assets:A:Sub  4 STK {{10 USD}}\n\
+                 \x20 Assets:Cash  -140 USD\n2024-01-03 pad Assets:A Equity:O\n\
+                 2024-01-10 balance Assets:A 20 STK\n",
+                opens(&[
+                    "Assets:A",
+                    "Assets:A:B",
+                    "Assets:A:Sub",
+                    "Assets:Cash",
+                    "Equity:O"
+                ])
+            ),
+            vec![("Assets:A", dec!(6))],
+            vec![],
+            vec![],
+            vec!["(14 STK { 10 USD, 2024-01-02})"],
+        ),
+        // A lot held in a sub-account of the padded account.
+        shape(
+            "a lot held at cost in a sub-account",
+            format!(
+                "{}{}2024-01-03 pad Assets:A Equity:O\n2024-01-10 balance Assets:A 15 STK\n",
+                opens(&["Assets:A", "Assets:A:B", "Assets:Cash", "Equity:O"]),
+                buy("  Assets:A:B  10 STK {10 USD}\n")
+            ),
+            vec![("Assets:A", dec!(5))],
+            vec![],
+            vec![],
+            vec!["(10 STK { 10 USD, 2024-01-02})"],
+        ),
+        // Pads on a sub-account and then its parent, at cost: each group's
+        // message shows what that group holds, not the other's padding.
+        shape(
+            "pads on a sub-account and its parent, at cost",
+            format!(
+                "{}{}2024-01-03 pad Assets:A:B Equity:O\n2024-01-04 balance Assets:A:B 12 STK\n\
+                 2024-01-05 pad Assets:A Equity:O\n2024-01-10 balance Assets:A 15 STK\n",
+                opens(&["Assets:A", "Assets:A:B", "Assets:Cash", "Equity:O"]),
+                buy("  Assets:A:B  10 STK {10 USD}\n")
+            ),
+            vec![("Assets:A:B", dec!(2)), ("Assets:A", dec!(5))],
+            vec!["2024-01-10"],
+            vec![],
+            vec![
+                "(10 STK { 10 USD, 2024-01-02})",
+                "(10 STK { 10 USD, 2024-01-02})",
+            ],
+        ),
+        // A later balance just beyond the tolerance (0.016 against 0.01)
+        // fails: pins the balance check's tolerance to the pad's.
+        shape(
+            "a later balance just beyond the tolerance",
+            format!(
+                "{}2024-01-02 * \"x\"\n  Assets:A  100.004 USD\n  Equity:O  -100.004 USD\n\
+                 2024-01-03 pad Assets:A Equity:O\n2024-01-10 balance Assets:A 100.00 USD\n\
+                 2024-01-15 balance Assets:A 100.02 USD\n",
+                opens(&["Assets:A", "Equity:O"])
+            ),
+            vec![],
+            vec!["2024-01-15"],
+            vec!["2024-01-03"],
+            vec![],
+        ),
+    ];
+    // `option "tolerance_multiplier" "2"`: 99.97 against `balance 100.00` is
+    // within 2 * 2 * 0.01, so nothing is padded and the pad is unused
+    // (bean-check: `Unused Pad entry`). At the default it pads 0.03.
+    let mut multiplier = shape(
+        "a difference within a tolerance_multiplier of 2",
+        format!(
+            "{}2024-01-02 * \"x\"\n  Assets:A  99.97 USD\n  Equity:O  -99.97 USD\n\
+             2024-01-03 pad Assets:A Equity:O\n2024-01-10 balance Assets:A 100.00 USD\n",
+            opens(&["Assets:A", "Equity:O"])
+        ),
+        vec![],
+        vec![],
+        vec!["2024-01-03"],
+        vec![],
+    );
+    multiplier.tolerance_multiplier = dec!(2);
+    out.push(multiplier);
+    out
 }
+
 fn parse(source: &str) -> Vec<Directive> {
     let parsed = rustledger_parser::parse(source);
     assert!(parsed.errors.is_empty(), "{source:?}: {:?}", parsed.errors);
@@ -396,10 +498,7 @@ fn test_validator_padding_matches_process_pads_and_beancount() {
         let directives = parse(&shape.source);
 
         // The canonical padding.
-        let pads = rustledger_booking::process_pads(
-            &directives,
-            rustledger_booking::DEFAULT_TOLERANCE_MULTIPLIER,
-        );
+        let pads = rustledger_booking::process_pads(&directives, shape.tolerance_multiplier);
         let padding: Vec<(&str, Decimal)> = pads
             .padding_transactions
             .iter()
@@ -420,7 +519,9 @@ fn test_validator_padding_matches_process_pads_and_beancount() {
         );
 
         // The validator, padding inline.
-        let errors = validate(&directives);
+        let options =
+            ValidationOptions::default().with_tolerance_multiplier(shape.tolerance_multiplier);
+        let errors = validate_with_options(&directives, options.clone());
         let inline_failures = failures(&errors);
         let inline_unused = dates(
             errors
@@ -442,7 +543,7 @@ fn test_validator_padding_matches_process_pads_and_beancount() {
                 .cloned()
                 .map(Directive::Transaction),
         );
-        let canonical_failures = failures(&validate(&padded));
+        let canonical_failures = failures(&validate_with_options(&padded, options));
 
         assert_eq!(
             inline_failures, canonical_failures,
@@ -464,14 +565,18 @@ fn test_validator_padding_matches_process_pads_and_beancount() {
             inline_unused, shape.unused,
             "{name}: unused pads vs beancount"
         );
-        let cost_errors: Vec<_> = errors
+        let cost_messages: Vec<&str> = errors
             .iter()
             .filter(|e| e.code == ErrorCode::PadWithCost)
+            .map(|e| {
+                e.message
+                    .strip_prefix("Attempt to pad an entry with cost for balance: ")
+                    .unwrap_or(&e.message)
+            })
             .collect();
         assert_eq!(
-            cost_errors.len(),
-            shape.cost_errors,
-            "{name}: `Attempt to pad an entry with cost` errors vs beancount: {cost_errors:?}"
+            cost_messages, shape.cost_messages,
+            "{name}: `Attempt to pad an entry with cost` errors vs beancount"
         );
     }
 }

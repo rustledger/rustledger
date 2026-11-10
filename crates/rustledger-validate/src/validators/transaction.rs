@@ -547,6 +547,9 @@ pub fn update_inventories(
         let Some(units) = posting.amount() else {
             continue;
         };
+        if posting.cost.is_some() && !state.currencies_at_cost.contains(&units.currency) {
+            state.currencies_at_cost.insert(units.currency.clone());
+        }
         // An account with no `open` (reported as E1001) is booked under the
         // file's default method, as the booking engine books it.
         let booking_method = state

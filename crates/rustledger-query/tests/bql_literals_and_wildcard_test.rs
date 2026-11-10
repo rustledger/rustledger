@@ -272,10 +272,11 @@ fn test_parse_refuses_unary_plus_before_a_list() {
 }
 
 /// The nesting scan cannot tell a binary `-` from a unary one, so a bracket
-/// right after a binary minus costs two levels: `a - (b - (...` reaches the
-/// bound at half the brackets `a + (b + (...` does. This pins that cost
-/// exactly, as `nesting_exceeds_limit` documents it: 128 `+ (` parse and 129
-/// do not, 64 `- (` parse and 65 do not.
+/// right after a binary minus costs two nesting levels: `a - (b - (...`
+/// reaches the 60-bracket bound at 31 brackets. `a + (b + (...` is bounded
+/// first by the expression-depth budget, where each `+ (` costs 13 (one for
+/// the operator, 12 for the bracket) of 720. This pins both costs exactly:
+/// 55 `+ (` parse and 56 do not, 30 `- (` parse and 31 do not.
 #[test]
 fn test_parse_counts_a_bracket_after_a_binary_minus_twice() {
     let chain = |op: &str, n: usize| {
@@ -285,10 +286,10 @@ fn test_parse_counts_a_bracket_after_a_binary_minus_twice() {
             ")".repeat(n)
         )
     };
-    assert!(parse(&chain("+", 128)).is_ok());
-    assert!(parse(&chain("+", 129)).is_err());
-    assert!(parse(&chain("-", 64)).is_ok());
-    assert!(parse(&chain("-", 65)).is_err());
+    assert!(parse(&chain("+", 55)).is_ok());
+    assert!(parse(&chain("+", 56)).is_err());
+    assert!(parse(&chain("-", 30)).is_ok());
+    assert!(parse(&chain("-", 31)).is_err());
 }
 
 /// A run of signs counts toward the same nesting bound as the brackets around
@@ -298,7 +299,7 @@ fn test_parse_counts_a_bracket_after_a_binary_minus_twice() {
 fn test_parse_refuses_a_run_of_signs_past_the_nesting_bound() {
     let long = format!("SELECT {}6 LIMIT 1", "-".repeat(10_000));
     assert!(parse(&long).is_err());
-    assert_eq!(scalar(&format!("{}6", "-".repeat(64))), "6");
+    assert_eq!(scalar(&format!("{}6", "-".repeat(60))), "6");
     // Signs and brackets multiply: 20 brackets each behind 128 signs.
     let mixed = format!(
         "SELECT {}1{} LIMIT 1",
@@ -308,7 +309,7 @@ fn test_parse_refuses_a_run_of_signs_past_the_nesting_bound() {
     assert!(parse(&mixed).is_err());
     // Within the bound together, they still parse.
     assert_eq!(
-        scalar(&format!("{}1{}", "-(".repeat(60), ")".repeat(60))),
+        scalar(&format!("{}1{}", "-(".repeat(30), ")".repeat(30))),
         "1"
     );
 }

@@ -93,7 +93,7 @@ fn quote_run_edges_match_upstream_regex() {
 }
 
 /// Drift guards: the paren-nesting pre-scan must lex strings identically
-/// to the parser. Its ONLY observable is the `MAX_NESTING_DEPTH` (128)
+/// to the parser. Its ONLY observable is the `MAX_NESTING_DEPTH` (60)
 /// rejection, so each guard straddles that limit — a scanner that
 /// disagrees with the parser about where a string ends flips the
 /// outcome (per the review of #1798: a guard that a divergence cannot

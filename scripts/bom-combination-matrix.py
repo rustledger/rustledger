@@ -26,6 +26,8 @@ against it row by row, without needing Python at test time.
           rledger's follows the BOM)
        T  a BOM-led account with an invalid   `<BOM>Assets:A{i}$x`
           tail glued to it
+       t  the same for an account beancount   `<BOM>assets:A{i}$x`
+          reads only with its BOM
 
    Line-start prefixes (`PREFIXES`), put before the line, so before the
    indentation of an indented line:
@@ -117,6 +119,7 @@ TOKENS = {
     "C": "A" + BOM + "b{i}",
     "k": BOM + "assets:A{i}",
     "T": BOM + "Assets:A{i}$x",
+    "t": BOM + "assets:A{i}$x",
 }
 
 PREFIXES = {
@@ -184,6 +187,23 @@ EXTRA = [
     BOM + ";c " + BOM + "x\n",
     BOM + "%c " + BOM + "x\n",
     "2024-01-02 *\r\n  Assets:A  1 A\r\n",
+    BOM + "assets:A$x\n",
+    BOM + BOM + "assets:A$x\n",
+    BOM + "1:A$x\n",
+    BOM + "1:A:B$c\n",
+    BOM + "-:A$x\n",
+    BOM + "a-b:C$x\n",
+    BOM + "assets:A.b\n",
+    BOM + "assets:A'b\n",
+    BOM + "assets:A" + BOM + "$x\n",
+    BOM + "assets:A\"x\"\n",
+    BOM + "assets:A#t\n",
+    BOM + "assets:A^l\n",
+    BOM + "assets:A!\n",
+    BOM + "assets:A@\n",
+    BOM + "assets:A;c\n",
+    "2024-01-02 open Assets:C USD \"BAD\"\n  kk: " + BOM + "Assets:D\n",
+    "2024-01-02 open Assets:C USD \"BAD\"\n  kk: " + BOM + "assets:D\n",
 ]
 
 PROBE_SEED = 2931

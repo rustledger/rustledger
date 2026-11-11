@@ -533,3 +533,24 @@ fn test_parse_bom_led_account_shapes_count_as_beancount() {
         assert!(bom_errors(&result) >= 1, "{src:?}: {:?}", result.errors);
     }
 }
+
+/// BOMs beancount reads into an account are no invalid token on a metadata
+/// line either, so the `open` above it still has its booking method checked,
+/// as in beancount (`Invalid booking method: BAD`): the BOM is reported as
+/// the stray BOM it is, and the booking method as invalid.
+#[test]
+fn test_parse_bom_account_in_metadata_keeps_booking_method_check() {
+    for value in [format!("{BOM}Assets:D"), format!("{BOM}assets:D")] {
+        let src = format!("2024-01-02 open Assets:C USD \"BAD\"\n  kk: {value}\n");
+        let result = parse_both(&src);
+        assert!(
+            result
+                .errors
+                .iter()
+                .any(|e| matches!(e.kind, ParseErrorKind::InvalidBookingMethod(_))),
+            "{src:?}: {:?}",
+            result.errors
+        );
+        assert_eq!(bom_errors(&result), 1, "{src:?}: {:?}", result.errors);
+    }
+}

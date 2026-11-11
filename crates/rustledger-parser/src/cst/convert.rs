@@ -9280,20 +9280,54 @@ pub(super) fn report_invalid_tokens_of_error_line(
             Span::new(at.start + off, at.end + off),
         ));
     };
+    // Where the account beancount reads a line-start BOM run into ends, when
+    // no account of rledger's follows the BOMs (`<BOM>assets:A`): tokens
+    // before it are part of that account, and the rest of the blank-free run
+    // after it is beancount's next token.
+    let mut account_glue_end: Option<usize> = None;
     for range in invalid {
         let text = stripped.get(range.clone()).unwrap_or_default();
         let bom_account = is_bom_account_token(stripped, range.start, text);
         if is_line_start_bom_token(stripped, range.start, text) {
             bom_diagnostic_spent = true;
-            // An account of its own after the BOMs ends beancount's token
-            // there (`<BOM><BOM>Assets:A$x` is the account, then `$x`), so
-            // nothing after it is glued to them.
-            line_start_boms_end = (!bom_account).then_some(range.end);
+            let from = &stripped[range.start..];
+            let last_of_run = !from[text.len()..].starts_with(crate::bom::BOM_CHAR);
+            line_start_boms_end = None;
+            account_glue_end = None;
+            if bom_account {
+                // An account of its own after the BOMs ends beancount's
+                // token there (`<BOM><BOM>Assets:A$x` is the account, then
+                // `$x`), so nothing after it is glued to them.
+            } else if let Some((_, end)) = last_of_run
+                .then(|| crate::logos_lexer::bom_led_account(from))
+                .flatten()
+            {
+                account_glue_end = Some(range.start + end);
+            } else {
+                line_start_boms_end = Some(range.end);
+            }
             continue;
         }
         // BOMs beancount reads into an account: none of its invalid tokens.
         if bom_account {
             continue;
+        }
+        // The account a line-start BOM run starts, in beancount
+        // (`<BOM>assets:A$x`): a token inside it is part of it, and the part
+        // of a token past its end is beancount's next token, an invalid one
+        // when it lexes so (`$x`, but not `"x"`, `#t` or `;c`).
+        if let Some(end) = account_glue_end {
+            if range.end <= end {
+                continue;
+            }
+            account_glue_end = None;
+            if range.start < end {
+                let tail = &stripped[end..range.end];
+                if !invalid_runs(&format!(" {tail}")).is_empty() {
+                    report(end..range.end, tail, out);
+                }
+                continue;
+            }
         }
         // In the same blank-free run as the BOMs that start the line, glued
         // to them directly (`<BOM>foo`) or through tokens that lex here
@@ -9458,13 +9492,12 @@ fn quiet_after_invalid_tokens(
                         && !is_bom_account_token(stripped, at, t.text())
                     {
                         invalid.push(at);
-                        // The unread rest of a heading line: the invalid
-                        // tokens counted inside it (after a line-start BOM,
+                        // The invalid tokens counted inside one (the unread
+                        // rest of a `<BOM>*` heading line, the tail of an
+                        // account a line-start BOM run starts; see
                         // `report_invalid_tokens_of_error_line`) are the
                         // lexer's own errors too.
-                        if t.text().contains([' ', '\t']) {
-                            unread.push((at, at + t.text().len()));
-                        }
+                        unread.push((at, at + t.text().len()));
                     }
                     at += t.text().len();
                 }

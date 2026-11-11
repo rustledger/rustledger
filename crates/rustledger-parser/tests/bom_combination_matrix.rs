@@ -24,6 +24,13 @@
 //! current counts. A line no rule explains fails the test, and so does a
 //! listed input that now matches or counts differently. Regenerate the list
 //! after a deliberate change with `BOM_MATRIX_UPDATE=1`, and read the diff.
+//!
+//! No cause makes a line further from beancount than main acceptable on its
+//! own: each such line must be listed, by hand, in
+//! `data/bom_combination_matrix_worse_than_main.tsv` with its cause and the
+//! reason (and, for a recovery cause, the count beancount gives the line
+//! alone, which rledger must match). The update never writes that file, and
+//! refuses to run while a further-than-main line is not in it.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fmt::Write as _;
@@ -34,6 +41,7 @@ use rustledger_parser::{__baseline_canonical_payload, ParseErrorKind, parse};
 const DATA: &str = include_str!("data/bom_combination_matrix.tsv");
 const KNOWN: &str = include_str!("data/bom_combination_matrix_known.tsv");
 const KNOWN_PATH: &str = "tests/data/bom_combination_matrix_known.tsv";
+const WORSE_THAN_MAIN: &str = include_str!("data/bom_combination_matrix_worse_than_main.tsv");
 
 /// The lines every generated input starts with (`HEAD` in the script), as
 /// the tables write them.
@@ -51,7 +59,12 @@ const KNOWN_HEADER: &str = "\
 #
 # The causes are those of the input's differing lines, joined by `+`; the
 # test assigns each line one (`cause`), and its comments say what each one
-# is. All but `line-start-bom-before-comment` predate #2928.
+# is. Two come from #2928's own deliberate design, the rest predate it:
+# `line-start-bom-before-comment` (a BOM that starts its line keeps its own
+# extent) and `bom-glued-to-account` (a BOM glued to an account is a `P0026`
+# with its quick fix). A line rledger counts further from beancount than
+# main is listed by hand, with its reason, in
+# bom_combination_matrix_worse_than_main.tsv, which no update writes.
 ";
 
 /// A table source back to the input it stands for.
@@ -226,6 +239,20 @@ fn cause(lines: &[&str], l: usize, counts: &Counts) -> Option<&'static str> {
         // A date alone on a line: beancount reports its `unexpected EOL` on
         // the next line.
         "eol-reported-on-next-line"
+    } else if r > b && account_after_bom(text) {
+        // An invalid account (non-ASCII first character) after a BOM token
+        // on the line gets rledger's `P0006` as well as the BOM diagnostic,
+        // where beancount reports nothing more for the statement. Asked
+        // before `bom-glued-to-account`, whose BOM may lead that account,
+        // and before the recovery causes, which hold only for a line that
+        // counts right on its own.
+        "invalid-account-after-invalid-token"
+    } else if r > b && bom_glued_to_account(text) {
+        // BOMs glued to an account (`$x <BOM>Assets:A`): beancount reads them
+        // into the account and rejects the name on load; rledger reports the
+        // stray BOM (`P0026`, with its quick fix: #2928's own design), one
+        // error more than beancount's parse errors for each.
+        "bom-glued-to-account"
     } else if r > b && indented(text) && strip_boms(line(header)).starts_with('*') {
         // An indented line after a `*` heading: beancount ignores the
         // heading and reads the line under the directive before it, rledger
@@ -276,17 +303,6 @@ fn cause(lines: &[&str], l: usize, counts: &Counts) -> Option<&'static str> {
         // beancount reports a later grammar error after the line's first
         // error, rledger one diagnostic for the line.
         "one-diagnostic-per-line"
-    } else if bom_glued_to_account(text) {
-        // BOMs glued to an account (`$x <BOM>Assets:A`): beancount reads them
-        // into the account and rejects the name on load; rledger reports the
-        // stray BOM (`P0026`, with its quick fix), one error more than
-        // beancount's parse errors.
-        "bom-glued-to-account"
-    } else if account_after_bom(text) {
-        // An invalid account after a BOM token on the line gets rledger's
-        // `P0006` as well as the BOM diagnostic, where beancount reports
-        // nothing more for the statement.
-        "invalid-account-after-invalid-token"
     } else if ["poptag", "popmeta"]
         .iter()
         .any(|p| strip_boms(text).starts_with(p))
@@ -307,9 +323,28 @@ fn cause(lines: &[&str], l: usize, counts: &Counts) -> Option<&'static str> {
 /// A known-list entry: rledger's counts and the causes.
 type Entry = (String, String);
 
-/// One table row: its source after [`HEAD`], and, when it differs from
-/// beancount, its known-list entry (`Err` names the lines no rule explains).
-fn check_row(line: &str) -> (String, Option<Result<Entry, String>>) {
+/// What one table row yields: its known-list entry when it differs from
+/// beancount (`Err` names the lines no rule explains), and its lines rledger
+/// counts further from beancount than main, each with its cause and text.
+struct RowResult {
+    tail: String,
+    entry: Option<Result<Entry, String>>,
+    worse: Vec<Worse>,
+}
+
+/// A line rledger counts further from beancount than main: its number, cause
+/// and text, and beancount's and rledger's counts there.
+struct Worse {
+    line: usize,
+    cause: &'static str,
+    text: String,
+    bc: usize,
+    rl: usize,
+    analog_bc: usize,
+    analog_main: usize,
+}
+
+fn check_row(line: &str) -> RowResult {
     let fields: Vec<&str> = line.split('\t').collect();
     assert_eq!(fields.len(), 5, "malformed matrix line: {line:?}");
     let src = fields[0];
@@ -326,19 +361,38 @@ fn check_row(line: &str) -> (String, Option<Result<Entry, String>>) {
         rl: rledger_counts(&input),
     };
     if counts.rl == counts.bc {
-        return (tail, None);
+        return RowResult {
+            tail,
+            entry: None,
+            worse: Vec::new(),
+        };
     }
     let lines: Vec<&str> = input.split('\n').collect();
+    let get = |m: &BTreeMap<usize, usize>, k: usize| m.get(&k).copied().unwrap_or(0);
     let mut causes = BTreeSet::new();
     let mut unexplained = Vec::new();
+    let mut worse = Vec::new();
     let differing: BTreeSet<usize> = counts.bc.keys().chain(counts.rl.keys()).copied().collect();
     for l in differing {
-        if counts.bc.get(&l) == counts.rl.get(&l) {
+        let (b, r, m) = (get(&counts.bc, l), get(&counts.rl, l), get(&counts.main, l));
+        if b == r {
             continue;
         }
         match cause(&lines, l, &counts) {
             Some(c) => {
                 causes.insert(c);
+                if r.abs_diff(b) > m.abs_diff(b) {
+                    let text = l.checked_sub(1).and_then(|i| lines.get(i)).copied();
+                    worse.push(Worse {
+                        line: l,
+                        cause: c,
+                        text: text.unwrap_or("").to_string(),
+                        bc: b,
+                        rl: r,
+                        analog_bc: get(&counts.analog_bc, l),
+                        analog_main: get(&counts.analog_main, l),
+                    });
+                }
             }
             None => unexplained.push(l),
         }
@@ -356,20 +410,156 @@ fn check_row(line: &str) -> (String, Option<Result<Entry, String>>) {
             cells(&counts.rl)
         ))
     };
-    (tail, Some(entry))
+    RowResult {
+        tail,
+        entry: Some(entry),
+        worse,
+    }
+}
+
+/// A line further from beancount than main, accepted by hand: its cause, the
+/// standalone beancount count for a recovery cause (`-` otherwise), and why.
+struct Accepted<'a> {
+    cause: &'a str,
+    standalone: Option<usize>,
+    why: &'a str,
+}
+
+/// The hand-maintained list of lines rledger counts further from beancount
+/// than main (`data/bom_combination_matrix_worse_than_main.tsv`), by input
+/// and line. `BOM_MATRIX_UPDATE` never writes it.
+fn accepted() -> BTreeMap<(&'static str, usize), Accepted<'static>> {
+    let mut out = BTreeMap::new();
+    for l in WORSE_THAN_MAIN
+        .lines()
+        .filter(|l| !l.is_empty() && !l.starts_with("# ") && *l != "#")
+    {
+        let fields: Vec<&str> = l.split('\t').collect();
+        assert_eq!(fields.len(), 5, "malformed accepted line: {l:?}");
+        let standalone = (fields[3] != "-").then(|| fields[3].parse().expect("a count"));
+        assert!(!fields[4].trim().is_empty(), "no justification: {l:?}");
+        assert!(
+            !fields[4].contains("TODO"),
+            "justification still to write: {l:?}"
+        );
+        let key = (fields[0], fields[1].parse().expect("a line number"));
+        let entry = Accepted {
+            cause: fields[2],
+            standalone,
+            why: fields[4],
+        };
+        assert!(
+            out.insert(key, entry).is_none(),
+            "duplicate accepted line: {l:?}"
+        );
+    }
+    out
+}
+
+/// The causes a further-than-main line may be accepted for, by how the test
+/// checks each:
+///
+/// - recovery (`RECOVERY_CAUSES`): wrong only after the lines before it, so
+///   alone, after the head (under a bare transaction header when indented),
+///   rledger counts the line as beancount does alone;
+/// - `like-main-without-bom`: the analog columns, beancount's and main's
+///   counts for the input with its BOMs replaced by ordinary characters,
+///   are beancount's and rledger's counts here;
+/// - the line's own difference (`INTRINSIC_CAUSES`): alone, rledger is off
+///   from beancount the same way and at least as far as in context.
+const RECOVERY_CAUSES: &[&str] = &[
+    "indented-line-after-error",
+    "indented-line-after-heading",
+    "line-after-error-line",
+];
+const INTRINSIC_CAUSES: &[&str] = &[
+    "bom-glued-to-account",
+    "invalid-account-after-invalid-token",
+    "line-error-beside-bom-diagnostic",
+];
+
+/// rledger's count for `text` alone.
+fn standalone_count(text: &str) -> usize {
+    let header = if indented(text) { "2024-01-02 *\n" } else { "" };
+    let src = format!("{}{header}{text}\n", unescape(HEAD));
+    let line = if header.is_empty() { 3 } else { 4 };
+    rledger_counts(&src).get(&line).copied().unwrap_or(0)
+}
+
+#[allow(clippy::cast_possible_wrap)]
+const fn signed(n: usize) -> i64 {
+    n as i64
+}
+
+/// Whether an accepted further-than-main line holds for its cause.
+fn holds(a: &Accepted<'_>, w: &Worse) -> bool {
+    if a.cause == "like-main-without-bom" {
+        return w.analog_bc == w.bc && w.analog_main == w.rl;
+    }
+    let Some(bc_alone) = a.standalone else {
+        return false;
+    };
+    let alone = standalone_count(&w.text);
+    if RECOVERY_CAUSES.contains(&a.cause) {
+        return alone == bc_alone;
+    }
+    if INTRINSIC_CAUSES.contains(&a.cause) {
+        let (off_alone, off_here) = (
+            signed(alone) - signed(bc_alone),
+            signed(w.rl) - signed(w.bc),
+        );
+        return off_alone.signum() == off_here.signum() && off_alone.abs() >= off_here.abs();
+    }
+    false
+}
+
+/// Check every line further from beancount than main against the accepted
+/// list: it must be there, and its accepted cause must hold (`holds`). A
+/// listed line no longer worse is stale.
+fn check_worse_than_main(worse: &[(String, Worse)]) -> Vec<String> {
+    let accepted = accepted();
+    let mut failures = Vec::new();
+    let mut seen = BTreeSet::new();
+    for (tail, w) in worse {
+        let l = w.line;
+        seen.insert((tail.as_str(), l));
+        match accepted.get(&(tail.as_str(), l)) {
+            None => failures.push(format!(
+                "not accepted, further from beancount than main:\n{tail}\t{l}\t{}\t-\tTODO {} {}",
+                w.cause, w.bc, w.rl
+            )),
+            Some(a) if !holds(a, w) => failures.push(format!(
+                "accepted as {} ({}), which does not hold: beancount {}, rledger {} \
+                 here: {tail} line {l}",
+                a.cause, a.why, w.bc, w.rl
+            )),
+            Some(_) => {}
+        }
+    }
+    for (tail, l) in accepted.keys() {
+        if !seen.contains(&(*tail, *l)) {
+            failures.push(format!(
+                "accepted but no longer worse than main, remove it: {tail} line {l}"
+            ));
+        }
+    }
+    failures
 }
 
 #[test]
 fn test_parse_bom_combination_matrix_matches_beancount() {
     let mut rows = 0;
     let mut computed: Vec<(String, String, String)> = Vec::new();
+    let mut worse: Vec<(String, Worse)> = Vec::new();
     let mut failures = Vec::new();
     for line in DATA.lines() {
         rows += 1;
-        match check_row(line) {
-            (_, None) => {}
-            (tail, Some(Ok((counts, causes)))) => computed.push((tail, counts, causes)),
-            (tail, Some(Err(why))) => failures.push(format!("no cause for {tail}: {why}")),
+        let result = check_row(line);
+        worse.extend(result.worse.into_iter().map(|w| (result.tail.clone(), w)));
+        match result.entry {
+            None => {}
+            Some(Ok((counts, causes))) => computed.push((result.tail, counts, causes)),
+            Some(Err(why)) => failures.push(format!("no cause for {}: {why}", result.tail)),
         }
     }
     assert!(rows > 1000, "the matrix has only {rows} rows");
@@ -378,6 +568,16 @@ fn test_parse_bom_combination_matrix_matches_beancount() {
         "{} input(s) differ from beancount on a line no rule explains:\n{}",
         failures.len(),
         failures.join("\n")
+    );
+    // Before any update: no update may accept a line further from beancount
+    // than main.
+    let worse_failures = check_worse_than_main(&worse);
+    assert!(
+        worse_failures.is_empty(),
+        "{} line(s) further from beancount than main fail the accepted list \
+         (data/bom_combination_matrix_worse_than_main.tsv, kept by hand):\n{}",
+        worse_failures.len(),
+        worse_failures.join("\n")
     );
 
     if std::env::var_os("BOM_MATRIX_UPDATE").is_some() {

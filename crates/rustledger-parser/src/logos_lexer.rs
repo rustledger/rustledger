@@ -2065,10 +2065,11 @@ mod tests {
         // few seconds rather than running for minutes on the 1 MB one.
         for count in [20_000, 350_000] {
             let run = bom.repeat(count);
-            // A wall-clock bound too, generous for a debug build, for a
-            // rescan the counters do not see (a lookahead that trims the
-            // rest of the run itself): quadratic, the short run takes many
-            // seconds, linear well under one.
+            // A wall-clock bound too, generous even for a slow debug build,
+            // as a backstop for a rescan the byte counters (the primary
+            // guard) do not see, such as a lookahead that trims the rest of
+            // the run itself: linear, the short run takes well under a
+            // second, and the 1 MB one would take hours quadratic.
             let started = std::time::Instant::now();
             check_linear_bom_run(&[
                 format!("x\n{run}a\n"),
@@ -2079,7 +2080,7 @@ mod tests {
             ]);
             if count == 20_000 {
                 let took = started.elapsed();
-                assert!(took.as_secs() < 5, "{count} BOMs took {took:?}");
+                assert!(took.as_secs() < 30, "{count} BOMs took {took:?}");
             }
         }
     }

@@ -8,13 +8,14 @@ license.workspace = true
 publish = false
 
 [dependencies]
-
-[dev-dependencies]
+# The compiled component the test files share (`compiled_component`).
 # Track the workspace wasmtime version (adds the component-model feature on top)
 # so these pins can't drift from the root Cargo.toml.
 wasmtime = { workspace = true, features = ["component-model"] }
-wasmtime-wasi.workspace = true
 anyhow = "1"
+
+[dev-dependencies]
+wasmtime-wasi.workspace = true
 tempfile.workspace = true
 rustledger-booking.workspace = true
 rustledger-core.workspace = true

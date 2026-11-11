@@ -1662,7 +1662,7 @@ fn dispatch_plugins(
             ),
         ) {
             Ok(output) => {
-                record_plugin_errors(errors, output.errors, source_map);
+                record_plugin_errors(errors, &output.errors, source_map);
                 apply_plugin_ops(directives, output.ops, errors, source_map)?;
             }
             Err(e) => errors.push(run_error_to_ledger(&e).with_plugin_failure()),
@@ -1721,48 +1721,120 @@ fn build_wrappers(
 #[cfg(feature = "plugins")]
 fn record_plugin_errors(
     errors: &mut Vec<LedgerError>,
-    plugin_errors: Vec<rustledger_plugin::PluginError>,
+    plugin_errors: &[rustledger_plugin::PluginError],
     source_map: &SourceMap,
 ) {
-    for err in plugin_errors {
-        // A plugin's text is shown to the user: escape its control
-        // characters (see `rustledger_plugin::untrusted`).
-        let message = rustledger_plugin::escape_untrusted_text(&err.message).into_owned();
-        let mut ledger_err = match err.severity {
-            rustledger_plugin::PluginErrorSeverity::Error => {
-                LedgerError::error("PLUGIN", message).with_phase("plugin")
-            }
-            rustledger_plugin::PluginErrorSeverity::Warning => {
-                LedgerError::warning("PLUGIN", message).with_phase("plugin")
-            }
-        };
-        // A native plugin that could not do its work (a config it cannot
-        // use) says so on the error; it returned its input unchanged.
-        if err.failed {
-            ledger_err = ledger_err.with_plugin_failure();
+    errors.extend(
+        plugin_errors
+            .iter()
+            .map(|err| plugin_error_to_ledger_error(err, source_map)),
+    );
+}
+
+/// One plugin error as a [`LedgerError`], as the loader records it.
+///
+/// Code `PLUGIN`, phase `plugin`, the plugin's severity, its message with
+/// control characters escaped, a plugin failure when the plugin says it
+/// could not do its work, and the location the plugin set (`source_file` /
+/// `line_number`, column 1).
+///
+/// The mapping every surface that runs a plugin shares: the loader's own
+/// pass (`record_plugin_errors`, for `plugin` directives) and the FFI's
+/// host-requested plugins (`rustledger_ffi_wasi::helpers::apply_plugins`),
+/// which reported a bare message with no code, location or severity, and
+/// unescaped (review of
+/// #2946).
+///
+/// Source-location resolution: if the plugin's `source_file` resolves to a
+/// real file in `source_map`, that file's path is the location; otherwise
+/// (a plugin-synthesized name such as `"<auto_accounts>"`, or a surface with
+/// no source map) the name itself, escaped, so the rendered location still
+/// attributes the error to where the plugin pointed.
+#[cfg(feature = "plugins")]
+#[must_use]
+pub fn plugin_error_to_ledger_error(
+    err: &rustledger_plugin::PluginError,
+    source_map: &SourceMap,
+) -> LedgerError {
+    // A plugin's text is shown to the user: escape its control
+    // characters (see `rustledger_plugin::untrusted`).
+    let message = rustledger_plugin::escape_untrusted_text(&err.message).into_owned();
+    let mut ledger_err = match err.severity {
+        rustledger_plugin::PluginErrorSeverity::Error => {
+            LedgerError::error("PLUGIN", message).with_phase("plugin")
         }
-        // Propagate plugin-set source location into `ErrorLocation`.
-        // Column defaults to 1 — plugin errors don't carry column info
-        // through the wrapper protocol.
-        if let (Some(file), Some(line)) = (&err.source_file, err.line_number) {
-            let resolved_path = source_map
-                .get_by_path(std::path::Path::new(file))
-                .map_or_else(
-                    || {
-                        std::path::PathBuf::from(
-                            rustledger_plugin::escape_untrusted_line(file).into_owned(),
-                        )
-                    },
-                    |f| f.path.clone(),
-                );
-            ledger_err = ledger_err.with_location(ErrorLocation {
-                file: resolved_path,
-                line: line as usize,
-                column: 1,
-            });
+        rustledger_plugin::PluginErrorSeverity::Warning => {
+            LedgerError::warning("PLUGIN", message).with_phase("plugin")
         }
-        errors.push(ledger_err);
+    };
+    // A native plugin that could not do its work (a config it cannot use)
+    // says so on the error; it returned its input unchanged.
+    if err.failed {
+        ledger_err = ledger_err.with_plugin_failure();
     }
+    // Column 1: plugin errors carry no column through the wrapper protocol.
+    if let (Some(file), Some(line)) = (&err.source_file, err.line_number) {
+        let resolved_path = source_map
+            .get_by_path(std::path::Path::new(file))
+            .map_or_else(
+                || {
+                    std::path::PathBuf::from(
+                        rustledger_plugin::escape_untrusted_line(file).into_owned(),
+                    )
+                },
+                |f| f.path.clone(),
+            );
+        ledger_err = ledger_err.with_location(ErrorLocation {
+            file: resolved_path,
+            line: line as usize,
+            column: 1,
+        });
+    }
+    ledger_err
+}
+
+/// Each parse error of a [`LoadError::ParseErrors`] as a [`LedgerError`], as
+/// `rledger check` reports it.
+///
+/// Code `P` and the four-digit kind code, phase
+/// `parse`, the parser's message and hint, at its file, line and column
+/// (resolved through `source_map`, which holds the file's text), with its
+/// span. Whether it blocks queries is [`LoadError::blocks_queries`] of the
+/// failure. Any other [`LoadError`] gives nothing.
+///
+/// For a surface that takes the parse errors out of the load
+/// ([`crate::LoadResult::take_parse_errors`]) to report them one by one:
+/// left in, [`process`] reports each file's as one line-less `parse errors
+/// in <path>` (review of #2946, #2949).
+#[must_use]
+pub fn parse_errors_to_ledger_errors(
+    failure: &LoadError,
+    source_map: &SourceMap,
+) -> Vec<LedgerError> {
+    let LoadError::ParseErrors { path, errors } = failure else {
+        return Vec::new();
+    };
+    let file = source_map.get_by_path(path);
+    errors
+        .iter()
+        .map(|e| {
+            let mut err = LedgerError::error(format!("P{:04}", e.kind_code()), e.message())
+                .with_phase("parse");
+            err.hint.clone_from(&e.hint);
+            err.blocking_load = failure.blocks_queries();
+            if let Some(file) = file {
+                let (line, column) = file.line_col(e.span.start);
+                err = err
+                    .with_location(ErrorLocation {
+                        file: file.path.clone(),
+                        line,
+                        column,
+                    })
+                    .with_source_span((e.span.start, e.span.end), file.id as u16);
+            }
+            err
+        })
+        .collect()
 }
 
 /// Apply a plugin's `Vec<PluginOp>` to `directives` in place.
@@ -2659,6 +2731,56 @@ mod option_errors_tests {
         let other = 1 - e7002;
         assert_eq!(query[other].message, load[other].message);
     }
+
+    /// The refusal replaces the E7002 of the rejection it is about, matched
+    /// by its site too: with the same bad `booking_method` in the main file
+    /// and in an include, the refusal is at the main file's line, and the
+    /// include's E7002 is listed as it is.
+    #[test]
+    fn test_query_option_errors_replaces_the_e7002_at_the_refusals_site() {
+        let mut vfs = crate::VirtualFileSystem::new();
+        vfs.add_file(
+            "main.beancount",
+            "option \"booking_method\" \"fifo\"\n\
+             include \"inc.beancount\"\n\
+             2024-01-01 open Assets:A\n",
+        );
+        vfs.add_file("inc.beancount", "option \"booking_method\" \"fifo\"\n");
+        let raw = crate::Loader::new()
+            .with_filesystem(Box::new(vfs))
+            .load(std::path::Path::new("main.beancount"))
+            .expect("loads");
+        let ledger = super::process(raw, &super::LoadOptions::default()).expect("processes");
+        let refusal = ledger.query_refusal().expect("fifo refuses");
+
+        let at = |e: &super::LedgerError| {
+            e.location.as_ref().map(|l| {
+                (
+                    l.file
+                        .file_name()
+                        .and_then(|n| n.to_str())
+                        .unwrap_or("")
+                        .to_string(),
+                    l.line,
+                )
+            })
+        };
+        let query: Vec<_> = ledger
+            .query_option_errors()
+            .iter()
+            .filter(|e| e.code == "E7002")
+            .map(|e| (at(e), e.message == refusal.message))
+            .collect();
+        assert_eq!(
+            query,
+            vec![
+                (Some(("main.beancount".to_string(), 1)), true),
+                (Some(("inc.beancount".to_string(), 1)), false),
+            ],
+            "{:?}",
+            ledger.options.warnings
+        );
+    }
 }
 
 #[cfg(all(test, feature = "plugins"))]
@@ -2947,7 +3069,7 @@ mod plugin_decision_tests {
         let mut errors = Vec::new();
         super::record_plugin_errors(
             &mut errors,
-            vec![
+            &[
                 rustledger_plugin::PluginError::error("cannot use the config").mark_failed(),
                 rustledger_plugin::PluginError::error("a finding"),
             ],

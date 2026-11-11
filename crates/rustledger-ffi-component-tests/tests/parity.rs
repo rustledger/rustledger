@@ -19,9 +19,9 @@
 #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
 
 use anyhow::Result;
-use rustledger_ffi_component_tests::{component_built, component_path};
-use wasmtime::component::{Component, Linker, ResourceTable};
-use wasmtime::{Engine, Store};
+use rustledger_ffi_component_tests::{compiled_component, component_built};
+use wasmtime::Store;
+use wasmtime::component::{Linker, ResourceTable};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 wasmtime::component::bindgen!({
@@ -60,8 +60,7 @@ impl rustledger::ledger::host::Host for Host {
 }
 
 fn instantiate() -> Result<(Store<Host>, Rustledger)> {
-    let engine = Engine::default();
-    let component = Component::from_file(&engine, component_path())?;
+    let (engine, component) = compiled_component()?;
     let mut linker = Linker::<Host>::new(&engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
     rustledger::ledger::host::add_to_linker::<_, wasmtime::component::HasSelf<Host>>(
@@ -82,8 +81,7 @@ fn instantiate() -> Result<(Store<Host>, Rustledger)> {
 /// Like [`instantiate`], but grants the guest read access to `host_dir`,
 /// mounted at `/work`, so `load-file` can read files through WASI.
 fn instantiate_in(host_dir: &std::path::Path) -> Result<(Store<Host>, Rustledger)> {
-    let engine = Engine::default();
-    let component = Component::from_file(&engine, component_path())?;
+    let (engine, component) = compiled_component()?;
     let mut linker = Linker::<Host>::new(&engine);
     wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
     rustledger::ledger::host::add_to_linker::<_, wasmtime::component::HasSelf<Host>>(
@@ -1656,11 +1654,6 @@ fn check_parity_through_the_component() -> Result<()> {
         }
         let entry = format!("/work/{}", case.entry);
         let want = expected_rows(case, case.entry);
-        let others = case
-            .diagnostics
-            .iter()
-            .filter(|d| !d.code.starts_with("E70"))
-            .count() as u32;
         let (mut store, inst) = instantiate_in(dir.path())?;
         let ledger = inst.rustledger_ledger_ledger();
 
@@ -1679,8 +1672,12 @@ fn check_parity_through_the_component() -> Result<()> {
             case.name
         );
         assert!(!validated.valid, "{}", case.name);
-        assert_eq!(validated.parse_error_count, 0, "{}", case.name);
-        assert_eq!(validated.validate_error_count, others, "{}", case.name);
+        assert_eq!(
+            (validated.parse_error_count, validated.validate_error_count),
+            case.counts(),
+            "{}",
+            case.name
+        );
 
         if case.is_single_file() {
             let source = case.entry_text();
@@ -1698,7 +1695,12 @@ fn check_parity_through_the_component() -> Result<()> {
                 "{} via validate",
                 case.name
             );
-            assert_eq!(validated.parse_error_count, 0, "{}", case.name);
+            assert_eq!(
+                (validated.parse_error_count, validated.validate_error_count),
+                case.counts(),
+                "{}",
+                case.name
+            );
         }
     }
     Ok(())

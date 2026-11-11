@@ -7,9 +7,8 @@
 //
 // - `rustledger/tests/ffi_check_parity_test.rs` (`rledger check --format
 //   json`),
-// - `rustledger-ffi-component` (the four surfaces natively, and the
-//   `rustledger-ffi-wasi` errors they are built from, which carry the code and
-//   file the WIT `error` record has no field for),
+// - `rustledger-ffi-component` (the four surfaces natively, on the WIT
+//   `error` record itself, which carries `code` and `filename` since 4.0.0),
 // - `rustledger-ffi-component-tests/tests/parity.rs` (the four surfaces through
 //   the built wasip2 component).
 //
@@ -22,7 +21,7 @@
 // no file and no line. Every option diagnostic has its option's location
 // (#2925).
 //
-// Each case also closes an account with a balance, the advisory-only E1004
+// The option cases also close an account with a balance, the advisory-only E1004
 // that `rledger check` leaves out (bean-check does not flag it): no surface
 // may report it.
 
@@ -61,6 +60,17 @@ impl CheckParityCase {
     /// `validate`) can run it too: they do not resolve includes.
     pub const fn is_single_file(&self) -> bool {
         self.files.len() == 1
+    }
+
+    /// The `parse-error-count` and `validate-error-count` a `validate` of the
+    /// case gives: its `P` codes are parse errors; its option diagnostics are
+    /// counted in neither (#2929); every other is a validate-phase one.
+    pub fn counts(&self) -> (u32, u32) {
+        let parse = self.diagnostics.iter().filter(|d| d.code.starts_with('P')).count();
+        let options = self.diagnostics.iter().filter(|d| d.code.starts_with("E70")).count();
+        let parse = u32::try_from(parse).expect("small");
+        let rest = u32::try_from(self.diagnostics.len() - options).expect("small") - parse;
+        (parse, rest)
     }
 
     /// The entry file's text.
@@ -250,6 +260,47 @@ pub const CHECK_PARITY_CASES: &[CheckParityCase] = &[
                 file: Some("main.beancount"),
                 line: Some(3),
                 message: "Account Income:X was never opened",
+            },
+        ],
+    },
+    // A parse error in an included file: reported at its own file, line and
+    // column with its code (`P0012`), not as one line-less `parse errors in
+    // <path>`, and the entries that did parse are still validated, as
+    // `rledger check` does (review of #2946).
+    CheckParityCase {
+        name: "parse-error-in-include",
+        files: &[
+            (
+                "main.beancount",
+                "include \"inc.beancount\"\n\
+                 2024-01-01 open Assets:A\n\
+                 2024-01-05 balance Assets:A 1 USD\n",
+            ),
+            (
+                "inc.beancount",
+                "2024-01-01 open Assets:B\n\
+                 \n\
+                 2024-01-03 open\n\
+                 2024-01-04 * \"x\"\n  \
+                   Assets:B  10 USD\n  \
+                   Assets:A\n",
+            ),
+        ],
+        entry: "main.beancount",
+        diagnostics: &[
+            ExpectedDiagnostic {
+                code: "P0012",
+                severity: "error",
+                file: Some("inc.beancount"),
+                line: Some(3),
+                message: "parse error: unexpected input",
+            },
+            ExpectedDiagnostic {
+                code: "E2001",
+                severity: "error",
+                file: Some("main.beancount"),
+                line: Some(3),
+                message: "Balance failed for Assets:A: expected 1 USD, got -10 USD",
             },
         ],
     },

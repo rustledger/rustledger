@@ -77,6 +77,37 @@ pub fn component_built() -> bool {
     false
 }
 
+/// The component at [`component_path`], compiled once per test binary, with
+/// the [`wasmtime::Engine`] it was compiled for. Both are cheap handles to
+/// shared state, so each test makes its own `Store` from clones of them.
+///
+/// Compiling the debug component is the costly part of a test, in time and
+/// in memory: every test compiling its own, many at once on parallel test
+/// threads, held 10-12 GB for 20 minutes (review of #2946). The lock is held
+/// through the first compile, so the tests that start together wait for it
+/// rather than each compiling another copy.
+///
+/// # Errors
+///
+/// Returns the error of reading or compiling the component. A failed compile
+/// is not kept: the next caller tries again.
+pub fn compiled_component() -> anyhow::Result<(wasmtime::Engine, wasmtime::component::Component)> {
+    static COMPILED: std::sync::Mutex<Option<(wasmtime::Engine, wasmtime::component::Component)>> =
+        std::sync::Mutex::new(None);
+    // A test that panicked while holding the lock leaves either nothing or a
+    // whole compiled component: both are safe to read.
+    let mut compiled = COMPILED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(compiled) = compiled.as_ref() {
+        return Ok(compiled.clone());
+    }
+    let engine = wasmtime::Engine::default();
+    let component = wasmtime::component::Component::from_file(&engine, component_path())?;
+    *compiled = Some((engine.clone(), component.clone()));
+    Ok((engine, component))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

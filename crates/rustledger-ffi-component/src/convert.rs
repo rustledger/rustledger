@@ -1081,10 +1081,38 @@ pub fn batch(source: &str, queries: &[String]) -> out::BatchResult {
             })
             .collect()
     };
+    // One name for the source across the batch: its entries and load errors
+    // are `<stdin>`, so its query errors are too, not the loader's `<string>`.
+    let queries = query_results
+        .into_iter()
+        .map(|mut r| {
+            r.errors = named_source(r.errors, STDIN_NAME);
+            r
+        })
+        .collect();
     out::BatchResult {
-        load: load_result(loaded, "<stdin>", false),
-        queries: query_results,
+        load: load_result(loaded, STDIN_NAME, false),
+        queries,
     }
+}
+
+/// The name a source-text surface with no name from the embedder gives its
+/// entries (`batch`, a session from source).
+const STDIN_NAME: &str = "<stdin>";
+
+/// `errors` with the loader's name for the source text ([`SOURCE_NAME`])
+/// replaced by `name`, the one the surface gives its entries, so an error
+/// and the entry it is about name one file.
+fn named_source(errors: Vec<wit::Error>, name: &str) -> Vec<wit::Error> {
+    errors
+        .into_iter()
+        .map(|mut e| {
+            if e.filename.as_deref() == Some(SOURCE_NAME) {
+                e.filename = Some(name.to_string());
+            }
+            e
+        })
+        .collect()
 }
 
 // ---- file variants ----
@@ -1202,6 +1230,7 @@ pub fn load_file(
                 fl.directive_files,
                 &mut errors,
                 &opts,
+                &fl.source_map,
             );
             // The findings validate the ledger as written: the host's plugins
             // run after the pipeline, where `rledger check --plugin` runs its
@@ -2052,7 +2081,7 @@ impl SessionState {
     /// Parse + book from source text (single synthetic `<stdin>` filename).
     pub fn from_source(source: &str) -> Self {
         let loaded = ffi::helpers::load_source(source);
-        let files = vec!["<stdin>".to_string(); loaded.directives.len()];
+        let files = vec![STDIN_NAME.to_string(); loaded.directives.len()];
         let spans = loaded
             .spanned_directives
             .iter()
@@ -2068,20 +2097,27 @@ impl SessionState {
             files,
             query_blocked,
             // The load's errors, then its option diagnostics (#2929), as a
-            // load lists them and as a query does.
-            query_errors: loaded
-                .errors
-                .iter()
-                .chain(&loaded.query_option_errors)
-                .cloned()
-                .map(error)
-                .collect(),
-            errors: loaded
-                .errors
-                .into_iter()
-                .chain(loaded.option_errors)
-                .map(error)
-                .collect(),
+            // load lists them and as a query does, in the file the entries
+            // are in.
+            query_errors: named_source(
+                loaded
+                    .errors
+                    .iter()
+                    .chain(&loaded.query_option_errors)
+                    .cloned()
+                    .map(error)
+                    .collect(),
+                STDIN_NAME,
+            ),
+            errors: named_source(
+                loaded
+                    .errors
+                    .into_iter()
+                    .chain(loaded.option_errors)
+                    .map(error)
+                    .collect(),
+                STDIN_NAME,
+            ),
             options: options(loaded.options),
             tolerance_multiplier: loaded.tolerance_multiplier,
             plugins: loaded.plugins,
@@ -2226,6 +2262,7 @@ impl SessionState {
                     in_files,
                     &mut errors,
                     &opts,
+                    &fl.source_map,
                 );
                 // Spans from each directive's line and file, AFTER the session
                 // plugins ran: they can add or drop directives, and `lines` /
@@ -5129,15 +5166,10 @@ mod check_parity {
     /// no parse error (an option diagnostic is not one, #2929), and every
     /// other diagnostic a validate-phase one.
     fn assert_counts(case: &CheckParityCase, surface: &str, result: &out::ValidateResult) {
-        let others = case
-            .diagnostics
-            .iter()
-            .filter(|d| !d.code.starts_with("E70"))
-            .count();
         assert!(!result.valid, "{} via {surface}", case.name);
-        assert_eq!(result.parse_error_count, 0, "{} via {surface}", case.name);
         assert_eq!(
-            result.validate_error_count as usize, others,
+            (result.parse_error_count, result.validate_error_count),
+            case.counts(),
             "{} via {surface}",
             case.name
         );
@@ -5327,6 +5359,10 @@ mod check_parity {
                 .find(|e| e.message.contains("is not a booking method"))
                 .expect("the refusal");
             assert_eq!(refusal.line, Some(1), "at the option's line: {refusal:?}");
+            // As `query_refusal_error` gives it: not "parse", which would
+            // read as a parse error of a ledger that parsed.
+            assert_eq!(refusal.phase, "validate", "{refusal:?}");
+            assert_eq!(refusal.code.as_deref(), Some("E7002"), "{refusal:?}");
         };
 
         refused("query", &super::query(SOURCE, QUERY));
@@ -5394,5 +5430,70 @@ mod check_parity {
                 "{surface}: both findings, at their line: {errors:?}"
             );
         }
+    }
+
+    /// A plugin the host asks for reports its errors as the same plugin
+    /// declared in the ledger does, so as `rledger check` does: code
+    /// `PLUGIN`, its severity, at the file and line it named (review of
+    /// #2946). They came back as a bare message with no code, file, line or
+    /// severity.
+    #[test]
+    fn test_host_requested_plugin_errors_match_ledger_declared_ones() {
+        // Line 1 is the `plugin` line in one, a comment in the other, so the
+        // posting is on the same line in both.
+        const BODY: &str = "2024-01-01 open Assets:A\n\
+             2024-01-01 open Assets:A:B\n\
+             2024-01-01 open Income:X\n\
+             2024-01-02 * \"x\"\n  Assets:A  10 USD\n  Income:X\n";
+        let dir = tempfile::tempdir().expect("tempdir");
+        let declared = dir.path().join("declared.beancount");
+        std::fs::write(
+            &declared,
+            format!("plugin \"beancount.plugins.leafonly\"\n{BODY}"),
+        )
+        .expect("write");
+        let requested = dir.path().join("requested.beancount");
+        std::fs::write(&requested, format!("; the host asks for leafonly\n{BODY}")).expect("write");
+        let plugin_rows = |errors: Vec<wit::Error>, file: &std::path::Path| -> Vec<Row> {
+            errors
+                .into_iter()
+                .filter(|e| e.code.as_deref() == Some("PLUGIN"))
+                .map(|e| {
+                    assert_eq!(
+                        e.filename.as_deref(),
+                        file.to_str(),
+                        "the plugin error names its file: {e:?}"
+                    );
+                    (e.code, e.severity, None, e.line, e.message)
+                })
+                .collect()
+        };
+
+        let by_ledger = plugin_rows(
+            super::load_file(declared.to_str().expect("utf-8"), false, &[], false).errors,
+            &declared,
+        );
+        assert!(
+            !by_ledger.is_empty(),
+            "leafonly reports the non-leaf posting"
+        );
+        assert_eq!(
+            by_ledger[0].3,
+            Some(2),
+            "at the non-leaf account's open, as check: {by_ledger:?}"
+        );
+        let host = ["leafonly".to_string()];
+        let by_host = plugin_rows(
+            super::load_file(requested.to_str().expect("utf-8"), false, &host, false).errors,
+            &requested,
+        );
+        assert_eq!(by_host, by_ledger, "load-file");
+        let session =
+            super::SessionState::from_file(requested.to_str().expect("utf-8"), false, &host);
+        assert_eq!(
+            plugin_rows(session.info().errors, &requested),
+            by_ledger,
+            "session.from-file"
+        );
     }
 }

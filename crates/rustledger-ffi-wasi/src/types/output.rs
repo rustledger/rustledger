@@ -27,13 +27,12 @@ pub struct Error {
     pub phase: String,
     /// The diagnostic code (`E2001`, `E7002`, ...), when the error has one.
     ///
-    /// Not on the WIT `error` record, which has no field for it; kept here so
-    /// the drift guards can compare codes with `rledger check` (#2935).
+    /// The WIT `error` record's `code` (4.0.0, #2935).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub code: Option<String>,
     /// The file `line` is in, when the error has a location: on a multi-file
-    /// load it need not be the entry file. Not on the WIT `error` record
-    /// either; see [`Self::code`].
+    /// load it need not be the entry file. The WIT `error` record's
+    /// `filename` (4.0.0, #2935).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub file: Option<String>,
 }

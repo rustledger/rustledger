@@ -132,12 +132,19 @@ pub fn load_source(source: &str) -> LoadResult {
         validate: false,
         ..Default::default()
     };
+    // The parse errors are taken out before `process`, to be reported one by
+    // one with their code and line, as `rledger check` reports them
+    // (`take_parse_errors`, `parse_errors_to_ledger_errors`); left in,
+    // `process` reports them as one line-less `parse errors in <string>`.
+    let mut parse_errors: Vec<rustledger_loader::LedgerError> = Vec::new();
     let ledger = match rustledger_loader::Loader::new()
         .with_filesystem(Box::new(vfs))
         .load(std::path::Path::new("<string>"))
         .map_err(|e| e.to_string())
-        .and_then(|raw| rustledger_loader::process(raw, &load_opts).map_err(|e| e.to_string()))
-    {
+        .and_then(|mut raw| {
+            parse_errors = parse_errors_of(&mut raw);
+            rustledger_loader::process(raw, &load_opts).map_err(|e| e.to_string())
+        }) {
         Ok(ledger) => ledger,
         Err(e) => {
             // Fatal load/process failure is unexpected for an in-memory source,
@@ -230,9 +237,9 @@ pub fn load_source(source: &str) -> LoadResult {
     // `\` on Windows, while declared include paths use `/`.
     let normalized_includes: Vec<String> =
         includes.iter().map(|i| i.path.replace('\\', "/")).collect();
-    let (errors, error_blocks_queries): (Vec<Error>, Vec<bool>) = ledger
-        .errors
+    let (errors, error_blocks_queries): (Vec<Error>, Vec<bool>) = parse_errors
         .iter()
+        .chain(&ledger.errors)
         .filter(|e| {
             if e.phase != "parse"
                 || !(e.message.contains("not found") || e.message.contains("does not match"))
@@ -496,11 +503,24 @@ pub fn load_file_with_fs(
         validate,
         ..Default::default()
     };
-    let ledger = match fs {
-        Some(fs) => rustledger_loader::load_with_fs(path, &options, fs),
-        None => rustledger_loader::load(path, &options),
+    // `rustledger_loader::load` / `load_with_fs`, with the parse errors taken
+    // out before `process` to be reported one by one, each at its own file,
+    // line and column with its code, as `rledger check` reports them; left
+    // in, `process` reports each file's as one line-less `parse errors in
+    // <path>`. `process` then validates what did parse, as `check` does.
+    let mut loader = rustledger_loader::Loader::new();
+    if let Some(fs) = fs {
+        loader = loader.with_filesystem(fs);
     }
-    .map_err(|e| format!("Failed to load file: {e}"))?;
+    if path_security {
+        loader = loader.with_path_security(true);
+    }
+    let mut raw = loader
+        .load(path)
+        .map_err(|e| format!("Failed to load file: {e}"))?;
+    let parse_errors = parse_errors_of(&mut raw);
+    let ledger = rustledger_loader::process(raw, &options)
+        .map_err(|e| format!("Failed to load file: {e}"))?;
 
     // Directives + their line numbers / originating files (multi-file).
     // Synth-generated directives carry a `file_id` absent from the source map,
@@ -532,9 +552,9 @@ pub fn load_file_with_fs(
     // The validator's findings apart from the load's own errors: these are
     // what the host's plugins are gated on, and a finding (a failed
     // `balance`) does not make the booked directives unsound.
-    let (findings, load_errors): (Vec<_>, Vec<_>) = ledger
-        .errors
+    let (findings, load_errors): (Vec<_>, Vec<_>) = parse_errors
         .iter()
+        .chain(&ledger.errors)
         .partition(|e| e.is_validation_finding());
     let errors: Vec<Error> = load_errors
         .iter()
@@ -611,12 +631,11 @@ fn query_option_errors(ledger: &rustledger_loader::Ledger) -> Vec<Error> {
         .query_option_errors()
         .iter()
         .map(|e| {
-            let err = ledger_error_to_ffi(e);
             // The refusal crosses as `query_refusal_error` gives it.
             if e.blocks_queries() {
-                err.validate_phase()
+                refusal_to_ffi(e)
             } else {
-                err
+                ledger_error_to_ffi(e)
             }
         })
         .collect()
@@ -634,11 +653,31 @@ fn query_option_errors(ledger: &rustledger_loader::Ledger) -> Vec<Error> {
 fn query_refusal_error(ledger: &rustledger_loader::Ledger) -> Option<Error> {
     ledger.query_refusal().map(|refusal| {
         debug_assert!(refusal.blocks_queries());
-        // Not "parse" on the wire, though options are read at parse time:
-        // a parse-phase error there stops semantic validation, and the
-        // ledger parsed.
-        ledger_error_to_ffi(&refusal).validate_phase()
+        refusal_to_ffi(&refusal)
     })
+}
+
+/// A query refusal ([`rustledger_loader::Ledger::query_refusal`]) as a wire
+/// error, for [`query_refusal_error`] and [`query_option_errors`] alike.
+///
+/// Not "parse" on the wire, though options are read at parse time: a
+/// parse-phase error there stops semantic validation, and the ledger parsed.
+fn refusal_to_ffi(refusal: &rustledger_loader::LedgerError) -> Error {
+    ledger_error_to_ffi(refusal).validate_phase()
+}
+
+/// Take `raw`'s parse errors out ([`rustledger_loader::LoadResult::take_parse_errors`])
+/// and give each as `rledger check` reports it
+/// ([`rustledger_loader::parse_errors_to_ledger_errors`]): with its code,
+/// file, line and column, for an included file too. Left in, `process`
+/// reports each file's as one line-less `parse errors in <path>`.
+fn parse_errors_of(raw: &mut rustledger_loader::LoadResult) -> Vec<rustledger_loader::LedgerError> {
+    raw.take_parse_errors()
+        .iter()
+        .flat_map(|failure| {
+            rustledger_loader::parse_errors_to_ledger_errors(failure, &raw.source_map)
+        })
+        .collect()
 }
 
 /// Convert a loader [`rustledger_loader::LedgerError`] (produced by the
@@ -656,6 +695,7 @@ fn ledger_error_to_ffi(e: &rustledger_loader::LedgerError) -> Error {
     }
     if let Some(loc) = &e.location {
         err = err.with_line(loc.line as u32);
+        err.column = Some(loc.column as u32);
         err.file = Some(loc.file.display().to_string());
     }
     // The wire `Error` distinguishes only "parse" vs "validate". The
@@ -693,6 +733,10 @@ fn ledger_error_to_ffi(e: &rustledger_loader::LedgerError) -> Error {
 /// ledger plugin's warning silently skipped every plugin the host asked for
 /// (#2929). Pass the load's own errors only, never its validation findings
 /// or option diagnostics, which leave the directives sound.
+///
+/// A plugin's errors are mapped as the loader maps a declared plugin's
+/// (`rustledger_loader::plugin_error_to_ledger_error`), its file resolved
+/// through `source_map`, the load's (pass an empty one where there is none).
 #[must_use]
 pub fn apply_plugins(
     plugin_names: &[&str],
@@ -701,6 +745,7 @@ pub fn apply_plugins(
     mut directive_files: Vec<String>,
     errors: &mut Vec<Error>,
     options: &LedgerOptions,
+    source_map: &rustledger_loader::SourceMap,
 ) -> (Vec<Directive>, Vec<u32>, Vec<String>) {
     use rustledger_plugin::{
         NativePluginRegistry, PluginInput, PluginOptions, directive_to_wrapper,
@@ -774,9 +819,13 @@ pub fn apply_plugins(
         let input_dirs = input.directives.clone();
         let output = plugin.process(input);
 
-        for err in output.errors {
-            errors.push(Error::new(err.message));
-        }
+        // As the loader records a declared plugin's errors (code `PLUGIN`,
+        // its severity, its location, escaped): the one canonical mapping.
+        errors.extend(output.errors.iter().map(|err| {
+            ledger_error_to_ffi(&rustledger_loader::plugin_error_to_ledger_error(
+                err, source_map,
+            ))
+        }));
 
         // Validate the op set against the shared contract (the same coverage
         // check the loader pipeline runs). On violation, record it — naming the
@@ -1064,6 +1113,7 @@ mod plugin_options_tests {
             vec!["<test>".to_string(); n],
             &mut errors,
             &options,
+            &rustledger_loader::SourceMap::new(),
         );
 
         assert!(
@@ -1104,6 +1154,7 @@ mod plugin_options_tests {
                 vec!["<test>".to_string(); n],
                 &mut errors,
                 options,
+                &rustledger_loader::SourceMap::new(),
             );
             errors.len()
         };
@@ -1152,6 +1203,7 @@ mod plugin_options_tests {
                 vec!["<test>".to_string(); n],
                 &mut errors,
                 &crate::types::output::LedgerOptions::default(),
+                &rustledger_loader::SourceMap::new(),
             );
             out.len() > n
         };

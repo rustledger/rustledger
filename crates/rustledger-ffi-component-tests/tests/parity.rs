@@ -7,8 +7,11 @@
 //!
 //! Requires the component to be built first:
 //!   cargo build -p rustledger-ffi-component --target wasm32-wasip2
-//! The tests skip (rather than fail) when the artifact is absent, so they don't
-//! break a build that hasn't produced the wasip2 binary.
+//! The artifact is looked up under `$CARGO_TARGET_DIR` when that is set (see
+//! `rustledger_ffi_component_tests::component_path`), else the workspace
+//! `target/`. The tests skip (rather than fail) when the artifact is absent,
+//! printing where they looked, so they don't break a build that hasn't
+//! produced the wasip2 binary.
 
 // `bindgen!` generates an undocumented host-bindings module; quiet its lints
 // (this is a test harness, not shipped API).
@@ -16,6 +19,7 @@
 #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
 
 use anyhow::Result;
+use rustledger_ffi_component_tests::{component_built, component_path};
 use wasmtime::component::{Component, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{FsPerms, WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
@@ -53,11 +57,6 @@ impl rustledger::ledger::host::Host for Host {
     fn decrypt(&mut self, _ciphertext: Vec<u8>) -> Result<String, String> {
         Ok(DECRYPTED_LEDGER.to_string())
     }
-}
-
-fn component_path() -> std::path::PathBuf {
-    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../target/wasm32-wasip2/debug/rustledger_ffi_component.wasm")
 }
 
 fn instantiate() -> Result<(Store<Host>, Rustledger)> {
@@ -138,8 +137,7 @@ fn wit_package_api_version() -> String {
 /// is bumped on a WIT change; this test ensures the *runtime* version tracks it.
 #[test]
 fn version_matches_wit_package() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -155,8 +153,7 @@ fn version_matches_wit_package() -> Result<()> {
 
 #[test]
 fn load_entry_count_matches_jsonrpc() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -177,8 +174,7 @@ fn load_entry_count_matches_jsonrpc() -> Result<()> {
 
 #[test]
 fn query_row_count_matches_executor() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -211,8 +207,7 @@ const LEDGER_WITH_HISTORY: &str = "\
 
 #[test]
 fn clamp_runs_and_summarizes_pre_range() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -238,7 +233,7 @@ fn clamp_runs_and_summarizes_pre_range() -> Result<()> {
 
 #[test]
 fn query_expands_pads() -> Result<()> {
-    if !component_path().exists() {
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -266,7 +261,7 @@ fn query_expands_pads() -> Result<()> {
 
 #[test]
 fn query_short_circuits_on_parse_error() -> Result<()> {
-    if !component_path().exists() {
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -286,7 +281,7 @@ fn query_short_circuits_on_parse_error() -> Result<()> {
 
 #[test]
 fn filter_keeps_pre_begin_open_and_drops_commodity() -> Result<()> {
-    if !component_path().exists() {
+    if !component_built() {
         return Ok(());
     }
     use rustledger::ledger::types::Directive;
@@ -322,7 +317,7 @@ fn filter_keeps_pre_begin_open_and_drops_commodity() -> Result<()> {
 
 #[test]
 fn custom_directive_values_keep_their_type_tag() -> Result<()> {
-    if !component_path().exists() {
+    if !component_built() {
         return Ok(());
     }
     use rustledger::ledger::types::Directive;
@@ -365,7 +360,7 @@ fn custom_directive_values_keep_their_type_tag() -> Result<()> {
 
 #[test]
 fn load_file_reads_and_resolves_includes() -> Result<()> {
-    if !component_path().exists() {
+    if !component_built() {
         return Ok(());
     }
     let dir = tempfile::tempdir()?;
@@ -397,7 +392,7 @@ fn load_file_reads_and_resolves_includes() -> Result<()> {
 
 #[test]
 fn load_file_path_security_confines_cross_tree_includes() -> Result<()> {
-    if !component_path().exists() {
+    if !component_built() {
         return Ok(());
     }
     let dir = tempfile::tempdir()?;
@@ -451,7 +446,7 @@ fn load_file_path_security_confines_cross_tree_includes() -> Result<()> {
 
 #[test]
 fn load_file_runs_requested_plugin() -> Result<()> {
-    if !component_path().exists() {
+    if !component_built() {
         return Ok(());
     }
     use rustledger::ledger::types::Directive;
@@ -537,8 +532,7 @@ fn assert_generated_opens(entries: &[rustledger::ledger::types::Directive], surf
 
 #[test]
 fn load_runs_auto_accounts_synth() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -554,8 +548,7 @@ fn load_runs_auto_accounts_synth() -> Result<()> {
 
 #[test]
 fn load_file_runs_auto_accounts_synth() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let dir = tempfile::tempdir()?;
@@ -591,8 +584,7 @@ const LEDGER_WITH_COST: &str = "\
 /// recorded as broken.
 #[test]
 fn session_from_entries_with_options_carries_renamed_roots() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -656,8 +648,7 @@ fn session_from_entries_with_options_carries_renamed_roots() -> Result<()> {
 /// built a fresh executor, so the table was gone by the next.
 #[test]
 fn session_query_keeps_created_tables() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -690,8 +681,7 @@ fn session_query_keeps_created_tables() -> Result<()> {
 /// back to entry-inferred 2dp without).
 #[test]
 fn session_format_honors_display_precision() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -753,8 +743,7 @@ fn session_format_honors_display_precision() -> Result<()> {
 /// can differ by an ULP in the XIRR/TWR iteration.
 #[test]
 fn session_returns_matches_native_engine() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     const LEDGER: &str = "\
@@ -837,8 +826,7 @@ option \"operating_currency\" \"USD\"
 fn session_clamp_preserves_cost_basis() -> Result<()> {
     use rustledger::ledger::types::{CostNumber, Directive};
 
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -890,8 +878,7 @@ fn session_clamp_preserves_cost_basis() -> Result<()> {
 #[test]
 fn clamp_opening_balance_contra_keeps_cost() -> Result<()> {
     use rustledger::ledger::types::Directive;
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -940,8 +927,7 @@ fn clamp_opening_balance_contra_keeps_cost() -> Result<()> {
 /// re-rendering entries to source.
 #[test]
 fn query_entries_matches_source_query() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -980,8 +966,7 @@ fn query_entries_matches_source_query() -> Result<()> {
 /// and was lost when the FFI surface moved onto the shared pipeline (#1462).
 #[test]
 fn total_price_at_at_normalized_to_per_unit() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     use rustledger::ledger::types::Directive;
@@ -1022,8 +1007,7 @@ fn total_price_at_at_normalized_to_per_unit() -> Result<()> {
 /// instead of a silent green. Load-vs-validate parity for the balance check.
 #[test]
 fn load_reports_balance_assertion_failure() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -1087,8 +1071,7 @@ fn load_reports_balance_assertion_failure() -> Result<()> {
 /// layer had the same bug, fixed in #2238).
 #[test]
 fn same_date_balance_assertions_carry_their_own_diffs() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -1141,8 +1124,7 @@ fn same_date_balance_assertions_carry_their_own_diffs() -> Result<()> {
 /// (a standalone-validation safety net) must not duplicate it.
 #[test]
 fn load_oversell_reports_single_error() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -1183,8 +1165,7 @@ fn load_oversell_reports_single_error() -> Result<()> {
 /// ciphertext; we assert that plaintext is what gets parsed.
 #[test]
 fn load_file_decrypts_via_host_import() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let dir = tempfile::tempdir()?;
@@ -1228,8 +1209,7 @@ fn load_file_decrypts_via_host_import() -> Result<()> {
 /// native `rustledger-importer` engine on the result.
 #[test]
 fn importer_extract_matches_native_engine() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     const CSV: &str =
@@ -1364,8 +1344,7 @@ fn importer_extract_matches_native_engine() -> Result<()> {
 /// compared within a tolerance.
 #[test]
 fn session_budget_matches_native_engine() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     // A leap February (the denominator that catches a naive 30-day month), a
@@ -1482,8 +1461,7 @@ option \"operating_currency\" \"USD\"
 /// silently-substituted default.
 #[test]
 fn session_budget_rejects_an_empty_or_malformed_window() -> Result<()> {
-    if !component_path().exists() {
-        eprintln!("skip: component wasm not built");
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -1541,7 +1519,7 @@ fn assert_next_query_answers(store: &mut Store<Host>, inst: &Rustledger) -> Resu
 /// the brackets, 12 for `sum(`, 48 for the `+`s.)
 #[test]
 fn query_at_the_nesting_limits_runs_in_the_component() -> Result<()> {
-    if !component_path().exists() {
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;
@@ -1582,7 +1560,7 @@ fn query_at_the_nesting_limits_runs_in_the_component() -> Result<()> {
 /// nesting error, and a following query still answers.
 #[test]
 fn query_past_the_nesting_limits_is_refused_in_the_component() -> Result<()> {
-    if !component_path().exists() {
+    if !component_built() {
         return Ok(());
     }
     let (mut store, inst) = instantiate()?;

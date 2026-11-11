@@ -2,7 +2,10 @@
 //!
 //! The actual tests live in `tests/parity.rs`, which instantiates the built
 //! `rustledger-ffi-component` wasip2 component in a `wasmtime` host and asserts
-//! agreement with the `rustledger-ffi-wasi` JSON-RPC path. A `tests/`-only
+//! agreement with the `rustledger-ffi-wasi` JSON-RPC path, and in
+//! `tests/corpus_parity.rs`, which feeds every self-contained `.beancount`
+//! file in the repo through both the native loader and the component's `load`
+//! export and diffs the outcome. A `tests/`-only
 //! package reports "no targets specified in the manifest" on some toolchains,
 //! so this lib target exists; it also holds the one place both test files
 //! resolve the component artifact from (#2933).
@@ -17,10 +20,12 @@ const COMPONENT_IN_TARGET_DIR: &str = "wasm32-wasip2/debug/rustledger_ffi_compon
 /// component. CI's `component-parity` job greps for it, so keep it stable.
 pub const SKIP_MARKER: &str = "skip: component wasm not built";
 
-/// The workspace root (two levels above this crate's manifest).
+/// The workspace root (two levels above this crate's manifest), canonicalized
+/// when possible so paths built from it (and the skip message) carry no `..`.
 #[must_use]
 pub fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../..")
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    root.canonicalize().unwrap_or(root)
 }
 
 /// Resolve the component artifact path for a given `CARGO_TARGET_DIR` value.
@@ -77,6 +82,18 @@ mod tests {
     use super::*;
 
     const ARTIFACT: &str = "wasm32-wasip2/debug/rustledger_ffi_component.wasm";
+
+    #[test]
+    fn test_workspace_root_has_no_parent_dir_components() {
+        let root = workspace_root();
+        assert!(
+            !root
+                .components()
+                .any(|c| c == std::path::Component::ParentDir),
+            "workspace_root() should be normalized, got {}",
+            root.display()
+        );
+    }
 
     #[test]
     fn test_resolve_component_path_env_unset_uses_workspace_target() {
